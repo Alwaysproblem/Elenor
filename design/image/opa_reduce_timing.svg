@@ -1,0 +1,177 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1500" height="1020" viewBox="0 0 1500 1020" role="img" aria-labelledby="title desc">
+  <title id="title">OPA reduce timing diagram</title>
+  <desc id="desc">Readable clock timing diagram for OPA ReduceSum and ReduceMax local reduce flow.</desc>
+  <defs>
+    <style>
+      .bg { fill: #ffffff; }
+      .title { font: 700 28px Arial, Helvetica, sans-serif; fill: #172033; }
+      .subtitle { font: 16px Arial, Helvetica, sans-serif; fill: #4b5563; }
+      .axis { font: 13px Arial, Helvetica, sans-serif; fill: #667085; }
+      .label { font: 15px Arial, Helvetica, sans-serif; fill: #1f2937; }
+      .small { font: 12px Arial, Helvetica, sans-serif; fill: #475467; }
+      .note { font: 13px Arial, Helvetica, sans-serif; fill: #344054; }
+      .grid { stroke: #e4e7ec; stroke-width: 1; }
+      .majorGrid { stroke: #cfd4dc; stroke-width: 1.2; }
+      .wave { fill: none; stroke: #1d4ed8; stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; }
+      .waveGreen { fill: none; stroke: #059669; stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; }
+      .waveRed { fill: none; stroke: #dc2626; stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; }
+      .bus { fill: #eff6ff; stroke: #2563eb; stroke-width: 2; rx: 6; }
+      .bus2 { fill: #ecfdf3; stroke: #039855; stroke-width: 2; rx: 6; }
+      .invalid { fill: #f2f4f7; stroke: #98a2b3; stroke-width: 1.5; rx: 5; }
+      .phaseIssue { fill: #dbeafe; opacity: 0.36; }
+      .phaseExec { fill: #dcfce7; opacity: 0.35; }
+      .phaseHold { fill: #fee2e2; opacity: 0.38; }
+      .callout { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.4; rx: 8; }
+      .arrow { stroke: #475467; stroke-width: 1.6; fill: none; marker-end: url(#arrowHead); }
+    </style>
+    <marker id="arrowHead" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#475467"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1500" height="1020"/>
+  <text class="title" x="48" y="50">OPA Reduce Timing: ReduceSum / ReduceMax</text>
+  <text class="subtitle" x="48" y="78">One local reduce epoch using OPA_PASS + OPA_REDUCE_ADD or OPA_REDUCE_MAX. B input and multiplier path are gated in reduce mode.</text>
+
+  <!-- phase bands -->
+  <rect class="phaseIssue" x="430" y="102" width="180" height="820"/>
+  <rect class="phaseExec" x="610" y="102" width="180" height="820"/>
+  <rect class="phaseHold" x="790" y="102" width="180" height="820"/>
+  <text class="small" x="452" y="118">issue fragments</text>
+  <text class="small" x="630" y="118">local reduce</text>
+  <text class="small" x="810" y="118">output hold</text>
+
+  <!-- vertical cycle grid -->
+  <g>
+    <line class="majorGrid" x1="250" y1="96" x2="250" y2="935"/>
+    <line class="grid" x1="340" y1="96" x2="340" y2="935"/>
+    <line class="grid" x1="430" y1="96" x2="430" y2="935"/>
+    <line class="grid" x1="520" y1="96" x2="520" y2="935"/>
+    <line class="grid" x1="610" y1="96" x2="610" y2="935"/>
+    <line class="grid" x1="700" y1="96" x2="700" y2="935"/>
+    <line class="grid" x1="790" y1="96" x2="790" y2="935"/>
+    <line class="grid" x1="880" y1="96" x2="880" y2="935"/>
+    <line class="grid" x1="970" y1="96" x2="970" y2="935"/>
+    <line class="grid" x1="1060" y1="96" x2="1060" y2="935"/>
+    <line class="grid" x1="1150" y1="96" x2="1150" y2="935"/>
+    <line class="grid" x1="1240" y1="96" x2="1240" y2="935"/>
+    <line class="majorGrid" x1="1330" y1="96" x2="1330" y2="935"/>
+  </g>
+
+  <!-- cycle labels -->
+  <g class="axis">
+    <text x="241" y="96">C0</text>
+    <text x="331" y="96">C1</text>
+    <text x="421" y="96">C2</text>
+    <text x="511" y="96">C3</text>
+    <text x="601" y="96">C4</text>
+    <text x="691" y="96">C5</text>
+    <text x="781" y="96">C6</text>
+    <text x="871" y="96">C7</text>
+    <text x="961" y="96">C8</text>
+    <text x="1051" y="96">C9</text>
+    <text x="1138" y="96">C10</text>
+    <text x="1228" y="96">C11</text>
+    <text x="1318" y="96">C12</text>
+  </g>
+
+  <!-- signal labels -->
+  <g class="label" text-anchor="end">
+    <text x="225" y="140">clk</text>
+    <text x="225" y="188">rst_n</text>
+    <text x="225" y="236">opa_valid_i</text>
+    <text x="225" y="284">opa_ready_o</text>
+    <text x="225" y="332">fragment_accept</text>
+    <text x="225" y="380">opa_clear_i</text>
+    <text x="225" y="428">opa_epoch_i</text>
+    <text x="225" y="476">opa_mode_i</text>
+    <text x="225" y="524">opa_a_fragment_i</text>
+    <text x="225" y="572">opa_lane_mask_i</text>
+    <text x="225" y="620">b_path_gated</text>
+    <text x="225" y="668">S0_valid</text>
+    <text x="225" y="716">S1_reduce_valid</text>
+    <text x="225" y="764">acc_update_en</text>
+    <text x="225" y="812">opa_result_valid_o</text>
+    <text x="225" y="860">opa_result_ready_i</text>
+    <text x="225" y="908">opa_result_o</text>
+  </g>
+
+  <!-- clk -->
+  <path class="wave" d="M250 149 L250 121 L295 121 L295 149 L340 149 L340 121 L385 121 L385 149 L430 149 L430 121 L475 121 L475 149 L520 149 L520 121 L565 121 L565 149 L610 149 L610 121 L655 121 L655 149 L700 149 L700 121 L745 121 L745 149 L790 149 L790 121 L835 121 L835 149 L880 149 L880 121 L925 121 L925 149 L970 149 L970 121 L1015 121 L1015 149 L1060 149 L1060 121 L1105 121 L1105 149 L1150 149 L1150 121 L1195 121 L1195 149 L1240 149 L1240 121 L1285 121 L1285 149 L1330 149"/>
+
+  <!-- digital waves -->
+  <path class="wave" d="M250 197 L340 197 L340 169 L1330 169"/>
+  <path class="waveGreen" d="M250 245 L430 245 L430 217 L610 217 L610 245 L1330 245"/>
+  <path class="waveGreen" d="M250 293 L340 293 L340 265 L700 265 L700 293 L880 293 L880 265 L1330 265"/>
+  <path class="waveGreen" d="M250 341 L430 341 L430 313 L610 313 L610 341 L1330 341"/>
+  <path class="waveRed" d="M250 389 L430 389 L430 361 L520 361 L520 389 L1330 389"/>
+
+  <!-- bus rows -->
+  <rect class="invalid" x="250" y="410" width="180" height="28"/>
+  <rect class="bus" x="430" y="410" width="540" height="28"/>
+  <rect class="invalid" x="970" y="410" width="360" height="28"/>
+  <text class="small" text-anchor="middle" x="700" y="429">E0</text>
+
+  <rect class="invalid" x="250" y="458" width="180" height="28"/>
+  <rect class="bus" x="430" y="458" width="540" height="28"/>
+  <rect class="invalid" x="970" y="458" width="360" height="28"/>
+  <text class="small" text-anchor="middle" x="700" y="477">REDUCE_ADD / REDUCE_MAX</text>
+
+  <rect class="invalid" x="250" y="506" width="180" height="28"/>
+  <rect class="bus2" x="430" y="506" width="90" height="28"/>
+  <rect class="bus2" x="520" y="506" width="90" height="28"/>
+  <rect class="invalid" x="610" y="506" width="720" height="28"/>
+  <text class="small" text-anchor="middle" x="475" y="525">frag0</text>
+  <text class="small" text-anchor="middle" x="565" y="525">frag1</text>
+
+  <rect class="invalid" x="250" y="554" width="180" height="28"/>
+  <rect class="bus2" x="430" y="554" width="90" height="28"/>
+  <rect class="bus2" x="520" y="554" width="90" height="28"/>
+  <rect class="invalid" x="610" y="554" width="720" height="28"/>
+  <text class="small" text-anchor="middle" x="475" y="573">mask0</text>
+  <text class="small" text-anchor="middle" x="565" y="573">mask1</text>
+
+  <path class="waveRed" d="M250 629 L430 629 L430 601 L610 601 L610 629 L1330 629"/>
+  <path class="waveGreen" d="M250 677 L520 677 L520 649 L700 649 L700 677 L1330 677"/>
+  <path class="waveGreen" d="M250 725 L610 725 L610 697 L790 697 L790 725 L1330 725"/>
+  <path class="waveGreen" d="M250 773 L610 773 L610 745 L790 745 L790 773 L1330 773"/>
+  <path class="waveRed" d="M250 821 L790 821 L790 793 L970 793 L970 821 L1330 821"/>
+  <path class="wave" d="M250 841 L790 841 L790 869 L880 869 L880 841 L1330 841"/>
+
+  <rect class="invalid" x="250" y="890" width="540" height="28"/>
+  <rect class="bus" x="790" y="890" width="180" height="28"/>
+  <rect class="invalid" x="970" y="890" width="360" height="28"/>
+  <text class="small" text-anchor="middle" x="880" y="909">local reduce partial</text>
+
+  <!-- handshakes and callouts -->
+  <circle cx="430" cy="327" r="5" fill="#059669"/>
+  <circle cx="520" cy="327" r="5" fill="#059669"/>
+  <text class="small" x="435" y="306">accept frag0</text>
+  <text class="small" x="525" y="306">accept frag1</text>
+
+  <rect class="callout" x="1010" y="180" width="390" height="98"/>
+  <text class="note" x="1030" y="205">Input handshake</text>
+  <text class="small" x="1030" y="230">fragment_accept = opa_valid_i &amp;&amp; opa_ready_o</text>
+  <text class="small" x="1030" y="252">C2 clear initializes the new reduce epoch.</text>
+
+  <path class="arrow" d="M540 366 C575 330, 610 310, 652 300"/>
+  <rect class="callout" x="660" y="278" width="305" height="76"/>
+  <text class="note" x="680" y="302">Clear priority</text>
+  <text class="small" x="680" y="326">clear + valid: clear old acc first,</text>
+  <text class="small" x="680" y="345">then accept first fragment of E0.</text>
+
+  <path class="arrow" d="M675 746 C725 708, 765 692, 810 690"/>
+  <rect class="callout" x="815" y="656" width="355" height="78"/>
+  <text class="note" x="835" y="680">Local reduce update</text>
+  <text class="small" x="835" y="704">acc_update_en = S1_valid &amp;&amp; mask &amp;&amp; epoch_match</text>
+  <text class="small" x="835" y="724">ADD accumulates; MAX compares and keeps max.</text>
+
+  <path class="arrow" d="M842 794 C875 758, 915 746, 950 752"/>
+  <rect class="callout" x="980" y="756" width="400" height="92"/>
+  <text class="note" x="1000" y="780">Backpressure hold</text>
+  <text class="small" x="1000" y="804">C6: result_valid_o=1 but result_ready_i=0.</text>
+  <text class="small" x="1000" y="826">OPA must hold result_o stable until C7 handshake.</text>
+
+  <rect class="callout" x="48" y="950" width="1288" height="44"/>
+  <text class="note" x="68" y="976">Readout: ReduceSum uses OPA_PASS + OPA_REDUCE_ADD; ReduceMax uses OPA_PASS + OPA_REDUCE_MAX. OPA emits only local partials; BOA reduce network / upper layers finish wider reductions.</text>
+</svg>

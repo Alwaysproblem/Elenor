@@ -1,0 +1,239 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1450" height="1020" viewBox="0 0 1450 1020" role="img" aria-labelledby="title desc">
+  <title id="title">OPA Reduce 时钟时序图</title>
+  <desc id="desc">展示 OPA 在 ReduceSum 或 ReduceMax 模式下的 ready/valid、clear、epoch、mask、pipeline 和 result backpressure 时序。</desc>
+  <defs>
+    <style>
+      .bg { fill: #fbfcfe; }
+      .title { font: 700 28px Arial, sans-serif; fill: #162033; }
+      .subtitle { font: 15px Arial, sans-serif; fill: #526173; }
+      .axis { font: 13px Arial, sans-serif; fill: #697386; }
+      .label { font: 14px Arial, sans-serif; fill: #263244; }
+      .small { font: 12px Arial, sans-serif; fill: #526173; }
+      .note { font: 13px Arial, sans-serif; fill: #263244; }
+      .wave { fill: none; stroke: #1f2937; stroke-width: 2.3; stroke-linejoin: round; stroke-linecap: round; }
+      .wave-hi { fill: none; stroke: #0f766e; stroke-width: 2.8; stroke-linejoin: round; stroke-linecap: round; }
+      .wave-red { fill: none; stroke: #be123c; stroke-width: 2.8; stroke-linejoin: round; stroke-linecap: round; }
+      .grid { stroke: #dbe3ef; stroke-width: 1; }
+      .grid-major { stroke: #b8c4d6; stroke-width: 1.2; }
+      .lane { stroke: #edf2f7; stroke-width: 1; }
+      .bus { fill: #e9f7f4; stroke: #0f766e; stroke-width: 1.4; rx: 5; }
+      .bus-warn { fill: #fff1f2; stroke: #be123c; stroke-width: 1.4; rx: 5; }
+      .bus-idle { fill: #f1f5f9; stroke: #94a3b8; stroke-width: 1.1; rx: 5; }
+      .bus-text { font: 12px Arial, sans-serif; fill: #173b35; dominant-baseline: middle; text-anchor: middle; }
+      .bus-warn-text { font: 12px Arial, sans-serif; fill: #7f1d1d; dominant-baseline: middle; text-anchor: middle; }
+      .callout-line { stroke: #64748b; stroke-width: 1.2; stroke-dasharray: 5 5; }
+      .callout { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.2; rx: 8; }
+      .accept { fill: #d1fae5; stroke: #10b981; stroke-width: 1.1; rx: 4; }
+      .hold { fill: #ffe4e6; stroke: #fb7185; stroke-width: 1.1; rx: 4; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1450" height="1020"/>
+
+  <text class="title" x="40" y="42">OPA ReduceSum / ReduceMax 电路时钟时序图</text>
+  <text class="subtitle" x="40" y="68">基于当前 OPA 文档：A fragment 经 PASS/REDUCE path 做局部 reduce，B path 在 reduce mode 下 gating，结果通过 ready/valid 交付给 BOA reduce network。</text>
+
+  <!-- Geometry: label area x=40..270, waveform x=310..1270, cycle width=80, cycles C0..C11 -->
+  <g id="grid">
+    <line class="grid-major" x1="310" y1="94" x2="1270" y2="94"/>
+    <line class="grid-major" x1="310" y1="930" x2="1270" y2="930"/>
+    <line class="grid-major" x1="310" y1="94" x2="310" y2="930"/>
+    <line class="grid-major" x1="1270" y1="94" x2="1270" y2="930"/>
+
+    <line class="grid" x1="390" y1="94" x2="390" y2="930"/>
+    <line class="grid" x1="470" y1="94" x2="470" y2="930"/>
+    <line class="grid" x1="550" y1="94" x2="550" y2="930"/>
+    <line class="grid" x1="630" y1="94" x2="630" y2="930"/>
+    <line class="grid" x1="710" y1="94" x2="710" y2="930"/>
+    <line class="grid" x1="790" y1="94" x2="790" y2="930"/>
+    <line class="grid" x1="870" y1="94" x2="870" y2="930"/>
+    <line class="grid" x1="950" y1="94" x2="950" y2="930"/>
+    <line class="grid" x1="1030" y1="94" x2="1030" y2="930"/>
+    <line class="grid" x1="1110" y1="94" x2="1110" y2="930"/>
+    <line class="grid" x1="1190" y1="94" x2="1190" y2="930"/>
+
+    <line class="callout-line" x1="470" y1="94" x2="470" y2="930"/>
+    <line class="callout-line" x1="790" y1="94" x2="790" y2="930"/>
+    <line class="callout-line" x1="870" y1="94" x2="870" y2="930"/>
+  </g>
+
+  <g id="cycle-labels">
+    <text class="axis" x="350" y="88" text-anchor="middle">C0</text>
+    <text class="axis" x="430" y="88" text-anchor="middle">C1</text>
+    <text class="axis" x="510" y="88" text-anchor="middle">C2</text>
+    <text class="axis" x="590" y="88" text-anchor="middle">C3</text>
+    <text class="axis" x="670" y="88" text-anchor="middle">C4</text>
+    <text class="axis" x="750" y="88" text-anchor="middle">C5</text>
+    <text class="axis" x="830" y="88" text-anchor="middle">C6</text>
+    <text class="axis" x="910" y="88" text-anchor="middle">C7</text>
+    <text class="axis" x="990" y="88" text-anchor="middle">C8</text>
+    <text class="axis" x="1070" y="88" text-anchor="middle">C9</text>
+    <text class="axis" x="1150" y="88" text-anchor="middle">C10</text>
+    <text class="axis" x="1230" y="88" text-anchor="middle">C11</text>
+  </g>
+
+  <g id="lanes">
+    <line class="lane" x1="40" y1="136" x2="1370" y2="136"/>
+    <line class="lane" x1="40" y1="180" x2="1370" y2="180"/>
+    <line class="lane" x1="40" y1="224" x2="1370" y2="224"/>
+    <line class="lane" x1="40" y1="268" x2="1370" y2="268"/>
+    <line class="lane" x1="40" y1="312" x2="1370" y2="312"/>
+    <line class="lane" x1="40" y1="366" x2="1370" y2="366"/>
+    <line class="lane" x1="40" y1="410" x2="1370" y2="410"/>
+    <line class="lane" x1="40" y1="454" x2="1370" y2="454"/>
+    <line class="lane" x1="40" y1="508" x2="1370" y2="508"/>
+    <line class="lane" x1="40" y1="552" x2="1370" y2="552"/>
+    <line class="lane" x1="40" y1="596" x2="1370" y2="596"/>
+    <line class="lane" x1="40" y1="650" x2="1370" y2="650"/>
+    <line class="lane" x1="40" y1="694" x2="1370" y2="694"/>
+    <line class="lane" x1="40" y1="738" x2="1370" y2="738"/>
+    <line class="lane" x1="40" y1="792" x2="1370" y2="792"/>
+    <line class="lane" x1="40" y1="836" x2="1370" y2="836"/>
+    <line class="lane" x1="40" y1="880" x2="1370" y2="880"/>
+  </g>
+
+  <!-- Labels -->
+  <g id="labels">
+    <text class="label" x="40" y="124">clk</text>
+    <text class="label" x="40" y="168">rst_n</text>
+    <text class="label" x="40" y="212">opa_valid_i</text>
+    <text class="label" x="40" y="256">opa_ready_o</text>
+    <text class="label" x="40" y="300">fragment_accept</text>
+
+    <text class="label" x="40" y="354">opa_clear_i</text>
+    <text class="label" x="40" y="398">opa_epoch_i</text>
+    <text class="label" x="40" y="442">opa_mode_i</text>
+
+    <text class="label" x="40" y="496">opa_a_fragment_i</text>
+    <text class="label" x="40" y="540">opa_lane_mask_i</text>
+    <text class="label" x="40" y="584">b_path_gated</text>
+
+    <text class="label" x="40" y="638">S0_valid</text>
+    <text class="label" x="40" y="682">S1_accum_valid</text>
+    <text class="label" x="40" y="726">acc_update_en</text>
+
+    <text class="label" x="40" y="780">opa_result_valid_o</text>
+    <text class="label" x="40" y="824">opa_result_ready_i</text>
+    <text class="label" x="40" y="868">opa_result_o</text>
+  </g>
+
+  <!-- Waveforms. Low/high y values are row center +/- 9. -->
+  <g id="waves">
+    <!-- clk, half-cycle toggles -->
+    <path class="wave" d="M310 124 L350 124 L350 106 L390 106 L390 124 L430 124 L430 106 L470 106 L470 124 L510 124 L510 106 L550 106 L550 124 L590 124 L590 106 L630 106 L630 124 L670 124 L670 106 L710 106 L710 124 L750 124 L750 106 L790 106 L790 124 L830 124 L830 106 L870 106 L870 124 L910 124 L910 106 L950 106 L950 124 L990 124 L990 106 L1030 106 L1030 124 L1070 124 L1070 106 L1110 106 L1110 124 L1150 124 L1150 106 L1190 106 L1190 124 L1230 124 L1230 106 L1270 106"/>
+
+    <!-- rst_n: low C0, high after C1 -->
+    <path class="wave" d="M310 168 L390 168 L390 150 L1270 150"/>
+
+    <!-- opa_valid_i: high C2-C4 -->
+    <path class="wave-hi" d="M310 212 L470 212 L470 194 L630 194 L630 212 L1270 212"/>
+
+    <!-- opa_ready_o: high C1-C5, low C5-C7, high after C7 -->
+    <path class="wave" d="M310 256 L390 256 L390 238 L710 238 L710 256 L870 256 L870 238 L1270 238"/>
+
+    <!-- fragment_accept: high C2-C4 -->
+    <path class="wave-hi" d="M310 300 L470 300 L470 282 L630 282 L630 300 L1270 300"/>
+
+    <!-- clear: pulse C2-C3 -->
+    <path class="wave-red" d="M310 354 L470 354 L470 336 L550 336 L550 354 L1270 354"/>
+
+    <!-- b_path_gated: high while reduce fragments are accepted -->
+    <path class="wave-hi" d="M310 584 L470 584 L470 566 L630 566 L630 584 L1270 584"/>
+
+    <!-- S0_valid: high C3-C5 -->
+    <path class="wave-hi" d="M310 638 L550 638 L550 620 L710 620 L710 638 L1270 638"/>
+
+    <!-- S1_accum_valid: high C4-C6 -->
+    <path class="wave-hi" d="M310 682 L630 682 L630 664 L790 664 L790 682 L1270 682"/>
+
+    <!-- acc_update_en: high C4-C6 -->
+    <path class="wave-hi" d="M310 726 L630 726 L630 708 L790 708 L790 726 L1270 726"/>
+
+    <!-- result_valid: high C6-C8, held during C6 backpressure -->
+    <path class="wave-red" d="M310 780 L790 780 L790 762 L950 762 L950 780 L1270 780"/>
+
+    <!-- result_ready: high until C6, low C6-C7, high after C7 -->
+    <path class="wave" d="M310 806 L790 806 L790 824 L870 824 L870 806 L1270 806"/>
+  </g>
+
+  <!-- Bus values -->
+  <g id="buses">
+    <!-- epoch -->
+    <rect class="bus-idle" x="310" y="382" width="160" height="24"/>
+    <text class="small" x="390" y="398" text-anchor="middle">x / idle</text>
+    <rect class="bus" x="470" y="382" width="800" height="24"/>
+    <text class="bus-text" x="870" y="394">E0: reduce epoch</text>
+
+    <!-- mode -->
+    <rect class="bus-idle" x="310" y="426" width="160" height="24"/>
+    <text class="small" x="390" y="442" text-anchor="middle">idle</text>
+    <rect class="bus" x="470" y="426" width="800" height="24"/>
+    <text class="bus-text" x="870" y="438">OPA_PASS + OPA_REDUCE_ADD / OPA_REDUCE_MAX</text>
+
+    <!-- A fragment -->
+    <rect class="bus-idle" x="310" y="480" width="160" height="24"/>
+    <text class="small" x="390" y="496" text-anchor="middle">x</text>
+    <rect class="bus" x="470" y="480" width="80" height="24"/>
+    <text class="bus-text" x="510" y="492">frag0</text>
+    <rect class="bus" x="550" y="480" width="80" height="24"/>
+    <text class="bus-text" x="590" y="492">frag1</text>
+    <rect class="bus-idle" x="630" y="480" width="640" height="24"/>
+    <text class="small" x="950" y="496" text-anchor="middle">don't care / no new sample</text>
+
+    <!-- mask -->
+    <rect class="bus-idle" x="310" y="524" width="160" height="24"/>
+    <text class="small" x="390" y="540" text-anchor="middle">x</text>
+    <rect class="bus" x="470" y="524" width="80" height="24"/>
+    <text class="bus-text" x="510" y="536">mask0</text>
+    <rect class="bus" x="550" y="524" width="80" height="24"/>
+    <text class="bus-text" x="590" y="536">mask1</text>
+    <rect class="bus-idle" x="630" y="524" width="640" height="24"/>
+    <text class="small" x="950" y="540" text-anchor="middle">mask=0 lane does not update acc</text>
+
+    <!-- result -->
+    <rect class="bus-idle" x="310" y="852" width="480" height="24"/>
+    <text class="small" x="550" y="868" text-anchor="middle">invalid</text>
+    <rect class="bus-warn" x="790" y="852" width="160" height="24"/>
+    <text class="bus-warn-text" x="870" y="864">local reduce partial held</text>
+    <rect class="bus-idle" x="950" y="852" width="320" height="24"/>
+    <text class="small" x="1110" y="868" text-anchor="middle">accepted / idle</text>
+  </g>
+
+  <!-- Highlight windows -->
+  <g id="highlights">
+    <rect class="accept" x="472" y="906" width="156" height="22"/>
+    <text class="small" x="550" y="921" text-anchor="middle">C2-C3: accept fragments</text>
+
+    <rect class="hold" x="792" y="906" width="76" height="22"/>
+    <text class="small" x="830" y="921" text-anchor="middle">hold</text>
+
+    <rect class="accept" x="872" y="906" width="76" height="22"/>
+    <text class="small" x="910" y="921" text-anchor="middle">handoff</text>
+  </g>
+
+  <!-- Callouts -->
+  <g id="callouts">
+    <rect class="callout" x="1295" y="158" width="120" height="70"/>
+    <text class="note" x="1308" y="181">C2:</text>
+    <text class="small" x="1308" y="201">clear has priority,</text>
+    <text class="small" x="1308" y="217">then sample frag0</text>
+
+    <rect class="callout" x="1295" y="430" width="120" height="82"/>
+    <text class="note" x="1308" y="453">Reduce mode:</text>
+    <text class="small" x="1308" y="473">use A input only;</text>
+    <text class="small" x="1308" y="489">B register and</text>
+    <text class="small" x="1308" y="505">multiplier gated</text>
+
+    <rect class="callout" x="1295" y="738" width="120" height="86"/>
+    <text class="note" x="1308" y="761">C6-C7:</text>
+    <text class="small" x="1308" y="781">ready=0 keeps</text>
+    <text class="small" x="1308" y="797">valid/result stable</text>
+    <text class="small" x="1308" y="813">until handoff</text>
+  </g>
+
+  <g id="legend">
+    <rect x="40" y="956" width="1375" height="42" fill="#ffffff" stroke="#d8e1ee" rx="8"/>
+    <text class="note" x="58" y="981">语义：</text>
+    <text class="small" x="102" y="981">fragment_accept = opa_valid_i &amp;&amp; opa_ready_o；acc_update_en = S1_valid &amp;&amp; lane_mask &amp;&amp; epoch_match；result_valid_o &amp;&amp; !result_ready_i 时 result_o 必须保持稳定。</text>
+  </g>
+</svg>
