@@ -1,0 +1,246 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1100" viewBox="0 0 1600 1100" role="img" aria-labelledby="title desc">
+  <title id="title">OPA MatMul / GEMM clock timing diagram</title>
+  <desc id="desc">Readable circuit clock timing diagram for OPA_MUL MatMul or GEMM K-loop execution, including input handshake, A/B fragment sampling, multiplier S0, accumulator S1, K-loop last, and output backpressure.</desc>
+  <defs>
+    <style>
+      .bg { fill: #fbfcfe; }
+      .title { font: 700 30px Arial, Helvetica, sans-serif; fill: #172033; }
+      .subtitle { font: 16px Arial, Helvetica, sans-serif; fill: #4b5563; }
+      .axis { font: 13px Arial, Helvetica, sans-serif; fill: #667085; }
+      .label { font: 15px Arial, Helvetica, sans-serif; fill: #1f2937; }
+      .small { font: 12px Arial, Helvetica, sans-serif; fill: #475467; }
+      .note { font: 13px Arial, Helvetica, sans-serif; fill: #344054; }
+      .grid { stroke: #e4e7ec; stroke-width: 1; }
+      .majorGrid { stroke: #cfd4dc; stroke-width: 1.25; }
+      .lane { stroke: #edf2f7; stroke-width: 1; }
+      .wave { fill: none; stroke: #1d4ed8; stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; }
+      .waveGreen { fill: none; stroke: #059669; stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; }
+      .waveRed { fill: none; stroke: #dc2626; stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; }
+      .wavePurple { fill: none; stroke: #7c3aed; stroke-width: 3; stroke-linejoin: round; stroke-linecap: round; }
+      .bus { fill: #eff6ff; stroke: #2563eb; stroke-width: 1.8; rx: 6; }
+      .busGreen { fill: #ecfdf3; stroke: #039855; stroke-width: 1.8; rx: 6; }
+      .busPurple { fill: #f5f3ff; stroke: #7c3aed; stroke-width: 1.8; rx: 6; }
+      .busWarn { fill: #fff1f2; stroke: #e11d48; stroke-width: 1.8; rx: 6; }
+      .invalid { fill: #f2f4f7; stroke: #98a2b3; stroke-width: 1.3; rx: 5; }
+      .phaseIssue { fill: #dbeafe; opacity: 0.34; }
+      .phaseMul { fill: #dcfce7; opacity: 0.33; }
+      .phaseAcc { fill: #f5f3ff; opacity: 0.33; }
+      .phaseOut { fill: #fee2e2; opacity: 0.35; }
+      .callout { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.4; rx: 8; }
+      .arrow { stroke: #475467; stroke-width: 1.6; fill: none; marker-end: url(#arrowHead); }
+      .dotGreen { fill: #059669; stroke: #ffffff; stroke-width: 1.4; }
+      .dotRed { fill: #dc2626; stroke: #ffffff; stroke-width: 1.4; }
+    </style>
+    <marker id="arrowHead" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#475467"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="1100"/>
+  <text class="title" x="48" y="50">OPA MatMul / GEMM Circuit Clock Timing</text>
+  <text class="subtitle" x="48" y="78">OPA_MUL consumes aligned A/B fragments from BOA, multiplies in S0, accumulates in S1, then emits a registered partial tile to the BOA reduce network.</text>
+
+  <!-- Layout: labels end at x=245, wave starts x=280, cycle width=90, C0..C13. -->
+  <rect class="phaseIssue" x="460" y="105" width="270" height="890"/>
+  <rect class="phaseMul" x="550" y="105" width="270" height="890"/>
+  <rect class="phaseAcc" x="640" y="105" width="270" height="890"/>
+  <rect class="phaseOut" x="1000" y="105" width="180" height="890"/>
+  <text class="small" x="486" y="121">C2-C4: issue K fragments</text>
+  <text class="small" x="574" y="121">S0: multiply array</text>
+  <text class="small" x="664" y="121">S1: local accumulate</text>
+  <text class="small" x="1020" y="121">output hold / handoff</text>
+
+  <!-- vertical grid -->
+  <g>
+    <line class="majorGrid" x1="280" y1="96" x2="280" y2="1006"/>
+    <line class="grid" x1="370" y1="96" x2="370" y2="1006"/>
+    <line class="grid" x1="460" y1="96" x2="460" y2="1006"/>
+    <line class="grid" x1="550" y1="96" x2="550" y2="1006"/>
+    <line class="grid" x1="640" y1="96" x2="640" y2="1006"/>
+    <line class="grid" x1="730" y1="96" x2="730" y2="1006"/>
+    <line class="grid" x1="820" y1="96" x2="820" y2="1006"/>
+    <line class="grid" x1="910" y1="96" x2="910" y2="1006"/>
+    <line class="grid" x1="1000" y1="96" x2="1000" y2="1006"/>
+    <line class="grid" x1="1090" y1="96" x2="1090" y2="1006"/>
+    <line class="grid" x1="1180" y1="96" x2="1180" y2="1006"/>
+    <line class="grid" x1="1270" y1="96" x2="1270" y2="1006"/>
+    <line class="grid" x1="1360" y1="96" x2="1360" y2="1006"/>
+    <line class="grid" x1="1450" y1="96" x2="1450" y2="1006"/>
+    <line class="majorGrid" x1="1540" y1="96" x2="1540" y2="1006"/>
+  </g>
+
+  <!-- horizontal lanes -->
+  <g>
+    <line class="lane" x1="48" y1="158" x2="1540" y2="158"/>
+    <line class="lane" x1="48" y1="206" x2="1540" y2="206"/>
+    <line class="lane" x1="48" y1="254" x2="1540" y2="254"/>
+    <line class="lane" x1="48" y1="302" x2="1540" y2="302"/>
+    <line class="lane" x1="48" y1="350" x2="1540" y2="350"/>
+    <line class="lane" x1="48" y1="398" x2="1540" y2="398"/>
+    <line class="lane" x1="48" y1="446" x2="1540" y2="446"/>
+    <line class="lane" x1="48" y1="494" x2="1540" y2="494"/>
+    <line class="lane" x1="48" y1="542" x2="1540" y2="542"/>
+    <line class="lane" x1="48" y1="590" x2="1540" y2="590"/>
+    <line class="lane" x1="48" y1="638" x2="1540" y2="638"/>
+    <line class="lane" x1="48" y1="686" x2="1540" y2="686"/>
+    <line class="lane" x1="48" y1="734" x2="1540" y2="734"/>
+    <line class="lane" x1="48" y1="782" x2="1540" y2="782"/>
+    <line class="lane" x1="48" y1="830" x2="1540" y2="830"/>
+    <line class="lane" x1="48" y1="878" x2="1540" y2="878"/>
+    <line class="lane" x1="48" y1="926" x2="1540" y2="926"/>
+    <line class="lane" x1="48" y1="974" x2="1540" y2="974"/>
+  </g>
+
+  <!-- cycle labels -->
+  <g class="axis" text-anchor="middle">
+    <text x="325" y="96">C0</text>
+    <text x="415" y="96">C1</text>
+    <text x="505" y="96">C2</text>
+    <text x="595" y="96">C3</text>
+    <text x="685" y="96">C4</text>
+    <text x="775" y="96">C5</text>
+    <text x="865" y="96">C6</text>
+    <text x="955" y="96">C7</text>
+    <text x="1045" y="96">C8</text>
+    <text x="1135" y="96">C9</text>
+    <text x="1225" y="96">C10</text>
+    <text x="1315" y="96">C11</text>
+    <text x="1405" y="96">C12</text>
+    <text x="1495" y="96">C13</text>
+  </g>
+
+  <!-- labels -->
+  <g class="label" text-anchor="end">
+    <text x="245" y="144">clk</text>
+    <text x="245" y="192">rst_n</text>
+    <text x="245" y="240">opa_valid_i</text>
+    <text x="245" y="288">opa_ready_o</text>
+    <text x="245" y="336">fragment_accept</text>
+    <text x="245" y="384">opa_clear_i</text>
+    <text x="245" y="432">opa_epoch_i</text>
+    <text x="245" y="480">opa_mode_i</text>
+    <text x="245" y="528">opa_a_fragment_i</text>
+    <text x="245" y="576">opa_b_fragment_i</text>
+    <text x="245" y="624">opa_lane_mask_i</text>
+    <text x="245" y="672">multiplier_active</text>
+    <text x="245" y="720">S0_product_valid</text>
+    <text x="245" y="768">S1_accum_valid</text>
+    <text x="245" y="816">acc_update_en</text>
+    <text x="245" y="864">k_loop_last</text>
+    <text x="245" y="912">opa_result_valid_o</text>
+    <text x="245" y="960">opa_result_ready_i</text>
+    <text x="245" y="1008">opa_result_o</text>
+  </g>
+
+  <!-- clock -->
+  <path class="wave" d="M280 153 L280 125 L325 125 L325 153 L370 153 L370 125 L415 125 L415 153 L460 153 L460 125 L505 125 L505 153 L550 153 L550 125 L595 125 L595 153 L640 153 L640 125 L685 125 L685 153 L730 153 L730 125 L775 125 L775 153 L820 153 L820 125 L865 125 L865 153 L910 153 L910 125 L955 125 L955 153 L1000 153 L1000 125 L1045 125 L1045 153 L1090 153 L1090 125 L1135 125 L1135 153 L1180 153 L1180 125 L1225 125 L1225 153 L1270 153 L1270 125 L1315 125 L1315 153 L1360 153 L1360 125 L1405 125 L1405 153 L1450 153 L1450 125 L1495 125 L1495 153 L1540 153"/>
+
+  <!-- waves -->
+  <path class="wave" d="M280 201 L370 201 L370 173 L1540 173"/>
+  <path class="waveGreen" d="M280 249 L460 249 L460 221 L730 221 L730 249 L1540 249"/>
+  <path class="waveGreen" d="M280 297 L370 297 L370 269 L820 269 L820 297 L1000 297 L1000 269 L1540 269"/>
+  <path class="waveGreen" d="M280 345 L460 345 L460 317 L730 317 L730 345 L1540 345"/>
+  <path class="waveRed" d="M280 393 L460 393 L460 365 L550 365 L550 393 L1540 393"/>
+
+  <!-- epoch bus -->
+  <rect class="invalid" x="280" y="413" width="180" height="28"/>
+  <rect class="bus" x="460" y="413" width="630" height="28"/>
+  <rect class="invalid" x="1090" y="413" width="450" height="28"/>
+  <text class="small" text-anchor="middle" x="775" y="432">E1: GEMM micro-loop epoch</text>
+
+  <!-- mode bus -->
+  <rect class="invalid" x="280" y="461" width="180" height="28"/>
+  <rect class="bus" x="460" y="461" width="630" height="28"/>
+  <rect class="invalid" x="1090" y="461" width="450" height="28"/>
+  <text class="small" text-anchor="middle" x="775" y="480">OPA_MUL</text>
+
+  <!-- A fragment bus -->
+  <rect class="invalid" x="280" y="509" width="180" height="28"/>
+  <rect class="busGreen" x="460" y="509" width="90" height="28"/>
+  <rect class="busGreen" x="550" y="509" width="90" height="28"/>
+  <rect class="busGreen" x="640" y="509" width="90" height="28"/>
+  <rect class="invalid" x="730" y="509" width="810" height="28"/>
+  <text class="small" text-anchor="middle" x="505" y="528">A[k0]</text>
+  <text class="small" text-anchor="middle" x="595" y="528">A[k1]</text>
+  <text class="small" text-anchor="middle" x="685" y="528">A[k2]</text>
+
+  <!-- B fragment bus -->
+  <rect class="invalid" x="280" y="557" width="180" height="28"/>
+  <rect class="busGreen" x="460" y="557" width="90" height="28"/>
+  <rect class="busGreen" x="550" y="557" width="90" height="28"/>
+  <rect class="busGreen" x="640" y="557" width="90" height="28"/>
+  <rect class="invalid" x="730" y="557" width="810" height="28"/>
+  <text class="small" text-anchor="middle" x="505" y="576">B[k0]</text>
+  <text class="small" text-anchor="middle" x="595" y="576">B[k1]</text>
+  <text class="small" text-anchor="middle" x="685" y="576">B[k2]</text>
+
+  <!-- mask bus -->
+  <rect class="invalid" x="280" y="605" width="180" height="28"/>
+  <rect class="busGreen" x="460" y="605" width="270" height="28"/>
+  <rect class="invalid" x="730" y="605" width="810" height="28"/>
+  <text class="small" text-anchor="middle" x="595" y="624">lane/cell mask for valid M/N tail</text>
+
+  <!-- active and pipeline -->
+  <path class="wavePurple" d="M280 681 L460 681 L460 653 L730 653 L730 681 L1540 681"/>
+  <path class="waveGreen" d="M280 729 L550 729 L550 701 L820 701 L820 729 L1540 729"/>
+  <path class="waveGreen" d="M280 777 L640 777 L640 749 L910 749 L910 777 L1540 777"/>
+  <path class="waveGreen" d="M280 825 L640 825 L640 797 L910 797 L910 825 L1540 825"/>
+  <path class="waveRed" d="M280 873 L640 873 L640 845 L730 845 L730 873 L1540 873"/>
+
+  <!-- result valid/ready/output -->
+  <path class="waveRed" d="M280 921 L1000 921 L1000 893 L1180 893 L1180 921 L1540 921"/>
+  <path class="wave" d="M280 941 L1000 941 L1000 969 L1090 969 L1090 941 L1540 941"/>
+  <rect class="invalid" x="280" y="989" width="720" height="28"/>
+  <rect class="busWarn" x="1000" y="989" width="180" height="28"/>
+  <rect class="invalid" x="1180" y="989" width="360" height="28"/>
+  <text class="small" text-anchor="middle" x="1090" y="1008">C tile partial sum held</text>
+
+  <!-- handshake markers -->
+  <circle class="dotGreen" cx="460" cy="331" r="6"/>
+  <circle class="dotGreen" cx="550" cy="331" r="6"/>
+  <circle class="dotGreen" cx="640" cy="331" r="6"/>
+  <text class="small" x="468" y="313">accept k0</text>
+  <text class="small" x="558" y="313">accept k1</text>
+  <text class="small" x="648" y="313">accept k2 / last</text>
+  <circle class="dotRed" cx="1000" cy="908" r="6"/>
+  <circle class="dotGreen" cx="1090" cy="908" r="6"/>
+  <text class="small" x="1008" y="886">valid but ready=0</text>
+  <text class="small" x="1098" y="886">handoff</text>
+
+  <!-- callouts -->
+  <rect class="callout" x="1195" y="178" width="330" height="96"/>
+  <text class="note" x="1215" y="203">Input issue</text>
+  <text class="small" x="1215" y="227">Each accepted cycle samples one A fragment</text>
+  <text class="small" x="1215" y="247">and one B fragment for the same K step.</text>
+  <text class="small" x="1215" y="267">OPA_MUL uses both input paths.</text>
+
+  <path class="arrow" d="M520 393 C565 376, 594 360, 625 342"/>
+  <rect class="callout" x="650" y="352" width="350" height="86"/>
+  <text class="note" x="670" y="377">Clear and epoch</text>
+  <text class="small" x="670" y="401">clear + valid initializes the accumulator</text>
+  <text class="small" x="670" y="421">for E1 before accepting A[k0] and B[k0].</text>
+
+  <path class="arrow" d="M680 705 C720 672, 760 650, 812 644"/>
+  <rect class="callout" x="830" y="623" width="370" height="92"/>
+  <text class="note" x="850" y="648">S0 multiply array</text>
+  <text class="small" x="850" y="672">product[k] = A[m,k] x B[k,n]</text>
+  <text class="small" x="850" y="694">The product valid bit follows the data pipeline.</text>
+
+  <path class="arrow" d="M752 798 C798 782, 844 762, 890 742"/>
+  <rect class="callout" x="915" y="724" width="390" height="98"/>
+  <text class="note" x="935" y="749">S1 accumulator update</text>
+  <text class="small" x="935" y="773">acc_update_en = S1_valid &amp;&amp; mask &amp;&amp; epoch_match</text>
+  <text class="small" x="935" y="795">C tile partial sum accumulates k0, k1, k2.</text>
+  <text class="small" x="935" y="815">Masked tail cells do not update.</text>
+
+  <path class="arrow" d="M1070 992 C1090 958, 1130 940, 1170 930"/>
+  <rect class="callout" x="1205" y="878" width="330" height="98"/>
+  <text class="note" x="1225" y="903">Output backpressure</text>
+  <text class="small" x="1225" y="927">C8 has result_valid_o=1 but ready=0.</text>
+  <text class="small" x="1225" y="949">The output register holds result_o stable</text>
+  <text class="small" x="1225" y="969">until the C9 ready/valid handshake.</text>
+
+  <!-- footer -->
+  <rect class="callout" x="48" y="1032" width="1492" height="44"/>
+  <text class="note" x="68" y="1059">Readout: MatMul/GEMM maps to OPA_MUL. BOA feeds aligned A[m,k_step] and B[k_step,n] fragments; OPA accumulates local partial sums across K and emits a registered partial tile.</text>
+</svg>
