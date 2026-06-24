@@ -622,7 +622,7 @@ typedef struct {
 | Reduction   | `reduce.sum`, `reduce.max`, `reduce.sumsq`                                |
 | Shuffle     | `shuffle.pair`, `shuffle.split_half`, optional `transpose.small`          |
 
-### 6.2 Encoding原则
+### 6.2 Encoding 原则
 
 V1 可使用固定 64-bit 指令宽度，降低 decode 复杂度：
 

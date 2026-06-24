@@ -433,9 +433,7 @@ PMU 指纹示例：
 
 后续需要冻结：EVU op_kind 编号、dtype/elem_bits 子集、mask policy、all-masked reduction identity、exp/activation approximation、scatter/atomic 一致性、PMU counter 编号和读取协议。
 
-修改后的建议：
-----------
-
+## 修改后的建议：
 
 ## 2. 职责、非职责和 Ownership
 
@@ -993,18 +991,18 @@ EVU-MT ≠ tile-level scheduler
 
 EVU-MT（Enhanced Vector Unit - Microthread Engine）是 ELENOR Tile 内部的 **tile-local shared-PC microthread vector engine**。它面向 BOA 不适合处理、但又不值得引入完整 GPU SIMT 的 kernel：
 
-* elementwise fusion
-* activation
-* softmax local phase
-* normalization
-* RoPE
-* layout pack / unpack
-* attention mask
-* dynamic shape tail
-* indexed gather
-* small reduction
-* sparse valid lane
-* conflict-free scatter subset
+- elementwise fusion
+- activation
+- softmax local phase
+- normalization
+- RoPE
+- layout pack / unpack
+- attention mask
+- dynamic shape tail
+- indexed gather
+- small reduction
+- sparse valid lane
+- conflict-free scatter subset
 
 EVU-MT 采用：
 
@@ -2931,4 +2929,3 @@ EVU-MT 不负责：
 一句话：
 
 > EVU-MT 拿 SIMT 的 lane 编程便利性，但不拿 GPU 的 warp scheduler 和 global-memory execution model。
-

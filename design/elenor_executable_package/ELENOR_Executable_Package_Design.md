@@ -330,7 +330,7 @@ PPA 相关 section 只作为 manifest，不驱动硬件时序。硬件最终 SRA
 - Device Runtime 只接收 command template 实例，不读取 package 文件格式。
 - Tile Group Sequencer 通过 `program_id/template_id/program_iova` 触发隐式 residency lookup/fetch/verify/install。
 - Tile Dispatcher 向 Tile UCE 发送 prepared tile task，只携带 local program handle，不携带 global program_iova。
-- Tile UCE 执行 descriptor template patch，但只 patch允许字段：tile_id、group_id、slot offset、local event id。
+- Tile UCE 执行 descriptor template patch，但只 patch 允许字段：tile_id、group_id、slot offset、local event id。
 - MFE 拥有数据相关动态内存访问，例如 page list、segment offset 和 stream fill。
 - USE 拥有 state slot 生命周期和 checkpoint/restore 语义。
 

@@ -376,7 +376,7 @@ Bring-up：先 frame bind checker formal，再 Tile DMA slot access，再 BOA GE
 
 ### 8.3 跨模块 contract checklist
 
-- Binary struct / protocol：tile frame、slot entry、address template、patch record、frame寄存器均有 v0 草案。
+- Binary struct / protocol：tile frame、slot entry、address template、patch record、frame 寄存器均有 v0 草案。
 - State machine：frame bind、descriptor patch、slot lifecycle、reset generation invalidation 必须有 transition coverage。
 - Capacity / bandwidth / area：slot count、L1 profile、bank 数量、patch datapath 和 checker 面积分开记录；未冻结容量由 SRAM profile 冻结，checker 时序由 PPA exploration 冻结。
 - NoC VC behavior：Slot Frame 本身不发 bulk packet；slot violation、patch fault、descriptor fault 必须通过 VC0/event fault path 可见；slot 指向的 DMA/stream payload 按 Memory / NoC VC contract 使用 VC1/VC2。

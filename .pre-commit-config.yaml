@@ -1,0 +1,48 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: v4.0.0-alpha.8
+    hooks:
+      - id: prettier
+        files: \.(js|ts|jsx|tsx|css|less|html|json|markdown|md|yaml|yml)$
+        args:
+          - "--config"
+          - ".prettierrc"
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v2.1.0
+    hooks:
+      - id: mypy
+        additional_dependencies: ["types-requests"]
+        exclude: tests(/\w*)*/functional/|tests/input|tests(/\w*)*data/|doc/|TFserving/ClientAPI/go/pkg/|(/\w*)*_test.py
+
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: "v22.1.5"
+    hooks:
+      - id: clang-format
+        types_or: [c++, c]
+
+  - repo: https://github.com/mwouts/jupytext
+    rev: v1.19.4
+    hooks:
+      - id: jupytext
+        args: [--sync]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.19
+    hooks:
+      - id: ruff
+        args: ["--config=ruff.toml", "--fix"]
+        exclude: tests(/\w*)*/
+
+  - repo: https://github.com/cheshirekow/cmake-format-precommit
+    rev: v0.6.13
+    hooks:
+      - id: cmake-format
+      - id: cmake-lint

@@ -1,0 +1,16 @@
+# ELENOR pipeline_validator conda environment
+#
+# Create with:
+#   conda env create -f pipeline_validator/environment.yml
+# Activate with:
+#   conda activate elenor-validator
+#
+# The validator itself only needs Python 3.11+; pytest is included for tests.
+
+name: elenor-validator
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pytest
+  - pip
