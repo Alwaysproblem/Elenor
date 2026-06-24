@@ -50,7 +50,7 @@ BOA 必须提供：
 - event completion：done、fault、timeout、cancelled。
 - PMU local counter：active、stall reason、bank conflict、reduce tree saturation、writeback bandwidth。
 - deterministic replay contract：相同 descriptor、slot frame 和输入数据应产生相同输出；不同 reduction order 带来的数值差异必须由 dtype/rounding mode 明确。
-- reduce tree 的bypass的旁路，简单支持非 split-K 场景的。
+- reduce tree 的 bypass 的旁路，简单支持非 split-K 场景的。
 - 需要暴露 reduce tree 的输入以便于直接可以使用 reduce tree 做局部规约的场景
 - 计算基地址的能力，因为需要 pingpong buffer 来隐藏 operand fetch latency，BOA 需要能够在不阻塞 OPA hot path 的情况下切换 tile buffer。
 

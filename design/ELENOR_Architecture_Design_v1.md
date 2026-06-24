@@ -264,7 +264,6 @@ Host / System SoC
 | Global PMU        | 采集全局性能、trace 和错误信息。                                                                              |
 | NoC / Router      | 承载 command/control、data stream、collective 三类流量。                                                      |
 
-
 ## 5. Tile Group 架构
 
 ### 5.1 Tile Group 定位
@@ -318,7 +317,6 @@ Tile Group 解决以下问题：
 | Group PMU                  | Tile Group | DMA 利用率、Pipeline stall、Buffer occupancy、Group 级性能统计                       | 调度决策                             |
 | Tile Dispatcher            | Tile Group | Tile Program 派发、Tile 资源绑定                                                     | Graph 调度                           |
 
-
 ## 6. Compute Tile 架构
 
 ### 6.1 Compute Tile 定位
@@ -348,7 +346,6 @@ Compute Tile
 - BOA: 4 个 OPA，单 OPA 为 16x16 或 32x16 outer-product tile。
 - Data type: INT8、INT4 optional、BF16、FP16、INT32 accumulation、optional FP32 accumulation。
 - Local SRAM bank: 至少 16 banks，High End 可提升到 32 banks。
-
 
 ### 6.2 Compute Tile 模块职责
 
@@ -392,7 +389,6 @@ Tile-local RISC-V / micro-controller
 - **USE 负责状态计算和状态生命周期**。
 - **MFE 负责大多数数据相关的动态内存访问**，例如 page walk、address generation、prefetch、reorder 和 stream fill。
 - 对 program 本身的 memory access pattern，Tile UCE 负责控制和调度，MFE 负责把数据流规整成 BOA/EVU/USE 可消费的 stream。
-
 
 ## 7. 分层职责和控制流
 
@@ -593,7 +589,6 @@ Level 3: Memory merge, optional
 能早规约就早规约，但不能让 OPA 承担全局 mapping。
 ```
 
-
 ### 8.6 BOA Descriptor
 
 BOA descriptor 在本文中仍是架构级示例，不是最终二进制 ABI。正式 ABI 需要在 §18 的 command/descriptor ABI v0 中冻结 version、size、alignment、endianness、validation 和扩展字段。
@@ -714,7 +709,6 @@ Feather+ inside BOA, not whole chip.
 
 Whole chip 采用 Region-Tile IR + Tile UCE ISA + USE state task + descriptor task；BOA 内部采用 Feather+-like VBB mapping / layout / dataflow abstraction。
 
-
 ## 9. Enhanced Vector Unit / EVU
 
 ### 9.1 定位
@@ -781,7 +775,6 @@ Writeback
 | Reduction Unit      |     中 | sum、max、prefix、small reduce                  |
 | Micro-thread Assist |   可选 | 边界复杂 kernel，不做 GPU 化                    |
 
-
 ### 9.4 EVU V1 能力边界
 
 EVU 可以面向最终设计保留较完整的 irregular compute 能力；实现阶段需要按复杂度分层，以便验证和 PMU 归因收敛。
@@ -794,7 +787,6 @@ EVU 可以面向最终设计保留较完整的 irregular compute 能力；实现
 | P3     | cross-tile irregular access、complex micro-thread assist                     | 作为后续优化能力，不应阻塞 First Silicon V1        |
 
 设计目标可以覆盖大工程能力，但实现计划必须明确每一层的验证入口、PMU counter 和 fallback 路径。
-
 
 ### 9.5 指令形态示意
 
@@ -835,7 +827,6 @@ typedef struct {
     uint32_t activation_kind;
 } evu_desc_t;
 ```
-
 
 ## 10. MFE: Memory Flow Engine
 
@@ -933,7 +924,6 @@ typedef struct {
 } elenor_mfe_page_stream_desc_t;
 ```
 
-
 ### 10.5 Mode 2: Segment Stream
 
 用于：
@@ -1029,8 +1019,6 @@ typedef struct {
     uint32_t transform;
 } mfe_load_desc_t;
 ```
-
-
 
 ## 11. Unified State Engine / USE
 
@@ -1165,7 +1153,6 @@ typedef struct {
 RTL 原型 v1: 小 RISC-V 或极简 sequencer + USE state FU
 工业化 v2: RISC-V + custom instruction，或 sequencer + fallback RISC-V
 ```
-
 
 ## 12. Memory Hierarchy 和 SRAM / NoC 定量模型
 
@@ -1304,7 +1291,6 @@ V1 优先级：
 ```text
 1D/2D/strided copy > async event > multicast > gather list
 ```
-
 
 ## 13. Tile L1 Slot Frame 和 Descriptor Patch Contract
 
@@ -1492,8 +1478,6 @@ NoC 需要支撑三类流量：
 - MoE expert output combine。
 - multi-tile normalization statistics。
 
-
-
 ## 15. Execution Objects 和 Implicit Program Residency
 
 ### 15.1 Package 组织
@@ -1534,17 +1518,17 @@ model.pkg
 
 ### 15.2 核心对象
 
-| 对象            |                   粒度 | 作用                                                      |
-| --------------- | ---------------------: | --------------------------------------------------------- |
-| Graph Schedule  |                   整图 | 描述 region 间依赖、context、queue、memory lifetime       |
-| Pipeline Region |               subgraph | 描述 device-side pipeline                                 |
-| Region Program  |             Tile Group | 推进 region PC、dispatch stage、控制 HBM 到 L2 DMA        |
-| Tile Program    |                   Tile | 由 Tile UCE 执行，控制 L2 到 L1 DMA、BOA、EVU、MFE、USE   |
-| Descriptor      |               动态参数 | shape、stride、address、tiling、stream、state、patch 信息 |
-| Stream Queue    |               stage 间 | producer-consumer、credit、backpressure、EOS/error token  |
-| Slot Frame      |                Tile L1 | tile program 和 descriptor 引用的 L1 memory binding       |
+| 对象            |                              粒度 | 作用                                                          |
+| --------------- | --------------------------------: | ------------------------------------------------------------- |
+| Graph Schedule  |                              整图 | 描述 region 间依赖、context、queue、memory lifetime           |
+| Pipeline Region |                          subgraph | 描述 device-side pipeline                                     |
+| Region Program  |                        Tile Group | 推进 region PC、dispatch stage、控制 HBM 到 L2 DMA            |
+| Tile Program    |                              Tile | 由 Tile UCE 执行，控制 L2 到 L1 DMA、BOA、EVU、MFE、USE       |
+| Descriptor      |                          动态参数 | shape、stride、address、tiling、stream、state、patch 信息     |
+| Stream Queue    |                          stage 间 | producer-consumer、credit、backpressure、EOS/error token      |
+| Slot Frame      |                           Tile L1 | tile program 和 descriptor 引用的 L1 memory binding           |
 | Program Table   | runtime 索引 / residency registry | program_id 到 section metadata / local resident handle 的映射 |
-| Event Table     | runtime / group / tile | completion、dependency、fault、timeout 状态               |
+| Event Table     |            runtime / group / tile | completion、dependency、fault、timeout 状态                   |
 
 ### 15.3 Program Residency Contract
 
@@ -2230,7 +2214,6 @@ if (seq_len <= 512) {
 
 硬件不理解任意 tensor algebra，只理解 base、extent、stride、slot、event、stream token 和 descriptor。
 
-
 ## 19. 编译器栈
 
 ### 19.1 Lowering Pipeline
@@ -2354,7 +2337,6 @@ Command sequence：
 ```text
 DMA weights -> BOA QKV GEMM -> BOA QK -> Vector softmax -> BOA AV -> BOA output -> event signal
 ```
-
 
 ### 20.2 Paged Attention
 
@@ -2506,8 +2488,6 @@ dense tower           -> BOA
 - PMU feedback: 根据 stall 和利用率调整分配。
 
 未来可以将 tile group 分成若干组，每组有局部调度硬件做管理。
-
-
 
 ## 21. 性能模型和 PMU
 
@@ -2708,8 +2688,6 @@ ELENOR hardware queues
 4. 通知 driver。
 5. Runtime 选择 reset tile、reset group 或 reset device。
 
-
-
 ## 23. Verification 和 Bring-up
 
 ### 23.1 验证层级
@@ -2847,7 +2825,6 @@ ELENOR hardware queues
 - multimodal。
 - 轻训练 / fine-tuning 部分 kernel。
 
-
 ## 25. 关键取舍
 
 ### 25.1 Vector vs GPU SIMT
@@ -2901,7 +2878,6 @@ ELENOR hardware queues
 - 降低编译器生成成本。
 - 便于 firmware/tile kernel library 复用。
 - 便于 descriptor auto-patch。
-
 
 ## 26. 风险和缓解
 
@@ -2971,8 +2947,6 @@ ELENOR hardware queues
 - Tile Dispatcher 只下发 prepared tile task，附带 local program handle，不暴露 global `program_iova` 给 Tile UCE。
 - Runtime 热路径主要 patch descriptor，而不是频繁 reload program。
 - Tile UCE 在执行前校验 local handle 的 `program_id/version/epoch`，reset/drain 后旧 handle 必须失效。
-
-
 
 ## 27. 实施路线和实现计划
 
@@ -3110,7 +3084,6 @@ Exit criteria：
 - QoS latency / throughput 指标可量化。
 - PMU counter 能解释主要性能瓶颈。
 
-
 ## 28. 评审重点问题
 
 建议评审时重点检查以下问题：
@@ -3149,7 +3122,6 @@ Exit criteria：
 13. PMU counter 与 benchmark/roofline 的一一对应关系。
 14. 多模型并发下的 SRAM quota、priority、preemption 和 fault isolation。
 15. Error recovery 中 reset tile、reset group、reset device 的精确定义。
-
 
 ## 30. 总结
 

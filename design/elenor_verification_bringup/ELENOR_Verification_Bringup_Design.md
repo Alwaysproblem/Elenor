@@ -106,7 +106,7 @@ SPEC_LOCK
 | --------------- | --------------------------------------------- | --------------------------------------------- |
 | command queue   | empty、ready、consume、complete、fault、reset | invalid descriptor、timeout、queue drain      |
 | event/barrier   | pending、done、error、timeout、reset          | deadlock timeout、producer id mismatch        |
-| DMA             | idle、issue、outstanding、complete、fault     | address fault、stride越界、reset mid-flight   |
+| DMA             | idle、issue、outstanding、complete、fault     | address fault、stride 越界、reset mid-flight  |
 | Stream Queue    | empty、non-empty、full、EOS、error、drain     | credit leak、error token 丢失、循环等待       |
 | Tile Slot Frame | bind、access、reuse、release、fault           | slot 权限错误、alignment 错误、bank conflict  |
 | PMU snapshot    | arm、counting、freeze、read、clear            | overflow、cross-domain snapshot、context leak |
@@ -127,7 +127,7 @@ command layout 必须验证以下字段：ABI version、command size、context i
 | BOA          | INT8/BF16 GEMM、double buffer                                 | operand underflow、accumulator conflict       | BOA active/stall、SRAM conflict           |
 | EVU          | elementwise、softmax、norm、mask/tail、basic gather           | invalid mask、tail boundary、bank replay      | EVU active、LSU replay、masked lane       |
 | MFE Page     | page walk、KV prefetch、reorder、stream fill                  | invalid page、timeout、EOS/error token        | hit/miss、stream stall、BOA operand stall |
-| MFE Segment  | offsets decode、segment gather、local reduce、expert batching | duplicate index mode、segment越界             | routing imbalance、MFE stall              |
+| MFE Segment  | offsets decode、segment gather、local reduce、expert batching | duplicate index mode、segment 越界            | routing imbalance、MFE stall              |
 | USE          | scan、affine recurrence、checkpoint/restore                   | state slot 权限、reset/fault restore          | USE active、state hit/miss、event wait    |
 | Stream Queue | token、credit、backpressure、EOS、error                       | credit leak、full/empty deadlock、reset/drain | occupancy、credit empty/full              |
 
