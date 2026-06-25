@@ -265,40 +265,48 @@ def make_tiled_matmul_tile_program(num_k_chunks: int = 4,
     Models the classic two-level tiling pattern:
       - Outer tile (MxN) is fixed; K dimension is split into `num_k_chunks`
         chunks of size `tile_k`.
-      - Each K chunk does: MFE load A_k + B_k  ->  BOA accumulate  ->  loop.
-      - Double-buffer: the MFE load for chunk i+1 is launched *before*
+      - Each K chunk does: MFE load A_k + B_k  ->  BOA accumulate  ->  MFE store C_k.
+
+    Both input and output are double-buffered and pipelined:
+      - *Input* double-buffer: the MFE load for chunk i+1 is launched *before*
         the BOA wait for chunk i, so MFE prefetch overlaps BOA compute.
+      - *Output* double-buffer: the MFE store for chunk i is launched right
+        after BOA_i finishes and is *not* waited on immediately.  The wait for
+        store(i-1) is placed after ``launch BOA_i`` so it overlaps with BOA_i
+        compute.  The last store is drained in an epilogue before ``ret``.
 
     Unrolled (no loop register in the UCE ISA yet); the UCE issues one
     instruction per cycle and the MFE/BOA engines run concurrently while
     the UCE waits.
 
     Instruction sequence (per K chunk i):
-        launch.mfe  load_A_k_i  -> e_a_i
+        launch.mfe  load_A_k_i  -> e_a_i        (prefetch, or from prologue)
         launch.mfe  load_B_k_i  -> e_b_i
         [if i < n-1: also launch load_A_k_(i+1), load_B_k_(i+1)]
-        waitall     (e_a_i, e_b_i)                 # operands ready for chunk i
-        launch.boa  matmul_k_i  -> e_mm_i           # accumulate partial sum
-        wait        e_mm_i
-    Final:
-        launch.mfe  store_C -> e_store
-        wait e_store
+        waitall     (e_a_i, e_b_i)               # operands ready for chunk i
+        launch.boa  matmul_k_i  -> e_mm_i        # accumulate partial sum
+        [if i >= 1: wait e_store(i-1)]           # drain prev store, overlaps BOA_i
+        wait        e_mm_i                        # BOA chunk i done
+        launch.mfe  store_C_k_i -> e_store_i      # fire-and-forget store
+    Epilogue:
+        wait        e_store(n-1)                  # drain last store
         ret
 
-    The overlap window is the smaller of T_mfe(chunk_i+1) and T_boa(chunk_i).
-    With enough chunks the MFE latency is fully hidden behind BOA compute,
-    validating the Architecture 21.2 roofline: BOA_perf bound by compute,
-    not memory.
+    The overlap windows are:
+      - Input:  T_mfe(chunk_i+1) hidden behind T_boa(chunk_i)
+      - Output: T_store(chunk_i-1) hidden behind T_boa(chunk_i)
+    With enough chunks both MFE load and store latencies are fully hidden
+    behind BOA compute, validating the Architecture 21.2 roofline:
+    BOA_perf bound by compute, not memory.
     """
     p = TileProgram(name=f"tiled_matmul_{num_k_chunks}k_tile")
     k_chunk_bytes_a = tile_m * tile_k * 2  # BF16
     k_chunk_bytes_b = tile_k * tile_n * 2
     # per-chunk BOA ops: 2*M*N*K_chunk (accumulate across chunks)
     k_chunk_ops = 2 * tile_m * tile_n * tile_k
-    # descriptors for each K chunk (must be unique names since the UCE
-    # references by name)
     insts: list[TileInst] = []
-    # phase 1: prefetch chunk 0
+
+    # ---- prologue: prefetch chunk 0 inputs ----
     insts.append(
         TileInst(TileOp.LAUNCH_MFE,
                  dst="e_a0",
@@ -317,9 +325,10 @@ def make_tiled_matmul_tile_program(num_k_chunks: int = 4,
         "bytes": k_chunk_bytes_b,
         "ops": 0
     })
-    # per-chunk loop body (unrolled)
+
+    # ---- per-chunk loop body (unrolled) ----
     for i in range(num_k_chunks):
-        # if not last chunk, prefetch chunk i+1 (double-buffer overlap)
+        # prefetch chunk i+1 inputs (input double-buffer: overlaps BOA_i)
         if i < num_k_chunks - 1:
             ni = i + 1
             insts.append(
@@ -342,11 +351,13 @@ def make_tiled_matmul_tile_program(num_k_chunks: int = 4,
                     "bytes": k_chunk_bytes_b,
                     "ops": 0
                 })
+
         # wait for chunk i operands
         insts.append(
             TileInst(TileOp.WAITALL,
                      args=(f"e_a{i}", f"e_b{i}"),
                      comment=f"operands for chunk {i} ready"))
+
         # BOA accumulate chunk i
         mm_name = f"matmul_k{i}"
         p.descriptors[mm_name] = EngineDesc(
@@ -363,21 +374,39 @@ def make_tiled_matmul_tile_program(num_k_chunks: int = 4,
                      dst=f"e_mm{i}",
                      args=(mm_name, ),
                      comment=f"BOA accumulate chunk {i}"))
+
+        # drain previous store while BOA_i runs (output double-buffer)
+        if i >= 1:
+            insts.append(
+                TileInst(TileOp.WAIT,
+                         args=(f"e_store{i - 1}", ),
+                         comment=f"drain store {i - 1} (overlap BOA{i})"))
+
+        # wait for BOA_i result
         insts.append(
             TileInst(TileOp.WAIT,
                      args=(f"e_mm{i}", ),
                      comment=f"BOA chunk {i} done"))
-    # store final result
-    p.descriptors["store_C"] = EngineDesc("store_C", "MFE", "store", {
-        "bytes": tile_m * tile_n * 2,
-        "ops": 0
-    })
+
+        # store chunk i output (fire-and-forget: overlaps next BOA)
+        store_name = f"store_C_k{i}"
+        p.descriptors[store_name] = EngineDesc(
+            store_name, "MFE", "store", {
+                "bytes": tile_m * tile_n * 2,
+                "ops": 0,
+                "chunk": i,
+            })
+        insts.append(
+            TileInst(TileOp.LAUNCH_MFE,
+                     dst=f"e_store{i}",
+                     args=(store_name, ),
+                     comment=f"MFE store result chunk {i} (deferred wait)"))
+
+    # ---- epilogue: drain last store ----
     insts.append(
-        TileInst(TileOp.LAUNCH_MFE,
-                 dst="e_store",
-                 args=("store_C", ),
-                 comment="store final C"))
-    insts.append(TileInst(TileOp.WAIT, args=("e_store", )))
+        TileInst(TileOp.WAIT,
+                 args=(f"e_store{num_k_chunks - 1}", ),
+                 comment="drain last store"))
     insts.append(TileInst(TileOp.RET))
     p.insts = insts
     p.resolve_labels()

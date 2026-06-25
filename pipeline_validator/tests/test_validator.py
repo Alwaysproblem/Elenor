@@ -188,13 +188,14 @@ class TestIR:
         assert p.descriptors["gather_K_pages"].op == "page_stream"
 
     def test_tiled_matmul_tile_program(self):
-        p = make_tiled_matmul_tile_program(num_k_chunks=4)
+        num_k_chunks = 4
+        p = make_tiled_matmul_tile_program(num_k_chunks=num_k_chunks)
         assert "tiled_matmul" in p.name
         ops = [i.op for i in p.insts]
-        # 4 K chunks: each needs load_A + load_B (but chunk 0 prefetched
-        # before the loop, and each chunk i prefetches chunk i+1).
-        # So total MFE launches = 2*(4) loads + 1 store = 9
-        assert ops.count(TileOp.LAUNCH_MFE) == 9
+        # 4 K chunks: each needs load_A + load_B (chunk 0 prefetched before
+        # the loop, each chunk i prefetches chunk i+1).
+        # Total MFE launches = 2*(4) loads + 4 stores = 12
+        assert ops.count(TileOp.LAUNCH_MFE) == 12
         # 4 BOA accumulate launches (one per K chunk)
         assert ops.count(TileOp.LAUNCH_BOA) == 4
         assert ops.count(TileOp.RET) == 1
@@ -206,6 +207,27 @@ class TestIR:
         # first chunk is not accumulate, later chunks are
         assert p.descriptors["matmul_k0"].params.get("accumulate") is False
         assert p.descriptors["matmul_k1"].params.get("accumulate") is True
+
+        # Output double-buffer: the store for chunk i is fire-and-forget.
+        # For chunks 0..n-2 its wait is deferred so it overlaps a later BOA
+        # (the drain sits after ``launch BOA_{i+1}``).  Only the *last* chunk's
+        # store is drained in the epilogue, where the wait is necessarily
+        # adjacent to its launch (no further BOA to overlap) — that is the
+        # expected pipeline epilogue, not a bug.
+        store_wait_idx = {ins.args[0]: n
+                          for n, ins in enumerate(p.insts)
+                          if ins.op == TileOp.WAIT
+                          and ins.args[0].startswith("e_store")}
+        assert len(store_wait_idx) == 4
+        # chunks 0..2 must be deferred: their wait is NOT adjacent to launch
+        for i in range(num_k_chunks - 1):
+            ev = f"e_store{i}"
+            w = store_wait_idx[ev]
+            prev = p.insts[w - 1]
+            assert not (prev.op == TileOp.LAUNCH_MFE and prev.dst == ev), (
+                f"store {ev} waited immediately after launch at inst {w}")
+        # last chunk is drained in the epilogue (adjacency is fine there)
+        assert f"e_store{num_k_chunks - 1}" in store_wait_idx
 
     def test_tiled_matmul_region(self):
         r = make_tiled_matmul_region(num_k_chunks=4)
