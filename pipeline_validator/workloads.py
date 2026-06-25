@@ -39,11 +39,12 @@ class MatmulWorkload(Workload):
     """
 
     def __init__(self, cfg: WorkloadConfig | None = None):
-        cfg = cfg or WorkloadConfig(name="matmul", m=512, n=512, k=512)
+        cfg = cfg or WorkloadConfig(name="matmul")
         region = make_matmul_region()
         super().__init__(
             name="matmul",
-            description=("Dense GEMM (512x512x512, BF16) across 4 tiles. "
+            description=("Dense GEMM (128x128x256 BF16 per tile) across 4 tiles. "
+                         "Same per-tile BOA work as tiled_matmul (4x128x128x64). "
                          "Single stage, no inter-tile stream. "
                          "Validates BOA peak compute + MFE/DMA load overlap."),
             region=region,
@@ -83,13 +84,14 @@ class TiledMatmulWorkload(Workload):
         region = make_tiled_matmul_region(num_k_chunks=num_k_chunks)
         super().__init__(
             name="tiled_matmul",
-            description=(
-                f"Multi-level tiled GEMM (128x128 output, K split into "
-                f"{num_k_chunks} chunks of 64, BF16) across 4 tiles. "
-                "Double-buffered MFE prefetch overlaps BOA compute. "
-                "Validates K-dimension tiling + pipeline overlap vs the "
-                "single-chunk matmul workload."),
             region=region,
+            description=(
+                "Multi-level tiled GEMM (128x128 per tile, K split into "
+                f"{num_k_chunks} chunks of 64, BF16) across 4 tiles. "
+                "Same per-tile BOA work as matmul (4x128x128x64 = 128x128x256). "
+                "Double-buffered MFE prefetch overlaps BOA compute. "
+                "12 MFE ops/tile (8 loads + 4 per-chunk stores) vs matmul's 3 — "
+                "extra launch overhead + store traffic, not a pure tiling speedup."),
             expected={
                 "primary_bottleneck": "BOA",
                 "boa_active_ratio_min": 0.40,
