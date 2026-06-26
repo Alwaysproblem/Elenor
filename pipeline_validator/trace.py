@@ -300,7 +300,8 @@ const TRACE = __TRACE_JSON__;
   const barH = 16, rowH = 22, leftPad = 180;
   const colors = {{BOA:"#e74c3c", EVU:"#27ae60", MFE:"#3498db", USE:"#f39c12",
                    UCE:"#9b59b6", DMA:"#1abc9c", Region:"#e67e22",
-                   Stream:"#95a5a6", default:"#888"}};
+                   Stream:"#95a5a6", Stage:"#2ecc71", "Global DMA":"#16a085",
+                   Collective:"#d35400", default:"#888"}};
   let y = 4;
   const tooltip = document.getElementById("tooltip");
   for (const k of trackKeys) {{
