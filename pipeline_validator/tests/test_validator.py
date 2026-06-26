@@ -451,8 +451,8 @@ class TestTracer:
         assert "stage_dispatch" in instants
         assert "dma_complete" in instants
         assert "region_done" in instants
-        # dma_complete instant must land on the Global DMA thread, not a
-        # stale "DMA" thread — prevents thread-name regression.
+        # dma_complete instant must land on a DMA channel thread, not a
+        # stale "DMA" or "Global DMA" thread — prevents thread-name regression.
         tg_pid = next(e["pid"] for e in events
                        if e.get("name") == "process_name"
                        and e.get("args", {}).get("name") == "TileGroup")
@@ -463,11 +463,16 @@ class TestTracer:
         }
         assert "DMA" not in thread_names, \
             "stale 'DMA' thread_name leaked on TileGroup"
-        assert "Global DMA" in thread_names
+        assert "Global DMA" not in thread_names, \
+            "stale 'Global DMA' thread_name leaked on TileGroup"
+        assert "DMA Ch0" in thread_names
+        assert "DMA Ch1" in thread_names
         for e in events:
             if e.get("name") == "dma_complete" and e.get("ph") == "i":
-                assert e["cat"] == "Global DMA", \
-                    f"dma_complete instant cat={e['cat']}, expected 'Global DMA'"
+                assert e["cat"] in ("DMA Ch0", "DMA Ch1"), \
+                    f"dma_complete instant cat={e['cat']}, expected 'DMA Ch0/1'"
+                assert "channel" in e["args"], \
+                    "dma_complete instant must carry channel arg"
 
     def test_tiled_matmul_trace_has_global_dma_and_mfe(self):
         """tiled_matmul region has Global DMA bars on TileGroup timeline and

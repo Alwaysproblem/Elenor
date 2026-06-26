@@ -47,6 +47,8 @@ class RegionSequencer:
         self.done = False
         # block counter for branch.lt loops
         self._block_reg: dict[str, int] = {}
+        # round-robin DMA channel allocation
+        self._next_dma_channel: int = 0
 
     def load(self, program: RegionProgram) -> None:
         self.program = program
@@ -54,8 +56,8 @@ class RegionSequencer:
         self._events_done.clear()
         self._pending = None
         self._stage_events.clear()
-        self._tile_masks.clear()
         self._block_reg.clear()
+        self._next_dma_channel = 0
         self.done = False
 
     # ---- per-cycle step -------------------------------------------------
@@ -116,6 +118,9 @@ class RegionSequencer:
             bytes_total = ins.args[2] if len(ins.args) > 2 else None
             resolved_bytes = bytes_total if bytes_total and bytes_total > 0 else 1024 * 1024
             lat = self._dma_latency(resolved_bytes)
+            # round-robin DMA channel allocation
+            ch = self._next_dma_channel % self.cfg.num_dma_channels
+            self._next_dma_channel += 1
             self.group.schedule_dma(
                 ins.dst,
                 lat,
@@ -124,6 +129,7 @@ class RegionSequencer:
                 desc_id=desc_id,
                 l2_slot=dst_l2,
                 bytes_total=resolved_bytes,
+                channel=ch,
             )
             self.pmu.add_event("dma_prefetch")
             self.pc += 1
@@ -134,6 +140,9 @@ class RegionSequencer:
             bytes_total = ins.args[2] if len(ins.args) > 2 else None
             resolved_bytes = bytes_total if bytes_total and bytes_total > 0 else 1024 * 1024
             lat = self._dma_latency(resolved_bytes)
+            # round-robin DMA channel allocation
+            ch = self._next_dma_channel % self.cfg.num_dma_channels
+            self._next_dma_channel += 1
             self.group.schedule_dma(
                 ins.dst,
                 lat,
@@ -142,6 +151,7 @@ class RegionSequencer:
                 desc_id=desc_id,
                 l2_slot=src_l2,
                 bytes_total=resolved_bytes,
+                channel=ch,
             )
             self.pmu.add_event("dma_store")
             self.pc += 1
@@ -229,5 +239,6 @@ class RegionSequencer:
         self._stage_events.clear()
         self._tile_masks.clear()
         self._block_reg.clear()
+        self._next_dma_channel = 0
         self.done = False
         self.pmu.reset()
