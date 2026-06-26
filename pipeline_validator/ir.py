@@ -792,19 +792,43 @@ def make_matmul_region(block_count: int = 4) -> RegionProgram:
     """Region that dispatches a single matmul stage across 4 tiles.
 
     Stage0 (tiles 0-3) run the matmul tile program.  No inter-tile stream;
-    the region just dispatches and waits.  This is the simplest region
-    used to validate engine timing + PMU attribution.
+    the region prefetches A/B weights HBM->L2 via Group DMA, dispatches
+    the stage, then stores C L2->HBM.  This validates Global DMA + stage
+    + storeback trace coverage on the TileGroup timeline.
     """
+    # Per-tile A = 128*256*2, B = 256*128*2, C = 128*128*2 (BF16).
+    # 4-tile M-split: A and C are per-tile (x4), B is shared (x1).
+    bytes_a = 128 * 256 * 2 * 4
+    bytes_b = 256 * 128 * 2
+    bytes_c = 128 * 128 * 2 * 4
     r = RegionProgram(name="matmul_region")
     r.streams = []
     r.tile_programs = {0: make_matmul_tile_program()}
     r.insts = [
         RegionInst(RegionOp.REGION_BEGIN, args=(0, ), comment="region 0"),
+        # Group DMA HBM -> L2 prefetch (both prefetches issued before wait
+        # so they overlap, per Architecture 16.3).
+        RegionInst(RegionOp.DMA_PREFETCH,
+                   args=("gdma_prefetch_A", "l2_buf_A", bytes_a),
+                   dst="ev_dma_A",
+                   comment="Group DMA prefetch A HBM->L2"),
+        RegionInst(RegionOp.DMA_PREFETCH,
+                   args=("gdma_prefetch_B", "l2_buf_B", bytes_b),
+                   dst="ev_dma_B",
+                   comment="Group DMA prefetch B HBM->L2"),
+        RegionInst(RegionOp.WAIT_EVENT, args=("ev_dma_A", )),
+        RegionInst(RegionOp.WAIT_EVENT, args=("ev_dma_B", )),
         RegionInst(
             RegionOp.DISPATCH_STAGE,
             args=(0, 0x0F, 0),  # stage=0, tile_mask=0x0F, program=matmul
             dst="ev_stage0"),
         RegionInst(RegionOp.WAIT_EVENT, args=("ev_stage0", )),
+        # Group DMA L2 -> HBM storeback
+        RegionInst(RegionOp.DMA_STORE,
+                   args=("gdma_store_C", "l2_buf_C", bytes_c),
+                   dst="ev_dma_C",
+                   comment="Group DMA store C L2->HBM"),
+        RegionInst(RegionOp.WAIT_EVENT, args=("ev_dma_C", )),
         RegionInst(RegionOp.REGION_END, dst="ev_region_done"),
     ]
     r.resolve_labels()
@@ -819,7 +843,16 @@ def make_tiled_matmul_region(num_k_chunks: int = 4) -> RegionProgram:
     prefetch to overlap memory and compute.  This validates the
     multi-level tiling + pipeline overlap that the single-chunk matmul
     workload cannot expose.
+
+    The region prefetches A/B HBM->L2 via Group DMA before dispatching
+    the single stage, then stores C L2->HBM after.
     """
+    # K = tile_k * num_k_chunks.  A = M*K*2, B = K*N*2, C = M*N*2 (BF16).
+    # 4-tile M-split: A and C are per-tile (x4), B is shared (x1).
+    total_k = 64 * num_k_chunks
+    bytes_a = 128 * total_k * 2 * 4
+    bytes_b = total_k * 128 * 2
+    bytes_c = 128 * 128 * 2 * 4
     r = RegionProgram(name="tiled_matmul_region")
     r.streams = []
     r.tile_programs = {
@@ -829,9 +862,24 @@ def make_tiled_matmul_region(num_k_chunks: int = 4) -> RegionProgram:
         RegionInst(RegionOp.REGION_BEGIN,
                    args=(5, ),
                    comment="tiled matmul region"),
+        RegionInst(RegionOp.DMA_PREFETCH,
+                   args=("gdma_prefetch_A", "l2_buf_A", bytes_a),
+                   dst="ev_dma_A",
+                   comment="Group DMA prefetch A HBM->L2"),
+        RegionInst(RegionOp.DMA_PREFETCH,
+                   args=("gdma_prefetch_B", "l2_buf_B", bytes_b),
+                   dst="ev_dma_B",
+                   comment="Group DMA prefetch B HBM->L2"),
+        RegionInst(RegionOp.WAIT_EVENT, args=("ev_dma_A", )),
+        RegionInst(RegionOp.WAIT_EVENT, args=("ev_dma_B", )),
         RegionInst(RegionOp.DISPATCH_STAGE, args=(0, 0x0F, 0),
                    dst="ev_stage0"),
         RegionInst(RegionOp.WAIT_EVENT, args=("ev_stage0", )),
+        RegionInst(RegionOp.DMA_STORE,
+                   args=("gdma_store_C", "l2_buf_C", bytes_c),
+                   dst="ev_dma_C",
+                   comment="Group DMA store C L2->HBM"),
+        RegionInst(RegionOp.WAIT_EVENT, args=("ev_dma_C", )),
         RegionInst(RegionOp.REGION_END, dst="ev_region_done"),
     ]
     r.resolve_labels()

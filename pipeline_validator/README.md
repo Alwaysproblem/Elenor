@@ -76,10 +76,14 @@ python -m pipeline_validator --all --trace-json all.json --trace-html all.html
 - **Slices** (Gantt bars): every BOA/EVU/MFE/USE engine job with op name,
   ops/bytes, event_id, tile_id. Each tile gets its own track
   (Tile0/Tile1/Tile2/Tile3) with sub-tracks per engine (BOA/EVU/MFE/USE).
+  TileGroup runtime windows: `TileGroup/Region` (region begin→end),
+  `TileGroup/Stage` (dispatch→stage complete), `TileGroup/Global DMA`
+  (HBM↔L2 prefetch/store), `TileGroup/Collective` (reduce/broadcast).
+  Tile L2↔L1 traffic is MFE load/store on each tile track.
 - **Counters** (line graphs): Stream Queue occupancy and credit_available
   sampled per cycle — only for workloads with streams (attention, moe).
-- **Instant markers**: `tile_done`, `stage_complete`, `region_done`,
-  `dma_complete`.
+- **Instant markers**: `tile_done`, `stage_dispatch`, `stage_complete`,
+  `region_done`, `dma_complete`, `collective_complete`.
 
 To view:
 

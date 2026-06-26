@@ -46,13 +46,15 @@ class MatmulWorkload(Workload):
             description=("Dense GEMM (128x128x256 BF16 per tile) across 4 tiles. "
                          "Same per-tile BOA work as tiled_matmul (4x128x128x64). "
                          "Single stage, no inter-tile stream. "
-                         "Validates BOA peak compute + MFE/DMA load overlap."),
+                         "Validates BOA peak compute + MFE/DMA load overlap. "
+                         "Region prefetches A/B HBM->L2 via Global DMA, "
+                         "then dispatches a single stage, then stores C L2->HBM."),
             region=region,
             expected={
                 "primary_bottleneck": "BOA",
                 "boa_active_ratio_min": 0.40,
                 "stream_stall_ratio_max": 0.05,
-                "mfe_active_ratio_min": 0.10,
+                "mfe_active_ratio_min": 0.09,
             },
             config=cfg,
         )
@@ -91,7 +93,9 @@ class TiledMatmulWorkload(Workload):
                 "Same per-tile BOA work as matmul (4x128x128x64 = 128x128x256). "
                 "Double-buffered MFE prefetch overlaps BOA compute. "
                 "12 MFE ops/tile (8 loads + 4 per-chunk stores) vs matmul's 3 — "
-                "extra launch overhead + store traffic, not a pure tiling speedup."),
+                "extra launch overhead + store traffic, not a pure tiling speedup. "
+                "Region prefetches A/B HBM->L2 via Global DMA before the stage, "
+                "then stores C L2->HBM after."),
             expected={
                 "primary_bottleneck": "BOA",
                 "boa_active_ratio_min": 0.40,

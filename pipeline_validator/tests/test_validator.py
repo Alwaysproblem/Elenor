@@ -7,8 +7,10 @@ from __future__ import annotations
 
 from pipeline_validator.config import HardwareConfig, SimConfig
 from pipeline_validator.ir import (
+    RegionInst,
     RegionOp,
     TileOp,
+    make_identity_tile_program,
     make_matmul_region,
     make_matmul_tile_program,
     make_paged_attention_tile_program,
@@ -16,6 +18,7 @@ from pipeline_validator.ir import (
     make_tiled_matmul_region,
     make_tiled_matmul_tile_program,
 )
+from pipeline_validator.ir import RegionProgram
 from pipeline_validator.report import build_report, report_to_text
 from pipeline_validator.simulator import Simulator
 from pipeline_validator.stream_queue import (
@@ -169,6 +172,10 @@ class TestIR:
         assert RegionOp.REGION_BEGIN in ops
         assert RegionOp.DISPATCH_STAGE in ops
         assert RegionOp.REGION_END in ops
+        # Global DMA HBM->L2 prefetch + L2->HBM storeback
+        assert ops.count(RegionOp.DMA_PREFETCH) == 2  # A + B
+        assert ops.count(RegionOp.DMA_STORE) == 1  # C storeback
+        assert ops.count(RegionOp.DISPATCH_STAGE) == 1  # single stage
 
     def test_paged_attention_tile_program(self):
         p = make_paged_attention_tile_program()
@@ -235,6 +242,10 @@ class TestIR:
         assert RegionOp.REGION_BEGIN in ops
         assert RegionOp.DISPATCH_STAGE in ops
         assert RegionOp.REGION_END in ops
+        # Global DMA HBM->L2 prefetch + L2->HBM storeback
+        assert ops.count(RegionOp.DMA_PREFETCH) == 2  # A + B
+        assert ops.count(RegionOp.DMA_STORE) == 1  # C storeback
+        assert ops.count(RegionOp.DISPATCH_STAGE) == 1  # single stage
 
 
 # ---------------------------------------------------------------------------
@@ -359,3 +370,165 @@ class TestTracer:
         for c in counters:
             counter_names.update(c["args"].keys())
         assert "occupancy" in counter_names or "credit_available" in counter_names
+
+    def test_trace_has_tilegroup_runtime_slices(self):
+        """TileGroup region/stage/Global-DMA/Collective duration bars exist."""
+        region = make_group_runtime_trace_region()
+        sim = Simulator(HardwareConfig(),
+                        SimConfig(max_cycles=50_000),
+                        enable_tracer=True)
+        result = sim.run(region)
+        assert result.completed, f"region did not complete: {result.reason}"
+        import json
+        data = json.loads(result.tracer.to_chrome_json())
+        events = data["traceEvents"]
+        slices = [e for e in events if e["ph"] == "X"]
+        names = {e["name"] for e in slices}
+        # region runtime window
+        assert "region:group_runtime_trace_region" in names
+        # stage runtime window
+        assert any(n.startswith("stage0:ev_stage0:run") for n in names), names
+        # Global DMA runtime windows
+        assert "dma.prefetch:dma_prefetch0" in names
+        assert "dma.store:dma_store0" in names
+        # Collective runtime window
+        assert "collective.reduce:coll_reduce0" in names
+        # Global DMA slice carries bytes
+        gdma = next(e for e in slices
+                    if e["name"] == "dma.prefetch:dma_prefetch0")
+        assert gdma["args"]["bytes"] == 4096
+        assert gdma["args"]["l2_slot"] == "l2_in0"
+        # Collective slice carries bytes + participant_mask
+        coll = next(e for e in slices
+                    if e["name"] == "collective.reduce:coll_reduce0")
+        assert coll["args"]["bytes"] == 2048
+        assert coll["args"]["participant_mask"] == 0x01
+        # instant markers still present
+        instants = {e["name"] for e in events if e["ph"] == "i"}
+        assert "stage_dispatch" in instants
+        assert "stage_complete" in instants
+        assert "dma_complete" in instants
+        assert "collective_complete" in instants
+        assert "region_done" in instants
+
+    def test_matmul_trace_has_global_dma_slices(self):
+        """matmul region emits Global DMA HBM->L2 prefetch/store bars on
+        the TileGroup timeline, plus MFE load/store bars on each tile."""
+        wl = MatmulWorkload()
+        sim = Simulator(HardwareConfig(),
+                        SimConfig(max_cycles=50_000),
+                        enable_tracer=True)
+        result = sim.run(wl.region)
+        assert result.completed, f"matmul did not complete: {result.reason}"
+        import json
+        data = json.loads(result.tracer.to_chrome_json())
+        events = data["traceEvents"]
+        slices = [e for e in events if e["ph"] == "X"]
+        names = {e["name"] for e in slices}
+        # Global DMA prefetch A + B (HBM->L2)
+        assert "dma.prefetch:gdma_prefetch_A" in names
+        assert "dma.prefetch:gdma_prefetch_B" in names
+        # Global DMA storeback C (L2->HBM)
+        assert "dma.store:gdma_store_C" in names
+        # region + stage runtime windows on TileGroup timeline
+        assert "region:matmul_region" in names
+        assert any(n.startswith("stage0:ev_stage0:run") for n in names), names
+        # MFE load/store bars still present on tile tracks (not renamed)
+        mfe = [e for e in slices if e["cat"] == "MFE"]
+        mfe_names = {e["name"] for e in mfe}
+        assert "MFE:load" in mfe_names
+        assert "MFE:store" in mfe_names
+        # no "Tile DMA" category should exist
+        assert not [e for e in slices if e["cat"] == "Tile DMA"], \
+            "Tile DMA category should not exist"
+        # Global DMA slice carries bytes
+        gdma_a = next(e for e in slices
+                      if e["name"] == "dma.prefetch:gdma_prefetch_A")
+        assert gdma_a["args"]["bytes"] > 0
+        assert gdma_a["args"]["l2_slot"] == "l2_buf_A"
+        # instant markers include stage_dispatch + dma_complete
+        instants = {e["name"] for e in events if e["ph"] == "i"}
+        assert "stage_dispatch" in instants
+        assert "dma_complete" in instants
+        assert "region_done" in instants
+        # dma_complete instant must land on the Global DMA thread, not a
+        # stale "DMA" thread — prevents thread-name regression.
+        tg_pid = next(e["pid"] for e in events
+                       if e.get("name") == "process_name"
+                       and e.get("args", {}).get("name") == "TileGroup")
+        thread_names = {
+            e["args"]["name"]
+            for e in events
+            if e.get("name") == "thread_name" and e.get("pid") == tg_pid
+        }
+        assert "DMA" not in thread_names, \
+            "stale 'DMA' thread_name leaked on TileGroup"
+        assert "Global DMA" in thread_names
+        for e in events:
+            if e.get("name") == "dma_complete" and e.get("ph") == "i":
+                assert e["cat"] == "Global DMA", \
+                    f"dma_complete instant cat={e['cat']}, expected 'Global DMA'"
+
+    def test_tiled_matmul_trace_has_global_dma_and_mfe(self):
+        """tiled_matmul region has Global DMA bars on TileGroup timeline and
+        MFE load/store bars on tile tracks (MFE is NOT renamed to Tile DMA)."""
+        wl = TiledMatmulWorkload()
+        sim = Simulator(HardwareConfig(),
+                        SimConfig(max_cycles=50_000),
+                        enable_tracer=True)
+        result = sim.run(wl.region)
+        assert result.completed, (
+            f"tiled_matmul did not complete: {result.reason}")
+        import json
+        data = json.loads(result.tracer.to_chrome_json())
+        events = data["traceEvents"]
+        slices = [e for e in events if e["ph"] == "X"]
+        names = {e["name"] for e in slices}
+        # Global DMA prefetch A + B (HBM->L2)
+        assert "dma.prefetch:gdma_prefetch_A" in names
+        assert "dma.prefetch:gdma_prefetch_B" in names
+        # Global DMA storeback C (L2->HBM)
+        assert "dma.store:gdma_store_C" in names
+        # region + stage runtime windows
+        assert "region:tiled_matmul_region" in names
+        assert any(n.startswith("stage0:ev_stage0:run") for n in names), names
+        # MFE load/store bars present (NOT renamed to Tile DMA)
+        mfe = [e for e in slices if e["cat"] == "MFE"]
+        mfe_names = {e["name"] for e in mfe}
+        assert "MFE:load" in mfe_names
+        assert "MFE:store" in mfe_names
+        # no "Tile DMA" category should exist
+        assert not [e for e in slices if e["cat"] == "Tile DMA"], \
+            "Tile DMA category should not exist"
+
+# ---------------------------------------------------------------------------
+# Synthetic region for TileGroup runtime trace coverage
+# ---------------------------------------------------------------------------
+
+
+def make_group_runtime_trace_region() -> RegionProgram:
+    """A synthetic region exercising Global DMA, stage dispatch, and Collective."""
+    r = RegionProgram(name="group_runtime_trace_region")
+    r.tile_programs = {0: make_identity_tile_program()}
+    r.insts = [
+        RegionInst(RegionOp.REGION_BEGIN,
+                   args=(99, ),
+                   comment="trace group runtime"),
+        RegionInst(RegionOp.DMA_PREFETCH,
+                   args=("dma_prefetch0", "l2_in0", 4096),
+                   dst="ev_dma0"),
+        RegionInst(RegionOp.WAIT_EVENT, args=("ev_dma0", )),
+        RegionInst(RegionOp.DISPATCH_STAGE, args=(0, 0x01, 0), dst="ev_stage0"),
+        RegionInst(RegionOp.WAIT_EVENT, args=("ev_stage0", )),
+        RegionInst(RegionOp.COLLECTIVE_RUN,
+                   args=("coll_reduce0", "reduce", 2048, 0x01),
+                   dst="ev_coll0"),
+        RegionInst(RegionOp.WAIT_EVENT, args=("ev_coll0", )),
+        RegionInst(RegionOp.DMA_STORE,
+                   args=("dma_store0", "l2_out0", 4096),
+                   dst="ev_dma1"),
+        RegionInst(RegionOp.WAIT_EVENT, args=("ev_dma1", )),
+        RegionInst(RegionOp.REGION_END, dst="ev_region_done"),
+    ]
+    r.resolve_labels()
+    return r

@@ -110,15 +110,39 @@ class RegionSequencer:
             self.pc += 1
         elif op == RegionOp.DMA_PREFETCH:
             # Group DMA HBM->L2: model as latency, produces an event.
-            _desc_id, _dst_l2, event_id = ins.args
-            lat = self._dma_latency(ins)
-            self.group.schedule_dma(event_id, lat, cycle)
+            if ins.dst is None:
+                raise ValueError("DMA_PREFETCH requires dst event id")
+            desc_id, dst_l2 = ins.args[0], ins.args[1]
+            bytes_total = ins.args[2] if len(ins.args) > 2 else None
+            resolved_bytes = bytes_total if bytes_total and bytes_total > 0 else 1024 * 1024
+            lat = self._dma_latency(resolved_bytes)
+            self.group.schedule_dma(
+                ins.dst,
+                lat,
+                cycle,
+                op="dma.prefetch",
+                desc_id=desc_id,
+                l2_slot=dst_l2,
+                bytes_total=resolved_bytes,
+            )
             self.pmu.add_event("dma_prefetch")
             self.pc += 1
         elif op == RegionOp.DMA_STORE:
-            _desc_id, _src_l2, event_id = ins.args
-            lat = self._dma_latency(ins)
-            self.group.schedule_dma(event_id, lat, cycle)
+            if ins.dst is None:
+                raise ValueError("DMA_STORE requires dst event id")
+            desc_id, src_l2 = ins.args[0], ins.args[1]
+            bytes_total = ins.args[2] if len(ins.args) > 2 else None
+            resolved_bytes = bytes_total if bytes_total and bytes_total > 0 else 1024 * 1024
+            lat = self._dma_latency(resolved_bytes)
+            self.group.schedule_dma(
+                ins.dst,
+                lat,
+                cycle,
+                op="dma.store",
+                desc_id=desc_id,
+                l2_slot=src_l2,
+                bytes_total=resolved_bytes,
+            )
             self.pmu.add_event("dma_store")
             self.pc += 1
         elif op == RegionOp.DISPATCH_STAGE:
@@ -130,7 +154,7 @@ class RegionSequencer:
             self._tile_masks[stage_id] = tile_mask
             # start the tiles: load program + bind streams
             self.group.dispatch_stage(stage_id, tile_mask, prog_idx,
-                                      out_stream, in_stream, cycle)
+                                      out_stream, in_stream, cycle, event_id=ev)
             self.pmu.add_event("dispatch_stage")
             self.pc += 1
             return (stage_id, ev)
@@ -148,7 +172,18 @@ class RegionSequencer:
             self.pmu.add_event("barrier")
             self.pc += 1
         elif op == RegionOp.COLLECTIVE_RUN:
-            self.pmu.add_event("collective")
+            if ins.dst is None:
+                raise ValueError("COLLECTIVE_RUN requires dst event id")
+            desc_id, op_name, bytes_total, participant_mask = ins.args
+            self.group.schedule_collective(
+                desc_id,
+                ins.dst,
+                op_name,
+                bytes_total,
+                participant_mask,
+                cycle,
+            )
+            self.pmu.add_event("collective_run")
             self.pc += 1
         elif op == RegionOp.PUSH_EOS:
             qid, producer_id = ins.args
@@ -176,10 +211,10 @@ class RegionSequencer:
             self.pc += 1
         return None
 
-    def _dma_latency(self, ins: RegionInst) -> int:
+    def _dma_latency(self, bytes_total: int | None = None) -> int:
         """Group DMA latency: bytes / group_dma_bandwidth."""
         # default prefetch = 1MB block
-        nbytes = 1024 * 1024
+        nbytes = bytes_total if bytes_total and bytes_total > 0 else 1024 * 1024
         bw_bytes_per_cycle = self.cfg.group_dma_bandwidth_gbs * 1e9 / (
             self.cfg.clock_mhz * 1e6)
         return int(max((nbytes + bw_bytes_per_cycle - 1) // bw_bytes_per_cycle, 1))
