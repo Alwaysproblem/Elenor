@@ -33,7 +33,8 @@ class HardwareConfig:
     group_sram_bytes: int = 8 * 1024 * 1024  # 8 MB Balanced-small (12.3)
     group_sram_banks: int = 16
     hbm_bandwidth_gbs: float = 819.2  # 8 HBM stacks * 102.4 GB/s
-    group_dma_bandwidth_gbs: float = 204.8  # 2D/strided DMA peak (frozen later)
+    group_dma_bandwidth_gbs: float = 204.8  # per-channel DMA peak (frozen later)
+    num_dma_channels: int = 2  # concurrent Global DMA channels
 
     # --- Tile / L1 -------------------------------------------------------
     tile_l1_bytes: int = 1 * 1024 * 1024  # 1 MB Balanced-small (12.3)

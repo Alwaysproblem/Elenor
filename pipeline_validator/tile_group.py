@@ -29,6 +29,7 @@ class _DMAJob:
   desc_id: str
   l2_slot: str
   bytes_total: int
+  channel: int
 
 
 @dataclass
@@ -67,6 +68,8 @@ class TileGroup:
     self.region_seq = RegionSequencer(self)
     self.queues: dict[int, StreamQueue] = {}
     self._dma_jobs: list[_DMAJob] = []
+    # per-channel "free cycle" for serializing DMA jobs on each channel
+    self._channel_free_cycle: dict[int, int] = {}
     self._collective_jobs: list[_CollectiveJob] = []
     self._stage_tile_mask: dict[int, int] = {}
     self._stage_prog_idx: dict[int, int] = {}
@@ -105,7 +108,6 @@ class TileGroup:
       if (desc.producer_mask | desc.consumer_mask) & (1 << t.tile_id):
         t.bind_stream(desc.queue_id, q)
     return q
-
   def schedule_dma(
     self,
     event_id: str,
@@ -115,16 +117,25 @@ class TileGroup:
     desc_id: str,
     l2_slot: str,
     bytes_total: int,
+    channel: int = 0,
   ) -> None:
+    # Each channel serializes jobs: a new job starts only after the previous
+    # one on the same channel finishes.  This models a real DMA channel with
+    # a single outstanding request.
+    ch_free = self._channel_free_cycle.get(channel, 0)
+    start = max(cycle, ch_free)
+    finish = start + latency
+    self._channel_free_cycle[channel] = finish
     self._dma_jobs.append(
       _DMAJob(
         event_id=event_id,
-        start_cycle=cycle,
-        finish_cycle=cycle + latency,
+        start_cycle=start,
+        finish_cycle=finish,
         op=op,
         desc_id=desc_id,
         l2_slot=l2_slot,
         bytes_total=bytes_total,
+        channel=channel,
       ))
 
   def schedule_collective(
@@ -220,11 +231,11 @@ class TileGroup:
     for job in self._dma_jobs:
       if cycle >= job.finish_cycle:
         self.region_seq.notify_event(job.event_id)
-        self.pmu.add_event("dma_complete")
         if tr is not None:
+          thread = f"DMA Ch{job.channel}"
           tr.complete(
             "TileGroup",
-            "Global DMA",
+            thread,
             f"{job.op}:{job.desc_id}",
             job.start_cycle,
             job.finish_cycle,
@@ -232,10 +243,11 @@ class TileGroup:
               "event_id": job.event_id,
               "bytes": job.bytes_total,
               "l2_slot": job.l2_slot,
+              "channel": job.channel,
             },
           )
-          tr.instant("TileGroup", "Global DMA", "dma_complete", cycle,
-                     {"event_id": job.event_id})
+          tr.instant("TileGroup", thread, "dma_complete", cycle,
+                     {"event_id": job.event_id, "channel": job.channel})
       else:
         remaining_dma.append(job)
     self._dma_jobs = remaining_dma
@@ -363,6 +375,7 @@ class TileGroup:
       t.reset()
     self.region_seq.reset()
     self.queues.clear()
+    self._channel_free_cycle.clear()
     self._dma_jobs.clear()
     self._collective_jobs.clear()
     self._stage_tile_mask.clear()
@@ -385,6 +398,7 @@ class TileGroup:
     self.region_seq.reset()
     for q in self.queues.values():
       q.reset()
+    self._channel_free_cycle.clear()
     self._dma_jobs.clear()
     self._collective_jobs.clear()
     self._stage_tile_mask.clear()
