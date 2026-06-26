@@ -172,6 +172,40 @@ class TileProgram:
             self.resolve_labels()
         return self._labels[label]
 
+    # ---- IR pretty-print ----
+
+    def _fmt_inst(self, ins: TileInst) -> str:
+        parts: list[str] = []
+        if ins.label is not None:
+            parts.append(f"{ins.label}:")
+        parts.append(ins.op.value)
+        if ins.dst is not None:
+            parts.append(f"-> {ins.dst}")
+        if ins.args:
+            parts.append(", ".join(str(a) for a in ins.args))
+        line = " ".join(parts)
+        if ins.comment:
+            line = f"{line:<40s}  ; {ins.comment}"
+        return line
+
+    def _fmt_desc(self, name: str, d: EngineDesc) -> str:
+        params_str = ", ".join(f"{k}={v}" for k, v in sorted(d.params.items()))
+        return f"  {name:<20s} kind={d.kind:<4s} op={d.op:<12s} {params_str}"
+
+    def pretty_print(self) -> str:
+        """Return an assembly-style listing of this Tile Program."""
+        lines: list[str] = []
+        lines.append(f"tile_program {self.name} {{")
+        if self.descriptors:
+            lines.append("  // descriptors")
+            for name, d in self.descriptors.items():
+                lines.append(self._fmt_desc(name, d))
+            lines.append("")
+        lines.append("  // instructions")
+        for ins in self.insts:
+            lines.append(f"  {self._fmt_inst(ins)}")
+        lines.append("}")
+        return "\n".join(lines)
 
 @dataclass
 class RegionProgram:
@@ -193,6 +227,47 @@ class RegionProgram:
         if not self._labels:
             self.resolve_labels()
         return self._labels[label]
+
+    # ---- IR pretty-print ----
+
+    def _fmt_inst(self, ins: RegionInst) -> str:
+        parts: list[str] = []
+        if ins.label is not None:
+            parts.append(f"{ins.label}:")
+        parts.append(ins.op.value)
+        if ins.dst is not None:
+            parts.append(f"-> {ins.dst}")
+        if ins.args:
+            parts.append(", ".join(str(a) for a in ins.args))
+        line = " ".join(parts)
+        if ins.comment:
+            line = f"{line:<40s}  ; {ins.comment}"
+        return line
+
+    def _fmt_stream(self, s: StreamDesc) -> str:
+        return (f"  stream q{s.queue_id}: depth={s.depth} "
+                f"prod=0x{s.producer_mask:X} cons=0x{s.consumer_mask:X}")
+
+    def pretty_print(self) -> str:
+        """Return an assembly-style listing of this Region Program and all
+        its Tile Programs."""
+        lines: list[str] = []
+        lines.append(f"region_program {self.name} {{")
+        if self.streams:
+            lines.append("  // stream descriptors")
+            for s in self.streams:
+                lines.append(self._fmt_stream(s))
+            lines.append("")
+        lines.append("  // region instructions")
+        for ins in self.insts:
+            lines.append(f"  {self._fmt_inst(ins)}")
+        lines.append("}")
+        # tile programs
+        for stage_id, tp in sorted(self.tile_programs.items()):
+            lines.append("")
+            lines.append(f"// --- tile program for stage {stage_id} ---")
+            lines.append(tp.pretty_print())
+        return "\n".join(lines)
 
 
 # ===========================================================================
