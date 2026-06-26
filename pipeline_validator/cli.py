@@ -83,6 +83,9 @@ def main(argv=None) -> int:
         default=None,
         metavar="PATH",
         help="write standalone trace.html to PATH (enables tracing)")
+    parser.add_argument("--print-ir",
+                        action="store_true",
+                        help="print the Region/Tile IR and exit (no simulation)")
     parser.add_argument("--json",
                         action="store_true",
                         help="emit JSON instead of text")
@@ -115,6 +118,12 @@ def main(argv=None) -> int:
             _list_workloads()
             return 2
         workloads.append(match())
+
+    if args.print_ir:
+        for wl in workloads:
+            print(wl.region.pretty_print())
+        return 0
+
 
     outputs = []
     overall_pass = True
