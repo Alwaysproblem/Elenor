@@ -973,6 +973,130 @@ def make_tiled_matmul_task(num_k_chunks: int = 4) -> TileGroupTask:
     return t
 
 
+def make_tiled_matmul_pipelined_task(num_group_chunks: int = 4,
+                                     num_k_chunks: int = 4) -> TileGroupTask:
+    """Tiled matmul task with group-level async IO pipeline.
+
+    Unlike `make_tiled_matmul_task` (which does ONE big DMA_PREFETCH for A+B
+    and ONE DMA_STORE for C at the group level), this task issues multiple
+    DMA_PREFETCH → DISPATCH_ROLE → DMA_STORE cycles, pipelined so
+    HBM↔L2 DMA for stage i+1 overlaps tile compute for stage i.
+
+    This is a **timing proxy** for a multi-stage tiled matmul: each stage
+    dispatches the same K-chunked tile program and independently stores its
+    result.  Cross-stage accumulation semantics are not modelled (the
+    validator exercises pipeline timing, not numerical correctness).  What
+    this validates:
+      - Group-level IO pipeline: DMA for g+1 hidden behind compute for g.
+      - Tile-level K-chunk pipeline: MFE load for k+1 hidden behind BOA for k.
+      - Both levels working simultaneously (two-level overlap).
+
+    Group action sequence (per group chunk g):
+        [prologue: DMA_PREFETCH A_0, B_0]
+        WAIT A_g, B_g
+        DISPATCH_ROLE 0  → ev_role_cg
+        [if g < N-1: DMA_PREFETCH A_{g+1}, B_{g+1}  (overlaps compute)]
+        WAIT ev_role_cg
+        DMA_STORE C_g    → ev_dma_Cg
+        [if g >= 1: WAIT ev_dma_C{g-1}  (drain prev store)]
+        [epilogue: WAIT last store, SIGNAL_EVENT]
+    """
+    total_k = 64 * num_k_chunks
+    bytes_a = 128 * total_k * 2 * 4  # tile_m * total_k * BF16 * 4 tiles
+    bytes_b = total_k * 128 * 2      # total_k * tile_n * BF16 (shared)
+    bytes_c = 128 * 128 * 2 * 4      # tile_m * tile_n * BF16 * 4 tiles
+    t = TileGroupTask(name="tiled_matmul_pipelined_task")
+    t.streams = []
+    t.role_bindings = {
+        0: TileRoleBinding(role_id=0, tile_mask=0x0F,
+                           tile_program=make_tiled_matmul_tile_program(
+                               num_k_chunks=num_k_chunks))
+    }
+    actions: list[GroupAction] = []
+
+    # ---- prologue: prefetch first chunk ----
+    actions.append(
+        GroupAction(GroupActionOp.DMA_PREFETCH,
+                    args=("gdma_prefetch_A0", "l2_buf_A0", bytes_a),
+                    dst="ev_dma_A0",
+                    comment="Group DMA prefetch A chunk 0 HBM->L2"))
+    actions.append(
+        GroupAction(GroupActionOp.DMA_PREFETCH,
+                    args=("gdma_prefetch_B0", "l2_buf_B0", bytes_b),
+                    dst="ev_dma_B0",
+                    comment="Group DMA prefetch B chunk 0 HBM->L2"))
+
+    # ---- per-chunk loop body (unrolled) ----
+    for g in range(num_group_chunks):
+        # wait for A_g, B_g DMA
+        actions.append(
+            GroupAction(GroupActionOp.WAIT_EVENT,
+                        args=(f"ev_dma_A{g}",),
+                        comment=f"Wait for A chunk {g} DMA"))
+        actions.append(
+            GroupAction(GroupActionOp.WAIT_EVENT,
+                        args=(f"ev_dma_B{g}",),
+                        comment=f"Wait for B chunk {g} DMA"))
+
+        # dispatch tile role
+        actions.append(
+            GroupAction(GroupActionOp.DISPATCH_ROLE, args=(0,),
+                        dst=f"ev_role_c{g}",
+                        comment=f"Dispatch tiles for group chunk {g}"))
+
+        # prefetch next chunk while tiles compute (input double-buffer)
+        if g < num_group_chunks - 1:
+            ng = g + 1
+            actions.append(
+                GroupAction(GroupActionOp.DMA_PREFETCH,
+                            args=(f"gdma_prefetch_A{ng}",
+                                  f"l2_buf_A{ng}", bytes_a),
+                            dst=f"ev_dma_A{ng}",
+                            comment=f"Group DMA prefetch A chunk {ng} "
+                                    f"(overlap compute g={g})"))
+            actions.append(
+                GroupAction(GroupActionOp.DMA_PREFETCH,
+                            args=(f"gdma_prefetch_B{ng}",
+                                  f"l2_buf_B{ng}", bytes_b),
+                            dst=f"ev_dma_B{ng}",
+                            comment=f"Group DMA prefetch B chunk {ng} "
+                                    f"(overlap compute g={g})"))
+
+        # wait for tile role completion
+        actions.append(
+            GroupAction(GroupActionOp.WAIT_EVENT,
+                        args=(f"ev_role_c{g}",),
+                        comment=f"Wait for chunk {g} tiles"))
+
+        # store results (non-blocking)
+        actions.append(
+            GroupAction(GroupActionOp.DMA_STORE,
+                        args=(f"gdma_store_C{g}", f"l2_buf_C{g}", bytes_c),
+                        dst=f"ev_dma_C{g}",
+                        comment=f"Group DMA store C chunk {g} L2->HBM"))
+
+        # drain previous store (output double-buffer, overlaps next compute)
+        if g >= 1:
+            actions.append(
+                GroupAction(GroupActionOp.WAIT_EVENT,
+                            args=(f"ev_dma_C{g - 1}",),
+                            comment=f"Drain store chunk {g - 1} (overlap)"))
+
+    # ---- epilogue: drain last store ----
+    actions.append(
+        GroupAction(GroupActionOp.WAIT_EVENT,
+                    args=(f"ev_dma_C{num_group_chunks - 1}",),
+                    comment="Drain last store"))
+    actions.append(
+        GroupAction(GroupActionOp.SIGNAL_EVENT,
+                    args=("group_task_done",)))
+
+    t.actions = actions
+    return t
+
+
+
+
 def make_conv_relu_task() -> TileGroupTask:
     """Task that dispatches a fused Conv+ReLU role across 4 tiles.
 

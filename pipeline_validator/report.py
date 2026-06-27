@@ -183,6 +183,23 @@ def _run_checks(wl: Workload, result: SimResult, engine_active: dict,
             "pass": overlap_ok,
         })
 
+    if exp.get("multi_stage_group_io"):
+        # Multiple DMA prefetch + dispatch stages prove the group-level
+        # task was unrolled into stages (the trace test verifies actual
+        # temporal overlap; this check only confirms staged structure).
+        dma_prefetch_count = result.pmu.events.get("tgs_dma_prefetch", 0)
+        dispatch_count = result.pmu.events.get("tgs_dispatch_role", 0)
+        ok = dma_prefetch_count >= 2 and dispatch_count >= 2
+        checks.append({
+            "check": "multi_stage_group_io",
+            "expected": True,
+            "actual": ok,
+            "detail": (
+                f"dma_prefetch={dma_prefetch_count}, "
+                f"dispatch={dispatch_count}"
+            ),
+            "pass": ok,
+        })
     return checks
 
 

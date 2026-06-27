@@ -21,6 +21,7 @@ from pipeline_validator.ir import (
   make_matmul_tile_program,
   make_paged_attention_tile_program,
   make_stream_pipeline_tile_program,
+  make_tiled_matmul_pipelined_task,
   make_tiled_matmul_task,
   make_tiled_matmul_tile_program,
 )
@@ -37,6 +38,7 @@ from pipeline_validator.workloads import (
   MatmulWorkload,
   MoEWorkload,
   PagedAttentionWorkload,
+  TiledMatmulPipelinedWorkload,
   TiledMatmulWorkload,
 )
 
@@ -264,6 +266,24 @@ class TestIR:
     assert ops.count(GroupActionOp.DMA_STORE) == 1  # C storeback
     assert ops.count(GroupActionOp.DISPATCH_ROLE) == 1  # single role
 
+  def test_tiled_matmul_pipelined_task(self):
+    num_group_chunks = 4
+    num_k_chunks = 4
+    t = make_tiled_matmul_pipelined_task(
+        num_group_chunks=num_group_chunks, num_k_chunks=num_k_chunks)
+    ops = [a.op for a in t.actions]
+    # Group-level IO pipeline: multiple DMA stages
+    assert ops.count(GroupActionOp.DMA_PREFETCH) == num_group_chunks * 2  # A+B per chunk
+    assert ops.count(GroupActionOp.DMA_STORE) == num_group_chunks  # C per chunk
+    assert ops.count(GroupActionOp.DISPATCH_ROLE) == num_group_chunks  # one dispatch per chunk
+    # Verify unique event IDs across chunks (no accidental reuse)
+    dsts = [a.dst for a in t.actions if a.dst is not None]
+    assert len(dsts) == len(set(dsts)), f"duplicate event ids: {dsts}"
+    # Verify the task references the k-chunked tile program
+    binding = t.role_bindings[0]
+    assert "tiled_matmul" in binding.tile_program.name
+
+
   def test_attention_task_has_role_bindings(self):
     t = make_attention_task()
     assert set(t.role_bindings.keys()) == {0, 1}
@@ -319,6 +339,14 @@ class TestSimulation:
     assert result.cycles > 0
     assert result.credit_invariant_ok
 
+  def test_tiled_matmul_pipelined_completes(self):
+    result = self._run(TiledMatmulPipelinedWorkload())
+    assert result.completed, (
+        f"tiled_matmul_pipelined did not complete: {result.reason}")
+    assert result.cycles > 0
+    assert result.credit_invariant_ok
+
+
   def test_attention_completes(self):
     result = self._run(AttentionWorkload())
     assert result.completed, f"attention did not complete: {result.reason}"
@@ -361,6 +389,22 @@ class TestSimulation:
     text = report_to_text(rep)
     assert "Workload: matmul" in text
     assert "Checks:" in text
+
+
+  def test_tiled_matmul_pipelined_report_has_passing_checks(self):
+    wl = TiledMatmulPipelinedWorkload(num_group_chunks=4, num_k_chunks=4)
+    sim = Simulator(HardwareConfig(), SimConfig(max_cycles=200_000))
+    result = sim.run(wl.task)
+    rep = build_report(wl, result)
+    # completion + credit invariant must pass
+    completion = next(c for c in rep.checks
+                      if c["check"] == "task_completed")
+    assert completion["pass"]
+    # multi_stage_group_io check must exist and pass
+    gp = next(c for c in rep.checks
+              if c["check"] == "multi_stage_group_io")
+    assert gp["pass"], f"multi_stage_group_io failed: {gp}"
+    assert gp["actual"] is True
 
   def test_stream_workloads_drain_eos_tokens(self):
     # Attention and MoE use a producer/consumer Stream Queue; after
@@ -574,6 +618,61 @@ class TestTracer:
     # no "Tile DMA" category should exist
     assert not [e for e in slices if e["cat"] == "Tile DMA"], \
         "Tile DMA category should not exist"
+
+  def test_tiled_matmul_pipelined_trace_has_multi_stage_dma(self):
+    """Pipelined tiled matmul task emits multiple Global DMA bars
+    (one prefetch/store pair per group chunk) plus multiple role
+    dispatch windows, proving the group-level IO pipeline."""
+    wl = TiledMatmulPipelinedWorkload(num_group_chunks=4, num_k_chunks=4)
+    sim = Simulator(HardwareConfig(),
+                    SimConfig(max_cycles=200_000),
+                    enable_tracer=True)
+    result = sim.run(wl.task)
+    assert result.completed, (
+        f"tiled_matmul_pipelined did not complete: {result.reason}")
+    data = json.loads(result.tracer.to_chrome_json())
+    events = data["traceEvents"]
+    slices = [e for e in events if e["ph"] == "X"]
+    names = {e["name"] for e in slices}
+    # Multiple DMA prefetch bars (one A+B pair per group chunk)
+    for g in range(4):
+        assert f"dma.prefetch:gdma_prefetch_A{g}" in names, (
+            f"missing prefetch A{g} in {sorted(names)}")
+        assert f"dma.prefetch:gdma_prefetch_B{g}" in names
+        assert f"dma.store:gdma_store_C{g}" in names
+    # Multiple role dispatch windows (one per group chunk)
+    for g in range(4):
+        assert any(n.startswith(f"dispatch:role0:ev_role_c{g}:run")
+                   for n in names), (
+            f"missing role dispatch for chunk {g} in {sorted(names)}")
+    # Task runtime window present
+    assert "task:tiled_matmul_pipelined_task" in names
+    mfe = [e for e in slices if e["cat"] == "MFE"]
+    mfe_names = {e["name"] for e in mfe}
+    assert "MFE:load" in mfe_names
+    assert "MFE:store" in mfe_names
+    # ---- Overlap assertion: prove group-level IO pipeline ----
+    # DMA_PREFETCH for chunk 1 must start before role dispatch for
+    # chunk 0 finishes, proving HBM↔L2 DMA overlaps tile compute.
+    by_name: dict[str, dict] = {e["name"]: e for e in slices}
+    dma_a1 = by_name.get("dma.prefetch:gdma_prefetch_A1")
+    assert dma_a1 is not None, "missing DMA prefetch A1 slice"
+    role0 = next((e for e in slices
+                  if e["name"].startswith("dispatch:role0:ev_role_c0:run")),
+                 None)
+    assert role0 is not None, "missing role0 dispatch slice"
+    dma_a1_start = dma_a1["ts"]
+    role0_end = role0["ts"] + role0["dur"]
+    assert dma_a1_start < role0_end, (
+        f"DMA prefetch A1 starts at {dma_a1_start} us, "
+        f"but role0 ends at {role0_end} us — no overlap")
+    # Also verify DMA prefetch B1 overlaps role0
+    dma_b1 = by_name.get("dma.prefetch:gdma_prefetch_B1")
+    assert dma_b1 is not None, "missing DMA prefetch B1 slice"
+    assert dma_b1["ts"] < role0_end, (
+        f"DMA prefetch B1 starts at {dma_b1['ts']} us, "
+        f"but role0 ends at {role0_end} us — no overlap")
+
 
 
 # ---------------------------------------------------------------------------
