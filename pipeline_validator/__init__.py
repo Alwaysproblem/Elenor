@@ -33,6 +33,7 @@ from .ir import (
     make_paged_attention_tile_program,
     make_relu_tile_program,
     make_stream_pipeline_tile_program,
+    make_tiled_matmul_pipelined_task,
     make_tiled_matmul_task,
     make_tiled_matmul_tile_program,
 )
@@ -65,6 +66,7 @@ from .workloads import (
     MatmulWorkload,
     MoEWorkload,
     PagedAttentionWorkload,
+    TiledMatmulPipelinedWorkload,
     TiledMatmulWorkload,
     Workload,
 )
@@ -118,6 +120,7 @@ __all__ = [
     "TileRoleBinding",
     "TileTaskState",
     "TileUCE",
+    "TiledMatmulPipelinedWorkload",
     "TiledMatmulWorkload",
     "TokenFlags",
     "Tracer",
@@ -135,6 +138,7 @@ __all__ = [
     "make_paged_attention_tile_program",
     "make_relu_tile_program",
     "make_stream_pipeline_tile_program",
+    "make_tiled_matmul_pipelined_task",
     "make_tiled_matmul_task",
     "make_tiled_matmul_tile_program",
     "trace_to_html",

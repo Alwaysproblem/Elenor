@@ -17,6 +17,7 @@ from .ir import (
   make_matmul_task,
   make_moe_task,
   make_paged_attention_task,
+  make_tiled_matmul_pipelined_task,
   make_tiled_matmul_task,
 )
 
@@ -103,6 +104,63 @@ class TiledMatmulWorkload(Workload):
             "mfe_active_ratio_min": 0.10,
             "stream_stall_ratio_max": 0.05,
             "tiled_overlap": True,
+        },
+        config=cfg,
+    )
+
+class TiledMatmulPipelinedWorkload(Workload):
+  """Tiled matmul timing proxy with group-level async IO pipeline.
+
+  Extends `TiledMatmulWorkload` by adding pipelined IO at the tile group
+  level.  Instead of one monolithic DMA_PREFETCH for all A+B and one
+  DMA_STORE for C, this workload issues multiple DMA_PREFETCH →
+  DISPATCH_ROLE → DMA_STORE cycles, pipelined so HBM↔L2 DMA for stage
+  i+1 overlaps tile compute for stage i.
+
+  This is a **timing proxy**: each stage independently dispatches the
+  same K-chunked tile program and stores its own result.  Cross-stage
+  accumulation is not modelled (the validator exercises pipeline timing,
+  not numerical correctness).
+
+  Expected: with sufficient stages the HBM DMA latency is fully hidden
+  behind tile compute:
+    - Two-level overlap: group DMA hidden behind tile BOA, tile MFE
+      hidden behind inner-K BOA.
+    - BOA active ratio stays high (compute-bound).
+    - DMA channel utilization increases (more prefetch/store jobs).
+
+  """
+
+  def __init__(self,
+               cfg: WorkloadConfig | None = None,
+               num_group_chunks: int = 4,
+               num_k_chunks: int = 4):
+    cfg = cfg or WorkloadConfig(name="tiled_matmul_pipelined")
+    task = make_tiled_matmul_pipelined_task(
+        num_group_chunks=num_group_chunks,
+        num_k_chunks=num_k_chunks)
+    super().__init__(
+        name="tiled_matmul_pipelined",
+        task=task,
+        description=(
+            "Timing proxy for multi-stage tiled GEMM (128x128 per tile, "
+            f"{num_group_chunks} group stages x {num_k_chunks} inner "
+            f"K-chunks of 64, BF16) across 4 tiles. "
+            "Group-level IO pipeline: DMA_PREFETCH for stage g+1 overlaps "
+            "tile compute for stage g.  Tile-level K-chunk pipeline: MFE "
+            "prefetch for chunk k+1 overlaps BOA for chunk k.  "
+            f"Per-stage: {num_k_chunks}x2 MFE loads + {num_k_chunks} BOA "
+            f"accumulates + {num_k_chunks} MFE stores per tile.  "
+            f"Group DMA: {num_group_chunks}x2 prefetches + "
+            f"{num_group_chunks} stores.  "
+            "Each stage independently stores its result; cross-stage "
+            "accumulation semantics are not modelled."),
+        expected={
+            "primary_bottleneck": "BOA",
+            "boa_active_ratio_min": 0.35,
+            "mfe_active_ratio_min": 0.08,
+            "stream_stall_ratio_max": 0.05,
+            "multi_stage_group_io": True,
         },
         config=cfg,
     )
@@ -245,8 +303,7 @@ class PagedAttentionWorkload(Workload):
         config=cfg,
     )
 
-
 ALL_WORKLOADS: list = [
-    MatmulWorkload, TiledMatmulWorkload, ConvReLuWorkload,
-    PagedAttentionWorkload, AttentionWorkload, MoEWorkload
+    MatmulWorkload, TiledMatmulWorkload, TiledMatmulPipelinedWorkload,
+    ConvReLuWorkload, PagedAttentionWorkload, AttentionWorkload, MoEWorkload
 ]
