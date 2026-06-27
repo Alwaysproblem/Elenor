@@ -2,7 +2,7 @@
 
 ## 1. 定位、目标和 First Silicon cutline
 
-BOA（Block Outer-product Accelerator）是 ELENOR 的 dense compute 主路径，面向规则、密集、block 化的矩阵型计算。硬件执行 Tile UCE 发起的 command、descriptor 和 Tile Program，不直接执行高层 graph。BOA 内部只处理局部 contraction、局部 accumulate、局部 reduce 和受限 epilogue；全局 tensor mapping、page/segment 数据流、runtime scheduling 和状态生命周期分别由 compiler/runtime、MFE、Region Sequencer、Tile UCE 和 USE 承担。
+BOA（Block Outer-product Accelerator）是 ELENOR 的 dense compute 主路径，面向规则、密集、block 化的矩阵型计算。硬件执行 Tile UCE 发起的 command、descriptor 和 Tile Program，不直接执行高层 graph。BOA 内部只处理局部 contraction、局部 accumulate、局部 reduce 和受限 epilogue；全局 tensor mapping、page/segment 数据流、runtime scheduling 和状态生命周期分别由 compiler/runtime、MFE、Tile Group Sequencer、Tile UCE 和 USE 承担。
 
 目标工作负载：
 

@@ -85,7 +85,7 @@ def main(argv=None) -> int:
         help="write standalone trace.html to PATH (enables tracing)")
     parser.add_argument("--print-ir",
                         action="store_true",
-                        help="print the Region/Tile IR and exit (no simulation)")
+                        help="print the TileGroupTask/Tile IR and exit (no simulation)")
     parser.add_argument("--json",
                         action="store_true",
                         help="emit JSON instead of text")
@@ -121,7 +121,7 @@ def main(argv=None) -> int:
 
     if args.print_ir:
         for wl in workloads:
-            print(wl.region.pretty_print())
+            print(wl.task.pretty_print())
         return 0
 
 
@@ -130,7 +130,7 @@ def main(argv=None) -> int:
     enable_tracer = bool(args.trace_json or args.trace_html)
     for wl in workloads:
         sim = Simulator(hw, sim_cfg, enable_tracer=enable_tracer)
-        result = sim.run(wl.region)
+        result = sim.run(wl.task)
         rep = build_report(wl, result)
         outputs.append(rep)
         if not all(ch.get("pass", False) for ch in rep.checks):

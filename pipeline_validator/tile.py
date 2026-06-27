@@ -324,7 +324,7 @@ class ComputeTile:
         self.use = USEEngine(cfg, tile_id, tracer)
         self.streams: dict[int, StreamQueue] = {}
         self.pmu = PMUCounter()
-        self.stage_id: int | None = None
+        self.role_id: int | None = None
 
     def bind_stream(self, qid: int, q: StreamQueue) -> None:
         self.streams[qid] = q
@@ -373,7 +373,7 @@ class ComputeTile:
         for eng in (self.boa, self.evu, self.mfe, self.use):
             eng.reset()
         self.pmu.reset()
-        self.stage_id = None
+        self.role_id = None
 
     def snapshot(self) -> dict:
         return {

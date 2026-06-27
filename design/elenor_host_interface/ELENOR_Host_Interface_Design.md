@@ -70,7 +70,7 @@ Host / System Interconnect
 ### 2.2 非职责
 
 - 不消费 command payload，不解析 BOA/EVU/MFE/USE/DMA 私有 descriptor。
-- 不调度 Pipeline Region；调度由 Runtime Processor 和 Global Scheduler 执行。
+- 不调度 Group Task；调度由 Runtime Processor 和 Global Scheduler 执行。
 - 不决定 Tile Group partition、SRAM quota 或 QoS policy。
 - 不实现 Host OS driver 的 memory pinning；只消费 driver 配置后的 IOVA/domain。
 - 不把 host interrupt 当作 event table 的唯一真相；event table 状态由 Event Fabric owns。

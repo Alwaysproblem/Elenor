@@ -30,7 +30,7 @@ First Silicon cutline：
 | Kernel driver                   | interrupt handling、fault record readout、context teardown、device reset request                        | Tile 内 drain 细节    |
 | Firmware / Runtime processor    | command queue consume、descriptor validation、fault aggregation、reset/drain policy、profiling snapshot | engine datapath 修复  |
 | Global Scheduler / Event Fabric | event fault bit、dependency unblock/poison、timeout monitor                                             | 数据 payload 修正     |
-| Region Sequencer                | group 内 stage stop、stream queue drain、group reset sequencing                                         | 高层 graph 重新调度   |
+| Tile Group Sequencer            | group 内 role stop、stream queue drain、group reset sequencing                                          | 高层 graph 重新调度   |
 | Tile UCE                        | Tile Program stop、engine cancel、descriptor patch fault、tile reset sequencing                         | HBM memory policy     |
 | Stream Queue Engine             | error token、credit reconcile、EOS/error/reset 状态                                                     | payload 数据修复      |
 | DMA / MFE                       | address fault、timeout、poison completion、outstanding cancel                                           | command policy        |
@@ -80,7 +80,7 @@ RUNNING
 reset domain：
 
 - Tile reset：影响单 tile 的 UCE、USE state shadow、engine wrappers、Tile DMA、L1 frame shadow、tile-local stream handles。
-- Group reset：影响 Region Sequencer、Stream Queue Engine、Barrier/Event Engine、Group DMA、Group SRAM volatile region、group collective。
+- Group reset：影响 Tile Group Sequencer、Stream Queue Engine、Barrier/Event Engine、Group DMA、Group SRAM volatile region、group collective。
 - Device reset：影响全局 scheduler、command/event fabric、NoC global state、memory controller device-side queues、全部 groups。
 
 ### 3.3 drain 和 cancel 状态机
@@ -127,7 +127,7 @@ typedef enum {
 
 typedef enum {
     ELENOR_FAULT_SRC_RUNTIME = 0,
-    ELENOR_FAULT_SRC_REGION  = 1,
+    ELENOR_FAULT_SRC_GROUP_TASK  = 1,
     ELENOR_FAULT_SRC_TILE_UCE = 2,
     ELENOR_FAULT_SRC_STREAM  = 3,
     ELENOR_FAULT_SRC_DMA     = 4,
@@ -236,7 +236,7 @@ NoC fault/poison：
 2. Tile UCE 或 firmware latch first fault。
 3. 阻止 engine launch；不发出部分 DMA/NoC transaction。
 4. 写 fault record，event 设置 FAULT。
-5. Region Sequencer 停止受影响 queue，按 policy drain。
+5. Tile Group Sequencer 停止受影响 queue，按 policy drain。
 6. Driver interrupt 或 runtime polling 观察 fault。
 
 ### 5.2 DMA timeout / address fault path

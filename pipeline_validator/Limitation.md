@@ -4,10 +4,10 @@
 
 模拟了（V1 scope）：
 
-- 控制流层级 Region→Tile→Engine 的逐周期推进；
+- 控制流层级 Group Task→Tile role→Engine 的逐周期推进；
 - 4 引擎延迟（Roofline）与 launch/wait 重叠；
 - Stream Queue credit/backpressure/EOS；
-- stage 完成聚合 → region 推进；
+- role 完成聚合 → group task 推进；
 - PMU stall 归因（WAIT_EVENT/WAIT_OPERAND/STREAM_CREDIT/NONE）；
 - credit 不变量每周期校验。
 
@@ -18,4 +18,4 @@
 - L1 SRAM 是带宽预算：不模拟容量、bank 冲突（tile.py:8-9 注释明说 V1 leave frozen）；
 - 引擎非流水：一引擎一 job，无流水线深度（engines.py:14-15）；
 - 无真实数据：descriptor 的 bytes/ops 是数值参数，不搬真实 payload，只算延迟；
-- **residency/cold-warm load**：dispatch_stage 直接 load_program，不模拟 program residency miss/cold launch（设计文档 15 的 residency 契约未进模型）。
+- **residency/cold-warm load**：dispatch_role 直接 load_program，不模拟 program residency miss/cold launch（设计文档 15 的 residency 契约未进模型）。

@@ -4,7 +4,7 @@
 
 Tile UCE 是每个 Compute Tile 内的 program control 和 engine orchestration 功能组件。它执行 Tile Program，管理 Tile PC、branch、wait/fence、descriptor template patch、Tile DMA、BOA/EVU/MFE/USE launch、stream token 和 tile done event。
 
-Tile UCE 不解释高层 graph，不做全局调度，不承担 state compute，也不负责 page/segment 数据相关动态内存访问。高层 graph 已由 compiler/runtime 降低为 command、Region Program、Tile Program、slot frame、descriptor 和 stream queue contract。UCE 的边界是 tile-local kernel pipeline。
+Tile UCE 不解释高层 graph，不做全局调度，不承担 state compute，也不负责 page/segment 数据相关动态内存访问。高层 graph 已由 compiler/runtime 降低为 command、TileGroupTask、Tile Program、slot frame、descriptor 和 stream queue contract。UCE 的边界是 tile-local kernel pipeline。
 
 核心决策：Tile UCE 和 USE 可以共享同一个 tile-local RISC-V / micro-controller 或等价 micro-sequencer 实现，但在架构上必须保持两个独立功能组件：
 
@@ -202,7 +202,7 @@ Tile Program 只引用架构对象：
 - descriptor reference：指向 descriptor table 或 L1 descriptor slot。
 - slot reference：指向 current frame 的 slot。
 - event reference：local event id 或 event table entry。
-- stream reference：Region Sequencer 初始化的 stream queue id。
+- stream reference：Tile Group Sequencer 初始化的 stream queue id。
 - prepared program handle：`program_local_slot / program_local_offset / program_bytes / program_epoch`。
 
 禁止在 Tile Program 中硬编码长期稳定物理地址；使用 slot frame 和 descriptor patch 计算 effective address。Tile UCE 不得在 task 执行路径解引用 global `program_iova`；global backing store 只由 Tile Group Sequencer / Program Residency Manager 使用。
@@ -258,7 +258,7 @@ Profiling/Error:
 
 ```asm
 tile_matmul_relu:
-    prof.begin      PMU_REGION_KERNEL
+    prof.begin      PMU_GROUP_KERNEL
 
     patch.desc      d_load_a, slot[A], tile_id, group_id
     patch.desc      d_load_b, slot[B], tile_id, group_id
@@ -278,7 +278,7 @@ tile_matmul_relu:
     launch.mfe      d_store -> e4
     wait            e4
 
-    prof.end        PMU_REGION_KERNEL
+    prof.end        PMU_GROUP_KERNEL
     ret
 ```
 
@@ -424,15 +424,15 @@ Slot：
 
 ### 5.1 控制流层级
 
-```text
+````text
 Graph Schedule PC
-  -> Region Program PC
+  -> Group Task Iterator
+  -> Tile Group Sequencer action index
   -> Tile UCE PC
   -> Engine task descriptor
   -> Engine internal micro-loop
-```
 
-UCE 只推进第三层，不越权修改 Region PC 或 engine micro-loop。
+UCE 只推进第四层，不越权修改 Tile Group Sequencer action index 或 engine micro-loop。
 
 ### 5.2 UCE launch 时序
 
@@ -443,7 +443,7 @@ cycle N+2:   launch_valid to BOA
 cycle N+k:   BOA accepts, event[e2]=PENDING
 cycle M:     BOA done, event[e2]=DONE
 cycle M+1:   wait e2 retires, PC advances
-```
+````
 
 具体 cycle 数由 PPA exploration 冻结；架构要求是 event ordering deterministic。
 
@@ -460,7 +460,7 @@ cycle M+1:   wait e2 retires, PC advances
 ```text
 Runtime patches context-level descriptor in memory
   -> descriptor cache invalidate command or version bump
-Region Sequencer dispatches tile task
+Tile Group Sequencer dispatches prepared tile task
   -> UCE binds frame
   -> UCE patch tile/group/slot fields
   -> UCE validates descriptor

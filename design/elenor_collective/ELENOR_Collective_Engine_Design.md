@@ -2,7 +2,7 @@
 
 ## 1. 定位、目标和 First Silicon cutline
 
-Collective Engine 是 Tile Group 内负责 tile 间数据合并、广播和同步归约的专用 engine。它位于 Tile Group data/control boundary：Region Sequencer 发起 collective command，Compute Tile 通过 Tile DMA/stream/event 提供 partial data，Collective Engine 在 Group Shared SRAM/L2 或专用 reduction datapath 中完成 reduce/broadcast/multicast，并通过 Barrier/Event Engine signal completion。
+Collective Engine 是 Tile Group 内负责 tile 间数据合并、广播和同步归约的专用 engine。它位于 Tile Group data/control boundary：Tile Group Sequencer 发起 collective command，Compute Tile 通过 Tile DMA/stream/event 提供 partial data，Collective Engine 在 Group Shared SRAM/L2 或专用 reduction datapath 中完成 reduce/broadcast/multicast，并通过 Barrier/Event Engine signal completion。
 
 典型用途：
 
@@ -42,7 +42,7 @@ Collective Engine 不负责：
 - Tile UCE 的 tile program control、descriptor patch 和 L2 到 L1 DMA。
 - Group DMA 的 HBM 到 L2 prefetch/storeback；Collective 只消费或产生 L2 buffer，storeback 仍由 Group DMA 或后续 stage 处理。
 - Stream Queue token lifecycle；Collective 可消费 token metadata 或 signal event，但不拥有 queue credit。
-- 高层 graph 的 expert routing、attention partition 或 schedule policy；compiler/runtime/Region Sequencer 提供 descriptor。
+- 高层 graph 的 expert routing、attention partition 或 schedule policy；compiler/runtime/Tile Group Sequencer 提供 descriptor。
 
 Ownership 规则：
 
@@ -96,7 +96,7 @@ fault/timeout:
 
 状态说明：
 
-- `ACCEPT_CMD`：从 Region Sequencer 或 command queue 接收 collective descriptor id。
+- `ACCEPT_CMD`：从 Tile Group Sequencer 或 command queue 接收 collective descriptor id。
 - `VALIDATE_DESC`：检查 op、dtype、shape、participant_mask、L2 range、alignment、output policy。
 - `WAIT_INPUTS`：等待 tile done event、stream token 或 explicit participant ready bit。
 - `READ_PARTIALS`：按 descriptor stride 从 L2 partial buffer 读取输入。
@@ -104,19 +104,19 @@ fault/timeout:
 - `WRITE_OUTPUTS`：写回 L2 output buffer 或为 tile consumers 生成 output token/event。
 - `SIGNAL_DONE`：向 Barrier/Event Engine signal DONE，PMU epoch 记录元素数和 stall。
 
-### 3.3 Stage pipeline semantics
+### 3.3 Role pipeline semantics
 
-Collective 可以作为 region pipeline 的一个 stage：
+Collective 可以作为 group task 的一个 role：
 
 ```text
-Stage0: tile BOA/EVU produce partial -> stream S_partial
-Stage1: collective.reduce consumes S_partial -> stream S_reduced
-Stage2: tile EVU/Group DMA consumes S_reduced -> storeback or next compute
+Role0: tile BOA/EVU produce partial -> stream S_partial
+Role1: collective.reduce consumes S_partial -> stream S_reduced
+Role2: tile EVU/Group DMA consumes S_reduced -> storeback or next compute
 ```
 
 语义要求：
 
-- Collective stage 可按 block 粒度工作；不要求整个 tensor 所有 block 到齐。
+- Collective role 可按 block 粒度工作；不要求整个 tensor 所有 block 到齐。
 - 对同一 `collective_id + block_id + sequence_id`，participant mask 内所有 required input 到达后才能 reduce。
 - 如果 descriptor 允许 partial participant，mask 和 neutral element 必须显式给出；默认不允许静默缺 participant。
 - Collective 输出可以是 L2 buffer、stream token 或 broadcast fanout event；具体 mode 由 descriptor 指定。
@@ -137,7 +137,7 @@ Error 行为：
 | ------------------- | ---------------------------------------- | -------------------------------------------------------------------------- |
 | descriptor fault    | op/dtype/range/alignment/mask 非法       | 不读写 payload，signal ERROR                                               |
 | participant timeout | required tile/event/token 未到           | fault record + ERROR/TIMEOUT                                               |
-| input error token   | 上游 stage error                         | propagate ERROR，携带 fault_record_slot                                    |
+| input error token   | 上游 role error                          | propagate ERROR，携带 fault_record_slot                                    |
 | SRAM fault          | L2 ECC/range/permission fault            | abort command，signal ERROR                                                |
 | numeric fault       | overflow/NaN policy violation            | 按 descriptor numeric mode signal ERROR 或 saturate，policy 由后续规格冻结 |
 | protocol fault      | duplicate participant、sequence mismatch | signal ERROR，PMU protocol_fault++                                         |
@@ -164,8 +164,8 @@ typedef struct {
 
     uint32_t collective_id;
     uint32_t context_id;
-    uint32_t region_id;
-    uint32_t stage_id;
+    uint32_t task_id;
+    uint32_t role_id;
 
     uint32_t participant_mask;
     uint32_t element_count;
@@ -198,22 +198,22 @@ typedef struct {
 
 ### 4.2 Command examples
 
-Region Program 发起 split-K reduce：
+TileGroupTask 发起 split-K reduce：
 
 ```asm
-    dispatch.stage stage=0, tile_mask=0xff, program=tile_kernel_splitk, out=s_partial
+    dispatch.role role_id=0, tile_mask=0xff, program=tile_kernel_splitk, out=s_partial
     wait.stream    s_partial, condition=all_participants_ready
 
     collective.run desc=coll_splitk_reduce -> ev_coll0
     wait.event     ev_coll0
 
-    dispatch.stage stage=1, tile_mask=0x0f, program=tile_kernel_epilogue, in=s_reduced
+    dispatch.role role_id=1, tile_mask=0x0f, program=tile_kernel_epilogue, in=s_reduced
 ```
 
 MoE combine：
 
 ```asm
-    dispatch.stage stage=0, tile_mask=0xff, program=tile_kernel_expert_mlp, out=s_expert_partial
+    dispatch.role role_id=0, tile_mask=0xff, program=tile_kernel_expert_mlp, out=s_expert_partial
     wait.stream    s_expert_partial, condition=block_ready
 
     collective.run desc=coll_moe_combine -> ev_combine
@@ -230,7 +230,7 @@ Broadcast weights or metadata：
     wait.event      ev_w
     collective.run  desc=coll_broadcast_weight -> ev_bcast
     wait.event      ev_bcast
-    dispatch.stage  stage=0, tile_mask=0xff, program=tile_kernel_gemm, in=s_weight_ready
+    dispatch.role  role_id=0, tile_mask=0xff, program=tile_kernel_gemm, in=s_weight_ready
 ```
 
 ### 4.3 Event/stream/barrier protocol
@@ -247,7 +247,7 @@ Broadcast weights or metadata：
 | ------------------------ | --------------------------------------------------- |
 | `COLL_CONTROL`           | enable、soft_reset、drain                           |
 | `COLL_STATUS`            | idle、running、waiting_input、writing_output、error |
-| `COLL_ACTIVE_DESC`       | collective_id、op、stage_id                         |
+| `COLL_ACTIVE_DESC`       | collective_id、op、role_id                          |
 | `COLL_PARTICIPANT_READY` | ready mask snapshot                                 |
 | `COLL_FAULT_CODE`        | descriptor/protocol/SRAM/numeric fault              |
 | `COLL_TIMEOUT`           | active command timeout                              |
@@ -266,14 +266,14 @@ Tile BOA/EVU/MFE output
   -> Collective L2 read
   -> Reduction datapath
   -> L2 output buffer / output stream token
-  -> next tile stage or Group DMA storeback
+  -> next tile role or Group DMA storeback
 ```
 
 Group DMA relationship：
 
 - Group DMA 负责把输入 weights/activation/KV 或最终 output 在 HBM 与 L2 之间移动。
 - Collective 只读写 L2 partial/result buffer；不直接发起 HBM transaction。
-- Region Sequencer 可在 Collective 完成后 issue Group DMA storeback。
+- Tile Group Sequencer 可在 Collective 完成后 issue Group DMA storeback。
 - Group DMA 与 Collective 同时访问 L2 时，SRAM arbiter 必须按 bank/port 规则仲裁，PMU 记录冲突 owner。
 
 ### 5.2 Broadcast/multicast data flow
@@ -291,12 +291,12 @@ Broadcast 适合 weights、scale/mask metadata、小型 normalization statistics
 ### 5.3 Control flow
 
 ```text
-Region Sequencer collective.run
+Tile Group Sequencer collective.run
   -> Collective Descriptor Validator
   -> Input Wait / Participant Scoreboard
   -> L2 read/reduce/write
   -> Event completion
-  -> Region Sequencer wait.event retires
+  -> Tile Group Sequencer wait.event retires
 ```
 
 控制面使用 command/event VC，collective data path 使用 collective VC 或 group internal tree。event/barrier 不得被 large reduce traffic 阻塞。
@@ -309,7 +309,7 @@ Region Sequencer collective.run
 - L2 read response mux -> reduction datapath input。
 - reduction tree carry/compare path。
 - output writeback arbitration -> stream token push。
-- event completion -> Region Sequencer wakeup。
+- event completion -> Tile Group Sequencer wakeup。
 
 建议 reduction datapath pipeline 化，participant scoreboard 和 L2 address generation registered，避免 fan-in mask 和 arithmetic tree 落在同一 cycle。
 
@@ -406,7 +406,7 @@ Software/compiler：
 - compiler 应显式决定 partial result owner、participant mask、L2 layout、bank placement hint。
 - split-K、attention、MoE combine 的 collective descriptor 由 kernel library 模板生成，避免 runtime 拼接复杂语义。
 - runtime 只 patch IOVA/L2 frame binding、event id、shape element_count，不改变 op 语义。
-- 如果 collective output 需要 storeback，Region Sequencer 在 completion event 后 issue Group DMA storeback。
+- 如果 collective output 需要 storeback，Tile Group Sequencer 在 completion event 后 issue Group DMA storeback。
 
 ## 8. 验证、bring-up 和验收标准
 
@@ -439,7 +439,7 @@ Software/compiler：
 
 - reduce add/max/min 在 supported dtype 下与 golden 对齐。
 - Broadcast/multicast completion event 和 output stream token 行为确定。
-- Collective 可作为 region pipeline stage 与 Stream Queue/Event/Barrier 正确交互。
+- Collective 可作为 group task role 与 Stream Queue/Event/Barrier 正确交互。
 - reset/drain/error 不产生 stale done event、不泄漏 stream credit、不写坏 output range。
 - PMU 能解释 input wait、SRAM bank conflict、NoC/stream backpressure 和 active utilization。
 - SVA/formal properties 对配置的 participant count、queue depth 和 FIFO depth 通过。

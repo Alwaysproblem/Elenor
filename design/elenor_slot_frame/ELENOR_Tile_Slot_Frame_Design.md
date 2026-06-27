@@ -18,7 +18,7 @@ First Silicon cutline：
 | -------------- | ---------------------------------------------------------- | -------------------------------------------- |
 | slot 数量      | 16 个固定 slot                                             | 可扩展 slot table、dynamic allocation        |
 | 权限           | read、write、accumulate、persistent、bank_pinned           | fine-grained engine mask、capability token   |
-| 生命周期       | per-command、per-tile-program、per-region、resident        | preemption save/restore                      |
+| 生命周期       | per-command、per-tile-program、per-role、resident          | preemption save/restore                      |
 | patch          | tile_id/group_id/slot offset auto-patch                    | complex affine patch、late binding optimizer |
 | coherency      | descriptor cache invalidate、program text running 禁 patch | hardware descriptor coherence                |
 | bank placement | compiler/runtime hint + hardware check                     | automatic bank remap                         |
@@ -123,7 +123,7 @@ FAULTED -> RESET_CLEAN
 
 - per-command：单个 engine task 的 input/output/workspace；event 完成后可释放。
 - per-tile-program：Tile Program 内多个 engine 复用；Tile Program 结束后释放。
-- per-region：stage 间缓存或 partial result；Region Sequencer / Stream Queue 管理可见性。
+- per-role：role 间缓存或 partial result；Tile Group Sequencer / Stream Queue 管理可见性。
 - resident：program、const、hot descriptor、USE state cache；只有 firmware/runtime 或 checkpoint path 可替换。
 
 ## 4. 接口、descriptor、寄存器和协议
@@ -158,7 +158,7 @@ typedef enum {
 typedef enum {
     ELENOR_SLOT_LIFE_PER_COMMAND      = 0,
     ELENOR_SLOT_LIFE_PER_TILE_PROGRAM = 1,
-    ELENOR_SLOT_LIFE_PER_REGION       = 2,
+    ELENOR_SLOT_LIFE_PER_ROLE        = 2,
     ELENOR_SLOT_LIFE_RESIDENT         = 3,
 } elenor_slot_lifetime_t;
 
@@ -252,7 +252,7 @@ effective_addr = template.base_addr
 
 1. Host Runtime 上传 package、descriptor、frame table、program。
 2. Device Runtime 校验 ABI version 和 context。
-3. Region Sequencer dispatch tile task。
+3. Tile Group Sequencer dispatch prepared tile task。
 4. Tile UCE 加载 Tile Program，fetch frame descriptor。
 5. Tile UCE validate slot table：范围、重叠、对齐、权限、bank policy。
 6. UCE install shadow，执行 descriptor template auto-patch。
@@ -265,7 +265,7 @@ Warm launch 不 reload program，只 patch descriptor、context、shape metadata
 
 ```text
 Runtime patch descriptor -> descriptor cache invalidate/flush
-Device Runtime issue region
+Device Runtime issue group task
 Tile UCE bind existing program + new frame generation
 Tile UCE patch descriptor shadow
 Tile Program run

@@ -73,7 +73,7 @@ class HardwareConfig:
     uce_dispatch_per_cycle: int = 1
 
     # --- Stream queue -----------------------------------------------------
-    # Stream Queue design 6.1: depth=3 canonical trace from Region Program.
+    # Stream Queue design 6.1: depth=3 canonical trace from TileGroupTask.
     stream_depth_default: int = 3
     stream_token_overhead_cycles: int = 1  # T_acquire + T_push + T_pop + T_release
     stream_fence_cycles: int = 1  # payload visibility fence
@@ -127,7 +127,7 @@ class WorkloadConfig:
     num_experts: int = 8  # MoE
     tokens_per_batch: int = 1024
     expert_ffn_dim: int = 512
-    block_count: int = 4  # pipeline blocks (region loop iterations)
+    block_count: int = 4  # pipeline blocks (task loop iterations)
 
     def with_overrides(self, **kw) -> WorkloadConfig:
         return replace(self, **kw)

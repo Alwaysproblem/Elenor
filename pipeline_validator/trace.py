@@ -9,12 +9,12 @@ opened in any browser without a server.
 The trace has three kinds of events:
 
   * **slice**  (ph=B/E):  engine jobs (BOA/EVU/MFE/USE), UCE instruction
-    phases (wait/issue/stream), region-sequencer stages, DMA jobs.
+    phases (wait/issue/stream), task role dispatches, DMA jobs.
     These show up as horizontal bars on a Gantt timeline.
   * **counter** (ph=C):   stream-queue occupancy and credit, sampled
     per cycle.  These render as line graphs in Perfetto/Chrome.
   * **instant** (ph=i):   stream push/pop/release/EOS events, dispatch,
-    tile_done, region_done — markers on the timeline.
+    tile_done, group_task_done — markers on the timeline.
 
 Cycle → time mapping: one cycle = `hw.cycle_ns()` nanoseconds.  Chrome
 trace uses microseconds, so cycles are converted to µs with 3 decimal
@@ -299,8 +299,8 @@ const TRACE = __TRACE_JSON__;
   const chart = document.getElementById("chart");
   const barH = 16, rowH = 22, leftPad = 180;
   const colors = {{BOA:"#e74c3c", EVU:"#27ae60", MFE:"#3498db", USE:"#f39c12",
-                   UCE:"#9b59b6", DMA:"#1abc9c", Region:"#e67e22",
-                   Stream:"#95a5a6", Stage:"#2ecc71",
+                   UCE:"#9b59b6", DMA:"#1abc9c", Task:"#e67e22",
+                   Stream:"#95a5a6", TileRole:"#2ecc71",
                    "DMA Ch0":"#16a085", "DMA Ch1":"#1d6f8c",
                    Collective:"#d35400", default:"#888"}};
   let y = 4;

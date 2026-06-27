@@ -2,7 +2,7 @@
 
 ## 1. 定位、目标和 First Silicon cutline
 
-Compute Tile 是 ELENOR 的 tile-local kernel 执行域。它不调度高层 graph，也不消费 tensor algebra；它接收 Region Sequencer 下发的 tile task，执行已经由 compiler/runtime 降低好的 Tile Program、slot frame、descriptor 和 stream token。
+Compute Tile 是 ELENOR 的 tile-local kernel 执行域。它不调度高层 graph，也不消费 tensor algebra；它接收 Tile Group Sequencer / Tile Dispatcher 下发的 prepared tile task，执行已经由 compiler/runtime 降低好的 Tile Program、slot frame、descriptor 和 stream token。
 
 核心定位：
 
@@ -16,7 +16,7 @@ Compute Tile = Tile UCE 控制面
              + local event / PMU / debug
 ```
 
-目标是把一个 tile 内的 kernel pipeline 闭环：L2 到 L1 搬运、descriptor auto-patch、engine launch、event wait、stream pop/push、L1 slot 生命周期、state update 和 PMU 归因。Compute Tile 只处理 tile-local 工作；跨 group 调度、全局 memory policy、多模型 QoS 和 host ABI 由上层 runtime / Region Sequencer / driver 负责。
+目标是把一个 tile 内的 kernel pipeline 闭环：L2 到 L1 搬运、descriptor auto-patch、engine launch、event wait、stream pop/push、L1 slot 生命周期、state update 和 PMU 归因。Compute Tile 只处理 tile-local 工作；跨 group 调度、全局 memory policy、多模型 QoS 和 host ABI 由上层 runtime / Tile Group Sequencer / driver 负责。
 
 Architecture V1 的目标形态：
 
@@ -45,19 +45,19 @@ First Silicon V1 cutline：
 
 ### 2.1 模块职责
 
-| 模块                       | owner               | 职责                                                                                                                         | 非职责                                                     |
-| -------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| Compute Tile top           | Tile integration    | Tile task ingress、clock/reset/debug 集成、L1/NoC/PMU 汇聚                                                                   | graph schedule、global queue policy                        |
-| Tile Command Queue         | Tile UCE            | 接收 Region Sequencer 发来的 prepared tile task，保存 context、program id、local handle、frame id、stream id                 | host command ring 解析                                     |
-| Tile UCE                   | Tile control        | Tile PC、从 local program slot/I-cache fetch/decode、launch/wait/branch/fence、descriptor patch、stream token、Tile DMA 编排 | state update 算术、page table walk、高层 graph 解释        |
-| USE                        | Tile state          | state register/cache、scan、recurrence、checkpoint/restore、local event assist                                               | Tile Program 主 PC、常规 engine launch、大多数动态数据访存 |
-| Tile DMA                   | Tile data movement  | L2<->L1、slot 到 slot copy、async completion event、basic stride                                                             | HBM 访问调度、page/segment walk                            |
-| L1 SRAM / Slot Frame       | Tile memory         | program/descriptor/event region、operand、accumulator、vector temp、stream buffer、state cache                               | cache coherence、global allocation                         |
-| BOA Cluster                | Dense compute       | GEMM、Conv lowering、attention QK/AV、expert MLP                                                                             | elementwise、fine-grained gather/scatter                   |
-| EVU                        | Irregular compute   | elementwise、activation、norm、softmax、mask/tail、基础 gather/scatter                                                       | 大规模 dense matmul 主路径                                 |
-| MFE Tile Port              | Memory flow ingress | 接收 MFE stream token/payload，写入 L1 stream/metadata slot，向 UCE/EVU/BOA/USE 暴露 ready                                   | 任意图遍历、程序控制流                                     |
-| Local Event / Barrier Unit | Tile sync           | engine completion、tile done、timeout、fault、local barrier                                                                  | group barrier 的全局 arbitration                           |
-| PMU / Trace                | Observability       | primary stall owner、engine utilization、queue/stream/SRAM/NoC counter                                                       | 调度策略本身                                               |
+| 模块                       | owner               | 职责                                                                                                                               | 非职责                                                     |
+| -------------------------- | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Compute Tile top           | Tile integration    | Tile task ingress、clock/reset/debug 集成、L1/NoC/PMU 汇聚                                                                         | graph schedule、global queue policy                        |
+| Tile Command Queue         | Tile UCE            | 接收 Tile Group Sequencer / Tile Dispatcher 发来的 prepared tile task，保存 context、program id、local handle、frame id、stream id | host command ring 解析                                     |
+| Tile UCE                   | Tile control        | Tile PC、从 local program slot/I-cache fetch/decode、launch/wait/branch/fence、descriptor patch、stream token、Tile DMA 编排       | state update 算术、page table walk、高层 graph 解释        |
+| USE                        | Tile state          | state register/cache、scan、recurrence、checkpoint/restore、local event assist                                                     | Tile Program 主 PC、常规 engine launch、大多数动态数据访存 |
+| Tile DMA                   | Tile data movement  | L2<->L1、slot 到 slot copy、async completion event、basic stride                                                                   | HBM 访问调度、page/segment walk                            |
+| L1 SRAM / Slot Frame       | Tile memory         | program/descriptor/event region、operand、accumulator、vector temp、stream buffer、state cache                                     | cache coherence、global allocation                         |
+| BOA Cluster                | Dense compute       | GEMM、Conv lowering、attention QK/AV、expert MLP                                                                                   | elementwise、fine-grained gather/scatter                   |
+| EVU                        | Irregular compute   | elementwise、activation、norm、softmax、mask/tail、基础 gather/scatter                                                             | 大规模 dense matmul 主路径                                 |
+| MFE Tile Port              | Memory flow ingress | 接收 MFE stream token/payload，写入 L1 stream/metadata slot，向 UCE/EVU/BOA/USE 暴露 ready                                         | 任意图遍历、程序控制流                                     |
+| Local Event / Barrier Unit | Tile sync           | engine completion、tile done、timeout、fault、local barrier                                                                        | group barrier 的全局 arbitration                           |
+| PMU / Trace                | Observability       | primary stall owner、engine utilization、queue/stream/SRAM/NoC counter                                                             | 调度策略本身                                               |
 
 ### 2.2 ownership 边界
 
@@ -67,7 +67,7 @@ First Silicon V1 cutline：
 - state slot 内容：USE 管理生命周期；DMA 只能在明确 checkpoint/restore 或 UCE 发起的数据搬运路径下修改。
 - metadata/page-list slot：MFE 可写入；UCE/USE 可读取；同一 slot 的写 owner 由 frame/descriptor 指定。
 - stream token credit：Stream Queue Engine owner；Tile UCE 通过 pop/push/acquire/release 协议使用，不私自改 credit 计数。
-- fault record：产生 fault 的模块写本地 syndrome，Local Event Unit 分配或引用 fault record slot，上报给 Region Sequencer。
+- fault record：产生 fault 的模块写本地 syndrome，Local Event Unit 分配或引用 fault record slot，上报给 Tile Group Sequencer。
 - PMU primary stall：每个 cycle 只能归给一个 primary owner；secondary tag 仅用于 debug。
 
 ### 2.3 非目标
@@ -85,7 +85,7 @@ Compute Tile 不承担：
 ### 3.1 Top-level 数据通路
 
 ```text
-              Region Sequencer / Stream Queue / Event Fabric
+              Tile Group Sequencer / Stream Queue / Event Fabric
                                |
                                v
 +-------------------------------------------------------------------+
@@ -139,7 +139,7 @@ RESET
 | ------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | ------------------------------- |
 | RESET               | reset asserted 或 reset command          | 清空 valid bit、停止 launch、回收本地 event、使 pending token 进入 drain policy，并失效本 tile 可见的 program handle tag | reset release 且 CSR 初始化完成 |
 | IDLE                | 无 active tile task                      | clock gating eligible，保留 validated local program/state tag                                                            | command queue 非空              |
-| TASK_ACCEPT         | Region Sequencer dispatch                | latch context_id、program_id、frame_id、stream binding、local handle、timeout                                            | command 合法                    |
+| TASK_ACCEPT         | Tile Group Sequencer dispatch            | latch context_id、program_id、frame_id、stream binding、local handle、timeout                                            | command 合法                    |
 | PREPARED_TASK_CHECK | task accepted                            | 校验 `program_local_slot/program_version/program_epoch`、descriptor cache、frame generation；不向 HBM 发 program load    | handle/frame ready              |
 | FRAME_BIND          | prepared metadata ready                  | 校验 slot permission、alignment、bank policy、owner                                                                      | frame valid                     |
 | PROGRAM_RUN         | frame bound                              | UCE 从 local program slot/I-cache 取指并推进 Tile Program，launch engines，处理 stream/event                             | program END 或 fault            |
@@ -196,7 +196,7 @@ typedef struct {
     uint16_t priority;
 
     uint32_t context_id;
-    uint32_t region_id;
+    uint32_t role_id;
     uint32_t group_id;
     uint32_t tile_id;
 
@@ -337,7 +337,7 @@ producer: stream.acquire -> fill payload -> stream.push
 - valid token、EOS token、error token。
 - queue full stall producer，queue empty stall consumer。
 - reset/drain 回收 credit 并清理 pending event。
-- error token 携带 fault record index，并传播到 tile/region completion。
+- error token 携带 fault record index，并传播到 tile/group task completion。
 - multi-consumer 策略必须在 stream descriptor 中声明为 broadcast、refcount 或 independent queue。
 
 ## 5. 数据流、控制流和时序路径
@@ -351,9 +351,9 @@ Host Runtime
   -> ring doorbell
 Device Runtime
   -> validate command
-  -> issue region task
+  -> issue group task
 Tile Group Sequencer
-  -> ensure region/tile program residency
+  -> ensure tile program residency
   -> init streams
   -> dispatch prepared tile task
 Compute Tile
@@ -675,7 +675,7 @@ Exception 分类：
 - compiler 生成 tile kernel library selection、descriptor template、slot frame 和 command buffer。
 - runtime/firmware 负责 package load、context-level patch、program section registry、descriptor cache invalidate 和 residency hint。
 - Tile UCE firmware 或 microcode 只消费 prepared local program handle，不调用 host service，也不在运行态发起 global program load。
-- golden trace 应记录 command id、region id、tile id、program id、descriptor ids、event transitions、stream token sequence 和 PMU snapshot。
+- golden trace 应记录 command id、task id、tile id、program id、descriptor ids、event transitions、stream token sequence 和 PMU snapshot。
 
 ## 8. 验证、bring-up 和验收标准
 
@@ -700,7 +700,7 @@ Exception 分类：
 3. Prepared task handle + frame generation smoke。
 4. BOA GEMM through UCE launch，不允许 testbench 直接驱动 datapath。
 5. EVU elementwise/mask/tail through UCE launch。
-6. Stream pop/push/EOS/error token 与 Region Sequencer 连接。
+6. Stream pop/push/EOS/error token 与 Tile Group Sequencer 连接。
 7. MFE Page Stream token 到 L1 buffer，再 BOA/EVU 消费。
 8. USE scan/recurrence + checkpoint/restore。
 9. Paged attention tile trace，验证 `T_prefetch <= T_qk` case 的 PMU 指纹。

@@ -13,14 +13,14 @@ Runtime Command/Event ABI 是 host runtime、kernel driver、firmware runtime �
 
 First Silicon V1 切线：
 
-| 领域            | 必须实现                                                                     | 可预留                            |
-| --------------- | ---------------------------------------------------------------------------- | --------------------------------- |
-| Command queue   | fixed-size ring、doorbell、sequence、context_id、queue_id                    | priority/preemption               |
-| Command type    | launch_region、DMA、BOA descriptor、event wait/signal、barrier、reset_domain | full MFE Segment、multi-model QoS |
-| Event table     | pending/done/error/timeout/reset、producer、sequence、timestamp              | sampled trace                     |
-| Fault record    | invalid descriptor、address fault、timeout、engine fault                     | NoC poison、ECC policy            |
-| Memory ordering | command fetch fence、descriptor visibility、completion visibility            | relaxed ordering hint             |
-| PMU             | command queue occupancy、event wait、DMA bandwidth、BOA active/stall         | full stall taxonomy               |
+| 领域            | 必须实现                                                                         | 可预留                            |
+| --------------- | -------------------------------------------------------------------------------- | --------------------------------- |
+| Command queue   | fixed-size ring、doorbell、sequence、context_id、queue_id                        | priority/preemption               |
+| Command type    | launch_group_task、DMA、BOA descriptor、event wait/signal、barrier、reset_domain | full MFE Segment、multi-model QoS |
+| Event table     | pending/done/error/timeout/reset、producer、sequence、timestamp                  | sampled trace                     |
+| Fault record    | invalid descriptor、address fault、timeout、engine fault                         | NoC poison、ECC policy            |
+| Memory ordering | command fetch fence、descriptor visibility、completion visibility                | relaxed ordering hint             |
+| PMU             | command queue occupancy、event wait、DMA bandwidth、BOA active/stall             | full stall taxonomy               |
 
 ## 2. 职责、非职责和 ownership
 
@@ -43,7 +43,7 @@ Runtime ABI 不负责：
 - 不规定 BOA/EVU/MFE/USE 内部微架构。
 - 不在 ABI 中嵌入任意 graph interpreter。
 - 不替代 executable package 的 section format。
-- 不让 USE 承担 program control；program control 归 UCE/Region Sequencer/Runtime，USE 管 state/scan/recurrence。
+- 不让 USE 承担 program control；program control 归 UCE/Tile Group Sequencer/Runtime，USE 管 state/scan/recurrence。
 
 ### 2.3 Ownership
 
@@ -192,7 +192,7 @@ Command type 示例：
 
 ```c
 typedef enum {
-    ELENOR_CMD_LAUNCH_REGION = 1,
+    ELENOR_CMD_LAUNCH_GROUP_TASK = 1,
     ELENOR_CMD_DMA = 2,
     ELENOR_CMD_BOA_GEMM = 3,
     ELENOR_CMD_EVU_KERNEL = 4,
@@ -292,7 +292,7 @@ Kernel driver:
 Firmware runtime:
   fetch command
   validate command and descriptor
-  dispatch launch_region or engine command
+  dispatch group task or engine command
   update event table
   write fault record on error
 
@@ -420,8 +420,8 @@ Runtime dialect 只表达可打包为 ABI 的对象：
 
 ```mlir
 elenor.runtime.command @decode_step {
-  type = #elenor.cmd<launch_region>
-  region = @paged_attention_region
+  type = #elenor.cmd<launch_group_task>
+  task = @paged_attention_group_task
   wait = [#elenor.event<input_ready>]
   signal = #elenor.event<decode_done>
   timeout = #elenor.timeout<profile_default>

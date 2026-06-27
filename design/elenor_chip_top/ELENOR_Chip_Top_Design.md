@@ -2,7 +2,7 @@
 
 ## 1. 定位、目标和 First Silicon cutline
 
-ELENOR Chip Top 是整颗 ELENOR Device 的顶层集成边界，负责把 Host Interface、Runtime Processor、Global Scheduler、Global DMA、Memory Controller、Collective、Global PMU、NoC/Router 和 Tile Group 阵列组合成一个可复位、可枚举、可提交 command、可产生 event、可读 PMU、可隔离 fault 的 device。它不是高层 graph interpreter；硬件只消费 command buffer、descriptor、Region Program 和 Tile Program。
+ELENOR Chip Top 是整颗 ELENOR Device 的顶层集成边界，负责把 Host Interface、Runtime Processor、Global Scheduler、Global DMA、Memory Controller、Collective、Global PMU、NoC/Router 和 Tile Group 阵列组合成一个可复位、可枚举、可提交 command、可产生 event、可读 PMU、可隔离 fault 的 device。它不是高层 graph interpreter；硬件只消费 command buffer、descriptor、TileGroupTask 和 Tile Program。
 
 顶层目标有三类：
 
@@ -16,7 +16,7 @@ Architecture V1 允许描述完整芯片形态，包括多 Tile Group、多 NoC 
 | ----------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------- |
 | Host path         | doorbell、command ring、event/fault MSI/MSI-X 或 SoC interrupt                        | CXL.cache/coherent attach、复杂虚拟化               |
 | Runtime Processor | command consume、descriptor validation、shape branch 基础路径、reset/drain            | 高级 priority/preemption、PMU feedback scheduling   |
-| Global Scheduler  | queue dispatch、region launch、event/barrier、basic resource map                      | 多模型 QoS、跨 group 动态重分配                     |
+| Global Scheduler  | queue dispatch、group task launch、event/barrier、basic resource map                  | 多模型 QoS、跨 group 动态重分配                     |
 | Global DMA        | 1D/2D/strided copy、async completion event、timeout fault                             | multicast、gather list、复杂 layout transform       |
 | Memory            | HBM/DDR/LPDDR 控制器接口、IOMMU/IOVA 透传检查                                         | coherent host memory policy                         |
 | NoC               | VC0 command/event、VC1 read response、VC2 write/stream、VC3 collective 预留或最小实现 | hierarchical mesh 参数、QoS aging、adaptive routing |
@@ -65,16 +65,16 @@ Host / System SoC
 
 ### 2.1 顶层职责
 
-| 职责          | 顶层实现要求                                                                                                   |
-| ------------- | -------------------------------------------------------------------------------------------------------------- |
-| 集成边界      | 定义所有全局模块端口、clock/reset/power domain、DFT hook、scan/test mode 和 CSR aperture。                     |
-| 地址空间      | 统一 Host IOVA、device physical address、HBM address、CSR address 和 NoC target id 的解码规则。                |
-| 命令入口      | 把 Host Interface 写入的 doorbell/queue tail 转成 Runtime Processor 和 Global Scheduler 可消费的 work item。   |
-| 事件出口      | 将 engine completion、DMA completion、region done、tile/group fault 汇聚为 event table 状态和 host interrupt。 |
-| 数据路径      | 连接 Global DMA、Memory Controller、NoC 和 Tile Group，保证 command/control 与 bulk data 不互相饿死。          |
-| 错误隔离      | 按 context、queue、group、tile、engine 记录 fault，并触发 reset/drain，不把单模型 fault 扩散到无关 context。   |
-| PMU 汇聚      | 对 global PMU、本地 group/tile PMU 和 NoC counter 做时间戳对齐、snapshot、clear-on-read 或 latch-on-event。    |
-| Bring-up 支撑 | 提供最小 CSR、loopback、DMA copy、event interrupt、PMU readout 和 reset smoke path。                           |
+| 职责          | 顶层实现要求                                                                                                       |
+| ------------- | ------------------------------------------------------------------------------------------------------------------ |
+| 集成边界      | 定义所有全局模块端口、clock/reset/power domain、DFT hook、scan/test mode 和 CSR aperture。                         |
+| 地址空间      | 统一 Host IOVA、device physical address、HBM address、CSR address 和 NoC target id 的解码规则。                    |
+| 命令入口      | 把 Host Interface 写入的 doorbell/queue tail 转成 Runtime Processor 和 Global Scheduler 可消费的 work item。       |
+| 事件出口      | 将 engine completion、DMA completion、group task done、tile/group fault 汇聚为 event table 状态和 host interrupt。 |
+| 数据路径      | 连接 Global DMA、Memory Controller、NoC 和 Tile Group，保证 command/control 与 bulk data 不互相饿死。              |
+| 错误隔离      | 按 context、queue、group、tile、engine 记录 fault，并触发 reset/drain，不把单模型 fault 扩散到无关 context。       |
+| PMU 汇聚      | 对 global PMU、本地 group/tile PMU 和 NoC counter 做时间戳对齐、snapshot、clear-on-read 或 latch-on-event。        |
+| Bring-up 支撑 | 提供最小 CSR、loopback、DMA copy、event interrupt、PMU readout 和 reset smoke path。                               |
 
 ### 2.2 非职责
 
@@ -82,7 +82,7 @@ Host / System SoC
 - 不在顶层实现 BOA/EVU/MFE/USE 计算语义。
 - 不把某个绝对 SRAM 地址绑定到算子语义；Tile L1 由 Slot Frame 和 descriptor 管理。
 - 不替代 driver 的 memory allocation/pinning/IOMMU 配置。
-- 不在 Global Scheduler 中实现任意通用 CPU 调度策略；First Silicon V1 只做 command/region 级确定调度。
+- 不在 Global Scheduler 中实现任意通用 CPU 调度策略；First Silicon V1 只做 command/group task 级确定调度。
 - 不在 NoC 中修复无效 descriptor 或非法访问；NoC 只传播错误响应和 poison/error metadata。
 
 ### 2.3 Ownership matrix
@@ -225,7 +225,7 @@ typedef struct {
 - timeout_cycles 不为非法保留值；具体范围由后续规格冻结。
 - fault_record_slot 可写或由硬件分配。
 
-Event Fabric 输出 `PENDING/DONE/ERROR/TIMEOUT/RESET`，用于 DMA completion、stage synchronization、tile done、group done 和 graph done。
+Event Fabric 输出 `PENDING/DONE/ERROR/TIMEOUT/RESET`，用于 DMA completion、role synchronization、tile done、group done 和 graph done。
 
 ## 5. 数据流、控制流和时序路径
 
@@ -244,11 +244,11 @@ Runtime Processor
   -> validates version/context/descriptor bounds
 Global Scheduler
   -> allocates event/fault slots
-  -> launches Pipeline Region to target Tile Groups
+  -> launches Group Task to target Tile Groups
 Global DMA / NoC
   -> moves program/data to Group SRAM or Tile path
 Tile Group
-  -> executes Region Program and Tile Program
+  -> executes TileGroupTask and Tile Program
 Event Fabric
   -> writes event done/error and interrupts host
 ```
@@ -382,7 +382,7 @@ First Silicon V1 顶层验收必须覆盖：
 
 - 所有 lifecycle 状态和状态转换。
 - 所有 reset domain 和 reset reason。
-- command type 至少覆盖 DMA、BARRIER、EVENT_WAIT、EVENT_SIGNAL、LAUNCH_REGION、RESET_DOMAIN。
+- command type 至少覆盖 DMA、BARRIER、EVENT_WAIT、EVENT_SIGNAL、LAUNCH_GROUP_TASK、RESET_DOMAIN。
 - event status 覆盖 PENDING、DONE、ERROR、TIMEOUT、RESET。
 - NoC VC 覆盖 command/event 与 data 同时拥塞。
 - PMU primary stall owner 覆盖 WAIT_EVENT、NOC_VC、DMA_MEMORY、UNKNOWN。

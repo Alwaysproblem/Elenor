@@ -2,7 +2,7 @@
 
 ## 1. 定位、目标和 First Silicon cutline
 
-Memory / NoC 子系统是 ELENOR 从 host memory、HBM/DDR/LPDDR 到 Group L2、Tile L1、engine operand buffer 的确定性数据通路。它不解释高层 graph，也不直接决定 workload 调度；硬件只执行 command、descriptor、Region Program 和 Tile Program 产生的 DMA、stream、event 和 collective 请求。
+Memory / NoC 子系统是 ELENOR 从 host memory、HBM/DDR/LPDDR 到 Group L2、Tile L1、engine operand buffer 的确定性数据通路。它不解释高层 graph，也不直接决定 workload 调度；硬件只执行 command、descriptor、TileGroupTask 和 Tile Program 产生的 DMA、stream、event 和 collective 请求。
 
 设计目标：
 
@@ -228,8 +228,8 @@ VC 映射：
 
 1. Host 上传 package、program、descriptor、weights 到 HBM。
 2. Runtime ring doorbell；Device Runtime 校验 command / descriptor version。
-3. Region Sequencer 通过 Global DMA 将 hot Region Program 加载到 Group SRAM。
-4. Region 初始化 stream queue，发起 HBM 到 L2 预取。
+3. Tile Group Sequencer 通过 Global DMA 将 hot Tile Program 加载到 Group SRAM。
+4. Tile Group Sequencer 初始化 stream queue，发起 HBM 到 L2 预取。
 5. Tile UCE 加载 Tile Program，绑定 slot frame。
 6. Tile DMA / MFE 将 L2 数据写入 L1 slot。
 7. BOA/EVU/USE 消费 L1 slot；结果经 Tile DMA、Group DMA 或 Stream Queue 推进。

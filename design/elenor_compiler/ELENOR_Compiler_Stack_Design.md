@@ -57,16 +57,16 @@ Compiler 不负责：
 
 ### 2.3 Ownership
 
-| 对象                | Compiler owner             | Runtime/Firmware owner        | Hardware consumer  |
-| ------------------- | -------------------------- | ----------------------------- | ------------------ |
-| Shape class         | shape-specialize pass      | launch-time branch            | Runtime / Tile UCE |
-| Engine partition    | engine-partition pass      | 不重分区                      | BOA/EVU/MFE/USE    |
-| Tile kernel binding | kernel-library-select pass | validate residency            | Tile UCE           |
-| Descriptor template | engine dialect lowering    | context/tile/data/state patch | Engines            |
-| Slot frame template | memory-plan pass           | bind physical/local slots     | Tile UCE / DMA     |
-| Stream queue        | pipeline-schedule pass     | init/reset/drain              | Region Sequencer   |
-| Command template    | runtime lowering pass      | instantiate/submit            | Device Runtime     |
-| PMU manifest        | performance pass           | read/compare                  | PMU tools          |
+| 对象                | Compiler owner             | Runtime/Firmware owner        | Hardware consumer    |
+| ------------------- | -------------------------- | ----------------------------- | -------------------- |
+| Shape class         | shape-specialize pass      | launch-time branch            | Runtime / Tile UCE   |
+| Engine partition    | engine-partition pass      | 不重分区                      | BOA/EVU/MFE/USE      |
+| Tile kernel binding | kernel-library-select pass | validate residency            | Tile UCE             |
+| Descriptor template | engine dialect lowering    | context/tile/data/state patch | Engines              |
+| Slot frame template | memory-plan pass           | bind physical/local slots     | Tile UCE / DMA       |
+| Stream queue        | pipeline-schedule pass     | init/reset/drain              | Tile Group Sequencer |
+| Command template    | runtime lowering pass      | instantiate/submit            | Device Runtime       |
+| PMU manifest        | performance pass           | read/compare                  | PMU tools            |
 
 ## 3. 微架构和状态机
 
@@ -168,7 +168,7 @@ Versioning 规则：compiler manifest、package container、command ABI、descri
 | `elenor.evu`     | elementwise、activation、softmax、norm、mask/tail、gather/scatter 子集 | EVU descriptor template |
 | `elenor.mfe`     | Page Stream、Segment Stream、layout/reorder/data stream                | MFE stream descriptor   |
 | `elenor.use`     | state、scan、recurrence、checkpoint/restore                            | USE state descriptor    |
-| `elenor.runtime` | command、event、barrier、branch_shape、launch_region                   | command template        |
+| `elenor.runtime` | command、event、barrier、branch_shape、launch_group_task               | command template        |
 | `elenor.package` | section、relocation、manifest、kernel binding                          | executable package      |
 
 Dialect 不应互相吞并：BOA dialect 不表达 event wait；Runtime dialect 不表达 matmul tile layout；MFE dialect 不表达 high-level graph traversal。
@@ -183,13 +183,13 @@ func.func @decode_step(%q: tensor<?x?xbf16>, %kv: !elenor.kv_pages, %out: tensor
       elenor.runtime.launch @dense_attention_short(%q, %kv, %out)
     }
     case #elenor.shape<paged> {
-      elenor.runtime.launch @paged_attention_region(%q, %kv, %out)
+      elenor.runtime.launch @paged_attention_task(%q, %kv, %out)
     }
   }
   return
 }
 
-elenor.region @paged_attention_region(%q, %kv, %out) {
+elenor.group_task @paged_attention_task(%q, %kv, %out) {
   %pages = elenor.mfe.page_stream %kv
     page_table = @kv_page_table
     prefetch_depth = #elenor.param<由后续规格冻结>
@@ -202,7 +202,7 @@ elenor.region @paged_attention_region(%q, %kv, %out) {
 
   %value = elenor.boa.matmul %prob, %pages.v
   elenor.mfe.store %value, %out
-  elenor.runtime.signal #elenor.event<region_done>
+  elenor.runtime.signal #elenor.event<group_task_done>
 }
 ```
 
