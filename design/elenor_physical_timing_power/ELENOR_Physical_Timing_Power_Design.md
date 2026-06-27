@@ -60,7 +60,7 @@ Chip
 ├── Host / Runtime / Global PMU / Global DMA
 ├── Global NoC spine
 └── Tile Group x N
-    ├── Region Sequencer / Group PMU / Barrier
+    ├── Tile Group Sequencer / Group PMU / Barrier
     ├── Group DMA / Collective / Stream Queue
     ├── Group Shared SRAM L2 macros
     └── Compute Tile x M

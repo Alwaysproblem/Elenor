@@ -1,12 +1,13 @@
-"""Tile/Region Program IR for the ELENOR pipeline validator.
+"""Tile Program + TileGroupTask IR for the ELENOR pipeline validator.
 
-Mirrors the Tile-SPMD programming model and the Region/Tile Program
+Mirrors the Tile-SPMD programming model and the TileGroupTask / Tile Program
 contracts in design/ELENOR_Architecture_Design_v1.md sections 16-17.
 
 A *Tile Program* is a list of `TileInst` executed by a Tile UCE on each
-Compute Tile.  A *Region Program* is a list of `RegionInst` executed by
-the Region Sequencer on the Tile Group.  Both are pure data; the
-controllers in `tile.py` / `region.py` interpret them cycle by cycle.
+Compute Tile.  A *TileGroupTask* is a list of `GroupAction` executed by the
+Tile Group Sequencer on the Tile Group, plus a set of `TileRoleBinding`s.
+Both are pure data; the controllers in `tile.py` /
+`tile_group_sequencer.py` interpret them cycle by cycle.
 """
 
 from __future__ import annotations
@@ -56,24 +57,16 @@ class TileOp(Enum):
     TRAP = "trap"
 
 
-class RegionOp(Enum):
-    """Region Sequencer opcodes (Architecture doc 16.5 + Region Sequencer 4.1)."""
-    REGION_BEGIN = "region.begin"
-    REGION_END = "region.end"
+class GroupActionOp(Enum):
+    """Tile Group Sequencer action opcodes (Architecture doc 16.5)."""
     INIT_STREAM = "init.stream"
     DMA_PREFETCH = "dma.prefetch"
     DMA_STORE = "dma.store"
-    DISPATCH_STAGE = "dispatch.stage"
+    DISPATCH_ROLE = "dispatch.role"
     WAIT_EVENT = "wait.event"
-    WAIT_STREAM = "wait.stream"
-    WAIT_CREDIT = "wait.credit"
     BARRIER_GROUP = "barrier.group"
     COLLECTIVE_RUN = "collective.run"
-    PUSH_EOS = "push.eos"
-    ADVANCE_BLOCK = "advance.block"
-    BRANCH_LT = "branch.lt"
     SIGNAL_EVENT = "signal.event"
-
 
 # ---------------------------------------------------------------------------
 # Instruction records
@@ -94,14 +87,12 @@ class TileInst:
     label: str | None = None  # label this instruction carries (branch target)
     comment: str = ""
 
-
 @dataclass
-class RegionInst:
-    """One Region Sequencer instruction."""
-    op: RegionOp
+class GroupAction:
+    """One Tile Group Sequencer action."""
+    op: GroupActionOp
     args: tuple = ()
-    label: str | None = None
-    dst: str | None = None  # event id produced
+    dst: str | None = None
     comment: str = ""
 
 
@@ -115,8 +106,8 @@ class StreamDesc:
     """Stream Queue descriptor (Stream Queue design 4.1 elenor_stream_queue_desc_v0_t)."""
     queue_id: int
     depth: int
-    producer_mask: int  # which stages produce
-    consumer_mask: int  # which stages consume
+    producer_mask: int  # tile-bit mask: which tiles produce
+    consumer_mask: int  # tile-bit mask: which tiles consume
     payload_slot_id: int = 0
     token_stride: int = 32
     pmu_stream_id: int = 0
@@ -208,65 +199,82 @@ class TileProgram:
         return "\n".join(lines)
 
 @dataclass
-class RegionProgram:
-    """A Region Program executed by the Region Sequencer (Architecture 16.3)."""
+class TileRoleBinding:
+    """One role binding inside a TileGroupTask.
+
+    Static dispatch metadata binding a Tile Program template to a set of
+    tiles.  Each role is still Tile-SPMD: the same Tile Program runs on
+    every tile selected by `tile_mask`, distinguished by tile_id, group_id,
+    descriptor offset and slot/frame binding.
+    """
+    role_id: int
+    tile_mask: int
+    tile_program: TileProgram
+    in_stream: int | None = None
+    out_stream: int | None = None
+
+
+@dataclass
+class TileGroupTask:
+    """A group-level dispatch task executed by the Tile Group Sequencer.
+
+    It is not a fetchable program / ISA and not a subgraph: it is a list of
+    `GroupAction`s plus a set of `TileRoleBinding`s.  The sequencer advances
+    its action index, issues DMA/stream/collective/barrier/wait, and
+    dispatches prepared tile tasks role by role.
+    """
     name: str
-    insts: list[RegionInst] = field(default_factory=list)
+    actions: list[GroupAction] = field(default_factory=list)
     streams: list[StreamDesc] = field(default_factory=list)
-    tile_programs: dict = field(
-        default_factory=dict)  # stage_id -> TileProgram
-    _labels: dict = field(default_factory=dict, repr=False)
-
-    def resolve_labels(self) -> None:
-        self._labels = {}
-        for i, ins in enumerate(self.insts):
-            if ins.label is not None:
-                self._labels[ins.label] = i
-
-    def label_index(self, label: str) -> int:
-        if not self._labels:
-            self.resolve_labels()
-        return self._labels[label]
+    role_bindings: dict[int, TileRoleBinding] = field(default_factory=dict)
+    completion_event: str = "group_task_done"
 
     # ---- IR pretty-print ----
 
-    def _fmt_inst(self, ins: RegionInst) -> str:
-        parts: list[str] = []
-        if ins.label is not None:
-            parts.append(f"{ins.label}:")
-        parts.append(ins.op.value)
-        if ins.dst is not None:
-            parts.append(f"-> {ins.dst}")
-        if ins.args:
-            parts.append(", ".join(str(a) for a in ins.args))
+    def _fmt_action(self, a: GroupAction) -> str:
+        parts: list[str] = [a.op.value]
+        if a.dst is not None:
+            parts.append(f"-> {a.dst}")
+        if a.args:
+            parts.append(", ".join(str(x) for x in a.args))
         line = " ".join(parts)
-        if ins.comment:
-            line = f"{line:<40s}  ; {ins.comment}"
+        if a.comment:
+            line = f"{line:<40s}  ; {a.comment}"
         return line
 
     def _fmt_stream(self, s: StreamDesc) -> str:
         return (f"  stream q{s.queue_id}: depth={s.depth} "
                 f"prod=0x{s.producer_mask:X} cons=0x{s.consumer_mask:X}")
 
+    def _fmt_role(self, r: TileRoleBinding) -> str:
+        in_s = "-" if r.in_stream is None else r.in_stream
+        out_s = "-" if r.out_stream is None else r.out_stream
+        return (f"  role {r.role_id}: mask=0x{r.tile_mask:X} "
+                f"program={r.tile_program.name} in={in_s} out={out_s}")
+
     def pretty_print(self) -> str:
-        """Return an assembly-style listing of this Region Program and all
-        its Tile Programs."""
+        """Return an assembly-style listing of this TileGroupTask and the
+        Tile Program of every role."""
         lines: list[str] = []
-        lines.append(f"region_program {self.name} {{")
+        lines.append(f"tile_group_task {self.name} {{")
         if self.streams:
             lines.append("  // stream descriptors")
             for s in self.streams:
                 lines.append(self._fmt_stream(s))
             lines.append("")
-        lines.append("  // region instructions")
-        for ins in self.insts:
-            lines.append(f"  {self._fmt_inst(ins)}")
-        lines.append("}")
-        # tile programs
-        for stage_id, tp in sorted(self.tile_programs.items()):
+        if self.role_bindings:
+            lines.append("  // role bindings")
+            for rid in sorted(self.role_bindings):
+                lines.append(self._fmt_role(self.role_bindings[rid]))
             lines.append("")
-            lines.append(f"// --- tile program for stage {stage_id} ---")
-            lines.append(tp.pretty_print())
+        lines.append("  // group actions")
+        for a in self.actions:
+            lines.append(f"  {self._fmt_action(a)}")
+        lines.append("}")
+        for rid in sorted(self.role_bindings):
+            lines.append("")
+            lines.append(f"// --- tile program for role {rid} ---")
+            lines.append(self.role_bindings[rid].tile_program.pretty_print())
         return "\n".join(lines)
 
 
@@ -851,7 +859,7 @@ def make_stream_pipeline_tile_program(in_q: int | None,
 
 
 def make_identity_tile_program() -> TileProgram:
-    """A tile program that does nothing (for pure stage dispatch testing)."""
+    """A tile program that does nothing (for pure role dispatch testing)."""
     p = TileProgram(name="identity_tile")
     p.insts = [TileInst(TileOp.RET)]
     p.resolve_labels()
@@ -859,59 +867,59 @@ def make_identity_tile_program() -> TileProgram:
 
 
 # ===========================================================================
-# Region Program builders
+# TileGroupTask builders
 # ===========================================================================
 
 
-def make_matmul_region(block_count: int = 4) -> RegionProgram:
-    """Region that dispatches a single matmul stage across 4 tiles.
+def make_matmul_task(block_count: int = 4) -> TileGroupTask:
+    """Task that dispatches a single matmul role across 4 tiles.
 
-    Stage0 (tiles 0-3) run the matmul tile program.  No inter-tile stream;
-    the region prefetches A/B weights HBM->L2 via Group DMA, dispatches
-    the stage, then stores C L2->HBM.  This validates Global DMA + stage
+    Role 0 (tiles 0-3) runs the matmul tile program.  No inter-tile stream;
+    the task prefetches A/B weights HBM->L2 via Group DMA, dispatches the
+    role, then stores C L2->HBM.  This validates Global DMA + role dispatch
     + storeback trace coverage on the TileGroup timeline.
     """
+    del block_count
     # Per-tile A = 128*256*2, B = 256*128*2, C = 128*128*2 (BF16).
     # 4-tile M-split: A and C are per-tile (x4), B is shared (x1).
     bytes_a = 128 * 256 * 2 * 4
     bytes_b = 256 * 128 * 2
     bytes_c = 128 * 128 * 2 * 4
-    r = RegionProgram(name="matmul_region")
-    r.streams = []
-    r.tile_programs = {0: make_matmul_tile_program()}
-    r.insts = [
-        RegionInst(RegionOp.REGION_BEGIN, args=(0, ), comment="region 0"),
+    t = TileGroupTask(name="matmul_task")
+    t.streams = []
+    t.role_bindings = {0: TileRoleBinding(role_id=0, tile_mask=0x0F,
+                                          tile_program=make_matmul_tile_program())}
+    t.actions = [
         # Group DMA HBM -> L2 prefetch (both prefetches issued before wait
-        # so they overlap, per Architecture 16.3).
-        RegionInst(RegionOp.DMA_PREFETCH,
+        # so they overlap, per Architecture 16.5).
+        GroupAction(GroupActionOp.DMA_PREFETCH,
                    args=("gdma_prefetch_A", "l2_buf_A", bytes_a),
                    dst="ev_dma_A",
                    comment="Group DMA prefetch A HBM->L2"),
-        RegionInst(RegionOp.DMA_PREFETCH,
+        GroupAction(GroupActionOp.DMA_PREFETCH,
                    args=("gdma_prefetch_B", "l2_buf_B", bytes_b),
                    dst="ev_dma_B",
                    comment="Group DMA prefetch B HBM->L2"),
-        RegionInst(RegionOp.WAIT_EVENT, args=("ev_dma_A", )),
-        RegionInst(RegionOp.WAIT_EVENT, args=("ev_dma_B", )),
-        RegionInst(
-            RegionOp.DISPATCH_STAGE,
-            args=(0, 0x0F, 0),  # stage=0, tile_mask=0x0F, program=matmul
-            dst="ev_stage0"),
-        RegionInst(RegionOp.WAIT_EVENT, args=("ev_stage0", )),
+        GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_dma_A", )),
+        GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_dma_B", )),
+        GroupAction(
+            GroupActionOp.DISPATCH_ROLE,
+            args=(0, ),  # role=0
+            dst="ev_role0"),
+        GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_role0", )),
         # Group DMA L2 -> HBM storeback
-        RegionInst(RegionOp.DMA_STORE,
+        GroupAction(GroupActionOp.DMA_STORE,
                    args=("gdma_store_C", "l2_buf_C", bytes_c),
                    dst="ev_dma_C",
                    comment="Group DMA store C L2->HBM"),
-        RegionInst(RegionOp.WAIT_EVENT, args=("ev_dma_C", )),
-        RegionInst(RegionOp.REGION_END, dst="ev_region_done"),
+        GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_dma_C", )),
+        GroupAction(GroupActionOp.SIGNAL_EVENT, args=("group_task_done", )),
     ]
-    r.resolve_labels()
-    return r
+    return t
 
 
-def make_tiled_matmul_region(num_k_chunks: int = 4) -> RegionProgram:
-    """Tiled matmul region with K-dimension chunking across 4 tiles.
+def make_tiled_matmul_task(num_k_chunks: int = 4) -> TileGroupTask:
+    """Tiled matmul task with K-dimension chunking across 4 tiles.
 
     Each tile runs the tiled matmul program that splits K into
     `num_k_chunks` chunks of size tile_k and uses double-buffered MFE
@@ -919,8 +927,8 @@ def make_tiled_matmul_region(num_k_chunks: int = 4) -> RegionProgram:
     multi-level tiling + pipeline overlap that the single-chunk matmul
     workload cannot expose.
 
-    The region prefetches A/B HBM->L2 via Group DMA before dispatching
-    the single stage, then stores C L2->HBM after.
+    The task prefetches A/B HBM->L2 via Group DMA before dispatching the
+    single role, then stores C L2->HBM after.
     """
     # K = tile_k * num_k_chunks.  A = M*K*2, B = K*N*2, C = M*N*2 (BF16).
     # 4-tile M-split: A and C are per-tile (x4), B is shared (x1).
@@ -928,67 +936,60 @@ def make_tiled_matmul_region(num_k_chunks: int = 4) -> RegionProgram:
     bytes_a = 128 * total_k * 2 * 4
     bytes_b = total_k * 128 * 2
     bytes_c = 128 * 128 * 2 * 4
-    r = RegionProgram(name="tiled_matmul_region")
-    r.streams = []
-    r.tile_programs = {
-        0: make_tiled_matmul_tile_program(num_k_chunks=num_k_chunks)
+    t = TileGroupTask(name="tiled_matmul_task")
+    t.streams = []
+    t.role_bindings = {
+        0: TileRoleBinding(role_id=0, tile_mask=0x0F,
+                           tile_program=make_tiled_matmul_tile_program(num_k_chunks=num_k_chunks))
     }
-    r.insts = [
-        RegionInst(RegionOp.REGION_BEGIN,
-                   args=(5, ),
-                   comment="tiled matmul region"),
-        RegionInst(RegionOp.DMA_PREFETCH,
+    t.actions = [
+        GroupAction(GroupActionOp.DMA_PREFETCH,
                    args=("gdma_prefetch_A", "l2_buf_A", bytes_a),
                    dst="ev_dma_A",
                    comment="Group DMA prefetch A HBM->L2"),
-        RegionInst(RegionOp.DMA_PREFETCH,
+        GroupAction(GroupActionOp.DMA_PREFETCH,
                    args=("gdma_prefetch_B", "l2_buf_B", bytes_b),
                    dst="ev_dma_B",
                    comment="Group DMA prefetch B HBM->L2"),
-        RegionInst(RegionOp.WAIT_EVENT, args=("ev_dma_A", )),
-        RegionInst(RegionOp.WAIT_EVENT, args=("ev_dma_B", )),
-        RegionInst(RegionOp.DISPATCH_STAGE, args=(0, 0x0F, 0),
-                   dst="ev_stage0"),
-        RegionInst(RegionOp.WAIT_EVENT, args=("ev_stage0", )),
-        RegionInst(RegionOp.DMA_STORE,
+        GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_dma_A", )),
+        GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_dma_B", )),
+        GroupAction(GroupActionOp.DISPATCH_ROLE, args=(0, ),
+                   dst="ev_role0"),
+        GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_role0", )),
+        GroupAction(GroupActionOp.DMA_STORE,
                    args=("gdma_store_C", "l2_buf_C", bytes_c),
                    dst="ev_dma_C",
                    comment="Group DMA store C L2->HBM"),
-        RegionInst(RegionOp.WAIT_EVENT, args=("ev_dma_C", )),
-        RegionInst(RegionOp.REGION_END, dst="ev_region_done"),
+        GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_dma_C", )),
+        GroupAction(GroupActionOp.SIGNAL_EVENT, args=("group_task_done", )),
     ]
-    r.resolve_labels()
-    return r
+    return t
 
 
-def make_conv_relu_region() -> RegionProgram:
-    """Region that dispatches a fused Conv+ReLU stage across 4 tiles.
+def make_conv_relu_task() -> TileGroupTask:
+    """Task that dispatches a fused Conv+ReLU role across 4 tiles.
 
-    Stage0 (tiles 0-3) run the conv_relu tile program.  No inter-tile stream;
-    single stage validates BOA conv compute + EVU relu epilogue fusion +
-    MFE load overlap.  This exercises the BOA->EVU producer-consumer path
-    within a single tile (no Stream Queue needed — the UCE serializes them).
+    Role 0 (tiles 0-3) runs the conv_relu tile program.  No inter-tile
+    stream; single role validates BOA conv compute + EVU relu epilogue
+    fusion + MFE load overlap.  This exercises the BOA->EVU producer-
+    consumer path within a single tile (no Stream Queue needed — the UCE
+    serializes them).
     """
-    r = RegionProgram(name="conv_relu_region")
-    r.streams = []
-    r.tile_programs = {0: make_conv_relu_tile_program()}
-    r.insts = [
-        RegionInst(RegionOp.REGION_BEGIN,
-                   args=(3, ),
-                   comment="conv-relu region"),
-        RegionInst(
-            RegionOp.DISPATCH_STAGE,
-            args=(0, 0x0F, 0),  # stage=0, tile_mask=0x0F, program=conv_relu
-            dst="ev_stage0"),
-        RegionInst(RegionOp.WAIT_EVENT, args=("ev_stage0", )),
-        RegionInst(RegionOp.REGION_END, dst="ev_region_done"),
+    t = TileGroupTask(name="conv_relu_task")
+    t.streams = []
+    t.role_bindings = {0: TileRoleBinding(role_id=0, tile_mask=0x0F,
+                                          tile_program=make_conv_relu_tile_program())}
+    t.actions = [
+        GroupAction(GroupActionOp.DISPATCH_ROLE, args=(0, ),
+                   dst="ev_role0"),
+        GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_role0", )),
+        GroupAction(GroupActionOp.SIGNAL_EVENT, args=("group_task_done", )),
     ]
-    r.resolve_labels()
-    return r
+    return t
 
 
-def make_paged_attention_region() -> RegionProgram:
-    """Single-stage paged-attention region across 4 tiles.
+def make_paged_attention_task() -> TileGroupTask:
+    """Single-role paged-attention task across 4 tiles.
 
     Each tile runs the full paged-attention pipeline (Architecture 20.2):
     MFE page-walk gathers K/V pages, BOA does QK and PV, EVU does
@@ -997,35 +998,30 @@ def make_paged_attention_region() -> RegionProgram:
     the MFE Page Stream + multi-step EVU + dual-BOA (QK then PV) path and
     the T_prefetch <= T_qk overlap condition (Architecture 21.3).
     """
-    r = RegionProgram(name="paged_attention_region")
-    r.streams = []
-    r.tile_programs = {0: make_paged_attention_tile_program()}
-    r.insts = [
-        RegionInst(RegionOp.REGION_BEGIN,
-                   args=(4, ),
-                   comment="paged attention region"),
-        RegionInst(
-            RegionOp.DISPATCH_STAGE,
-            args=(0, 0x0F, 0),  # stage=0, all 4 tiles, program=0
-            dst="ev_stage0"),
-        RegionInst(RegionOp.WAIT_EVENT, args=("ev_stage0", )),
-        RegionInst(RegionOp.REGION_END, dst="ev_region_done"),
+    t = TileGroupTask(name="paged_attention_task")
+    t.streams = []
+    t.role_bindings = {0: TileRoleBinding(role_id=0, tile_mask=0x0F,
+                                          tile_program=make_paged_attention_tile_program())}
+    t.actions = [
+        GroupAction(GroupActionOp.DISPATCH_ROLE, args=(0, ),
+                   dst="ev_role0"),
+        GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_role0", )),
+        GroupAction(GroupActionOp.SIGNAL_EVENT, args=("group_task_done", )),
     ]
-    r.resolve_labels()
-    return r
+    return t
 
 
-def make_attention_region(block_count: int = 4) -> RegionProgram:
-    """Two-stage paged-attention-style region with a Stream Queue.
+def make_attention_task(block_count: int = 4) -> TileGroupTask:
+    """Two-role paged-attention-style task with a Stream Queue.
 
-    Stage0 (tiles 0-1): source tiles — QK matmul, push score tiles into S0.
-    Stage1 (tiles 2-3): consumer tiles — softmax (EVU) + AV matmul, consume S0.
+    Role 0 (tiles 0-1): source tiles — QK matmul, push score tiles into S0.
+    Role 1 (tiles 2-3): consumer tiles — softmax (EVU) + AV matmul, consume S0.
 
     This exercises the Stream Queue producer-consumer pipeline, credit
     backpressure, and the BOA/EVU cross-engine overlap the specs predict
     (Architecture 21.3: T_prefetch <= T_qk enables overlap).
     """
-    r = RegionProgram(name="attention_region")
+    t = TileGroupTask(name="attention_task")
     s0 = StreamDesc(queue_id=0,
                     depth=3,
                     producer_mask=0x03,
@@ -1078,39 +1074,39 @@ def make_attention_region(block_count: int = 4) -> RegionProgram:
         ],
         producer_id=1,
     )
-    r.streams = [s0]
-    r.tile_programs = {0: qk_tile, 1: av_tile}
-    r.insts = [
-        RegionInst(RegionOp.REGION_BEGIN,
-                   args=(1, ),
-                   comment="attention region"),
-        RegionInst(RegionOp.INIT_STREAM,
+    t.streams = [s0]
+    t.role_bindings = {
+        0: TileRoleBinding(role_id=0, tile_mask=0x03, tile_program=qk_tile,
+                           out_stream=0),
+        1: TileRoleBinding(role_id=1, tile_mask=0x0C, tile_program=av_tile,
+                           in_stream=0),
+    }
+    t.actions = [
+        GroupAction(GroupActionOp.INIT_STREAM,
                    args=(0, 3, 0x03, 0x0C),
                    comment="init S0"),
-        RegionInst(RegionOp.DISPATCH_STAGE,
-                   args=(0, 0x03, 0, 0),
-                   dst="ev_stage0"),
-        RegionInst(RegionOp.DISPATCH_STAGE,
-                   args=(1, 0x0C, 1, 0),
-                   dst="ev_stage1"),
-        RegionInst(RegionOp.WAIT_EVENT, args=("ev_stage1", )),
-        RegionInst(RegionOp.REGION_END, dst="ev_region_done"),
+        GroupAction(GroupActionOp.DISPATCH_ROLE, args=(0, ),
+                   dst="ev_role0"),
+        GroupAction(GroupActionOp.DISPATCH_ROLE, args=(1, ),
+                   dst="ev_role1"),
+        GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_role1", )),
+        GroupAction(GroupActionOp.SIGNAL_EVENT, args=("group_task_done", )),
     ]
-    r.resolve_labels()
-    return r
+    return t
 
 
-def make_moe_region(num_experts: int = 8,
-                    tokens_per_batch: int = 1024,
-                    block_count: int = 4) -> RegionProgram:
-    """MoE region: token-grouped expert matmul.
+def make_moe_task(num_experts: int = 8,
+                  tokens_per_batch: int = 1024,
+                  block_count: int = 4) -> TileGroupTask:
+    """MoE task: token-grouped expert matmul.
 
-    Stage0 (tiles 0-1): source — MFE segment-stream groups tokens per expert.
-    Stage1 (tiles 2-3): consumer — BOA runs expert MLP matmul per group.
+    Role 0 (tiles 0-1): source — MFE segment-stream groups tokens per expert.
+    Role 1 (tiles 2-3): consumer — BOA runs expert MLP matmul per group.
 
     Models the MoE imbalance effect (BOA design 6.2: U_boa = 1/imbalance).
     """
-    r = RegionProgram(name="moe_region")
+    del tokens_per_batch
+    t = TileGroupTask(name="moe_task")
     s0 = StreamDesc(queue_id=0,
                     depth=3,
                     producer_mask=0x03,
@@ -1154,19 +1150,20 @@ def make_moe_region(num_experts: int = 8,
         ],
         producer_id=1,
     )
-    r.streams = [s0]
-    r.tile_programs = {0: group_tile, 1: expert_tile}
-    r.insts = [
-        RegionInst(RegionOp.REGION_BEGIN, args=(2, ), comment="moe region"),
-        RegionInst(RegionOp.INIT_STREAM, args=(0, 3, 0x03, 0x0C)),
-        RegionInst(RegionOp.DISPATCH_STAGE,
-                   args=(0, 0x03, 0, 0),
-                   dst="ev_stage0"),
-        RegionInst(RegionOp.DISPATCH_STAGE,
-                   args=(1, 0x0C, 1, 0),
-                   dst="ev_stage1"),
-        RegionInst(RegionOp.WAIT_EVENT, args=("ev_stage1", )),
-        RegionInst(RegionOp.REGION_END, dst="ev_region_done"),
+    t.streams = [s0]
+    t.role_bindings = {
+        0: TileRoleBinding(role_id=0, tile_mask=0x03, tile_program=group_tile,
+                           out_stream=0),
+        1: TileRoleBinding(role_id=1, tile_mask=0x0C, tile_program=expert_tile,
+                           in_stream=0),
+    }
+    t.actions = [
+        GroupAction(GroupActionOp.INIT_STREAM, args=(0, 3, 0x03, 0x0C)),
+        GroupAction(GroupActionOp.DISPATCH_ROLE, args=(0, ),
+                   dst="ev_role0"),
+        GroupAction(GroupActionOp.DISPATCH_ROLE, args=(1, ),
+                   dst="ev_role1"),
+        GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_role1", )),
+        GroupAction(GroupActionOp.SIGNAL_EVENT, args=("group_task_done", )),
     ]
-    r.resolve_labels()
-    return r
+    return t

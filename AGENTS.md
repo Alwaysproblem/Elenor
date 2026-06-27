@@ -6,7 +6,7 @@
 
 ELENOR is a **documentation-only architecture repository** for a future AI accelerator targeting inference and light training. There is **no source code, no build system, no test suite, no CI** — the deliverable is a set of ~28 interlocking Markdown design specs plus a PDF export script.
 
-The accelerator's central thesis is **`Compute != Control != Data Movement`**: hardware consumes low-level objects (command buffers, descriptors, Region Programs, Tile Programs), never high-level graphs. Four engines cover the workload space:
+The accelerator's central thesis is **`Compute != Control != Data Movement`**: hardware consumes low-level objects (command buffers, descriptors, TileGroupTasks, Tile Programs), never high-level graphs. Four engines cover the workload space:
 
 | Engine  | Full name                       | Responsibility                 | Target workloads                                                          |
 | ------- | ------------------------------- | ------------------------------ | ------------------------------------------------------------------------- |
@@ -42,40 +42,40 @@ Host / System SoC
 - **OPA** (Outer-product Primitive Array) is the BOA's smallest dense-compute primitive — _not_ a runtime-schedulable engine. Tile UCE launches a BOA descriptor; the BOA sequencer lowers it into OPA micro-loops.
 - **Tile UCE** (Unified Control Engine) and **USE** are two functional components that may share one tile-local RISC-V / micro-controller. UCE owns program control, engine launch, event wait, stream token, descriptor patch; USE owns state register/cache, scan, recurrence, checkpoint/restore.
 
-### Control-flow hierarchy: `Graph → Region → Tile → Engine`
+### Control-flow hierarchy: `Graph → Group Task → Tile → Engine`
 
 ```text
-Graph Schedule PC / Region Iterator   (Device Runtime)
-   └─ Region PC                       (Region Sequencer, per Tile Group)
-       └─ Tile PC / Tile UCE          (per Compute Tile)
+Graph Schedule PC / Group Task Iterator   (Device Runtime)
+   └─ Tile Group Sequencer action index   (Tile Group Sequencer, per Tile Group)
+       └─ Tile PC / Tile UCE             (per Compute Tile)
            └─ BOA / EVU / MFE / USE tasks
                └─ BOA / EVU micro-sequencer + datapath
 ```
 
-| Control layer | Controller          | Managed objects                                             |
-| ------------- | ------------------- | ----------------------------------------------------------- |
-| Graph         | Device Runtime      | graph schedule, region dependency, context, queue           |
-| Region        | Region Sequencer    | Device Pipeline, Group DMA, stage dispatch, group barrier   |
-| Kernel        | Tile UCE            | Tile Program, stream token, descriptor patch, engine launch |
-| State         | USE                 | state update, scan, recurrence, checkpoint/restore          |
-| Compute       | BOA / EVU Sequencer | micro loop, operand fetch, local reduce, vector mask        |
+| Control layer | Controller           | Managed objects                                             |
+| ------------- | -------------------- | ----------------------------------------------------------- |
+| Graph         | Device Runtime       | graph schedule, group task dependency, context, queue       |
+| Group         | Tile Group Sequencer | Group Task, Group DMA, role dispatch, group barrier         |
+| Kernel        | Tile UCE             | Tile Program, stream token, descriptor patch, engine launch |
+| State         | USE                  | state update, scan, recurrence, checkpoint/restore          |
+| Compute       | BOA / EVU Sequencer  | micro loop, operand fetch, local reduce, vector mask        |
 
 ### Data-flow hierarchy
 
-`HBM/DDR/LPDDR → L2 (Group SRAM via Group DMA / MFE) → L1 (Tile DMA / MFE tile port) → Engine (BOA/EVU/USE)`, with `Stage → Stage` flow through Stream Queues and `Tile → Tile` flow through Collective/Broadcast.
+`HBM/DDR/LPDDR → L2 (Group SRAM via Group DMA / MFE) → L1 (Tile DMA / MFE tile port) → Engine (BOA/EVU/USE)`, with `Role → Role` flow through Stream Queues and `Tile → Tile` flow through Collective/Broadcast.
 
 ### Execution objects & program residency
 
-A compiled package (`model.pkg`) is **not** a graph or an op — it is `graph_schedule.bin` + `region_programs/` + `tile_programs/` + `descriptors/` + `weights/` + `relocation_table`. Core objects:
+A compiled package (`model.pkg`) is **not** a graph or an op — it is `graph_schedule.bin` + `group_tasks/` + `tile_programs/` + `descriptors/` + `weights/` + `relocation_table`. Core objects:
 
 | Object          | Granularity        | Role                                                     |
 | --------------- | ------------------ | -------------------------------------------------------- |
-| Graph Schedule  | whole graph        | region dependency, context, queue, memory lifetime       |
-| Pipeline Region | subgraph           | device-side pipeline                                     |
-| Region Program  | Tile Group         | region PC, stage dispatch, HBM→L2 DMA                    |
+| Graph Schedule  | whole graph        | group task dependency, context, queue, memory lifetime   |
+| TileGroupTask   | Tile Group         | group task, role dispatch, HBM→L2 DMA                    |
+| TileRoleBinding | role               | role_id, tile_mask, Tile Program, in/out stream          |
 | Tile Program    | Tile               | Tile UCE executes: L2→L1 DMA, BOA/EVU/MFE/USE            |
 | Descriptor      | dynamic params     | shape, stride, address, tiling, stream, state, patch     |
-| Stream Queue    | inter-stage        | producer-consumer, credit, backpressure, EOS/error token |
+| Stream Queue    | inter-role         | producer-consumer, credit, backpressure, EOS/error token |
 | Slot Frame      | Tile L1            | L1 memory binding for tile program + descriptor          |
 | Program Table   | residency registry | program_id → section metadata / local handle             |
 | Event Table     | runtime/group/tile | completion, dependency, fault, timeout                   |
@@ -92,7 +92,7 @@ One Tile Program template runs on many tiles; per-tile data is distinguished by 
 | `elenor.evu`     | elementwise, softmax, norm, mask/tail, gather/scatter subset | EVU descriptor template |
 | `elenor.mfe`     | Page/Segment Stream, layout/reorder                          | MFE stream descriptor   |
 | `elenor.use`     | state, scan, recurrence, checkpoint/restore                  | USE state descriptor    |
-| `elenor.runtime` | command, event, barrier, branch_shape, launch_region         | command template        |
+| `elenor.runtime` | command, event, barrier, branch_shape, launch_group_task     | command template        |
 | `elenor.package` | section, relocation, manifest, kernel binding                | executable package      |
 
 Dialects must not encroach on each other (BOA dialect never expresses event-wait; runtime dialect never expresses matmul tile layout).
@@ -138,14 +138,14 @@ Every module lives at `design/elenor_<module>/ELENOR_<Module>_Design.md`. The 27
 
 **On-chip organization & data flow**
 
-- `elenor_tile_group` — Tile Group: region task FSM, shared SRAM, group DMA
+- `elenor_tile_group` — Tile Group: group task FSM, shared SRAM, group DMA
 - `elenor_compute_tile` — Compute Tile: kernel execution domain, L1 SRAM, engine arbitration
 - `elenor_tile_uce` — Tile UCE: Tile Program PC, engine launch, descriptor patch
 - `elenor_slot_frame` — L1 SRAM layout, frame bind, descriptor patch FSM
 - `elenor_memory_noc` — NoC router pipeline, DMA descriptor, SRAM bank arbiter
 - `elenor_global_dma` — 1D/2D/strided copy, descriptor lifecycle, burst splitter
 - `elenor_stream_queue` — producer-consumer queue, credit/backpressure, EOS propagation
-- `elenor_region_sequencer` — Region PC, Device Pipeline stage dispatch, wait FSM
+- `elenor_tile_group_sequencer` — Tile Group Sequencer action index, role dispatch, wait FSM
 
 **Software stack & system**
 
@@ -195,7 +195,7 @@ The design docs follow a **strict, shared 9-section template**. Every module spe
 
 ### Design doc conventions
 
-- **Language:** Primary content is Chinese; technical terms (BOA, EVU, descriptor, Region Program, FSM, etc.) stay in English. Keep this mixed style.
+- **Language:** Primary content is Chinese; technical terms (BOA, EVU, descriptor, TileGroupTask, FSM, etc.) stay in English. Keep this mixed style.
 - **Unfrozen values:** Any not-yet-decided number/encoding is explicitly marked with one of `由后续规格冻结` / `由 SRAM profile 冻结` / `由 PPA exploration 冻结` ("to be frozen by later spec / SRAM profile / PPA exploration"). **Never fabricate binary encodings or physical macros** in a spec — defer them with this marker.
 - **ABI versioning:** All interface drafts are tagged `v0` (e.g. `DMA descriptor v0`, `ABI v0 command layout`, `fault record v0`, `binary ABI v0`). Treat `v0` as draft, not frozen.
 - **Descriptor templates:** Use C-style `typedef struct { … } elenor_*_template_v0_example_t;` with a `patch_mask` field declaring which fields runtime/Tile UCE/MFE/USE may patch. Undeclared fields must not be modified at runtime.
@@ -275,7 +275,7 @@ conda run -n elenor-validator python -m pytest pipeline_validator/tests/ -v
 
 - **26 tests** across 4 test classes:
   - `TestStreamQueue` (9 tests) — credit invariant, backpressure, EOS, reset.
-  - `TestIR` (5 tests) — Tile/Region program builders produce valid ISA.
+  - `TestIR` (5 tests) — Tile/TileGroupTask builders produce valid IR.
   - `TestSimulation` (9 tests) — end-to-end: all 6 workloads complete,
     credit invariant holds, report is renderable.
   - `TestTracer` (3 tests) — Perfetto/Chrome trace JSON + HTML output.
@@ -293,7 +293,7 @@ The document review in `review/ELENOR_Document_Review.md` identified:
 
 ## Important Files
 
-- **`design/ELENOR_Architecture_Design_v1.md`** — the master spec (3197 lines). Start here. Contains the chip overview, the four engines (§8–11), memory hierarchy (§12), Slot Frame + descriptor patch contract (§13), NoC/Collective (§14), execution objects & residency (§15), Region/Tile Program & Stream Queue contract (§16), Tile-SPMD (§17), Runtime/Command ABI/Event model (§18), compiler stack (§19), workload mapping (§20), performance/PMU (§21), driver/firmware (§22), verification (§23), configs (§24), tradeoffs (§25), risks (§26), implementation roadmap (§27), review focus (§28).
+- **`design/ELENOR_Architecture_Design_v1.md`** — the master spec (3197 lines). Start here. Contains the chip overview, the four engines (§8–11), memory hierarchy (§12), Slot Frame + descriptor patch contract (§13), NoC/Collective (§14), execution objects & residency (§15), TileGroupTask、Tile Program 和 Stream Queue Contract (§16), Tile-SPMD (§17), Runtime/Command ABI/Event model (§18), compiler stack (§19), workload mapping (§20), performance/PMU (§21), driver/firmware (§22), verification (§23), configs (§24), tradeoffs (§25), risks (§26), implementation roadmap (§27), review focus (§28).
 - **`README.md`** — entry point; defines the repo's positioning, engine table, target configs, directory structure, doc-navigation table, and a **suggested reading order** for newcomers.
 - **`review/ELENOR_Document_Review.md`** — a systematic review with 8 P0 blockers and 10 cross-document consistency issues. **Current highest-priority work is a contract-freeze pass, not new features** — see this file's §3 (P0) and §4 (consistency).
 - **`review/deep-research-report.md`** — an external feasibility/competitive technical review.

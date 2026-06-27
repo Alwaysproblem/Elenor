@@ -1,28 +1,28 @@
 # ELENOR Runtime Pipeline Validator
 
 A **cycle-accurate functional simulator** of one ELENOR Tile Group
-(1 Region Sequencer + 4 Compute Tiles), built to validate the runtime
+(1 Tile Group Sequencer + 4 Compute Tiles), built to validate the runtime
 pipeline efficiency described in the `design/` architecture specs.
 
-It models the full `Graph → Region → Tile → Engine` control flow, the
-Stream Queue producer-consumer pipeline, and the BOA / EVU / MFE / USE
-engine partition, then reports a PMU fingerprint with pass/fail checks
-against the architecture's predicted bottlenecks.
+It models the full `Graph → Group Task → Tile-SPMD Tile Program roles → Engine`
+control flow, the Stream Queue producer-consumer pipeline, and the
+BOA / EVU / MFE / USE engine partition, then reports a PMU fingerprint
+with pass/fail checks against the architecture's predicted bottlenecks.
 
 ## Scope
 
-| Aspect           | Modelled                                                   | Source spec                                 |
-| ---------------- | ---------------------------------------------------------- | ------------------------------------------- |
-| Tile Group       | 1 group, 4 tiles                                           | `design/elenor_tile_group/`                 |
-| Region Sequencer | Region Program ISA, stage dispatch, DMA prefetch, barriers | `design/elenor_region_sequencer/`, arch §16 |
-| Compute Tile     | UCE + BOA/EVU/MFE/USE + L1 SRAM bandwidth                  | `design/elenor_compute_tile/`               |
-| Tile UCE         | Tile Program ISA: launch/wait/stream/branch                | arch §16.4, §17.6                           |
-| Stream Queue     | credit invariant, backpressure, EOS, reset/drain, PMU      | `design/elenor_stream_queue/`               |
-| BOA              | 4×OPA (16×16) MAC throughput, bandwidth ceiling            | `design/elenor_boa/`                        |
-| EVU              | 32-lane vector FMA throughput                              | `design/elenor_evu/`                        |
-| MFE              | bandwidth-bound stream shaping                             | `design/elenor_mfe/`                        |
-| USE              | slower-clock state engine                                  | `design/elenor_use/`                        |
-| PMU              | unique stall attribution (one primary owner per cycle)     | arch §21.6                                  |
+| Aspect               | Modelled                                                  | Source spec                                     |
+| -------------------- | --------------------------------------------------------- | ----------------------------------------------- |
+| Tile Group           | 1 group, 4 tiles                                          | `design/elenor_tile_group/`                     |
+| Tile Group Sequencer | Group Task actions, role dispatch, DMA prefetch, barriers | `design/elenor_tile_group_sequencer/`, arch §16 |
+| Compute Tile         | UCE + BOA/EVU/MFE/USE + L1 SRAM bandwidth                 | `design/elenor_compute_tile/`                   |
+| Tile UCE             | Tile Program ISA: launch/wait/stream/branch               | arch §16.4, §17.6                               |
+| Stream Queue         | credit invariant, backpressure, EOS, reset/drain, PMU     | `design/elenor_stream_queue/`                   |
+| BOA                  | 4×OPA (16×16) MAC throughput, bandwidth ceiling           | `design/elenor_boa/`                            |
+| EVU                  | 32-lane vector FMA throughput                             | `design/elenor_evu/`                            |
+| MFE                  | bandwidth-bound stream shaping                            | `design/elenor_mfe/`                            |
+| USE                  | slower-clock state engine                                 | `design/elenor_use/`                            |
+| PMU                  | unique stall attribution (one primary owner per cycle)    | arch §21.6                                      |
 
 Hardware defaults follow the **Balanced-small** profile (arch §12.3):
 64 tiles / 1 MB L1 per tile / 8 MB Group SRAM. The validator runs a
@@ -58,7 +58,7 @@ python -m pipeline_validator --all --json
 
 The validator can emit **Perfetto / Chrome `chrome://tracing`-compatible**
 trace files for visual Gantt-chart inspection of every engine job, stream
-queue occupancy, and region/tile lifecycle event.
+queue occupancy, and task/tile lifecycle event.
 
 ```bash
 # write a Perfetto-loadable trace.json (load at perfetto.dev or chrome://tracing)
@@ -76,14 +76,14 @@ python -m pipeline_validator --all --trace-json all.json --trace-html all.html
 - **Slices** (Gantt bars): every BOA/EVU/MFE/USE engine job with op name,
   ops/bytes, event_id, tile_id. Each tile gets its own track
   (Tile0/Tile1/Tile2/Tile3) with sub-tracks per engine (BOA/EVU/MFE/USE).
-  TileGroup runtime windows: `TileGroup/Region` (region begin→end),
-  `TileGroup/Stage` (dispatch→stage complete), `TileGroup/Global DMA`
+  TileGroup runtime windows: `TileGroup/Task` (task begin→end),
+  `TileGroup/TileRole` (role dispatch→complete), `TileGroup/Global DMA`
   (HBM↔L2 prefetch/store), `TileGroup/Collective` (reduce/broadcast).
   Tile L2↔L1 traffic is MFE load/store on each tile track.
 - **Counters** (line graphs): Stream Queue occupancy and credit_available
   sampled per cycle — only for workloads with streams (attention, moe).
-- **Instant markers**: `tile_done`, `stage_dispatch`, `stage_complete`,
-  `region_done`, `dma_complete`, `collective_complete`.
+- **Instant markers**: `tile_done`, `tile_role_dispatch`, `tile_role_complete`,
+  `group_task_done`, `dma_complete`, `collective_complete`.
 
 To view:
 
@@ -100,7 +100,7 @@ python -m pytest pipeline_validator/tests/ -v
 
 ## Workloads
 
-| Workload          | Stages                                  | Validates                                                                      |
+| Workload          | Roles                                   | Validates                                                                      |
 | ----------------- | --------------------------------------- | ------------------------------------------------------------------------------ |
 | `matmul`          | single (4 tiles)                        | BOA peak compute + MFE/DMA load overlap                                        |
 | `tiled_matmul`    | single (4 tiles)                        | K-dimension tiling + double-buffer MFE/BOA pipeline overlap                    |
@@ -119,13 +119,13 @@ these expectations and prints `PASS` / `FAIL`.
 pipeline_validator/
 ├── __init__.py          # public API
 ├── config.py            # HardwareConfig / WorkloadConfig / SimConfig
-├── ir.py                # Tile/Region Program IR + builders (mirrors arch §16-17)
+├── ir.py                # Tile/TileGroupTask IR + builders (mirrors arch §16-17)
 ├── stream_queue.py      # StreamQueue (credit, backpressure, EOS, PMU)
 ├── engines.py           # BOA/EVU/MFE/USE timing models
 ├── pmu.py               # PMU counters + unique stall attribution
 ├── tile.py              # ComputeTile + TileUCE controller
-├── region.py            # RegionSequencer controller
-├── tile_group.py        # TileGroup (region seq + 4 tiles + streams)
+├── tile_group_sequencer.py  # TileGroupSequencer controller
+├── tile_group.py        # TileGroup (sequencer + 4 tiles + streams)
 ├── simulator.py         # cycle-accurate driver
 ├── workloads.py         # Matmul / Attention / MoE workloads
 ├── report.py            # PMU fingerprint + pass/fail checks

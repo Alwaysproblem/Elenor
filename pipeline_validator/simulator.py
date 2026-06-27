@@ -1,8 +1,8 @@
 """Cycle-accurate ELENOR pipeline simulator.
 
-Drives one Tile Group (1 Region Sequencer + 4 Compute Tiles) cycle by cycle
-until the Region Program completes or the cycle cap is hit.  Collects PMU
-fingerprints and validates credit invariants on every cycle.
+Drives one Tile Group (1 Tile Group Sequencer + 4 Compute Tiles) cycle by
+cycle until the TileGroupTask completes or the cycle cap is hit.  Collects
+PMU fingerprints and validates credit invariants on every cycle.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .config import HardwareConfig, SimConfig
-from .ir import RegionProgram
+from .ir import TileGroupTask
 from .pmu import PMUCounter
 from .tile_group import TileGroup
 from .trace import Tracer
@@ -48,8 +48,8 @@ class Simulator:
         self.cycle = 0
         self._trace: list = []
 
-    def run(self, program: RegionProgram) -> SimResult:
-        self.group.load_region(program)
+    def run(self, task: TileGroupTask) -> SimResult:
+        self.group.load_task(task)
         self.cycle = 0
         self._trace.clear()
         completed = False
@@ -70,7 +70,7 @@ class Simulator:
 
             if done:
                 completed = True
-                reason = "region complete"
+                reason = "group task complete"
                 break
             self.cycle += 1
         else:

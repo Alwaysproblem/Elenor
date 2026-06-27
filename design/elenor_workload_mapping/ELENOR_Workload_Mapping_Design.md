@@ -2,7 +2,7 @@
 
 ## 1. 定位、目标和 First Silicon cutline
 
-Workload Mapping 文档定义 Dense Transformer、Paged Attention、MoE、SSM/Mamba/RWKV、Embedding/GNN 和多模型并发如何映射到 ELENOR 的 BOA、EVU、MFE、USE、Tile UCE、Region Sequencer、Device Runtime、Stream Queue 和 Slot Frame。它面向 compiler pass、runtime package、kernel library、PMU model 和 verification trace。
+Workload Mapping 文档定义 Dense Transformer、Paged Attention、MoE、SSM/Mamba/RWKV、Embedding/GNN 和多模型并发如何映射到 ELENOR 的 BOA、EVU、MFE、USE、Tile UCE、Tile Group Sequencer、Device Runtime、Stream Queue 和 Slot Frame。它面向 compiler pass、runtime package、kernel library、PMU model 和 verification trace。
 
 核心原则：
 
@@ -10,7 +10,7 @@ Workload Mapping 文档定义 Dense Transformer、Paged Attention、MoE、SSM/Ma
 - Irregular compute 归 EVU。
 - 数据相关动态内存访问归 MFE。
 - Stateful compute 归 USE。
-- Program control 归 Runtime / Region Sequencer / Tile UCE。
+- Program control 归 Runtime / Tile Group Sequencer / Tile UCE。
 - 硬件执行 command、descriptor、program，不执行高层 graph。
 
 First Silicon V1 切线：
@@ -56,7 +56,7 @@ Workload mapping 负责：
 | token grouping/segment stream | MFE + EVU + optional USE               | MFE 管数据流，USE 可辅助 state/counter |
 | recurrence/state update       | USE                                    | state slot、checkpoint/restore         |
 | dynamic branch                | Runtime / Tile UCE                     | command path 和 tile-local branch      |
-| stage overlap                 | Region Sequencer + Stream Queue        | credit/backpressure/EOS/error          |
+| role overlap                  | Tile Group Sequencer + Stream Queue    | credit/backpressure/EOS/error          |
 | descriptor patch              | Compiler/Runtime/Tile UCE/MFE/USE 分层 | owner 不得重叠                         |
 
 ## 3. 微架构和状态机
@@ -64,14 +64,14 @@ Workload mapping 负责：
 ### 3.1 通用 pipeline pattern
 
 ```text
-Region Program:
+TileGroupTask:
   init stream queues
   prefetch block metadata/data
-  dispatch tile stage 0
-  dispatch tile stage 1
+  dispatch role 0
+  dispatch role 1
   overlap DMA/MFE with BOA/EVU/USE
   propagate EOS/error
-  signal region done
+  signal group task done
 
 Tile Program:
   pop stream token
@@ -95,7 +95,7 @@ ProducerAcquireCredit
   -> ReleaseCredit
 ```
 
-EOS/error token 必须沿 workload pipeline 传播。Paged Attention、MoE 和 GNN 都依赖 stream queue 的 credit/backpressure 来避免 stage 间无限 buffering。
+EOS/error token 必须沿 workload pipeline 传播。Paged Attention、MoE 和 GNN 都依赖 stream queue 的 credit/backpressure 来避免 role 间无限 buffering。
 
 ### 3.3 Workload-specific 状态机
 
@@ -241,7 +241,7 @@ Dialect 使用：
 - `elenor.evu`：softmax、norm、activation、mask/tail、top-k 子步骤、combine。
 - `elenor.mfe`：Page Stream、Segment Stream、embedding gather、layout/reorder。
 - `elenor.use`：scan、recurrence、state checkpoint、routing counter assist。
-- `elenor.runtime`：shape branch、launch_region、event、barrier、reset/fault path。
+- `elenor.runtime`：shape branch、launch_group_task、event、barrier、reset/fault path。
 
 Clean MLIR-like workload 示例：
 
@@ -434,7 +434,7 @@ PMU primary owner 必须唯一，避免同一 stall cycle 多头计数。
 
 ### 7.3 Firmware/RTL
 
-- Region Sequencer 负责 pipeline stage 和 stream queue 初始化。
+- Tile Group Sequencer 负责 pipeline role 和 stream queue 初始化。
 - Tile UCE 负责 tile program control、L2->L1 DMA、engine launch/wait、descriptor patch。
 - MFE Page/Segment Stream 要定义 EOS/error token、timeout、invalid page/segment 行为。
 - USE checkpoint/restore 在 fault/reset path 下必须 deterministic。

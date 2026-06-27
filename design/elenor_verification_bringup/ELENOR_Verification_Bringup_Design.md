@@ -2,7 +2,7 @@
 
 ## 1. 定位、目标和 First Silicon cutline
 
-ELENOR verification/bring-up 的定位是把 Architecture V1 的职责边界、First Silicon V1 cutline、binary ABI、descriptor contract、Tile Slot Frame、Stream Queue、PMU 归因和 workload trace 转化为可执行的验证计划。硬件执行 command、descriptor、Region Program 和 Tile Program；验证环境也必须围绕这些对象构造，不把高层 graph 直接送入硬件 testbench。
+ELENOR verification/bring-up 的定位是把 Architecture V1 的职责边界、First Silicon V1 cutline、binary ABI、descriptor contract、Tile Slot Frame、Stream Queue、PMU 归因和 workload trace 转化为可执行的验证计划。硬件执行 command、descriptor、TileGroupTask 和 Tile Program；验证环境也必须围绕这些对象构造，不把高层 graph 直接送入硬件 testbench。
 
 核心目标：
 
@@ -117,7 +117,7 @@ SPEC_LOCK
 
 command layout 必须验证以下字段：ABI version、command size、context id、queue id、descriptor IOVA、descriptor bytes、descriptor checksum/validation mode、wait/signal event、timeout cycles、fault record slot、privilege/isolation flags。
 
-事件模型必须覆盖：engine completion、DMA completion、stage synchronization、tile done、group done、graph done、fault、timeout、reset。每个 event record 必须能关联 producer、sequence、error code 和 timestamp。
+事件模型必须覆盖：engine completion、DMA completion、role synchronization、tile done、group done、graph done、fault、timeout、reset。每个 event record 必须能关联 producer、sequence、error code 和 timestamp。
 
 ### 4.2 descriptor 验证矩阵
 
@@ -157,7 +157,7 @@ unknown_or_unclassified
 | USE active/state hit/miss/checkpoint      | engine/tile       | recurrence、reset/fault restore                |
 | DMA bytes/stall/outstanding               | tile/group/global | DMA copy、paged attention prefetch             |
 | SRAM bank conflict                        | tile/group        | bank-aware layout、EVU replay                  |
-| Stream occupancy/credit empty/full        | tile/group        | stage pipeline、EOS/error                      |
+| Stream occupancy/credit empty/full        | tile/group        | role pipeline、EOS/error                       |
 | Event wait cycles                         | tile/group/global | barrier、timeout、dependency                   |
 | NoC congestion by VC                      | group/global      | command/event isolation、DMA/collective stress |
 | command queue occupancy/context count     | global            | multi-context QoS                              |
@@ -181,7 +181,7 @@ unknown_or_unclassified
 
 ### 5.2 控制流验证
 
-- Region Sequencer 推进 Pipeline Region 和 stage dispatch。
+- Tile Group Sequencer 推进 Group Task 和 role dispatch。
 - Tile UCE 推进 Tile Program、launch/wait/branch、stream token、descriptor patch、L2/L1 DMA、engine orchestration。
 - USE 只验证 state compute/state lifecycle，不把 Tile Program 主控制流归给 USE。
 - MFE 只验证 page/segment metadata walk、address generation、prefetch、reorder、stream fill，不把任意图遍历归给 MFE。
@@ -257,7 +257,7 @@ Phase gate 中 PMU 是硬性验收项：Phase 1 要有 BOA active/stall；Phase 
 | Runtime ABI            | command ring、event table、fault record、reset domain | submit/wait/fault/reset/read_counter 正确 |
 | RTL unit               | Verilator/VCS、constrained random、SVA                | engine/protocol 单元覆盖                  |
 | Tile integration       | command queue + SRAM + UCE/USE + engine               | tile 内 DMA/engine/event/PMU 闭环         |
-| Group integration      | stream queue、collective、broadcast、DMA overlap      | stage pipeline、EOS/error/reset 闭环      |
+| Group integration      | stream queue、collective、broadcast、DMA overlap      | role pipeline、EOS/error/reset 闭环       |
 | System integration     | driver + firmware + runtime end-to-end                | workload 从 command 到 output 闭环        |
 | Performance validation | PMU counter + benchmark + roofline                    | 瓶颈可由 counter 解释                     |
 

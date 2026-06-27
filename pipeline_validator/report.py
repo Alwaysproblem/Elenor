@@ -83,7 +83,7 @@ def _run_checks(wl: Workload, result: SimResult, engine_active: dict,
 
     # 1. completion
     checks.append({
-        "check": "region_completed",
+        "check": "task_completed",
         "expected": True,
         "actual": result.completed,
         "pass": result.completed,
@@ -143,7 +143,7 @@ def _run_checks(wl: Workload, result: SimResult, engine_active: dict,
             "pass": occ > 0,
         })
     if exp.get("producer_consumer_overlap"):
-        # overlap: both BOA (stage1) and EVU (stage1) active in same window
+        # overlap: both BOA (role1) and EVU (role1) active in same window
         overlap = (engine_active.get("BOA", 0) > 0
                    and engine_active.get("EVU", 0) > 0)
         checks.append({

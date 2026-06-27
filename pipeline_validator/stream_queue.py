@@ -8,7 +8,7 @@ and Architecture doc section 16.2:
   credit invariant: credit_available + tokens_in_fifo + tokens_popped_not_released == depth
   backpressure:     queue full  -> producer stall (stream_queue_full)
                     queue empty -> consumer stall (stream_queue_empty)
-  EOS:              per-producer EOS bitmap; all-EOS policy closes the stage.
+  EOS:              per-producer EOS bitmap; all-EOS policy closes the role.
   error:            error token carries fault record index, propagates.
   reset/drain:      credit reconciled to depth, occupancy cleared.
 
@@ -132,7 +132,7 @@ class StreamQueue:
 
     @property
     def all_eos_seen(self) -> bool:
-        """True when the EOS policy is satisfied (stage done for consumers)."""
+        """True when the EOS policy is satisfied (role done for consumers)."""
         if self.eos_policy == EOSPolicy.SINGLE_PRODUCER:
             return self._producer_eos_bitmap != 0
         if self.eos_policy == EOSPolicy.ALL_PRODUCERS:
@@ -182,9 +182,9 @@ class StreamQueue:
     def push(self, token: StreamToken, cycle: int) -> bool:
         """Push a token.  Assumes credit already acquired for valid tokens.
 
-        EOS tokens consume credit per the First Silicon recommendation
-        (Stream Queue 3.2: 'First Silicon 建议消耗 credit 以保持实现简单').
-        Error tokens bypass to fault fabric and do not consume FIFO credit.
+        EOS tokens carry no payload and do not consume FIFO credit, so they
+        are excluded from the credit invariant.  Error tokens bypass to the
+        fault fabric and do not consume FIFO credit either.
         """
         if token.is_error:
             if self._first_fault_index < 0:
@@ -192,12 +192,14 @@ class StreamQueue:
             self._faulted = True
             return True
         if token.is_eos:
-            # EOS does not consume a payload credit slot in this model
-            # (it carries no payload); credit is only consumed by VALID
-            # tokens via an explicit acquire().  This keeps the invariant
-            # credit_available + fifo + popped_unreleased == depth exact.
+            # EOS carries no payload and consumes no credit slot: mark the
+            # producer as end-of-stream, append exactly one EOS token, and
+            # return before the valid-token path.  Credit leased by an
+            # explicit acquire() must NOT be decremented for an EOS push.
             self._producer_eos_bitmap |= (1 << token.producer_id)
+            token.pushed_cycle = cycle
             self._fifo.append(token)
+            return True
         # valid token (credit already acquired by the producer)
         token.sequence_id = self._producer_seq.get(token.producer_id, 0)
         self._producer_seq[token.producer_id] = token.sequence_id + 1
