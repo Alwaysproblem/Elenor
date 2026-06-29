@@ -7,6 +7,7 @@ PMU fingerprints and validates credit invariants on every cycle.
 
 from __future__ import annotations
 
+import zlib
 from dataclasses import dataclass, field
 
 from .config import HardwareConfig, SimConfig
@@ -44,11 +45,16 @@ class Simulator:
         self.hw = hw
         self.sim = sim
         self.tracer = Tracer(hw) if enable_tracer else None
-        self.group = TileGroup(hw, self.tracer)
+        self.group = TileGroup(hw, self.tracer, fidelity=sim.fidelity)
         self.cycle = 0
         self._trace: list = []
+        # persistent program identity registry: name -> stable program_id.
+        # Survives across run() calls so warm launch works across tasks.
+        self._program_name_registry: dict[str, int] = {}
+        self._next_program_id: int = 1
 
     def run(self, task: TileGroupTask) -> SimResult:
+        self._assign_program_ids(task)
         self.group.load_task(task)
         self.cycle = 0
         self._trace.clear()
@@ -69,8 +75,13 @@ class Simulator:
                 break
 
             if done:
-                completed = True
-                reason = "group task complete"
+                if self.group.sequencer.faulted:
+                    completed = False
+                    reason = (f"faulted: "
+                              f"{self.group.sequencer.fault_reason}")
+                else:
+                    completed = True
+                    reason = "group task complete"
                 break
             self.cycle += 1
         else:
@@ -92,3 +103,37 @@ class Simulator:
         self.group.reset()
         self.cycle = 0
         self._trace.clear()
+
+    def _assign_program_ids(self, task: TileGroupTask) -> None:
+        """Assign deterministic program_id + content-derived program_hash to
+        every TileProgram in the task's role bindings.
+
+        program_id: derived from program name via a stable registry so the
+          same name maps to the same id across runs (PYTHONHASHSEED-safe).
+        program_hash: crc32 of the canonical program content (instructions +
+          descriptor templates), so a program that changes instructions or
+          descriptors gets a different hash and triggers cold re-install.
+
+        Only assigns if program_id == 0 (unassigned); existing builders that
+        set their own ids are respected.
+        """
+        for binding in task.role_bindings.values():
+            prog = binding.tile_program
+            if prog.program_id == 0:
+                if prog.name not in self._program_name_registry:
+                    self._program_name_registry[prog.name] = (
+                        self._next_program_id)
+                    self._next_program_id += 1
+                prog.program_id = self._program_name_registry[prog.name]
+            if prog.program_hash == 0:
+                # canonical content: instructions + descriptor templates,
+                # sorted by descriptor name so dict insertion order doesn't
+                # perturb the hash (warm reuse must be order-independent).
+                parts = [f"{ins.op.value}|{ins.args}|{ins.dst}"
+                         for ins in prog.insts]
+                parts += [
+                    f"{name}|{d.kind}|{d.op}|{sorted(d.params.items())}"
+                    for name in sorted(prog.descriptors)
+                    for d in [prog.descriptors[name]]]
+                prog.program_hash = zlib.crc32(
+                    "\n".join(parts).encode()) & 0xFFFFFFFF

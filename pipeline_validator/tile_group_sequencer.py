@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from .ir import GroupAction, GroupActionOp, StreamDesc, TileGroupTask
 from .pmu import PMUCounter, StallReason
+from .runtime import EventStatus
 
 if TYPE_CHECKING:
   from .tile_group import TileGroup
@@ -47,6 +48,8 @@ class TileGroupSequencer:
     # role_id -> completion event id
     self._role_events: dict[int, str] = {}
     self.done = False
+    self.faulted = False
+    self.fault_reason: str = ""
     # round-robin DMA channel allocation
     self._next_dma_channel: int = 0
 
@@ -58,6 +61,8 @@ class TileGroupSequencer:
     self._role_events.clear()
     self._next_dma_channel = 0
     self.done = False
+    self.faulted = False
+    self.fault_reason = ""
 
   # ---- per-cycle step -------------------------------------------------
 
@@ -72,6 +77,15 @@ class TileGroupSequencer:
 
     if self._pending is not None:
       if all(e in self._events_done for e in self._pending.events):
+        # runtime fidelity: check if any event errored (P0-4/P0-5)
+        if self.group.runtime_enabled:
+          for ev in self._pending.events:
+            status = self.group.event_table.wait(ev)
+            if status is not None and status is not EventStatus.DONE:
+              self.faulted = True
+              self.fault_reason = f"event {ev} status={status.name}"
+              self.done = True
+              return None
         self._pending = None
         self.pmu.add_cycle("wait_resolved", 1)
         self.pmu.add_cycle("total", 1)
@@ -111,7 +125,18 @@ class TileGroupSequencer:
       desc_id, dst_l2 = ins.args[0], ins.args[1]
       bytes_total = ins.args[2] if len(ins.args) > 2 else None
       resolved_bytes = bytes_total if bytes_total and bytes_total > 0 else 1024 * 1024
-      lat = self._dma_latency(resolved_bytes)
+      lat = self._dma_latency(resolved_bytes, l2_slot=dst_l2)
+      if lat < 0:
+        # L2 capacity fault: terminate the task with a fault rather than
+        # masking it as a successful DMA completion.  The sequencer marks
+        # itself faulted+done so Simulator.run() reports the error; it does
+        # NOT add ins.dst to _events_done (which would let waiters proceed
+        # as if the DMA succeeded).
+        self.pmu.add_event("l2_capacity_fault")
+        self.faulted = True
+        self.fault_reason = f"L2 capacity fault on prefetch {desc_id}"
+        self.done = True
+        return None
       # round-robin DMA channel allocation
       ch = self._next_dma_channel % self.cfg.num_dma_channels
       self._next_dma_channel += 1
@@ -133,7 +158,7 @@ class TileGroupSequencer:
       desc_id, src_l2 = ins.args[0], ins.args[1]
       bytes_total = ins.args[2] if len(ins.args) > 2 else None
       resolved_bytes = bytes_total if bytes_total and bytes_total > 0 else 1024 * 1024
-      lat = self._dma_latency(resolved_bytes)
+      lat = self._dma_latency(resolved_bytes, l2_slot=src_l2)
       # round-robin DMA channel allocation
       ch = self._next_dma_channel % self.cfg.num_dma_channels
       self._next_dma_channel += 1
@@ -191,16 +216,42 @@ class TileGroupSequencer:
       self.action_index += 1
     return None
 
-  def _dma_latency(self, bytes_total: int | None = None) -> int:
-    """Group DMA latency: bytes / group_dma_bandwidth."""
-    # default prefetch = 1MB block
+  def _dma_latency(self, bytes_total: int | None = None,
+                   l2_slot: str = "") -> int:
+    """Group DMA latency: bytes / group_dma_bandwidth (Global DMA 6.2).
+
+    In full_memory fidelity, also checks L2 SRAM capacity.  If the L2
+    slot cannot be allocated (capacity exhausted), returns -1 to signal
+    a capacity fault — the caller records a fault and does not schedule.
+    """
     nbytes = bytes_total if bytes_total and bytes_total > 0 else 1024 * 1024
+    # full_memory: L2 capacity gate + T_desc + T_issue + T_completion
+    if self.group.memory_enabled and l2_slot:
+      slot = self.group.l2_sram.alloc_slot(l2_slot, nbytes)
+      if slot is None:
+        # L2 capacity fault: record and return -1
+        self.group.pmu.add_cycle("l2_capacity_fault", 1)
+        return -1
+      # extended DMA latency model (Global DMA 6.2):
+      # T_dma = max(T_read, T_write) + T_desc + T_issue + T_completion
+      bw_bytes_per_cycle = self.cfg.group_dma_bandwidth_gbs * 1e9 / (
+          self.cfg.clock_mhz * 1e6)
+      t_xfer = int(max((nbytes + bw_bytes_per_cycle - 1)
+                       // bw_bytes_per_cycle, 1))
+      return (t_xfer + self.cfg.dma_desc_cycles
+              + self.cfg.dma_issue_cycles + self.cfg.dma_completion_cycles)
+    # timing_only / runtime: original latency model
     bw_bytes_per_cycle = self.cfg.group_dma_bandwidth_gbs * 1e9 / (
         self.cfg.clock_mhz * 1e6)
     return int(max((nbytes + bw_bytes_per_cycle - 1) // bw_bytes_per_cycle, 1))
 
   def notify_event(self, event_id: str) -> None:
     self._events_done.add(event_id)
+    # runtime fidelity: also signal the EventTable so error/timeline/reset
+    # status is observable (P0-4).  In timing_only this is a no-op.
+    if self.group.runtime_enabled:
+      self.group.event_table.signal(
+          event_id, EventStatus.DONE, producer_id=-1, cycle=0)
 
   def reset(self) -> None:
     self.action_index = 0
@@ -209,4 +260,6 @@ class TileGroupSequencer:
     self._role_events.clear()
     self._next_dma_channel = 0
     self.done = False
+    self.faulted = False
+    self.fault_reason = ""
     self.pmu.reset()
