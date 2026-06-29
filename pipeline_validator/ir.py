@@ -151,6 +151,13 @@ class TileProgram:
     descriptors: dict = field(default_factory=dict)  # name -> EngineDesc
     # map label -> instruction index, built lazily.
     _labels: dict = field(default_factory=dict, repr=False)
+    # program identity for residency contract (Architecture 15):
+    # program_id + version + program_hash + epoch gate.  Optional so
+    # existing builders/tests are unaffected; the Simulator populates
+    # these in runtime fidelity via a deterministic registry.
+    program_id: int = 0
+    version: int = 1
+    program_hash: int = 0  # 0 = unhashed; Simulator assigns deterministically
 
     def resolve_labels(self) -> None:
         self._labels = {}

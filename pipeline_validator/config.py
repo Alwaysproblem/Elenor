@@ -85,6 +85,26 @@ class HardwareConfig:
     mfe_launch_cycles: int = 3
     use_launch_cycles: int = 2
     dma_launch_cycles: int = 2
+    # --- Runtime / memory (V2, runtime-level simulator) -----------------
+    # All values below are unfrozen and tagged per the spec conventions:
+    #   由后续规格冻结 / 由 SRAM profile 冻结 / 由 PPA exploration 冻结
+    # Defaults follow the First Silicon V1 recommended values so a baseline
+    # simulation is reproducible.
+    hbm_capacity_bytes: int = 16 * 1024 * 1024 * 1024  # 16 GB, 由后续规格冻结
+    hbm_outstanding_limit: int = 32  # tag CAM depth, 由 PPA exploration 冻结
+    l2_bank_bandwidth_gbs: float = 12.8  # per-bank, 由 SRAM profile 冻结
+    tile_program_sram_bytes: int = 64 * 1024  # hot tile kernel, 由 SRAM profile 冻结
+    noc_vc_depth: int = 8  # 由 PPA exploration 冻结
+    noc_router_latency_cycles: int = 4  # 8-stage pipeline (NoC design 3.2)
+    dma_desc_cycles: int = 2  # T_desc (Global DMA 6.2)
+    dma_issue_cycles: int = 1  # T_issue
+    dma_completion_cycles: int = 1  # T_completion
+    host_validate_cycles: int = 50  # package validate, 由后续规格冻结
+    host_patch_cycles: int = 10  # descriptor patch
+    doorbell_latency_cycles: int = 5
+    firmware_fetch_cycles: int = 3
+    firmware_validate_cycles: int = 5
+    frame_bind_cycles: int = 8  # slot frame 3.2 FSM (8 states)
 
     def cycle_ns(self) -> float:
         """Length of one simulator cycle in nanoseconds."""
@@ -144,6 +164,7 @@ class SimConfig:
     trace_html: str | None = None  # write standalone trace.html
     report_path: str | None = None
     seed: int = 0
+    fidelity: str = "timing_only"  # "timing_only" | "runtime" | "full_memory"
 
     def with_overrides(self, **kw) -> SimConfig:
         return replace(self, **kw)

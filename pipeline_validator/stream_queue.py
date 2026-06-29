@@ -56,6 +56,7 @@ class StreamToken:
     sequence_id: int = 0
     fault_record_index: int = 0
     user_metadata: int = 0
+    generation: int = 0  # P0-4: reuse-generation counter; reset bumps it
     # simulation bookkeeping
     pushed_cycle: int = 0
     popped_cycle: int = 0
@@ -102,6 +103,7 @@ class StreamQueue:
     _first_fault_index: int = -1
     _faulted: bool = False
     _next_token_id: int = 0
+    _generation: int = 0  # P0-4: bumped on reset to reject stale tokens
     # last-cycle stall tracking for unique attribution
     _last_producer_stall_cycle: int = -1
     _last_consumer_stall_cycle: int = -1
@@ -202,6 +204,7 @@ class StreamQueue:
             return True
         # valid token (credit already acquired by the producer)
         token.sequence_id = self._producer_seq.get(token.producer_id, 0)
+        token.generation = self._generation  # P0-4: stamp queue generation
         self._producer_seq[token.producer_id] = token.sequence_id + 1
         token.pushed_cycle = cycle
         if self._credit_leased > 0:
@@ -268,6 +271,7 @@ class StreamQueue:
         self._first_fault_index = -1
         self._faulted = False
         self._producer_seq = dict.fromkeys(self.producers, 0)
+        self._generation += 1  # P0-4: bump so stale tokens are rejected
 
     def snapshot(self) -> dict:
         return {

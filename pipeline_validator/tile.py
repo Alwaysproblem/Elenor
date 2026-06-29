@@ -21,6 +21,7 @@ UCE records a WAIT_EVENT stall so PMU can attribute it.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 
 from .config import HardwareConfig
 from .engines import BOAEngine, Engine, EngineJob, EngineState, EVUEngine, MFEEngine, USEEngine
@@ -61,6 +62,9 @@ class TileUCE:
         self._tokens: dict[str, StreamToken] = {}
         # event -> StreamQueue id (for stream-token-based events)
         self._event_meta: dict[str, dict] = {}
+        # runtime fidelity: optional callback fired on engine event completion
+        # so the group-level EventTable can track sequence/status (P0-4).
+        self._event_done_callback = None
         self.done = False
 
     def load(self, program: TileProgram) -> None:
@@ -287,11 +291,11 @@ class TileUCE:
             return False
         self._event_meta[ins.dst] = {"engine": "DMA", "job": job}
         return True
-
-    # ---- event completion notification ----------------------------------
-
     def notify_event(self, event_id: str) -> None:
         self._events_done.add(event_id)
+        if self._event_done_callback is not None:
+            self._event_done_callback(event_id)
+
 
     def reset(self) -> None:
         self.pc = 0
@@ -301,6 +305,25 @@ class TileUCE:
         self._event_meta.clear()
         self.done = False
         self.pmu.reset()
+
+
+class TileTaskState(Enum):
+    """Compute Tile task accept FSM (Compute Tile design 3).
+
+    In timing_only fidelity this is bypassed (tiles go straight to RUN).
+    In runtime/full_memory fidelity the tile advances through:
+      TASK_ACCEPT -> PREPARED_TASK_CHECK -> FRAME_BIND -> PROGRAM_RUN -> DRAIN
+    Each pre-RUN state consumes cycles, modelling the runtime overhead that
+    the existing validator treats as zero.
+    """
+    IDLE = 0
+    TASK_ACCEPT = 1
+    PREPARED_TASK_CHECK = 2
+    FRAME_BIND = 3
+    PROGRAM_RUN = 4
+    DRAIN = 5
+    FAULTED = 6
+    DONE = 7
 
 
 class ComputeTile:
@@ -313,10 +336,14 @@ class ComputeTile:
     def __init__(self,
                  tile_id: int,
                  cfg: HardwareConfig,
-                 tracer: Tracer | None = None):
+                 tracer: Tracer | None = None,
+                 runtime_enabled: bool = False,
+                 memory_enabled: bool = False):
         self.tile_id = tile_id
         self.cfg = cfg
         self.tracer = tracer
+        self.runtime_enabled = runtime_enabled
+        self.memory_enabled = memory_enabled
         self.uce = TileUCE(tile_id, cfg, tracer)
         self.boa = BOAEngine(cfg, tile_id, tracer)
         self.evu = EVUEngine(cfg, tile_id, tracer)
@@ -325,6 +352,12 @@ class ComputeTile:
         self.streams: dict[int, StreamQueue] = {}
         self.pmu = PMUCounter()
         self.role_id: int | None = None
+        # TileTaskState FSM (runtime fidelity only)
+        self.task_state: TileTaskState = TileTaskState.IDLE
+        self._prepared_check_remaining: int = 0
+        self._frame_bind_remaining: int = 0
+        # L1 Slot Frame (full_memory fidelity only)
+        self.l1_frame: object | None = None  # SlotFrame, created on demand
 
     def bind_stream(self, qid: int, q: StreamQueue) -> None:
         self.streams[qid] = q
@@ -332,14 +365,30 @@ class ComputeTile:
     def get_stream(self, qid: int) -> StreamQueue:
         return self.streams[qid]
 
-    def load_program(self, program: TileProgram) -> None:
+    def load_program(self, program: TileProgram,
+                      prepare_cycles: int = 0) -> None:
         self.uce.load(program)
+        if self.runtime_enabled:
+            # Enter the task FSM: TASK_ACCEPT -> PREPARED -> FRAME_BIND -> RUN.
+            # prepare_cycles = cold/warm residency penalty (per-tile).
+            self.task_state = TileTaskState.TASK_ACCEPT
+            # PREPARED_TASK_CHECK always costs 1 cycle (the id+version+hash+
+            # epoch gate); cold miss adds prepare_cycles for install latency.
+            # warm path: 1 cycle (gate only); cold path: 1 + prepare_cycles.
+            self._prepared_check_remaining = 1 + prepare_cycles
+            self._frame_bind_remaining = self.cfg.frame_bind_cycles
 
     # ---- per-cycle step -------------------------------------------------
 
     def step(self, cycle: int) -> EngineJob | None:
         """Advance one cycle.  Returns a completed EngineJob if any engine
         finished this cycle (so the TileGroup can fire events).
+
+        In runtime fidelity, the TileTaskState FSM runs first: the tile
+        spends cycles in TASK_ACCEPT / PREPARED_TASK_CHECK / FRAME_BIND
+        before the UCE starts executing (PROGRAM_RUN).  In timing_only the
+        FSM is bypassed (task_state stays IDLE/RUN) and behavior is
+        identical to the original validator.
         """
         # tick engines first; collect completions
         completed = None
@@ -349,11 +398,50 @@ class ComputeTile:
                 completed = job
                 # notify UCE the event is done
                 self.uce.notify_event(job.event_id)
-        # tick UCE
-        self.uce.step(cycle, self)
+
+        # ---- TileTaskState FSM (runtime fidelity) ----
+        if self.runtime_enabled and self.task_state != TileTaskState.PROGRAM_RUN:
+            self._advance_task_fsm(cycle)
+            self._aggregate_pmu()
+            return completed
+
+        # tick UCE (only in PROGRAM_RUN, or always in timing_only)
+        if not self.runtime_enabled or self.task_state == TileTaskState.PROGRAM_RUN:
+            self.uce.step(cycle, self)
         # aggregate PMU snapshot (lightweight: copy counters)
         self._aggregate_pmu()
         return completed
+
+    def _advance_task_fsm(self, cycle: int) -> None:
+        """Advance the TileTaskState FSM one cycle (Compute Tile design 3)."""
+        if self.task_state == TileTaskState.TASK_ACCEPT:
+            self.pmu.add_cycle("task_accept", 1)
+            # always enter PREPARED_TASK_CHECK (remaining >= 1 = gate cycle);
+            # warm path pays 1 cycle (gate), cold pays 1 + install_cycles.
+            self.task_state = TileTaskState.PREPARED_TASK_CHECK
+        elif self.task_state == TileTaskState.PREPARED_TASK_CHECK:
+            self.pmu.add_cycle("prepared_check", 1)
+            if self._prepared_check_remaining > 1:
+                self._prepared_check_remaining -= 1
+            else:
+                # last prepared-check cycle: transition this cycle
+                self._prepared_check_remaining = 0
+                self.task_state = TileTaskState.FRAME_BIND
+        elif self.task_state == TileTaskState.FRAME_BIND:
+            self.pmu.add_cycle("frame_bind", 1)
+            if self._frame_bind_remaining > 1:
+                self._frame_bind_remaining -= 1
+            else:
+                # last frame-bind cycle: enter PROGRAM_RUN this cycle
+                self._frame_bind_remaining = 0
+                self.task_state = TileTaskState.PROGRAM_RUN
+        elif self.task_state == TileTaskState.PROGRAM_RUN:
+            pass  # handled by UCE in step()
+        elif self.task_state == TileTaskState.DRAIN:
+            self.pmu.add_cycle("drain", 1)
+            if self._outstanding_zero():
+                self.task_state = TileTaskState.DONE
+        # FAULTED/DONE/IDLE: no-op
 
     def _aggregate_pmu(self) -> None:
         for eng in (self.boa, self.evu, self.mfe, self.use):
@@ -364,7 +452,32 @@ class ComputeTile:
 
     @property
     def done(self) -> bool:
+        if self.runtime_enabled:
+            # In runtime mode, done requires the FSM to reach DONE/FAULTED
+            # *and* UCE + engines to be idle.
+            if self.task_state in (TileTaskState.TASK_ACCEPT,
+                                   TileTaskState.PREPARED_TASK_CHECK,
+                                   TileTaskState.FRAME_BIND,
+                                   TileTaskState.DRAIN):
+                return False
+            if self.task_state == TileTaskState.DONE:
+                return True
+            # PROGRAM_RUN: check UCE + engines, then transition to DRAIN
+            uce_done = self.uce.done
+            engs_idle = all(
+                eng.state in (EngineState.IDLE, EngineState.DONE)
+                for eng in (self.boa, self.evu, self.mfe, self.use))
+            if uce_done and engs_idle:
+                self.task_state = TileTaskState.DRAIN
+                return False
+            return False
         return self.uce.done and all(
+            eng.state in (EngineState.IDLE, EngineState.DONE)
+            for eng in (self.boa, self.evu, self.mfe, self.use))
+
+    def _outstanding_zero(self) -> bool:
+        """Check all engines idle (DRAIN exit condition, Compute Tile 3)."""
+        return all(
             eng.state in (EngineState.IDLE, EngineState.DONE)
             for eng in (self.boa, self.evu, self.mfe, self.use))
 
@@ -374,12 +487,15 @@ class ComputeTile:
             eng.reset()
         self.pmu.reset()
         self.role_id = None
-
+        self.task_state = TileTaskState.IDLE
+        self._prepared_check_remaining = 0
+        self._frame_bind_remaining = 0
     def snapshot(self) -> dict:
         return {
             "tile_id": self.tile_id,
             "uce_pc": self.uce.pc,
             "uce_done": self.uce.done,
+            "task_state": self.task_state.name,
             "boa_state": self.boa.state.name,
             "evu_state": self.evu.state.name,
             "mfe_state": self.mfe.state.name,
