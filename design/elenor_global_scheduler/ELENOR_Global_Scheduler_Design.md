@@ -7,7 +7,7 @@ Global Scheduler 是 ELENOR chip-level 控制面的核心，位于 Host Interfac
 Global Scheduler 的设计目标：
 
 1. **确定性调度**：同一 command sequence 在相同 event/descriptor 条件下产生相同 group task dispatch 顺序和 event 结果。
-2. **事件驱动**：command wait_event、signal_event、DMA completion、tile/group done、barrier 统一进入 Event Fabric。
+2. **事件驱动**：command wait_ref、`signal_event + signal_sequence`、DMA completion、tile/group done、barrier 统一进入 Event Fabric。
 3. **资源绑定**：把 context、queue、Tile Group mask、program reference、descriptor_iova、fault_record_slot 绑定到可审计的 group task。
 4. **First Silicon 稳定优先**：先闭合 command/event/barrier/DMA/PMU，再扩展 multi-model priority、preemption 和 PMU feedback scheduling。
 
@@ -61,8 +61,8 @@ Runtime Processor / Queue Fetcher
 | 职责                    | 说明                                                                                                                                                                |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | command dispatch        | 从多个 queue 中选择 ready command，维护 queue head 更新条件。                                                                                                       |
-| dependency check        | 检查 wait_event 是否 DONE，ERROR/TIMEOUT/RESET 是否阻断 command。                                                                                                   |
-| event allocation/update | 对 command signal_event、group task done、DMA done、barrier done 统一更新。                                                                                         |
+| dependency check        | 检查 wait_ref 中每个 `event_id + expected_sequence` 是否 DONE，ERROR/TIMEOUT/RESET 是否阻断 command。                                                               |
+| event allocation/update | 对 command `signal_event + signal_sequence`、group task done、DMA done、barrier done 统一更新。                                                                     |
 | group task launch       | 向 Tile Group Sequencer 发送 elenor_group_task_launch_desc_v0_t：task_id、group_id、role binding、descriptor pointer、group mask、stream config 和 residency hint。 |
 | DMA task launch         | 将 ELENOR_CMD_DMA 转换成 Global DMA descriptor launch，并绑定 completion event。                                                                                    |
 | barrier                 | 管理 group/tile/global barrier 参与者、timeout 和 fault propagation。                                                                                               |
@@ -129,17 +129,17 @@ Q_READY
   -> RETIRE
 ```
 
-每一级建议寄存化，避免 wait_event fan-in、resource conflict check 和 NoC ready 组合成一条长路径。
+每一级建议寄存化，避免 wait_ref fan-in、resource conflict check 和 NoC ready 组合成一条长路径。
 
-| 阶段            | 输入                                     | 输出                              | fault 条件                                                   |
-| --------------- | ---------------------------------------- | --------------------------------- | ------------------------------------------------------------ |
-| Q_READY         | queue pending/head/tail                  | selected queue                    | queue disabled、context reset。                              |
-| HEADER_ACCEPT   | command header                           | internal command record           | unsupported type、bad ABI 已由 Runtime 捕获时可直接 reject。 |
-| DEP_CHECK       | wait_event_base/count                    | ready 或 blocked                  | wait event ERROR/TIMEOUT/RESET。                             |
-| RESOURCE_CHECK  | group mask、queue policy、inflight slots | grant 或 stall                    | resource conflict、quota exceeded。                          |
-| ISSUE           | command type                             | group_task/dma/barrier/event task | downstream not ready timeout。                               |
-| WAIT_COMPLETION | completion event                         | done/error/timeout                | command timeout。                                            |
-| RETIRE          | final status                             | queue head advance、signal event  | event table write failure。                                  |
+| 阶段            | 输入                                           | 输出                              | fault 条件                                                   |
+| --------------- | ---------------------------------------------- | --------------------------------- | ------------------------------------------------------------ |
+| Q_READY         | queue pending/head/tail                        | selected queue                    | queue disabled、context reset。                              |
+| HEADER_ACCEPT   | command header                                 | internal command record           | unsupported type、bad ABI 已由 Runtime 捕获时可直接 reject。 |
+| DEP_CHECK       | wait_ref list (`event_id + expected_sequence`) | ready 或 blocked                  | wait event ERROR/TIMEOUT/RESET 或 sequence mismatch。        |
+| RESOURCE_CHECK  | group mask、queue policy、inflight slots       | grant 或 stall                    | resource conflict、quota exceeded。                          |
+| ISSUE           | command type                                   | group_task/dma/barrier/event task | downstream not ready timeout。                               |
+| WAIT_COMPLETION | completion event                               | done/error/timeout                | command timeout。                                            |
+| RETIRE          | final status                                   | queue head advance、signal event  | event table write failure。                                  |
 
 ### 3.3 Event scoreboard
 
@@ -159,14 +159,14 @@ FREE
 规则：
 
 - terminal status 不允许回到 PENDING。
-- wait on DONE 可立即放行。
-- wait on ERROR/TIMEOUT/RESET 必须阻断 command，并生成 dependent command fault 或 skipped status，具体编码由后续规格冻结。
-- signal_event 如果重复写 terminal event，必须按 duplicate signal policy 处理；policy 由后续规格冻结，但必须可观测。
+- wait on DONE 只有在 `event_id + expected_sequence` 匹配时可立即放行；sequence mismatch 必须继续等待、转 stale fault 或按 reset/drain policy 处理。
+- wait on ERROR/TIMEOUT/RESET 且 sequence 匹配时必须阻断 command，并生成 dependent command fault 或 skipped status，具体编码由后续规格冻结。
+- `signal_event + signal_sequence` 如果重复写 terminal event，必须按 duplicate signal policy 处理；policy 由后续规格冻结，但必须可观测。
 - event update 必须带 producer_id 和 sequence，方便定位 stale completion。
 
 ### 3.4 Barrier manager
 
-Barrier 对象字段：barrier_id、context_id、participant_mask、arrived_mask、generation、timeout_cycles、signal_event、fault_policy。状态：
+Barrier 对象字段：barrier_id、context_id、participant_mask、arrived_mask、generation、timeout_cycles、signal_event、signal_sequence、fault_policy。状态：
 
 ```text
 BARRIER_FREE
@@ -204,9 +204,11 @@ typedef struct {
     uint32_t command_id;
     uint64_t desc_iova;
     uint32_t desc_bytes;
-    uint32_t wait_event_base;
-    uint16_t wait_event_count;
-    uint16_t signal_event;
+    uint64_t wait_ref_iova;
+    uint32_t wait_ref_count;
+    uint32_t wait_ref_crc_or_zero;
+    uint32_t signal_event;
+    uint32_t signal_sequence;
     uint32_t timeout_cycles;
     uint32_t fault_record_slot;
 } elenor_sched_cmd_record_v0_t;
@@ -238,9 +240,11 @@ typedef struct {
     uint64_t stream_desc_iova;
     uint32_t stream_desc_bytes;
 
-    uint32_t wait_event_base;
-    uint16_t wait_event_count;
-    uint16_t signal_event;
+    uint64_t wait_ref_iova;
+    uint32_t wait_ref_count;
+    uint32_t wait_ref_crc_or_zero;
+    uint32_t signal_event;
+    uint32_t signal_sequence;
 
     uint16_t residency_hint;
     uint16_t cache_policy;
@@ -265,8 +269,8 @@ group_task_iova / group_task_bytes
 role_binding_iova / role_binding_bytes
 engine_desc_iova / engine_desc_bytes
 stream_desc_iova / stream_desc_bytes
-wait_event_base / wait_event_count
-signal_event
+wait_ref_iova / wait_ref_count / wait_ref_crc_or_zero
+signal_event / signal_sequence
 completion_event
 fault_record_slot
 timeout_cycles
@@ -344,14 +348,14 @@ Scheduler 不参与 DMA burst 级调度，但负责 DMA command 的 event depend
 
 ### 5.4 关键时序路径
 
-| 路径                  | 风险                      | 缓解                                                             |
-| --------------------- | ------------------------- | ---------------------------------------------------------------- |
-| multi-queue arbitrate | queue 数多时 fan-in 大    | 分层仲裁，per-priority ready bitmap。                            |
-| wait_event_count scan | 多 event 依赖组合路径长   | 限制 First Silicon wait_event_count 或分拍检查，由后续规格冻结。 |
-| event waiter wakeup   | 高 fanout wakeup          | waiter bitmap 分块，queue pending bit 寄存。                     |
-| resource map check    | context/group mask CAM    | static partition 用 RAM lookup + mask compare。                  |
-| timeout wheel cancel  | completion 同周期 cancel  | tag match 寄存，定义优先级。                                     |
-| completion_router     | DMA/group/collective 多源 | source arbiter + event update FIFO。                             |
+| 路径                  | 风险                      | 缓解                                                                                         |
+| --------------------- | ------------------------- | -------------------------------------------------------------------------------------------- |
+| multi-queue arbitrate | queue 数多时 fan-in 大    | 分层仲裁，per-priority ready bitmap。                                                        |
+| wait_ref_count scan   | 多 event 依赖组合路径长   | 限制 First Silicon wait_ref_count 或分拍检查；每项比较 event_id + sequence，由后续规格冻结。 |
+| event waiter wakeup   | 高 fanout wakeup          | waiter bitmap 分块，queue pending bit 寄存。                                                 |
+| resource map check    | context/group mask CAM    | static partition 用 RAM lookup + mask compare。                                              |
+| timeout wheel cancel  | completion 同周期 cancel  | tag match 寄存，定义优先级。                                                                 |
+| completion_router     | DMA/group/collective 多源 | source arbiter + event update FIFO。                                                         |
 
 ## 6. 配置、PPA、性能模型和 PMU
 
@@ -363,7 +367,7 @@ Scheduler 不参与 DMA burst 级调度，但负责 DMA command 的 event depend
 | event table entries       | 由后续规格冻结          |
 | barrier entries           | 由后续规格冻结          |
 | inflight group tasks      | 由 PPA exploration 冻结 |
-| wait_event_count max      | 由后续规格冻结          |
+| wait_ref_count max        | 由后续规格冻结          |
 | group mask width          | 由后续规格冻结          |
 | timeout wheel granularity | 由后续规格冻结          |
 | arbitration policy        | 由后续规格冻结          |
@@ -374,7 +378,7 @@ Scheduler 不参与 DMA burst 级调度，但负责 DMA command 的 event depend
 | --------------------------------- | --------------------------- | ---------------------------- |
 | sched_cycles_active               | 至少一个 command inflight   | engine_active/control_active |
 | sched_queue_occupancy             | queue 非空周期              | command queue occupancy      |
-| sched_queue_blocked_event         | queue 因 wait_event 阻塞    | `ELENOR_STALL_WAIT_EVENT`    |
+| sched_queue_blocked_event         | queue 因 wait_ref 依赖阻塞  | `ELENOR_STALL_WAIT_EVENT`    |
 | sched_queue_blocked_resource      | group/resource 不可用       | scheduler_resource           |
 | sched_dispatch_count_group_task   | group task launch 数        | none                         |
 | sched_dispatch_count_dma          | DMA command 数              | none                         |
@@ -385,7 +389,7 @@ Scheduler 不参与 DMA burst 级调度，但负责 DMA command 的 event depend
 | sched_downstream_backpressure_vc0 | NoC VC0 not ready           | `ELENOR_STALL_NOC_VC`        |
 | sched_fault_count                 | scheduler source fault      | fault                        |
 
-PMU 归因：如果 command 已 issue 并等待 engine/DMA completion，stall owner 是 engine/DMA/event，不是 Scheduler；如果 command 因 event dependency 未满足而不能 issue，owner 是 wait_event；如果 NoC VC0 无 credit，owner 是 NoC VC。
+PMU 归因：如果 command 已 issue 并等待 engine/DMA completion，stall owner 是 engine/DMA/event，不是 Scheduler；如果 command 因 wait_ref 依赖未满足而不能 issue，owner 是 wait_event；如果 NoC VC0 无 credit，owner 是 NoC VC。
 
 ### 6.3 性能模型
 
@@ -409,7 +413,7 @@ First Silicon V1 不要求硬件消除所有 launch overhead，但必须用 PMU 
 - Reset/drain 时先停止 queue arbitration，再取消未 issue command 的 pending 状态；已 issue 的 DMA/group task 等待 completion、timeout 或 downstream reset ack。
 - Event table、barrier table、resource map 和 timeout wheel reset 后必须进入确定状态；terminal event 是否保留给 host 读取由后续规格冻结。
 - Clock gating 粒度可按 queue_ready_table idle、event update FIFO empty、no inflight task、timeout wheel idle 划分；gating 条件必须排除同周期新 doorbell/wakeup。
-- Timing closure 优先关注 multi-queue arbitration、wait_event scan、waiter wakeup fanout、resource mask compare、timeout cancel 和 completion_router arbitration。
+- Timing closure 优先关注 multi-queue arbitration、wait_ref scan、waiter wakeup fanout、resource mask compare、timeout cancel 和 completion_router arbitration。
 
 ## 7. RTL/软件实现建议
 
@@ -425,7 +429,7 @@ First Silicon V1 不要求硬件消除所有 launch overhead，但必须用 PMU 
 ### 7.2 Firmware/runtime 建议
 
 - Runtime Processor 先做 ABI/cmd_size/context/domain/descriptor bounds 校验，再交给 Scheduler。
-- Compiler/runtime 生成的 command sequence 应显式表达 wait_event/signal_event，避免 Scheduler 推断高层依赖。
+- Compiler/runtime 生成的 command sequence 应显式表达 wait_ref 和 `signal_event + signal_sequence`，避免 Scheduler 推断高层依赖。
 - 多模型 First Silicon 可用 static group partition + queue priority，不引入 preemption。
 - timeout_cycles 应由 runtime 按 workload profile 设置；未设置时使用 Scheduler default。
 - reset/drain command 应先 quiesce affected queue，再请求 reset domain。
@@ -433,11 +437,11 @@ First Silicon V1 不要求硬件消除所有 launch overhead，但必须用 PMU 
 ### 7.3 Assertions
 
 - terminal event 不可回到 PENDING。
-- command retire 前必须写 signal_event 或 fault event，除非 command 类型定义为 no-signal。
+- command retire 前必须写 `signal_event + signal_sequence` 或 fault event，除非 command 类型定义为 no-signal。
 - queue head 不能越过未完成 command。
 - resource map grant 的 group 必须属于 command context。
 - timeout entry 被 cancel 后不能再产生 timeout fault。
-- duplicate completion 必须被检测，不能重复 signal event。
+- duplicate completion 必须用 `event_id + sequence` 检测，不能重复 signal event。
 - NoC task valid 在 ready 前保持 stable。
 
 ## 8. 验证、bring-up 和验收标准
@@ -473,19 +477,19 @@ First Silicon V1 不要求硬件消除所有 launch overhead，但必须用 PMU 
 - BOA GEMM 通过 command queue/LAUNCH_GROUP_TASK 触发，而不是绕过 Scheduler。
 - event completion、timeout、fault record 闭环。
 - resource map 能隔离两个 context 的 group partition。
-- Scheduler PMU 能区分 queue empty、wait_event、resource stall、NoC VC0 backpressure。
+- Scheduler PMU 能区分 queue empty、wait_ref dependency、resource stall、NoC VC0 backpressure。
 - reset/drain 后 event、barrier、timeout、resource map 状态确定。
 
 ## 9. 风险、取舍和后续细化方向
 
-| 风险                             | 影响                                           | 缓解                                                                            |
-| -------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------- |
-| Scheduler 变成 graph interpreter | 硬件复杂度失控，compiler/runtime contract 模糊 | 只消费 command/descriptor/program，TileGroupTask 由 Tile Group Sequencer 执行。 |
-| Event dependency fan-in 过大     | 时序不收敛                                     | 限制 wait_event_count，分拍检查，waiter bitmap 分块。                           |
-| Timeout 与 completion 竞态       | 偶发错误 event                                 | 定义同周期优先级，generation/tag，SVA 覆盖。                                    |
-| 多模型 QoS 过早复杂              | First Silicon 验证面扩大                       | First Silicon 用 static partition + simple priority，PMU feedback 放后续。      |
-| Resource map 动态修改            | context 污染或 use-after-reset                 | active context 禁止修改，quiesce 后更新。                                       |
-| PMU 归因错误                     | 性能优化方向错误                               | primary stall owner 规则，Scheduler 只统计控制面阻塞。                          |
-| Barrier deadlock                 | group task 永久挂起                            | timeout、fault propagation、reset/drain 明确定义。                              |
+| 风险                             | 影响                                           | 缓解                                                                              |
+| -------------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------- |
+| Scheduler 变成 graph interpreter | 硬件复杂度失控，compiler/runtime contract 模糊 | 只消费 command/descriptor/program，TileGroupTask 由 Tile Group Sequencer 执行。   |
+| Event dependency fan-in 过大     | 时序不收敛                                     | 限制 wait_ref_count，分拍检查，waiter bitmap 分块，event_id + sequence 同时比较。 |
+| Timeout 与 completion 竞态       | 偶发错误 event                                 | 定义同周期优先级，generation/tag，SVA 覆盖。                                      |
+| 多模型 QoS 过早复杂              | First Silicon 验证面扩大                       | First Silicon 用 static partition + simple priority，PMU feedback 放后续。        |
+| Resource map 动态修改            | context 污染或 use-after-reset                 | active context 禁止修改，quiesce 后更新。                                         |
+| PMU 归因错误                     | 性能优化方向错误                               | primary stall owner 规则，Scheduler 只统计控制面阻塞。                            |
+| Barrier deadlock                 | group task 永久挂起                            | timeout、fault propagation、reset/drain 明确定义。                                |
 
-后续规格需要冻结：event_id namespace、event table size、wait_event_count 上限、duplicate signal policy、barrier participant 编码、timeout 同周期优先级、resource map CSR、queue arbitration policy、group task launch descriptor binary layout、Scheduler PMU counter id 和 reset/drain 对 blocked queue 的精确语义。
+后续规格需要冻结：event_id namespace、event table size、wait_ref_count 上限、duplicate signal policy、barrier participant 编码、timeout 同周期优先级、resource map CSR、queue arbitration policy、group task launch descriptor binary layout、Scheduler PMU counter id 和 reset/drain 对 blocked queue 的精确语义。

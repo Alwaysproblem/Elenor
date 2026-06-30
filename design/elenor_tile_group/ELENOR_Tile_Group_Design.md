@@ -186,9 +186,11 @@ typedef struct {
     uint64_t stream_desc_iova;
     uint32_t stream_desc_bytes;
 
-    uint32_t wait_event_base;
-    uint16_t wait_event_count;
-    uint16_t signal_event;
+    uint64_t wait_ref_iova;
+    uint32_t wait_ref_count;
+    uint32_t wait_ref_crc_or_zero;
+    uint32_t signal_event;
+    uint32_t signal_sequence;
 
     uint16_t residency_hint;
     uint16_t cache_policy;
@@ -253,26 +255,28 @@ group_task.accept t0
     init_stream   s0, depth=3, policy=all_eos
     init_stream   s1, depth=2, policy=single_producer
 
-    dma.prefetch  desc=weights_blk0, dst=l2_w0 -> ev_dma0
-    wait.event    ev_dma0
+    dma.prefetch  desc=weights_blk0, dst=l2_w0 -> ev_dma0:seq_dma0
+    wait.event    ev_dma0 seq=seq_dma0
 
-    dispatch.role role_id=0, tile_mask=0x0f, program=tile_kernel_qk, out=s0
-    dispatch.role role_id=1, tile_mask=0xf0, program=tile_kernel_softmax, in=s0, out=s1
+    dispatch.role role_id=0, event=ev_role0, seq=seq_role0, tile_mask=0x0f, program=tile_kernel_qk, out=s0
+    dispatch.role role_id=1, event=ev_role1, seq=seq_role1, tile_mask=0xf0, program=tile_kernel_softmax, in=s0, out=s1
 
 loop_blocks:
     wait.credit   s0
-    dma.prefetch  desc=kv_next, dst=l2_kv_next -> ev_dma1
-    wait.event    ev_dma1
+    dma.prefetch  desc=kv_next, dst=l2_kv_next -> ev_dma1:seq_dma1[block_id]
+    wait.event    ev_dma1 seq=seq_dma1[block_id]
     wait.stream   s0
     advance.block
     branch.lt     block_id, block_count, loop_blocks
 
     push.eos      s0
     push.eos      s1
-    barrier.group participants=0xff -> ev_bar0
-    wait.event    ev_bar0
-group_task.complete signal=group_done
+    barrier.group participants=0xff -> ev_bar0:seq_bar0
+    wait.event    ev_bar0 seq=seq_bar0
+group_task.complete signal=group_done seq=seq_group_done
 ```
+
+`seq_*[block_id]` 表示每次 block 循环复用 event id 时必须使用新的 expected sequence；固定 sequence 不能跨循环迭代复用。
 
 硬件执行这些 command/descriptor/program，不解释 MLIR 或高层 graph。
 

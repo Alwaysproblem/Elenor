@@ -220,6 +220,7 @@ desc_iova
 desc_bytes
 desc_crc_or_zero
 signal_event
+signal_sequence
 fault_record_slot
 timeout_cycles
 priority_or_qos
@@ -230,14 +231,14 @@ Global DMA 接受 launch 后返回 `launch_accepted`，最终通过 Event Fabric
 
 ### 4.3 Memory/NoC interface
 
-| 通道         | 方向                | VC/目标         | 内容                                           |
-| ------------ | ------------------- | --------------- | ---------------------------------------------- |
-| read_req     | DMA -> Memory/NoC   | request path    | address、bytes、tag、domain、qos。             |
-| read_rsp     | Memory/NoC -> DMA   | VC1             | data、tag、error、last。                       |
-| write_req    | DMA -> Memory/NoC   | VC2             | address、data、byte_enable、tag、domain、qos。 |
-| write_rsp    | Memory/NoC -> DMA   | response path   | tag、error。                                   |
-| event_update | DMA -> Event Fabric | VC0 或 sideband | event_id、status、producer_id、fault_slot。    |
-| pmu_sample   | DMA -> Global PMU   | sideband        | bytes、stall、latency、error。                 |
+| 通道         | 方向                | VC/目标         | 内容                                                  |
+| ------------ | ------------------- | --------------- | ----------------------------------------------------- |
+| read_req     | DMA -> Memory/NoC   | request path    | address、bytes、tag、domain、qos。                    |
+| read_rsp     | Memory/NoC -> DMA   | VC1             | data、tag、error、last。                              |
+| write_req    | DMA -> Memory/NoC   | VC2             | address、data、byte_enable、tag、domain、qos。        |
+| write_rsp    | Memory/NoC -> DMA   | response path   | tag、error。                                          |
+| event_update | DMA -> Event Fabric | VC0 或 sideband | event_id、sequence、status、producer_id、fault_slot。 |
+| pmu_sample   | DMA -> Global PMU   | sideband        | bytes、stall、latency、error。                        |
 
 ### 4.4 DMA CSR
 

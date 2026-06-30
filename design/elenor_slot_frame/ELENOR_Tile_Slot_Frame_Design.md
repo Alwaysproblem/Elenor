@@ -14,29 +14,30 @@ Tile Slot Frame 是 ELENOR Tile L1 SRAM 的二进制 binding contract。它把 T
 
 First Silicon cutline：
 
-| 能力           | First Silicon V1                                           | V1.x / V2 保留                               |
-| -------------- | ---------------------------------------------------------- | -------------------------------------------- |
-| slot 数量      | 16 个固定 slot                                             | 可扩展 slot table、dynamic allocation        |
-| 权限           | read、write、accumulate、persistent、bank_pinned           | fine-grained engine mask、capability token   |
-| 生命周期       | per-command、per-tile-program、per-role、resident          | preemption save/restore                      |
-| patch          | tile_id/group_id/slot offset auto-patch                    | complex affine patch、late binding optimizer |
-| coherency      | descriptor cache invalidate、program text running 禁 patch | hardware descriptor coherence                |
-| bank placement | compiler/runtime hint + hardware check                     | automatic bank remap                         |
+| 能力           | First Silicon V1                                           | V1.x / V2 保留                                                                    |
+| -------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| slot 数量      | 16 个固定 slot                                             | 可扩展 slot table、dynamic allocation                                             |
+| 权限           | read、write、accumulate、persistent、bank_pinned           | fine-grained engine mask、capability token                                        |
+| 生命周期       | per-command、per-tile-program、per-role、resident          | per-window owner tag、pre-provisioned multi-buffer reuse、preemption save/restore |
+| patch          | tile_id/group_id/slot offset auto-patch                    | complex affine patch、late binding optimizer                                      |
+| coherency      | descriptor cache invalidate、program text running 禁 patch | hardware descriptor coherence                                                     |
+| bank placement | compiler/runtime hint + hardware check                     | automatic bank remap                                                              |
 
 ## 2. 职责、非职责和 ownership
 
 ### 2.1 ownership matrix
 
-| 对象 / 动作                        | owner                           | 说明                                                         |
-| ---------------------------------- | ------------------------------- | ------------------------------------------------------------ |
-| slot role、layout、alignment       | Compiler                        | package build 时由 kernel library ABI 和 memory planner 决定 |
-| context base、IOVA、residency      | Runtime / firmware              | load package、bind context、warm launch patch                |
-| frame bind                         | Tile UCE                        | launch Tile Program 前绑定 frame，检查版本和权限             |
-| tile_id/group_id/slot offset patch | Tile UCE auto-patch             | per tile launch 时生成 effective address                     |
-| page list / segment offset patch   | MFE                             | 数据相关动态地址由 MFE 管理                                  |
-| state slot / checkpoint pointer    | USE / Tile UCE                  | USE 拥有 state 生命周期，UCE 发起控制                        |
-| descriptor cache invalidate        | Runtime / firmware + Tile UCE   | warm patch 后确保 UCE 看到新 descriptor                      |
-| slot violation fault               | Tile UCE / DMA / engine wrapper | 记录 command id、program id、tile id、slot id                |
+| 对象 / 动作                        | owner                           | 说明                                                                |
+| ---------------------------------- | ------------------------------- | ------------------------------------------------------------------- |
+| slot role、layout、alignment       | Compiler                        | package build 时由 kernel library ABI 和 memory planner 决定        |
+| context base、IOVA、residency      | Runtime / firmware              | load package、bind context、warm launch patch                       |
+| frame bind                         | Tile UCE                        | launch Tile Program 前绑定 frame，检查版本和权限                    |
+| window buffer owner / hazard check | Tile UCE + Slot Frame shadow    | V1 window id 固定 0；V1.x 才比较多个 active window 的读写 slot mask |
+| tile_id/group_id/slot offset patch | Tile UCE auto-patch             | per tile launch 时生成 effective address                            |
+| page list / segment offset patch   | MFE                             | 数据相关动态地址由 MFE 管理                                         |
+| state slot / checkpoint pointer    | USE / Tile UCE                  | USE 拥有 state 生命周期，UCE 发起控制                               |
+| descriptor cache invalidate        | Runtime / firmware + Tile UCE   | warm patch 后确保 UCE 看到新 descriptor                             |
+| slot violation fault               | Tile UCE / DMA / engine wrapper | 记录 command id、program id、tile id、slot id                       |
 
 ### 2.2 非职责
 
@@ -125,6 +126,8 @@ FAULTED -> RESET_CLEAN
 - per-tile-program：Tile Program 内多个 engine 复用；Tile Program 结束后释放。
 - per-role：role 间缓存或 partial result；Tile Group Sequencer / Stream Queue 管理可见性。
 - resident：program、const、hot descriptor、USE state cache；只有 firmware/runtime 或 checkpoint path 可替换。
+
+Sliding window 语义只允许复用 **预先声明的** ping-pong / multi-buffer slot set。Slot Frame V1 不做硬件动态分配；`window_size>1` 时，UCE 使用 frame shadow 中的 lifetime、owner、role、flags 和 active window 的 read/write mask 判定 slot 是否可复用。
 
 ## 4. 接口、descriptor、寄存器和协议
 
@@ -282,6 +285,8 @@ Tile Program run
 - DMA 写 output slot 后，consumer engine 需要 event/fence；Stream Queue token 只排序 token，不替代 L1 memory fence。
 - accumulator slot 只能被 BOA/EVU accumulate path 或明确 storeback path 修改；普通 DMA 覆盖需要显式 flag，否则 fault。
 - USE state slot 的 checkpoint/restore 由 USE 生命周期控制，UCE 发起；DMA 不能绕过 checkpoint path 写 state。
+- 若 UCE V1.x 开启 `window_size>1`，slot owner handoff 必须按 `event_id + sequence`、fence 和 stream release 判定；不得因 window entry 退出 decode 就提前释放 buffer。
+- read-only const slot 可被多个 window alias；任何 writable alias、WAR/RAW/WAW hazard 必须由 UCE/engine wrapper stall 或 fault。
 
 ### 5.4 bank placement
 
@@ -317,6 +322,8 @@ BW_eff(slot_i) = BW_bank_peak(bank_policy_i) * (1 - conflict_rate_i)
 ```
 
 Compiler/runtime 应避免以下峰值重叠：BOA A/B operand burst、BOA accumulator RMW、MFE stream write、Tile DMA load/store、EVU gather replay、UCE descriptor fetch。
+
+Sliding window profile 会提高同时活跃 slot set 数量。V1.x 只能通过 compiler/runtime 预留多 buffer 来吸收该压力；若 `window_size` 增大导致 bank conflict 或 slot hazard stall 上升，PMU 应分别归因到 `l1_bank_conflict_by_slot` 与 UCE `slot_hazard_stall`，不能把两者合并。
 
 ### 6.3 PMU / error hooks
 
@@ -358,6 +365,7 @@ Fault record 必须包含：command id、program id、frame id、generation、ti
 - Patch atomicity：patch commit 前 engine launch 不得看到部分写入 descriptor。
 - Running text immutable：active program text slot 不允许 write/patch。
 - Bank policy：BANK_PINNED slot 的 request bank 必须在 mask 内。
+- Window hazard：V1 `window_id` 恒为 0；V1.x 下多个 active window 对同一 writable slot 的 alias、WAR/RAW/WAW 必须被 admission checker 拦截。
 - Reset clean：tile reset 后 active frame invalid 或 generation 递增，旧 descriptor handle 不可继续使用。
 
 ### 8.2 测试矩阵
@@ -383,18 +391,20 @@ Bring-up：先 frame bind checker formal，再 Tile DMA slot access，再 BOA GE
 - Credit / EOS / error / reset：Slot Frame 不拥有 stream credit/EOS，但 payload slot 必须支持 EOS/error token 引用；tile reset 后旧 frame generation、token handle 和 descriptor patch 失效。
 - Patch ownership：Compiler 冻结静态 shape/layout，Runtime/firmware patch context/residency，Tile UCE patch tile/group/slot offset，MFE patch page/segment，USE 管理 state slot。
 - Ordering / coherency：active shadow 是唯一权威视图；warm patch 必须 invalidate descriptor cache；engine launch 只能使用 patch commit 后的 descriptor。
+- Sliding window：若启用 `window_size>1`，Slot Frame 只提供 pre-provisioned multi-buffer binding 和 owner metadata；dynamic allocation、eviction 或 compaction 不属于 Slot Frame V1。
 - SVA / formal：range、overlap、permission、generation、patch atomicity、running text immutable、bank pinned check 必须覆盖。
 - PMU / error hooks：slot fault、patch fault、descriptor invalidate 和 per-slot bank conflict 必须带 frame id、slot id、patch id。
 
 ## 9. 风险、取舍和后续细化方向
 
-| 风险                            | 影响                                   | 缓解                                                       |
-| ------------------------------- | -------------------------------------- | ---------------------------------------------------------- |
-| 固定地址语义回流                | dynamic shape / paged attention 难扩展 | 强制 slot ABI + frame binding                              |
-| patch ownership 混乱            | UCE/MFE/Runtime 覆盖彼此字段           | patch record owner 和 fault code                           |
-| descriptor cache coherence 错误 | warm launch 使用旧值                   | invalidate/flush protocol + generation check               |
-| bank hint 被误认为 correctness  | 静默性能退化                           | correctness 属性必须 fault，性能 hint 只记录 PMU           |
-| slot alias 规则过宽             | 数据破坏                               | First Silicon 禁止 writable alias                          |
-| patch datapath 过复杂           | UCE timing 风险                        | 限制为 stride/add 模式，复杂计算由 compiler/runtime 预处理 |
+| 风险                                | 影响                                   | 缓解                                                       |
+| ----------------------------------- | -------------------------------------- | ---------------------------------------------------------- |
+| 固定地址语义回流                    | dynamic shape / paged attention 难扩展 | 强制 slot ABI + frame binding                              |
+| patch ownership 混乱                | UCE/MFE/Runtime 覆盖彼此字段           | patch record owner 和 fault code                           |
+| descriptor cache coherence 错误     | warm launch 使用旧值                   | invalidate/flush protocol + generation check               |
+| bank hint 被误认为 correctness      | 静默性能退化                           | correctness 属性必须 fault，性能 hint 只记录 PMU           |
+| slot alias 规则过宽                 | 数据破坏                               | First Silicon 禁止 writable alias                          |
+| sliding window 误引入动态 allocator | scope 膨胀、slot ABI 和验证面失控      | 仅允许预配置 multi-buffer slot + owner/hazard 检查         |
+| patch datapath 过复杂               | UCE timing 风险                        | 限制为 stride/add 模式，复杂计算由 compiler/runtime 预处理 |
 
-后续需要冻结：slot alias policy、layout 编码、bank_policy 编码、engine owner mask、alignment 最小值、frame table residency、descriptor cache line size、patch field width 和 canonical kernel slot ABI。
+后续需要冻结：slot alias policy、layout 编码、bank_policy 编码、engine owner mask、alignment 最小值、frame table residency、descriptor cache line size、patch field width、canonical kernel slot ABI、per-window owner tag 和 multi-buffer profile。

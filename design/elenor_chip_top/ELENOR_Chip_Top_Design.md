@@ -217,7 +217,7 @@ typedef struct {
 
 ### 4.4 Command/Event ABI 对顶层的要求
 
-顶层必须接受 `elenor_command_v0_t` 中的以下字段并传递给 owner：abi_version、cmd_size、type、flags、context_id、queue_id、desc_iova、desc_bytes、desc_crc_or_zero、wait_event_base、wait_event_count、signal_event、timeout_cycles、fault_record_slot。Chip Top 不解析 engine 私有 descriptor，但必须校验：
+顶层必须接受 `elenor_command_v0_t` 中的以下字段并传递给 owner：abi_version、cmd_size、type、flags、context_id、queue_id、desc_iova、desc_bytes、desc_crc_or_zero、wait_ref_iova、wait_ref_count、wait_ref_crc_or_zero、signal_event、signal_sequence、timeout_cycles、fault_record_slot。Chip Top 不解析 engine 私有 descriptor，但必须校验：
 
 - command header 可读、大小合法、version 支持。
 - desc_iova 属于当前 context/IOMMU domain。

@@ -309,6 +309,7 @@ typedef struct {
     uint16_t flags;
     uint32_t use_desc_slot;
     uint32_t event_id;
+  uint32_t event_sequence;
     uint32_t timeout_cycles;
     uint32_t dependency_event_mask;
 } elenor_use_launch_req_v0_t;
@@ -319,14 +320,16 @@ typedef struct {
 1. UCE 完成 descriptor patch 和 fence。
 2. UCE 发送 launch request。
 3. USE 获取 state lock/tag，执行 descriptor。
-4. USE signal done/error event。
+4. USE signal done/error event，并携带 `event_id + event_sequence` completion identity。
 5. UCE wait event 后继续 Tile Program。
 
-USE 不直接推进 UCE PC；它只能通过 event result、condition result 或 fault 影响 UCE 的后续 branch。
+USE 不直接推进 UCE PC；它只能通过 event result、condition result 或 fault 影响 UCE 的后续 branch。UCE 和 USE 必须把 `event_id + event_sequence` 一起作为 completion identity，避免 reset/reuse 后把旧完成误判为当前 state update 完成。
 
 ### 4.4 自定义指令示例
 
 若采用 RISC-V 共享实现，USE 可作为 custom functional unit 或 MMIO task。示例语义，不冻结编码：
+
+下面的 `e_use` 是符号化 completion handle，逻辑上绑定 launch 产生的 `(event_id, event_sequence)`。
 
 ```asm
 # UCE control path

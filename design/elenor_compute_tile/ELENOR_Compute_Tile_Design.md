@@ -23,21 +23,23 @@ Architecture V1 的目标形态：
 - 同一份 Tile-SPMD program template 可在多个 tile 上运行，通过 `tile_id`、`group_id`、descriptor offset 和 slot frame binding 区分数据。
 - Tile UCE 和 USE 是两个功能组件；实现上可共享一个 tile-local RISC-V / micro-controller 或等价 micro-sequencer。
 - UCE 负责 program control、engine launch、event wait、stream token 和 descriptor patch。
+- First Silicon 的 UCE issue window 固定为 `window_size=1`；`2~4` 的 sliding window overlap 只作为 V1.x/V2 profile 保留。
 - USE 负责 state register/cache、scan、recurrence、checkpoint/restore 和 state lifecycle。
 - MFE 负责大多数数据相关的动态内存访问，包括 page/segment metadata walk、address generation、prefetch、reorder 和 stream fill。
 - BOA、EVU、MFE、USE 都通过 descriptor/task 进入执行，不让 datapath 解释高层 graph。
 
 First Silicon V1 cutline：
 
-| 范围     | 必须闭环                                                                                     | 可预留字段或后续实现                                        |
-| -------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| 控制面   | tile task receive、prepared local program handle check、PC 推进、wait/fence、tile done event | priority、preemption、多上下文 tile-local time slicing      |
-| L1 / DMA | slot frame binding、1D/2D/strided L2->L1、L1->L2、async event                                | multicast、gather list、复杂 layout transform               |
-| BOA      | INT8/BF16 GEMM、QK/AV 基础路径、split-K reduce 接口                                          | 复杂 epilogue fusion、稀疏 matmul                           |
-| EVU      | elementwise、mask/tail、softmax/norm、基础 gather                                            | full scatter、atomic update、复杂 permutation               |
-| MFE port | Page Stream minimal token 到 L1 stream slot、error/EOS 传播                                  | Segment Stream full update、Sparse Block、Persistent Stream |
-| USE      | state register/cache 接口、prefix scan、simple recurrence、checkpoint/restore                | 高级 recurrence transform、复杂 token routing rollback      |
-| PMU      | engine active/stall、DMA bandwidth、SRAM bank conflict、stream wait、event wait              | sampled trace、完整 feedback scheduler                      |
+| 范围             | 必须闭环                                                                                     | 可预留字段或后续实现                                        |
+| ---------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| 控制面           | tile task receive、prepared local program handle check、PC 推进、wait/fence、tile done event | priority、preemption、多上下文 tile-local time slicing      |
+| UCE issue window | 单 active Tile Program、`event_id + sequence` completion、slot hazard 可观测                 | V1.x/V2 `window_size=2~4` issue/preparation overlap         |
+| L1 / DMA         | slot frame binding、1D/2D/strided L2->L1、L1->L2、async event                                | multicast、gather list、复杂 layout transform               |
+| BOA              | INT8/BF16 GEMM、QK/AV 基础路径、split-K reduce 接口                                          | 复杂 epilogue fusion、稀疏 matmul                           |
+| EVU              | elementwise、mask/tail、softmax/norm、基础 gather                                            | full scatter、atomic update、复杂 permutation               |
+| MFE port         | Page Stream minimal token 到 L1 stream slot、error/EOS 传播                                  | Segment Stream full update、Sparse Block、Persistent Stream |
+| USE              | state register/cache 接口、prefix scan、simple recurrence、checkpoint/restore                | 高级 recurrence transform、复杂 token routing rollback      |
+| PMU              | engine active/stall、DMA bandwidth、SRAM bank conflict、stream wait、event wait              | sampled trace、完整 feedback scheduler                      |
 
 未冻结数值全部以 `由后续规格冻结`、`由 SRAM profile 冻结` 或 `由 PPA exploration 冻结` 标注，不在 Compute Tile 文档中伪造二进制编码或物理宏参数。
 
@@ -147,6 +149,8 @@ RESET
 | COMPLETE            | drain complete                           | signal tile done event，snapshot PMU，可写 status                                                                        | event accepted                  |
 | FAULT_CAPTURE       | invalid desc、timeout、ECC、engine fault | freeze syndrome、pc、desc id、slot id、event id                                                                          | fault record 写入完成           |
 
+First Silicon V1 的 `PROGRAM_RUN` 只有一个 active Tile Program context。若 V1.x/V2 profile 开启 `window_size>1`，Compute Tile 必须把每个 active context 绑定到独立 window entry，并记录 `frame_id/frame_generation/desc_window/event_sequence/read_write_slot_mask`；但 prepared tile task binary layout 不因此扩展为多线程模型。
+
 ### 3.3 Engine task 状态机
 
 每个 engine 接口采用一致的 ready/valid + event 模型：
@@ -183,6 +187,8 @@ L1 SRAM 逻辑分区：
 | DMA staging/shared           | 由 SRAM profile 冻结                    | DMA、UCE                          | 只作为显式 workspace 使用                 |
 
 Arbiter 至少应区分：BOA operand read、BOA accumulator RMW、EVU LSU、MFE stream write/read、DMA load/store、USE state、UCE program/descriptor/event。带宽峰值和端口数由 SRAM profile 冻结；文档只冻结归因和隔离原则。
+
+Sliding window 不改变 L1 分配模型：V1 仍是固定 slot frame；V1.x 的 `window_size=2~4` 只能消费 compiler/runtime 预先规划好的 ping-pong / multi-buffer slot set，不能在硬件中引入新的动态 slot allocator。Arbiter 和 PMU 必须能把 window admission stall、slot hazard stall 与真实 SRAM bank conflict 分开归因。
 
 ## 4. 接口、descriptor、寄存器和协议
 
@@ -264,7 +270,7 @@ typedef struct {
 
 ### 4.3 Tile UCE 指令示例
 
-Compute Tile 文档只要求语义，不冻结编码。示例：
+Compute Tile 文档只要求语义，不冻结编码。示例中的 `e_load`、`e_boa`、`e_evu`、`e_use`、`e_store` 是符号化 completion handle，逻辑上对应 launch 产生的 `event_id + event_sequence`。
 
 ```asm
 tile_stage:
@@ -397,6 +403,8 @@ L2 A/B tiles
 T_dma_load_next <= T_boa_compute_current
 T_evu_epilogue  <= T_store_or_next_load_overlap window
 ```
+
+在 UCE `window_size=1` 时，上述 overlap 只能来自单 Tile Program 内部的 DMA/BOA/EVU/MFE pipeline。若 V1.x 打开 `window_size=2~4`，`T_store_or_next_load_overlap` 只有在 next program 使用独立 slot set、store visibility event 使用正确 sequence、MFE async LD/ST queue 有 credit 时成立；否则 UCE 必须把新 program admission stall 到 buffer release。
 
 具体 latency target 由 PPA exploration 冻结。
 
@@ -681,17 +689,17 @@ Exception 分类：
 
 ### 8.1 单元验证
 
-| 单元               | 必测内容                                                                          |
-| ------------------ | --------------------------------------------------------------------------------- |
-| Tile Command Queue | overflow/underflow、context isolation、reset drain                                |
-| UCE front-end      | prepared task check、program handle/epoch、branch、wait、fence、trap              |
-| Descriptor Patch   | tile_id/group_id/slot offset、range check、coherence invalidate、desc window 边界 |
-| Slot Frame         | permission、alignment、owner handoff、bank hint                                   |
-| Tile DMA           | 1D/2D/strided、async event、timeout、range fault                                  |
-| Local Event        | done/error/timeout/reset 状态转换                                                 |
-| Stream             | credit、backpressure、EOS、error token、reset/drain                               |
-| L1 Arbiter         | bank conflict、priority starvation、PMU attribution                               |
-| PMU                | primary owner 唯一性、counter snapshot 一致性                                     |
+| 单元               | 必测内容                                                                                                             |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| Tile Command Queue | overflow/underflow、context isolation、reset drain                                                                   |
+| UCE front-end      | prepared task check、program handle/epoch、branch、wait、fence、trap、`window_size=1` hardwire、event sequence match |
+| Descriptor Patch   | tile_id/group_id/slot offset、range check、coherence invalidate、desc window 边界                                    |
+| Slot Frame         | permission、alignment、owner handoff、bank hint                                                                      |
+| Tile DMA           | 1D/2D/strided、async event、timeout、range fault                                                                     |
+| Local Event        | done/error/timeout/reset 状态转换                                                                                    |
+| Stream             | credit、backpressure、EOS、error token、reset/drain                                                                  |
+| L1 Arbiter         | bank conflict、priority starvation、PMU attribution                                                                  |
+| PMU                | primary owner 唯一性、counter snapshot 一致性                                                                        |
 
 ### 8.2 集成 bring-up 顺序
 
@@ -704,13 +712,15 @@ Exception 分类：
 7. MFE Page Stream token 到 L1 buffer，再 BOA/EVU 消费。
 8. USE scan/recurrence + checkpoint/restore。
 9. Paged attention tile trace，验证 `T_prefetch <= T_qk` case 的 PMU 指纹。
-10. fault injection：invalid/stale program handle、invalid descriptor、slot fault、timeout、stream error、engine fault。
+10. UCE issue window smoke：V1 证明 `window_size=1` 时 P0 complete 前 P1 不进入 active；V1.x 仿真 `window_size=2` 时验证独立 slot 才允许 P0 store / P1 load overlap。
+11. fault injection：invalid/stale program handle、invalid descriptor、slot fault、timeout、stream error、engine fault。
 
 ### 8.3 验收标准
 
 - 所有 engine 必须通过 command/event 路径触发，而不是旁路 testbench。
 - 每个 program handle 或 descriptor fault 必须能定位 command id、program id、tile id、local slot/epoch、descriptor id、slot id 或 address syndrome。
 - reset/drain 后 stream credit、event pending、DMA outstanding 和 engine busy 进入确定状态。
+- UCE window 相关行为必须与 profile 一致：V1 active window high-watermark 为 1；V1.x 若开启多 window，slot hazard、event sequence mismatch 和 store visibility wait 必须产生确定 stall/fault/PMU。
 - BOA/EVU/MFE/USE/UCE/SRAM/NoC stall 能通过 PMU primary owner 解释。
 - Python golden 或 workload trace 能复现 dense GEMM、softmax/norm、paged attention tile path、USE recurrence 四类路径。
 - First Silicon 验收至少覆盖 Phase 1 control plane + BOA runtime skeleton；Phase 5 前不得宣称 USE state path 完整。
@@ -719,15 +729,16 @@ Exception 分类：
 
 ### 9.1 风险
 
-| 风险                         | 影响                                    | 缓解                                                                                  |
-| ---------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------- |
-| UCE/USE 共享实现导致职责混淆 | program control 与 state compute 难验证 | 文档、RTL 接口、PMU、fault owner 分离；共享 fetch/debug/CSR，不共享 ownership         |
-| L1 SRAM 争用                 | BOA/EVU/MFE/USE 互相阻塞                | bank-aware layout、protected state region、PMU primary stall、compiler memory planner |
-| descriptor patch 一致性复杂  | warm launch 读到 stale descriptor       | descriptor version/tag、running text 不可 patch、显式 invalidate                      |
-| stream deadlock              | pipeline 停滞且难 debug                 | credit leak detection、timeout、EOS/error 形式化、cycle wait graph 检查               |
-| MFE 与 UCE 数据访问边界不清  | page walk 被错误放入控制面              | 数据相关动态地址归 MFE，program control 归 UCE，state metadata 更新归 USE             |
-| reset 粒度不清               | fault recovery 污染其他 context         | tile/group/device reset domain 明确，fault record 记录 context id                     |
-| PMU 重复计数                 | 性能分析失真                            | primary owner 唯一规则，secondary tag 不进入 utilization 汇总                         |
+| 风险                         | 影响                                                       | 缓解                                                                                                                  |
+| ---------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| UCE/USE 共享实现导致职责混淆 | program control 与 state compute 难验证                    | 文档、RTL 接口、PMU、fault owner 分离；共享 fetch/debug/CSR，不共享 ownership                                         |
+| L1 SRAM 争用                 | BOA/EVU/MFE/USE 互相阻塞                                   | bank-aware layout、protected state region、PMU primary stall、compiler memory planner                                 |
+| descriptor patch 一致性复杂  | warm launch 读到 stale descriptor                          | descriptor version/tag、running text 不可 patch、显式 invalidate                                                      |
+| stream deadlock              | pipeline 停滞且难 debug                                    | credit leak detection、timeout、EOS/error 形式化、cycle wait graph 检查                                               |
+| UCE sliding window 语义过宽  | 单 tile 被误解为多线程执行，slot lifetime/event reuse 出错 | V1 固定 `window_size=1`；V1.x 只允许 issue/preparation overlap，依赖 event sequence、Slot Frame owner 和 hazard table |
+| MFE 与 UCE 数据访问边界不清  | page walk 被错误放入控制面                                 | 数据相关动态地址归 MFE，program control 归 UCE，state metadata 更新归 USE                                             |
+| reset 粒度不清               | fault recovery 污染其他 context                            | tile/group/device reset domain 明确，fault record 记录 context id                                                     |
+| PMU 重复计数                 | 性能分析失真                                               | primary owner 唯一规则，secondary tag 不进入 utilization 汇总                                                         |
 
 ### 9.2 取舍
 
@@ -743,5 +754,6 @@ Exception 分类：
 - Tile UCE 指令编码、register file 大小和 trap ABI：由后续规格冻结。
 - L1 SRAM 容量、bank 数、端口、宏类型、ECC 策略：由 SRAM profile 冻结。
 - BOA OPA shape、EVU lane 数、Tile DMA outstanding、MFE stream buffer 深度：由 PPA exploration 冻结。
+- UCE issue window size、window hazard table、per-window PMU counter：V1 固定为 1；V1.x/V2 由 PPA exploration 和后续规格冻结。
 - Debug CSR 地址、PMU counter id、fault code 编码：由后续规格冻结。
 - reset/drain 对 resident state 的保留策略：由后续规格冻结。
