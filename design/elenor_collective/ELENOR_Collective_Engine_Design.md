@@ -177,9 +177,11 @@ typedef struct {
     uint32_t scratch_l2_base;
     uint32_t scratch_bytes;
 
-    uint32_t wait_event_base;
-    uint16_t wait_event_count;
-    uint16_t signal_event;
+    uint64_t wait_ref_iova;
+    uint32_t wait_ref_count;
+    uint32_t wait_ref_crc_or_zero;
+    uint32_t signal_event;
+    uint32_t signal_sequence;
 
     uint32_t input_stream_id;
     uint32_t output_stream_id;
@@ -204,8 +206,8 @@ TileGroupTask 发起 split-K reduce：
     dispatch.role role_id=0, tile_mask=0xff, program=tile_kernel_splitk, out=s_partial
     wait.stream    s_partial, condition=all_participants_ready
 
-    collective.run desc=coll_splitk_reduce -> ev_coll0
-    wait.event     ev_coll0
+    collective.run desc=coll_splitk_reduce -> ev_coll0:seq_coll0
+    wait.event     ev_coll0 seq=seq_coll0
 
     dispatch.role role_id=1, tile_mask=0x0f, program=tile_kernel_epilogue, in=s_reduced
 ```
@@ -216,20 +218,20 @@ MoE combine：
     dispatch.role role_id=0, tile_mask=0xff, program=tile_kernel_expert_mlp, out=s_expert_partial
     wait.stream    s_expert_partial, condition=block_ready
 
-    collective.run desc=coll_moe_combine -> ev_combine
-    wait.event     ev_combine
+    collective.run desc=coll_moe_combine -> ev_combine:seq_combine
+    wait.event     ev_combine seq=seq_combine
 
-    dma.store      desc=moe_output_store, src=l2_moe_out -> ev_store
-    wait.event     ev_store
+    dma.store      desc=moe_output_store, src=l2_moe_out -> ev_store:seq_store
+    wait.event     ev_store seq=seq_store
 ```
 
 Broadcast weights or metadata：
 
 ```asm
-    dma.prefetch    desc=weight_block, dst=l2_weight -> ev_w
-    wait.event      ev_w
-    collective.run  desc=coll_broadcast_weight -> ev_bcast
-    wait.event      ev_bcast
+    dma.prefetch    desc=weight_block, dst=l2_weight -> ev_w:seq_w
+    wait.event      ev_w seq=seq_w
+    collective.run  desc=coll_broadcast_weight -> ev_bcast:seq_bcast
+    wait.event      ev_bcast seq=seq_bcast
     dispatch.role  role_id=0, tile_mask=0xff, program=tile_kernel_gemm, in=s_weight_ready
 ```
 

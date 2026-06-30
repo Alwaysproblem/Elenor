@@ -360,6 +360,7 @@ typedef struct {
 
     uint32_t cmd_id;
     uint32_t event_id;
+    uint32_t event_sequence;
 
     uint32_t fault_code;
     uint32_t fault_pc;
@@ -489,12 +490,13 @@ typedef struct {
     uint16_t cmd_id;
     uint16_t event_id;
     uint16_t reserved0;
+  uint32_t event_sequence;
     uint32_t fault_record_slot;
     uint32_t pmu_snapshot_slot;
 } evu_mt_commit_t;
 ```
 
-V1 推荐 done/fault 统一走 commit interface，不引入单独 sideband interrupt path。
+V1 推荐 done/fault 统一走 commit interface，不引入单独 sideband interrupt path。commit identity 必须携带 `event_id + event_sequence`，避免 reset/reuse 后 stale completion 被误判为当前 kernel 完成。
 
 ## 5. Launch Descriptor 和 slot contract
 
@@ -507,6 +509,7 @@ typedef struct {
 
     uint16_t cmd_id;
     uint16_t event_id;
+  uint32_t event_sequence;
 
     uint16_t code_slot;
     uint16_t arg_slot;
@@ -539,7 +542,8 @@ typedef struct {
 | ------------------------ | ------------------------------------ | ----------------------------------------------------- |
 | `version` / `size_bytes` | ABI 兼容                             | 不匹配必须 reject/fault                               |
 | `cmd_id`                 | 当前 kernel command id               | fault record 必须回填                                 |
-| `event_id`               | completion event id                  | commit 时原样输出                                     |
+| `event_id`               | completion event slot id             | 必须和 `event_sequence` 一起形成 completion identity  |
+| `event_sequence`         | completion event generation          | commit、wait 和 fault record 必须原样回填             |
 | `code_slot`              | kernel binary 所在 local slot        | 必须具有 execute permission                           |
 | `arg_slot`               | kernel 参数 slot                     | 只读                                                  |
 | `scratch_slot`           | scratch / spill / temp slot          | permission 必须匹配                                   |
@@ -750,7 +754,7 @@ S7: COMMIT / FAULT
 ```text
 - 接收 launch request
 - descriptor 基本合法性检查
-- 初始化 cmd_id / event_id / PC
+- 初始化 cmd_id / event_id / event_sequence / PC
 - 初始化 lane_valid_mask / active_mask
 - 清空 pred RF / mask_stack state
 ```
@@ -1228,6 +1232,7 @@ typedef struct {
     uint16_t fault_code;
     uint16_t cmd_id;
     uint16_t event_id;
+  uint32_t event_sequence;
     uint32_t fault_pc;
     uint32_t fault_lane;
     uint32_t fault_slot;

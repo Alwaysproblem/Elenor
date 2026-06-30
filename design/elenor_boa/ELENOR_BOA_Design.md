@@ -85,18 +85,18 @@ Writeback / Event Commit
 
 推荐内部子模块：
 
-| 子模块               | 职责                                                            | 关键接口                             |
-| -------------------- | --------------------------------------------------------------- | ------------------------------------ |
-| Launch Frontend      | 接收 Tile UCE launch、读取 descriptor、建立 command context     | cmd_id、desc_slot、event_id          |
-| Descriptor Validator | 检查 ABI version、size、dtype、tile、slot 权限、reserved bits   | fault record                         |
-| Tile Decoder         | 生成 m/n/k loop、split-K、dataflow、transpose 和 layout control | micro-loop issue                     |
-| Operand Fetcher      | 从 L1 operand slot 读取 A/B tile，填充 ping-pong buffer         | SRAM read port、bank conflict signal |
-| OPA Array            | 多个 OPA 并行执行 outer product / local reduce                  | fragment valid/ready                 |
-| Accumulator File     | 保存 partial sum，支持 read-modify-write 和 clear/reuse         | accumulator SRAM / register file     |
-| Reduce Network       | OPA 间、K tile 间和 split-K 局部规约                            | reduce_op、rounding mode             |
-| Epilogue Unit        | bias、activation、requant、saturate、convert                    | param slot、out dtype                |
-| Writeback Unit       | 写 C slot 或 output stream，提交 event                          | SRAM write port、event unit          |
-| PMU/Fault Unit       | 记录 cycle、stall、fault、overflow、ECC 可选事件                | PMU bus、fault record                |
+| 子模块               | 职责                                                            | 关键接口                                    |
+| -------------------- | --------------------------------------------------------------- | ------------------------------------------- |
+| Launch Frontend      | 接收 Tile UCE launch、读取 descriptor、建立 command context     | cmd_id、desc_slot、event_id、event_sequence |
+| Descriptor Validator | 检查 ABI version、size、dtype、tile、slot 权限、reserved bits   | fault record                                |
+| Tile Decoder         | 生成 m/n/k loop、split-K、dataflow、transpose 和 layout control | micro-loop issue                            |
+| Operand Fetcher      | 从 L1 operand slot 读取 A/B tile，填充 ping-pong buffer         | SRAM read port、bank conflict signal        |
+| OPA Array            | 多个 OPA 并行执行 outer product / local reduce                  | fragment valid/ready                        |
+| Accumulator File     | 保存 partial sum，支持 read-modify-write 和 clear/reuse         | accumulator SRAM / register file            |
+| Reduce Network       | OPA 间、K tile 间和 split-K 局部规约                            | reduce_op、rounding mode                    |
+| Epilogue Unit        | bias、activation、requant、saturate、convert                    | param slot、out dtype                       |
+| Writeback Unit       | 写 C slot 或 output stream，提交 event                          | SRAM write port、event unit                 |
+| PMU/Fault Unit       | 记录 cycle、stall、fault、overflow、ECC 可选事件                | PMU bus、fault record                       |
 
 ### 3.2 状态机
 
@@ -155,8 +155,8 @@ IDLE
 Tile UCE 通过 Tile Program 发起 BOA command：
 
 ```text
-launch.boa desc_slot, event_id
-wait event_id
+launch.boa desc_slot, event_id, event_sequence
+wait event_id, expected_sequence
 ```
 
 硬件可见握手：
@@ -167,10 +167,13 @@ uce_boa_launch_ready
 uce_boa_desc_slot
 uce_boa_cmd_id
 uce_boa_event_id
+uce_boa_event_sequence
 boa_uce_done_valid
 boa_uce_fault_valid
 boa_uce_fault_code
 ```
+
+BOA launch frontend 必须把 `event_id + event_sequence` 一起锁存为 completion identity；只锁存 `event_id` 会在 reset/reuse、fault drain 或多 window profile 下误判 stale completion。
 
 `launch_ready=0` 的 primary stall owner 是 BOA busy 或 descriptor frontend full；如果 BOA 等待 operand 或 stream credit，PMU 必须归因到 `boa_operand_stall` 或 `stream_credit_empty_or_full`，不能重复计入 UCE stall。
 

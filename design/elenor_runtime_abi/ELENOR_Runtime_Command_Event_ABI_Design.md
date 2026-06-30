@@ -147,8 +147,8 @@ CommandQueue
 Command
   header
   descriptor_ref
-  wait_events[]
-  signal_event
+  wait_refs[]  // event_id + expected_sequence
+  signal_event + signal_sequence
   timeout_policy
   fault_record_slot
 
@@ -167,6 +167,11 @@ Event
 #define ELENOR_ABI_VERSION_EXAMPLE 1u
 
 typedef struct {
+    uint32_t event_id;
+    uint32_t expected_sequence;
+} elenor_event_ref_v0_t;
+
+typedef struct {
     uint16_t abi_version;
     uint16_t cmd_size;
     uint16_t type;
@@ -179,9 +184,12 @@ typedef struct {
     uint32_t desc_bytes;
     uint32_t desc_crc_or_zero;
 
-    uint32_t wait_event_base;
-    uint16_t wait_event_count;
-    uint16_t signal_event;
+    uint64_t wait_ref_iova;        /* elenor_event_ref_v0_t[]; 0 means no waits */
+    uint32_t wait_ref_count;
+    uint32_t wait_ref_crc_or_zero;
+
+    uint32_t signal_event;
+    uint32_t signal_sequence;
 
     uint32_t timeout_cycles;
     uint32_t fault_record_slot;
@@ -320,9 +328,9 @@ Warm launch 中如果 descriptor cache 可能保留旧数据，runtime 必须执
 
 ### 5.3 Wait/signal protocol
 
-- `wait_event_base + wait_event_count` 表达连续 event 等待；非连续依赖可用 descriptor 扩展表表达。
-- `signal_event` 在 command 成功完成时写 DONE；失败写 ERROR/TIMEOUT/RESET。
-- barrier command 是 event dependency 的显式节点，不隐式 flush 全系统。
+- `wait_ref_iova + wait_ref_count` 表达等待集合；每个元素必须携带 `event_id + expected_sequence`。
+- `signal_event + signal_sequence` 在 command 成功完成时写 DONE；失败写 ERROR/TIMEOUT/RESET，同一 event id 的旧 sequence 不得覆盖新轮次。
+- 连续 event id 只是 runtime 分配优化；硬件 wait 方不得只依赖 `event_id` 或 base/count 推断正确性。
 - timeout 计数域必须声明：device cycle、queue cycle 或 wall-clock tick 由后续规格冻结。
 
 ### 5.4 Dynamic shape branch
@@ -345,15 +353,15 @@ if (seq_len <= profile->small_seq_limit) {
 
 ### 6.1 ABI 配置字段
 
-| 字段                    | 目的                    | 冻结方式                |
-| ----------------------- | ----------------------- | ----------------------- |
-| queue_depth             | command ring 容量       | 由后续规格冻结          |
-| max_wait_events         | 单 command 直接等待数量 | 由后续规格冻结          |
-| event_table_entries     | event table 大小        | 由后续规格冻结          |
-| fault_record_slots      | fault ring 大小         | 由后续规格冻结          |
-| descriptor_alignment    | descriptor fetch 对齐   | 由后续规格冻结          |
-| command_cacheline_bytes | command ring stride     | 由后续规格冻结          |
-| doorbell_latency        | submit latency model    | 由 PPA exploration 冻结 |
+| 字段                    | 目的                       | 冻结方式                |
+| ----------------------- | -------------------------- | ----------------------- |
+| queue_depth             | command ring 容量          | 由后续规格冻结          |
+| max_wait_refs           | 单 command 直接等待 ref 数 | 由后续规格冻结          |
+| event_table_entries     | event table 大小           | 由后续规格冻结          |
+| fault_record_slots      | fault ring 大小            | 由后续规格冻结          |
+| descriptor_alignment    | descriptor fetch 对齐      | 由后续规格冻结          |
+| command_cacheline_bytes | command ring stride        | 由后续规格冻结          |
+| doorbell_latency        | submit latency model       | 由 PPA exploration 冻结 |
 
 ### 6.2 Performance model
 

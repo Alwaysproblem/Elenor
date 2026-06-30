@@ -1374,6 +1374,8 @@ typedef struct {
 3. metadata/page-list slot 可以由 MFE 写入、UCE/USE 读取，但写入 owner 必须唯一。
 4. state slot 由 USE 管理，DMA 只能通过明确 command 或 checkpoint/restore path 修改。
 5. bank placement 应能被 compiler/runtime 指定或 hint，以降低 BOA/EVU/MFE 并发冲突。
+6. UCE sliding window 不引入 V1 硬件动态 allocator；`window_size>1` 只能使用 compiler/runtime 预先声明的 ping-pong / multi-buffer slot set。
+7. buffer 正确性由 Slot Frame owner/lifetime、event sequence 和 UCE dependency scoreboard 保证，不由 window size 本身保证。
 
 ### 13.4 Descriptor Template Auto-Patch
 
@@ -1562,6 +1564,9 @@ Data:
 - Tile Group Sequencer 必须在 dispatch 前保证 program ready。
 - Tile UCE 只消费 resident local handle，不从 global memory 直接拉 program。
 
+- Tile UCE First Silicon V1 固定 `window_size=1`，即单 active Tile Program；V1.x/V2 可在不改变 public IR 的前提下探索 `window_size=2~4` issue/preparation overlap。
+- 若开启 `window_size>1`，每个 window entry 必须携带 frame generation、descriptor window、`event_id + sequence`、read/write slot mask 和 timeout epoch；reset/drain 后旧 completion 必须因 sequence mismatch 被拒绝或转 fault。
+
 ### 15.4 Cold Launch
 
 Cold Launch 表示首次执行命中 residency miss，需要由硬件/firmware 隐式完成 fetch/verify/install。
@@ -1696,31 +1701,35 @@ group_task.accept
 
     init_stream    S0, depth=3
 
-    dma.prefetch   block=0, dst=L2_BUF0
-    dma.prefetch   block=1, dst=L2_BUF1
+    dma.prefetch   block=0, dst=L2_BUF0 -> ev_pref0:seq_pref0
+    dma.prefetch   block=1, dst=L2_BUF1 -> ev_pref1:seq_pref1
 
-    dispatch.role  role_id=0          ; QK source role: tile_mask=0x03, out_stream=S0
-    dispatch.role  role_id=1          ; softmax+AV consumer role: tile_mask=0x0C, in_stream=S0
+    dispatch.role  role_id=0 event=ev_role0_block seq=seq_role0_block[0] ; QK source role: tile_mask=0x03, out_stream=S0
+    dispatch.role  role_id=1 event=ev_role1_block seq=seq_role1_block[0] ; softmax+AV consumer role: tile_mask=0x0C, in_stream=S0
 
 loop_blocks:
-    wait.event     ev_role0_block
+    wait.event     ev_role0_block seq=seq_role0_block[block_id]
 
-    dma.prefetch   next_block, dst=L2_NEXT
+    dma.prefetch   next_block, dst=L2_NEXT -> ev_pref_next:seq_pref_next[block_id + 1]
 
-    signal.event   ev_role0, current_block
-    wait.event     ev_role1_block
+    signal.event   ev_role0_block seq=seq_role0_block[block_id] payload=current_block
+    wait.event     ev_role1_block seq=seq_role1_block[block_id]
 
     advance_block
     branch_lt      block_id, block_count, loop_blocks
 
     push_eos       S0
-    wait.event     ev_role1          ; role 1 completion fan-in
+    wait.event     ev_role1_done seq=seq_role1_done ; role 1 completion fan-in
 
-    collective.run reduce=partial_sum
-    dma.store      L2_OUT -> HBM
+    collective.run reduce=partial_sum -> ev_reduce:seq_reduce
+    wait.event     ev_reduce seq=seq_reduce
+    dma.store      L2_OUT -> HBM -> ev_store:seq_store
+    wait.event     ev_store seq=seq_store
 
-group_task.complete
+group_task.complete signal=ev_group_task_done seq=seq_group_task_done
 ```
+
+`seq_*[block_id]` 表示 runtime/Sequencer 为同一 event id 的每次循环复用分配的新 expected sequence；示例不得把固定 sequence 跨 block 重用。
 
 Tile Group Sequencer 的职责：
 
@@ -1777,6 +1786,28 @@ Tile UCE 的职责：
 5. 处理 stream token。
 6. 执行 descriptor template patch。
 7. signal tile done。
+
+Tile UCE sliding window admission contract：
+
+```text
+V1:
+  uce_window_size = 1
+  P0 complete/release -> P1 active
+
+V1.x / V2 reserved:
+  uce_window_size = 2..4
+  P0 store in-flight + P1 load/patch/compute may overlap
+  only when buffer hazard table proves slot independence
+```
+
+约束：
+
+1. sliding window 是 issue lookahead / preparation depth，不是 Tile UCE multithreading、preemption 或 multi-context scheduling。
+2. correctness 由 `event_id + sequence`、dependency scoreboard、Slot Frame owner/lifetime 和 buffer alias rules 保证；window size 本身不提供 correctness。
+3. UCE front-end 可以保持 single-issue in-order；多个 window entry 只表示多个 Tile Program context 在 event/slot scoreboard 中 in-flight。
+4. SRAM 侧使用预先声明的 ping-pong / multi-buffer slot set；V1 不新增 dynamic slot allocator。
+5. MFE async load/store overlap 需要 queue credit 和 store visibility event；store request accepted 不等于 output buffer release。
+6. read-only const slot 可以跨 window alias；任何 writable alias、WAR/RAW/WAW hazard 必须 stall admission 或 fault。
 
 ### 16.5 Tile Group Sequencer ISA 建议
 
@@ -1988,7 +2019,7 @@ Profiling/Error:
   trap
 ```
 
-示例 tile program：
+示例 tile program 中的 `e0`、`e1`、`e2`、`e3`、`e4` 是符号化 completion handle，逻辑上对应 launch 产生的 `event_id + sequence`。
 
 ```asm
 tile_matmul_relu:
@@ -2110,6 +2141,11 @@ typedef enum {
 #define ELENOR_ABI_VERSION 1
 
 typedef struct {
+    uint32_t event_id;
+    uint32_t expected_sequence;
+} elenor_event_ref_v0_t;
+
+typedef struct {
     uint16_t abi_version;
     uint16_t cmd_size;
     uint16_t type;
@@ -2122,9 +2158,12 @@ typedef struct {
     uint32_t desc_bytes;
     uint32_t desc_crc_or_zero;
 
-    uint32_t wait_event_base;
-    uint16_t wait_event_count;
-    uint16_t signal_event;
+    uint64_t wait_ref_iova;        /* elenor_event_ref_v0_t[]; 0 means no waits */
+    uint32_t wait_ref_count;
+    uint32_t wait_ref_crc_or_zero;
+
+    uint32_t signal_event;
+    uint32_t signal_sequence;
 
     uint32_t timeout_cycles;
     uint32_t fault_record_slot;
@@ -2143,6 +2182,8 @@ typedef struct {
 - timeout policy。
 - fence / memory ordering semantics。
 - completion event id。
+- wait dependency 的 `event_id + expected_sequence`。
+- signal event 的 `event_id + sequence`。
 - fault record pointer。
 - privilege / isolation flags。
 
@@ -2170,14 +2211,19 @@ typedef struct {
 
 Event 用于 engine completion、DMA completion、stage synchronization、tile done、group done 和 graph done。
 
+wait 方必须同时匹配 `event_id + expected_sequence`；只检查 status 或只检查 event id 会在 reset/reuse、多 window in-flight 和 fault drain 后误判 stale completion。
+
 ### 18.7 Runtime API
 
 ```c
-int elenor_submit(elenor_command_v0_t *cmds, int num_cmds);
-int elenor_wait(uint32_t event_id);
-int elenor_signal(uint32_t event_id);
-int elenor_reset(void);
-int elenor_read_counter(uint32_t counter_id, uint64_t *value);
+int elenor_context_create(elenor_device_t *dev, elenor_context_t **ctx);
+int elenor_queue_create(elenor_context_t *ctx, const elenor_queue_attr_t *attr, elenor_queue_t **queue);
+int elenor_submit(elenor_queue_t *queue, const elenor_command_v0_t *cmds, uint32_t num_cmds);
+int elenor_wait(elenor_context_t *ctx, uint32_t event_id, uint32_t expected_sequence, uint64_t timeout_ns);
+int elenor_event_query(elenor_context_t *ctx, uint32_t event_id, elenor_event_v0_t *out);
+int elenor_fault_read(elenor_context_t *ctx, uint32_t slot, elenor_fault_record_v0_t *out);
+int elenor_reset_domain(elenor_context_t *ctx, const elenor_reset_request_t *req);
+int elenor_read_counter(elenor_context_t *ctx, uint32_t counter_id, uint64_t *value);
 
 int elenor_use_checkpoint(elenor_state_view_t *state);
 int elenor_use_restore(elenor_state_view_t *state);
