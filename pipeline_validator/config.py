@@ -83,6 +83,12 @@ class HardwareConfig:
     boa_launch_cycles: int = 4
     evu_launch_cycles: int = 3
     mfe_launch_cycles: int = 3
+    mfe_pipeline_depth: int = 4  # MFE descriptor-accept queue depth (V2 pipelined)
+    mfe_load_queue_depth: int = 1  # UCE→MFE load command ingress FIFO depth
+    mfe_store_queue_depth: int = 1  # UCE→MFE store command ingress FIFO depth
+    # 0 = unfrozen / non-enforcing baseline (由 SRAM profile 冻结);
+    # finite value enables page-stream prefetch-capacity validation.
+    mfe_stream_buffer_bytes: int = 0
     use_launch_cycles: int = 2
     dma_launch_cycles: int = 2
     # --- Runtime / memory (V2, runtime-level simulator) -----------------
@@ -105,6 +111,16 @@ class HardwareConfig:
     firmware_fetch_cycles: int = 3
     firmware_validate_cycles: int = 5
     frame_bind_cycles: int = 8  # slot frame 3.2 FSM (8 states)
+
+    def __post_init__(self) -> None:
+        if self.mfe_pipeline_depth < 1:
+            raise ValueError("mfe_pipeline_depth must be >= 1")
+        if self.mfe_load_queue_depth < 1:
+            raise ValueError("mfe_load_queue_depth must be >= 1")
+        if self.mfe_store_queue_depth < 1:
+            raise ValueError("mfe_store_queue_depth must be >= 1")
+        if self.mfe_stream_buffer_bytes < 0:
+            raise ValueError("mfe_stream_buffer_bytes must be >= 0")
 
     def cycle_ns(self) -> float:
         """Length of one simulator cycle in nanoseconds."""
