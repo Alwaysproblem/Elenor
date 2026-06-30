@@ -503,6 +503,182 @@ def make_tiled_matmul_tile_program(num_k_chunks: int = 4,
     return p
 
 
+def make_tiled_matmul_persistent_tile_program(
+        num_group_chunks: int = 4,
+        num_k_chunks: int = 4,
+        tile_m: int = 128,
+        tile_n: int = 128,
+        tile_k: int = 64) -> TileProgram:
+    """Persistent single-dispatch tiled matmul with cross-chunk L2→L1 overlap.
+
+    Unlike ``make_tiled_matmul_tile_program`` (which is re-loaded per group
+    chunk via ``DISPATCH_ROLE``), this program runs **all group chunks** in
+    one Tile Program instance.  The key benefit: chunk g+1's prologue L2→L1
+    MFE load is issued *before* chunk g's last BOA ``WAIT``, so the load
+    overlaps with chunk g's BOA compute — eliminating the inter-program
+    bubble that exists when each chunk is a separate ``DISPATCH_ROLE``.
+
+    The program ``WAIT``s on sequencer-issued DMA events (``ev_dma_A{g}`` /
+    ``ev_dma_B{g}``) via the cross-level event bridge: the TileGroup
+    forwards group DMA completions to active tiles, and seeds already-
+    completed events at ``dispatch_role`` time so chunk-0 waits resolve
+    immediately.
+
+    Per group chunk g, the K-chunk inner loop is identical to
+    ``make_tiled_matmul_tile_program``: input double-buffer (MFE load
+    k+1 before BOA k) + output double-buffer (store k deferred, drained
+    during BOA k+1).
+
+    Instruction sequence (simplified, per group chunk g):
+        [if g < N-1: WAIT ev_dma_A{g+1}, ev_dma_B{g+1}   # cross-chunk overlap
+                     launch.mfe load_A_k0_g{g+1}, load_B_k0_g{g+1}]
+        WAIT ev_dma_A{g}, ev_dma_B{g}                     # L2 data ready (chunk g)
+        launch.mfe load_A_k0_g{g}, load_B_k0_g{g}         # prologue load chunk g
+        [K-chunk inner loop: same as make_tiled_matmul_tile_program]
+        [epilogue: drain last store of chunk g]
+    Final epilogue: drain last store, RET.
+    """
+    p = TileProgram(
+        name=f"tiled_matmul_persistent_{num_group_chunks}g_{num_k_chunks}k")
+    k_chunk_bytes_a = tile_m * tile_k * 2  # BF16
+    k_chunk_bytes_b = tile_k * tile_n * 2
+    k_chunk_ops = 2 * tile_m * tile_n * tile_k
+    insts: list[TileInst] = []
+
+    # Helper: register a load descriptor for chunk (g, k)
+    def _load_desc(name: str, nbytes: int) -> None:
+        if name not in p.descriptors:
+            p.descriptors[name] = EngineDesc(name, "MFE", "load", {
+                "bytes": nbytes, "ops": 0})
+
+    def _store_desc(name: str, nbytes: int, chunk: int) -> None:
+        if name not in p.descriptors:
+            p.descriptors[name] = EngineDesc(name, "MFE", "store", {
+                "bytes": nbytes, "ops": 0, "chunk": chunk})
+
+    def _boa_desc(name: str, chunk: int, accumulate: bool) -> None:
+        if name not in p.descriptors:
+            p.descriptors[name] = EngineDesc(name, "BOA", "matmul", {
+                "m": tile_m, "n": tile_n, "k": tile_k,
+                "ops": k_chunk_ops, "chunk": chunk,
+                "accumulate": accumulate})
+
+    for g in range(num_group_chunks):
+        # ---- wait for current chunk's L2 data (bridged DMA event) ----
+        insts.append(TileInst(
+            TileOp.WAIT, args=(f"ev_dma_A{g}",),
+            comment=f"L2 A{g} ready (group DMA)"))
+        insts.append(TileInst(
+            TileOp.WAIT, args=(f"ev_dma_B{g}",),
+            comment=f"L2 B{g} ready (group DMA)"))
+
+        # ---- prologue: load chunk g's K-chunk 0 ----
+        # For g == 0 the prologue is launched here.  For g > 0 it was
+        # already launched by the cross-chunk overlap block of chunk
+        # g-1 (hidden behind g-1's last BOA compute).
+        if g == 0:
+            _load_desc(f"load_A_k0_g{g}", k_chunk_bytes_a)
+            _load_desc(f"load_B_k0_g{g}", k_chunk_bytes_b)
+            insts.append(TileInst(
+                TileOp.LAUNCH_MFE, dst=f"e_a0_g{g}",
+                args=(f"load_A_k0_g{g}",),
+                comment=f"prefetch A k0 g{g}"))
+            insts.append(TileInst(
+                TileOp.LAUNCH_MFE, dst=f"e_b0_g{g}",
+                args=(f"load_B_k0_g{g}",),
+                comment=f"prefetch B k0 g{g}"))
+
+        # ---- K-chunk inner loop ----
+        for i in range(num_k_chunks):
+            # prefetch K-chunk i+1 inputs (input double-buffer)
+            if i < num_k_chunks - 1:
+                ni = i + 1
+                _load_desc(f"load_A_k{ni}_g{g}", k_chunk_bytes_a)
+                _load_desc(f"load_B_k{ni}_g{g}", k_chunk_bytes_b)
+                insts.append(TileInst(
+                    TileOp.LAUNCH_MFE, dst=f"e_a{ni}_g{g}",
+                    args=(f"load_A_k{ni}_g{g}",),
+                    comment=f"prefetch A k{ni} g{g} (overlap)"))
+                insts.append(TileInst(
+                    TileOp.LAUNCH_MFE, dst=f"e_b{ni}_g{g}",
+                    args=(f"load_B_k{ni}_g{g}",),
+                    comment=f"prefetch B k{ni} g{g} (overlap)"))
+
+            # wait for chunk i operands
+            insts.append(TileInst(
+                TileOp.WAITALL, args=(f"e_a{i}_g{g}", f"e_b{i}_g{g}"),
+                comment=f"operands k{i} g{g} ready"))
+
+            # BOA accumulate chunk i
+            mm_name = f"matmul_k{i}_g{g}"
+            _boa_desc(mm_name, i, accumulate=(i > 0))
+            insts.append(TileInst(
+                TileOp.LAUNCH_BOA, dst=f"e_mm{i}_g{g}",
+                args=(mm_name,),
+                comment=f"BOA accumulate k{i} g{g}"))
+
+            # ---- cross-chunk overlap: on the LAST K-chunk, issue the
+            #      next group chunk's prologue load *before* waiting for
+            #      this BOA, so the L2→L1 load overlaps with BOA compute.
+            #      The WAIT on the bridged DMA event is also deferred to
+            #      here — if the DMA isn't done yet, the WAIT stalls
+            #      behind BOA (best case: DMA already finished = no
+            #      stall).  This is the key overlap that eliminates the
+            #      inter-program bubble.
+            if i == num_k_chunks - 1 and g < num_group_chunks - 1:
+                ng = g + 1
+                insts.append(TileInst(
+                    TileOp.WAIT, args=(f"ev_dma_A{ng}",),
+                    comment=(f"cross-chunk: L2 A{ng} ready "
+                             f"(overlap last BOA g={g})")))
+                insts.append(TileInst(
+                    TileOp.WAIT, args=(f"ev_dma_B{ng}",),
+                    comment=(f"cross-chunk: L2 B{ng} ready "
+                             f"(overlap last BOA g={g})")))
+                _load_desc(f"load_A_k0_g{ng}", k_chunk_bytes_a)
+                _load_desc(f"load_B_k0_g{ng}", k_chunk_bytes_b)
+                insts.append(TileInst(
+                    TileOp.LAUNCH_MFE, dst=f"e_a0_g{ng}",
+                    args=(f"load_A_k0_g{ng}",),
+                    comment=(f"cross-chunk: prefetch A k0 g{ng} "
+                             f"(overlap last BOA g={g})")))
+                insts.append(TileInst(
+                    TileOp.LAUNCH_MFE, dst=f"e_b0_g{ng}",
+                    args=(f"load_B_k0_g{ng}",),
+                    comment=(f"cross-chunk: prefetch B k0 g{ng} "
+                             f"(overlap last BOA g={g})")))
+
+            # drain previous store while BOA_i runs (output double-buffer)
+            if i >= 1:
+                insts.append(TileInst(
+                    TileOp.WAIT, args=(f"e_store{i - 1}_g{g}",),
+                    comment=f"drain store k{i - 1} g{g} (overlap BOA{i})"))
+
+            # wait for BOA_i result
+            insts.append(TileInst(
+                TileOp.WAIT, args=(f"e_mm{i}_g{g}",),
+                comment=f"BOA k{i} g{g} done"))
+
+            # store chunk i output (fire-and-forget)
+            store_name = f"store_C_k{i}_g{g}"
+            _store_desc(store_name, tile_m * tile_n * 2, i)
+            insts.append(TileInst(
+                TileOp.LAUNCH_MFE, dst=f"e_store{i}_g{g}",
+                args=(store_name,),
+                comment=f"MFE store k{i} g{g} (deferred wait)"))
+
+        # ---- drain last store of this group chunk ----
+        insts.append(TileInst(
+            TileOp.WAIT, args=(f"e_store{num_k_chunks - 1}_g{g}",),
+            comment=f"drain last store g{g}"))
+
+    # ---- final epilogue ----
+    insts.append(TileInst(TileOp.RET))
+    p.insts = insts
+    p.resolve_labels()
+    return p
+
+
 def make_relu_tile_program() -> TileProgram:
     """EVU elementwise relu on a tile."""
     p = TileProgram(name="relu_tile")
@@ -1090,6 +1266,117 @@ def make_tiled_matmul_pipelined_task(num_group_chunks: int = 4,
     actions.append(
         GroupAction(GroupActionOp.SIGNAL_EVENT,
                     args=("group_task_done",)))
+
+    t.actions = actions
+    return t
+
+def make_tiled_matmul_persistent_task(num_group_chunks: int = 4,
+                                      num_k_chunks: int = 4) -> TileGroupTask:
+    """Persistent single-dispatch tiled matmul with cross-chunk L2→L1 overlap.
+
+    Unlike ``make_tiled_matmul_pipelined_task`` (which re-dispatches the tile
+    program per group chunk, creating an inter-program bubble), this task
+    dispatches the tile program **once**.  The persistent tile program
+    iterates over all group chunks internally, using the cross-level event
+    bridge to ``WAIT`` on sequencer-issued ``ev_dma_A{g}`` / ``ev_dma_B{g}``
+    events.  This lets chunk g+1's prologue L2→L1 load overlap with chunk g's
+    BOA compute — eliminating the inter-program bubble.
+
+    Group action sequence:
+        prologue: DMA_PREFETCH A0, B0
+        WAIT A0, B0
+        [for g in 0..N-2: DMA_PREFETCH A{g+1}, B{g+1}]  # all prefetches
+        DISPATCH_ROLE 0 -> ev_role0                      # single dispatch
+        WAIT ev_role0                                     # persistent program finishes
+        [for g in 0..N-1: DMA_STORE C{g}, WAIT ev_dma_C{g-1}]
+        WAIT ev_dma_C{N-1}
+        SIGNAL_EVENT group_task_done
+
+    Note: this is a **different workload** from ``tiled_matmul_pipelined``,
+    not a drop-in replacement.  The group-level IO pipeline differs:
+    all HBM→L2 prefetches are issued before dispatch (they are async DMA
+    jobs that complete independently).  The cross-chunk L2→L1 load
+    overlap — the key benefit — happens *inside* the persistent tile
+    program: chunk g+1's prologue load is issued behind chunk g's last
+    BOA compute, gated by ``WAIT ev_dma_A{g+1}`` (bridged event).  Group
+    DMA_STORE is issued after the tile program completes because the
+    tile program fills ``l2_buf_C{g}`` via MFE stores; store overlap is
+    not modelled at the group level in this variant.
+    """
+    total_k = 64 * num_k_chunks
+    bytes_a = 128 * total_k * 2 * 4
+    bytes_b = total_k * 128 * 2
+    bytes_c = 128 * 128 * 2 * 4
+    t = TileGroupTask(name="tiled_matmul_persistent_task")
+    t.streams = []
+    t.role_bindings = {
+        0: TileRoleBinding(
+            role_id=0, tile_mask=0x0F,
+            tile_program=make_tiled_matmul_persistent_tile_program(
+                num_group_chunks=num_group_chunks,
+                num_k_chunks=num_k_chunks))
+    }
+    actions: list[GroupAction] = []
+
+    # prologue: prefetch first chunk
+    actions.append(GroupAction(
+        GroupActionOp.DMA_PREFETCH,
+        args=("gdma_prefetch_A0", "l2_buf_A0", bytes_a),
+        dst="ev_dma_A0",
+        comment="Group DMA prefetch A chunk 0 HBM->L2"))
+    actions.append(GroupAction(
+        GroupActionOp.DMA_PREFETCH,
+        args=("gdma_prefetch_B0", "l2_buf_B0", bytes_b),
+        dst="ev_dma_B0",
+        comment="Group DMA prefetch B chunk 0 HBM->L2"))
+    actions.append(GroupAction(
+        GroupActionOp.WAIT_EVENT, args=("ev_dma_A0",),
+        comment="Wait for A chunk 0 DMA"))
+    actions.append(GroupAction(
+        GroupActionOp.WAIT_EVENT, args=("ev_dma_B0",),
+        comment="Wait for B chunk 0 DMA"))
+
+    # issue all remaining prefetches before dispatch (async DMA jobs;
+    # the tile program gates L2→L1 loads on ev_dma_A{g+1} bridged events,
+    # so the overlap happens inside the persistent program)
+    for g in range(num_group_chunks - 1):
+        ng = g + 1
+        actions.append(GroupAction(
+            GroupActionOp.DMA_PREFETCH,
+            args=(f"gdma_prefetch_A{ng}", f"l2_buf_A{ng}", bytes_a),
+            dst=f"ev_dma_A{ng}",
+            comment=f"Group DMA prefetch A chunk {ng}"))
+        actions.append(GroupAction(
+            GroupActionOp.DMA_PREFETCH,
+            args=(f"gdma_prefetch_B{ng}", f"l2_buf_B{ng}", bytes_b),
+            dst=f"ev_dma_B{ng}",
+            comment=f"Group DMA prefetch B chunk {ng}"))
+
+    # single dispatch: persistent tile program handles all chunks
+    actions.append(GroupAction(
+        GroupActionOp.DISPATCH_ROLE, args=(0,),
+        dst="ev_role0",
+        comment="Dispatch persistent tile program (all chunks)"))
+    actions.append(GroupAction(
+        GroupActionOp.WAIT_EVENT, args=("ev_role0",),
+        comment="Wait for persistent tile program"))
+
+    # store all chunks after tile program completes (L2→HBM)
+    for g in range(num_group_chunks):
+        actions.append(GroupAction(
+            GroupActionOp.DMA_STORE,
+            args=(f"gdma_store_C{g}", f"l2_buf_C{g}", bytes_c),
+            dst=f"ev_dma_C{g}",
+            comment=f"Group DMA store C chunk {g} L2->HBM"))
+        if g >= 1:
+            actions.append(GroupAction(
+                GroupActionOp.WAIT_EVENT, args=(f"ev_dma_C{g - 1}",),
+                comment=f"Drain store chunk {g - 1}"))
+    actions.append(GroupAction(
+        GroupActionOp.WAIT_EVENT, args=(f"ev_dma_C{num_group_chunks - 1}",),
+        comment="Drain last store"))
+    actions.append(GroupAction(
+        GroupActionOp.SIGNAL_EVENT, args=("group_task_done",)))
 
     t.actions = actions
     return t

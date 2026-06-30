@@ -11,15 +11,17 @@ design/ELENOR_Architecture_Design_v1.md section 21:
   MFE      : bandwidth-bound (bytes / mfe_bandwidth)
   USE      : state ops on the small control core
 
-Engines are *non-pipelined* in V1 for simplicity: an engine issues one
-descriptor at a time and the latency is ceil(ops / throughput).  The Tile
-UCE models the overlap by issuing launches and waiting on events, so
-memory (MFE/DMA) and compute (BOA/EVU) overlap naturally when the UCE
-launches them before waiting.
+V1: BOA/EVU/USE are non-pipelined (one job at a time; UCE blocks on
+`is_busy`).  MFE supports descriptor-accept queuing (pipeline_depth >= 1):
+the UCE may launch a new MFE job while an earlier job is still in flight;
+jobs execute serially on the single MFE resource with chained service
+start cycles.  This allows the double-buffered prefetch pattern in
+tiled_matmul tile programs to issue back-to-back loads without UCE stalls.
 """
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -38,92 +40,120 @@ class EngineState(Enum):
 
 @dataclass
 class EngineJob:
-    """One in-flight engine descriptor with its completion cycle."""
+    """One in-flight or queued engine descriptor."""
+
     desc: EngineDesc
-    start_cycle: int
+    start_cycle: int       # actual service-start (may be later than UCE launch)
     finish_cycle: int
     event_id: str
     pmu: PMUCounter = field(default_factory=PMUCounter)
 
 
 class Engine:
-    """Base engine: holds a config, a local PMU, and at most one running job."""
+    """Base engine.
+
+    pipeline_depth = 1  → non-pipelined (original V1).  UCE blocks on is_busy
+                          when a job is running.
+    pipeline_depth > 1  → accept up to this many total jobs (running + queued).
+                          UCE blocks only when the queue is full.  Jobs still
+                          execute one at a time on the single resource.
+    """
 
     kind: str = "BASE"
 
     def __init__(self,
                  cfg: HardwareConfig,
                  tile_id: int,
-                 tracer: Tracer | None = None):
+                 tracer: Tracer | None = None,
+                 pipeline_depth: int = 1):
         self.cfg = cfg
         self.tile_id = tile_id
         self.pmu = PMUCounter()
         self.state = EngineState.IDLE
-        self.job: EngineJob | None = None
         self.tracer = tracer
+        self._pipeline_depth = pipeline_depth
+        self._running: EngineJob | None = None
+        self._queue: deque[EngineJob] = deque()
 
-    # subclasses override
     def latency(self, desc: EngineDesc) -> int:
         raise NotImplementedError
 
     @property
     def is_busy(self) -> bool:
-        return self.job is not None and self.state == EngineState.RUNNING
+        """True → UCE must retry launch next cycle.
+
+        depth=1:  busy while a job is running.
+        depth>1:  busy when total accepted (running + queued) >= depth.
+        """
+        if self._pipeline_depth == 1:
+            return self._running is not None
+        accepted = len(self._queue) + (1 if self._running else 0)
+        return accepted >= self._pipeline_depth
 
     def launch(self, desc: EngineDesc, cycle: int,
                event_id: str) -> EngineJob | None:
-        """Launch a descriptor.  Returns None if the engine is busy (the
-        caller should retry next cycle).  Non-pipelined V1: one job at a time.
+        """Launch a descriptor.  Returns None if the engine cannot accept
+        (queue full); the caller retries next cycle.
+
+        For pipelined engines the returned job may not start immediately —
+        ``start_cycle`` reflects actual service-start, chained after
+        earlier jobs.
         """
         if self.is_busy:
             return None
         lat = self.latency(desc)
+        # service-start chains from the tail of existing work
+        tail = self._queue[-1] if self._queue else self._running
+        service_start = max(cycle, tail.finish_cycle if tail else cycle)
         job = EngineJob(desc=desc,
-                        start_cycle=cycle,
-                        finish_cycle=cycle + lat,
+                        start_cycle=service_start,
+                        finish_cycle=service_start + lat,
                         event_id=event_id,
                         pmu=PMUCounter())
-        self.state = EngineState.RUNNING
-        self.job = job
-        self.pmu.add_event("launch")
-        if self.tracer is not None:
-            self.tracer.complete(f"Tile{self.tile_id}",
-                                 self.kind,
-                                 f"{self.kind}:{desc.op}",
-                                 cycle,
-                                 cycle + lat,
-                                 args={
-                                     "event_id": event_id,
-                                     "ops": desc.params.get("ops", 0),
-                                     "bytes": desc.params.get("bytes", 0),
-                                     "desc": desc.name,
-                                     "tile_id": self.tile_id
-                                 })
+        self._queue.append(job)
+        if self._running is None:
+            self._start_next()
         return job
 
-    def tick(self, cycle: int) -> EngineJob | None:
-        """Advance one cycle; return the job if it just completed.
+    def _start_next(self) -> None:
+        """Pop the queue head and begin servicing it."""
+        if not self._queue:
+            self.state = EngineState.IDLE
+            self._running = None
+            return
+        self._running = self._queue.popleft()
+        self.state = EngineState.RUNNING
+        self.pmu.add_event("launch")
+        if self.tracer is not None:
+            self.tracer.complete(
+                f"Tile{self.tile_id}",
+                self.kind,
+                f"{self.kind}:{self._running.desc.op}",
+                self._running.start_cycle,
+                self._running.finish_cycle,
+                args={
+                    "event_id": self._running.event_id,
+                    "ops": self._running.desc.params.get("ops", 0),
+                    "bytes": self._running.desc.params.get("bytes", 0),
+                    "desc": self._running.desc.name,
+                    "tile_id": self.tile_id,
+                })
 
-        Records exactly one counter per cycle:
-          - <kind>_active  when busy (job in flight, not yet due)
-          - <kind>_idle    when idle
-        Completion is detected on the cycle the job is due.
-        """
+    def tick(self, cycle: int) -> EngineJob | None:
+        """Advance one cycle; return the job if it just completed."""
         active_key = f"{self.kind.lower()}_active"
         idle_key = f"{self.kind.lower()}_idle"
-        if self.job is not None and cycle >= self.job.finish_cycle:
-            done = self.job
-            self.job = None
-            self.state = EngineState.DONE
+        if self._running is not None and cycle >= self._running.finish_cycle:
+            done = self._running
             self.pmu.add_event("complete")
-            # the completion cycle counts as active (the job ran this cycle)
             self.pmu.add_cycle(active_key, 1)
             self.pmu.add(StallReason.NONE, 1)
             self.pmu.add_cycle("total", 1)
+            self._start_next()
             return done
-        if self.job is not None:
+        if self._running is not None:
             self.pmu.add_cycle(active_key, 1)
-            self.pmu.add(StallReason.NONE, 1)  # busy cycle
+            self.pmu.add(StallReason.NONE, 1)
             self.pmu.add_cycle("total", 1)
         else:
             self.pmu.add_cycle(idle_key, 1)
@@ -131,7 +161,8 @@ class Engine:
         return None
 
     def reset(self) -> None:
-        self.job = None
+        self._running = None
+        self._queue.clear()
         self.state = EngineState.IDLE
         self.pmu.reset()
 
@@ -140,7 +171,7 @@ class BOAEngine(Engine):
     """Block Outer-product Accelerator — dense compute.
 
     latency = launch_overhead + ceil(ops / peak_macs)
-    where peak_macs = num_opa * opa_rows * opa_cols (MACs/cycle).
+    peak_macs = num_opa * opa_rows * opa_cols (MACs/cycle).
     """
 
     kind = "BOA"
@@ -151,7 +182,6 @@ class BOAEngine(Engine):
         peak_macs = (self.cfg.boa_num_opa * self.cfg.boa_opa_rows *
                      self.cfg.boa_opa_cols)
         compute = (macs + peak_macs - 1) // peak_macs if peak_macs else 0
-        # operand bandwidth ceiling (A+B+acc read/write)
         bytes_per_op = desc.params.get("bytes", 0)
         sram_bw_bytes_per_cycle = self.cfg.tile_l1_bandwidth_gbs * 1e9 / (
             self.cfg.clock_mhz * 1e6)
@@ -172,7 +202,7 @@ class EVUEngine(Engine):
 
     def latency(self, desc: EngineDesc) -> int:
         ops = desc.params.get("ops", 0)
-        peak = self.cfg.evu_lanes * 2  # FMA = 2 ops/lane/cycle
+        peak = self.cfg.evu_lanes * 2
         compute = (ops + peak - 1) // peak if peak else 0
         return self.cfg.evu_launch_cycles + compute
 
@@ -181,9 +211,17 @@ class MFEEngine(Engine):
     """Memory Flow Engine — bandwidth-bound stream shaping.
 
     latency = launch_overhead + ceil(bytes / (mfe_bw_bytes_per_cycle))
+
+    Supports descriptor-accept queuing (pipeline_depth from config)
+    so the UCE can issue back-to-back MFE jobs without stalling.
     """
 
     kind = "MFE"
+
+    def __init__(self, cfg: HardwareConfig, tile_id: int,
+                 tracer: Tracer | None = None):
+        super().__init__(cfg, tile_id, tracer,
+                         pipeline_depth=cfg.mfe_pipeline_depth)
 
     def latency(self, desc: EngineDesc) -> int:
         nbytes = desc.params.get("bytes", 0)
@@ -192,6 +230,42 @@ class MFEEngine(Engine):
         cycles = (nbytes + bw_bytes_per_cycle -
                   1) // bw_bytes_per_cycle if bw_bytes_per_cycle else 0
         return self.cfg.mfe_launch_cycles + cycles
+
+    def launch(self, desc: EngineDesc, cycle: int,
+               event_id: str) -> EngineJob | None:
+        """Validate page-stream prefetch capacity before delegating to
+        ``Engine.launch()``.  Raises ``ValueError`` when an explicit
+        ``prefetch_depth`` exceeds the configured stream-buffer capacity;
+        the tile launch path catches it and converts it into a modeled
+        fault rather than crashing the simulation.
+        """
+        self._validate_stream_buffer(desc)
+        return super().launch(desc, cycle, event_id)
+
+    def _validate_stream_buffer(self, desc: EngineDesc) -> None:
+        """Enforce page-stream prefetch capacity when the buffer size is
+        frozen (non-zero).  Non-page-stream ops and descriptors without an
+        explicit ``prefetch_depth`` are always accepted.
+        """
+        if self.cfg.mfe_stream_buffer_bytes == 0:
+            return
+        if desc.op != "page_stream":
+            return
+        if "prefetch_depth" not in desc.params:
+            return
+        num_pages = int(desc.params["num_pages"])
+        total_bytes = int(desc.params["bytes"])
+        prefetch_depth = int(desc.params["prefetch_depth"])
+        if num_pages <= 0:
+            raise ValueError(
+                "MFE page_stream num_pages must be > 0 for buffer validation")
+        page_bytes = (total_bytes + num_pages - 1) // num_pages
+        required_bytes = prefetch_depth * page_bytes
+        if required_bytes > self.cfg.mfe_stream_buffer_bytes:
+            raise ValueError(
+                f"MFE page_stream prefetch requires {required_bytes} bytes, "
+                f"exceeds mfe_stream_buffer_bytes="
+                f"{self.cfg.mfe_stream_buffer_bytes}")
 
 
 class USEEngine(Engine):
@@ -204,8 +278,6 @@ class USEEngine(Engine):
 
     def latency(self, desc: EngineDesc) -> int:
         ops = desc.params.get("ops", 0)
-        # USE runs at a slower clock; convert to core cycles.
         ratio = self.cfg.use_clock_mhz / self.cfg.clock_mhz
-        # one state op per USE cycle, expressed in core cycles
         cycles = (ops / ratio) if ratio else 0
         return self.cfg.use_launch_cycles + int(cycles)

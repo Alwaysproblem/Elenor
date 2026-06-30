@@ -334,7 +334,7 @@ class TestSlotFrame:
 class TestBackwardCompat:
 
   def test_timing_only_unchanged(self):
-    """timing_only fidelity produces identical results to the original."""
+    """timing_only bypasses runtime residency overhead."""
     hw = HardwareConfig()
     sim = SimConfig(fidelity="timing_only")
     s = Simulator(hw, sim)

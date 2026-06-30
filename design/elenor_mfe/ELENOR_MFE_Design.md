@@ -55,6 +55,8 @@ MFE 负责：
 - page gather
 - scatter assist
 - stream-to-BOA direct feed
+- zero-copy buffer aliasing
+- view descriptor system
 
 MFE 不负责：
 
@@ -67,15 +69,17 @@ MFE 不负责：
 
 ownership 规则：
 
-| 对象                                     | owner                                    | MFE 行为                                 |
-| ---------------------------------------- | ---------------------------------------- | ---------------------------------------- |
-| page table base / block table descriptor | runtime / compiler                       | MFE 读取并 walk，fault 时记录 page id    |
-| page list / segment offset patch         | MFE                                      | 数据相关动态地址由 MFE 管理              |
-| Tile Program control                     | Tile UCE                                 | MFE 只响应 launch/wait/cancel            |
-| metadata/page-list slot                  | MFE writer，UCE/USE reader               | 写入 owner 必须唯一                      |
-| stream buffer                            | MFE producer，BOA/EVU/USE consumer       | credit/EOS/error 明确                    |
-| segment reduce partial owner             | descriptor 声明为 MFE、EVU 或 Collective | 不能隐式共享                             |
-| duplicate index                          | descriptor mode                          | 未声明行为必须 fault 或 ordered fallback |
+| 对象                                     | owner                                        | MFE 行为                                                           |
+| ---------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------ |
+| page table base / block table descriptor | runtime / compiler                           | MFE 读取并 walk，fault 时记录 page id                              |
+| page list / segment offset patch         | MFE                                          | 数据相关动态地址由 MFE 管理                                        |
+| Tile Program control                     | Tile UCE                                     | MFE 只响应 launch/wait/cancel                                      |
+| metadata/page-list slot                  | MFE writer，UCE/USE reader                   | 写入 owner 必须唯一                                                |
+| stream buffer                            | MFE producer，BOA/EVU/USE consumer           | credit/EOS/error 明确                                              |
+| segment reduce partial owner             | descriptor 声明为 MFE、EVU 或 Collective     | 不能隐式共享                                                       |
+| duplicate index                          | descriptor mode                              | 未声明行为必须 fault 或 ordered fallback                           |
+| TensorView / view binding                | compiler / runtime 定义，MFE 消费            | 复用共享 TensorView 语义解释 zero-copy view，不单独发明平行 schema |
+| alias lifecycle / release                | producer owner + runtime / Tile UCE contract | backing store 在所有 alias view release / barrier 完成前不得回收   |
 
 ## 3. 微架构和状态机
 
@@ -119,6 +123,57 @@ Consumer Handoff / Commit
 | Stream Buffer         | ping-pong buffer，写入 L1 stream slot                                 | credit、EOS/error               |
 | Store Visibility Unit | store payload 对 L1/L2 consumer 可见后产生 completion identity        | event sequence、fence           |
 | Commit Unit           | event、fault、PMU snapshot                                            | done/fault 原子提交             |
+
+#### 3.1.1 Queue 架构和 ingress 分层
+
+MFE 的 queue 架构应保持 **external command ingress** 与 **internal data/event pipeline** 分层，而不是把所有功能都做成独立 queue：
+
+- Tile UCE 到 MFE 至少区分 load/store 两类 command ingress（可实现为 `LD_CMD_Q` / `ST_CMD_Q` 或等价 launch class）；精确深度、仲裁和是否共享物理 storage 由后续规格冻结。
+- MFE 内部保留 `RD_REQ`、`RD_RESP`、`WR_REQ` 和 event/commit path 的最小 queue 组合；精确 entries / beats 预算由 SRAM profile、NoC profile 和 PPA exploration 冻结。
+- 现有 **Prefetch Queue** 继续作为 MFE 内部预取/请求跟踪路径的一部分存在；它不是 UCE→MFE 的 external command ingress 替代物。
+- 只有当可见顺序、burst 拼接或 layout reorder 确实需要时，才引入小型 skid buffer 或 reorder buffer；默认 V1 不做 full-tile write-data staging FIFO。
+
+不推荐的 V1 默认结构：
+
+- WindowGen queue。
+- LayoutTransform queue。
+- per-feature command queue。
+- full-tile WR data FIFO。
+
+#### 3.1.2 Load/Store 路径
+
+推荐的数据路径形态：
+
+```text
+Load:
+  Tile UCE
+    -> load command ingress
+    -> Window / Address Generation
+    -> RD request path
+    -> DMA Read
+    -> RD response path
+    -> optional layout transform
+    -> L1 stream / metadata slot
+
+Store:
+  Tile UCE
+    -> store command ingress
+    -> L1 read
+    -> optional layout transform
+    -> WR request path
+    -> DMA Write
+    -> L2 / HBM
+    -> event / commit path
+```
+
+这个拆分的目的不是把 MFE 变成两个独立 engine，而是在同一个 MFE 中保持 **load/store orchestration、data movement 和 completion/event** 三条路径的边界清晰。
+
+#### 3.1.3 Window Generator 和 Layout Transform 规则
+
+- Window Generator 是 streaming address-generation stage，直接喂给 read-request path；V1 不建议把它设计成独立 command queue。
+- Layout Transform 在 streaming case 走 `DMA -> XFORM -> SRAM` 或带小 skid buffer 的路径；只有当可见顺序必须恢复时才引入 reorder buffer。
+- Layout Transform 不应拥有独立 command queue；它属于 load/store pipeline 内部 stage。
+- 对 CONV / pooling 的 window 生成，复用现有 window generator / line-buffer 逻辑即可；不要再额外复制一套 feature queue。
 
 ### 3.2 总状态机
 
@@ -328,19 +383,43 @@ typedef struct {
 } mfe_segment_desc_v0_t;
 ```
 
+#### Zero-copy buffer aliasing 和 view descriptor system
+
+MFE 的 view descriptor system 复用共享 `elenor_tensor_view_t` 语义，而不是定义一套完全独立的 MFE view ABI。MFE descriptor 通过 slot/frame 先解析 backing storage，再通过 view binding 解释逻辑视图。
+
+概念性 view binding 可写成：
+
+```c
+typedef struct {
+    uint16_t src_view_slot;
+    uint16_t dst_view_slot;
+    uint16_t view_op;
+    uint16_t alias_policy;
+} mfe_view_binding_v0_t;
+```
+
+这里的 `src_view_slot` / `dst_view_slot` 指向共享 `TensorView` 条目或 slot-based 等价对象；exact field layout、slot 编码和 ABI 归属由后续规格冻结。V1 先冻结以下语义：
+
+1. zero-copy aliasing 只表示逻辑 view 共享 backing store，不隐含新的 buffer allocation。
+2. subview、slice、stride/extent 改写、只读 layout reinterpret 可保持 zero-copy。
+3. 需要真实 reorder、pack/unpack materialization 或可见顺序恢复时，MFE 必须退回 bufferized path。
+4. writable alias 仍受 Slot Frame policy 约束：V1 不允许同时存活的重叠 writable alias；只读 alias 或显式 release/barrier 分隔的 phase-disjoint handoff 才允许。
+5. backing store 在所有 alias view release / barrier 完成前不得回收。
+
 ### 4.3 Consistency boundaries
 
 MFE 的一致性边界必须 descriptor 化：
 
-| 边界              | V1 行为                                                 | 后续能力                                |
-| ----------------- | ------------------------------------------------------- | --------------------------------------- |
-| Page Stream order | logical token order；乱序返回由 reorder buffer 恢复     | 更复杂 page residency policy            |
-| Page fault        | first fault record + EOS/error token；不 silent skip    | fault recovery policy 由后续规格冻结    |
-| Segment gather    | indices 顺序或 segment order 输出，由 descriptor 声明   | coalesced reorder 但可见顺序不变        |
-| Local reduce      | partial owner 为 MFE 时只在 tile-local scope 内有效     | group/global reduce 交给 Collective     |
-| Duplicate index   | `duplicate_policy` 明确 first/last/sum/fault/ordered    | atomic add 由后续规格冻结               |
-| Scatter           | V1 仅 ordered scatter 可选；unordered atomic 不默认支持 | V2 atomic path                          |
-| Cross-tile update | 不在 MFE V1 内解决                                      | runtime 分桶、group reduce、atomic path |
+| 边界              | V1 行为                                                               | 后续能力                                        |
+| ----------------- | --------------------------------------------------------------------- | ----------------------------------------------- |
+| Page Stream order | logical token order；乱序返回由 reorder buffer 恢复                   | 更复杂 page residency policy                    |
+| Page fault        | first fault record + EOS/error token；不 silent skip                  | fault recovery policy 由后续规格冻结            |
+| Segment gather    | indices 顺序或 segment order 输出，由 descriptor 声明                 | coalesced reorder 但可见顺序不变                |
+| Local reduce      | partial owner 为 MFE 时只在 tile-local scope 内有效                   | group/global reduce 交给 Collective             |
+| Duplicate index   | `duplicate_policy` 明确 first/last/sum/fault/ordered                  | atomic add 由后续规格冻结                       |
+| Scatter           | V1 仅 ordered scatter 可选；unordered atomic 不默认支持               | V2 atomic path                                  |
+| Cross-tile update | 不在 MFE V1 内解决                                                    | runtime 分桶、group reduce、atomic path         |
+| View alias        | 复用共享 TensorView 语义；只读 alias 或 phase-disjoint handoff 才允许 | 更细粒度 alias policy / writable alias contract |
 
 ### 4.4 协议
 
@@ -372,6 +451,37 @@ mfe_stream_credit
 - UCE V1.x 可以在 P0 store 未完成时发起 P1 load，条件是 Slot Frame / UCE hazard table 证明二者不访问同一 active buffer。
 - MFE store completion event 表示 store visibility，而不是仅表示请求被接受；event 必须匹配 `event_id + sequence`。
 - Async LD/ST queue credit 是 MFE 的 backpressure 边界；queue full 时 UCE window admission 或 `launch.mfe` 必须 stall，不得丢弃请求。
+
+#### Store visibility model
+
+MFE 的 store completion 不应只暴露一个扁平 “store done” 语义。V1 至少区分三层 **概念性可见性阶段**；具体 event 名称、编码和 ABI 归属由后续共享规格冻结：
+
+| 概念阶段       | 含义                                                                 |
+| -------------- | -------------------------------------------------------------------- |
+| store accepted | MFE 已接受 store command，buffer lifecycle 可按显式 release 规则推进 |
+| L2 visible     | 数据已提交到 L2 / group-visible region，可参与后续 barrier 统计      |
+| global visible | 数据已对更大系统范围可见（例如 host / system agent 需要的路径）      |
+
+规则：
+
+- Tile / L1 不默认因为 store 尚未达到 L2/global visible 而阻塞；是否等待由 descriptor、event dependency 或上层 runtime contract 明确声明。
+- 对当前 **multi-level matmul + gather** 映射，gather 的 source of truth 不是 “DMA accepted” 或单独 ready event，而是 **L2 visible arrival + 上层显式 L2 barrier complete**。
+- exact event name / code / ABI field 由后续共享规格冻结，本节只冻结语义层次，不伪造二进制编码。
+
+#### L2 barrier、可选 scoreboarding 和 gather sync
+
+MFE commit/event path 可以维护一个概念化的 bookkeeping 结构，例如：
+
+```text
+ready_table[region][tile][version]
+```
+
+但在当前 V1 `matmul -> L2 barrier -> gather` 路径中，它只是 barrier manager / tile-group / MFE 的内部实现选择，不是对外冻结的 gather 触发 ABI。V1 先冻结以下规则：
+
+1. producer matmul/store 先把结果写到 L2，并在达到 **L2 visible** 时向 barrier scope 报到。
+2. gather / dependent consumer 只在显式 **L2 barrier complete** 后启动。
+3. partial matmul / split accumulation store 不单独释放 gather；它们只贡献 barrier arrival。
+4. 若后续版本引入 tile-level replay 或更细粒度 ready event，再由共享规格单独冻结。
 
 ### 4.5 状态寄存器和 PMU
 
@@ -462,6 +572,7 @@ MoE 中，MFE 主要用于 token grouping、expert batching 和 expert weight/to
 - MFE 与 EVU 并发时，index/mask/vector buffer bank hint 应由 compiler memory planner 统一规划。
 - Program / Descriptor / Event region 不应与 MFE stream hot path 固定共享同一组 bank。
 - UCE sliding window profile 只消费预先规划的 ping-pong / multi-buffer stream/operand slot；MFE 不承担 tile-local dynamic allocator。
+- zero-copy alias view 不自动分配新的 stream buffer；只有当 descriptor 要求 materialize/reorder 时才占用额外 SRAM workspace。
 
 ### 5.4 关键时序路径
 
@@ -495,6 +606,12 @@ MoE 中，MFE 主要用于 token grouping、expert batching 和 expert weight/to
 | outstanding requests | 匹配 L2/HBM path                                 | 由 NoC/memory profile 冻结 |
 | Page Stream format   | page table + block table V1                      | 由后续规格冻结             |
 | Segment mode         | gather only、gather local reduce、ordered output | atomic add 后续冻结        |
+
+补充约束：
+
+- queue budget 默认保持最小分层：load/store command ingress + request/response/event path；精确容量由后续规格冻结，不在本规格中伪造 `2~4` / `4~8` 数值。
+- flow control 默认采用 **buffer reservation + outstanding tracking + registered backpressure**，而不是为每个功能堆深 FIFO。
+- 只有当 reorder、visibility isolation 或跨时钟边界真的需要时，才引入额外 staging buffer。
 
 ### 6.2 性能模型
 
@@ -565,6 +682,10 @@ PMU 唯一归因：当 MFE 因 consumer 不读而阻塞时，MFE primary stall �
 - timeout 计数器按 request age 或 command age 实现，阈值由后续规格冻结。
 - Sparse/Persistent mode 未实现时 descriptor 必须 fault，不允许 silent no-op。
 - clock gating：metadata idle、prefetch queue empty、stream buffer full wait、reorder idle 分域。
+- command ingress 与 data/event path 分离：load/store command ingress、request/response path、event/commit path 不应混成一个巨型 feature queue。
+- Window Generator 作为 sequencer 内 streaming stage 实现；Layout Transform 默认走 pipeline stage + skid buffer，不单独建 command queue。
+- event/commit path 应覆盖 accepted、L2-visible、fault/timeout 以及 barrier-arrival 一类语义提交；gather 释放点由上层 barrier-complete 决定，literal event 名称由后续共享规格冻结。
+- 默认避免 full-tile WR data FIFO；只有当 store visibility isolation 或 reorder 需求证明必须时才引入。
 
 ### 7.2 软件和 compiler
 
@@ -574,6 +695,7 @@ PMU 唯一归因：当 MFE 因 consumer 不读而阻塞时，MFE primary stall �
 - Paged attention lowering 必须串联：MFE K/V page stream -> BOA QK -> EVU scale/mask/softmax -> BOA AV -> MFE/DMA store。
 - Segment Stream lowering 必须声明 duplicate policy、reduce owner、output order 和 consistency scope。
 - 对 V1 不支持的 unordered scatter/atomic，compiler 应选择 runtime 分桶、ordered fallback 或 group collective combine。
+- 对 zero-copy aliasing path，compiler/runtime 负责生成共享 TensorView 语义的 view binding，并通过显式 release/barrier 管理 backing store 生命周期。
 
 ## 8. 验证、bring-up 和验收标准
 
@@ -589,6 +711,9 @@ PMU 唯一归因：当 MFE 因 consumer 不读而阻塞时，MFE primary stall �
 - local reduce partial owner 唯一；MFE/EVU/Collective 不双写同一 output。
 - PMU active、prefetch wait、stream credit stall、NoC backpressure primary 互斥。
 - Async LD/ST queue：queue full backpressure、store visibility event、event sequence mismatch、fault epoch 后旧 response 丢弃均需覆盖。
+- store accepted / L2-visible / global-visible 三层语义单调推进，不允许 consumer 在 L2-visible 之前观察到可见数据。
+- 对当前 `matmul -> L2 barrier -> gather` 路径，barrier complete 之前不得启动 gather；partial matmul store 不得错误释放 gather。
+- TensorView / view binding 的 zero-copy alias 不得绕过 Slot Frame writable alias 规则；backing store release 必须晚于所有 alias consumer 完成。
 
 ### 8.2 Bring-up 顺序
 
