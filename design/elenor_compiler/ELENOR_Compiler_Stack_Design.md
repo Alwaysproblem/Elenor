@@ -41,7 +41,7 @@ Compiler 负责：
 2. Shape specialization 与 dynamic shape multi-versioning。
 3. Engine partition：BOA、EVU、MFE、USE、Runtime/Tile UCE 的职责映射。
 4. 选择 tile kernel library 中的 kernel template。
-5. 生成 descriptor template、slot frame template、stream queue descriptor 和 event dependency。
+5. 生成 descriptor template、slot frame template、共享 `TensorView` 语义的 view binding、stream queue descriptor 和 event dependency。
 6. 生成 executable package：section table、program reference、descriptor table、relocation table、command template、PMU manifest。
 7. 生成 golden tests：FileCheck IR、golden binary descriptor、canonical workload trace。
 
@@ -92,6 +92,7 @@ ImportedGraph
 - `KernelBoundIR`：每个 kernel_call 绑定 kernel_id、kernel ABI、descriptor ABI、slot frame ABI。
 - `DescriptorTemplateIR`：静态字段已填，runtime/tile/MFE/USE patch 字段显式标记。
 - `RuntimeCommandIR`：event dependency、barrier、timeout、fault slot 完整。
+- `MemoryPlannedIR`：TensorView/view binding 已解析到 slot frame backing store；live writable alias 不重叠，phase-disjoint alias 有显式 barrier/release。
 - `PackagedBinary`：section、relocation、CRC、version manifest 完整。
 
 ## 4. 接口、descriptor、寄存器和协议
@@ -241,6 +242,7 @@ typedef struct {
 -elenor-shape-specialize
 -elenor-engine-partition
 -elenor-kernel-library-select
+-elenor-tensor-view-alias-plan
 -elenor-slot-frame-plan
 -elenor-boa-desc-template
 -elenor-evu-irregular-lowering
@@ -394,16 +396,15 @@ Compiler 必须在编译期拒绝 unsupported op、unsupported dtype/layout、sl
 
 ### 8.1 Golden tests
 
-| 测试                     | 覆盖                                | 验收                 |
-| ------------------------ | ----------------------------------- | -------------------- |
-| FileCheck per pass       | dialect 边界、op lowering           | IR pattern 稳定      |
-| descriptor binary golden | BOA/EVU/MFE/USE/DMA descriptor      | bytes 与 golden 一致 |
-| package golden           | section/relocation/command template | deterministic build  |
-| shape multi-version      | short/medium/paged path             | branch 选择正确      |
-| kernel binding           | kernel ABI/descriptor ABI mismatch  | compile 或 load 拒绝 |
-| memory plan              | slot capacity/bank hint             | 不超过 SRAM profile  |
-| workload canonical       | GEMM/attention/paged/MoE/SSM        | Python golden 对齐   |
-| fault compile tests      | unsupported op/layout/dtype         | 明确 diagnostic      |
+| 测试                     | 覆盖                                       | 验收                                       |
+| ------------------------ | ------------------------------------------ | ------------------------------------------ |
+| FileCheck per pass       | dialect 边界、op lowering                  | IR pattern 稳定                            |
+| descriptor binary golden | BOA/EVU/MFE/USE/DMA descriptor             | bytes 与 golden 一致                       |
+| package golden           | section/relocation/command template        | deterministic build                        |
+| memory plan              | slot capacity / bank hint / alias lifetime | 不超过 SRAM profile，writable alias 不重叠 |
+| kernel binding           | kernel ABI/descriptor ABI mismatch         | compile 或 load 拒绝                       |
+| workload canonical       | GEMM/attention/paged/MoE/SSM               | Python golden 对齐                         |
+| fault compile tests      | unsupported op/layout/dtype                | 明确 diagnostic                            |
 
 ### 8.2 Bring-up alignment
 

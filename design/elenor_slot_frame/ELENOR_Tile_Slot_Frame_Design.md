@@ -353,6 +353,7 @@ Fault record 必须包含：command id、program id、frame id、generation、ti
 
 - Slot range：`base + size <= l1_bytes`，加法不得溢出。
 - Slot overlap：除明确允许 alias 的只读 const case 外，两个 writable slot 不得重叠。
+- TensorView / MFE view descriptor 可以在一个 backing slot 上创建多个逻辑 view，但这不放宽 writable alias 规则；V1 只允许只读 alias，或由显式 release/barrier 分隔的 phase-disjoint handoff alias。
 - Permission：write request 必须命中 WRITE；accumulate request 必须命中 ACCUMULATE；execute request 必须命中 EXECUTE。
 - Generation：engine launch 使用的 descriptor generation 必须等于 active frame generation。
 - Patch atomicity：patch commit 前 engine launch 不得看到部分写入 descriptor。

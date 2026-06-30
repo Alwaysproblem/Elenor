@@ -890,6 +890,31 @@ IDLE
 | Reorder Buffer        | 合并乱序返回，恢复 logical order               |
 | Commit Unit           | 更新 event、状态和错误码                       |
 
+#### Queue 架构、Load/Store 路径和 Window/Layout 规则
+
+MFE 的 queue 架构应保持 **external command ingress** 与 **internal data/event pipeline** 分层，而不是为每个功能复制独立 queue：
+
+- Tile UCE 到 MFE 至少区分 load/store 两类 command ingress（可实现为 `LD_CMD_Q` / `ST_CMD_Q` 或等价 launch class）；精确深度、仲裁和是否共享物理 storage 由后续规格冻结。
+- MFE 内部保留 `RD_REQ`、`RD_RESP`、`WR_REQ` 和 event/commit path 的最小 queue 组合；精确 entries / beats 预算由 SRAM profile、NoC profile 和 PPA exploration 冻结。
+- 现有 **Prefetch Queue** 继续作为 MFE 内部预取/请求跟踪路径的一部分存在；它不是 UCE→MFE 的 external command ingress 替代物。
+- **Window Generator** 是 streaming address-generation stage，直接喂给 read-request path；V1 不建议把它做成独立 command queue。
+- **Layout Transform** 在 streaming case 走 `DMA -> XFORM -> SRAM` 或带小 skid buffer 的路径；只有当可见顺序真的需要时才引入 reorder buffer，不建议给 layout transform 单独建 command queue。
+- V1 避免的默认结构：per-feature command queue、WindowGen queue、LayoutTransform queue、full-tile write-data staging FIFO。
+
+推荐的数据路径形态：
+
+```text
+Load:
+  UCE -> load command ingress -> Window / Addr Gen -> RD request path
+      -> DMA read -> RD response path -> optional layout transform
+      -> L1 stream / metadata slot
+
+Store:
+  UCE -> store command ingress -> L1 read -> optional layout transform
+      -> WR request path -> DMA write -> L2 / HBM
+      -> event / commit path
+```
+
 ### 10.4 Mode 1: Page Stream
 
 用于：
@@ -1019,6 +1044,34 @@ typedef struct {
     uint32_t transform;
 } mfe_load_desc_t;
 ```
+
+### 10.9 Store visibility、L2 barrier 和 gather sync
+
+MFE 的 store completion 不应只暴露“store done”一个平面语义。V1 至少要区分三层 **概念性可见性阶段**；具体 event 名称、编码和 ABI 归属由后续共享规格冻结：
+
+| 概念阶段       | 含义                                                                      |
+| -------------- | ------------------------------------------------------------------------- |
+| store accepted | MFE 已接受 store command，后续 buffer lifecycle 可按显式 release 规则推进 |
+| L2 visible     | 数据已提交到 L2 / group-visible region，可参与后续 barrier 统计           |
+| global visible | 数据已对更大系统范围可见（例如 host / system agent 需要的路径）           |
+
+共享规则：
+
+1. Tile / L1 不默认因为 store 尚未达到 L2/global visible 而阻塞；是否等待由 descriptor、event dependency 或上层 runtime contract 明确声明。
+2. 对当前 **multi-level matmul + gather** 映射，架构同步点是 **matmul store 达到 L2 visible 之后的显式 L2 barrier**；gather 只在 barrier complete 后启动。
+3. partial store、split accumulation 或多 tile producer 都只为 barrier 提供 arrival，不单独释放 gather。
+4. `ready_table[region][tile][version]` 一类结构可以作为 barrier manager / MFE / tile-group 的内部 bookkeeping，但不是当前 V1 对外冻结的 gather 触发 ABI。
+5. 因此，依赖 gather / region consumer 的 source of truth 是 **L2 visible + barrier complete**，而不是隐含的“store issued”/“DMA accepted”或单独 per-tile ready event。
+
+#### Zero-copy buffer aliasing 和 view descriptor system
+
+MFE 的 zero-copy path 不应重新发明一套独立 view schema，而应复用共享 `TensorView` 语义：descriptor 通过 slot/frame 绑定到 backing storage，再通过 view 解释 offset / extent / stride / layout。
+
+- **zero-copy aliasing** 表示多个逻辑 view 共享同一 backing store，而不是再分配一份新的 L1/L2 buffer。
+- 纯 view 变换（subview、slice、stride/extent 改写、只读 layout reinterpret）保持 zero-copy。
+- 需要真实数据重排、顺序恢复或 bank/layout materialization 时，MFE 才退回到显式 reorder/bufferized path。
+- V1 不放宽 Slot Frame 的 writable alias 规则：只允许只读 alias，或由显式 release/barrier 分隔的 phase-disjoint handoff；不允许同时存活的重叠 writable alias。
+- 具体 view binding 字段、alias policy 编码和 release handle 由后续规格冻结。
 
 ## 11. Unified State Engine / USE
 
@@ -2070,6 +2123,8 @@ typedef struct {
     uint32_t stride[ELENOR_MAX_RANK];
 } elenor_tensor_view_t;
 ```
+
+`elenor_tensor_view_t` 是共享 view object：BOA/EVU/MFE/Runtime 使用同一套 view 语义描述 base、extent、stride 和 dtype。MFE 的 zero-copy aliasing / view descriptor system 应引用这套 `TensorView` 语义，而不是定义并行的 MFE-only view schema。V1 仍受 Slot Frame alias policy 约束：只读 alias 或显式 release/barrier 分隔的 phase-disjoint handoff 可以成立，同时存活的重叠 writable alias 不成立。
 
 ### 18.3 StateView
 

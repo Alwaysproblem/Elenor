@@ -49,6 +49,11 @@ python -m pipeline_validator -l
 
 # override a hardware param (e.g. faster clock)
 python -m pipeline_validator -w attention --hw-override clock_mhz=2000
+# override MFE ingress queue depths and stream-buffer capacity
+python -m pipeline_validator -w tiled_matmul --hw-override mfe_load_queue_depth=2 --hw-override mfe_store_queue_depth=2 --hw-override mfe_stream_buffer_bytes=65536
+# mfe_stream_buffer_bytes=0 keeps the default unfrozen/non-enforcing buffer
+# baseline; a finite value enables page-stream prefetch-capacity validation
+# when descriptors provide prefetch_depth.
 
 # JSON output
 python -m pipeline_validator --all --json

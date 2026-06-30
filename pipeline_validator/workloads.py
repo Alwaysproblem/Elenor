@@ -17,6 +17,7 @@ from .ir import (
   make_matmul_task,
   make_moe_task,
   make_paged_attention_task,
+  make_tiled_matmul_persistent_task,
   make_tiled_matmul_pipelined_task,
   make_tiled_matmul_task,
 )
@@ -165,6 +166,51 @@ class TiledMatmulPipelinedWorkload(Workload):
         config=cfg,
     )
 
+class TiledMatmulPersistentWorkload(Workload):
+  """Persistent single-dispatch tiled matmul with cross-chunk L2→L1 overlap.
+
+  Unlike ``TiledMatmulPipelinedWorkload`` (which re-dispatches per group
+  chunk, creating an inter-program bubble), this workload dispatches the
+  tile program once.  The persistent tile program iterates over all group
+  chunks internally, using the cross-level event bridge to WAIT on
+  sequencer DMA events.  This lets chunk g+1's prologue L2→L1 load overlap
+  with chunk g's last BOA compute — eliminating the inter-program bubble.
+
+  Group-level IO: all HBM→L2 prefetches are issued before dispatch (async
+  DMA).  L2→HBM stores are issued after the tile program completes.
+  Store overlap is not modelled at the group level in this variant.
+  """
+
+  def __init__(self,
+               cfg: WorkloadConfig | None = None,
+               num_group_chunks: int = 4,
+               num_k_chunks: int = 4):
+    cfg = cfg or WorkloadConfig(name="tiled_matmul_persistent")
+    task = make_tiled_matmul_persistent_task(
+        num_group_chunks=num_group_chunks,
+        num_k_chunks=num_k_chunks)
+    super().__init__(
+        name="tiled_matmul_persistent",
+        task=task,
+        description=(
+            "Persistent single-dispatch tiled GEMM (128x128 per tile, "
+            f"{num_group_chunks} group chunks x {num_k_chunks} inner "
+            f"K-chunks of 64, BF16) across 4 tiles. "
+            "Cross-chunk L2→L1 overlap: chunk g+1's prologue load is "
+            "issued behind chunk g's last BOA compute via the cross-level "
+            "event bridge.  HBM→L2 prefetches are issued before dispatch; "
+            "L2→HBM stores after the tile program completes. "
+            "Tile-level K-chunk pipeline: MFE prefetch for k+1 overlaps "
+            "BOA for chunk k."),
+        expected={
+            "primary_bottleneck": "BOA",
+            "boa_active_ratio_min": 0.35,
+            "mfe_active_ratio_min": 0.08,
+            "stream_stall_ratio_max": 0.05,
+        },
+        config=cfg,
+    )
+
 
 class AttentionWorkload(Workload):
   """Paged-attention-style two-role pipeline (QK -> softmax+AV).
@@ -302,8 +348,8 @@ class PagedAttentionWorkload(Workload):
         },
         config=cfg,
     )
-
 ALL_WORKLOADS: list = [
     MatmulWorkload, TiledMatmulWorkload, TiledMatmulPipelinedWorkload,
+    TiledMatmulPersistentWorkload,
     ConvReLuWorkload, PagedAttentionWorkload, AttentionWorkload, MoEWorkload
 ]

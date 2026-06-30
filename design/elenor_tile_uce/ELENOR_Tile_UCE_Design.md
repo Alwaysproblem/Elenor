@@ -282,6 +282,8 @@ tile_matmul_relu:
     ret
 ```
 
+> 说明：示例中的 `launch.mfe d_store -> e4` / `wait e4` 不是把 MFE store 扁平化成单一 `STORE_DONE` 事件。对 store 类 MFE descriptor，`event_id` 等待的是 **descriptor 声明的本地可见性/完成阶段**；在当前 `matmul -> L2 barrier -> gather` 映射里，这通常是 barrier-participating store 的 `L2 visible`。真正的跨 tile gather 同步点不是本地 `wait e4`，而是上层 **group-level L2 barrier complete**。具体 event 名称、编码和 ABI 字段由后续共享规格冻结。
+
 ### 4.4 Tile Program 示例：stream pipeline
 
 ```asm

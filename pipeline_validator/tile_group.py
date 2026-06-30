@@ -271,6 +271,17 @@ class TileGroup:
               prog.program_id, t.tile_id, cycle)
           total_cold += prepare
         t.load_program(binding.tile_program, prepare_cycles=prepare)
+        # Seed tile-visible done-events from already-completed sequencer
+        # events (cross-level replay).  A persistent tile program may
+        # WAIT on sequencer-issued DMA events (e.g. ev_dma_A0) that
+        # completed before DISPATCH_ROLE fired — without this seed the
+        # WAIT would never resolve because the live bridge only forwards
+        # completions to tiles that were already active.  Route through
+        # notify_event so the completion queue + _complete_event path
+        # decrements dependent dep-counters correctly.
+        for done_ev in sorted(self.sequencer._events_done):
+          if done_ev.startswith("ev_dma_"):
+            t.uce.notify_event(done_ev)
         # runtime fidelity: route UCE engine-completion events through the
         # group EventTable so sequence/status is observable (P0-4).
         if self.runtime_enabled:
@@ -310,6 +321,14 @@ class TileGroup:
     for job in self._dma_jobs:
       if cycle >= job.finish_cycle:
         self.sequencer.notify_event(job.event_id)
+        # Cross-level event bridge: forward group DMA completion to
+        # active tiles so a persistent tile program can WAIT on
+        # sequencer-issued DMA events (e.g. ev_dma_A{g}).  Tiles not
+        # waiting on this event ignore it (notify_event is a no-op for
+        # unknown events when no program is loaded).
+        for t in self.tiles:
+          if not t.uce.done and t.uce.program is not None:
+            t.uce.notify_event(job.event_id)
         # full_memory: record the DMA transfer as a payload so downstream
         # engine layout checks can validate the cross-engine ABI (P0-3).
         # Alloc a tracked src payload first, then copy to the L2 slot IOVA.
@@ -392,6 +411,15 @@ class TileGroup:
     # 4. tick all compute tiles; collect role completions by event id
     for t in self.tiles:
       t.step(cycle)
+      # A tile validation fault (e.g. MFE stream-buffer prefetch overflow)
+      # must surface as a modeled group fault, not a successful completion.
+      if t.faulted:
+        self.sequencer.faulted = True
+        self.sequencer.fault_reason = f"tile{t.tile_id}: {t.fault_reason}"
+        self.sequencer.done = True
+        self.pmu.add_event("tile_fault")
+        self._aggregate_pmu()
+        return True
       if t.done and t.tile_id in self._tile_role_event:
         ev = self._tile_role_event[t.tile_id]
         done_set = self._role_done_tiles.setdefault(ev, set())
@@ -432,6 +460,7 @@ class TileGroup:
                   "event_id": ev
                 },
               )
+
 
     # 5. aggregate PMU
 
