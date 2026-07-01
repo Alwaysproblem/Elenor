@@ -180,6 +180,28 @@ class TileGroupSequencer:
       binding = self.task.role_bindings.get(role_id)
       if binding is None:
         raise ValueError(f"unknown role_id {role_id}")
+      # Backpressure: if any tile in the target mask is still running
+      # a previous role's program (program loaded and not done), do not
+      # overwrite it.  Stall here without advancing action_index so the
+      # dispatch retries next cycle once those tiles finish.  This lets a
+      # TileGroupTask issue multiple DISPATCH_ROLE actions to the same
+      # tile_mask (e.g. the pow phase of tiled_matmul_pipelined_pow) and
+      # have them execute sequentially without an explicit intervening
+      # WAIT_EVENT.  For workloads that already WAIT between dispatches
+      # this is a no-op (tiles are done by the time the next dispatch
+      # arrives).
+      tile_mask = binding.tile_mask
+      busy = any(
+          (t.role_id is not None and not t.done
+           and t.uce.program is not None)
+          for t in self.group.tiles
+          if tile_mask & (1 << t.tile_id))
+      if busy:
+        # Stall: do not advance action_index.  step() already counted
+        # this cycle as "total"; attribute it as a dispatch-wait stall.
+        self.pmu.add(StallReason.WAIT_EVENT, 1)
+        self.pmu.add_cycle("dispatch_wait", 1)
+        return None
       ev = ins.dst or f"ev_role{role_id}"
       self._role_events[role_id] = ev
       # start the tiles: load program + bind streams

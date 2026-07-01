@@ -20,9 +20,11 @@ from pipeline_validator.ir import (
   make_matmul_task,
   make_matmul_tile_program,
   make_paged_attention_tile_program,
+  make_pow_tile_program,
   make_stream_pipeline_tile_program,
   make_tiled_matmul_persistent_task,
   make_tiled_matmul_persistent_tile_program,
+  make_tiled_matmul_pipelined_pow_task,
   make_tiled_matmul_pipelined_task,
   make_tiled_matmul_task,
   make_tiled_matmul_tile_program,
@@ -40,8 +42,9 @@ from pipeline_validator.workloads import (
   MatmulWorkload,
   MoEWorkload,
   PagedAttentionWorkload,
-  TiledMatmulPipelinedWorkload,
   TiledMatmulPersistentWorkload,
+  TiledMatmulPipelinedPowWorkload,
+  TiledMatmulPipelinedWorkload,
   TiledMatmulWorkload,
 )
 
@@ -1066,8 +1069,15 @@ class TestTileScheduler:
     """A finite mfe_stream_buffer_bytes faults explicit page-stream prefetch
     that exceeds capacity; exact-fit and default-0 (unfrozen) complete."""
     from pipeline_validator.ir import (
-        EngineDesc, GroupAction, GroupActionOp, TileGroupTask,
-        TileInst, TileOp, TileProgram, TileRoleBinding)
+      EngineDesc,
+      GroupAction,
+      GroupActionOp,
+      TileGroupTask,
+      TileInst,
+      TileOp,
+      TileProgram,
+      TileRoleBinding,
+    )
     from pipeline_validator.simulator import Simulator
 
     def make_page_stream_task(prefetch_depth: int) -> TileGroupTask:
@@ -1117,3 +1127,225 @@ class TestTileScheduler:
     result = sim.run(make_page_stream_task(3))
     assert result.completed, (
         f"default non-enforcing buffer should complete, got: {result.reason}")
+
+
+# ---------------------------------------------------------------------------
+# Tiled-matmul-pipelined-pow tests (two-stage: matmul + EVU pow)
+# ---------------------------------------------------------------------------
+
+
+class TestTiledMatmulPipelinedPow:
+  """Tests for the two-stage tiled-matmul-pipelined-pow workload.
+
+  The workload runs a pipelined tiled matmul (role 0) followed by an EVU
+  elementwise pow (role 1) with a strict phase fence: the pow phase starts
+  only after all matmul stores drain to HBM.  This covers:
+    - End-to-end completion of a multi-role two-stage task.
+    - PMU fingerprint: BOA active (matmul) + EVU active (pow) + MFE active
+      (loads/stores in both phases) + multi-stage group IO.
+    - Trace: pow prefetch starts after the last matmul store (phase fence),
+      and EVU:pow slices appear on the tile tracks.
+    - Sequencer backpressure: repeated DISPATCH_ROLE to the same tile_mask
+      (pow phase) must not overwrite a running role.
+  """
+
+  def _run(self, **hw_overrides):
+    hw = HardwareConfig().with_overrides(**hw_overrides)
+    sim = Simulator(hw, SimConfig(max_cycles=200_000))
+    return sim.run(TiledMatmulPipelinedPowWorkload().task)
+
+  def test_completes(self):
+    result = self._run()
+    assert result.completed, (
+        f"tiled_matmul_pipelined_pow did not complete: {result.reason}")
+    assert result.cycles > 0
+    assert result.credit_invariant_ok
+
+  def test_task_structure_two_roles(self):
+    """The task has two role bindings and the pow phase actions."""
+    t = make_tiled_matmul_pipelined_pow_task(
+        num_group_chunks=4, num_k_chunks=4)
+    assert len(t.role_bindings) == 2
+    assert 0 in t.role_bindings and 1 in t.role_bindings
+    # role 0 = matmul, role 1 = pow
+    assert t.role_bindings[0].tile_program.name == "tiled_matmul_4k_tile"
+    assert t.role_bindings[1].tile_program.name == "pow_4k_tile"
+    # pow phase: 4 prefetches + 4 dispatches(role 1) + 4 stores + 4 drains
+    ops = [a.op for a in t.actions]
+    # matmul phase: 4 dispatches(role 0) + pow phase: 4 dispatches(role 1)
+    assert ops.count(GroupActionOp.DISPATCH_ROLE) == 8
+    # 4 matmul C stores + 4 pow output stores
+    assert ops.count(GroupActionOp.DMA_STORE) == 8
+    # matmul prefetches (4x2 A+B) + pow prefetches (4) = 12
+    assert ops.count(GroupActionOp.DMA_PREFETCH) == 12
+
+  def test_pow_tile_program_structure(self):
+    """The pow tile program is load -> pow -> store."""
+    p = make_pow_tile_program(name="pow_4k_tile",
+                               chunk_bytes=128 * 128 * 2)
+    assert p.name == "pow_4k_tile"
+    ops = [i.op for i in p.insts]
+    # launch.mfe, wait, launch.evu, wait, launch.mfe, wait, ret
+    assert ops == [
+        TileOp.LAUNCH_MFE, TileOp.WAIT,
+        TileOp.LAUNCH_EVU, TileOp.WAIT,
+        TileOp.LAUNCH_MFE, TileOp.WAIT,
+        TileOp.RET,
+    ]
+    # descriptors
+    assert "load_pow" in p.descriptors
+    assert "pow_chunk" in p.descriptors
+    assert "store_pow" in p.descriptors
+    assert p.descriptors["pow_chunk"].kind == "EVU"
+    assert p.descriptors["pow_chunk"].op == "pow"
+    assert p.descriptors["pow_chunk"].params["exponent"] == 2
+    assert p.descriptors["pow_chunk"].params["ops"] == 65536
+
+  def test_report_all_checks_pass(self):
+    """The report fingerprint passes: BOA + EVU + MFE + multi-stage IO."""
+    wl = TiledMatmulPipelinedPowWorkload(num_group_chunks=4, num_k_chunks=4)
+    sim = Simulator(HardwareConfig(), SimConfig(max_cycles=200_000))
+    result = sim.run(wl.task)
+    assert result.completed, (
+        f"did not complete: {result.reason}")
+    rep = build_report(wl, result)
+    # all checks must pass
+    failed = [c for c in rep.checks if not c["pass"]]
+    assert not failed, f"failed checks: {failed}"
+    # verify specific checks exist and pass
+    completion = next(c for c in rep.checks
+                      if c["check"] == "task_completed")
+    assert completion["pass"]
+    gp = next(c for c in rep.checks
+              if c["check"] == "multi_stage_group_io")
+    assert gp["pass"]
+    assert gp["actual"] is True
+    evu = next(c for c in rep.checks
+               if c["check"] == "evu_active_ratio")
+    assert evu["pass"], f"EVU should be active (pow phase): {evu}"
+    # EVU must have run (pow phase)
+    assert rep.engine_active.get("EVU", 0) > 0
+    # BOA must have run (matmul phase)
+    assert rep.engine_active.get("BOA", 0) > 0
+
+  def test_trace_has_pow_phase_and_fence(self):
+    """Trace contains EVU:pow slices, pow role dispatches, pow prefetch/store
+    bars, and the phase fence: the first pow prefetch starts after the last
+    matmul store ends."""
+    wl = TiledMatmulPipelinedPowWorkload(num_group_chunks=4, num_k_chunks=4)
+    sim = Simulator(HardwareConfig(),
+                    SimConfig(max_cycles=200_000),
+                    enable_tracer=True)
+    result = sim.run(wl.task)
+    assert result.completed, (
+        f"did not complete: {result.reason}")
+    data = json.loads(result.tracer.to_chrome_json())
+    events = data["traceEvents"]
+    slices = [e for e in events if e["ph"] == "X"]
+    names = {e["name"] for e in slices}
+
+    # ---- matmul phase DMA bars ----
+    for g in range(4):
+      assert f"dma.prefetch:gdma_prefetch_A{g}" in names, names
+      assert f"dma.store:gdma_store_C{g}" in names, names
+
+    # ---- pow phase DMA bars ----
+    for g in range(4):
+      assert f"dma.prefetch:gdma_prefetch_pow{g}" in names, names
+      assert f"dma.store:gdma_store_pow{g}" in names, names
+
+    # ---- pow role dispatch windows (role 1) ----
+    for g in range(4):
+      assert any(
+          n.startswith(f"dispatch:role1:ev_role_pow{g}:run")
+          for n in names), (
+          f"missing pow role dispatch for chunk {g} in {sorted(names)}")
+
+    # ---- EVU:pow engine slices on tile tracks ----
+    evu_slices = [e for e in slices if e["cat"] == "EVU"]
+    evu_names = {e["name"] for e in evu_slices}
+    assert "EVU:pow" in evu_names, (
+        f"EVU:pow slice missing, got: {evu_names}")
+
+    # ---- phase fence: pow prefetch 0 starts after matmul store C3 ends ----
+    by_name = {e["name"]: e for e in slices}
+    store_c3 = by_name.get("dma.store:gdma_store_C3")
+    pow_prefetch0 = by_name.get("dma.prefetch:gdma_prefetch_pow0")
+    assert store_c3 is not None, "missing matmul store C3 slice"
+    assert pow_prefetch0 is not None, "missing pow prefetch 0 slice"
+    store_c3_end = store_c3["ts"] + store_c3["dur"]
+    assert pow_prefetch0["ts"] >= store_c3_end, (
+        f"phase fence violated: pow prefetch 0 starts at "
+        f"{pow_prefetch0['ts']} but matmul store C3 ends at "
+        f"{store_c3_end}")
+
+  def test_pow_prefetch_overlap_with_compute(self):
+    """The up-front pow prefetches overlap: pow prefetch for chunk g+1
+    starts before pow dispatch for chunk g finishes, proving the prefetches
+    are issued up front (async DMA) while earlier chunks compute."""
+    wl = TiledMatmulPipelinedPowWorkload(num_group_chunks=4, num_k_chunks=4)
+    sim = Simulator(HardwareConfig(),
+                    SimConfig(max_cycles=200_000),
+                    enable_tracer=True)
+    result = sim.run(wl.task)
+    assert result.completed, f"did not complete: {result.reason}"
+    data = json.loads(result.tracer.to_chrome_json())
+    slices = [e for e in data["traceEvents"] if e["ph"] == "X"]
+    by_name = {e["name"]: e for e in slices}
+    # pow prefetch 1 must start before pow dispatch 0 finishes
+    pow_prefetch1 = by_name.get("dma.prefetch:gdma_prefetch_pow1")
+    assert pow_prefetch1 is not None, "missing pow prefetch 1"
+    pow_dispatch0 = next(
+        (e for e in slices
+         if e["name"].startswith("dispatch:role1:ev_role_pow0:run")),
+        None)
+    assert pow_dispatch0 is not None, "missing pow dispatch 0"
+    dispatch0_end = pow_dispatch0["ts"] + pow_dispatch0["dur"]
+    assert pow_prefetch1["ts"] < dispatch0_end, (
+        f"pow prefetch 1 starts at {pow_prefetch1['ts']} but pow dispatch 0 "
+        f"ends at {dispatch0_end} — prefetches not issued up front")
+
+  def test_sequencer_backpressure_same_mask_dispatch(self):
+    """Regression: two DISPATCH_ROLE actions to the same tile_mask with no
+    intervening WAIT must complete — the sequencer backpressures the second
+    dispatch until the tiles from the first are done, instead of
+    overwriting tile state and deadlocking."""
+    t = TileGroupTask(name="test_backpressure")
+    t.streams = []
+    t.role_bindings = {
+      0: TileRoleBinding(role_id=0, tile_mask=0x0F,
+                         tile_program=make_pow_tile_program(
+                             name="pow_tile",
+                             chunk_bytes=128 * 128 * 2)),
+    }
+    t.actions = [
+      GroupAction(GroupActionOp.DMA_PREFETCH,
+                  args=("pref0", "l2_0", 128 * 128 * 2 * 4),
+                  dst="ev_dma0"),
+      GroupAction(GroupActionOp.DMA_PREFETCH,
+                  args=("pref1", "l2_1", 128 * 128 * 2 * 4),
+                  dst="ev_dma1"),
+      GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_dma0",)),
+      GroupAction(GroupActionOp.DISPATCH_ROLE, args=(0,), dst="ev_role0"),
+      GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_dma1",)),
+      GroupAction(GroupActionOp.DISPATCH_ROLE, args=(0,), dst="ev_role1"),
+      GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_role0",)),
+      GroupAction(GroupActionOp.DMA_STORE,
+                  args=("store0", "l2_0", 128 * 128 * 2 * 4),
+                  dst="ev_store0"),
+      GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_role1",)),
+      GroupAction(GroupActionOp.DMA_STORE,
+                  args=("store1", "l2_1", 128 * 128 * 2 * 4),
+                  dst="ev_store1"),
+      GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_store0",)),
+      GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_store1",)),
+      GroupAction(GroupActionOp.SIGNAL_EVENT, args=("group_task_done",)),
+    ]
+    sim = Simulator(HardwareConfig(), SimConfig(max_cycles=50_000))
+    result = sim.run(t)
+    assert result.completed, (
+        f"backpressure test did not complete: {result.reason}")
+    # both dispatches and both stores must have run
+    assert result.pmu.events.get("tgs_dispatch_role", 0) == 2
+    assert result.pmu.events.get("tgs_dma_store", 0) == 2
+    assert result.pmu.events.get("tile_done", 0) == 8  # 2 dispatches x 4 tiles

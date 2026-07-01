@@ -18,6 +18,7 @@ from .ir import (
   make_moe_task,
   make_paged_attention_task,
   make_tiled_matmul_persistent_task,
+  make_tiled_matmul_pipelined_pow_task,
   make_tiled_matmul_pipelined_task,
   make_tiled_matmul_task,
 )
@@ -160,6 +161,64 @@ class TiledMatmulPipelinedWorkload(Workload):
             "primary_bottleneck": "BOA",
             "boa_active_ratio_min": 0.35,
             "mfe_active_ratio_min": 0.08,
+            "stream_stall_ratio_max": 0.05,
+            "multi_stage_group_io": True,
+        },
+        config=cfg,
+    )
+
+
+class TiledMatmulPipelinedPowWorkload(Workload):
+  """Tiled matmul + elementwise pow two-stage task with pipelined group IO.
+
+  Mirrors the ``tiled_matmul_pipelined_pow_task`` IR example.  Two roles
+  share the Tile Group:
+    - Role 0 (tiles 0-3): K-chunked tiled matmul with the same group-level
+      async IO pipeline as ``tiled_matmul_pipelined``.
+    - Role 1 (tiles 0-3): EVU elementwise pow (exponent=2) on each stage's
+      output.  The pow phase starts only after ALL matmul stores (C0..C3)
+      are drained to HBM — a strict phase fence.  Inside the pow phase the
+      four HBM->L2 prefetches are issued up front, then each chunk is
+      dispatched as soon as its own input is visible in L2, and each chunk's
+      result is stored back as soon as its pow tiles finish.
+
+  Expected fingerprint:
+    - BOA active (matmul phase is compute-bound).
+    - EVU active (pow phase runs the EVU engine).
+    - MFE active (L2<->L1 loads/stores in both phases).
+    - Multi-stage group IO (multiple prefetch/dispatch actions).
+    - No stream stall (no inter-tile Stream Queue).
+  """
+
+  def __init__(self,
+               cfg: WorkloadConfig | None = None,
+               num_group_chunks: int = 4,
+               num_k_chunks: int = 4):
+    cfg = cfg or WorkloadConfig(name="tiled_matmul_pipelined_pow")
+    task = make_tiled_matmul_pipelined_pow_task(
+        num_group_chunks=num_group_chunks,
+        num_k_chunks=num_k_chunks)
+    super().__init__(
+        name="tiled_matmul_pipelined_pow",
+        task=task,
+        description=(
+            "Two-stage tiled GEMM (128x128 per tile, "
+            f"{num_group_chunks} group stages x {num_k_chunks} inner "
+            f"K-chunks of 64, BF16) across 4 tiles, followed by an EVU "
+            f"elementwise pow(x, 2) on each stage's output ({num_group_chunks} "
+            "pow chunks).  Matmul phase: group-level IO pipeline with "
+            "DMA prefetch for stage g+1 overlapping tile compute for stage g. "
+            "Pow phase: strict fence — starts only after all matmul stores "
+            "drain to HBM; all pow prefetches issue up front, each chunk "
+            "dispatches when its input is visible in L2.  "
+            f"Per-stage matmul: {num_k_chunks}x2 MFE loads + "
+            f"{num_k_chunks} BOA accumulates + {num_k_chunks} MFE stores. "
+            f"Per-stage pow: 1 MFE load + 1 EVU pow + 1 MFE store."),
+        expected={
+            "primary_bottleneck": "BOA",
+            "boa_active_ratio_min": 0.35,
+            "mfe_active_ratio_min": 0.08,
+            "evu_active_ratio_min": 0.01,
             "stream_stall_ratio_max": 0.05,
             "multi_stage_group_io": True,
         },
@@ -350,6 +409,6 @@ class PagedAttentionWorkload(Workload):
     )
 ALL_WORKLOADS: list = [
     MatmulWorkload, TiledMatmulWorkload, TiledMatmulPipelinedWorkload,
-    TiledMatmulPersistentWorkload,
+    TiledMatmulPipelinedPowWorkload, TiledMatmulPersistentWorkload,
     ConvReLuWorkload, PagedAttentionWorkload, AttentionWorkload, MoEWorkload
 ]
