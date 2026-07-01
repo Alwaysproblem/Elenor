@@ -71,6 +71,7 @@ class HardwareConfig:
     # 6.3: UCE + USE may share one tile-local RISC-V; UCE issues 1 inst/cycle.
     uce_clock_mhz: float = 1000.0
     uce_dispatch_per_cycle: int = 1
+    uce_window_size: int = 2  # active + prepared Tile Program entries
 
     # --- Stream queue -----------------------------------------------------
     # Stream Queue design 6.1: depth=3 canonical trace from TileGroupTask.
