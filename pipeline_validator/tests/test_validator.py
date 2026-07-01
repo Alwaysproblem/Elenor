@@ -10,11 +10,14 @@ import json
 import pipeline_validator as pv
 from pipeline_validator.config import HardwareConfig, SimConfig
 from pipeline_validator.ir import (
+  EngineDesc,
   GroupAction,
   GroupActionOp,
   TileGroupTask,
+  TileInst,
   TileOp,
   TileRoleBinding,
+  TileProgram,
   make_attention_task,
   make_identity_tile_program,
   make_matmul_task,
@@ -346,6 +349,115 @@ class TestSimulation:
     assert result.cycles > 0
     assert result.credit_invariant_ok
 
+  def test_runtime_uce_window_queues_next_role(self):
+    slow = TileProgram(name="window_slow")
+    slow.descriptors = {
+      "work": EngineDesc("work", "BOA", "matmul", {"ops": 2_000_000}),
+    }
+    slow.insts = [
+      TileInst(TileOp.LAUNCH_BOA, dst="e_work", args=("work", )),
+      TileInst(TileOp.WAIT, args=("e_work", )),
+      TileInst(TileOp.RET),
+    ]
+    slow.resolve_labels()
+
+    fast = make_identity_tile_program()
+    task = TileGroupTask(name="uce_window_two_roles")
+    task.role_bindings = {
+      0: TileRoleBinding(role_id=0, tile_mask=0x01, tile_program=slow),
+      1: TileRoleBinding(role_id=1, tile_mask=0x01, tile_program=fast),
+    }
+    task.actions = [
+      GroupAction(GroupActionOp.DISPATCH_ROLE, args=(0, ), dst="ev_role0"),
+      GroupAction(GroupActionOp.DISPATCH_ROLE, args=(1, ), dst="ev_role1"),
+      GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_role0", )),
+      GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_role1", )),
+      GroupAction(GroupActionOp.SIGNAL_EVENT, args=("group_task_done", )),
+    ]
+
+    sim = Simulator(HardwareConfig(), SimConfig(fidelity="runtime", max_cycles=20_000))
+    result = sim.run(task)
+
+    assert result.completed, f"window task did not complete: {result.reason}"
+    assert result.pmu.events.get("uce_window_entry_queued", 0) == 1
+    assert result.pmu.events.get("tile_task_completed", 0) == 2
+    overlap = (
+      result.pmu.named_cycles.get("uce_window_prepare_overlap", 0)
+      + result.pmu.named_cycles.get("uce_window_frame_bind_overlap", 0)
+    )
+    assert overlap > 0
+
+  def test_runtime_uce_window_executes_next_program_mfe_load_prefix(self):
+    """Direct proof: a queued next TileProgram issues its leading MFE load
+    while the current TileProgram is still running, then promotes without
+    re-executing that load."""
+    # role 0: slow BOA program (runs long enough for role 1 to queue and
+    # issue its MFE-load lookahead prefix).
+    slow = TileProgram(name="window_slow")
+    slow.descriptors = {
+      "work": EngineDesc("work", "BOA", "matmul", {"ops": 2_000_000}),
+    }
+    slow.insts = [
+      TileInst(TileOp.LAUNCH_BOA, dst="e_work", args=("work", )),
+      TileInst(TileOp.WAIT, args=("e_work", )),
+      TileInst(TileOp.RET),
+    ]
+    slow.resolve_labels()
+
+    # role 1: leading MFE load (lookahead-eligible) then BOA compute.
+    nxt = TileProgram(name="window_next_mfe_load")
+    nxt.descriptors = {
+      "load_next": EngineDesc("load_next", "MFE", "load",
+                              {"bytes": 4096, "ops": 0}),
+      "compute_next": EngineDesc("compute_next", "BOA", "matmul",
+                                 {"ops": 4096}),
+    }
+    nxt.insts = [
+      TileInst(TileOp.LAUNCH_MFE, dst="e_load", args=("load_next", )),
+      TileInst(TileOp.WAIT, args=("e_load", )),
+      TileInst(TileOp.LAUNCH_BOA, dst="e_compute", args=("compute_next", )),
+      TileInst(TileOp.WAIT, args=("e_compute", )),
+      TileInst(TileOp.RET),
+    ]
+    nxt.resolve_labels()
+
+    task = TileGroupTask(name="uce_window_lookahead_two_roles")
+    task.role_bindings = {
+      0: TileRoleBinding(role_id=0, tile_mask=0x01, tile_program=slow),
+      1: TileRoleBinding(role_id=1, tile_mask=0x01, tile_program=nxt),
+    }
+    task.actions = [
+      GroupAction(GroupActionOp.DISPATCH_ROLE, args=(0, ), dst="ev_role0"),
+      GroupAction(GroupActionOp.DISPATCH_ROLE, args=(1, ), dst="ev_role1"),
+      GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_role0", )),
+      GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_role1", )),
+      GroupAction(GroupActionOp.SIGNAL_EVENT, args=("group_task_done", )),
+    ]
+
+    sim = Simulator(HardwareConfig(),
+                    SimConfig(fidelity="runtime", max_cycles=20_000),
+                    enable_tracer=True)
+    result = sim.run(task)
+
+    assert result.completed, (
+        f"lookahead task did not complete: {result.reason}")
+    assert result.pmu.events.get("uce_window_entry_queued", 0) == 1
+    assert result.pmu.events.get(
+        "uce_window_mfe_lookahead_launch", 0) == 1
+    assert result.pmu.events.get(
+        "uce_window_mfe_lookahead_promote", 0) == 1
+    assert result.pmu.events.get("tile_task_completed", 0) == 2
+
+    data = json.loads(result.tracer.to_chrome_json())
+    events = data["traceEvents"]
+    mfe_loads = [
+      e for e in events
+      if e.get("name") == "MFE:load"
+      and str(e.get("args", {}).get("event_id", "")).startswith("lookahead:")
+    ]
+    assert mfe_loads, (
+        "no MFE:load slice with lookahead: event_id in trace")
+
 
   def test_attention_completes(self):
     result = self._run(AttentionWorkload())
@@ -393,7 +505,10 @@ class TestSimulation:
 
   def test_tiled_matmul_pipelined_report_has_passing_checks(self):
     wl = TiledMatmulPipelinedWorkload(num_group_chunks=4, num_k_chunks=4)
-    sim = Simulator(HardwareConfig(), SimConfig(max_cycles=200_000))
+    # Lookahead is a runtime-fidelity feature; the report proof must run
+    # in runtime so the uce_window_mfe_lookahead check is exercised.
+    sim = Simulator(HardwareConfig(),
+                    SimConfig(fidelity="runtime", max_cycles=200_000))
     result = sim.run(wl.task)
     rep = build_report(wl, result)
     # completion + credit invariant must pass
@@ -405,6 +520,10 @@ class TestSimulation:
               if c["check"] == "multi_stage_group_io")
     assert gp["pass"], f"multi_stage_group_io failed: {gp}"
     assert gp["actual"] is True
+    # uce_window_mfe_lookahead check must exist and pass (runtime fidelity)
+    la = next(c for c in rep.checks
+              if c["check"] == "uce_window_mfe_lookahead")
+    assert la["pass"], f"uce_window_mfe_lookahead failed: {la}"
 
   def test_stream_workloads_drain_eos_tokens(self):
     # Attention and MoE use a producer/consumer Stream Queue; after
@@ -622,10 +741,15 @@ class TestTracer:
   def test_tiled_matmul_pipelined_trace_has_multi_stage_dma(self):
     """Pipelined tiled matmul task emits multiple Global DMA bars
     (one prefetch/store pair per group chunk) plus multiple role
-    dispatch windows, proving the group-level IO pipeline."""
+    dispatch windows, proving the group-level IO pipeline.
+
+    Runs in runtime fidelity so the UCE window lookahead path is active:
+    chunk g+1 is dispatched before chunk g role completion, the queued
+    next TileProgram issues its leading MFE load under chunk g compute,
+    and a namespaced lookahead MFE:load slice appears in the trace."""
     wl = TiledMatmulPipelinedWorkload(num_group_chunks=4, num_k_chunks=4)
     sim = Simulator(HardwareConfig(),
-                    SimConfig(max_cycles=200_000),
+                    SimConfig(fidelity="runtime", max_cycles=200_000),
                     enable_tracer=True)
     result = sim.run(wl.task)
     assert result.completed, (
@@ -672,6 +796,35 @@ class TestTracer:
     assert dma_b1["ts"] < role0_end, (
         f"DMA prefetch B1 starts at {dma_b1['ts']} us, "
         f"but role0 ends at {role0_end} us — no overlap")
+    # ---- Dispatch-order assertion: chunk g+1 dispatched before chunk g
+    # role completion, so the queued next TileProgram arrives while chunk g
+    # is still running (precondition for UCE window lookahead). ----
+    role1 = next((e for e in slices
+                  if e["name"].startswith("dispatch:role0:ev_role_c1:run")),
+                 None)
+    assert role1 is not None, "missing role1 dispatch slice"
+    assert role1["ts"] < role0_end, (
+        f"role1 dispatch starts at {role1['ts']} us, "
+        f"but role0 ends at {role0_end} us — no queued next TileProgram")
+    # ---- Lookahead PMU assertion ----
+    assert result.pmu.events.get("uce_window_entry_queued", 0) > 0
+    assert result.pmu.events.get(
+        "uce_window_mfe_lookahead_launch", 0) > 0
+    # ---- Lookahead trace assertion: at least one MFE:load slice with a
+    # namespaced event_id starting with "lookahead:" starts before chunk 0
+    # role completion, proving the queued program's leading MFE load issued
+    # under chunk g compute. ----
+    lookahead_loads = [
+        e for e in mfe
+        if e["name"] == "MFE:load"
+        and str(e.get("args", {}).get("event_id", "")).startswith("lookahead:")
+    ]
+    assert lookahead_loads, (
+        "no MFE:load slice with lookahead: event_id in trace")
+    assert min(e["ts"] for e in lookahead_loads) < role0_end, (
+        f"lookahead MFE load starts at "
+        f"{min(e['ts'] for e in lookahead_loads)} us, "
+        f"but role0 ends at {role0_end} us — lookahead did not overlap")
 
 
 

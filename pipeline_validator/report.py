@@ -200,6 +200,20 @@ def _run_checks(wl: Workload, result: SimResult, engine_active: dict,
             ),
             "pass": ok,
         })
+
+    if exp.get("uce_window_mfe_lookahead"):
+        lookahead_launch = result.pmu.events.get(
+            "uce_window_mfe_lookahead_launch", 0)
+        queued = result.pmu.events.get("uce_window_entry_queued", 0)
+        ok = lookahead_launch > 0 and queued > 0
+        checks.append({
+            "check": "uce_window_mfe_lookahead",
+            "expected": True,
+            "actual": ok,
+            "detail": (
+                f"lookahead_launch={lookahead_launch}, queued={queued}"),
+            "pass": ok,
+        })
     return checks
 
 

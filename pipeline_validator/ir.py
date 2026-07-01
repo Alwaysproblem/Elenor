@@ -990,16 +990,26 @@ def make_tiled_matmul_pipelined_task(num_group_chunks: int = 4,
       - Group-level IO pipeline: DMA for g+1 hidden behind compute for g.
       - Tile-level K-chunk pipeline: MFE load for k+1 hidden behind BOA for k.
       - Both levels working simultaneously (two-level overlap).
+      - UCE window lookahead: chunk g+1 DISPATCH_ROLE arrives before chunk g
+        role completion, so the queued next TileProgram can issue its leading
+        MFE loads while chunk g is still computing (runtime fidelity only).
 
-    Group action sequence (per group chunk g):
+    Group action sequence:
         [prologue: DMA_PREFETCH A_0, B_0]
-        WAIT A_g, B_g
-        DISPATCH_ROLE 0  → ev_role_cg
-        [if g < N-1: DMA_PREFETCH A_{g+1}, B_{g+1}  (overlaps compute)]
-        WAIT ev_role_cg
-        DMA_STORE C_g    → ev_dma_Cg
-        [if g >= 1: WAIT ev_dma_C{g-1}  (drain prev store)]
-        [epilogue: WAIT last store, SIGNAL_EVENT]
+        WAIT A_0, B_0
+        DISPATCH_ROLE chunk 0 -> ev_role_c0
+        for g in 0..N-2:
+            DMA_PREFETCH A_{g+1}, B_{g+1}
+            WAIT A_{g+1}, B_{g+1}
+            DISPATCH_ROLE chunk g+1 -> ev_role_c{g+1}
+            WAIT ev_role_cg
+            DMA_STORE C_g -> ev_dma_Cg
+            if g >= 1: WAIT ev_dma_C{g-1}
+        WAIT ev_role_c{N-1}
+        DMA_STORE C_{N-1} -> ev_dma_C{N-1}
+        if N >= 2: WAIT ev_dma_C{N-2}
+        WAIT ev_dma_C{N-1}
+        SIGNAL_EVENT group_task_done
     """
     total_k = 64 * num_k_chunks
     bytes_a = 128 * total_k * 2 * 4  # tile_m * total_k * BF16 * 4 tiles
@@ -1026,55 +1036,65 @@ def make_tiled_matmul_pipelined_task(num_group_chunks: int = 4,
                     dst="ev_dma_B0",
                     comment="Group DMA prefetch B chunk 0 HBM->L2"))
 
-    # ---- per-chunk loop body (unrolled) ----
-    for g in range(num_group_chunks):
-        # wait for A_g, B_g DMA
-        actions.append(
-            GroupAction(GroupActionOp.WAIT_EVENT,
-                        args=(f"ev_dma_A{g}",),
-                        comment=f"Wait for A chunk {g} DMA"))
-        actions.append(
-            GroupAction(GroupActionOp.WAIT_EVENT,
-                        args=(f"ev_dma_B{g}",),
-                        comment=f"Wait for B chunk {g} DMA"))
+    # ---- wait for first chunk DMA, then dispatch chunk 0 ----
+    actions.append(
+        GroupAction(GroupActionOp.WAIT_EVENT,
+                    args=("ev_dma_A0",),
+                    comment="Wait for A chunk 0 DMA"))
+    actions.append(
+        GroupAction(GroupActionOp.WAIT_EVENT,
+                    args=("ev_dma_B0",),
+                    comment="Wait for B chunk 0 DMA"))
+    actions.append(
+        GroupAction(GroupActionOp.DISPATCH_ROLE, args=(0,),
+                    dst="ev_role_c0",
+                    comment="Dispatch tiles for group chunk 0"))
 
-        # dispatch tile role
+    # ---- loop g in 0..N-2: prefetch/wait/dispatch g+1 before waiting for g ----
+    for g in range(num_group_chunks - 1):
+        ng = g + 1
+        # prefetch next chunk while tiles compute (input double-buffer)
+        actions.append(
+            GroupAction(GroupActionOp.DMA_PREFETCH,
+                        args=(f"gdma_prefetch_A{ng}",
+                              f"l2_buf_A{ng}", bytes_a),
+                        dst=f"ev_dma_A{ng}",
+                        comment=f"Group DMA prefetch A chunk {ng} "
+                                f"(overlap compute g={g})"))
+        actions.append(
+            GroupAction(GroupActionOp.DMA_PREFETCH,
+                        args=(f"gdma_prefetch_B{ng}",
+                              f"l2_buf_B{ng}", bytes_b),
+                        dst=f"ev_dma_B{ng}",
+                        comment=f"Group DMA prefetch B chunk {ng} "
+                                f"(overlap compute g={g})"))
+        # wait for next chunk DMA
+        actions.append(
+            GroupAction(GroupActionOp.WAIT_EVENT,
+                        args=(f"ev_dma_A{ng}",),
+                        comment=f"Wait for A chunk {ng} DMA"))
+        actions.append(
+            GroupAction(GroupActionOp.WAIT_EVENT,
+                        args=(f"ev_dma_B{ng}",),
+                        comment=f"Wait for B chunk {ng} DMA"))
+        # dispatch chunk g+1 BEFORE waiting for chunk g role completion,
+        # so the queued next TileProgram arrives while chunk g is still
+        # running and can issue its leading MFE loads under UCE lookahead.
         actions.append(
             GroupAction(GroupActionOp.DISPATCH_ROLE, args=(0,),
-                        dst=f"ev_role_c{g}",
-                        comment=f"Dispatch tiles for group chunk {g}"))
-
-        # prefetch next chunk while tiles compute (input double-buffer)
-        if g < num_group_chunks - 1:
-            ng = g + 1
-            actions.append(
-                GroupAction(GroupActionOp.DMA_PREFETCH,
-                            args=(f"gdma_prefetch_A{ng}",
-                                  f"l2_buf_A{ng}", bytes_a),
-                            dst=f"ev_dma_A{ng}",
-                            comment=f"Group DMA prefetch A chunk {ng} "
-                                    f"(overlap compute g={g})"))
-            actions.append(
-                GroupAction(GroupActionOp.DMA_PREFETCH,
-                            args=(f"gdma_prefetch_B{ng}",
-                                  f"l2_buf_B{ng}", bytes_b),
-                            dst=f"ev_dma_B{ng}",
-                            comment=f"Group DMA prefetch B chunk {ng} "
-                                    f"(overlap compute g={g})"))
-
-        # wait for tile role completion
+                        dst=f"ev_role_c{ng}",
+                        comment=f"Dispatch tiles for group chunk {ng}"))
+        # wait for chunk g role completion
         actions.append(
             GroupAction(GroupActionOp.WAIT_EVENT,
                         args=(f"ev_role_c{g}",),
                         comment=f"Wait for chunk {g} tiles"))
-
         # store results (non-blocking)
         actions.append(
             GroupAction(GroupActionOp.DMA_STORE,
                         args=(f"gdma_store_C{g}", f"l2_buf_C{g}", bytes_c),
                         dst=f"ev_dma_C{g}",
                         comment=f"Group DMA store C chunk {g} L2->HBM"))
-
         # drain previous store (output double-buffer, overlaps next compute)
         if g >= 1:
             actions.append(
@@ -1082,10 +1102,25 @@ def make_tiled_matmul_pipelined_task(num_group_chunks: int = 4,
                             args=(f"ev_dma_C{g - 1}",),
                             comment=f"Drain store chunk {g - 1} (overlap)"))
 
-    # ---- epilogue: drain last store ----
+    # ---- epilogue: wait last role, store/drain final chunk ----
+    last = num_group_chunks - 1
     actions.append(
         GroupAction(GroupActionOp.WAIT_EVENT,
-                    args=(f"ev_dma_C{num_group_chunks - 1}",),
+                    args=(f"ev_role_c{last}",),
+                    comment=f"Wait for chunk {last} tiles"))
+    actions.append(
+        GroupAction(GroupActionOp.DMA_STORE,
+                    args=(f"gdma_store_C{last}", f"l2_buf_C{last}", bytes_c),
+                    dst=f"ev_dma_C{last}",
+                    comment=f"Group DMA store C chunk {last} L2->HBM"))
+    if num_group_chunks >= 2:
+        actions.append(
+            GroupAction(GroupActionOp.WAIT_EVENT,
+                        args=(f"ev_dma_C{last - 1}",),
+                        comment=f"Drain store chunk {last - 1}"))
+    actions.append(
+        GroupAction(GroupActionOp.WAIT_EVENT,
+                    args=(f"ev_dma_C{last}",),
                     comment="Drain last store"))
     actions.append(
         GroupAction(GroupActionOp.SIGNAL_EVENT,

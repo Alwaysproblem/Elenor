@@ -108,6 +108,7 @@ class TileGroupSequencer:
   # ---- action issue ----------------------------------------------
 
   def _issue(self, ins: GroupAction, cycle: int) -> tuple[int, str] | None:
+    assert self.task is not None
     op = ins.op
     if op == GroupActionOp.INIT_STREAM:
       qid, depth, pmask, cmask = ins.args
@@ -176,14 +177,15 @@ class TileGroupSequencer:
       self.action_index += 1
     elif op == GroupActionOp.DISPATCH_ROLE:
       role_id, = ins.args
-      assert self.task is not None
-      binding = self.task.role_bindings.get(role_id)
-      if binding is None:
+      if role_id not in self.task.role_bindings:
         raise ValueError(f"unknown role_id {role_id}")
+      binding = self.task.role_bindings[role_id]
       ev = ins.dst or f"ev_role{role_id}"
+      accepted = self.group.dispatch_role(binding, cycle, event_id=ev)
+      if not accepted:
+        self.pmu.add_cycle("uce_window_admission_stall", 1)
+        return None
       self._role_events[role_id] = ev
-      # start the tiles: load program + bind streams
-      self.group.dispatch_role(binding, cycle, event_id=ev)
       self.pmu.add_event("tgs_dispatch_role")
       self.action_index += 1
       return (role_id, ev)

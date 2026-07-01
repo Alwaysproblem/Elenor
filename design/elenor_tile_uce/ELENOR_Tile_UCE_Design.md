@@ -219,10 +219,13 @@ Window=1:
 Window=2:
   P0 compute/store in-flight
   P1 load/patch/compute may issue only if slot hazard table proves independence
+  (V1.x verification model: restricted MFE-load-prefix lookahead —
+   see §3.5.1 for the queued-entry load-prefix issue model)
 
 Window=4:
   P0/P1/P2/P3 may occupy different load/compute/store/wait stages,
   but commit/fault visibility still follows event + sequence rules.
+
 ```
 
 关键规则：
@@ -235,6 +238,31 @@ Window=4:
 6. 所有 writable slot alias、write-after-read、read-after-write、write-after-write hazard 必须 stall admission；除只读 const alias 外不能靠 software convention 放行。
 7. SRAM 侧不引入 V1 硬件动态 allocator；compiler/runtime 通过 Slot Frame 预留 ping-pong / multi-buffer slot set，UCE 只做 owner/lifetime reuse 检查。
 8. reset/drain 必须按 window entry 清理 outstanding event、stream token、slot owner 和 descriptor generation；旧 completion 若 sequence 不匹配必须被丢弃或转 fault。
+
+### 3.5.1 V1.x restricted MFE-load-prefix lookahead（验证模型）
+
+V1.x `window_size=2` profile 的一个可验证子模型是 **restricted queued-entry MFE-load-prefix lookahead**：当 P0 仍在 PROGRAM_RUN/DRAIN 时，P1 的 prepared entry 在完成 prepare/frame-bind 后，可以从其 Tile Program 前缀中发射 **leading MFE `load` 指令**，而其余指令（store、BOA/EVU/USE launch、branch、stream op、非 P1 自发事件的 wait）必须等到 P1 被 promote 为 active context 后才执行。
+
+```text
+P0 (active):   ... BOA compute / wait ...
+P1 (queued):   launch.mfe L0 ->  launch.mfe L1 ->  wait L0,L1 ->  launch.boa -> ...
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                lookahead prefix: 只允许 MFE load，
+                stop at store/compute/branch/stream/foreign-wait
+```
+
+关键规则（验证模型语义，非 First Silicon V1 硬件 ABI）：
+
+1. lookahead 只覆盖 `launch.mfe` 且 descriptor `kind == MFE`、`op == load`；MFE store 和所有 BOA/EVU/USE launch 立即 stop。
+2. 包含任何 stream op（pop/push/acquire/release/push_eos/br_eos）的 Tile Program 不进入 lookahead，只保留 prepare/frame-bind overlap。
+3. `wait`/`waitall` 只有在所有被等待事件都由本 lookahead context 自身发出且已 done 时才跨越；否则 stop。这避免 P1 等待 P0 才能提供的事件而提前阻塞。
+4. lookahead event 使用 **namespaced event id**（`lookahead:{window_id}:{original_event}`）以隔离 P0 active UCE 的 event namespace；该命名格式是 **implementation-private trace/debug only**，不是 public ABI、不是 event table 的架构 event id 编码，First Silicon V1 硬件 event id 不使用该前缀。
+5. P1 promote 为 active 时 **不重放** 已发射的 load：active UCE PC 直接设为 `lookahead_pc`，`events_done` 并入 `lookahead_done`；仍在 in-flight 的 namespaced load 通过 event alias bridge（`lookahead:…` -> original event id）由 active UCE 的后续 wait 消费。
+6. lookahead 不得 stall active UCE：lookahead issue 只在 active UCE 本 cycle 已 step（PROGRAM_RUN，含 wait-stall/wait-resolve）或 active task 已在 DRAIN 时发生；在 FRAME_BIND -> PROGRAM_RUN 的 transition cycle 不发射，避免抢占 active program 首条 `launch.mfe` 的 MFE engine。
+7. MFE busy 时 lookahead 记录 retry 周期（`uce_window_mfe_lookahead_engine_busy`），不阻塞 active UCE。
+8. 该子模型不建模具体 memory alias / SlotFrame read-write mask correctness；correctness 仍由 §3.5 关键规则 1/5/6 的 event sequence、Slot Frame owner 和 buffer alias 检查保证。若未来 descriptor 暴露 per-dispatch slot mask，应在 lookahead issue 前加 alias 检查。
+
+验证模型与 §3.5 profile 表的关系：`V1.x balanced (window=2)` 行描述的 load/compute/store overlap 即由本子模型的 leading-load-prefix 提供 first-level overlap；完整 compute overlap 仍需 promote 后 active UCE 执行。
 
 建议 profile：
 
@@ -526,6 +554,20 @@ cycle B:   P0 store visibility event DONE(seq0)
 cycle C:   P0 buffer release retires; slot owner becomes reusable
 ```
 
+V1.x restricted MFE-load-prefix lookahead 时序（验证模型）：
+
+```text
+P0 active:   launch.boa -> wait e_boa -> ...
+                                  |  (P0 在 BOA compute / wait 期间)
+P1 queued:                      launch.mfe L0  (namespaced event lookahead:{wid}:e_L0)
+                                launch.mfe L1  (namespaced event lookahead:{wid}:e_L1)
+                                stop at wait L0/L1 (issued by self, not yet done) 或 launch.boa
+P0 complete -> P1 promote:
+              uce.pc = lookahead_pc (跳过已发射的 load prefix)
+              events_done ∪= lookahead_done
+              in-flight namespaced load 通过 alias bridge 被 active wait 消费
+```
+
 架构不要求 UCE out-of-order commit。即使多个 window entry 同时 active，fault、DONE、RESET 的可见性也必须由 event sequence 和 dependency scoreboard 决定。
 
 ### 5.4 Wait/fence ordering
@@ -615,25 +657,30 @@ T_effective_tile =
 
 ### 6.3 PMU counter
 
-| Counter                          | 说明                                                     |
-| -------------------------------- | -------------------------------------------------------- |
-| `uce_active_cycles`              | UCE 非 idle 周期                                         |
-| `uce_retired_insts`              | retired Tile Program 指令数                              |
-| `uce_branch_taken`               | taken branch 数                                          |
-| `uce_launch_dma/boa/evu/mfe/use` | 各 engine launch 数                                      |
-| `uce_wait_cycles`                | wait/waitall 阻塞周期                                    |
-| `uce_wait_error`                 | wait 观察到 error/timeout/reset 次数                     |
-| `uce_desc_patch_count`           | patch 指令数                                             |
-| `uce_desc_patch_stall`           | patch unit/cache/range check stall                       |
-| `uce_stream_pop_empty`           | pop 等待 input token                                     |
-| `uce_stream_push_full`           | push/acquire 等待 output credit                          |
-| `uce_fetch_stall`                | program fetch stall                                      |
-| `uce_trap_count`                 | trap 次数，按 cause 可分组                               |
-| `uce_timeout_count`              | watchdog timeout 次数                                    |
-| `uce_window_active_high`         | active window entries high-watermark；V1 应为 1          |
-| `uce_window_admission_stall`     | window full、event entry full 或 hazard table 阻塞       |
-| `uce_slot_hazard_stall`          | slot alias / WAR / RAW / WAW hazard 导致 admission stall |
-| `uce_store_visibility_wait`      | 等待 store visibility event 或 buffer release 的周期     |
+| Counter                                  | 说明                                                                     |
+| ---------------------------------------- | ------------------------------------------------------------------------ |
+| `uce_active_cycles`                      | UCE 非 idle 周期                                                         |
+| `uce_retired_insts`                      | retired Tile Program 指令数                                              |
+| `uce_branch_taken`                       | taken branch 数                                                          |
+| `uce_launch_dma/boa/evu/mfe/use`         | 各 engine launch 数                                                      |
+| `uce_wait_cycles`                        | wait/waitall 阻塞周期                                                    |
+| `uce_wait_error`                         | wait 观察到 error/timeout/reset 次数                                     |
+| `uce_desc_patch_count`                   | patch 指令数                                                             |
+| `uce_desc_patch_stall`                   | patch unit/cache/range check stall                                       |
+| `uce_stream_pop_empty`                   | pop 等待 input token                                                     |
+| `uce_stream_push_full`                   | push/acquire 等待 output credit                                          |
+| `uce_fetch_stall`                        | program fetch stall                                                      |
+| `uce_trap_count`                         | trap 次数，按 cause 可分组                                               |
+| `uce_timeout_count`                      | watchdog timeout 次数                                                    |
+| `uce_window_active_high`                 | active window entries high-watermark；V1 应为 1                          |
+| `uce_window_admission_stall`             | window full、event entry full 或 hazard table 阻塞                       |
+| `uce_slot_hazard_stall`                  | slot alias / WAR / RAW / WAW hazard 导致 admission stall                 |
+| `uce_store_visibility_wait`              | 等待 store visibility event 或 buffer release 的周期                     |
+| `uce_window_mfe_lookahead_launch`        | V1.x 验证模型：queued entry 发射 leading MFE load 次数（非 V1 硬件 PMU） |
+| `uce_window_mfe_lookahead_wait`          | V1.x 验证模型：lookahead context 等待自身已发出但未 done 的 event 的周期 |
+| `uce_window_mfe_lookahead_promote`       | V1.x 验证模型：带已发射 load prefix 的 queued entry 被 promote 次数      |
+| `uce_window_mfe_lookahead_wait_resolved` | V1.x 验证模型：lookahead context 跨越自身 wait 次数                      |
+| `uce_window_mfe_lookahead_engine_busy`   | V1.x 验证模型：lookahead 因 MFE busy retry 的周期                        |
 
 PMU primary stall owner 规则：
 

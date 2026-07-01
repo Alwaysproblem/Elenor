@@ -209,10 +209,14 @@ class TileGroup:
     binding: TileRoleBinding,
     cycle: int,
     event_id: str | None = None,
-  ) -> None:
-    """Load the role's Tile Program onto the selected tiles and mark them."""
+  ) -> bool:
+    """Load the role's Tile Program onto selected tiles when their UCE window admits it."""
     role_id = binding.role_id
     tile_mask = binding.tile_mask
+    selected_tiles = [t for t in self.tiles if tile_mask & (1 << t.tile_id)]
+    if any(not t.can_accept_program() for t in selected_tiles):
+      return False
+
     self._role_tile_mask[role_id] = tile_mask
     ev = event_id or f"ev_role{role_id}"
     # overwrite (not setdefault) so a re-dispatched role_id in a loop
@@ -244,6 +248,7 @@ class TileGroup:
         out_stream=binding.out_stream,
         in_stream=binding.in_stream,
       )
+
     total_cold = 0
     prog = binding.tile_program
     # runtime fidelity: register program identity once keyed by the full
@@ -260,29 +265,37 @@ class TileGroup:
           program_id=prog.program_id, version=prog.version,
           program_hash=prog.program_hash,
           hbm_iova=0, hbm_bytes=cached)
-    for t in self.tiles:
-      if tile_mask & (1 << t.tile_id):
-        # per-tile prepare cycles: each tile pays its own cold/warm penalty
-        # (residency is tracked per-tile; a partial reset leaves some tiles
-        # warm and others cold, so we must not broadcast a single max).
-        prepare = 0
-        if self.runtime_enabled and prog.program_id != 0:
-          prepare = self.program_table.ensure_resident(
-              prog.program_id, t.tile_id, cycle)
-          total_cold += prepare
-        t.load_program(binding.tile_program, prepare_cycles=prepare)
-        # runtime fidelity: route UCE engine-completion events through the
-        # group EventTable so sequence/status is observable (P0-4).
-        if self.runtime_enabled:
-          t.uce._event_done_callback = self._make_event_callback()
-        t.role_id = role_id
+
+    for t in selected_tiles:
+      # per-tile prepare cycles: each tile pays its own cold/warm penalty
+      # (residency is tracked per-tile; a partial reset leaves some tiles
+      # warm and others cold, so we must not broadcast a single max).
+      prepare = 0
+      if self.runtime_enabled and prog.program_id != 0:
+        prepare = self.program_table.ensure_resident(
+            prog.program_id, t.tile_id, cycle)
+        total_cold += prepare
+      accepted = t.load_program(
+        binding.tile_program,
+        prepare_cycles=prepare,
+        role_id=role_id,
+        role_event=ev,
+      )
+      if not accepted:
+        return False
+      # runtime fidelity: route UCE engine-completion events through the
+      # group EventTable so sequence/status is observable (P0-4).
+      if self.runtime_enabled:
+        t.uce._event_done_callback = self._make_event_callback()
+      if t.current_role_event == ev:
         self._tile_role_event[t.tile_id] = ev
-        # rebind streams for this role (program may use qid 0/1)
-        for qid, q in self.queues.items():
-          t.bind_stream(qid, q)
+      # rebind streams for this role (program may use qid 0/1)
+      for qid, q in self.queues.items():
+        t.bind_stream(qid, q)
+
     if total_cold > 0:
       self.pmu.add_cycle("program_cold_load", total_cold)
-
+    return True
   @staticmethod
   def _program_bytes(prog) -> int:
     """Estimate *program text* size for residency (install to tile program SRAM).
@@ -392,47 +405,58 @@ class TileGroup:
     # 4. tick all compute tiles; collect role completions by event id
     for t in self.tiles:
       t.step(cycle)
-      if t.done and t.tile_id in self._tile_role_event:
-        ev = self._tile_role_event[t.tile_id]
-        done_set = self._role_done_tiles.setdefault(ev, set())
-        if t.tile_id not in done_set:
-          done_set.add(t.tile_id)
+      completed_task = t.pop_completed_task()
+      if completed_task is None:
+        continue
+
+      if t.has_active_task and t.current_role_event is not None:
+        self._tile_role_event[t.tile_id] = t.current_role_event
+      else:
+        self._tile_role_event.pop(t.tile_id, None)
+
+      ev = completed_task.role_event
+      if ev is None:
+        continue
+
+      role_id = completed_task.role_id
+      done_set = self._role_done_tiles.setdefault(ev, set())
+      if t.tile_id not in done_set:
+        done_set.add(t.tile_id)
+        if tr is not None:
+          tr.instant(f"Tile{t.tile_id}", "UCE", "tile_done", cycle,
+                     {"role_id": role_id})
+        # when all tiles of a role are done, fire the role event
+        mask = self._role_tile_mask.get(role_id if role_id is not None else -1, 0)
+        expected = bin(mask).count("1")
+        if len(done_set) >= expected:
+          self.sequencer.notify_event(ev)
           if tr is not None:
-            tr.instant(f"Tile{t.tile_id}", "UCE", "tile_done", cycle,
-                       {"role_id": getattr(t, "role_id", None)})
-          # when all tiles of a role are done, fire the role event
-          mask = self._role_tile_mask.get(getattr(t, "role_id", -1), 0)
-          expected = bin(mask).count("1")
-          if len(done_set) >= expected:
-            self.sequencer.notify_event(ev)
-            if tr is not None:
-              rt = self._role_trace.get(ev)
-              if rt is not None:
-                tr.complete(
-                  "TileGroup",
-                  "TileRole",
-                  f"dispatch:role{rt.role_id}:{ev}:run",
-                  rt.start_cycle,
-                  cycle,
-                  args={
-                    "role_id": rt.role_id,
-                    "event_id": ev,
-                    "tile_mask": mask,
-                    "out_stream": rt.out_stream,
-                    "in_stream": rt.in_stream,
-                  },
-                )
-              tr.instant(
+            rt = self._role_trace.get(ev)
+            if rt is not None:
+              tr.complete(
                 "TileGroup",
                 "TileRole",
-                "tile_role_complete",
+                f"dispatch:role{rt.role_id}:{ev}:run",
+                rt.start_cycle,
                 cycle,
-                {
-                  "role_id": getattr(t, "role_id", None),
-                  "event_id": ev
+                args={
+                  "role_id": rt.role_id,
+                  "event_id": ev,
+                  "tile_mask": mask,
+                  "out_stream": rt.out_stream,
+                  "in_stream": rt.in_stream,
                 },
               )
-
+            tr.instant(
+              "TileGroup",
+              "TileRole",
+              "tile_role_complete",
+              cycle,
+              {
+                "role_id": role_id,
+                "event_id": ev
+              },
+            )
     # 5. aggregate PMU
 
     # 5b. advance reset/drain FSM if active (runtime fidelity)

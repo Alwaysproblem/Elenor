@@ -149,7 +149,7 @@ RESET
 | COMPLETE            | drain complete                           | signal tile done event，snapshot PMU，可写 status                                                                        | event accepted                  |
 | FAULT_CAPTURE       | invalid desc、timeout、ECC、engine fault | freeze syndrome、pc、desc id、slot id、event id                                                                          | fault record 写入完成           |
 
-First Silicon V1 的 `PROGRAM_RUN` 只有一个 active Tile Program context。若 V1.x/V2 profile 开启 `window_size>1`，Compute Tile 必须把每个 active context 绑定到独立 window entry，并记录 `frame_id/frame_generation/desc_window/event_sequence/read_write_slot_mask`；但 prepared tile task binary layout 不因此扩展为多线程模型。
+First Silicon V1 的 `PROGRAM_RUN` 只有一个 active Tile Program context。若 V1.x/V2 profile 开启 `window_size>1`，Compute Tile 必须把每个 active context 绑定到独立 window entry，并记录 `frame_id/frame_generation/desc_window/event_sequence/read_write_slot_mask`；但 prepared tile task binary layout 不因此扩展为多线程模型。V1.x 验证模型的 restricted queued-entry MFE-load-prefix lookahead 见 `elenor_tile_uce` §3.5.1：queued entry 在 P0 仍处于 PROGRAM_RUN/DRAIN 时只发射 leading MFE load 前缀，lookahead issue 不得抢占 active UCE 的 MFE engine，promote 时不重放已发射的 load。
 
 ### 3.3 Engine task 状态机
 
@@ -404,7 +404,7 @@ T_dma_load_next <= T_boa_compute_current
 T_evu_epilogue  <= T_store_or_next_load_overlap window
 ```
 
-在 UCE `window_size=1` 时，上述 overlap 只能来自单 Tile Program 内部的 DMA/BOA/EVU/MFE pipeline。若 V1.x 打开 `window_size=2~4`，`T_store_or_next_load_overlap` 只有在 next program 使用独立 slot set、store visibility event 使用正确 sequence、MFE async LD/ST queue 有 credit 时成立；否则 UCE 必须把新 program admission stall 到 buffer release。
+在 UCE `window_size=1` 时，上述 overlap 只能来自单 Tile Program 内部的 DMA/BOA/EVU/MFE pipeline。若 V1.x 打开 `window_size=2~4`，`T_store_or_next_load_overlap` 只有在 next program 使用独立 slot set、store visibility event 使用正确 sequence、MFE async LD/ST queue 有 credit 时成立；否则 UCE 必须把新 program admission stall 到 buffer release。V1.x 验证模型中，next program 的 leading MFE load 前缀可在 active program 仍在 PROGRAM_RUN/DRAIN 时提前发射（restricted MFE-load-prefix lookahead，见 `elenor_tile_uce` §3.5.1），为上述 overlap 提供第一级 load hiding。
 
 具体 latency target 由 PPA exploration 冻结。
 
@@ -712,7 +712,7 @@ Exception 分类：
 7. MFE Page Stream token 到 L1 buffer，再 BOA/EVU 消费。
 8. USE scan/recurrence + checkpoint/restore。
 9. Paged attention tile trace，验证 `T_prefetch <= T_qk` case 的 PMU 指纹。
-10. UCE issue window smoke：V1 证明 `window_size=1` 时 P0 complete 前 P1 不进入 active；V1.x 仿真 `window_size=2` 时验证独立 slot 才允许 P0 store / P1 load overlap。
+10. UCE issue window smoke：V1 证明 `window_size=1` 时 P0 complete 前 P1 不进入 active；V1.x 仿真 `window_size=2` 时验证独立 slot 才允许 P0 store / P1 load overlap。V1.x 验证模型（restricted MFE-load-prefix lookahead，见 `elenor_tile_uce` §3.5.1）的验收要求：(a) P1 DISPATCH_ROLE 在 P0 role completion 前到达；(b) queued P1 只发射 leading MFE load 前缀，store/compute/branch/stream/foreign-wait 立即 stop；(c) P1 promote 时不重放已发射的 load（active UCE PC 跳过 lookahead prefix）；(d) lookahead 不得抢占 active UCE 的 MFE engine（FRAME_BIND→PROGRAM_RUN transition cycle 不发射）；(e) PMU `uce_window_mfe_lookahead_launch`/`_promote`/`_wait_resolved`/`_engine_busy` 和 trace 中 `lookahead:` namespaced event id 可作为 implementation-private 证据。
 11. fault injection：invalid/stale program handle、invalid descriptor、slot fault、timeout、stream error、engine fault。
 
 ### 8.3 验收标准
@@ -720,7 +720,7 @@ Exception 分类：
 - 所有 engine 必须通过 command/event 路径触发，而不是旁路 testbench。
 - 每个 program handle 或 descriptor fault 必须能定位 command id、program id、tile id、local slot/epoch、descriptor id、slot id 或 address syndrome。
 - reset/drain 后 stream credit、event pending、DMA outstanding 和 engine busy 进入确定状态。
-- UCE window 相关行为必须与 profile 一致：V1 active window high-watermark 为 1；V1.x 若开启多 window，slot hazard、event sequence mismatch 和 store visibility wait 必须产生确定 stall/fault/PMU。
+- UCE window 相关行为必须与 profile 一致：V1 active window high-watermark 为 1；V1.x 若开启多 window，slot hazard、event sequence mismatch 和 store visibility wait 必须产生确定 stall/fault/PMU。V1.x 验证模型的 restricted MFE-load-prefix lookahead 必须证明 load-prefix 提前发射、promote-without-replay 和 lookahead-不抢占-active-MFE 三个不变量。
 - BOA/EVU/MFE/USE/UCE/SRAM/NoC stall 能通过 PMU primary owner 解释。
 - Python golden 或 workload trace 能复现 dense GEMM、softmax/norm、paged attention tile path、USE recurrence 四类路径。
 - First Silicon 验收至少覆盖 Phase 1 control plane + BOA runtime skeleton；Phase 5 前不得宣称 USE state path 完整。

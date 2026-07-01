@@ -20,7 +20,7 @@ UCE records a WAIT_EVENT stall so PMU can attribute it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from .config import HardwareConfig
@@ -37,6 +37,29 @@ class _PendingWait:
     events: tuple
     all: bool  # True=waitall, False=wait single
     started_cycle: int
+
+
+@dataclass
+class _PreparedTileTask:
+    """A Tile Program admitted into the UCE issue window."""
+    program: TileProgram
+    prepare_remaining: int
+    frame_bind_remaining: int
+    role_id: int | None
+    role_event: str | None
+    overlap_started: bool = False
+    window_id: int = 0
+    lookahead_pc: int = 0
+    lookahead_event_aliases: dict[str, str] = field(default_factory=dict)
+    lookahead_done: set[str] = field(default_factory=set)
+    lookahead_stopped: bool = False
+
+
+@dataclass
+class _CompletedTileTask:
+    """A role completion latched for TileGroup fan-in accounting."""
+    role_id: int | None
+    role_event: str | None
 
 
 class TileUCE:
@@ -356,6 +379,13 @@ class ComputeTile:
         self.task_state: TileTaskState = TileTaskState.IDLE
         self._prepared_check_remaining: int = 0
         self._frame_bind_remaining: int = 0
+        self._current_role_event: str | None = None
+        self._active_task_valid: bool = False
+        self._window_queue: list[_PreparedTileTask] = []
+        self._just_completed: _CompletedTileTask | None = None
+        self._completion_latched: bool = False
+        self._next_window_id: int = 0
+        self._active_event_aliases: dict[str, str] = {}
         # L1 Slot Frame (full_memory fidelity only)
         self.l1_frame: object | None = None  # SlotFrame, created on demand
 
@@ -365,49 +395,150 @@ class ComputeTile:
     def get_stream(self, qid: int) -> StreamQueue:
         return self.streams[qid]
 
-    def load_program(self, program: TileProgram,
-                      prepare_cycles: int = 0) -> None:
-        self.uce.load(program)
-        if self.runtime_enabled:
-            # Enter the task FSM: TASK_ACCEPT -> PREPARED -> FRAME_BIND -> RUN.
-            # prepare_cycles = cold/warm residency penalty (per-tile).
-            self.task_state = TileTaskState.TASK_ACCEPT
-            # PREPARED_TASK_CHECK always costs 1 cycle (the id+version+hash+
-            # epoch gate); cold miss adds prepare_cycles for install latency.
-            # warm path: 1 cycle (gate only); cold path: 1 + prepare_cycles.
-            self._prepared_check_remaining = 1 + prepare_cycles
-            self._frame_bind_remaining = self.cfg.frame_bind_cycles
+    @property
+    def has_active_task(self) -> bool:
+        return self._active_task_valid
 
+    @property
+    def current_role_event(self) -> str | None:
+        return self._current_role_event
+
+    def window_active_entries(self) -> int:
+        current = 1 if self._active_task_valid else 0
+        return current + len(self._window_queue)
+
+    def can_accept_program(self) -> bool:
+        if not self.runtime_enabled:
+            # timing_only has no window queue: a tile accepts only when it
+            # has no active task or the active task has completed and been
+            # retired.  Keeps the precheck in dispatch_role() consistent
+            # with load_program()'s rejection path.
+            return (not self._active_task_valid) or self._completion_latched
+        return self.window_active_entries() < max(1, self.cfg.uce_window_size)
+
+    def load_program(self,
+                     program: TileProgram,
+                     prepare_cycles: int = 0,
+                     role_id: int | None = None,
+                     role_event: str | None = None) -> bool:
+        if not self.runtime_enabled:
+            # timing_only has no window queue: reject a second program while
+            # one is active so the sequencer retries the dispatch after the
+            # current role completes (prevents overwriting a running
+            # TileProgram before its role event fires).
+            if self._active_task_valid and not self._completion_latched:
+                return False
+            if self._completion_latched:
+                self.pop_completed_task()
+            self.uce.load(program)
+            self.role_id = role_id
+            self._current_role_event = role_event
+            self._active_task_valid = True
+            return True
+
+        if self._completion_latched:
+            self.pop_completed_task()
+        if not self.can_accept_program():
+            return False
+
+        entry = _PreparedTileTask(
+            program=program,
+            prepare_remaining=1 + prepare_cycles,
+            frame_bind_remaining=self.cfg.frame_bind_cycles,
+            role_id=role_id,
+            role_event=role_event,
+            window_id=self._next_window_id,
+        )
+        self._next_window_id += 1
+        if not self._active_task_valid:
+            self._start_window_entry(entry)
+        else:
+            self._window_queue.append(entry)
+            self.pmu.add_event("uce_window_entry_queued")
+        return True
+
+    def _start_window_entry(self, entry: _PreparedTileTask) -> None:
+        self.uce.load(entry.program)
+        # Promote lookahead progress: a queued entry may have already issued
+        # its leading MFE-load prefix and crossed lookahead-only waits.  Set
+        # the UCE PC past those instructions and seed events_done so the
+        # active UCE never re-executes already-issued loads.  Bridge any
+        # in-flight namespaced lookahead loads to the original event ids the
+        # program waits on.
+        self.uce.pc = entry.lookahead_pc
+        self.uce._events_done.update(entry.lookahead_done)
+        self._active_event_aliases = {
+            namespaced: original
+            for namespaced, original in entry.lookahead_event_aliases.items()
+            if original not in entry.lookahead_done
+        }
+        if entry.lookahead_pc > 0:
+            self.pmu.add_event("uce_window_mfe_lookahead_promote")
+        self.role_id = entry.role_id
+        self._current_role_event = entry.role_event
+        self._active_task_valid = True
+        self._completion_latched = False
+        self._just_completed = None
+        if self.runtime_enabled:
+            self._prepared_check_remaining = max(0, entry.prepare_remaining)
+            self._frame_bind_remaining = max(0, entry.frame_bind_remaining)
+            if self._prepared_check_remaining > 0:
+                self.task_state = (TileTaskState.PREPARED_TASK_CHECK
+                                   if entry.overlap_started else TileTaskState.TASK_ACCEPT)
+            elif self._frame_bind_remaining > 0:
+                self.task_state = TileTaskState.FRAME_BIND
+            else:
+                self.task_state = TileTaskState.PROGRAM_RUN
     # ---- per-cycle step -------------------------------------------------
 
     def step(self, cycle: int) -> EngineJob | None:
-        """Advance one cycle.  Returns a completed EngineJob if any engine
-        finished this cycle (so the TileGroup can fire events).
+        """Advance one cycle and latch role completion without auto-retiring it.
 
-        In runtime fidelity, the TileTaskState FSM runs first: the tile
-        spends cycles in TASK_ACCEPT / PREPARED_TASK_CHECK / FRAME_BIND
-        before the UCE starts executing (PROGRAM_RUN).  In timing_only the
-        FSM is bypassed (task_state stays IDLE/RUN) and behavior is
-        identical to the original validator.
+        Runtime/full_memory fidelity uses a small UCE issue window: at most one
+        Tile Program is executing while one queued entry may overlap its
+        prepared-task/frame-bind work.  Completion fan-in is exposed through
+        pop_completed_task(), so TileGroup accounting is not derived from the
+        mutable ``done`` state after the next queued entry starts.
         """
+        if not self._completion_latched:
+            self._just_completed = None
+
         # tick engines first; collect completions
         completed = None
         for eng in (self.boa, self.evu, self.mfe, self.use):
             job = eng.tick(cycle)
             if job is not None:
                 completed = job
-                # notify UCE the event is done
-                self.uce.notify_event(job.event_id)
+                queued_lookahead = self._notify_window_event(job.event_id)
+                if job.event_id in self._active_event_aliases:
+                    self.uce.notify_event(self._active_event_aliases.pop(job.event_id))
+                elif not queued_lookahead:
+                    self.uce.notify_event(job.event_id)
 
-        # ---- TileTaskState FSM (runtime fidelity) ----
-        if self.runtime_enabled and self.task_state != TileTaskState.PROGRAM_RUN:
-            self._advance_task_fsm(cycle)
-            self._aggregate_pmu()
-            return completed
-
-        # tick UCE (only in PROGRAM_RUN, or always in timing_only)
-        if not self.runtime_enabled or self.task_state == TileTaskState.PROGRAM_RUN:
+        if self.runtime_enabled:
+            self._advance_window_queue(cycle)
+            active_uce_ran = False
+            if self._active_task_valid:
+                if self.task_state != TileTaskState.PROGRAM_RUN:
+                    self._advance_task_fsm(cycle)
+                else:
+                    self.uce.step(cycle, self)
+                    self._maybe_enter_drain()
+                    active_uce_ran = True
+                self._maybe_latch_completion()
+            # Issue queued-entry MFE-load lookahead ONLY when the active UCE
+            # had its step this cycle (PROGRAM_RUN, including wait-stall/
+            # wait-resolve cycles that do not advance pc) or the active task
+            # is already draining.  This blocks lookahead on the
+            # FRAME_BIND->PROGRAM_RUN transition cycle, where the active UCE
+            # never got a turn and its first LAUNCH_MFE would hit
+            # engine_busy next cycle.
+            if active_uce_ran or self.task_state == TileTaskState.DRAIN:
+                self._advance_window_mfe_lookahead(cycle)
+        elif self._active_task_valid:
             self.uce.step(cycle, self)
+            self._maybe_latch_completion()
+
         # aggregate PMU snapshot (lightweight: copy counters)
         self._aggregate_pmu()
         return completed
@@ -443,6 +574,184 @@ class ComputeTile:
                 self.task_state = TileTaskState.DONE
         # FAULTED/DONE/IDLE: no-op
 
+    def _advance_window_queue(self, cycle: int) -> None:
+        del cycle  # overlap accounting is cycle-local; no timestamp needed here
+        if not (self.runtime_enabled and self._active_task_valid and self._window_queue):
+            return
+        if self._completion_latched:
+            return
+        if self.task_state not in (TileTaskState.PROGRAM_RUN, TileTaskState.DRAIN):
+            return
+
+        entry = self._window_queue[0]
+        entry.overlap_started = True
+        if entry.prepare_remaining > 0:
+            entry.prepare_remaining -= 1
+            self.pmu.add_cycle("uce_window_prepare_overlap", 1)
+        elif entry.frame_bind_remaining > 0:
+            entry.frame_bind_remaining -= 1
+            self.pmu.add_cycle("uce_window_frame_bind_overlap", 1)
+
+    def _can_mfe_lookahead(self, program: TileProgram) -> bool:
+        """Stream TilePrograms are excluded from lookahead (stream token
+        semantics are unsafe to pre-execute under another TileProgram)."""
+        stream_ops = {
+            TileOp.STREAM_POP,
+            TileOp.STREAM_PUSH,
+            TileOp.STREAM_ACQUIRE,
+            TileOp.STREAM_RELEASE,
+            TileOp.STREAM_PUSH_EOS,
+            TileOp.BR_EOS,
+        }
+        return all(ins.op not in stream_ops for ins in program.insts)
+
+    def _lookahead_event_id(self, entry: _PreparedTileTask,
+                            original_event: str) -> str:
+        return f"lookahead:{entry.window_id}:{original_event}"
+
+    def _advance_window_mfe_lookahead(self, cycle: int) -> None:
+        """Issue at most one MFE-load instruction from the queued entry's
+        leading MFE-load prefix while the active TileProgram is still running.
+
+        Never stalls the active UCE: it is called after the active UCE step,
+        and only issues when the active task is in PROGRAM_RUN/DRAIN and
+        the MFE engine is free.  Stops at the first non-load instruction or
+        at a wait for an event not issued by this lookahead context.
+        """
+        if not (self.runtime_enabled and self._active_task_valid and self._window_queue):
+            return
+        if self._completion_latched:
+            return
+        if self.task_state not in (TileTaskState.PROGRAM_RUN, TileTaskState.DRAIN):
+            return
+        entry = self._window_queue[0]
+        if entry.lookahead_stopped:
+            return
+        if entry.prepare_remaining > 0 or entry.frame_bind_remaining > 0:
+            return
+        program = entry.program
+        if not self._can_mfe_lookahead(program):
+            return
+        if entry.lookahead_pc >= len(program.insts):
+            return
+        ins = program.insts[entry.lookahead_pc]
+        # ---- WAIT / WAITALL ----
+        if ins.op in (TileOp.WAIT, TileOp.WAITALL):
+            waited = tuple(ins.args)
+            issued_originals = set(entry.lookahead_event_aliases.values())
+            foreign = [e for e in waited if e not in issued_originals]
+            if foreign:
+                entry.lookahead_stopped = True
+                return
+            done = [e for e in waited if e in entry.lookahead_done]
+            satisfied = (len(done) == len(waited)
+                         if ins.op == TileOp.WAITALL else len(done) > 0)
+            if satisfied:
+                entry.lookahead_pc += 1
+                self.pmu.add_event("uce_window_mfe_lookahead_wait_resolved")
+            else:
+                self.pmu.add_cycle("uce_window_mfe_lookahead_wait", 1)
+            return
+        # ---- non-MFE launch stops lookahead ----
+        if ins.op != TileOp.LAUNCH_MFE:
+            entry.lookahead_stopped = True
+            return
+        desc = program.descriptors[ins.args[0]]
+        if desc.kind != "MFE" or desc.op != "load":
+            entry.lookahead_stopped = True
+            return
+        if self.mfe.is_busy:
+            self.pmu.add_cycle("uce_window_mfe_lookahead_engine_busy", 1)
+            return
+        assert ins.dst is not None, "LAUNCH_MFE requires dst event id"
+        namespaced = self._lookahead_event_id(entry, ins.dst)
+        patched = EngineDesc(
+            name=desc.name,
+            kind=desc.kind,
+            op=desc.op,
+            params={**desc.params, "tile_id": self.tile_id},
+        )
+        job = self.mfe.launch(patched, cycle, namespaced)
+        if job is None:
+            self.pmu.add_cycle("uce_window_mfe_lookahead_engine_busy", 1)
+            return
+        entry.lookahead_event_aliases[namespaced] = ins.dst
+        entry.lookahead_pc += 1
+        self.pmu.add_event("uce_window_mfe_lookahead_launch")
+        if self.tracer is not None:
+            self.tracer.instant(
+                f"Tile{self.tile_id}",
+                "UCE",
+                "uce_window_mfe_lookahead_launch",
+                cycle,
+                {
+                    "window_id": entry.window_id,
+                    "role_event": entry.role_event,
+                    "program": program.name,
+                    "event_id": namespaced,
+                    "original_event": ins.dst,
+                    "desc": desc.name,
+                },
+            )
+
+    def _notify_window_event(self, event_id: str) -> bool:
+        """Route a namespaced lookahead event completion to its queued entry.
+
+        Returns True if the event belongs to a queued lookahead context (the
+        active UCE must NOT be notified with the namespaced id).  Returns
+        False for ordinary active-UCE events.
+        """
+        for entry in self._window_queue:
+            if event_id in entry.lookahead_event_aliases:
+                entry.lookahead_done.add(entry.lookahead_event_aliases[event_id])
+                return True
+        return False
+
+    def _maybe_enter_drain(self) -> None:
+        if not (self.runtime_enabled and self._active_task_valid):
+            return
+        if self.task_state != TileTaskState.PROGRAM_RUN:
+            return
+        if self.uce.done and self._outstanding_zero():
+            self.task_state = TileTaskState.DRAIN
+
+    def _maybe_latch_completion(self) -> None:
+        if not self._active_task_valid or self._completion_latched:
+            return
+
+        if self.runtime_enabled:
+            completed = self.task_state == TileTaskState.DONE and self._outstanding_zero()
+        else:
+            completed = self.uce.done and self._outstanding_zero()
+        if not completed:
+            return
+
+        self._completion_latched = True
+        self._just_completed = _CompletedTileTask(
+            role_id=self.role_id,
+            role_event=self._current_role_event,
+        )
+        self.pmu.add_event("tile_task_completed")
+
+    def pop_completed_task(self) -> _CompletedTileTask | None:
+        completed = self._just_completed
+        if completed is None:
+            return None
+
+        self._just_completed = None
+        self._completion_latched = False
+        self._active_task_valid = False
+
+        if self._window_queue:
+            self._start_window_entry(self._window_queue.pop(0))
+        else:
+            self.role_id = None
+            self._current_role_event = None
+            if self.runtime_enabled:
+                self.task_state = TileTaskState.IDLE
+
+        return completed
+
     def _aggregate_pmu(self) -> None:
         for eng in (self.boa, self.evu, self.mfe, self.use):
             self.pmu.merge(eng.pmu)
@@ -452,28 +761,13 @@ class ComputeTile:
 
     @property
     def done(self) -> bool:
+        if not self._active_task_valid:
+            return True
+        if self._completion_latched:
+            return True
         if self.runtime_enabled:
-            # In runtime mode, done requires the FSM to reach DONE/FAULTED
-            # *and* UCE + engines to be idle.
-            if self.task_state in (TileTaskState.TASK_ACCEPT,
-                                   TileTaskState.PREPARED_TASK_CHECK,
-                                   TileTaskState.FRAME_BIND,
-                                   TileTaskState.DRAIN):
-                return False
-            if self.task_state == TileTaskState.DONE:
-                return True
-            # PROGRAM_RUN: check UCE + engines, then transition to DRAIN
-            uce_done = self.uce.done
-            engs_idle = all(
-                eng.state in (EngineState.IDLE, EngineState.DONE)
-                for eng in (self.boa, self.evu, self.mfe, self.use))
-            if uce_done and engs_idle:
-                self.task_state = TileTaskState.DRAIN
-                return False
-            return False
-        return self.uce.done and all(
-            eng.state in (EngineState.IDLE, EngineState.DONE)
-            for eng in (self.boa, self.evu, self.mfe, self.use))
+            return self.task_state == TileTaskState.DONE and self._outstanding_zero()
+        return self.uce.done and self._outstanding_zero()
 
     def _outstanding_zero(self) -> bool:
         """Check all engines idle (DRAIN exit condition, Compute Tile 3)."""
@@ -487,15 +781,43 @@ class ComputeTile:
             eng.reset()
         self.pmu.reset()
         self.role_id = None
+        self._current_role_event = None
+        self._active_task_valid = False
+        self._window_queue.clear()
+        self._just_completed = None
+        self._completion_latched = False
+        self._active_event_aliases.clear()
+        self._next_window_id = 0
         self.task_state = TileTaskState.IDLE
         self._prepared_check_remaining = 0
         self._frame_bind_remaining = 0
+
     def snapshot(self) -> dict:
         return {
             "tile_id": self.tile_id,
             "uce_pc": self.uce.pc,
             "uce_done": self.uce.done,
             "task_state": self.task_state.name,
+            "role_id": self.role_id,
+            "current_role_event": self._current_role_event,
+            "uce_window_size": self.cfg.uce_window_size,
+            "uce_window_active": self.window_active_entries(),
+            "uce_window_queued": len(self._window_queue),
+            "uce_window_completion_latched": self._completion_latched,
+            "uce_window_queue": [
+                {
+                    "role_id": entry.role_id,
+                    "event_id": entry.role_event,
+                    "prepare_remaining": entry.prepare_remaining,
+                    "frame_bind_remaining": entry.frame_bind_remaining,
+                    "overlap_started": entry.overlap_started,
+                    "window_id": entry.window_id,
+                    "lookahead_pc": entry.lookahead_pc,
+                    "lookahead_done": sorted(entry.lookahead_done),
+                    "lookahead_event_aliases": dict(entry.lookahead_event_aliases),
+                }
+                for entry in self._window_queue
+            ],
             "boa_state": self.boa.state.name,
             "evu_state": self.evu.state.name,
             "mfe_state": self.mfe.state.name,

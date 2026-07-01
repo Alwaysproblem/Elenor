@@ -1564,7 +1564,7 @@ Data:
 - Tile Group Sequencer 必须在 dispatch 前保证 program ready。
 - Tile UCE 只消费 resident local handle，不从 global memory 直接拉 program。
 
-- Tile UCE First Silicon V1 固定 `window_size=1`，即单 active Tile Program；V1.x/V2 可在不改变 public IR 的前提下探索 `window_size=2~4` issue/preparation overlap。
+- Tile UCE First Silicon V1 固定 `window_size=1`，即单 active Tile Program；V1.x/V2 可在不改变 public IR 的前提下探索 `window_size=2~4` issue/preparation overlap（V1.x 验证模型的 restricted MFE-load-prefix lookahead 见 `elenor_tile_uce` §3.5.1）。
 - 若开启 `window_size>1`，每个 window entry 必须携带 frame generation、descriptor window、`event_id + sequence`、read/write slot mask 和 timeout epoch；reset/drain 后旧 completion 必须因 sequence mismatch 被拒绝或转 fault。
 
 ### 15.4 Cold Launch
@@ -1798,6 +1798,10 @@ V1.x / V2 reserved:
   uce_window_size = 2..4
   P0 store in-flight + P1 load/patch/compute may overlap
   only when buffer hazard table proves slot independence
+  (V1.x 验证模型见 elenor_tile_uce §3.5.1：restricted queued-entry
+   MFE-load-prefix lookahead，namespaced event id 为 implementation-
+   private trace/debug only，非 public ABI)
+
 ```
 
 约束：

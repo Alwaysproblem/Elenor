@@ -286,7 +286,7 @@ Tile Program run
 - accumulator slot 只能被 BOA/EVU accumulate path 或明确 storeback path 修改；普通 DMA 覆盖需要显式 flag，否则 fault。
 - USE state slot 的 checkpoint/restore 由 USE 生命周期控制，UCE 发起；DMA 不能绕过 checkpoint path 写 state。
 - 若 UCE V1.x 开启 `window_size>1`，slot owner handoff 必须按 `event_id + sequence`、fence 和 stream release 判定；不得因 window entry 退出 decode 就提前释放 buffer。
-- read-only const slot 可被多个 window alias；任何 writable alias、WAR/RAW/WAW hazard 必须由 UCE/engine wrapper stall 或 fault。
+- read-only const slot 可被多个 window alias；任何 writable alias、WAR/RAW/WAW hazard 必须由 UCE/engine wrapper stall 或 fault。V1.x 验证模型的 restricted MFE-load-prefix lookahead（见 `elenor_tile_uce` §3.5.1）当前不建模 per-dispatch SlotFrame read/write mask alias 检查——lookahead 只发射 MFE load 前缀并 stop 在 store/compute 之前，依赖上述 owner/hazard 规则保证 correctness；若未来 descriptor 暴露 per-dispatch slot mask，必须在 lookahead issue 前补 alias 检查。
 
 ### 5.4 bank placement
 

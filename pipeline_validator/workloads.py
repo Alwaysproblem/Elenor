@@ -161,6 +161,7 @@ class TiledMatmulPipelinedWorkload(Workload):
             "mfe_active_ratio_min": 0.08,
             "stream_stall_ratio_max": 0.05,
             "multi_stage_group_io": True,
+            "uce_window_mfe_lookahead": True,
         },
         config=cfg,
     )
