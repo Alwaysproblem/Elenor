@@ -810,6 +810,62 @@ def make_conv_relu_tile_program() -> TileProgram:
     return p
 
 
+def make_pow_tile_program(name: str = "pow_tile",
+                          chunk_bytes: int = 32768,
+                          exponent: int = 2,
+                          pow_ops: int = 65536) -> TileProgram:
+    """EVU elementwise pow on one tile chunk.
+
+    Mirrors the ``pow_4k_tile`` program from the tiled-matmul-pipelined-pow
+    IR example: load input L2->L1 (MFE), EVU pow, store output L1->L2 (MFE).
+    ``pow_ops`` defaults to the value used in the IR example (65536 for
+    exponent=2 on a 128x128 BF16 chunk) and feeds the EVU latency model
+    ``launch + ceil(ops / (lanes*2))``.
+    """
+    p = TileProgram(name=name)
+    p.descriptors = {
+        "load_pow":
+        EngineDesc("load_pow", "MFE", "load", {
+            "bytes": chunk_bytes,
+            "ops": 0
+        }),
+        "pow_chunk":
+        EngineDesc("pow_chunk", "EVU", "pow", {
+            "bytes": chunk_bytes,
+            "exponent": exponent,
+            "ops": pow_ops
+        }),
+        "store_pow":
+        EngineDesc("store_pow", "MFE", "store", {
+            "bytes": chunk_bytes,
+            "ops": 0
+        }),
+    }
+    p.insts = [
+        TileInst(TileOp.LAUNCH_MFE,
+                 dst="e_load",
+                 args=("load_pow", ),
+                 comment="load pow input L2->L1"),
+        TileInst(TileOp.WAIT, args=("e_load", ),
+                 comment="pow input ready"),
+        TileInst(TileOp.LAUNCH_EVU,
+                 dst="e_pow",
+                 args=("pow_chunk", ),
+                 comment="EVU pow on one tile chunk"),
+        TileInst(TileOp.WAIT, args=("e_pow", ),
+                 comment="pow chunk done"),
+        TileInst(TileOp.LAUNCH_MFE,
+                 dst="e_store",
+                 args=("store_pow", ),
+                 comment="store pow output L1->L2"),
+        TileInst(TileOp.WAIT, args=("e_store", ),
+                 comment="drain pow output"),
+        TileInst(TileOp.RET),
+    ]
+    p.resolve_labels()
+    return p
+
+
 def make_paged_attention_tile_program() -> TileProgram:
     """Full paged-attention tile program (Architecture 20.2 example).
 
@@ -1263,6 +1319,166 @@ def make_tiled_matmul_pipelined_task(num_group_chunks: int = 4,
         GroupAction(GroupActionOp.WAIT_EVENT,
                     args=(f"ev_dma_C{num_group_chunks - 1}",),
                     comment="Drain last store"))
+    actions.append(
+        GroupAction(GroupActionOp.SIGNAL_EVENT,
+                    args=("group_task_done",)))
+
+    t.actions = actions
+    return t
+
+
+def make_tiled_matmul_pipelined_pow_task(num_group_chunks: int = 4,
+                                          num_k_chunks: int = 4) -> TileGroupTask:
+    """Tiled matmul + elementwise pow two-stage task with pipelined group IO.
+
+    Mirrors the ``tiled_matmul_pipelined_pow_task`` IR example.  It is the
+    ``make_tiled_matmul_pipelined_task`` matmul phase followed by a second
+    EVU-pow phase, sharing the same Tile Group.
+
+    Two roles:
+      - Role 0 (tiles 0-3): K-chunked tiled matmul with the same group-level
+        async IO pipeline as ``tiled_matmul_pipelined`` (DMA prefetch for
+        stage g+1 overlaps tile compute for stage g).
+      - Role 1 (tiles 0-3): elementwise ``pow`` (EVU) applied to each stage's
+        output.  The pow phase starts only after ALL matmul stores (C0..C3)
+        are drained to HBM — a strict phase fence.  Inside the pow phase
+        the four HBM->L2 prefetches are issued up front, then each chunk is
+        dispatched as soon as its own input is visible in L2.
+
+    Group action sequence:
+        [matmul phase: identical to make_tiled_matmul_pipelined_task
+         minus the trailing SIGNAL_EVENT, keeping the final
+         WAIT ev_dma_C{N-1} as the phase fence]
+        DMA_PREFETCH pow_in{0..N-1}            # issue all prefetches up front
+        for g in 0..N-1:
+            WAIT ev_dma_pow_in{g}
+            DISPATCH_ROLE 1 -> ev_role_pow{g}
+        for g in 0..N-1:
+            WAIT ev_role_pow{g}
+            DMA_STORE pow_out{g} -> ev_dma_pow_out{g}
+        WAIT ev_dma_pow_out{0..N-1}
+        SIGNAL_EVENT group_task_done
+    """
+    total_k = 64 * num_k_chunks
+    bytes_a = 128 * total_k * 2 * 4  # tile_m * total_k * BF16 * 4 tiles
+    bytes_b = total_k * 128 * 2      # total_k * tile_n * BF16 (shared)
+    bytes_c = 128 * 128 * 2 * 4      # tile_m * tile_n * BF16 * 4 tiles
+    # pow operates on one stage's C (128x128 per tile, BF16) across 4 tiles.
+    bytes_pow = 128 * 128 * 2 * 4
+    t = TileGroupTask(name="tiled_matmul_pipelined_pow_task")
+    t.streams = []
+    t.role_bindings = {
+        0: TileRoleBinding(role_id=0, tile_mask=0x0F,
+                           tile_program=make_tiled_matmul_tile_program(
+                               num_k_chunks=num_k_chunks)),
+        1: TileRoleBinding(role_id=1, tile_mask=0x0F,
+                           tile_program=make_pow_tile_program(
+                               name="pow_4k_tile",
+                               chunk_bytes=128 * 128 * 2)),
+    }
+    actions: list[GroupAction] = []
+
+    # ---- matmul phase: same pipeline as make_tiled_matmul_pipelined_task ----
+    # prologue: prefetch first chunk
+    actions.append(
+        GroupAction(GroupActionOp.DMA_PREFETCH,
+                    args=("gdma_prefetch_A0", "l2_buf_A0", bytes_a),
+                    dst="ev_dma_A0",
+                    comment="Group DMA prefetch A chunk 0 HBM->L2"))
+    actions.append(
+        GroupAction(GroupActionOp.DMA_PREFETCH,
+                    args=("gdma_prefetch_B0", "l2_buf_B0", bytes_b),
+                    dst="ev_dma_B0",
+                    comment="Group DMA prefetch B chunk 0 HBM->L2"))
+
+    for g in range(num_group_chunks):
+        actions.append(
+            GroupAction(GroupActionOp.WAIT_EVENT,
+                        args=(f"ev_dma_A{g}",),
+                        comment=f"Wait for A chunk {g} DMA"))
+        actions.append(
+            GroupAction(GroupActionOp.WAIT_EVENT,
+                        args=(f"ev_dma_B{g}",),
+                        comment=f"Wait for B chunk {g} DMA"))
+        actions.append(
+            GroupAction(GroupActionOp.DISPATCH_ROLE, args=(0,),
+                        dst=f"ev_role_c{g}",
+                        comment=f"Dispatch tiles for group chunk {g}"))
+        if g < num_group_chunks - 1:
+            ng = g + 1
+            actions.append(
+                GroupAction(GroupActionOp.DMA_PREFETCH,
+                            args=(f"gdma_prefetch_A{ng}",
+                                  f"l2_buf_A{ng}", bytes_a),
+                            dst=f"ev_dma_A{ng}",
+                            comment=f"Group DMA prefetch A chunk {ng} "
+                                    f"(overlap compute g={g})"))
+            actions.append(
+                GroupAction(GroupActionOp.DMA_PREFETCH,
+                            args=(f"gdma_prefetch_B{ng}",
+                                  f"l2_buf_B{ng}", bytes_b),
+                            dst=f"ev_dma_B{ng}",
+                            comment=f"Group DMA prefetch B chunk {ng} "
+                                    f"(overlap compute g={g})"))
+        actions.append(
+            GroupAction(GroupActionOp.WAIT_EVENT,
+                        args=(f"ev_role_c{g}",),
+                        comment=f"Wait for chunk {g} tiles"))
+        actions.append(
+            GroupAction(GroupActionOp.DMA_STORE,
+                        args=(f"gdma_store_C{g}", f"l2_buf_C{g}", bytes_c),
+                        dst=f"ev_dma_C{g}",
+                        comment=f"Group DMA store C chunk {g} L2->HBM"))
+        if g >= 1:
+            actions.append(
+                GroupAction(GroupActionOp.WAIT_EVENT,
+                            args=(f"ev_dma_C{g - 1}",),
+                            comment=f"Drain store chunk {g - 1} (overlap)"))
+
+    # phase fence: drain last matmul store before pow stage starts
+    actions.append(
+        GroupAction(GroupActionOp.WAIT_EVENT,
+                    args=(f"ev_dma_C{num_group_chunks - 1}",),
+                    comment="Drain last store before pow stage"))
+
+    # ---- pow phase: issue all prefetches, then dispatch per-chunk ----
+    for g in range(num_group_chunks):
+        actions.append(
+            GroupAction(GroupActionOp.DMA_PREFETCH,
+                        args=(f"gdma_prefetch_pow{g}",
+                              f"l2_buf_pow{g}", bytes_pow),
+                        dst=f"ev_dma_pow_in{g}",
+                        comment=f"Pow input chunk {g} HBM->L2"))
+
+    for g in range(num_group_chunks):
+        actions.append(
+            GroupAction(GroupActionOp.WAIT_EVENT,
+                        args=(f"ev_dma_pow_in{g}",),
+                        comment=f"Pow chunk {g} input visible in L2"))
+        actions.append(
+            GroupAction(GroupActionOp.DISPATCH_ROLE, args=(1,),
+                        dst=f"ev_role_pow{g}",
+                        comment=f"Launch pow tile program for chunk {g}"))
+
+    for g in range(num_group_chunks):
+        actions.append(
+            GroupAction(GroupActionOp.WAIT_EVENT,
+                        args=(f"ev_role_pow{g}",),
+                        comment=f"Pow tiles finished chunk {g}"))
+        actions.append(
+            GroupAction(GroupActionOp.DMA_STORE,
+                        args=(f"gdma_store_pow{g}",
+                              f"l2_buf_pow{g}", bytes_pow),
+                        dst=f"ev_dma_pow_out{g}",
+                        comment=f"Pow output chunk {g} L2->HBM"))
+
+    # drain all pow outputs
+    for g in range(num_group_chunks):
+        actions.append(
+            GroupAction(GroupActionOp.WAIT_EVENT,
+                        args=(f"ev_dma_pow_out{g}",),
+                        comment=f"Drain pow output chunk {g}"))
+
     actions.append(
         GroupAction(GroupActionOp.SIGNAL_EVENT,
                     args=("group_task_done",)))
