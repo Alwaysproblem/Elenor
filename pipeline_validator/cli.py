@@ -129,8 +129,10 @@ def main(argv=None) -> int:
         workloads.append(match())
 
     if args.print_ir:
-        for wl in workloads:
-            print(wl.task.pretty_print())
+        for idx, wl in enumerate(workloads):
+            if idx:
+                sys.stdout.write("\n")
+            sys.stdout.write(wl.task.pretty_print())
         return 0
 
 

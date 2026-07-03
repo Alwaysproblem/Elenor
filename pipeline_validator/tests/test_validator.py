@@ -50,6 +50,7 @@ from pipeline_validator.workloads import (
   PowWorkload,
   TiledMatmulPipelinedPowWorkload,
   TiledMatmulPipelinedWorkload,
+  TiledMatmulTopWorkload,
   TiledMatmulWorkload,
 )
 
@@ -372,6 +373,13 @@ class TestSimulation:
     result = self._run(TiledMatmulPipelinedWorkload())
     assert result.completed, (
         f"tiled_matmul_pipelined did not complete: {result.reason}")
+    assert result.cycles > 0
+    assert result.credit_invariant_ok
+
+  def test_tiled_matmul_top_completes(self):
+    result = self._run(TiledMatmulTopWorkload())
+    assert result.completed, (
+        f"tiled_matmul_top did not complete: {result.reason}")
     assert result.cycles > 0
     assert result.credit_invariant_ok
 

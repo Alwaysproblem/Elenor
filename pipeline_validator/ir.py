@@ -1402,6 +1402,80 @@ def make_tiled_matmul_pipelined_task(num_group_chunks: int = 4,
     t.actions = actions
     return t
 
+def make_tiled_matmul_top_task(num_group_chunks: int = 4,
+                               num_k_chunks: int = 4) -> TileGroupTask:
+    """Tiled matmul task matching ``tiled_matmul_top.ir`` exactly."""
+    total_k = 64 * num_k_chunks
+    bytes_a = 128 * total_k * 2 * 4
+    bytes_b = total_k * 128 * 2
+    bytes_c = 128 * 128 * 2 * 4
+    t = TileGroupTask(name="tiled_matmul_pipelined_task")
+    t.streams = []
+    t.role_bindings = {
+        0: TileRoleBinding(role_id=0, tile_mask=0x0F,
+                           tile_program=make_tiled_matmul_tile_program(
+                               num_k_chunks=num_k_chunks))
+    }
+    actions: list[GroupAction] = []
+
+    for g in range(num_group_chunks):
+        if g == 0:
+            a_comment = "Group DMA prefetch A chunk 0 HBM->L2"
+            b_comment = "Group DMA prefetch B chunk 0 HBM->L2"
+        else:
+            a_comment = f"Group DMA prefetch A chunk {g} (overlap compute g={g - 1})"
+            b_comment = f"Group DMA prefetch B chunk {g} (overlap compute g={g - 1})"
+        actions.append(
+            GroupAction(GroupActionOp.DMA_PREFETCH,
+                        args=(f"gdma_prefetch_A{g}", f"l2_buf_A{g}", bytes_a),
+                        dst=f"ev_dma_A{g}",
+                        comment=a_comment))
+        actions.append(
+            GroupAction(GroupActionOp.DMA_PREFETCH,
+                        args=(f"gdma_prefetch_B{g}", f"l2_buf_B{g}", bytes_b),
+                        dst=f"ev_dma_B{g}",
+                        comment=b_comment))
+
+    for g in range(num_group_chunks):
+        actions.append(
+            GroupAction(GroupActionOp.WAIT_EVENT,
+                        args=(f"ev_dma_A{g}",),
+                        comment=f"Wait for A chunk {g} DMA"))
+        actions.append(
+            GroupAction(GroupActionOp.WAIT_EVENT,
+                        args=(f"ev_dma_B{g}",),
+                        comment=f"Wait for B chunk {g} DMA"))
+        actions.append(
+            GroupAction(GroupActionOp.DISPATCH_ROLE, args=(0,),
+                        dst=f"ev_role_c{g}",
+                        comment=f"Dispatch tiles for group chunk {g}"))
+
+    for g in range(num_group_chunks):
+        actions.append(
+            GroupAction(GroupActionOp.WAIT_EVENT,
+                        args=(f"ev_role_c{g}",),
+                        comment=f"Wait for chunk {g} tiles"))
+        actions.append(
+            GroupAction(GroupActionOp.DMA_STORE,
+                        args=(f"gdma_store_C{g}", f"l2_buf_C{g}", bytes_c),
+                        dst=f"ev_dma_C{g}",
+                        comment=f"Group DMA store C chunk {g} L2->HBM"))
+
+    for g in range(num_group_chunks):
+        actions.append(
+            GroupAction(GroupActionOp.WAIT_EVENT,
+                        args=(f"ev_dma_C{g}",),
+                        comment=(f"Drain store chunk {g} (overlap)"
+                                 if g < num_group_chunks - 1
+                                 else "Drain last store")))
+
+    actions.append(
+        GroupAction(GroupActionOp.SIGNAL_EVENT,
+                    args=("group_task_done",)))
+
+    t.actions = actions
+    return t
+
 
 def make_tiled_matmul_pipelined_pow_task(num_group_chunks: int = 4,
                                           num_k_chunks: int = 4) -> TileGroupTask:

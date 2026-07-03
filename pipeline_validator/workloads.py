@@ -21,6 +21,7 @@ from .ir import (
   make_tiled_matmul_pipelined_pow_task,
   make_tiled_matmul_pipelined_task,
   make_tiled_matmul_task,
+  make_tiled_matmul_top_task,
 )
 
 
@@ -159,6 +160,36 @@ class TiledMatmulPipelinedWorkload(Workload):
             "accumulation semantics are not modelled."),
         expected={
             "primary_bottleneck": "BOA",
+            "boa_active_ratio_min": 0.35,
+            "mfe_active_ratio_min": 0.08,
+            "stream_stall_ratio_max": 0.05,
+            "multi_stage_group_io": True,
+        },
+        config=cfg,
+    )
+
+
+class TiledMatmulTopWorkload(Workload):
+  """Topology (without Software Pipelining) tiled matmul workload matching ``tiled_matmul_top.ir``."""
+
+  def __init__(self,
+               cfg: WorkloadConfig | None = None,
+               num_group_chunks: int = 4,
+               num_k_chunks: int = 4):
+    cfg = cfg or WorkloadConfig(name="tiled_matmul_top")
+    task = make_tiled_matmul_top_task(
+        num_group_chunks=num_group_chunks,
+        num_k_chunks=num_k_chunks)
+    super().__init__(
+        name="tiled_matmul_top",
+        task=task,
+        description=(
+            "Topology (without Software Pipelining) tiled GEMM workload matching `tiled_matmul_top.ir`: "
+            f"{num_group_chunks} staged group chunks x {num_k_chunks} inner "
+            "K-chunks of 64, BF16, across 4 tiles.  All group-DMA prefetches "
+            "are hoisted before dispatch, then wait/dispatch pairs, then "
+            "wait/store pairs, then store drains."),
+        expected={
             "boa_active_ratio_min": 0.35,
             "mfe_active_ratio_min": 0.08,
             "stream_stall_ratio_max": 0.05,
@@ -396,6 +427,6 @@ class PagedAttentionWorkload(Workload):
     )
 ALL_WORKLOADS: list = [
     MatmulWorkload, TiledMatmulWorkload, TiledMatmulPipelinedWorkload,
-    PowWorkload, TiledMatmulPipelinedPowWorkload, ConvReLuWorkload,
-    PagedAttentionWorkload, AttentionWorkload, MoEWorkload
+    TiledMatmulTopWorkload, PowWorkload, TiledMatmulPipelinedPowWorkload,
+    ConvReLuWorkload, PagedAttentionWorkload, AttentionWorkload, MoEWorkload
 ]
