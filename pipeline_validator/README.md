@@ -57,6 +57,9 @@ python -m pipeline_validator -w tiled_matmul --hw-override mfe_load_queue_depth=
 
 # JSON output
 python -m pipeline_validator --all --json
+
+# run with dual tile-UCE contexts and emit an HTML trace
+python -m pipeline_validator -w <workload> --context-mode 2 --trace-html ctx2.html
 ```
 
 ### Profiling / Trace Visualization
@@ -89,6 +92,9 @@ python -m pipeline_validator --all --trace-json all.json --trace-html all.html
   sampled per cycle — only for workloads with streams (attention, moe).
 - **Instant markers**: `tile_done`, `tile_role_dispatch`, `tile_role_complete`,
   `group_task_done`, `dma_complete`, `collective_complete`.
+- **Multi-context trace details**: with `--context-mode 2`, tile tracks expose
+  `UCE CTX0` / `UCE CTX1` lanes, `ctx_switch` instants, and
+  `active_context_count` / `ready_context_count` counters.
 
 To view:
 

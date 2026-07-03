@@ -865,6 +865,82 @@ def make_pow_tile_program(name: str = "pow_tile",
     p.resolve_labels()
     return p
 
+def make_pow_task(num_group_chunks: int = 4) -> TileGroupTask:
+    """Standalone EVU pow workload with pipelined group DMA.
+
+    Mirrors the ``pow.ir`` task shape: one role (role 1) across all four
+    tiles, four HBM->L2 prefetches issued up front, per-chunk dispatch once
+    the input is visible in L2, per-chunk L2->HBM store once the tiles finish,
+    then a final drain of all output DMAs.
+    """
+    chunk_bytes = 128 * 128 * 2
+    bytes_pow = chunk_bytes * 4
+    t = TileGroupTask(name="pow_task")
+    t.streams = []
+    t.role_bindings = {
+        1: TileRoleBinding(
+            role_id=1,
+            tile_mask=0x0F,
+            tile_program=make_pow_tile_program(
+                name="pow_4k_tile",
+                chunk_bytes=chunk_bytes,
+            ),
+        ),
+    }
+    actions: list[GroupAction] = []
+
+    for g in range(num_group_chunks):
+        actions.append(
+            GroupAction(
+                GroupActionOp.DMA_PREFETCH,
+                args=(f"gdma_prefetch_pow{g}", f"l2_buf_pow{g}", bytes_pow),
+                dst=f"ev_dma_pow_in{g}",
+                comment=f"Pow input chunk {g} HBM->L2",
+            ))
+
+    for g in range(num_group_chunks):
+        actions.append(
+            GroupAction(
+                GroupActionOp.WAIT_EVENT,
+                args=(f"ev_dma_pow_in{g}",),
+                comment=f"Pow chunk {g} input visible in L2",
+            ))
+        actions.append(
+            GroupAction(
+                GroupActionOp.DISPATCH_ROLE,
+                args=(1,),
+                dst=f"ev_role_pow{g}",
+                comment=f"Launch pow tile program for chunk {g}",
+            ))
+
+    for g in range(num_group_chunks):
+        actions.append(
+            GroupAction(
+                GroupActionOp.WAIT_EVENT,
+                args=(f"ev_role_pow{g}",),
+                comment=f"Pow tiles finished chunk {g}",
+            ))
+        actions.append(
+            GroupAction(
+                GroupActionOp.DMA_STORE,
+                args=(f"gdma_store_pow{g}", f"l2_buf_pow{g}", bytes_pow),
+                dst=f"ev_dma_pow_out{g}",
+                comment=f"Pow output chunk {g} L2->HBM",
+            ))
+
+    for g in range(num_group_chunks):
+        actions.append(
+            GroupAction(
+                GroupActionOp.WAIT_EVENT,
+                args=(f"ev_dma_pow_out{g}",),
+                comment=f"Drain pow output chunk {g}",
+            ))
+
+    actions.append(GroupAction(GroupActionOp.SIGNAL_EVENT,
+                               args=("group_task_done",)))
+    t.actions = actions
+    return t
+
 
 def make_paged_attention_tile_program() -> TileProgram:
     """Full paged-attention tile program (Architecture 20.2 example).

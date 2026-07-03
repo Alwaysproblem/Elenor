@@ -45,7 +45,8 @@ class Simulator:
         self.hw = hw
         self.sim = sim
         self.tracer = Tracer(hw) if enable_tracer else None
-        self.group = TileGroup(hw, self.tracer, fidelity=sim.fidelity)
+        self.group = TileGroup(hw, self.tracer, fidelity=sim.fidelity,
+                               context_count=sim.context_count)
         self.cycle = 0
         self._trace: list = []
         # persistent program identity registry: name -> stable program_id.

@@ -137,6 +137,9 @@ class Engine:
                     "bytes": self._running.desc.params.get("bytes", 0),
                     "desc": self._running.desc.name,
                     "tile_id": self.tile_id,
+                    "ctx_id": self._running.desc.params.get("ctx_id"),
+                    "program": self._running.desc.params.get("program"),
+                    "local_event_id": self._running.desc.params.get("local_event_id"),
                 })
 
     def tick(self, cycle: int) -> EngineJob | None:

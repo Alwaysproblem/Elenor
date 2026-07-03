@@ -23,16 +23,16 @@ Architecture V1 目标：
 
 First Silicon V1 cutline：
 
-| 类别            | 必须实现                                                     | 后续可扩展                                         |
-| --------------- | ------------------------------------------------------------ | -------------------------------------------------- |
-| Program control | fetch/decode、PC、branch、loop、ret/end、trap                | compressed encoding、call stack、复杂 predication  |
-| Engine launch   | launch.dma、launch.boa、launch.evu、launch.mfe、launch.use   | priority launch、speculative prelaunch             |
-| Sync            | wait、waitall、fence、timeout                                | event set algebra、advanced dependency compression |
-| Issue window    | `window_size=1`，单 active Tile Program，event sequence 匹配 | V1.x/V2 可探索 `window_size=2~4` sliding window    |
-| Stream          | pop、push、acquire、release、EOS/error branch                | multi-consumer refcount acceleration               |
-| Descriptor      | load/validate/patch、slot offset、tile/group id patch        | richer relocation、descriptor cache hierarchy      |
-| Debug/fault     | PC capture、fault record、halt at boundary                   | sampled trace、single-step across engine internals |
-| PMU             | wait/branch/patch/fetch stall、launch count、stream wait     | feedback scheduling hooks                          |
+| 类别            | 必须实现                                                                            | 后续可扩展                                                                                                                                                            |
+| --------------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Program control | fetch/decode、PC、branch、loop、ret/end、trap；单 active context、单 issue in-order | compressed encoding、call stack、复杂 predication                                                                                                                     |
+| Context model   | 单 resident handle / 单 execution context / 单 tile terminal path                   | 最多 2 个 execution context 的 dual-context coroutine mode；共享单 issue pipeline；只在 `wait.event` / stream 阻塞 / terminal boundary 切换；不是新的 group scheduler |
+| Engine launch   | launch.dma、launch.boa、launch.evu、launch.mfe、launch.use                          | priority launch、speculative prelaunch                                                                                                                                |
+| Sync            | wait、waitall、fence、timeout                                                       | event set algebra、advanced dependency compression                                                                                                                    |
+| Stream          | pop、push、acquire、release、EOS/error branch                                       | multi-consumer refcount acceleration                                                                                                                                  |
+| Descriptor      | load/validate/patch、slot offset、tile/group id patch                               | richer relocation、descriptor cache hierarchy                                                                                                                         |
+| Debug/fault     | PC capture、fault record、halt at boundary                                          | sampled trace、single-step across engine internals                                                                                                                    |
+| PMU             | wait/branch/patch/fetch stall、launch count、stream wait                            | feedback scheduling hooks                                                                                                                                             |
 
 未冻结的指令编码、CSR 地址、寄存器数量、cache 容量和 pipeline 深度均写作 `由后续规格冻结` 或 `由 PPA exploration 冻结`。
 
@@ -42,17 +42,16 @@ First Silicon V1 cutline：
 
 Tile UCE 的职责：
 
-1. 维护 Tile Program PC 和 resident local program handle 对应的执行状态。
-2. 接收 prepared tile task，校验 `program_local_slot/program_version/program_epoch`、frame generation 和 descriptor window。
+1. 维护 Tile Program PC 和 resident local program handle 对应的执行状态；First Silicon V1 为单 active context，V1.x 可扩展为最多 2 个 execution context，但仍共享 single issue pipeline。
+2. 接收 prepared tile task，校验 `program_local_slot/program_version/program_epoch`、frame generation 和 descriptor window；若启用 dual-context，则按 context 分别校验。
 3. 执行 descriptor template auto-patch：tile_id、group_id、slot base、slot offset、shape variant、event id。
 4. 发起 L2<->L1 Tile DMA 和 MFE stream/dataflow task。
 5. 启动 BOA、EVU、MFE、USE engine task，并分配或引用 completion event。
 6. 执行 wait、waitall、fence、timeout 和 local barrier assist。
 7. 处理 Stream Queue token：pop、push、acquire、release、EOS、error propagation。
-8. 管理 outstanding event bitmap、event sequence 和 engine busy 状态。
-9. 执行 issue-window admission 和 slot hazard 检查；First Silicon 固定 `window_size=1`。
-10. 在 fault、timeout、reset/drain 时进入确定状态并上报 fault record。
-11. 向 PMU 提供 UCE fetch、decode、branch、wait、descriptor patch、stream stall 和 window admission stall 归因信号。
+8. 管理 outstanding event bitmap、wait state 和 context-local 归属；若启用 dual-context，context switch 只在显式 wait/stream stall/terminal boundary 发生。
+9. 在 fault、timeout、reset/drain 时进入确定状态并上报 fault record；post-launch runtime fault 可升级为 tile-local drain domain。
+10. 向 PMU 提供 UCE fetch、decode、branch、wait、descriptor patch 和 stream stall 归因信号。
 
 ### 2.2 非职责
 
@@ -69,18 +68,18 @@ Tile UCE 不负责：
 
 ### 2.3 ownership matrix
 
-| 对象                | owner                                                                     | UCE 权限                     | 说明                                                                         |
-| ------------------- | ------------------------------------------------------------------------- | ---------------------------- | ---------------------------------------------------------------------------- |
-| Tile PC             | UCE                                                                       | read/write                   | trap/debug 可读，正常运行由 UCE 独占                                         |
-| Tile Program text   | Tile Group Program Residency Manager / Runtime backing store，UCE execute | fetch only                   | running 状态不可 patch；UCE 只接受 local resident handle                     |
-| Descriptor template | Compiler/Runtime                                                          | patch selected fields        | patch 失败产生 invalid descriptor fault                                      |
-| Slot frame          | Runtime/Firmware bind，UCE enforce                                        | read/validate                | 权限、alignment、owner 校验由 UCE/descriptor unit 执行                       |
-| Stream token        | Stream Queue Engine                                                       | protocol access              | UCE 不直接修改 credit counter                                                |
-| Engine event        | Local Event Unit                                                          | allocate/wait/signal request | event 状态由 event unit 写入                                                 |
-| Issue window entry  | UCE                                                                       | allocate/check/release       | V1 固定 1 entry；V1.x/V2 才允许多 entry，必须携带 frame/slot hazard metadata |
-| USE state slot      | USE                                                                       | launch/control only          | state lifecycle 归 USE                                                       |
-| MFE metadata stream | MFE                                                                       | launch/wait/read token       | 数据相关动态地址归 MFE                                                       |
-| PMU primary stall   | PMU                                                                       | source signal                | UCE 不能重复归因 engine stall                                                |
+| 对象                              | owner                                                                     | UCE 权限                     | 说明                                                                                      |
+| --------------------------------- | ------------------------------------------------------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------- |
+| Tile PC / execution context state | UCE                                                                       | read/write                   | First Silicon V1 为单 active context；V1.x dual-context 仍由 UCE 独占其本地 context state |
+| Tile Program text                 | Tile Group Program Residency Manager / Runtime backing store，UCE execute | fetch only                   | running 状态不可 patch；UCE 只接受 local resident handle                                  |
+| Descriptor template               | Compiler/Runtime                                                          | patch selected fields        | patch 失败产生 invalid descriptor fault                                                   |
+| Slot frame                        | Runtime/Firmware bind，UCE enforce                                        | read/validate                | 权限、alignment、owner、frame generation 校验由 UCE/descriptor unit 执行                  |
+| Stream token                      | Stream Queue Engine                                                       | protocol access              | UCE 不直接修改 credit counter                                                             |
+| Engine event                      | Local Event Unit                                                          | allocate/wait/signal request | event 身份仍由既有 event model 定义；UCE 只消费/等待                                      |
+| Outstanding scoreboard            | UCE                                                                       | read/write internal          | `owner_ctx`、`expected_sequence` 等归属/防 stale 字段是 UCE 内部状态，不是共享 ABI        |
+| USE state slot                    | USE                                                                       | launch/control only          | state lifecycle 归 USE                                                                    |
+| MFE metadata stream               | MFE                                                                       | launch/wait/read token       | 数据相关动态地址归 MFE                                                                    |
+| PMU primary stall                 | PMU                                                                       | source signal                | UCE 不能重复归因 engine stall                                                             |
 
 ## 3. 微架构和状态机
 
@@ -142,7 +141,7 @@ RESET
 ```text
 任意 active 状态
   -> TRAP_CAPTURE
-  -> SIGNAL_ERROR_EVENT
+  -> 写 fault record / signal error event
   -> DRAIN_OUTSTANDING
   -> IDLE 或 RESET
 ```
@@ -166,6 +165,21 @@ RESET
 | TRAP_CAPTURE           | 捕获 PC、opcode、desc id、slot id、engine id、fault code                                        | fault record ready        |
 | DRAIN_OUTSTANDING      | 停止新 issue，等待或取消 outstanding engine/token                                               | drain complete 或 reset   |
 
+### 3.2.1 V1.x dual-context reserved extension
+
+若后续启用 dual-context mode，规范边界如下：
+
+1. 它仍然只消费 `prepared tile task + resident Tile Program handle`，**不**引入新的 group-level program object。
+2. 最多允许 2 个 active execution context，共享同一个 fetch/decode/issue pipeline；不是 superscalar，也不是 OoO。
+3. architected baseline 下，context switch 只发生在：
+   - `wait.event` 未满足；
+   - `stream.pop` / `stream.acquire` 等现有 stream 阻塞点未满足；
+   - 当前 context 完成或进入终止路径。
+4. `engine credit` / local transient backpressure 在 baseline 中先视为当前 context stall；若后续实现要在 credit-stall 时切到另一个 ready context，应作为实现可选优化，而不是共享外部 contract。
+5. `program handle / frame generation / descriptor window` validation fault 一旦发生在 `ACCEPT_TASK` 之后，就必须沿既有 trap/fault 路径完成：`TRAP_CAPTURE` 写 fault record，并把对应 tile terminal event 置为 ERROR，然后回到 `IDLE/RESET`；不能静默退回 scheduler。
+6. 一旦任一 context 已经有 engine launch accepted，则后续 runtime fault / timeout 可升级为 tile-local `DRAIN_OUTSTANDING`，以保持 reset/drain/fault 语义确定。
+7. dual-context 所需的 `owner_ctx`、per-context wait state、local sequence check 等字段都属于 UCE 内部状态；编码、容量和实现形态由后续规格冻结。
+
 ### 3.3 Instruction issue pipeline
 
 推荐简化 pipeline：
@@ -185,16 +199,16 @@ First Silicon 可做单 issue in-order；不需要乱序、speculation 或多发
 
 UCE 持有 tile-local outstanding scoreboard：
 
-| 字段        | 含义                                 |
-| ----------- | ------------------------------------ |
-| `event_id`  | local/global event table index       |
-| `sequence`  | expected event sequence / generation |
-| `window_id` | issue window entry id；V1 固定为 0   |
-| `producer`  | DMA/BOA/EVU/MFE/USE/Stream/Event     |
-| `state`     | pending/done/error/timeout/reset     |
-| `desc_ref`  | descriptor id 或 table slot          |
-| `slot_mask` | 该 task 可能读写的 slot              |
-| `timeout`   | local deadline                       |
+| 字段                | 含义                                                                |
+| ------------------- | ------------------------------------------------------------------- |
+| `event_id`          | local/global event table index                                      |
+| `expected_sequence` | 与 event model 对齐的 wait sequence；用于防止 stale completion      |
+| `owner_ctx`         | 该 scoreboard entry 属于哪个本地 execution context；仅 UCE 内部可见 |
+| `producer`          | DMA/BOA/EVU/MFE/USE/Stream/Event                                    |
+| `state`             | pending/done/error/timeout/reset                                    |
+| `desc_ref`          | descriptor id 或 table slot                                         |
+| `slot_mask`         | 该 task 可能读写的 slot                                             |
+| `timeout`           | local deadline                                                      |
 
 Scoreboard 行数由后续规格冻结。资源不足、`event_id + sequence` 不匹配或 slot hazard 未解除时，`launch.*` / window admission 必须 stall 或 trap，不能静默覆盖 outstanding event。
 
@@ -745,7 +759,9 @@ Debug：
 7. USE recurrence trace：launch.use scan/recurrence，验证 UCE 只控制 event，不修改 state data。
 8. Fault injection：invalid/stale program handle、invalid descriptor、slot permission、stream credit leak、engine timeout。
 9. Reset/drain：active launch 中 soft reset，所有 event/token/scoreboard 进入确定状态。
-10. Sliding window profile：V1 验证 `window_size=1` 不重叠；V1.x 仿真 `window_size=2` 时验证 P0 store 与 P1 load 只在 slot 独立、event sequence 正确时 overlap。
+10. Dual-context independent trace（V1.x optional）：两个 prepared tile task 共驻留，同一 tile 上只在 `wait.event` / stream stall / terminal boundary 发生 context switch。
+11. Dual-context validation fault（V1.x optional）：第二个 context 的 stale handle / bad frame generation / invalid desc window 在 `ACCEPT_TASK` 后必须走 error terminal path，不能伪装成 scheduler retry。
+12. Dual-context runtime fault（V1.x optional）：一个 active context 在 launch accepted 后 timeout / fault，两个 active context 的 drain/reset/event 终态确定且无 stale completion。
 
 ### 8.3 验收标准
 
@@ -755,7 +771,8 @@ Debug：
 - Stream reset/drain 不泄漏 credit。
 - `wait` 不会永久 hang；timeout 行为可验证。
 - UCE overhead 在 canonical GEMM/paged attention/recurrence trace 中不会成为未解释瓶颈；若成为瓶颈，PMU 能指向 fetch、patch、stream 或 event wait。
-- First Silicon `uce_window_size` 必须可观测为 1；若启用 V1.x window profile，必须证明 slot hazard stall、store visibility wait 和 event sequence mismatch 均可观测并可复现。
+- 若实现 V1.x dual-context mode，golden trace 必须证明切换只发生在 `wait.event` / stream stall / terminal boundary，而不是任意 transient backpressure。
+- 若实现 V1.x dual-context mode，validation fault、post-launch runtime fault 和 reset/drain 的 completion 语义必须与单 context 模式一样 deterministic。
 
 ## 9. 风险、取舍和后续细化方向
 

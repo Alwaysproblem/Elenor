@@ -181,6 +181,11 @@ class SimConfig:
     report_path: str | None = None
     seed: int = 0
     fidelity: str = "timing_only"  # "timing_only" | "runtime" | "full_memory"
+    context_count: int = 1
+
+    def __post_init__(self) -> None:
+        if self.context_count < 1 or self.context_count > 2:
+            raise ValueError("context_count must be 1 or 2")
 
     def with_overrides(self, **kw) -> SimConfig:
         return replace(self, **kw)

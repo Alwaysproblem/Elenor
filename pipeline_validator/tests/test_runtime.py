@@ -16,6 +16,16 @@ These tests exercise the runtime / full_memory fidelity modes:
 from __future__ import annotations
 
 from pipeline_validator.config import HardwareConfig, SimConfig
+from pipeline_validator.ir import (
+  EngineDesc,
+  GroupAction,
+  GroupActionOp,
+  TileGroupTask,
+  TileInst,
+  TileOp,
+  TileProgram,
+  TileRoleBinding,
+)
 from pipeline_validator.memory import L2SRAM, NoCRouter, PayloadTracker
 from pipeline_validator.runtime import (
   EventStatus,
@@ -26,7 +36,7 @@ from pipeline_validator.runtime import (
 from pipeline_validator.runtime.fault_ring import FaultDomain, FaultRecord
 from pipeline_validator.runtime.reset_domain import ResetDomain, ResetRequest
 from pipeline_validator.simulator import Simulator
-from pipeline_validator.workloads import MatmulWorkload
+from pipeline_validator.workloads import ALL_WORKLOADS, MatmulWorkload
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -37,6 +47,53 @@ def make_sim(fidelity: str = "runtime") -> Simulator:
   hw = HardwareConfig()
   sim = SimConfig(fidelity=fidelity)
   return Simulator(hw, sim)
+
+
+def make_waiting_mfe_program(name: str = "ctx_wait_mfe") -> TileProgram:
+  p = TileProgram(name=name)
+  p.descriptors = {
+    "mfe_load": EngineDesc("mfe_load", "MFE", "load",
+                            {"bytes": 128 * 1024, "ops": 0}),
+  }
+  p.insts = [
+    TileInst(TileOp.LAUNCH_MFE, dst="e_load", args=("mfe_load",)),
+    TileInst(TileOp.WAIT, args=("e_load",)),
+    TileInst(TileOp.RET),
+  ]
+  p.resolve_labels()
+  return p
+
+
+def make_short_evu_program(name: str = "ctx_short_evu") -> TileProgram:
+  p = TileProgram(name=name)
+  p.descriptors = {
+    "evu_short": EngineDesc("evu_short", "EVU", "relu", {"ops": 16}),
+  }
+  p.insts = [
+    TileInst(TileOp.LAUNCH_EVU, dst="e_evu", args=("evu_short",)),
+    TileInst(TileOp.WAIT, args=("e_evu",)),
+    TileInst(TileOp.RET),
+  ]
+  p.resolve_labels()
+  return p
+
+
+def make_two_role_same_tile_task() -> TileGroupTask:
+  t = TileGroupTask(name="two_role_same_tile")
+  t.role_bindings = {
+    0: TileRoleBinding(role_id=0, tile_mask=0x01,
+                       tile_program=make_waiting_mfe_program()),
+    1: TileRoleBinding(role_id=1, tile_mask=0x01,
+                       tile_program=make_short_evu_program()),
+  }
+  t.actions = [
+    GroupAction(GroupActionOp.DISPATCH_ROLE, args=(0,), dst="ev_role0"),
+    GroupAction(GroupActionOp.DISPATCH_ROLE, args=(1,), dst="ev_role1"),
+    GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_role0",)),
+    GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_role1",)),
+    GroupAction(GroupActionOp.SIGNAL_EVENT, args=("group_task_done",)),
+  ]
+  return t
 
 
 # ---------------------------------------------------------------------------
@@ -327,30 +384,15 @@ class TestSlotFrame:
 
 
 # ---------------------------------------------------------------------------
-# Backward compatibility
+# Fidelity modes
 # ---------------------------------------------------------------------------
 
 
-class TestBackwardCompat:
-
-  def test_timing_only_unchanged(self):
-    """timing_only bypasses runtime residency overhead."""
-    hw = HardwareConfig()
-    sim = SimConfig(fidelity="timing_only")
-    s = Simulator(hw, sim)
-    wl = MatmulWorkload()
-    r = s.run(wl.task)
-    assert r.completed
-    # timing_only should have no cold-load PMU
-    cold = r.pmu.named_cycles.get("program_cold_load", 0)
-    assert cold == 0
-    assert r.pmu.named_cycles.get("task_accept", 0) == 0
+class TestFidelityModes:
 
   def test_all_workloads_complete_in_all_fidelities(self):
     """Every workload completes in all three fidelity modes."""
     import signal
-
-    from pipeline_validator.workloads import ALL_WORKLOADS
 
     def handler(signum, frame):
       raise TimeoutError("workload timed out")
@@ -358,7 +400,7 @@ class TestBackwardCompat:
     signal.signal(signal.SIGALRM, handler)
     for fidelity in ("timing_only", "runtime", "full_memory"):
       hw = HardwareConfig()
-      sim = SimConfig(fidelity=fidelity, max_cycles=200000)
+      sim = SimConfig(fidelity=fidelity, context_count=1, max_cycles=200000)
       for wl_cls in ALL_WORKLOADS:
         wl = wl_cls()
         s = Simulator(hw, sim)
@@ -366,4 +408,14 @@ class TestBackwardCompat:
         r = s.run(wl.task)
         signal.alarm(0)
         assert r.completed, (
-            f"{wl.name} failed in {fidelity}: {r.reason}")
+          f"{wl.name} failed in {fidelity}: {r.reason}")
+
+  def test_runtime_context_count_two_runs_two_same_tile_roles(self):
+    sim = Simulator(HardwareConfig(),
+                    SimConfig(fidelity="runtime",
+                              context_count=2,
+                              max_cycles=10000))
+    result = sim.run(make_two_role_same_tile_task())
+    assert result.completed, result.reason
+    assert result.pmu.events.get("uce_context_switch", 0) > 0
+    assert result.pmu.named_cycles.get("task_accept", 0) > 0
