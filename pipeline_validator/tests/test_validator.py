@@ -7,13 +7,18 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 import pipeline_validator as pv
 from pipeline_validator.config import HardwareConfig, SimConfig
 from pipeline_validator.ir import (
+  EngineDesc,
   GroupAction,
   GroupActionOp,
   TileGroupTask,
+  TileInst,
   TileOp,
+  TileProgram,
   TileRoleBinding,
   make_attention_task,
   make_identity_tile_program,
@@ -42,7 +47,7 @@ from pipeline_validator.workloads import (
   MatmulWorkload,
   MoEWorkload,
   PagedAttentionWorkload,
-  TiledMatmulPersistentWorkload,
+  PowWorkload,
   TiledMatmulPipelinedPowWorkload,
   TiledMatmulPipelinedWorkload,
   TiledMatmulWorkload,
@@ -430,13 +435,20 @@ class TestSimulation:
     assert gp["pass"], f"multi_stage_group_io failed: {gp}"
     assert gp["actual"] is True
 
-  def test_tiled_matmul_persistent_completes(self):
-    """Persistent single-dispatch workload completes end-to-end."""
-    result = self._run(TiledMatmulPersistentWorkload())
-    assert result.completed, (
-        f"tiled_matmul_persistent did not complete: {result.reason}")
+  def test_pow_completes(self):
+    result = self._run(PowWorkload())
+    assert result.completed, f"pow did not complete: {result.reason}"
     assert result.cycles > 0
     assert result.credit_invariant_ok
+
+  def test_pow_report_has_passing_checks(self):
+    wl = PowWorkload()
+    sim = Simulator(HardwareConfig(), SimConfig(max_cycles=200_000))
+    result = sim.run(wl.task)
+    assert result.completed, result.reason
+    rep = build_report(wl, result)
+    failed = [c for c in rep.checks if not c["pass"]]
+    assert not failed, f"pow failed checks: {failed}"
 
   def test_tiled_matmul_persistent_is_single_dispatch(self):
     """The persistent task dispatches exactly once (not per-chunk)."""
@@ -467,17 +479,6 @@ class TestSimulation:
       assert f"ev_dma_B{g}" in bridged, (
           f"missing bridged WAIT ev_dma_B{g}")
 
-  def test_tiled_matmul_persistent_report_has_passing_checks(self):
-    """The persistent workload's report checks pass."""
-    wl = TiledMatmulPersistentWorkload(num_group_chunks=4, num_k_chunks=4)
-    sim = Simulator(HardwareConfig(), SimConfig(max_cycles=200_000))
-    result = sim.run(wl.task)
-    assert result.completed, (
-        f"tiled_matmul_persistent did not complete: {result.reason}")
-    rep = build_report(wl, result)
-    completion = next(c for c in rep.checks
-                      if c["check"] == "task_completed")
-    assert completion["pass"], f"task_completed failed: {completion}"
 
   def test_tiled_matmul_persistent_has_cross_chunk_load_overlap(self):
     """The persistent tile program issues chunk g+1's prologue load
@@ -586,6 +587,62 @@ class TestTracer:
     for c in counters:
       counter_names.update(c["args"].keys())
     assert "occupancy" in counter_names or "credit_available" in counter_names
+
+  def test_multi_context_trace_has_separate_uce_lanes(self):
+    sim = Simulator(HardwareConfig(),
+                    SimConfig(context_count=2, max_cycles=5000),
+                    enable_tracer=True)
+    result = sim.run(make_two_role_same_tile_task())
+    assert result.completed, result.reason
+    data = json.loads(result.tracer.to_chrome_json())
+    events = data["traceEvents"]
+
+    tile0_pid = next(
+      e["pid"] for e in events
+      if e.get("name") == "process_name"
+      and e.get("args", {}).get("name") == "Tile0")
+    thread_names = {
+      e["tid"]: e["args"]["name"]
+      for e in events
+      if e.get("name") == "thread_name" and e.get("pid") == tile0_pid
+    }
+    assert "UCE CTX0" in thread_names.values()
+    assert "UCE CTX1" in thread_names.values()
+
+    instants = [e for e in events if e["ph"] == "i"]
+    instant_names = {e["name"] for e in instants}
+    assert "ctx_switch" in instant_names
+    assert "uce_issue" in instant_names
+
+    counter_names = set()
+    for e in events:
+      if e["ph"] == "C":
+        counter_names.update(e["args"].keys())
+    assert "active_context_count" in counter_names
+    assert "ready_context_count" in counter_names
+
+    ctx0_wait_intervals: list[tuple[float, float]] = []
+    wait_starts: list[float] = []
+    for e in events:
+      if e.get("cat") != "UCE CTX0":
+        continue
+      if e["ph"] == "B" and e["name"].startswith("WAIT_EVENT"):
+        wait_starts.append(e["ts"])
+      elif e["ph"] == "E" and wait_starts:
+        start = wait_starts.pop()
+        ctx0_wait_intervals.append((start, e["ts"]))
+    assert ctx0_wait_intervals, "missing CTX0 WAIT_EVENT slice"
+
+    ctx1_issue_ts = [
+      e["ts"] for e in instants
+      if e["name"] == "uce_issue"
+      and thread_names.get(e["tid"]) == "UCE CTX1"
+    ]
+    assert ctx1_issue_ts, "missing CTX1 uce_issue instant"
+    assert any(start <= ts <= end
+               for start, end in ctx0_wait_intervals
+               for ts in ctx1_issue_ts), (
+      "expected a CTX1 uce_issue during a CTX0 WAIT_EVENT interval")
 
   def test_trace_has_tilegroup_runtime_slices(self):
     """TileGroup task/role/Global-DMA/Collective duration bars exist."""
@@ -815,318 +872,149 @@ def make_group_runtime_trace_task() -> TileGroupTask:
 
 
 # ---------------------------------------------------------------------------
-# Tile UCE task-list scheduler tests  (V2)
+# UCE multi-context tests
 # ---------------------------------------------------------------------------
 
 
-class TestTileScheduler:
-  """Verify ready-first dispatch, dep-counter, completion queue, and SlotFrame snapshot."""
+def make_waiting_mfe_program(name="ctx_wait_mfe") -> TileProgram:
+  p = TileProgram(name=name)
+  p.descriptors = {
+    "mfe_load": EngineDesc("mfe_load", "MFE", "load",
+                            {"bytes": 128 * 1024, "ops": 0}),
+  }
+  p.insts = [
+    TileInst(TileOp.LAUNCH_MFE, dst="e_load", args=("mfe_load",)),
+    TileInst(TileOp.WAIT, args=("e_load",)),
+    TileInst(TileOp.RET),
+  ]
+  p.resolve_labels()
+  return p
 
-  def test_ready_first_skips_full_engine_queue(self):
-    """When MFE engine + UCE-side FIFO are full, BOA still issues,
-    proving ready-first scan skips full-FIFO targets."""
-    from pipeline_validator.ir import EngineDesc, TileInst, TileOp, TileProgram
-    from pipeline_validator.tile import ComputeTile
 
-    hw = HardwareConfig().with_overrides(
-        mfe_pipeline_depth=4, mfe_load_queue_depth=1,
-        mfe_store_queue_depth=1, mfe_stream_buffer_bytes=0)
-    # first mfe_pipeline_depth fill MFE internal accept queue; next
-    # mfe_load_queue_depth fill UCE-side MFE_LOAD ingress; the final one
-    # is skipped so BOA can issue.
-    num_mfe = hw.mfe_pipeline_depth + hw.mfe_load_queue_depth + 1
+def make_short_evu_program(name="ctx_short_evu") -> TileProgram:
+  p = TileProgram(name=name)
+  p.descriptors = {
+    "evu_short": EngineDesc("evu_short", "EVU", "relu", {"ops": 16}),
+  }
+  p.insts = [
+    TileInst(TileOp.LAUNCH_EVU, dst="e_evu", args=("evu_short",)),
+    TileInst(TileOp.WAIT, args=("e_evu",)),
+    TileInst(TileOp.RET),
+  ]
+  p.resolve_labels()
+  return p
 
-    p = TileProgram(name="ready_first_mfe_full")
-    for i in range(num_mfe):
-      p.descriptors[f"mfe_{i}"] = EngineDesc(
-          f"mfe_{i}", "MFE", "load",
-          {"bytes": 128 * 1024, "ops": 0})
-    p.descriptors["boa"] = EngineDesc(
-        "boa", "BOA", "matmul",
-        {"m": 16, "n": 16, "k": 16,
-         "ops": 2 * 16 * 16 * 16})
 
-    insts = []
-    for i in range(num_mfe):
-      insts.append(TileInst(TileOp.LAUNCH_MFE, dst=f"e_mfe{i}",
-                            args=(f"mfe_{i}",)))
-    insts.append(TileInst(TileOp.LAUNCH_BOA, dst="e_boa0",
-                          args=("boa",)))
-    insts.append(TileInst(TileOp.RET))
-    p.insts = insts
-    p.resolve_labels()
+def make_two_role_same_tile_task() -> TileGroupTask:
+  t = TileGroupTask(name="two_role_same_tile")
+  t.role_bindings = {
+    0: TileRoleBinding(role_id=0, tile_mask=0x01,
+                       tile_program=make_waiting_mfe_program()),
+    1: TileRoleBinding(role_id=1, tile_mask=0x01,
+                       tile_program=make_short_evu_program()),
+  }
+  t.actions = [
+    GroupAction(GroupActionOp.DISPATCH_ROLE, args=(0,), dst="ev_role0"),
+    GroupAction(GroupActionOp.DISPATCH_ROLE, args=(1,), dst="ev_role1"),
+    GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_role0",)),
+    GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_role1",)),
+    GroupAction(GroupActionOp.SIGNAL_EVENT, args=("group_task_done",)),
+  ]
+  return t
 
-    tile = ComputeTile(0, hw)
-    tile.load_program(p)
 
-    mfe_fifo_full = False
-    boa_launched_early = False
-    for cycle in range(0, 128):
-      tile.step(cycle)
-      snap = tile.snapshot()["uce_scheduler"]
-      e_mfe0_done = "e_mfe0" in snap["events_done"]
+class TestUceContextMode:
 
-      # Check if MFE UCE-side load ingress FIFO was ever occupied or a
-      # later MFE task was queued (proving backpressure before BOA launch).
-      if not e_mfe0_done:
-        if len(snap["queued"]["MFE_LOAD"]) > 0:
-          mfe_fifo_full = True
-        else:
-          for _ct, t in snap["tasks"].items():
-            if (t["event_id"] and t["event_id"].startswith("e_mfe")
-                and t["state"] == "queued"):
-              mfe_fifo_full = True
-              break
+  def test_context_count_two_overlaps_two_roles_on_same_tile(self):
+    dual = Simulator(HardwareConfig(),
+                     SimConfig(context_count=2, max_cycles=5000))
+    dual_result = dual.run(make_two_role_same_tile_task())
+    assert dual_result.completed, dual_result.reason
+    assert dual_result.pmu.events.get("uce_context_switch", 0) > 0
 
-        # BOA should reach running/done before the first (long) MFE finishes
-        for _ct, t in snap["tasks"].items():
-          if t["event_id"] == "e_boa0" and t["state"] in ("running", "done"):
-            boa_launched_early = True
-            break
-        if boa_launched_early:
-          break
+    single = Simulator(HardwareConfig(),
+                       SimConfig(context_count=1, max_cycles=5000))
+    single_result = single.run(make_two_role_same_tile_task())
+    assert single_result.completed, single_result.reason
+    assert dual_result.cycles < single_result.cycles, (
+      f"context_count=2 should overlap roles: ctx2={dual_result.cycles}, "
+      f"ctx1={single_result.cycles}")
 
-    assert mfe_fifo_full, (
-        "MFE UCE-side FIFO was never occupied — cannot prove backpressure skip")
-    assert boa_launched_early, (
-        "BOA task should have launched before e_mfe0 completed")
+  def test_context_count_one_serializes_same_tile_roles(self):
+    sim = Simulator(HardwareConfig(),
+                    SimConfig(context_count=1, max_cycles=5000))
+    result = sim.run(make_two_role_same_tile_task())
+    assert result.completed, result.reason
+    assert result.pmu.named_cycles.get("dispatch_wait", 0) > 0
 
-  def test_wait_dep_counter_releases_downstream_on_completion(self):
-    """Completion queue: notify enqueues; step drains and releases dep."""
-    from pipeline_validator.ir import EngineDesc, TileInst, TileOp, TileProgram
-    from pipeline_validator.tile import ComputeTile
-
-    p = TileProgram(name="wait_dep_tile")
-    p.descriptors = {
-        "mfe_load": EngineDesc(
-            "mfe_load", "MFE", "load",
-            {"bytes": 4096, "ops": 0}),
-        "boa_matmul": EngineDesc(
-            "boa_matmul", "BOA", "matmul",
-            {"m": 16, "n": 16, "k": 16,
-             "ops": 2 * 16 * 16 * 16}),
-    }
-    p.insts = [
-        TileInst(TileOp.LAUNCH_MFE, dst="e_load", args=("mfe_load",)),
-        TileInst(TileOp.WAIT, args=("e_load",)),
-        TileInst(TileOp.LAUNCH_BOA, dst="e_boa",
-                 args=("boa_matmul",)),
-        TileInst(TileOp.WAIT, args=("e_boa",)),
-        TileInst(TileOp.RET),
-    ]
-    p.resolve_labels()
-
-    tile = ComputeTile(0, HardwareConfig())
-    tile.load_program(p)
-
-    # Step once to launch e_load and enter wait
-    tile.step(0)
-    snap = tile.snapshot()["uce_scheduler"]
-    # Find BOA task
-    boa_task = None
-    for _ct, t in snap["tasks"].items():
-      if t["event_id"] == "e_boa":
-        boa_task = t
-        break
-    assert boa_task is not None, "BOA task not found"
-    assert boa_task["dep_counter"] == 1, (
-        "BOA should have dep_counter=1 before e_load completes")
-    assert boa_task["state"] == "pending", (
-        "BOA should be PENDING before e_load completes")
-
-    # Simulate completion arrival: notify_event should ENQUEUE, not
-    # immediately release the dependent.
-    tile.uce.notify_event("e_load")
-    snap = tile.snapshot()["uce_scheduler"]
-    assert snap["completion_queue"] == ["e_load"], (
-        f"completion_queue should contain e_load, got {snap['completion_queue']}")
-    assert "e_load" not in snap["events_done"], (
-        "e_load should NOT be in events_done before drain")
-    # BOA still blocked
-    boa_task = None
-    for _ct, t in snap["tasks"].items():
-      if t["event_id"] == "e_boa":
-        boa_task = t
-        break
-    assert boa_task["dep_counter"] == 1, (
-        "BOA dep_counter should still be 1 after enqueue")
-    assert boa_task["state"] == "pending", (
-        "BOA should still be PENDING after enqueue")
-
-    # Now step: drain completion queue, release dep
-    tile.uce.step(1, tile)
-    snap = tile.snapshot()["uce_scheduler"]
-    assert snap["completion_queue"] == [], "completion_queue should be empty after drain"
-    assert "e_load" in snap["events_done"], "e_load should be done after drain"
-    boa_task = None
-    for _ct, t in snap["tasks"].items():
-      if t["event_id"] == "e_boa":
-        boa_task = t
-        break
-    assert boa_task["dep_counter"] == 0, (
-        f"BOA dep_counter should be 0 after drain, got {boa_task['dep_counter']}")
-    assert boa_task["state"] in ("ready", "queued", "running", "done"), (
-        f"BOA should be ready/queued/running/done after drain, got {boa_task['state']}")
+  def test_context_count_validation(self):
+    with pytest.raises(ValueError, match="context_count must be 1 or 2"):
+      SimConfig(context_count=0)
+    with pytest.raises(ValueError, match="context_count must be 1 or 2"):
+      SimConfig(context_count=3)
 
   def test_full_memory_tile_scratchpad_snapshot_active(self):
-    """full_memory fidelity runs expose L1 SlotFrame scratchpad metadata,
-    UCE scheduler snapshot, and completion queue field."""
-    from pipeline_validator.simulator import Simulator
-
-    sim = Simulator(
-        HardwareConfig(),
-        SimConfig(fidelity="full_memory", max_cycles=200_000))
+    sim = Simulator(HardwareConfig(),
+                    SimConfig(fidelity="full_memory", max_cycles=200_000))
     result = sim.run(MatmulWorkload().task)
-    assert result.completed, (
-        f"full_memory matmul did not complete: {result.reason}")
-    gs = result.group_snapshot
-    tiles = gs["tiles"]
-    assert len(tiles) > 0, "no tile snapshots"
+    assert result.completed, result.reason
+    tiles = result.group_snapshot["tiles"]
+    assert tiles, "no tile snapshots"
     t0 = tiles[0]
-    assert "l1_frame" in t0, "l1_frame missing"
-    l1f = t0["l1_frame"]
-    assert l1f["state"] in ("FRAME_ACTIVE", "IDLE"), (
-        f"unexpected l1_frame state: {l1f['state']}")
-    assert "uce_scheduler" in t0, "uce_scheduler missing"
-    us = t0["uce_scheduler"]
-    assert us["mode"] in ("task_list", "pc")
-    assert "completion_queue" in us, "completion_queue field missing"
-    assert "tasks" in us
-    assert "command_buffer_size" in us
+    assert "l1_frame" in t0
+    assert t0["l1_frame"]["state"] in ("FRAME_ACTIVE", "IDLE")
+    assert "uce" in t0
+    assert t0["uce"]["context_count"] == 1
+    assert "contexts" in t0["uce"]
 
-  def test_mfe_load_store_ingress_depths_are_independent(self):
-    """MFE_LOAD and MFE_STORE have independent UCE-side queue depths;
-    ready-first dispatch skips full MFE ingress so a short BOA task still
-    issues before the first long MFE event completes."""
-    from pipeline_validator.ir import EngineDesc, TileInst, TileOp, TileProgram
-    from pipeline_validator.tile import ComputeTile
 
-    hw = HardwareConfig().with_overrides(
-        mfe_pipeline_depth=1, mfe_load_queue_depth=2,
-        mfe_store_queue_depth=1, mfe_stream_buffer_bytes=0)
-
-    p = TileProgram(name="mfe_load_store_independent")
-    for i in range(3):
-      p.descriptors[f"load_{i}"] = EngineDesc(
-          f"load_{i}", "MFE", "load",
-          {"bytes": 128 * 1024, "ops": 0})
-    for i in range(2):
-      p.descriptors[f"store_{i}"] = EngineDesc(
-          f"store_{i}", "MFE", "store",
-          {"bytes": 128 * 1024, "ops": 0})
-    p.descriptors["boa"] = EngineDesc(
-        "boa", "BOA", "matmul",
-        {"m": 16, "n": 16, "k": 16, "ops": 2 * 16 * 16 * 16})
-
-    insts = []
-    for i in range(3):
-      insts.append(TileInst(TileOp.LAUNCH_MFE, dst=f"e_load{i}",
-                            args=(f"load_{i}",)))
-    for i in range(2):
-      insts.append(TileInst(TileOp.LAUNCH_MFE, dst=f"e_store{i}",
-                            args=(f"store_{i}",)))
-    insts.append(TileInst(TileOp.LAUNCH_BOA, dst="e_boa0", args=("boa",)))
-    insts.append(TileInst(TileOp.RET))
-    p.insts = insts
-    p.resolve_labels()
-
-    tile = ComputeTile(0, hw)
-    tile.load_program(p)
-
-    load_reached_2 = False
-    store_reached_1 = False
-    boa_done_early = False
-    for cycle in range(0, 256):
-      tile.step(cycle)
-      snap = tile.snapshot()["uce_scheduler"]
-      queued = snap["queued"]
-      assert "MFE_LOAD" in queued, "MFE_LOAD key missing from snapshot"
-      assert "MFE_STORE" in queued, "MFE_STORE key missing from snapshot"
-
-      if len(queued["MFE_LOAD"]) >= 2:
-        load_reached_2 = True
-      if len(queued["MFE_STORE"]) >= 1:
-        store_reached_1 = True
-
-      e_load0_done = "e_load0" in snap["events_done"]
-      if not e_load0_done:
-        for _ct, t in snap["tasks"].items():
-          if (t["event_id"] == "e_boa0"
-                  and t["state"] in ("running", "done")):
-            boa_done_early = True
-            break
-        if boa_done_early and load_reached_2:
-          break
-
-    assert load_reached_2, (
-        "MFE_LOAD ingress never reached depth 2 — independence not proven")
-    assert store_reached_1, (
-        "MFE_STORE ingress never reached depth 1 — split not working")
-    assert boa_done_early, (
-        "BOA should issue before first long MFE completes (ready-first skip)")
+class TestMfeStreamBuffer:
 
   def test_mfe_stream_buffer_override_faults_page_prefetch(self):
-    """A finite mfe_stream_buffer_bytes faults explicit page-stream prefetch
-    that exceeds capacity; exact-fit and default-0 (unfrozen) complete."""
-    from pipeline_validator.ir import (
-      EngineDesc,
-      GroupAction,
-      GroupActionOp,
-      TileGroupTask,
-      TileInst,
-      TileOp,
-      TileProgram,
-      TileRoleBinding,
-    )
-    from pipeline_validator.simulator import Simulator
-
     def make_page_stream_task(prefetch_depth: int) -> TileGroupTask:
       p = TileProgram(name="page_stream_tile")
       p.descriptors["page_stream"] = EngineDesc(
-          "page_stream", "MFE", "page_stream",
-          {"bytes": 8192, "num_pages": 4, "page_size": 16,
-           "prefetch_depth": prefetch_depth})
+        "page_stream", "MFE", "page_stream",
+        {"bytes": 8192, "num_pages": 4, "page_size": 16,
+         "prefetch_depth": prefetch_depth})
       p.insts = [
-          TileInst(TileOp.LAUNCH_MFE, dst="e_page", args=("page_stream",)),
-          TileInst(TileOp.WAIT, args=("e_page",)),
-          TileInst(TileOp.RET),
+        TileInst(TileOp.LAUNCH_MFE, dst="e_page", args=("page_stream",)),
+        TileInst(TileOp.WAIT, args=("e_page",)),
+        TileInst(TileOp.RET),
       ]
       p.resolve_labels()
 
       t = TileGroupTask(name="page_stream_task")
       t.streams = []
       t.role_bindings = {
-          0: TileRoleBinding(role_id=0, tile_mask=0x0F,
-                             tile_program=p)}
+        0: TileRoleBinding(role_id=0, tile_mask=0x0F, tile_program=p),
+      }
       t.actions = [
-          GroupAction(GroupActionOp.DISPATCH_ROLE, args=(0,), dst="ev_role0"),
-          GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_role0",)),
-          GroupAction(GroupActionOp.SIGNAL_EVENT, args=("group_task_done",)),
+        GroupAction(GroupActionOp.DISPATCH_ROLE, args=(0,), dst="ev_role0"),
+        GroupAction(GroupActionOp.WAIT_EVENT, args=("ev_role0",)),
+        GroupAction(GroupActionOp.SIGNAL_EVENT, args=("group_task_done",)),
       ]
       return t
 
-    # prefetch_depth=3, buffer=4096 → required 6144 → fault
     hw = HardwareConfig().with_overrides(mfe_stream_buffer_bytes=4096)
     sim = Simulator(hw, SimConfig(max_cycles=1000))
     result = sim.run(make_page_stream_task(3))
     assert not result.completed, (
-        f"expected fault for over-capacity prefetch, got completed={result.completed}")
+      f"expected fault for over-capacity prefetch, got completed={result.completed}")
     assert "MFE page_stream prefetch requires 6144 bytes" in result.reason, (
-        f"reason should mention 6144 bytes, got: {result.reason}")
+      f"reason should mention 6144 bytes, got: {result.reason}")
 
-    # prefetch_depth=2, buffer=4096 → required 4096 → exact fit → complete
     hw = HardwareConfig().with_overrides(mfe_stream_buffer_bytes=4096)
     sim = Simulator(hw, SimConfig(max_cycles=1000))
     result = sim.run(make_page_stream_task(2))
     assert result.completed, (
-        f"exact-fit prefetch should complete, got: {result.reason}")
+      f"exact-fit prefetch should complete, got: {result.reason}")
 
-    # prefetch_depth=3, buffer=0 (default unfrozen) → complete
     hw = HardwareConfig()
     sim = Simulator(hw, SimConfig(max_cycles=1000))
     result = sim.run(make_page_stream_task(3))
     assert result.completed, (
-        f"default non-enforcing buffer should complete, got: {result.reason}")
+      f"default non-enforcing buffer should complete, got: {result.reason}")
 
 
 # ---------------------------------------------------------------------------

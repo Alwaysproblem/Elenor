@@ -66,6 +66,13 @@ def main(argv=None) -> int:
                         default=[],
                         metavar="KEY=VALUE",
                         help="override a SimConfig field, e.g. trace=True")
+    parser.add_argument(
+        "--context-mode",
+        type=int,
+        choices=(1, 2),
+        default=None,
+        metavar="N",
+        help="Tile UCE execution context count: 1 or 2 (default: 1)")
     parser.add_argument("--max-cycles",
                         type=int,
                         default=None,
@@ -102,6 +109,8 @@ def main(argv=None) -> int:
     sim_overrides = _parse_overrides(args.sim_override)
     if args.max_cycles is not None:
         sim_overrides["max_cycles"] = args.max_cycles
+    if args.context_mode is not None:
+        sim_overrides["context_count"] = args.context_mode
     if args.trace:
         sim_overrides["trace"] = True
     sim_cfg = SimConfig().with_overrides(**sim_overrides)

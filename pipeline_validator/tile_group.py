@@ -77,7 +77,7 @@ class TileGroup:
   """One ELENOR Tile Group with 4 Compute Tiles."""
 
   def __init__(self, cfg: HardwareConfig, tracer: Tracer | None = None,
-               fidelity: str = "timing_only"):
+               fidelity: str = "timing_only", context_count: int = 1):
     self.cfg = cfg
     self.tracer = tracer
     self.fidelity = fidelity
@@ -85,7 +85,7 @@ class TileGroup:
     mem = fidelity == "full_memory"
     self.tiles: list[ComputeTile] = [
       ComputeTile(i, cfg, tracer, runtime_enabled=rt,
-                  memory_enabled=mem)
+                  memory_enabled=mem, context_count=context_count)
       for i in range(cfg.num_tiles)
     ]
     self.sequencer = TileGroupSequencer(self)
@@ -95,14 +95,11 @@ class TileGroup:
     self._channel_free_cycle: dict[int, int] = {}
     self._collective_jobs: list[_CollectiveJob] = []
     self.pmu = PMUCounter()
-    # role dispatch: role_id -> tile_mask of the active dispatch
-    self._role_tile_mask: dict[int, int] = {}
-    # role completion fan-in by event id: event_id -> set of tile ids done
-    self._role_done_tiles: dict[str, set] = {}
+    # role dispatch fan-in by event id: event_id -> tile_mask / done tiles
+    self._role_event_tile_mask: dict[str, int] = {}
+    self._role_done_tiles: dict[str, set[int]] = {}
     # role trace bookkeeping: event_id -> _RoleTrace
     self._role_trace: dict[str, _RoleTrace] = {}
-    # which tile belongs to which role completion event id
-    self._tile_role_event: dict[int, str] = {}
     # task trace bookkeeping
     self._task_trace_name: str | None = None
     self._task_start_cycle: int | None = None
@@ -204,6 +201,11 @@ class TileGroup:
         participant_mask=participant_mask,
       ))
 
+  def can_dispatch_role(self, binding: TileRoleBinding) -> bool:
+    return all(t.can_accept_context()
+               for t in self.tiles
+               if binding.tile_mask & (1 << t.tile_id))
+
   def dispatch_role(
     self,
     binding: TileRoleBinding,
@@ -213,15 +215,47 @@ class TileGroup:
     """Load the role's Tile Program onto the selected tiles and mark them."""
     role_id = binding.role_id
     tile_mask = binding.tile_mask
-    self._role_tile_mask[role_id] = tile_mask
     ev = event_id or f"ev_role{role_id}"
-    # overwrite (not setdefault) so a re-dispatched role_id in a loop
-    # starts with fresh completion/trace state.
+    self._role_event_tile_mask[ev] = tile_mask
     self._role_done_tiles[ev] = set()
-    # always clear stale trace metadata so a re-dispatch never inherits it
     self._role_trace.pop(ev, None)
+    total_cold = 0
+    prog = binding.tile_program
+    if self.runtime_enabled and prog.program_id != 0:
+      identity = (prog.program_id, prog.version, prog.program_hash)
+      cached = self._registered_programs.get(identity)
+      if cached is None:
+        cached = self._program_bytes(prog)
+        self._registered_programs[identity] = cached
+        self.program_table.register(
+          program_id=prog.program_id, version=prog.version,
+          program_hash=prog.program_hash,
+          hbm_iova=0, hbm_bytes=cached)
+    ctx_ids: list[int] = []
+    for t in self.tiles:
+      if not (tile_mask & (1 << t.tile_id)):
+        continue
+      prepare = 0
+      if self.runtime_enabled and prog.program_id != 0:
+        prepare = self.program_table.ensure_resident(
+          prog.program_id, t.tile_id, cycle)
+        total_cold += prepare
+      ctx_id = t.load_program(binding.tile_program,
+                              role_id=role_id,
+                              role_event_id=ev,
+                              prepare_cycles=prepare)
+      assert ctx_id is not None
+      ctx_ids.append(ctx_id)
+      if self.runtime_enabled:
+        t.uce._event_done_callback = self._make_event_callback()
+      for qid, q in self.queues.items():
+        t.bind_stream(qid, q)
+      for done_ev in sorted(self.sequencer._events_done):
+        if done_ev.startswith("ev_dma_"):
+          t.uce.notify_event(done_ev)
     tr = self.tracer
     if tr is not None:
+      ctx_trace_arg = ctx_ids[0] if len(set(ctx_ids)) == 1 else ctx_ids
       tr.instant(
         "TileGroup",
         "TileRole",
@@ -234,6 +268,8 @@ class TileGroup:
           "event_id": ev,
           "out_stream": binding.out_stream,
           "in_stream": binding.in_stream,
+          "ctx_id": ctx_trace_arg,
+          "context_count": self.tiles[0].uce.context_count,
         },
       )
       self._role_trace[ev] = _RoleTrace(
@@ -244,56 +280,8 @@ class TileGroup:
         out_stream=binding.out_stream,
         in_stream=binding.in_stream,
       )
-    total_cold = 0
-    prog = binding.tile_program
-    # runtime fidelity: register program identity once keyed by the full
-    # (program_id, version, program_hash) tuple — re-registering on every
-    # dispatch would clear tile_states/epoch and make warm hits impossible.
-    # If the same program_id changes version/hash, we re-register (cold).
-    if self.runtime_enabled and prog.program_id != 0:
-      identity = (prog.program_id, prog.version, prog.program_hash)
-      cached = self._registered_programs.get(identity)
-      if cached is None:
-        cached = self._program_bytes(prog)
-        self._registered_programs[identity] = cached
-        self.program_table.register(
-          program_id=prog.program_id, version=prog.version,
-          program_hash=prog.program_hash,
-          hbm_iova=0, hbm_bytes=cached)
-    for t in self.tiles:
-      if tile_mask & (1 << t.tile_id):
-        # per-tile prepare cycles: each tile pays its own cold/warm penalty
-        # (residency is tracked per-tile; a partial reset leaves some tiles
-        # warm and others cold, so we must not broadcast a single max).
-        prepare = 0
-        if self.runtime_enabled and prog.program_id != 0:
-          prepare = self.program_table.ensure_resident(
-              prog.program_id, t.tile_id, cycle)
-          total_cold += prepare
-        t.load_program(binding.tile_program, prepare_cycles=prepare)
-        # Seed tile-visible done-events from already-completed sequencer
-        # events (cross-level replay).  A persistent tile program may
-        # WAIT on sequencer-issued DMA events (e.g. ev_dma_A0) that
-        # completed before DISPATCH_ROLE fired — without this seed the
-        # WAIT would never resolve because the live bridge only forwards
-        # completions to tiles that were already active.  Route through
-        # notify_event so the completion queue + _complete_event path
-        # decrements dependent dep-counters correctly.
-        for done_ev in sorted(self.sequencer._events_done):
-          if done_ev.startswith("ev_dma_"):
-            t.uce.notify_event(done_ev)
-        # runtime fidelity: route UCE engine-completion events through the
-        # group EventTable so sequence/status is observable (P0-4).
-        if self.runtime_enabled:
-          t.uce._event_done_callback = self._make_event_callback()
-        t.role_id = role_id
-        self._tile_role_event[t.tile_id] = ev
-        # rebind streams for this role (program may use qid 0/1)
-        for qid, q in self.queues.items():
-          t.bind_stream(qid, q)
     if total_cold > 0:
       self.pmu.add_cycle("program_cold_load", total_cold)
-
   @staticmethod
   def _program_bytes(prog) -> int:
     """Estimate *program text* size for residency (install to tile program SRAM).
@@ -324,10 +312,9 @@ class TileGroup:
         # Cross-level event bridge: forward group DMA completion to
         # active tiles so a persistent tile program can WAIT on
         # sequencer-issued DMA events (e.g. ev_dma_A{g}).  Tiles not
-        # waiting on this event ignore it (notify_event is a no-op for
-        # unknown events when no program is loaded).
+        # waiting on this event ignore it.
         for t in self.tiles:
-          if not t.uce.done and t.uce.program is not None:
+          if t.uce.has_active_contexts():
             t.uce.notify_event(job.event_id)
         # full_memory: record the DMA transfer as a payload so downstream
         # engine layout checks can validate the cross-engine ABI (P0-3).
@@ -411,55 +398,59 @@ class TileGroup:
     # 4. tick all compute tiles; collect role completions by event id
     for t in self.tiles:
       t.step(cycle)
-      # A tile validation fault (e.g. MFE stream-buffer prefetch overflow)
-      # must surface as a modeled group fault, not a successful completion.
-      if t.faulted:
-        self.sequencer.faulted = True
-        self.sequencer.fault_reason = f"tile{t.tile_id}: {t.fault_reason}"
-        self.sequencer.done = True
-        self.pmu.add_event("tile_fault")
-        self._aggregate_pmu()
-        return True
-      if t.done and t.tile_id in self._tile_role_event:
-        ev = self._tile_role_event[t.tile_id]
-        done_set = self._role_done_tiles.setdefault(ev, set())
-        if t.tile_id not in done_set:
-          done_set.add(t.tile_id)
+      for term in t.drain_context_terminals():
+        if term.status == "fault":
+          self.sequencer.faulted = True
+          self.sequencer.fault_reason = f"tile{term.tile_id}: {term.reason}"
+          self.sequencer.done = True
+          self.pmu.add_event("tile_fault")
+          self._aggregate_pmu()
+          return True
+        if term.status != "done" or term.role_event_id is None:
+          continue
+        done_set = self._role_done_tiles.setdefault(term.role_event_id, set())
+        if t.tile_id in done_set:
+          continue
+        done_set.add(t.tile_id)
+        if tr is not None:
+          tr.instant(f"Tile{t.tile_id}", f"UCE CTX{term.ctx_id}", "tile_done",
+                     cycle,
+                     {
+                       "ctx_id": term.ctx_id,
+                       "role_id": term.role_id,
+                       "event_id": term.role_event_id,
+                     })
+        rt = self._role_trace.get(term.role_event_id)
+        mask = self._role_event_tile_mask.get(term.role_event_id, 0)
+        expected = bin(mask).count("1")
+        if len(done_set) >= expected:
+          self.sequencer.notify_event(term.role_event_id)
           if tr is not None:
-            tr.instant(f"Tile{t.tile_id}", "UCE", "tile_done", cycle,
-                       {"role_id": getattr(t, "role_id", None)})
-          # when all tiles of a role are done, fire the role event
-          mask = self._role_tile_mask.get(getattr(t, "role_id", -1), 0)
-          expected = bin(mask).count("1")
-          if len(done_set) >= expected:
-            self.sequencer.notify_event(ev)
-            if tr is not None:
-              rt = self._role_trace.get(ev)
-              if rt is not None:
-                tr.complete(
-                  "TileGroup",
-                  "TileRole",
-                  f"dispatch:role{rt.role_id}:{ev}:run",
-                  rt.start_cycle,
-                  cycle,
-                  args={
-                    "role_id": rt.role_id,
-                    "event_id": ev,
-                    "tile_mask": mask,
-                    "out_stream": rt.out_stream,
-                    "in_stream": rt.in_stream,
-                  },
-                )
-              tr.instant(
+            if rt is not None:
+              tr.complete(
                 "TileGroup",
                 "TileRole",
-                "tile_role_complete",
+                f"dispatch:role{rt.role_id}:{term.role_event_id}:run",
+                rt.start_cycle,
                 cycle,
-                {
-                  "role_id": getattr(t, "role_id", None),
-                  "event_id": ev
+                args={
+                  "role_id": rt.role_id,
+                  "event_id": term.role_event_id,
+                  "tile_mask": rt.tile_mask,
+                  "out_stream": rt.out_stream,
+                  "in_stream": rt.in_stream,
                 },
               )
+            tr.instant(
+              "TileGroup",
+              "TileRole",
+              "tile_role_complete",
+              cycle,
+              {
+                "role_id": term.role_id,
+                "event_id": term.role_event_id,
+              },
+            )
 
 
     # 5. aggregate PMU
@@ -533,10 +524,9 @@ class TileGroup:
     self._channel_free_cycle.clear()
     self._dma_jobs.clear()
     self._collective_jobs.clear()
-    self._role_tile_mask.clear()
+    self._role_event_tile_mask.clear()
     self._role_done_tiles.clear()
     self._role_trace.clear()
-    self._tile_role_event.clear()
     # runtime-level: clear event/fault tables, but PRESERVE program residency
     # so warm launch works across tasks.  _registered_programs and
     # program_table are intentionally NOT cleared here — a program installed
@@ -567,10 +557,9 @@ class TileGroup:
     self._channel_free_cycle.clear()
     self._dma_jobs.clear()
     self._collective_jobs.clear()
-    self._role_tile_mask.clear()
+    self._role_event_tile_mask.clear()
     self._role_done_tiles.clear()
     self._role_trace.clear()
-    self._tile_role_event.clear()
     self._task_trace_name = None
     self._task_start_cycle = None
     self._task_done_traced = False

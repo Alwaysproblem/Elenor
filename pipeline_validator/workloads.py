@@ -17,7 +17,7 @@ from .ir import (
   make_matmul_task,
   make_moe_task,
   make_paged_attention_task,
-  make_tiled_matmul_persistent_task,
+  make_pow_task,
   make_tiled_matmul_pipelined_pow_task,
   make_tiled_matmul_pipelined_task,
   make_tiled_matmul_task,
@@ -225,47 +225,34 @@ class TiledMatmulPipelinedPowWorkload(Workload):
         config=cfg,
     )
 
-class TiledMatmulPersistentWorkload(Workload):
-  """Persistent single-dispatch tiled matmul with cross-chunk L2→L1 overlap.
+class PowWorkload(Workload):
+  """Standalone EVU pow task with pipelined group DMA.
 
-  Unlike ``TiledMatmulPipelinedWorkload`` (which re-dispatches per group
-  chunk, creating an inter-program bubble), this workload dispatches the
-  tile program once.  The persistent tile program iterates over all group
-  chunks internally, using the cross-level event bridge to WAIT on
-  sequencer DMA events.  This lets chunk g+1's prologue L2→L1 load overlap
-  with chunk g's last BOA compute — eliminating the inter-program bubble.
-
-  Group-level IO: all HBM→L2 prefetches are issued before dispatch (async
-  DMA).  L2→HBM stores are issued after the tile program completes.
-  Store overlap is not modelled at the group level in this variant.
+  Mirrors ``pow.ir``: one role (role 1) across 4 tiles, four up-front
+  HBM->L2 prefetches, per-chunk dispatch once the input is visible in L2,
+  per-chunk L2->HBM store once the pow tiles finish, then drain all stores.
+  No BOA role participates in this workload.
   """
 
   def __init__(self,
                cfg: WorkloadConfig | None = None,
-               num_group_chunks: int = 4,
-               num_k_chunks: int = 4):
-    cfg = cfg or WorkloadConfig(name="tiled_matmul_persistent")
-    task = make_tiled_matmul_persistent_task(
-        num_group_chunks=num_group_chunks,
-        num_k_chunks=num_k_chunks)
+               num_group_chunks: int = 4):
+    cfg = cfg or WorkloadConfig(name="pow")
+    task = make_pow_task(num_group_chunks=num_group_chunks)
     super().__init__(
-        name="tiled_matmul_persistent",
+        name="pow",
         task=task,
         description=(
-            "Persistent single-dispatch tiled GEMM (128x128 per tile, "
-            f"{num_group_chunks} group chunks x {num_k_chunks} inner "
-            f"K-chunks of 64, BF16) across 4 tiles. "
-            "Cross-chunk L2→L1 overlap: chunk g+1's prologue load is "
-            "issued behind chunk g's last BOA compute via the cross-level "
-            "event bridge.  HBM→L2 prefetches are issued before dispatch; "
-            "L2→HBM stores after the tile program completes. "
-            "Tile-level K-chunk pipeline: MFE prefetch for k+1 overlaps "
-            "BOA for chunk k."),
+            "Standalone EVU pow(x, 2) workload across 4 tiles. "
+            f"{num_group_chunks} group chunks; each chunk prefetches one "
+            "pow input tile group to L2, dispatches role 1 "
+            "(`pow_4k_tile`) once visible, then stores the output back "
+            "to HBM.  Per-tile work: 1 MFE load + 1 EVU pow + 1 MFE store."),
         expected={
-            "primary_bottleneck": "BOA",
-            "boa_active_ratio_min": 0.35,
-            "mfe_active_ratio_min": 0.08,
+            "evu_active_ratio_min": 0.01,
+            "mfe_active_ratio_min": 0.05,
             "stream_stall_ratio_max": 0.05,
+            "multi_stage_group_io": True,
         },
         config=cfg,
     )
@@ -409,6 +396,6 @@ class PagedAttentionWorkload(Workload):
     )
 ALL_WORKLOADS: list = [
     MatmulWorkload, TiledMatmulWorkload, TiledMatmulPipelinedWorkload,
-    TiledMatmulPipelinedPowWorkload, TiledMatmulPersistentWorkload,
-    ConvReLuWorkload, PagedAttentionWorkload, AttentionWorkload, MoEWorkload
+    PowWorkload, TiledMatmulPipelinedPowWorkload, ConvReLuWorkload,
+    PagedAttentionWorkload, AttentionWorkload, MoEWorkload
 ]

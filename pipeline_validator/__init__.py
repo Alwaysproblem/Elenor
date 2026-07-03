@@ -31,6 +31,7 @@ from .ir import (
     make_moe_task,
     make_paged_attention_task,
     make_paged_attention_tile_program,
+    make_pow_task,
     make_pow_tile_program,
     make_relu_tile_program,
     make_stream_pipeline_tile_program,
@@ -60,7 +61,7 @@ from .runtime import (
 )
 from .simulator import Simulator
 from .stream_queue import EOSPolicy, QueueKind, StreamQueue, StreamToken, TokenFlags
-from .tile import ComputeTile, TileTaskState, TileUCE
+from .tile import ComputeTile, TileUCE
 from .tile_group import TileGroup
 from .tile_group_sequencer import TileGroupSequencer
 from .trace import Tracer, trace_to_html
@@ -70,7 +71,7 @@ from .workloads import (
     MatmulWorkload,
     MoEWorkload,
     PagedAttentionWorkload,
-    TiledMatmulPersistentWorkload,
+    PowWorkload,
     TiledMatmulPipelinedPowWorkload,
     TiledMatmulPipelinedWorkload,
     TiledMatmulWorkload,
@@ -108,6 +109,7 @@ __all__ = [
     "PMUCounter",
     "PagedAttentionWorkload",
     "PayloadTracker",
+    "PowWorkload",
     "ProgramResidencyManager",
     "QueueKind",
     "ResetDomain",
@@ -124,9 +126,7 @@ __all__ = [
     "TileInst",
     "TileProgram",
     "TileRoleBinding",
-    "TileTaskState",
     "TileUCE",
-    "TiledMatmulPersistentWorkload",
     "TiledMatmulPipelinedPowWorkload",
     "TiledMatmulPipelinedWorkload",
     "TiledMatmulWorkload",
@@ -144,6 +144,7 @@ __all__ = [
     "make_moe_task",
     "make_paged_attention_task",
     "make_paged_attention_tile_program",
+    "make_pow_task",
     "make_pow_tile_program",
     "make_relu_tile_program",
     "make_stream_pipeline_tile_program",
