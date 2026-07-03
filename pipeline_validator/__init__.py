@@ -41,6 +41,7 @@ from .ir import (
     make_tiled_matmul_pipelined_task,
     make_tiled_matmul_task,
     make_tiled_matmul_tile_program,
+    make_tiled_matmul_top_task,
 )
 from .memory import L2SRAM, NoCRouter, PayloadTracker, SlotFrame
 from .package import ElenorPackage
@@ -74,6 +75,7 @@ from .workloads import (
     PowWorkload,
     TiledMatmulPipelinedPowWorkload,
     TiledMatmulPipelinedWorkload,
+    TiledMatmulTopWorkload,
     TiledMatmulWorkload,
     Workload,
 )
@@ -129,6 +131,7 @@ __all__ = [
     "TileUCE",
     "TiledMatmulPipelinedPowWorkload",
     "TiledMatmulPipelinedWorkload",
+    "TiledMatmulTopWorkload",
     "TiledMatmulWorkload",
     "TokenFlags",
     "Tracer",
@@ -154,5 +157,6 @@ __all__ = [
     "make_tiled_matmul_pipelined_task",
     "make_tiled_matmul_task",
     "make_tiled_matmul_tile_program",
+    "make_tiled_matmul_top_task",
     "trace_to_html",
 ]
