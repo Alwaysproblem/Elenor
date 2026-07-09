@@ -20,6 +20,7 @@ from .ir import (
   make_pow_task,
   make_tiled_matmul_pipelined_pow_task,
   make_tiled_matmul_pipelined_task,
+  make_tiled_matmul_pow_nodep_task,
   make_tiled_matmul_task,
   make_tiled_matmul_top_task,
 )
@@ -256,6 +257,34 @@ class TiledMatmulPipelinedPowWorkload(Workload):
         config=cfg,
     )
 
+
+class TiledMatmulPowNodepWorkload(Workload):
+  """Nodep tiled matmul + EVU pow trace fixture matching the IR fixture."""
+
+  def __init__(self, cfg: WorkloadConfig | None = None):
+    cfg = cfg or WorkloadConfig(name="tiled_matmul_pow_nodep")
+    task = make_tiled_matmul_pow_nodep_task()
+    super().__init__(
+        name="tiled_matmul_pow_nodep",
+        task=task,
+        description=(
+            "Nodep tiled GEMM + EVU pow trace fixture matching "
+            "`tiled_matmul_pow_nodep.ir`: pow inputs are prefetched first; "
+            "pow role dispatches are issued before any A/B prefetch or "
+            "matmul role dispatch; matmul C stores are issued before pow "
+            "output stores drain in the fixture order."
+        ),
+        expected={
+            "boa_active_ratio_min": 0.20,
+            "mfe_active_ratio_min": 0.05,
+            "evu_active_ratio_min": 0.01,
+            "stream_stall_ratio_max": 0.05,
+            "multi_stage_group_io": True,
+        },
+        config=cfg,
+    )
+
+
 class PowWorkload(Workload):
   """Standalone EVU pow task with pipelined group DMA.
 
@@ -429,5 +458,6 @@ class PagedAttentionWorkload(Workload):
 ALL_WORKLOADS: list = [
     MatmulWorkload, TiledMatmulWorkload, TiledMatmulPipelinedWorkload,
     TiledMatmulTopWorkload, PowWorkload, TiledMatmulPipelinedPowWorkload,
-    ConvReLuWorkload, PagedAttentionWorkload, AttentionWorkload, MoEWorkload
+    TiledMatmulPowNodepWorkload, ConvReLuWorkload, PagedAttentionWorkload,
+    AttentionWorkload, MoEWorkload
 ]

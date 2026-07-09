@@ -6,6 +6,7 @@ Run with:  python -m pytest pipeline_validator/tests/  (or: pytest)
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -31,6 +32,7 @@ from pipeline_validator.ir import (
   make_tiled_matmul_persistent_tile_program,
   make_tiled_matmul_pipelined_pow_task,
   make_tiled_matmul_pipelined_task,
+  make_tiled_matmul_pow_nodep_task,
   make_tiled_matmul_task,
   make_tiled_matmul_tile_program,
 )
@@ -50,6 +52,7 @@ from pipeline_validator.workloads import (
   PowWorkload,
   TiledMatmulPipelinedPowWorkload,
   TiledMatmulPipelinedWorkload,
+  TiledMatmulPowNodepWorkload,
   TiledMatmulTopWorkload,
   TiledMatmulWorkload,
 )
@@ -1302,3 +1305,106 @@ class TestTiledMatmulPipelinedPow:
     assert result.pmu.events.get("tgs_dispatch_role", 0) == 2
     assert result.pmu.events.get("tgs_dma_store", 0) == 2
     assert result.pmu.events.get("tile_done", 0) == 8  # 2 dispatches x 4 tiles
+
+
+class TestTiledMatmulPowNodep:
+  """Tests for the nodep tiled-matmul + pow trace fixture workload."""
+
+  def _run(self, enable_tracer: bool = False):
+    sim = Simulator(HardwareConfig(),
+                    SimConfig(max_cycles=200_000),
+                    enable_tracer=enable_tracer)
+    return sim.run(TiledMatmulPowNodepWorkload().task)
+
+  def test_print_ir_matches_fixture_ignoring_whitespace(self):
+    fixture = (Path(__file__).resolve().parents[2] /
+               "tiled_matmul_pow_nodep.ir")
+    actual = " ".join(make_tiled_matmul_pow_nodep_task().pretty_print().split())
+    expected = " ".join(fixture.read_text().split())
+    assert actual == expected
+
+  def test_task_structure_and_counts(self):
+    t = make_tiled_matmul_pow_nodep_task()
+    assert set(t.role_bindings.keys()) == {0, 1}
+    assert t.role_bindings[0].tile_program.name == "tiled_matmul_4k_tile"
+    assert t.role_bindings[1].tile_program.name == "pow_4k_tile"
+
+    ops = [a.op for a in t.actions]
+    assert ops.count(GroupActionOp.DMA_PREFETCH) == 12
+    assert ops.count(GroupActionOp.DISPATCH_ROLE) == 8
+    assert ops.count(GroupActionOp.DMA_STORE) == 8
+    assert ops.count(GroupActionOp.WAIT_EVENT) == 28
+    assert len(t.actions) == 57
+
+    assert t.actions[0].dst == "ev_dma_pow_in0"
+    assert t.actions[3].dst == "ev_dma_pow_in3"
+    assert t.actions[11].dst == "ev_role_pow3"
+    assert t.actions[12].dst == "ev_dma_A0"
+    assert t.actions[19].dst == "ev_dma_B3"
+    assert t.actions[20].op is GroupActionOp.WAIT_EVENT
+    assert t.actions[20].args == ("ev_dma_A0",)
+    assert t.actions[22].dst == "ev_role_c0"
+    assert t.actions[31].dst == "ev_role_c3"
+    assert t.actions[40].op is GroupActionOp.WAIT_EVENT
+    assert t.actions[40].args == ("ev_role_pow0",)
+    assert t.actions[41].dst == "ev_dma_pow_out0"
+    assert t.actions[-1].op is GroupActionOp.SIGNAL_EVENT
+
+  def test_completes_and_report_checks_pass(self):
+    wl = TiledMatmulPowNodepWorkload()
+    sim = Simulator(HardwareConfig(), SimConfig(max_cycles=200_000))
+    result = sim.run(wl.task)
+    assert result.completed, (
+        f"tiled_matmul_pow_nodep did not complete: {result.reason}")
+    assert result.credit_invariant_ok
+
+    rep = build_report(wl, result)
+    failed = [c for c in rep.checks if not c["pass"]]
+    assert not failed, f"failed checks: {failed}"
+
+  def test_trace_has_nodep_order(self):
+    result = self._run(enable_tracer=True)
+    assert result.completed, (
+        f"tiled_matmul_pow_nodep did not complete: {result.reason}")
+
+    data = json.loads(result.tracer.to_chrome_json())
+    slices = [e for e in data["traceEvents"] if e["ph"] == "X"]
+    names = {e["name"] for e in slices}
+
+    for g in range(4):
+      assert f"dma.prefetch:gdma_prefetch_A{g}" in names, names
+      assert f"dma.prefetch:gdma_prefetch_B{g}" in names, names
+      assert f"dma.prefetch:gdma_prefetch_pow{g}" in names, names
+      assert f"dma.store:gdma_store_C{g}" in names, names
+      assert f"dma.store:gdma_store_pow{g}" in names, names
+
+    assert "EVU:pow" in names
+    assert "BOA:matmul" in names
+
+    by_name = {e["name"]: e for e in slices}
+    pow_prefetch0 = by_name.get("dma.prefetch:gdma_prefetch_pow0")
+    store_c3 = by_name.get("dma.store:gdma_store_C3")
+    store_pow0 = by_name.get("dma.store:gdma_store_pow0")
+    assert pow_prefetch0 is not None, "missing pow prefetch 0 slice"
+    assert store_c3 is not None, "missing C3 store slice"
+    assert store_pow0 is not None, "missing pow store 0 slice"
+    assert pow_prefetch0["ts"] < store_c3["ts"], (
+        f"pow prefetch 0 starts at {pow_prefetch0['ts']} but C3 store starts "
+        f"at {store_c3['ts']}")
+    assert store_c3["ts"] <= store_pow0["ts"], (
+        f"C3 store starts at {store_c3['ts']} but pow store 0 starts at "
+        f"{store_pow0['ts']}")
+
+    pow_dispatch0 = next(
+        (e for e in slices
+         if e["name"].startswith("dispatch:role1:ev_role_pow0:run")),
+        None)
+    matmul_dispatch0 = next(
+        (e for e in slices
+         if e["name"].startswith("dispatch:role0:ev_role_c0:run")),
+        None)
+    assert pow_dispatch0 is not None, "missing pow dispatch 0 slice"
+    assert matmul_dispatch0 is not None, "missing matmul dispatch 0 slice"
+    assert pow_dispatch0["ts"] < matmul_dispatch0["ts"], (
+        f"pow dispatch 0 starts at {pow_dispatch0['ts']} but matmul dispatch "
+        f"0 starts at {matmul_dispatch0['ts']}")
