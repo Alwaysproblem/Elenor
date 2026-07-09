@@ -191,14 +191,14 @@ V1.x / V2 Reserved
 
 ### 3.4 V1 Requirements & Acceptance Matrix
 
-| V1 需求            | 架构机制                                                       | 关键 ABI / Contract                               | PMU 证据                                                      | 验证入口                      | 首次闭环阶段 |
-| ------------------ | -------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------------- | ----------------------------- | ------------ |
-| Dense GEMM / Conv  | BOA + Tile DMA + L1 double buffer                              | BOA descriptor、DMA descriptor、event             | BOA active、operand stall、SRAM conflict                      | Python golden + RTL GEMM      | Phase 1      |
-| Dense Attention    | BOA QK/AV + EVU softmax + collective reduce                    | BOA desc、EVU desc、event chain、collective desc  | BOA utilization、EVU active、collective stall                 | attention command trace       | Phase 2      |
-| Paged Attention    | MFE Page Stream + BOA + EVU                                    | page stream desc、stream token、event chain       | MFE prefetch hit/miss、BOA operand stall、stream backpressure | paged attention trace         | Phase 3      |
-| MoE Dispatch       | MFE Segment Stream + EVU + optional USE                        | segment desc、expert grouping、collective combine | routing imbalance、MFE stall、BOA utilization                 | 8/16-expert routing benchmark | Phase 4      |
-| SSM / Mamba / RWKV | USE scan/recurrence + BOA projection + EVU local op            | USE state desc、checkpoint ABI、state slot        | USE active、state cache hit/miss、event wait                  | recurrence golden benchmark   | Phase 5      |
-| 多模型并发         | group partition + command priority + SRAM quota + PMU feedback | context id、queue priority、fault/reset domain    | queue occupancy、QoS latency、fault isolation                 | multi-context runtime test    | Phase 6      |
+| V1 需求            | 架构机制                                                                                          | 关键 ABI / Contract                                          | PMU 证据                                                      | 验证入口                      | 首次闭环阶段 |
+| ------------------ | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------- | ----------------------------- | ------------ |
+| Dense GEMM / Conv  | GEMM: BOA + Tile DMA + L1 double buffer；Conv: MFE WindowGen/im2col + BOA GEMM + L1 double buffer | MFE window descriptor、BOA descriptor、DMA descriptor、event | BOA active、MFE window active、operand stall、SRAM conflict   | Python golden + RTL GEMM      | Phase 1      |
+| Dense Attention    | BOA QK/AV + EVU softmax + collective reduce                                                       | BOA desc、EVU desc、event chain、collective desc             | BOA utilization、EVU active、collective stall                 | attention command trace       | Phase 2      |
+| Paged Attention    | MFE Page Stream + BOA + EVU                                                                       | page stream desc、stream token、event chain                  | MFE prefetch hit/miss、BOA operand stall、stream backpressure | paged attention trace         | Phase 3      |
+| MoE Dispatch       | MFE Segment Stream + EVU + optional USE                                                           | segment desc、expert grouping、collective combine            | routing imbalance、MFE stall、BOA utilization                 | 8/16-expert routing benchmark | Phase 4      |
+| SSM / Mamba / RWKV | USE scan/recurrence + BOA projection + EVU local op                                               | USE state desc、checkpoint ABI、state slot                   | USE active、state cache hit/miss、event wait                  | recurrence golden benchmark   | Phase 5      |
+| 多模型并发         | group partition + command priority + SRAM quota + PMU feedback                                    | context id、queue priority、fault/reset domain               | queue occupancy、QoS latency、fault isolation                 | multi-context runtime test    | Phase 6      |
 
 ### 3.5 本轮评审需要冻结的问题
 
@@ -672,18 +672,18 @@ V1 可以只实现字段子集，但 descriptor layout 应预留扩展空间，�
 
 ### 8.7 算子映射
 
-| 算子               | BOA 路径                    | 其他引擎                      |
-| ------------------ | --------------------------- | ----------------------------- |
-| MatMul             | OPA(MUL) + ADD reduce       | Post-Op optional              |
-| Conv               | im2col/implicit tile + OPA  | MFE layout stream optional    |
-| Dot                | OPA + lane mask             | Vector tail mask              |
-| ReduceSum          | OPA(PASS) + ADD             | Vector for small tail         |
-| ReduceMax          | OPA(PASS) + MAX             | Vector for tail               |
-| AvgPool            | WindowGen/MFE + ADD + scale | Vector/Post-Op scale          |
-| MaxPool            | WindowGen/MFE + MAX         | None                          |
-| Dense Attention QK | OPA(MUL)                    | Vector softmax                |
-| Attention AV       | OPA(MUL)                    | MFE page stream               |
-| MoE Expert         | OPA(MUL)                    | MFE dispatch + Vector combine |
+| 算子               | BOA 路径                                      | 其他引擎                                                                                                 |
+| ------------------ | --------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| MatMul             | OPA(MUL) + ADD reduce                         | Post-Op optional                                                                                         |
+| Conv               | MFE 生成 im2col/implicit tile 后进入 OPA(MUL) | MFE WindowGen required；1x1 或 compiler 已预物化 im2col 时可省略 WinGen；ReLU 走 BOA epilogue 子集或 EVU |
+| Dot                | OPA + lane mask                               | Vector tail mask                                                                                         |
+| ReduceSum          | OPA(PASS) + ADD                               | Vector for small tail                                                                                    |
+| ReduceMax          | OPA(PASS) + MAX                               | Vector for tail                                                                                          |
+| AvgPool            | WindowGen/MFE + ADD + scale                   | Vector/Post-Op scale                                                                                     |
+| MaxPool            | WindowGen/MFE + MAX                           | None                                                                                                     |
+| Dense Attention QK | OPA(MUL)                                      | Vector softmax                                                                                           |
+| Attention AV       | OPA(MUL)                                      | MFE page stream                                                                                          |
+| MoE Expert         | OPA(MUL)                                      | MFE dispatch + Vector combine                                                                            |
 
 ### 8.8 Feather+ / MINISA 思想的吸收边界
 

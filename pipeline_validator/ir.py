@@ -713,101 +713,128 @@ def make_relu_tile_program() -> TileProgram:
 
 
 def make_conv_relu_tile_program() -> TileProgram:
-    """Fused Conv + ReLU tile: load input+weight, BOA conv (im2col->matmul),
-    EVU relu epilogue, store output.
+  """Fused regular 3x3 Conv + ReLU tile.
 
-    Mirrors the Conv lowering mapping in BOA design 5.4:
-    'im2col 或 implicit tile 后进入 OPA MUL; MFE 可选做 layout stream,
-    EVU 处理尾部'.  Here the im2col transform is assumed done by the
-    compiler/MFE layout stream, so BOA sees a matmul-shaped descriptor.
-    The EVU relu is fused as the epilogue after BOA writeback.
-    """
-    p = TileProgram(name="conv_relu_tile")
-    # Conv parameters: input tile 128x128, weight kernel 3x3 over 128 channels,
-    # im2col expands to K=128*9=1152 effective K dim, output 128x128.
-    p.descriptors = {
-        "load_input":
-        EngineDesc(
-            "load_input",
-            "MFE",
-            "load",
-            {
-                "bytes": 128 * 128 * 2,
-                "ops": 0
-            },
-        ),
-        "load_weight":
-        EngineDesc(
-            "load_weight",
-            "MFE",
-            "load",
-            {
-                "bytes": 128 * 9 * 2,
-                "ops": 0
-            },
-        ),
-        "conv":
-        EngineDesc(
-            "conv",
-            "BOA",
-            "conv",
-            {
-                "m": 128,
-                "n": 128,
-                "k": 1152,
-                "ops": 2 * 128 * 128 * 1152
-            },
-        ),
-        "relu":
-        EngineDesc(
-            "relu",
-            "EVU",
-            "relu",
-            {
-                "bytes": 128 * 128 * 2,
-                "ops": 128 * 128
-            },
-        ),
-        "store_output":
-        EngineDesc(
-            "store_output",
-            "MFE",
-            "store",
-            {
-                "bytes": 128 * 128 * 2,
-                "ops": 0
-            },
-        ),
-    }
-    p.insts = [
-        TileInst(TileOp.LAUNCH_MFE,
-                 dst="e0",
-                 args=("load_input", ),
-                 comment="load input patch L2->L1"),
-        TileInst(TileOp.LAUNCH_MFE,
-                 dst="e1",
-                 args=("load_weight", ),
-                 comment="load conv weight L2->L1"),
-        TileInst(TileOp.WAITALL, args=("e0", "e1")),
-        TileInst(TileOp.LAUNCH_BOA,
-                 dst="e2",
-                 args=("conv", ),
-                 comment="BOA conv (im2col matmul)"),
-        TileInst(TileOp.WAIT, args=("e2", )),
-        TileInst(TileOp.LAUNCH_EVU,
-                 dst="e3",
-                 args=("relu", ),
-                 comment="EVU relu epilogue"),
-        TileInst(TileOp.WAIT, args=("e3", )),
-        TileInst(TileOp.LAUNCH_MFE,
-                 dst="e4",
-                 args=("store_output", ),
-                 comment="store output L1->L2"),
-        TileInst(TileOp.WAIT, args=("e4", )),
-        TileInst(TileOp.RET),
-    ]
-    p.resolve_labels()
-    return p
+  The raw input tile and lowered weight matrix are first loaded into L1.
+  MFE then generates the im2col/window stream consumed as BOA operand A,
+  BOA executes the lowered matmul, and EVU applies the relu epilogue.
+  BOA owns only the dense GEMM; window generation stays in MFE.
+  """
+  p = TileProgram(name="conv_relu_tile")
+  gemm_m = 128  # output positions in this validator tile
+  gemm_n = 128  # output channels
+  in_channels = 128
+  kernel_h = 3
+  kernel_w = 3
+  dtype_bytes = 2  # BF16
+  gemm_k = in_channels * kernel_h * kernel_w
+  input_bytes = gemm_m * in_channels * dtype_bytes
+  im2col_bytes = gemm_m * gemm_k * dtype_bytes
+  weight_bytes = gemm_k * gemm_n * dtype_bytes
+  output_bytes = gemm_m * gemm_n * dtype_bytes
+  p.descriptors = {
+      "load_input":
+      EngineDesc(
+          "load_input",
+          "MFE",
+          "load",
+          {
+              "bytes": input_bytes,
+              "ops": 0
+          },
+      ),
+      "load_weight":
+      EngineDesc(
+          "load_weight",
+          "MFE",
+          "load",
+          {
+              "bytes": weight_bytes,
+              "ops": 0
+          },
+      ),
+      "im2col_window":
+      EngineDesc(
+          "im2col_window",
+          "MFE",
+          "im2col",
+          {
+              "m": gemm_m,
+              "k": gemm_k,
+              "ic": in_channels,
+              "kh": kernel_h,
+              "kw": kernel_w,
+              "bytes": im2col_bytes,
+              "ops": 0
+          },
+      ),
+      "conv_gemm":
+      EngineDesc(
+          "conv_gemm",
+          "BOA",
+          "matmul",
+          {
+              "m": gemm_m,
+              "n": gemm_n,
+              "k": gemm_k,
+              "ops": 2 * gemm_m * gemm_n * gemm_k
+          },
+      ),
+      "relu":
+      EngineDesc(
+          "relu",
+          "EVU",
+          "relu",
+          {
+              "bytes": output_bytes,
+              "ops": gemm_m * gemm_n
+          },
+      ),
+      "store_output":
+      EngineDesc(
+          "store_output",
+          "MFE",
+          "store",
+          {
+              "bytes": output_bytes,
+              "ops": 0
+          },
+      ),
+  }
+  p.insts = [
+      TileInst(TileOp.LAUNCH_MFE,
+               dst="e0",
+               args=("load_input", ),
+               comment="load input source tile L2->L1"),
+      TileInst(TileOp.LAUNCH_MFE,
+               dst="e1",
+               args=("load_weight", ),
+               comment="load lowered conv weights L2->L1"),
+      TileInst(TileOp.WAIT, args=("e0", )),
+      TileInst(TileOp.LAUNCH_MFE,
+               dst="e2",
+               args=("im2col_window", ),
+               comment="MFE im2col/window stream for BOA A"),
+      TileInst(TileOp.WAITALL, args=("e1", "e2")),
+      TileInst(TileOp.LAUNCH_BOA,
+               dst="e3",
+               args=("conv_gemm", ),
+               comment="BOA GEMM over MFE-generated im2col A"),
+      TileInst(TileOp.WAIT, args=("e3", )),
+      TileInst(TileOp.LAUNCH_EVU,
+               dst="e4",
+               args=("relu", ),
+               comment="EVU relu epilogue"),
+      TileInst(TileOp.WAIT, args=("e4", )),
+      TileInst(TileOp.LAUNCH_MFE,
+               dst="e5",
+               args=("store_output", ),
+               comment="store output L1->L2"),
+      TileInst(TileOp.WAIT, args=("e5", )),
+      TileInst(TileOp.RET),
+  ]
+  p.resolve_labels()
+  return p
 
 
 def make_pow_tile_program(name: str = "pow_tile",

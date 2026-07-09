@@ -294,14 +294,14 @@ Compiler 必须显式输出：binding table、relocation table、shape class tab
 
 ### 5.3 Engine partition rules
 
-| Pattern                              | Target                   | 边界                                      |
-| ------------------------------------ | ------------------------ | ----------------------------------------- |
-| matmul/conv/dense attention QK/AV    | BOA                      | 大规模 dense compute                      |
-| softmax/norm/activation/tail         | EVU                      | irregular scalar/vector path              |
-| gather/scatter/layout/page/KV stream | MFE + EVU                | data-related dynamic memory access 归 MFE |
-| MoE token dispatch                   | MFE + EVU + optional USE | grouping/segment stream/combine           |
-| scan/recurrence/state update         | USE                      | state lifecycle 归 USE                    |
-| dynamic branch                       | Runtime / Tile UCE       | branch over command/program path          |
+| Pattern                                            | Target                                                     | 边界                                                       |
+| -------------------------------------------------- | ---------------------------------------------------------- | ---------------------------------------------------------- |
+| matmul / conv-lowered GEMM / dense attention QK/AV | BOA；windowed Conv 还必须生成 MFE window/im2col descriptor | BOA 只做 dense compute，MFE 负责 Conv window/layout stream |
+| softmax/norm/activation/tail                       | EVU                                                        | irregular scalar/vector path                               |
+| gather/scatter/layout/page/KV stream               | MFE + EVU                                                  | data-related dynamic memory access 归 MFE                  |
+| MoE token dispatch                                 | MFE + EVU + optional USE                                   | grouping/segment stream/combine                            |
+| scan/recurrence/state update                       | USE                                                        | state lifecycle 归 USE                                     |
+| dynamic branch                                     | Runtime / Tile UCE                                         | branch over command/program path                           |
 
 ### 5.4 Tile-SPMD 与 kernel library
 

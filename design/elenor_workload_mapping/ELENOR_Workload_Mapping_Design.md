@@ -15,14 +15,14 @@ Workload Mapping 文档定义 Dense Transformer、Paged Attention、MoE、SSM/Ma
 
 First Silicon V1 切线：
 
-| Workload        | First Silicon V1                                                            | 后续扩展                              |
-| --------------- | --------------------------------------------------------------------------- | ------------------------------------- |
-| GEMM/Conv       | BOA INT8/BF16 GEMM、split-K 基础 reduce                                     | epilogue fusion、advanced tiling      |
-| Dense Attention | QK/AV BOA、softmax/norm EVU、event chain                                    | 更复杂 fusion                         |
-| Paged Attention | MFE Page Stream、KV prefetch/reorder、BOA QK/AV、EVU softmax                | Sparse Block Stream                   |
-| MoE             | router top-k、MFE Segment Stream、expert batching、BOA expert GEMM、combine | advanced load balance、atomic combine |
-| SSM             | USE scan/recurrence、checkpoint/restore、BOA projection、EVU local op       | advanced recurrence transform         |
-| Multi-model     | group partition、queue priority、SRAM quota metadata                        | preemption、QoS scheduler             |
+| Workload        | First Silicon V1                                                                  | 后续扩展                              |
+| --------------- | --------------------------------------------------------------------------------- | ------------------------------------- |
+| GEMM/Conv       | GEMM: BOA INT8/BF16 GEMM、split-K 基础 reduce；Conv: MFE WinGen/im2col + BOA GEMM | epilogue fusion、advanced tiling      |
+| Dense Attention | QK/AV BOA、softmax/norm EVU、event chain                                          | 更复杂 fusion                         |
+| Paged Attention | MFE Page Stream、KV prefetch/reorder、BOA QK/AV、EVU softmax                      | Sparse Block Stream                   |
+| MoE             | router top-k、MFE Segment Stream、expert batching、BOA expert GEMM、combine       | advanced load balance、atomic combine |
+| SSM             | USE scan/recurrence、checkpoint/restore、BOA projection、EVU local op             | advanced recurrence transform         |
+| Multi-model     | group partition、queue priority、SRAM quota metadata                              | preemption、QoS scheduler             |
 
 ABI v0 结构体和 workload descriptor 都是样例，不是最终冻结定义；未冻结 field、canonical case 参数和 performance target 由后续规格冻结。
 
