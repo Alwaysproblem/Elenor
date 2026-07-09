@@ -349,13 +349,13 @@ class MoEWorkload(Workload):
 class ConvReLuWorkload(Workload):
   """Fused Conv + ReLU across 4 tiles.
 
-  Maps the Conv lowering path (BOA design 5.4): im2col transforms the conv
-  into a matmul on the OPA array, then EVU applies the relu epilogue.
-  Single role, no inter-tile stream — validates BOA->EVU fusion within
-  a tile and that EVU is active (unlike pure matmul where EVU sits idle).
+  Models the regular 3x3 Conv lowering path used by ELENOR: MFE performs
+  im2col/window generation, BOA executes the lowered dense GEMM, then EVU
+  applies the relu epilogue. Single role, no inter-tile stream — validates
+  the explicit MFE->BOA->EVU handoff within a tile.
 
-  Expected: BOA-bound (conv is a large matmul), EVU active on the relu
-  epilogue, MFE loads overlap with BOA.
+  Expected: BOA-bound (the lowered GEMM dominates), EVU active on the relu
+  epilogue, MFE active for both data movement and window generation.
   """
 
   def __init__(self, cfg: WorkloadConfig | None = None):
@@ -366,8 +366,9 @@ class ConvReLuWorkload(Workload):
         description=(
             "Fused Conv (128x128, 3x3 kernel, im2col K=1152, BF16) + "
             "ReLU epilogue across 4 tiles.  Single role, no inter-tile "
-            "stream.  Validates BOA conv compute + EVU relu fusion + "
-            "MFE load overlap."),
+            "stream.  MFE im2col/window generation feeds BOA GEMM, then "
+            "EVU ReLU epilogue.  Validates explicit MFE windowing before "
+            "dense BOA compute."),
         task=task,
         expected={
             "primary_bottleneck": "BOA",

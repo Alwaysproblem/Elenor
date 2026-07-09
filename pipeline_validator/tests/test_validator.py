@@ -186,6 +186,27 @@ class TestIR:
     assert TileOp.WAITALL in ops
     assert TileOp.RET in ops
 
+
+  def test_conv_relu_tile_program_uses_mfe_im2col_and_boa_matmul(self):
+    p = pv.make_conv_relu_tile_program()
+
+    assert "conv" not in p.descriptors
+    assert p.descriptors["im2col_window"].kind == "MFE"
+    assert p.descriptors["im2col_window"].op == "im2col"
+    assert p.descriptors["conv_gemm"].kind == "BOA"
+    assert p.descriptors["conv_gemm"].op == "matmul"
+    assert (
+        p.descriptors["im2col_window"].params["k"]
+        == p.descriptors["conv_gemm"].params["k"]
+    )
+
+    launches = [(inst.op, inst.dst, inst.args) for inst in p.insts]
+    assert (TileOp.LAUNCH_MFE, "e2", ("im2col_window",)) in launches
+    assert (TileOp.LAUNCH_BOA, "e3", ("conv_gemm",)) in launches
+    assert launches.index((TileOp.LAUNCH_MFE, "e2", ("im2col_window",))) < (
+        launches.index((TileOp.LAUNCH_BOA, "e3", ("conv_gemm",)))
+    )
+
   def test_stream_pipeline_tile_program(self):
     from pipeline_validator.ir import EngineDesc
     body = [EngineDesc("qk", "BOA", "matmul", {"ops": 1000})]
@@ -790,6 +811,42 @@ class TestTracer:
     # no "Tile DMA" category should exist
     assert not [e for e in slices if e["cat"] == "Tile DMA"], \
         "Tile DMA category should not exist"
+
+
+  def test_conv_relu_trace_uses_mfe_im2col_before_boa_matmul(self):
+    wl = ConvReLuWorkload()
+    sim = Simulator(HardwareConfig(),
+                    SimConfig(max_cycles=200_000),
+                    enable_tracer=True)
+    result = sim.run(wl.task)
+    assert result.completed, f"conv_relu did not complete: {result.reason}"
+    assert result.tracer is not None
+
+    data = json.loads(result.tracer.to_chrome_json())
+    slices = [
+        e for e in data["traceEvents"]
+        if e.get("ph") == "X" and e.get("args", {}).get("program") == "conv_relu_tile"
+    ]
+    names = {e["name"] for e in slices}
+    assert "MFE:im2col" in names
+    assert "BOA:matmul" in names
+    assert "BOA:conv" not in names
+
+    by_tile: dict[int, dict[str, list[dict]]] = {}
+    for event in slices:
+      if event["name"] not in {"MFE:im2col", "BOA:matmul"}:
+        continue
+      by_tile.setdefault(event["pid"], {}).setdefault(event["name"], []).append(event)
+
+    boa_tiles = 0
+    for tile_events in by_tile.values():
+      for boa in tile_events.get("BOA:matmul", []):
+        boa_tiles += 1
+        assert any(
+            mfe["ts"] + mfe["dur"] <= boa["ts"]
+            for mfe in tile_events.get("MFE:im2col", [])
+        )
+    assert boa_tiles == 4
 
   def test_tiled_matmul_pipelined_trace_has_multi_stage_dma(self):
     """Pipelined tiled matmul task emits multiple Global DMA bars

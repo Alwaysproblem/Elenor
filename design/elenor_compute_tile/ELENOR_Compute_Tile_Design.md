@@ -448,6 +448,8 @@ USE state cache 应避免与 BOA operand hot path 争 bank；state checkpoint �
 Conv = MFE WinGen + BOA GEMM
 ```
 
+除 1x1 或 compiler 已预物化 im2col 的 fast path 外，regular Conv 不允许建模为 BOA-only conv op。
+
 |           Conv 类型           | 预计效率                           |
 | :---------------------------: | ---------------------------------- |
 |           1x1 Conv            | 很高                               |

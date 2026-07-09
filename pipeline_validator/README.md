@@ -115,7 +115,7 @@ python -m pytest pipeline_validator/tests/ -v
 | ----------------- | --------------------------------------- | ------------------------------------------------------------------------------ |
 | `matmul`          | single (4 tiles)                        | BOA peak compute + MFE/DMA load overlap                                        |
 | `tiled_matmul`    | single (4 tiles)                        | K-dimension tiling + double-buffer MFE/BOA pipeline overlap                    |
-| `conv_relu`       | single (4 tiles)                        | fused BOA conv (im2col) + EVU relu epilogue                                    |
+| `conv_relu`       | single (4 tiles)                        | MFE im2col/window stream -> BOA GEMM -> EVU relu epilogue                      |
 | `paged_attention` | single (4 tiles)                        | full paged-attention pipeline: MFE page-stream → BOA QK → EVU softmax → BOA PV |
 | `attention`       | 2 (QK → softmax+AV via Stream Queue S0) | stream pipeline, credit backpressure, BOA/EVU overlap                          |
 | `moe`             | 2 (MFE segment-stream → BOA expert MLP) | MFE segment stream + BOA batch utilization                                     |

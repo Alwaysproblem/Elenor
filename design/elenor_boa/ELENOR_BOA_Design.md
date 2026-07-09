@@ -299,13 +299,13 @@ BOA operand fetch 应按 bank-aware layout 发起 sequential burst。A/B hot pat
 
 ### 5.4 工作负载映射示例
 
-| 工作负载           | BOA 映射                                                       | 协同模块                                                        | 关键检查                                                   |
-| ------------------ | -------------------------------------------------------------- | --------------------------------------------------------------- | ---------------------------------------------------------- |
-| Dense GEMM         | A/B tile 进入 OPA array，K 维循环 accumulate，C slot writeback | Tile DMA 负责 L2->L1，Tile UCE 管 launch/wait                   | BOA active 高，operand stall 低，golden matmul 对齐        |
-| Dense Attention QK | Q tile 与 K tile 做 BOA GEMM，输出 score tile 到 workspace     | EVU 后续执行 scale/mask/softmax                                 | QK descriptor 的 layout 与 EVU score layout 一致           |
-| Attention AV       | softmax 后概率 tile 与 V tile 做 BOA GEMM                      | MFE 可提供 paged V stream，EVU 提供 softmax 输出                | `T_prefetch <= T_qk` case 下 AV operand stall 不应异常升高 |
-| MoE Expert MLP     | 每个 expert batch 映射为 BOA GEMM 或 batched GEMM              | MFE Segment Stream 做 token grouping，EVU/Collective 做 combine | BOA utilization 可由 expert imbalance model 解释           |
-| Conv lowering      | im2col 或 implicit tile 后进入 OPA MUL                         | MFE 可选做 layout stream，EVU 处理尾部                          | tile_m/n/k 与 packed layout 匹配                           |
+| 工作负载           | BOA 映射                                                       | 协同模块                                                                                  | 关键检查                                                   |
+| ------------------ | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Dense GEMM         | A/B tile 进入 OPA array，K 维循环 accumulate，C slot writeback | Tile DMA 负责 L2->L1，Tile UCE 管 launch/wait                                             | BOA active 高，operand stall 低，golden matmul 对齐        |
+| Dense Attention QK | Q tile 与 K tile 做 BOA GEMM，输出 score tile 到 workspace     | EVU 后续执行 scale/mask/softmax                                                           | QK descriptor 的 layout 与 EVU score layout 一致           |
+| Attention AV       | softmax 后概率 tile 与 V tile 做 BOA GEMM                      | MFE 可提供 paged V stream，EVU 提供 softmax 输出                                          | `T_prefetch <= T_qk` case 下 AV operand stall 不应异常升高 |
+| MoE Expert MLP     | 每个 expert batch 映射为 BOA GEMM 或 batched GEMM              | MFE Segment Stream 做 token grouping，EVU/Collective 做 combine                           | BOA utilization 可由 expert imbalance model 解释           |
+| Conv lowering      | im2col 或 implicit tile 后进入 OPA MUL                         | MFE WindowGen/layout stream 必需；仅 1x1 或 compiler 已预物化 im2col 可省略，EVU 处理尾部 | tile_m/n/k 与 packed layout 匹配                           |
 
 ## 6. 配置、PPA、性能模型和 PMU
 
