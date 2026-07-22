@@ -13,14 +13,14 @@ Tile Group 是 ELENOR 的局部数据复用、局部同步和 group 内 pipeline
 
 First Silicon V1 cutline：
 
-| 能力            | First Silicon V1                                                        | V1.x / V2 reserved                            |
-| --------------- | ----------------------------------------------------------------------- | --------------------------------------------- |
-| Group task 执行 | 单 group task、固定 role graph、有限分支                                | priority/preemption、多 context QoS           |
-| Group DMA       | 1D/2D/strided HBM 到 L2 prefetch，completion event                      | multicast DMA、gather list、layout transform  |
-| Stream Queue    | 单/多 producer-consumer token、credit、EOS/error token、drain           | 复杂 multi-consumer refcount 策略             |
-| Barrier/Event   | group barrier、role event、tile done、group done、timeout               | 分层 global barrier、采样 trace               |
-| Collective      | group 内 reduce add/max/min、broadcast/multicast                        | cross-group all-reduce、reduce-scatter 强化   |
-| PMU             | DMA bandwidth、queue occupancy、event wait、SRAM conflict、NoC VC stall | 完整 stall taxonomy 和 PMU feedback scheduler |
+| 能力            | First Silicon V1                                                                       | V1.x / V2 reserved                                            |
+| --------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Group task 执行 | 单 group task、固定 role graph、有限分支                                               | priority/preemption、多 context QoS                           |
+| Group DMA       | 1D/2D/strided HBM 到 L2 prefetch/storeback、centralized indirect gather/unique scatter | ordered overwrite、local combine、multicast、layout transform |
+| Stream Queue    | 单/多 producer-consumer token、credit、EOS/error token、drain                          | 复杂 multi-consumer refcount 策略                             |
+| Barrier/Event   | group barrier、role event、tile done、group done、timeout                              | 分层 global barrier、采样 trace                               |
+| Collective      | group 内 reduce add/max/min、broadcast/multicast                                       | cross-group all-reduce、reduce-scatter 强化                   |
+| PMU             | DMA bandwidth、queue occupancy、event wait、SRAM conflict、NoC VC stall                | 完整 stall taxonomy 和 PMU feedback scheduler                 |
 
 未冻结的容量、端口数、bank 数、队列深度、timeout 默认值和 NoC bandwidth 均写为 `由后续规格冻结` 或 `由 SRAM profile 冻结`，不能在 RTL 中以隐式常量固化。
 
@@ -32,7 +32,7 @@ Tile Group owns：
 - Program Residency Manager：lookup `program_id/template_id`、处理 miss fetch/verify/install、维护 program cache state/epoch/refcount/pinning。
 - Stream Queue Engine：role 间 token、credit、backpressure、EOS/error 传播。
 - Barrier/Event Engine：group 内 tile 同步、DMA completion、role synchronization、fault propagation。
-- Group DMA Engine：HBM/DDR/LPDDR 到 Group Shared SRAM/L2 的预取、storeback 和 completion event。
+- Group DMA Engine：HBM/DDR/LPDDR 到 Group Shared SRAM/L2 的预取、storeback、indirect gather/scatter 和 completion event。
 - Shared SRAM/L2：group 共享 prefetch buffer、stream buffer、partial result buffer、program cache、descriptor/status 区。
 - Collective Engine：group 内 reduce、broadcast、multicast、可选 all-reduce。
 - Group PMU：group 级 stall attribution、queue occupancy、DMA bandwidth、SRAM/NoC contention。
@@ -42,14 +42,14 @@ Tile Group 不负责：
 
 - 高层 graph 解释、shape policy 和 package 加载策略；这些由 Device Runtime 和 compiler/runtime package 负责。
 - Tile-local kernel PC、L2 到 L1 DMA、BOA/EVU/MFE/USE launch；这些由 Tile UCE 和 tile 内 engine 负责。
-- MFE 的数据相关动态地址生成；MFE owns page/segment metadata walk、address generation、prefetch/reorder/stream fill。
+- MFE 的 page/segment metadata walk、record emit 和 L1 stream fill；但基于已 materialize indices/count/value 的 HBM↔L2 indirect gather/scatter 由 Group DMA 执行。
 - USE 的 state/register file、prefix scan、recurrence、checkpoint/restore ownership。
 - 全芯片 memory policy、global arbitration 和跨 context security policy。
 
 关键 ownership 规则：
 
 1. Tile Group Sequencer owns group task dispatch control；hardware 执行 TileGroupTask，不执行高层 graph。
-2. Group DMA owns HBM 到 L2 的显式 copy；Tile DMA owns L2 到 L1；二者 completion event 必须区分 producer_id。
+2. Group DMA owns HBM↔L2 的显式 copy 与 indirect gather/scatter；Tile DMA owns L2 到 L1；二者 completion event 必须区分 producer_id。
 3. Stream Queue owns token 生命周期和 credit；Barrier/Event owns event 状态机；不能由 role program 直接篡改队列内部 credit。
 4. Shared SRAM/L2 的 allocation 由 descriptor/task frame 显式声明；DMA、Collective、Stream Queue、Tile Dispatcher 的写 owner 必须唯一。
 5. PMU primary stall owner 每 cycle 只能有一个，secondary tag 仅用于 debug。
@@ -211,9 +211,10 @@ typedef struct {
     uint32_t dma_desc_count;
 
     uint32_t l2_window_base;
-    uint32_t l2_window_bytes;
-    uint32_t stream_buffer_base;
-    uint32_t stream_buffer_bytes;
+    uint32_t l2_window_bytes;      /* coarse envelope only */
+    uint64_t group_l2_ref_iova;
+    uint32_t group_l2_ref_count;
+    uint32_t group_l2_ref_crc_or_zero;
 
     uint16_t residency_hint;
     uint16_t cache_policy;
@@ -223,13 +224,27 @@ typedef struct {
 } elenor_group_task_resource_desc_t;
 ```
 
+```c
+typedef struct {
+    uint32_t ref_id;
+    uint32_t base;
+    uint32_t bytes;
+    uint16_t permissions;      /* read/write/scratch/stream 等 */
+    uint16_t owner;
+    uint32_t producer_event;
+    uint32_t producer_sequence;
+    uint32_t release_event;
+    uint32_t release_sequence;
+} elenor_group_l2_ref_v0_t;
+```
+
 协议要求：
 
-- `l2_window_base/bytes` 必须落在 group SRAM allocation 内，且不覆盖 active resident program、descriptor、event 区。
+- `l2_window_base/bytes` 只是 group SRAM 的 coarse envelope；不能替代 per-buffer legality。每个 DMA/Collective/stream/indirect buffer 都必须绑定到 `GroupL2Ref`。
+- `group_l2_ref_iova/group_l2_ref_count` 指向 `elenor_group_l2_ref_v0_t[]`；每个 ref 必须声明 range、权限、owner、producer/release `EventRef`，供 Group DMA/TGS/arbiter 做 legality 和 lifecycle 检查。
 - `queue_count` 对应 Stream Queue descriptor table；每个 queue 的 producer/consumer mask 必须与 role binding 一致。
 - `residency_hint/cache_policy` 只提供 placement/pinning 建议，不改变 correctness；真正正确性由 `program_id + version + hash + epoch` 保证。
 - `sram_bank_hint_mask` 是 placement hint，不是安全边界；硬件仍需 range check。
-- descriptor patch 只允许由 Runtime/Tile Group Sequencer 在 group task start 前完成，RUN 状态下修改必须通过显式 fence。
 
 ### 4.3 MMIO/CSR 建议
 
@@ -264,7 +279,6 @@ group_task.accept t0
 loop_blocks:
     wait.credit   s0
     dma.prefetch  desc=kv_next, dst=l2_kv_next -> ev_dma1:seq_dma1[block_id]
-    wait.event    ev_dma1 seq=seq_dma1[block_id]
     wait.stream   s0
     advance.block
     branch.lt     block_id, block_count, loop_blocks
@@ -276,7 +290,11 @@ loop_blocks:
 group_task.complete signal=group_done seq=seq_group_done
 ```
 
+动态 embedding/GNN 或 owner-partitioned MoE 路径复用同一 skeleton，但 `dma.prefetch` 可以被 `dma.indirect` 替换。IDE 必须先 acquire descriptor `wait_ref`，再读取 count/indices 并生成 `chunk_id/start_offset/slot_selector` execution context；base descriptor 一旦 `VALID` 不可改写，终止 event 也只允许来自 descriptor `completion_ref`。
+
 `seq_*[block_id]` 表示每次 block 循环复用 event id 时必须使用新的 expected sequence；固定 sequence 不能跨循环迭代复用。
+
+动态 embedding/GNN 或 owner-partitioned MoE 路径复用同一 skeleton，但 `dma.prefetch` 可以被 `dma.indirect` 替换。`chunk_id/start_offset/slot_selector` 由 Tile Group Sequencer 每次 launch 生成内部 execution context；base descriptor 一旦 `VALID` 不可改写。
 
 硬件执行这些 command/descriptor/program，不解释 MLIR 或高层 graph。
 
@@ -287,21 +305,21 @@ group_task.complete signal=group_done seq=seq_group_done
 ```text
 HBM/DDR/LPDDR
   -> Memory Controller / NoC VC1/VC2
-  -> Group DMA
+  -> Group DMA / Indirect DMA Engine
   -> Group Shared SRAM / L2
   -> Tile DMA
   -> Tile L1 slot frame
   -> BOA / EVU / MFE tile port / USE
   -> Tile L1
   -> L2 partial/result buffer
-  -> Group Collective or Group DMA storeback
+  -> Group Collective or Group DMA storeback/indirect scatter
 ```
 
 Group DMA relationship：
 
-- Tile Group Sequencer issues Group DMA descriptors for HBM 到 L2 prefetch/storeback。
+- Tile Group Sequencer issues Group DMA descriptors for HBM 到 L2 prefetch/storeback，以及 indirect gather/scatter。
 - Tile UCE issues Tile DMA for L2 到 L1；Tile UCE 不应直接调度 HBM policy。
-- MFE 可以经 global path 参与数据相关动态访问，但 page/segment stream 的 address generation owner 是 MFE；如果写入 L2 stream buffer，需要与 Group DMA 通过 SRAM arbiter 和 descriptor ownership 隔离。
+- MFE 负责 page/segment metadata、indices/count/value record 或 stream buffer；Group DMA IDE 消费显式 `GroupL2Ref` 中的 record 执行 HBM↔L2 indirect path，并通过 SRAM arbiter 与其他 writer 隔离。
 - Group DMA completion event 可作为 role token 生产条件，也可作为 Tile Group Sequencer wait 条件。
 
 ### 5.2 控制流

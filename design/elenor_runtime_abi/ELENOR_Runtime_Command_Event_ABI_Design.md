@@ -147,7 +147,7 @@ CommandQueue
 Command
   header
   descriptor_ref
-  wait_refs[]  // event_id + expected_sequence
+  wait_refs[]  // shared EventRef {event_id, sequence}; wait side interprets sequence as expected_sequence
   signal_event + signal_sequence
   timeout_policy
   fault_record_slot
@@ -168,7 +168,7 @@ Event
 
 typedef struct {
     uint32_t event_id;
-    uint32_t expected_sequence;
+    uint32_t sequence; /* shared EventRef: wait side = expected_sequence, signal side = signal_sequence */
 } elenor_event_ref_v0_t;
 
 typedef struct {
@@ -195,6 +195,8 @@ typedef struct {
     uint32_t fault_record_slot;
 } elenor_command_v0_t;
 ```
+
+共享 EventRef 约束：任何 engine-private descriptor、TileGroupTask action、runtime wait array 或内部 launch context，只要需要表达可复用 event 身份，都 MUST 使用同一对 `{event_id, sequence}`。禁止在某些 descriptor 中退化为裸 `event_id` 或另起一套 epoch-only token。
 
 Command type 示例：
 
@@ -328,9 +330,9 @@ Warm launch 中如果 descriptor cache 可能保留旧数据，runtime 必须执
 
 ### 5.3 Wait/signal protocol
 
-- `wait_ref_iova + wait_ref_count` 表达等待集合；每个元素必须携带 `event_id + expected_sequence`。
-- `signal_event + signal_sequence` 在 command 成功完成时写 DONE；失败写 ERROR/TIMEOUT/RESET，同一 event id 的旧 sequence 不得覆盖新轮次。
-- 连续 event id 只是 runtime 分配优化；硬件 wait 方不得只依赖 `event_id` 或 base/count 推断正确性。
+- `wait_ref_iova + wait_ref_count` 表达等待集合；每个元素必须携带共享 `EventRef {event_id, sequence}`，wait side 将 `sequence` 解释为 `expected_sequence`。
+- `signal_event + signal_sequence` 在 command 成功完成时写 DONE；该二元组与 `EventRef` 同构。失败写 ERROR/TIMEOUT/RESET，同一 event id 的旧 sequence 不得覆盖新轮次。
+- 连续 event id 只是 runtime 分配优化；硬件 wait 方、engine-private descriptor 和 TileGroupTask action 都不得只依赖 `event_id` 或 base/count 推断正确性。
 - timeout 计数域必须声明：device cycle、queue cycle 或 wall-clock tick 由后续规格冻结。
 
 ### 5.4 Dynamic shape branch

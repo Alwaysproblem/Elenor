@@ -23,14 +23,14 @@ Graph Schedule PC / Group Task Iterator -> Tile Group Sequencer action index -> 
 硬件执行边界只涉及 `command buffer、descriptor、TileGroupTask 和 Tile Program`。`TileRoleBinding` 是 group task 内的静态 dispatch metadata，每个 role 内仍是 Tile-SPMD：通过 `tile_id`、`group_id`、descriptor offset 和 slot/frame binding 区分数据，不引入 per-tile dynamic role dispatch。
 First Silicon V1 cutline：
 
-| 项目     | First Silicon V1                                          | V1.x / V2 reserved                                                                                                                          |
-| -------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| Task     | 固定 action list、有限 action op、无自修改                | 压缩编码、动态 action 生成                                                                                                                  |
-| Dispatch | 静态 role binding、role 顺序 dispatch、stream wait/credit | 动态 role 创建、priority scheduling、dual-context prepared tile dispatch admission（仍消费 `TileProgram`，不引入 group-level program text） |
-| DMA      | 1D/2D/strided Group DMA prefetch/storeback                | gather list、multicast DMA                                                                                                                  |
-| Control  | action index 线性推进 + bounded wait；无 branch/loop ISA  | 通用分支预测或复杂异常恢复                                                                                                                  |
-| Sync     | wait/event/barrier/stream/EOS/error                       | cross-group barrier、preemption                                                                                                             |
-| PMU      | issue、wait、stall、timeout、fault attribution            | trace sampling 和 feedback scheduling                                                                                                       |
+| 项目     | First Silicon V1                                                    | V1.x / V2 reserved                                                                                                                          |
+| -------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Task     | 固定 action list、有限 action op、无自修改                          | 压缩编码、动态 action 生成                                                                                                                  |
+| Dispatch | 静态 role binding、role 顺序 dispatch、stream wait/credit           | 动态 role 创建、priority scheduling、dual-context prepared tile dispatch admission（仍消费 `TileProgram`，不引入 group-level program text） |
+| DMA      | 1D/2D/strided Group DMA prefetch/storeback、indirect gather/scatter | ordered overwrite、local combine、multicast DMA                                                                                             |
+| Control  | action index 线性推进 + bounded wait；无 branch/loop ISA            | 通用分支预测或复杂异常恢复                                                                                                                  |
+| Sync     | wait/event/barrier/stream/EOS/error                                 | cross-group barrier、preemption                                                                                                             |
+| PMU      | issue、wait、stall、timeout、fault attribution                      | trace sampling 和 feedback scheduling                                                                                                       |
 
 所有 action op 编码、action 数量上限、descriptor window 容量、最大 role 数、最大 queue 数、timeout 默认值由后续规格冻结。
 
@@ -42,7 +42,7 @@ Tile Group Sequencer owns：
 - Action index 推进：按 action list 顺序解释每条 `GroupAction`，不维护 program-counter semantics at group level、不取指 fetchable group-level program text、不维护 group-level program register file。
 - Role binding lookup：`dispatch.role role_id=<n>` 时按 `task_id` 上下文查找 `TileRoleBinding`，组装 prepared tile task 交给 Tile Dispatcher。
 - Stream Queue 初始化、reset、drain command issue；`wait.event` / `barrier.group` / collective 完成等待。
-- Group DMA prefetch / store descriptor issue、completion wait、DMA fault propagation。
+- Group DMA prefetch / store / indirect descriptor issue、completion wait、DMA fault propagation。
 - Tile Dispatcher issue：role binding 的 `tile_mask`、tile program id、resident local handle、descriptor patch window、stream binding、role_id、timeout/fault slot。
 - V1.x dual-context admission（若实现）：在 dispatch 前基于 dependency-free、resident handle readiness、frame partition compatibility 和 exclusivity class 判断 prepared tile task 是否可与目标 tile 上已 active context 共驻留；Tile UCE 只做本地 bind 校验和 runnable pick。
 - Barrier/Event wait/signal sequencing 与 group event timeout。
@@ -54,7 +54,7 @@ Tile Group Sequencer 不负责：
 - BOA/EVU/MFE/USE datapath 微循环或 tile-local engine launch；这些由 Tile UCE 和 engine sequencer 负责。每个 role 内仍是 Tile-SPMD：同一份 Tile Program template 在该 role 的 `tile_mask` 上运行，通过 `tile_id`、`group_id`、descriptor offset 和 slot/frame binding 区分数据。
 - Tile Program residency。Tile Program 的 lookup/fetch/verify/install/wake 由 Program Residency Manager 按 `TileRoleBinding` 管理；本模块没有 fetchable group-level program text residency、没有 fetchable group-level program text fetch、没有 program-counter semantics at group level。
 - L2 到 L1 的 Tile DMA；Tile Group Sequencer 只准备 L2 buffer、descriptor 和 stream token。
-- MFE 的 page/segment 数据相关动态地址生成；Tile Group Sequencer 只 dispatch 或等待相关 role/event。
+- MFE 的 page/segment metadata 生产；已 materialize 的 indices/count/value record 一旦交给 Group DMA IDE，Tile Group Sequencer 只负责 launch/wait 和 chunk execution context。
 - USE 的 state ownership、recurrence、checkpoint/restore。
 - Runtime queue scheduling、context priority、global graph dependency。
 - 不在 Tile UCE 内维护 group-level eligibility FIFO 或 next-program selection；若启用 dual-context，共驻留 candidate 的选择仍属于 Tile Group Sequencer dispatch policy。
@@ -64,7 +64,7 @@ Ownership 约束：
 
 1. Tile Group Sequencer 是 group 内 group task control owner；Tile UCE 是 tile-local program control owner。
 2. Tile Group Sequencer 可写 group event/status 区，但不能直接写 tile-local L1 状态，除非通过 Tile Dispatcher/Tile UCE 协议。
-3. Tile Group Sequencer issue 的 Group DMA completion event 必须唯一映射到 descriptor sequence。
+3. Tile Group Sequencer issue 的 Group DMA completion event 必须唯一映射到 descriptor sequence；对 `dma.indirect` 还必须唯一映射到内部 `chunk_id/start_offset/slot_selector` execution context。
 4. Tile Group Sequencer 不应直接解释 Stream Queue payload 内容，只使用 token metadata。
 5. 若启用 dual-context prepared tile dispatch，Tile Group Sequencer 负责“哪个 prepared tile task 可以与已 active context 共驻留”的 admission ownership；Tile UCE 不负责 group-level eligibility / FIFO / next-program selection。
 6. `fault_record_slot` 由 launch command 指定，Tile Group Sequencer 负责写入 group-task-level fault 摘要。
@@ -164,7 +164,7 @@ WAIT_ENTER
   -> RETIRE
 ```
 
-wait source 包括 event、stream token、credit、barrier、DMA completion、collective completion。`REVALIDATE` 必须比较 epoch 和 sequence，避免 reset 后 stale wakeup。
+wait source 包括 event、stream token、credit、barrier、DMA completion、collective completion。`REVALIDATE` 必须比较共享 `EventRef {event_id, sequence}`，避免 reset 后 stale wakeup。
 
 ## 4. 接口、descriptor、寄存器和协议
 
@@ -177,6 +177,7 @@ Tile Group Sequencer 解释的 action op 固定为以下集合，不存在 fetch
 | `init.stream`         | 初始化 stream queue                        | queue_id、depth、producer_mask、consumer_mask、policy |
 | `dma.prefetch`        | issue Group DMA HBM 到 L2                  | dma_desc_id、dst_l2、event_id、signal_sequence        |
 | `dma.store`           | issue Group DMA L2 到 HBM                  | dma_desc_id、src_l2、event_id、signal_sequence        |
+| `dma.indirect`        | issue Group DMA Indirect gather/scatter    | indirect_desc_id、chunk_capacity                      |
 | `dispatch.role`       | 向 Tile Dispatcher 派发 prepared tile task | role_id、completion_event_id、completion_sequence     |
 | `wait.event`          | 等待 event done/error/timeout              | event_id、expected_sequence、timeout                  |
 | `barrier.group`       | group participant barrier                  | participant_mask、event_id、signal_sequence           |
@@ -187,6 +188,8 @@ Tile Group Sequencer 解释的 action op 固定为以下集合，不存在 fetch
 `dispatch.role` 的 args 为 `(role_id, completion_event_id, completion_sequence)`。Tile Group Sequencer 查找 `task.role_bindings[role_id]`，记录 completion identity（`event_id + sequence`），调用 `TileGroup.dispatch_role(binding, cycle, event_id=completion_event_id, event_sequence=completion_sequence)`。缺失 role_id 触发 `unknown role_id <id>` fault。
 
 action op 只包含上表所列——不包含 branch/label、block advance、显式 EOS 注入或 stream/credit 等待 op（stream token/credit 等待通过 `wait.event` 绑定到对应 event；EOS 注入由 Tile UCE 或 Stream Queue Engine 在 role 执行内完成）。action op 编码、立即数宽度、operand 格式由后续规格冻结。
+
+`dma.indirect` 的 base descriptor 一旦 `VALID` 不可改写。IDE 先 acquire descriptor `wait_ref`，再读取动态 `count` 并按 `chunk_capacity` 推导 `chunk_id = start_offset / chunk_capacity`，为每次 chunk 生成内部 execution context：`{start_offset, chunk_count, slot_selector = chunk_id % 2}`。终止时只允许 signal descriptor `completion_ref`；如果 action list 需要等待它，必须使用与 descriptor `completion_ref` 完全一致的 `wait.event`，不能另起第二套 completion identity。
 
 ### 4.2 TileGroupTask pseudo-flow 示例
 
@@ -300,7 +303,7 @@ Tile Group Sequencer 只在 group control plane 上 issue，不在 data path 上
 
 ### 5.2 Data flow relationship
 
-- HBM -> L2：Tile Group Sequencer issue Group DMA prefetch/store descriptor。
+- HBM -> L2：Tile Group Sequencer issue Group DMA prefetch/store/indirect descriptor。
 - L2 -> L1：Tile Group Sequencer dispatch role，Tile UCE 根据 tile program 和 descriptor issue Tile DMA。
 - Role -> Role：Tile Group Sequencer 初始化 Stream Queue 并等待 token/credit event；payload 地址通常指向 L2 或 tile-local slot，由 descriptor 指明。
 - Tile -> Tile：Tile Group Sequencer issue Collective command 或 barrier，不直接读取 partial data。

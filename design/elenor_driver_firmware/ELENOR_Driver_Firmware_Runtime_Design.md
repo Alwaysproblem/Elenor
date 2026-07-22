@@ -64,7 +64,7 @@ ABI v0 结构体只作为样例，不是最终冻结定义；field、alignment�
 - Firmware 不解释高层 graph，不生成 tile program。
 - User runtime 不绕过 ABI 直接控制 BOA datapath。
 - USE 不负责 program control；USE 管 state/scan/recurrence，Tile UCE 管 tile program PC、launch、wait、branch 和 descriptor patch。
-- MFE 管数据相关动态内存访问，例如 page table walk、segment offset、stream fill。
+- MFE 管 page/segment metadata path，例如 page table walk、segment offset/record、stream fill；HBM-level indexed gather/scatter 由 Group DMA Indirect path 执行。
 
 ### 2.5 Ownership matrix
 

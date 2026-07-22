@@ -57,12 +57,12 @@ Compute != Control != Data Movement
 
 在这个原则下，ELENOR 把执行能力拆成四类核心引擎：
 
-| 子系统                | 主要职责          | 典型 workload                                                      |
-| --------------------- | ----------------- | ------------------------------------------------------------------ |
-| BOA                   | Dense Compute     | GEMM、Conv、QK、AV、Expert MLP                                     |
-| Enhanced Vector / EVU | Irregular Compute | Softmax、Norm、RoPE、Activation、Gather/Scatter、tail 处理         |
-| MFE                   | Memory Flow       | Page Stream、Segment Stream、Sparse Block Stream、layout transform |
-| USE                   | State / Control   | Scan、Recurrence、Dynamic Shape assist、Token Routing、Event       |
+| 子系统                | 主要职责          | 典型 workload                                                               |
+| --------------------- | ----------------- | --------------------------------------------------------------------------- |
+| BOA                   | Dense Compute     | GEMM、Conv、QK、AV、Expert MLP                                              |
+| Enhanced Vector / EVU | Irregular Compute | Softmax、Norm、RoPE、Activation、local gather/scatter、tail 处理            |
+| MFE                   | Memory Flow       | Page Stream、Segment metadata stream、Sparse Block Stream、layout transform |
+| USE                   | State / Control   | Scan、Recurrence、Dynamic Shape assist、Token Routing、Event                |
 
 ELENOR 的硬件消费 command buffer、descriptor、TileGroupTask 和 Tile Program，不直接消费高层 graph。高层动态图由 compiler/runtime 降到可执行 command sequence、descriptor table 和 executable package。
 
@@ -85,7 +85,7 @@ BOA/Vector/MFE/USE 分别承担 dense、irregular、memory-flow 和 state/contro
 ELENOR 负责以下类型的计算、数据流和运行时执行：
 
 - dense compute: GEMM、Conv、dense attention、expert MLP。
-- irregular compute: softmax、norm、activation、gather/scatter、layout transform。
+- irregular compute: softmax、norm、activation、local gather/scatter、layout transform。
 - dynamic memory streaming: paged attention、KV cache、embedding、ragged tensor、MoE dispatch。
 - stateful compute: SSM、scan、recurrence、streaming state update。
 - runtime command execution: command buffer、event、barrier、dynamic shape dispatch。
@@ -147,10 +147,10 @@ ELENOR 希望提供一套统一但分层清晰的执行架构，使同一架构�
 V1 不追求一次实现所有扩展能力，建议固化以下最小能力：
 
 - BOA: INT8/BF16 GEMM、attention QK/AV、expert MLP 主路径。
-- EVU: elementwise、activation、softmax、norm、mask/tail、gather/scatter。
-- MFE: Page Stream、Segment Stream。
+- EVU: elementwise、activation、softmax、norm、mask/tail、local gather/scatter。
+- MFE: Page Stream、Segment metadata stream、local reduce assist。
 - USE: prefix scan、simple recurrence、state checkpoint/restore、event assist。
-- DMA: 1D、2D、strided copy、async completion event。
+- DMA: 1D、2D、strided copy、centralized indirect gather/scatter、async completion event。
 - Runtime: command queue、event、barrier、dynamic shape branch。
 - PMU: engine active/stall、DMA bandwidth、SRAM bank conflict、NoC congestion、queue occupancy。
 
@@ -176,16 +176,16 @@ V1.x / V2 Reserved
 
 推荐 First Silicon V1 cutline：
 
-| 类别     | First Silicon V1 必须实现                                                            | V1.x / V2 可预留或后续实现                                                |
-| -------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
-| BOA      | INT8/BF16 GEMM、attention QK/AV、基础 split-K reduce                                 | 更多 dataflow search、复杂 epilogue fusion、稀疏 matmul                   |
-| EVU      | elementwise、mask/tail、softmax/norm、基础 gather                                    | full scatter、atomic update、复杂 permutation、跨 tile irregular access   |
-| DMA      | 1D/2D/strided copy、async completion event                                           | multicast、gather list、复杂 layout transform                             |
-| MFE      | Page Stream minimal：page walk、KV prefetch、reorder、stream fill                    | Segment Stream full reduce/update、Sparse Block Stream、Persistent Stream |
-| USE      | state/register file、prefix scan、simple recurrence、checkpoint/restore 的接口和模型 | 高级 recurrence transform、复杂 token routing、rollback policy 扩展       |
-| Runtime  | command queue、event、barrier、doorbell、basic fault record                          | priority scheduling、preemption、多模型 QoS                               |
-| PMU      | engine active/stall、DMA bandwidth、SRAM conflict、queue/event wait                  | 完整 stall taxonomy、采样 trace、PMU feedback scheduler                   |
-| Compiler | kernel library selection、descriptor template、command buffer emitter                | 自动 engine partition、自动 tiling/fusion、动态 shape 搜索                |
+| 类别     | First Silicon V1 必须实现                                                                                        | V1.x / V2 可预留或后续实现                                                    |
+| -------- | ---------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| BOA      | INT8/BF16 GEMM、attention QK/AV、基础 split-K reduce                                                             | 更多 dataflow search、复杂 epilogue fusion、稀疏 matmul                       |
+| EVU      | elementwise、mask/tail、softmax/norm、tile-local gather                                                          | tile-local scatter、atomic update、复杂 permutation、跨 tile irregular access |
+| DMA      | 1D/2D/strided copy、centralized indirect gather、unique scatter、async completion event                          | ordered overwrite、local combine、multicast、复杂 layout transform            |
+| MFE      | Page Stream minimal：page walk、KV prefetch、reorder、stream fill、Segment metadata/grouping/local reduce assist | full Segment Stream update、Sparse Block Stream、Persistent Stream            |
+| USE      | state/register file、prefix scan、simple recurrence、checkpoint/restore 的接口和模型                             | 高级 recurrence transform、复杂 token routing、rollback policy 扩展           |
+| Runtime  | command queue、event、barrier、doorbell、basic fault record                                                      | priority scheduling、preemption、多模型 QoS                                   |
+| PMU      | engine active/stall、DMA bandwidth、SRAM conflict、queue/event wait                                              | 完整 stall taxonomy、采样 trace、PMU feedback scheduler                       |
+| Compiler | kernel library selection、descriptor template、command buffer emitter                                            | 自动 engine partition、自动 tiling/fusion、动态 shape 搜索                    |
 
 本文后续章节描述的是 Architecture V1 的目标形态；§27 单独给出实现阶段和 phase exit criteria。
 
@@ -959,7 +959,7 @@ typedef struct {
 - GNN aggregation。
 - MoE token group。
 
-Segment Stream 的长期目标可以覆盖 gather、segment reduce、scatter/update 和 expert grouping；实现阶段应显式区分 mode，避免 V1 一次承担 atomic/coherence 的完整复杂度。
+Segment Stream 的长期目标可以覆盖 segment metadata decode、token grouping、local reduce、ordered record 输出，以及为 Group DMA Indirect Engine 准备 gather/scatter record；真正的 HBM-level random gather/scatter 执行由 Group DMA 完成，MFE 不承担独立的全局随机写一致性。
 
 ```c
 typedef enum {
@@ -973,7 +973,7 @@ typedef enum {
 First Silicon V1 推荐实现：
 
 ```text
-Segment gather + local reduce + ordered output
+Segment decode + local reduce + ordered output record
 ```
 
 V1.x / V2 再扩展：
@@ -1008,7 +1008,7 @@ typedef struct {
 1. V1 不默认支持跨 tile unordered atomic update。
 2. duplicate index 的行为必须由 descriptor mode 明确规定。
 3. Segment reduce 的 partial result owner 必须是 MFE、EVU 或 Collective 中的一个，不能隐式共享。
-4. 对于需要全局一致性的 scatter/update，优先通过 runtime 分桶、group-level reduce 或 V2 atomic path 解决。
+4. 对需要 HBM-level gather/scatter 的路径，MFE 只输出 indices/count/values/sequence record；Group DMA Indirect Engine 负责实际 HBM↔L2 搬运、冲突策略和 completion 可见性。
 
 ### 10.6 Mode 3: Sparse Block Stream
 
@@ -1336,13 +1336,13 @@ typedef struct {
 - 1D copy。
 - 2D copy。
 - strided copy。
-- multicast optional。
-- gather list optional。
+- centralized indirect gather / unique scatter。
+- ordered overwrite / local combine optional。
 
 V1 优先级：
 
 ```text
-1D/2D/strided copy > async event > multicast > gather list
+1D/2D/strided copy + indirect gather/unique scatter > async event > ordered combine > multicast
 ```
 
 ## 13. Tile L1 Slot Frame 和 Descriptor Patch Contract
@@ -1539,7 +1539,7 @@ NoC 需要支撑三类流量：
 
 Program 不是整个 graph，也不是单个 op，而是 TileGroupTask / Kernel Tile Program。
 
-````text
+```text
 model.pkg
 |
 ├── graph_schedule.bin
@@ -1564,21 +1564,22 @@ model.pkg
 ├── weights/
 |
 └── relocation_table
+```
 
 ### 15.2 核心对象
 
-| 对象            |                              粒度 | 作用                                                          |
-| --------------- | --------------------------------: | ------------------------------------------------------------- |
-| Graph Schedule   |                              整图 | 描述 group task 间依赖、context、queue、memory lifetime           |
-| TileGroupTask    |                        Tile Group | group task、Group DMA prefetch/store、role dispatch、group barrier |
-| TileRoleBinding  |                  Tile Group role | tile_mask、tile_program_id/version/hash、in/out stream、descriptor window |
-| Prepared Tile Task|                          Tile | local program handle、descriptor window、slot frame、stream binding |
-| Tile Program     |                              Tile | 由 Tile UCE 执行，控制 L2 到 L1 DMA、BOA、EVU、MFE、USE       |
-| Descriptor       |                          动态参数 | shape、stride、address、tiling、stream、state、patch 信息     |
-| Stream Queue     |                        role 间 | producer-consumer、credit、backpressure、EOS/error token      |
-| Slot Frame      |                           Tile L1 | tile program 和 descriptor 引用的 L1 memory binding           |
-| Program Table   | runtime 索引 / residency registry | program_id 到 section metadata / local resident handle 的映射 |
-| Event Table     |            runtime / group / tile | completion、dependency、fault、timeout 状态                   |
+| 对象               |                              粒度 | 作用                                                                      |
+| ------------------ | --------------------------------: | ------------------------------------------------------------------------- |
+| Graph Schedule     |                              整图 | 描述 group task 间依赖、context、queue、memory lifetime                   |
+| TileGroupTask      |                        Tile Group | group task、Group DMA prefetch/store、role dispatch、group barrier        |
+| TileRoleBinding    |                   Tile Group role | tile_mask、tile_program_id/version/hash、in/out stream、descriptor window |
+| Prepared Tile Task |                              Tile | local program handle、descriptor window、slot frame、stream binding       |
+| Tile Program       |                              Tile | 由 Tile UCE 执行，控制 L2 到 L1 DMA、BOA、EVU、MFE、USE                   |
+| Descriptor         |                          动态参数 | shape、stride、address、tiling、stream、state、patch 信息                 |
+| Stream Queue       |                           role 间 | producer-consumer、credit、backpressure、EOS/error token                  |
+| Slot Frame         |                           Tile L1 | tile program 和 descriptor 引用的 L1 memory binding                       |
+| Program Table      | runtime 索引 / residency registry | program_id 到 section metadata / local resident handle 的映射             |
+| Event Table        |            runtime / group / tile | completion、dependency、fault、timeout 状态                               |
 
 ### 15.3 Program Residency Contract
 
@@ -1595,7 +1596,7 @@ Tile Group-visible:
 
 Tile UCE-visible:
     resident local program handle only
-````
+```
 
 执行时：
 
@@ -2197,7 +2198,7 @@ typedef enum {
 
 typedef struct {
     uint32_t event_id;
-    uint32_t expected_sequence;
+    uint32_t sequence; /* shared EventRef: wait side = expected_sequence, signal side = signal_sequence */
 } elenor_event_ref_v0_t;
 
 typedef struct {
@@ -2225,6 +2226,8 @@ typedef struct {
 } elenor_command_v0_t;
 ```
 
+共享 EventRef 约束：command wait array、TileGroupTask action、engine-private descriptor 和 chunk-level internal execution context 只要表达可复用 event 身份，都必须使用同一对 `{event_id, sequence}`；不得回退到裸 `event_id` 或独立 epoch-only token。
+
 最小 ABI 必须预留：
 
 - ABI version。
@@ -2237,8 +2240,8 @@ typedef struct {
 - timeout policy。
 - fence / memory ordering semantics。
 - completion event id。
-- wait dependency 的 `event_id + expected_sequence`。
-- signal event 的 `event_id + sequence`。
+- wait dependency 的共享 `EventRef {event_id, sequence}`，其中 wait side 将 `sequence` 解释为 `expected_sequence`。
+- signal event 的 `event_id + sequence`，与共享 `EventRef` 同构。
 - fault record pointer。
 - privilege / isolation flags。
 
@@ -2266,7 +2269,7 @@ typedef struct {
 
 Event 用于 engine completion、DMA completion、stage synchronization、tile done、group done 和 graph done。
 
-wait 方必须同时匹配 `event_id + expected_sequence`；只检查 status 或只检查 event id 会在 reset/reuse、多 window in-flight 和 fault drain 后误判 stale completion。
+wait 方必须同时匹配共享 `EventRef {event_id, sequence}`；wait side 将 `sequence` 解释为 `expected_sequence`。只检查 status 或只检查 event id 会在 reset/reuse、多 window in-flight 和 fault drain 后误判 stale completion。
 
 ### 18.7 Runtime API
 
@@ -2566,13 +2569,16 @@ sequence -> chunks -> local scan -> chunk summary scan -> fixup
 映射：
 
 ```text
-indices / offsets     -> MFE Segment Stream
-embedding gather      -> MFE + Vector LSU
-segment reduce        -> Vector / USE
-dense tower           -> BOA
+indices / offsets       -> MFE Segment Stream
+HBM gather/scatter      -> Group DMA Indirect Engine
+local reduce / tail     -> Vector / USE
+dense tower             -> BOA
 ```
 
-主要瓶颈是随机访存和 coalescing。MFE 需要尽量把 index stream 转成合并后的 burst stream。
+主要瓶颈是随机访存和 coalescing。MFE 需要尽量把 index stream 转成合并后的 burst stream。然后将 index 的集合交给 global DMA indirect engine 做 gather/scatter。最后在 tile 内做 local reduce 和 tail handling。
+事件需要 CPU 提前将 gather/scatter 的事件提前交给 Tile Group Sequencer，在index stream完成后，tile program 立刻继续执行将数据从 HBM 传输到 L2 cache 以便于 tile 的 local indexing。
+
+随机访存的支持办法第一版：需要算子同步等待 CPU 完成 gather/scatter 操作
 
 ### 20.6 多模型并发
 
@@ -2805,14 +2811,14 @@ ELENOR hardware queues
 
 1. command queue + event + barrier 最小闭环。
 2. DMA 1D/2D copy + completion event。
-3. BOA GEMM through command queue。
-4. basic PMU counter。
-5. EVU elementwise / mask / tail。
-6. EVU softmax / norm。
-7. MFE Page Stream。
-8. Paged Attention end-to-end。
-9. EVU gather/scatter。
-10. MFE Segment Stream。
+3. Group DMA indirect gather/scatter + sequence-correct completion。
+4. BOA GEMM through command queue。
+5. basic PMU counter。
+6. EVU elementwise / mask / tail。
+7. EVU softmax / norm。
+8. MFE Page Stream。
+9. Paged Attention end-to-end。
+10. MFE Segment Stream + owner-partitioned indirect path。
 11. USE scan / recurrence。
 12. MoE dispatch。
 13. multi-model scheduling。
@@ -2821,15 +2827,15 @@ ELENOR hardware queues
 
 ### 23.3 Phase Exit Criteria
 
-| Phase   | 必须通过的功能                    | 必须通过的验证                                            | 性能门槛                                               |
-| ------- | --------------------------------- | --------------------------------------------------------- | ------------------------------------------------------ |
-| Phase 0 | ABI/cutline/ownership/spec freeze | spec review checklist + golden trace format               | 无性能门槛，要求接口闭环                               |
-| Phase 1 | BOA GEMM through command queue    | RTL sim + Python golden compare + command/event test      | BOA active/stall counter 合理                          |
-| Phase 2 | EVU softmax/norm/tail             | random tensor test + mask/tail corner cases               | error < tolerance，EVU active/stall 可归因             |
-| Phase 3 | MFE Page Stream + paged attention | page reorder、timeout、EOS/error token test               | BOA operand stall 与 MFE prefetch 指标对齐             |
-| Phase 4 | MoE dispatch / Segment Stream     | routing imbalance benchmark + segment reduce golden       | BOA utilization vs imbalance model 可解释              |
-| Phase 5 | USE scan / recurrence             | Mamba/RWKV golden + checkpoint/restore test               | state update correctness，USE state cache counter 有效 |
-| Phase 6 | multi-model                       | context isolation + fault injection + priority queue test | QoS latency / throughput target 可量化                 |
+| Phase   | 必须通过的功能                    | 必须通过的验证                                                                | 性能门槛                                               |
+| ------- | --------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------ |
+| Phase 0 | ABI/cutline/ownership/spec freeze | spec review checklist + golden trace format                                   | 无性能门槛，要求接口闭环                               |
+| Phase 1 | BOA GEMM through command queue    | RTL sim + Python golden compare + command/event test                          | BOA active/stall counter 合理                          |
+| Phase 2 | EVU softmax/norm/tail             | random tensor test + mask/tail corner cases                                   | error < tolerance，EVU active/stall 可归因             |
+| Phase 3 | MFE Page Stream + Indirect DMA    | page reorder、indirect gather/scatter bounds/conflict/timeout、EOS/error test | BOA operand stall 与 MFE prefetch、DMA PMU 指标对齐    |
+| Phase 4 | MoE dispatch / Segment Stream     | routing imbalance benchmark + owner-partitioned indirect scatter golden       | BOA utilization vs imbalance model 可解释              |
+| Phase 5 | USE scan / recurrence             | Mamba/RWKV golden + checkpoint/restore test                                   | state update correctness，USE state cache counter 有效 |
+| Phase 6 | multi-model                       | context isolation + fault injection + priority queue test                     | QoS latency / throughput target 可量化                 |
 
 ### 23.4 开源工具链建议
 
@@ -3128,12 +3134,13 @@ Exit criteria：
 - Paged Attention end-to-end 通过 golden。
 - `T_prefetch <= T_qk` 的 case 能在 PMU 上观察到 BOA stall 降低。
 
-### 27.5 Phase 4: MFE Segment + MoE
+### 27.5 Phase 4: MFE Segment + Indirect DMA + MoE
 
 任务：
 
 - offsets decode。
-- segment gather。
+- emit indices/count/value/sequence record。
+- owner partition / unique commit。
 - local segment reduce。
 - token grouping。
 - expert batching。
@@ -3142,7 +3149,7 @@ Exit criteria：
 Exit criteria：
 
 - 8/16 expert routing imbalance benchmark 可运行。
-- Segment gather + local reduce 的 duplicate index 行为被 descriptor mode 明确定义。
+- Segment record + indirect DMA 的 duplicate/conflict/ownership 行为被 descriptor mode 明确定义。
 - MoE combine 结果与 golden 对齐。
 
 ### 27.6 Phase 5: USE Scan / Recurrence
@@ -3188,7 +3195,7 @@ Exit criteria：
 2. **V1 cutline 是否清晰**: Architecture V1、First Silicon V1、V1.x/V2 reserved 是否已经区分。
 3. **UCE / USE / MFE / Runtime 分工是否合理**: UCE 与 USE 可共享同一个 RISC-V / micro-controller，但功能组件职责是否清楚。
 4. **BOA/EVU/MFE/USE 分工是否合理**: 是否存在某个 engine 负担过重，或者多个 engine 功能重叠严重。
-5. **MFE V1 范围是否可验证**: Page Stream 是否足够支撑 paged attention 初版，Segment Stream 的 scatter/atomic 是否有阶段边界。
+5. **MFE / Group DMA Indirect 边界是否清晰**: Page/Segment metadata、indices/count record、HBM-level gather/scatter 和 completion 可见性是否由唯一 owner 负责。
 6. **USE V1 范围是否可控**: prefix scan、affine recurrence、checkpoint、event assist 是否是合理最小集合。
 7. **Tile-SPMD 模型是否能支撑 compiler/runtime**: 同一 tile program template + descriptor auto-patch 是否足以覆盖初版 workload。
 8. **Slot Frame ABI 是否足够稳定**: slot 类型、权限、layout、lifetime、bank placement 是否足够表达。
@@ -3206,9 +3213,9 @@ Exit criteria：
 1. BOA tile size、OPA shape、accumulator layout 和 SRAM banking 的定量性能模型。
 2. OPA fragment 数据排布、行列循环时序和 operand fetch 细节。
 3. BOA dataflow，包括 output-stationary、weight-stationary 或其他模式的取舍。
-4. EVU gather/scatter、bank replay、duplicate index 和 limited atomic 的精确定义。
+4. EVU local gather/scatter、bank replay、duplicate index 和 limited atomic 的精确定义。
 5. MFE Page Stream 的 RTL microarchitecture，包括 page walker、ROB、prefetch queue、error model。
-6. MFE Segment Stream 的 atomic 和一致性语义，尤其是 segment reduce、scatter/update 类操作。
+6. MFE Segment Stream 与 Group DMA Indirect Engine 的 descriptor、chunk execution context 和一致性语义，尤其是 owner routing、scatter/update 类操作。
 7. Stream Queue binary layout、credit 协议、EOS/error token 语义和 reset/drain 行为。
 8. Tile Group Sequencer action index ISA 和 Tile UCE ISA 的编码格式。
 9. Runtime command buffer ABI 的二进制 layout 和版本兼容策略。

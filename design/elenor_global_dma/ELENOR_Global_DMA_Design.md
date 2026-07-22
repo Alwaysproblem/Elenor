@@ -7,18 +7,18 @@ Global DMA 是 ELENOR 芯片级大粒度数据搬运引擎，负责 host/HBM/DDR
 First Silicon V1 的 DMA cutline 与架构评审一致：
 
 ```text
-1D/2D/strided copy > async event > multicast > gather list
+1D/2D/strided copy + centralized indirect gather/unique scatter > async event > ordered combine > multicast
 ```
 
-| 能力       | First Silicon V1                                             | Architecture V1 / 后续规格                       |
-| ---------- | ------------------------------------------------------------ | ------------------------------------------------ |
-| Descriptor | src、dst、bytes、src_stride、dst_stride、rows、flags         | versioned binary layout、extended address mode   |
-| Copy       | 1D contiguous、2D rows、strided rows                         | scatter/gather list、multicast、layout transform |
-| Completion | async completion event、error event、timeout                 | chained DMA program、batch descriptor prefetch   |
-| Address    | IOVA/device physical/HBM aperture 基础检查                   | ATS/PASID/coherent host memory policy            |
-| QoS        | simple arbitration、NoC VC mapping                           | priority、deadline、bandwidth reservation        |
-| PMU        | bytes、requests、latency、stall by memory/NoC/descriptor     | per-context bandwidth shaping                    |
-| Error      | invalid descriptor、address fault、timeout、NoC/memory error | poison recovery、retry policy 扩展               |
+| 能力       | First Silicon V1                                                                  | Architecture V1 / 后续规格                                    |
+| ---------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Descriptor | copy desc + fixed-size indirect desc、shared EventRef、GroupL2Ref binding         | versioned binary layout、extended address mode                |
+| Copy       | 1D contiguous、2D rows、strided rows、centralized indirect gather、unique scatter | ordered overwrite、local combine、multicast、layout transform |
+| Completion | async completion event、error event、timeout、chunk execution context             | chained DMA program、batch descriptor prefetch                |
+| Address    | IOVA/device physical/HBM aperture 基础检查、`base + index * stride` indirect AGU  | ATS/PASID/coherent host memory policy                         |
+| QoS        | simple arbitration、NoC VC mapping                                                | priority、deadline、bandwidth reservation                     |
+| PMU        | bytes、requests、latency、stall by memory/NoC/descriptor、indirect merge/amp      | per-context bandwidth shaping                                 |
+| Error      | invalid descriptor、address fault、timeout、NoC/memory error、ownership/OOB       | poison recovery、retry policy 扩展                            |
 
 Global DMA block diagram：
 
@@ -54,37 +54,38 @@ Memory Controller         NoC / Group SRAM / Host Interface
 
 ### 2.1 职责
 
-| 职责               | 实现要求                                                                                    |
-| ------------------ | ------------------------------------------------------------------------------------------- |
-| Launch 接收        | 从 Global Scheduler 接收 DMA command，绑定 context、queue、event、fault slot。              |
-| Descriptor fetch   | 从 desc_iova 读取 DMA descriptor，校验 version/size/alignment/bounds。                      |
-| Address generation | 根据 src/dst/bytes/stride/rows 生成 read/write burst。                                      |
-| Data buffering     | 解耦 read response 与 write request，吸收 NoC/Memory backpressure。                         |
-| Completion         | 所有 row/burst 完成后 signal event；错误时写 fault record 并 signal error。                 |
-| Timeout            | launch、descriptor fetch、read、write、drain 均可被 timeout 观察。                          |
-| Ordering           | 对同一 descriptor 内 row/burst 的可见顺序满足 flags 定义；默认 copy completion 前数据可见。 |
-| PMU                | 统计 bandwidth、outstanding、stall、error、latency、row/burst 指纹。                        |
+| 职责               | 实现要求                                                                                                                    |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| Launch 接收        | 从 Global Scheduler 或 Tile Group Sequencer 接收 DMA command，绑定 context、queue、event、fault slot。                      |
+| Descriptor fetch   | 从 desc_iova 读取 DMA descriptor，校验 version/size/alignment/bounds。                                                      |
+| Address generation | 根据 src/dst/bytes/stride/rows 生成 copy burst，或根据 `base + index * stride` 生成 indirect gather/scatter burst。         |
+| Data buffering     | 解耦 read response 与 write request，吸收 NoC/Memory backpressure。                                                         |
+| Completion         | 所有 row/burst 或 indirect chunk 完成后 signal event；错误时写 fault record 并 signal error。                               |
+| Timeout            | launch、descriptor fetch、read、write、drain 和 indirect chunk execution 均可被 timeout 观察。                              |
+| Ordering           | 对同一 descriptor 内 row/burst 或 indirect conflict policy 的可见顺序满足 flags 定义；默认 completion 前数据可见。          |
+| PMU                | 统计 bandwidth、outstanding、stall、error、latency、row/burst 指纹，以及 indirect merge/write-amplification/conflict 指标。 |
 
 ### 2.2 非职责
 
 - 不执行 Tile L2 -> L1 DMA；Tile DMA 由 Tile UCE 控制。
-- 不负责 page table walk、KV page reorder、segment gather/reduce；这些属于 MFE。
+- 不负责 page table walk、KV page reorder、segment metadata decode 或 local reduce；这些属于 MFE。
 - 不解释 tensor semantic，不做自动 tiling/fusion。
 - 不隐式修改 USE state slot；state slot 只能通过明确 command 或 checkpoint/restore path 修改。
-- 不在 descriptor 错误时静默裁剪 copy；必须 fault。
+- 不在 descriptor 错误时静默裁剪 copy/indirect range；必须 fault。
 - 不保证 cache coherence，除非外部 host/coherent policy 在后续规格中冻结。
 
 ### 2.3 Ownership
 
-| 对象                      | Owner                                       | Global DMA 行为                                    |
-| ------------------------- | ------------------------------------------- | -------------------------------------------------- |
-| DMA command header        | Scheduler/Runtime                           | 接收已校验 context/queue/event 基本字段。          |
-| DMA descriptor body       | DMA owns validation and execution           | 解析 copy 相关字段。                               |
-| Source/destination memory | Memory Controller/Host Interface/Group SRAM | 按地址 aperture 发起读写，不拥有 allocation。      |
-| Completion event          | Event Fabric owns                           | DMA 发送 done/error update。                       |
-| Fault record              | Fault Fabric owns                           | DMA 提供 source、address、descriptor、burst 信息。 |
-| NoC VC mapping            | NoC owns arbitration                        | DMA 将 read response/write stream 映射到 VC1/VC2。 |
-| PMU counter               | DMA local + Global PMU                      | DMA 生成 local counter 和 snapshot。               |
+| 对象                      | Owner                                       | Global DMA 行为                                                                 |
+| ------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------- |
+| DMA command header        | Scheduler/Runtime                           | 接收已校验 context/queue/event 基本字段。                                       |
+| DMA descriptor body       | DMA owns validation and execution           | 解析 copy 或 indirect 相关字段。                                                |
+| GroupL2Ref                | Tile Group runtime / Sequencer              | 验证 indirect `indices/linear/scratch` 的 range、权限、producer/release event。 |
+| Source/destination memory | Memory Controller/Host Interface/Group SRAM | 按地址 aperture 发起读写，不拥有 allocation。                                   |
+| Completion event          | Event Fabric owns                           | DMA 发送 done/error update。                                                    |
+| Fault record              | Fault Fabric owns                           | DMA 提供 source、address、descriptor、burst/chunk 信息。                        |
+| NoC VC mapping            | NoC owns arbitration                        | DMA 将 read response/write stream 映射到 VC1/VC2。                              |
+| PMU counter               | DMA local + Global PMU                      | DMA 生成 local counter 和 snapshot。                                            |
 
 ## 3. 微架构和状态机
 
@@ -144,16 +145,22 @@ First Silicon V1 支持：
 - 1D：`rows = 1`，`bytes` 为总长度，stride 忽略或必须等于 bytes，具体由后续规格冻结。
 - 2D：每行 `bytes` 字节，共 `rows` 行，行起点递增 `src_stride` / `dst_stride`。
 - strided：允许 `src_stride != bytes` 或 `dst_stride != bytes`。
+- indirect gather/scatter：`addr_i = indexed_base + index[i] * indexed_stride`，线性侧地址为 `linear_base + (start_offset + i) * linear_stride`。
 
 地址计算：
 
 ```text
-src_row_addr = src + row * src_stride
-dst_row_addr = dst + row * dst_stride
-row_bytes    = bytes
+copy:
+  src_row_addr = src + row * src_stride
+  dst_row_addr = dst + row * dst_stride
+  row_bytes    = bytes
+
+indirect:
+  indexed_addr_i = indexed_base + index[i] * indexed_stride
+  linear_addr_i  = linear_base  + (start_offset + i) * linear_stride
 ```
 
-实现必须检测：`src + row * stride + bytes` 溢出、跨越非法 aperture、alignment 不满足 flags、rows 为零、bytes 为零时的行为。零长度 copy 是否产生 event done 由后续规格冻结。
+实现必须检测：`src + row * stride + bytes` 或 `indexed_base + index * stride + block_bytes` 溢出、跨越非法 aperture、alignment 不满足 flags、rows/count 为零、bytes/block_bytes 为零时的行为。IDE 必须先 acquire descriptor `wait_ref`，再读取 `dynamic_count_l2_addr` / `indices_l2_addr` 并生成 `start_offset/chunk_count/slot_selector` 内部 execution context；这些字段不得通过改写已 `VALID` descriptor 获得。
 
 ### 3.4 Burst splitter
 
@@ -191,6 +198,12 @@ typedef struct {
 本文建议实现时加 version/size/context 保留字段，但二进制 layout 由后续规格冻结：
 
 ```c
+typedef enum {
+    ELENOR_DMA_OP_COPY = 0,
+    ELENOR_DMA_OP_INDIRECT_GATHER = 1,
+    ELENOR_DMA_OP_INDIRECT_SCATTER = 2,
+} elenor_dma_op_v0_t;
+
 typedef struct {
     uint16_t abi_version;
     uint16_t desc_size;
@@ -207,7 +220,7 @@ typedef struct {
 } elenor_dma_desc_v0_ext_t;
 ```
 
-`op` First Silicon V1 只需要 COPY。multicast/gather list 使用 flags/op 预留，但未实现的必需位必须产生 unsupported descriptor fault。
+`ELENOR_DMA_OP_COPY` 使用上表字段。`ELENOR_DMA_OP_INDIRECT_GATHER/SCATTER` 复用同一 launch header，但 `desc_iova` 指向固定大小的 indirect descriptor body；其中 `indices_l2_addr`、`linear_base`、`scratch_l2_addr` 必须各自绑定到合法 `GroupL2Ref`，并使用共享 `EventRef {event_id, sequence}`。IDE 先 acquire descriptor `wait_ref`，再读取 count/indices，最终只 signal descriptor `completion_ref` 这一处 terminal completion identity。
 
 ### 4.2 Launch interface
 
@@ -227,7 +240,9 @@ priority_or_qos
 address_domain
 ```
 
-Global DMA 接受 launch 后返回 `launch_accepted`，最终通过 Event Fabric 返回 done/error/timeout。Scheduler 不应在 launch_accepted 后立即 retire command，除非 command 语义明确为 fire-and-forget；First Silicon V1 推荐等待 DMA completion event。
+Global DMA 接受 launch 后返回 `launch_accepted`，最终通过 Event Fabric 返回 done/error/timeout。Scheduler 不应在 `launch_accepted` 后立即 retire command，除非 command 语义明确为 fire-and-forget；First Silicon V1 推荐等待 DMA completion event。
+
+对于 `ELENOR_DMA_OP_INDIRECT_GATHER/SCATTER`，launch header 里的 `signal_event/signal_sequence` 不能再引入第二套 terminal completion source：它们必须与 indirect descriptor body 的 `completion_ref` 完全相等；不相等时 validator MUST reject launch，而不是选择其一或静默忽略。
 
 ### 4.3 Memory/NoC interface
 
@@ -353,28 +368,33 @@ BW_effective = BW_peak * efficiency
 
 ### 6.3 PMU counters
 
-| Counter                    | 说明                          | Primary stall owner       |
-| -------------------------- | ----------------------------- | ------------------------- |
-| dma_desc_count             | descriptor 完成数             | none                      |
-| dma_bytes_read/write       | 实际读写字节                  | none                      |
-| dma_read_req_count         | read burst 数                 | none                      |
-| dma_write_req_count        | write burst 数                | none                      |
-| dma_avg_burst_bytes        | burst efficiency              | none                      |
-| dma_active_cycles          | launch 到 completion 活跃周期 | engine_active             |
-| dma_wait_memory_cycles     | memory response 不足          | `ELENOR_STALL_DMA_MEMORY` |
-| dma_wait_noc_vc1_cycles    | read response VC backpressure | `ELENOR_STALL_NOC_VC`     |
-| dma_wait_noc_vc2_cycles    | write stream VC backpressure  | `ELENOR_STALL_NOC_VC`     |
-| dma_data_fifo_full_cycles  | write side 慢导致 read 停     | DMA internal backpressure |
-| dma_data_fifo_empty_cycles | read side 慢导致 write 停     | DMA internal backpressure |
-| dma_timeout_count          | timeout                       | fault                     |
-| dma_fault_invalid_desc     | descriptor 错误               | fault                     |
-| dma_fault_address          | address/aperture 错误         | fault                     |
+| Counter                          | 说明                             | Primary stall owner       |
+| -------------------------------- | -------------------------------- | ------------------------- |
+| dma_desc_count                   | descriptor 完成数                | none                      |
+| dma_bytes_read/write             | 实际读写字节                     | none                      |
+| dma_read_req_count               | read burst 数                    | none                      |
+| dma_write_req_count              | write burst 数                   | none                      |
+| dma_avg_burst_bytes              | burst efficiency                 | none                      |
+| dma_indirect_gather_lines        | indirect gather 物理 line 请求数 | none                      |
+| dma_indirect_reorder_hwm         | gather reorder 高水位            | none                      |
+| dma_indirect_combine_hit         | scatter combine hit 次数         | none                      |
+| dma_indirect_write_amplification | scatter write amplification      | none                      |
+| dma_indirect_conflict_stall      | ownership/conflict/combine stall | `ELENOR_STALL_DMA_MEMORY` |
+| dma_active_cycles                | launch 到 completion 活跃周期    | engine_active             |
+| dma_wait_memory_cycles           | memory response 不足             | `ELENOR_STALL_DMA_MEMORY` |
+| dma_wait_noc_vc1_cycles          | read response VC backpressure    | `ELENOR_STALL_NOC_VC`     |
+| dma_wait_noc_vc2_cycles          | write stream VC backpressure     | `ELENOR_STALL_NOC_VC`     |
+| dma_data_fifo_full_cycles        | write side 慢导致 read 停        | DMA internal backpressure |
+| dma_data_fifo_empty_cycles       | read side 慢导致 write 停        | DMA internal backpressure |
+| dma_timeout_count                | timeout                          | fault                     |
+| dma_fault_invalid_desc           | descriptor 错误                  | fault                     |
+| dma_fault_address                | address/aperture/GroupL2Ref 错误 | fault                     |
 
 Global PMU 汇总时，DMA stall 只有在 DMA command 已 active 且等待 memory/NoC/data buffer 时归因给 DMA。若 Scheduler 未发 launch，则不算 DMA stall。
 
 ### 6.4 PPA 策略
 
-- First Silicon V1 优先保证 descriptor validation、fault 精确性和 event ordering，不追求复杂 gather/multicast。
+- First Silicon V1 优先保证 descriptor validation、fault 精确性、EventRef/GroupL2Ref 正确性和 event ordering，不追求完全通用的 gather/atomic 子系统。
 - data buffer 深度由 bandwidth-delay product 决定，具体由 SRAM profile 冻结。
 - outstanding window 过大会增加 tag CAM 和验证面；可按 Edge/Balanced/High End profile 分档。
 - strided copy 短 row 场景可用 row coalescing hint，但必须保持地址语义，hint 格式由后续规格冻结。
@@ -437,32 +457,35 @@ Global PMU 汇总时，DMA stall 只有在 DMA command 已 active 且等待 memo
 2. 通过 Scheduler 提交 1D HBM->HBM 或 host->HBM copy，验证 completion event。
 3. 提交 2D copy，rows/stride 覆盖不连续地址。
 4. 提交 strided copy，src_stride 与 dst_stride 不同。
-5. 注入 invalid descriptor size/flags，验证 invalid descriptor fault。
-6. 注入 address fault，验证 fault record 包含 address 和 descriptor pointer。
-7. 注入 memory/NoC backpressure，验证 DMA 不丢数据且 PMU stall 增加。
-8. 注入 timeout，验证 event TIMEOUT 和 queue recovery。
-9. reset/drain during active DMA，验证状态确定。
+5. 提交 indirect gather，验证 GroupL2Ref、`EventRef {event_id, sequence}`、chunk execution context 和 L2 可见性。
+6. 提交 unique scatter，验证 write amplification / combine / completion event。
+7. 注入 ownership 或 unique contract 违规，验证 fault record 包含 logical index/chunk 信息。
+8. 注入 invalid descriptor size/flags，验证 invalid descriptor fault。
+9. 注入 address fault，验证 fault record 包含 address 和 descriptor pointer。
+10. 注入 memory/NoC backpressure，验证 DMA 不丢数据且 PMU stall 增加。
+11. 注入 timeout，验证 event TIMEOUT 和 queue recovery。
+12. reset/drain during active DMA，验证状态确定。
 
 ### 8.3 验收标准
 
 - DMA 1D/2D/strided copy 与 golden memory compare 一致。
-- DMA completion event、error event、timeout event 与 command_id/context_id/fault_slot 对齐。
+- indirect gather/scatter 在 `GroupL2Ref`、共享 `EventRef {event_id, sequence}`、`wait_ref/completion_ref` 和 chunk execution context 下行为确定，结果与 reference model 一致。
+- DMA completion event、error event、timeout event 与 `command_id/context_id/fault_slot` 对齐；indirect launch header 的 `signal_event/signal_sequence` 若与 descriptor `completion_ref` 不一致必须 reject。
 - DMA 不能绕过 command queue 成为不可审计 side path；debug CSR launch 仅用于 bring-up。
-- invalid descriptor/address/timeout 不产生 silent data corruption。
-- PMU 能解释 DMA bandwidth、memory stall、NoC VC stall、descriptor fault。
+- invalid descriptor/address/ownership/OOB/timeout 不产生 silent data corruption。
+- PMU 能解释 DMA bandwidth、memory stall、NoC VC stall、merge ratio、write amplification、descriptor fault 和 conflict stall。
 - event / queue / DMA / reset / timeout 系统稳定性先于复杂 engine 扩展完成。
 - CDC/RDC、FIFO/arbiter formal、SVA protocol assertion 覆盖 DMA 关键路径。
 
 ## 9. 风险、取舍和后续细化方向
 
-| 风险                           | 影响                                   | 缓解                                                               |
-| ------------------------------ | -------------------------------------- | ------------------------------------------------------------------ |
-| DMA 承担 MFE 动态内存职责      | ownership 混乱，paged attention 难验证 | DMA 只做确定地址 copy；page/segment walk 和 stream fill 属于 MFE。 |
-| Completion 早于数据可见        | host/runtime 读到旧数据                | write response 完成后才 signal event，ordering SVA 覆盖。          |
-| Strided copy 溢出或跨 aperture | 数据破坏或安全问题                     | 扩展位 overflow 检测、aperture checker、fault record。             |
-| Outstanding 过大               | tag CAM/时序/验证复杂                  | First Silicon 限制 window，profile 分档。                          |
-| NoC data 阻塞 event            | 系统 hang 或误 timeout                 | VC1/VC2 与 VC0 分离，event sideband 或高优先级。                   |
-| PMU 只统计 bytes 不统计效率    | 无法解释短 row/stride 性能             | average burst、row_count、stall by memory/NoC/data_fifo。          |
-| reset/drain 丢失 inflight 状态 | recovery 不确定                        | stop new launch、drain or timeout、fault/event 顺序固定。          |
-
-后续规格需要冻结：DMA descriptor binary layout、zero-length copy 语义、alignment/boundary 规则、address aperture 表、host coherent policy、max burst/outstanding/data buffer depth、unsupported flags policy、completion/fault 同周期优先级、debug launch 权限、PMU counter id、reset/drain 精确行为和 multicast/gather list 的阶段边界。
+| 风险                                    | 影响                                         | 缓解                                                                                                             |
+| --------------------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| DMA 承担 page/segment metadata walk     | ownership 混乱，paged attention 难验证       | DMA 只执行确定地址 copy 或已 materialize record 的 indirect HBM↔L2；page/segment walk 和 local reduce 属于 MFE。 |
+| 只做 flat L2 window 检查                | ping-pong buffer owner/lifetime 错误         | 引入 `GroupL2Ref`，显式声明 range、权限、producer/release event。                                                |
+| Completion 早于数据可见                 | host/runtime 读到旧数据                      | write response 完成后才 signal event，ordering SVA 覆盖。                                                        |
+| Strided/indirect 地址溢出或跨 aperture  | 数据破坏或安全问题                           | overflow 检测、aperture checker、GroupL2Ref legality、fault record。                                             |
+| Outstanding 过大                        | tag CAM/时序/验证复杂                        | First Silicon 限制 window，profile 分档。                                                                        |
+| NoC data 阻塞 event                     | 系统 hang 或误 timeout                       | VC1/VC2 与 VC0 分离，event sideband 或高优先级。                                                                 |
+| PMU 只统计 bytes 不统计效率             | 无法解释短 row/stride 或 random scatter 性能 | average burst、row_count、merge ratio、write amplification、stall by memory/NoC/data_fifo。                      |
+| reset/drain 丢失 inflight chunk/context | recovery 不确定                              | stop new launch、drain or timeout、fault/event 顺序固定，chunk context 不写回 descriptor。                       |

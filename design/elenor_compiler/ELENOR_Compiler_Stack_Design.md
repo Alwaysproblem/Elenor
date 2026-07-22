@@ -20,14 +20,14 @@ High-level graph
 
 First Silicon V1 切线：
 
-| 能力       | First Silicon V1                                                        | 后续扩展                             |
-| ---------- | ----------------------------------------------------------------------- | ------------------------------------ |
-| Frontend   | StableHLO/Torch-MLIR 子集导入                                           | eager/dynamic graph 更完整覆盖       |
-| Partition  | pattern-based engine partition                                          | cost-model 自动 partition            |
-| Kernel     | tile kernel library selection                                           | compiler 生成更多 tile program       |
-| Descriptor | BOA GEMM、DMA、EVU elementwise/softmax、MFE Page Stream、USE state 样例 | Segment/Sparse/Persistent 扩展       |
-| Runtime    | command template、event dependency、package manifest                    | PMU feedback scheduler               |
-| Tests      | FileCheck、golden descriptor、canonical traces                          | fuzzing、profile-guided optimization |
+| 能力       | First Silicon V1                                                                     | 后续扩展                             |
+| ---------- | ------------------------------------------------------------------------------------ | ------------------------------------ |
+| Frontend   | StableHLO/Torch-MLIR 子集导入                                                        | eager/dynamic graph 更完整覆盖       |
+| Partition  | pattern-based engine partition                                                       | cost-model 自动 partition            |
+| Kernel     | tile kernel library selection                                                        | compiler 生成更多 tile program       |
+| Descriptor | BOA GEMM、DMA/Indirect DMA、EVU elementwise/softmax、MFE Page Stream、USE state 样例 | Segment/Sparse/Persistent 扩展       |
+| Runtime    | command template、event dependency、package manifest                                 | PMU feedback scheduler               |
+| Tests      | FileCheck、golden descriptor、canonical traces                                       | fuzzing、profile-guided optimization |
 
 ABI v0 结构体和 descriptor layout 只作为样例，不是最终冻结定义；field、alignment、endianness、versioning 和兼容策略由后续规格冻结。
 
@@ -52,7 +52,7 @@ Compiler 不负责：
 - 不让硬件直接解释高层 graph。
 - First Silicon V1 不从零生成所有 tile microcode。
 - 不在 compiler 中实现 driver memory policy 或 IOMMU。
-- 不把 data-dependent dynamic memory access 放入 UCE 控制程序；MFE 拥有 page/segment stream 的数据相关访问。
+- 不把 data-dependent dynamic memory access 放入 UCE 控制程序；page/segment metadata 归 MFE，HBM-level indexed gather/scatter 归 Group DMA Indirect path。
 - 不把 USE 扩展成通用控制器；USE 管 state/scan/recurrence。
 
 ### 2.3 Ownership
@@ -60,7 +60,7 @@ Compiler 不负责：
 | 对象                | Compiler owner             | Runtime/Firmware owner        | Hardware consumer    |
 | ------------------- | -------------------------- | ----------------------------- | -------------------- |
 | Shape class         | shape-specialize pass      | launch-time branch            | Runtime / Tile UCE   |
-| Engine partition    | engine-partition pass      | 不重分区                      | BOA/EVU/MFE/USE      |
+| Engine partition    | engine-partition pass      | 不重分区                      | BOA/EVU/MFE/USE/DMA  |
 | Tile kernel binding | kernel-library-select pass | validate residency            | Tile UCE             |
 | Descriptor template | engine dialect lowering    | context/tile/data/state patch | Engines              |
 | Slot frame template | memory-plan pass           | bind physical/local slots     | Tile UCE / DMA       |
@@ -163,14 +163,14 @@ Versioning 规则：compiler manifest、package container、command ABI、descri
 
 ### 4.4 Dialect strategy
 
-| Dialect          | 语义                                                                   | 输出                    |
-| ---------------- | ---------------------------------------------------------------------- | ----------------------- |
-| `elenor.boa`     | dense GEMM/Conv/QK/AV/expert MLP                                       | BOA descriptor template |
-| `elenor.evu`     | elementwise、activation、softmax、norm、mask/tail、gather/scatter 子集 | EVU descriptor template |
-| `elenor.mfe`     | Page Stream、Segment Stream、layout/reorder/data stream                | MFE stream descriptor   |
-| `elenor.use`     | state、scan、recurrence、checkpoint/restore                            | USE state descriptor    |
-| `elenor.runtime` | command、event、barrier、branch_shape、launch_group_task               | command template        |
-| `elenor.package` | section、relocation、manifest、kernel binding                          | executable package      |
+| Dialect          | 语义                                                                                    | 输出                    |
+| ---------------- | --------------------------------------------------------------------------------------- | ----------------------- |
+| `elenor.boa`     | dense GEMM/Conv/QK/AV/expert MLP                                                        | BOA descriptor template |
+| `elenor.evu`     | elementwise、activation、softmax、norm、mask/tail、local gather/scatter 子集            | EVU descriptor template |
+| `elenor.mfe`     | Page Stream、Segment metadata/grouping、layout/reorder/data stream                      | MFE stream descriptor   |
+| `elenor.use`     | state、scan、recurrence、checkpoint/restore                                             | USE state descriptor    |
+| `elenor.runtime` | command、event、barrier、branch_shape、launch_group_task、indirect_dma launch/ownership | command template        |
+| `elenor.package` | section、relocation、manifest、kernel binding                                           | executable package      |
 
 Dialect 不应互相吞并：BOA dialect 不表达 event wait；Runtime dialect 不表达 matmul tile layout；MFE dialect 不表达 high-level graph traversal。
 
@@ -247,11 +247,11 @@ typedef struct {
 -elenor-boa-desc-template
 -elenor-evu-irregular-lowering
 -elenor-mfe-stream-detect
+-elenor-indirect-dma-lowering
 -elenor-use-state-detect
 -elenor-bufferize
 -elenor-memory-plan
 -elenor-runtime-command-buffer-lowering
--elenor-descriptor-abi-lowering
 -elenor-package-layout
 -elenor-golden-artifact-emit
 ```
@@ -294,14 +294,15 @@ Compiler 必须显式输出：binding table、relocation table、shape class tab
 
 ### 5.3 Engine partition rules
 
-| Pattern                                            | Target                                                     | 边界                                                       |
-| -------------------------------------------------- | ---------------------------------------------------------- | ---------------------------------------------------------- |
-| matmul / conv-lowered GEMM / dense attention QK/AV | BOA；windowed Conv 还必须生成 MFE window/im2col descriptor | BOA 只做 dense compute，MFE 负责 Conv window/layout stream |
-| softmax/norm/activation/tail                       | EVU                                                        | irregular scalar/vector path                               |
-| gather/scatter/layout/page/KV stream               | MFE + EVU                                                  | data-related dynamic memory access 归 MFE                  |
-| MoE token dispatch                                 | MFE + EVU + optional USE                                   | grouping/segment stream/combine                            |
-| scan/recurrence/state update                       | USE                                                        | state lifecycle 归 USE                                     |
-| dynamic branch                                     | Runtime / Tile UCE                                         | branch over command/program path                           |
+| Pattern                                            | Target                                                     | 边界                                                         |
+| -------------------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------ |
+| matmul / conv-lowered GEMM / dense attention QK/AV | BOA；windowed Conv 还必须生成 MFE window/im2col descriptor | BOA 只做 dense compute，MFE 负责 Conv window/layout stream   |
+| softmax/norm/activation/tail                       | EVU                                                        | irregular scalar/vector path                                 |
+| page/KV/layout stream                              | MFE                                                        | page walk、prefetch、reorder、stream fill 归 MFE             |
+| HBM-level gather/scatter                           | Group DMA Indirect + EVU/MFE                               | indices/count/value 先落到显式 L2 slot，再由 IDE 执行 HBM↔L2 |
+| MoE token dispatch                                 | MFE + Group DMA Indirect + EVU + optional USE              | grouping/segment stream/combine/owner-partitioned commit     |
+| scan/recurrence/state update                       | USE                                                        | state lifecycle 归 USE                                       |
+| dynamic branch                                     | Runtime / Tile UCE                                         | branch over command/program path                             |
 
 ### 5.4 Tile-SPMD 与 kernel library
 

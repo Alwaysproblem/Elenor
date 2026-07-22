@@ -13,14 +13,14 @@ ELENOR verification/bring-up 的定位是把 Architecture V1 的职责边界、F
 
 First Silicon V1 cutline：
 
-| 项目     | 必须闭环                                                                                                         | 预留                                                              |
-| -------- | ---------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| 控制面   | command queue、event、barrier、timeout、fault record、reset domain                                               | priority/preemption 的完整策略                                    |
-| 数据搬运 | DMA 1D/2D/strided、async completion event、L2/L1 基本路径                                                        | multicast/gather list 的复杂模式                                  |
-| Engine   | BOA GEMM、EVU elementwise/softmax/norm/tail、MFE Page Stream、MFE Segment Stream、USE scan/recurrence/checkpoint | Sparse Block、Persistent Memory Stream、高级 recurrence transform |
-| ABI      | command/event v0、descriptor validation、Tile Slot Frame、Stream Queue token/credit/EOS/error                    | 完整二进制兼容矩阵由后续规格冻结                                  |
-| PMU      | active/stall、DMA bandwidth、SRAM conflict、queue/event wait、NoC VC congestion                                  | sampled trace、PMU feedback scheduler                             |
-| 静态质量 | lint、CDC/RDC、SVA、formal、STA、power intent 的 phase gate                                                      | signoff 阈值由 PPA exploration 冻结                               |
+| 项目     | 必须闭环                                                                                                                | 预留                                                              |
+| -------- | ----------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| 控制面   | command queue、event、barrier、timeout、fault record、reset domain                                                      | priority/preemption 的完整策略                                    |
+| 数据搬运 | DMA 1D/2D/strided、centralized indirect gather/unique scatter、async completion event、L2/L1 基本路径                   | ordered overwrite/local combine/multicast 的复杂模式              |
+| Engine   | BOA GEMM、EVU elementwise/softmax/norm/tail、MFE Page Stream、MFE Segment metadata path、USE scan/recurrence/checkpoint | Sparse Block、Persistent Memory Stream、高级 recurrence transform |
+| ABI      | command/event v0、descriptor validation、Tile Slot Frame、Stream Queue token/credit/EOS/error                           | 完整二进制兼容矩阵由后续规格冻结                                  |
+| PMU      | active/stall、DMA bandwidth、SRAM conflict、queue/event wait、NoC VC congestion                                         | sampled trace、PMU feedback scheduler                             |
+| 静态质量 | lint、CDC/RDC、SVA、formal、STA、power intent 的 phase gate                                                             | signoff 阈值由 PPA exploration 冻结                               |
 
 ## 2. 职责、非职责和 ownership
 
@@ -35,7 +35,7 @@ First Silicon V1 cutline：
 
 ### 2.2 非职责
 
-- 验证计划不改变 ELENOR 架构职责：UCE 负责 program control，USE 负责 state，MFE 负责 data-related dynamic memory access。
+- 验证计划不改变 ELENOR 架构职责：UCE 负责 program control，USE 负责 state，MFE 负责 page/segment metadata path，Group DMA IDE 负责 HBM-level indexed gather/scatter。
 - testbench 不绕过 command queue 直接拉 datapath 作为 phase exit 证据；可用于早期 unit debug，但不能作为系统验收。
 - golden model 不替代 RTL protocol assertion；二者关注不同错误面。
 - PMU counter 不替代 waveform/debug，也不替代 SVA/formal 的协议证明。
@@ -83,6 +83,7 @@ Performance validation and bring-up
 SPEC_LOCK
   -> CONTROL_PLANE_ALIVE
   -> DMA_EVENT_ALIVE
+  -> INDIRECT_DMA_ALIVE
   -> BOA_COMMAND_ALIVE
   -> PMU_BASELINE_ALIVE
   -> EVU_ALIVE
@@ -96,9 +97,9 @@ SPEC_LOCK
 
 - `CONTROL_PLANE_ALIVE`：command queue、event table、timeout、fault record 可观测。
 - `DMA_EVENT_ALIVE`：1D/2D DMA 通过 descriptor 发起并产生 completion event。
+- `INDIRECT_DMA_ALIVE`：共享 `EventRef {event_id, sequence}`、chunk execution context、bounds/conflict/ownership/fault 路径正确。
 - `BOA_COMMAND_ALIVE`：BOA GEMM 必须通过 command queue 触发，而不是 testbench 直接驱动 datapath。
 - `PMU_BASELINE_ALIVE`：basic counter 与 event timestamp、waveform 对齐。
-- 后续状态依次打开 EVU、MFE、USE 和 multi-context，不允许跳过基础闭环。
 
 ### 3.3 关键协议状态机
 
@@ -121,15 +122,15 @@ command layout 必须验证以下字段：ABI version、command size、context i
 
 ### 4.2 descriptor 验证矩阵
 
-| descriptor   | 正常 case                                                     | 异常 case                                     | PMU/事件证据                              |
-| ------------ | ------------------------------------------------------------- | --------------------------------------------- | ----------------------------------------- |
-| DMA          | 1D、2D、strided、async event                                  | address fault、stride overflow、timeout       | DMA bytes、DMA stall、completion event    |
-| BOA          | INT8/BF16 GEMM、double buffer                                 | operand underflow、accumulator conflict       | BOA active/stall、SRAM conflict           |
-| EVU          | elementwise、softmax、norm、mask/tail、basic gather           | invalid mask、tail boundary、bank replay      | EVU active、LSU replay、masked lane       |
-| MFE Page     | page walk、KV prefetch、reorder、stream fill                  | invalid page、timeout、EOS/error token        | hit/miss、stream stall、BOA operand stall |
-| MFE Segment  | offsets decode、segment gather、local reduce、expert batching | duplicate index mode、segment 越界            | routing imbalance、MFE stall              |
-| USE          | scan、affine recurrence、checkpoint/restore                   | state slot 权限、reset/fault restore          | USE active、state hit/miss、event wait    |
-| Stream Queue | token、credit、backpressure、EOS、error                       | credit leak、full/empty deadlock、reset/drain | occupancy、credit empty/full              |
+| descriptor   | 正常 case                                                         | 异常 case                                                                          | PMU/事件证据                                    |
+| ------------ | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------- |
+| Indirect DMA | gather、unique scatter、owner-partitioned ordered/combined commit | OOB、unique violation、ownership violation、chunk timeout、completion_ref mismatch | line merge、write amplification、conflict stall |
+| BOA          | INT8/BF16 GEMM、double buffer                                     | operand underflow、accumulator conflict                                            | BOA active/stall、SRAM conflict                 |
+| EVU          | elementwise、softmax、norm、mask/tail、basic gather               | invalid mask、tail boundary、bank replay                                           | EVU active、LSU replay、masked lane             |
+| MFE Page     | page walk、KV prefetch、reorder、stream fill                      | invalid page、timeout、EOS/error token                                             | hit/miss、stream stall、BOA operand stall       |
+| MFE Segment  | offsets decode、record emit、local reduce、expert batching        | duplicate index mode、segment 越界、record ownership mismatch                      | routing imbalance、MFE stall、IDE owner bytes   |
+| USE          | scan、affine recurrence、checkpoint/restore                       | state slot 权限、reset/fault restore                                               | USE active、state hit/miss、event wait          |
+| Stream Queue | token、credit、backpressure、EOS、error                           | credit leak、full/empty deadlock、reset/drain                                      | occupancy、credit empty/full                    |
 
 ### 4.3 PMU attribution hierarchy 和 counter map
 
@@ -149,18 +150,18 @@ unknown_or_unclassified
 
 基础 counter map：
 
-| counter                                   | scope             | 验证用例                                       |
-| ----------------------------------------- | ----------------- | ---------------------------------------------- |
-| BOA active/stall operand/acc/writeback    | engine/tile       | GEMM、attention、SRAM conflict                 |
-| EVU active/LSU replay/masked lane         | engine/tile       | softmax、norm、tail、gather                    |
-| MFE active/prefetch hit/miss/stream stall | engine/tile       | paged attention、segment stream                |
-| USE active/state hit/miss/checkpoint      | engine/tile       | recurrence、reset/fault restore                |
-| DMA bytes/stall/outstanding               | tile/group/global | DMA copy、paged attention prefetch             |
-| SRAM bank conflict                        | tile/group        | bank-aware layout、EVU replay                  |
-| Stream occupancy/credit empty/full        | tile/group        | role pipeline、EOS/error                       |
-| Event wait cycles                         | tile/group/global | barrier、timeout、dependency                   |
-| NoC congestion by VC                      | group/global      | command/event isolation、DMA/collective stress |
-| command queue occupancy/context count     | global            | multi-context QoS                              |
+| counter                                    | scope             | 验证用例                                         |
+| ------------------------------------------ | ----------------- | ------------------------------------------------ |
+| BOA active/stall operand/acc/writeback     | engine/tile       | GEMM、attention、SRAM conflict                   |
+| EVU active/LSU replay/masked lane          | engine/tile       | softmax、norm、tail、gather                      |
+| MFE active/prefetch hit/miss/stream stall  | engine/tile       | paged attention、segment metadata path           |
+| USE active/state hit/miss/checkpoint       | engine/tile       | recurrence、reset/fault restore                  |
+| DMA bytes/stall/outstanding                | tile/group/global | DMA copy、paged attention prefetch、indirect DMA |
+| Indirect DMA line-merge/write-amp/conflict | group             | gather/scatter、owner partition、ordered path    |
+| Stream occupancy/credit empty/full         | tile/group        | role pipeline、EOS/error                         |
+| Event wait cycles                          | tile/group/global | barrier、timeout、dependency                     |
+| NoC congestion by VC                       | group/global      | command/event isolation、DMA/collective stress   |
+| command queue occupancy/context count      | global            | multi-context QoS                                |
 
 ### 4.4 roofline 和 workload PMU 签名
 

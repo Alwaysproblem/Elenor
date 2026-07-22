@@ -12,16 +12,16 @@ ELENOR Chip Top 是整颗 ELENOR Device 的顶层集成边界，负责把 Host I
 
 Architecture V1 允许描述完整芯片形态，包括多 Tile Group、多 NoC virtual channel、全局 collective、多 context 和 PMU feedback scheduling。First Silicon V1 只要求以下 cutline：
 
-| 范围              | First Silicon V1 必须实现                                                             | Architecture V1 / 后续规格                          |
-| ----------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| Host path         | doorbell、command ring、event/fault MSI/MSI-X 或 SoC interrupt                        | CXL.cache/coherent attach、复杂虚拟化               |
-| Runtime Processor | command consume、descriptor validation、shape branch 基础路径、reset/drain            | 高级 priority/preemption、PMU feedback scheduling   |
-| Global Scheduler  | queue dispatch、group task launch、event/barrier、basic resource map                  | 多模型 QoS、跨 group 动态重分配                     |
-| Global DMA        | 1D/2D/strided copy、async completion event、timeout fault                             | multicast、gather list、复杂 layout transform       |
-| Memory            | HBM/DDR/LPDDR 控制器接口、IOMMU/IOVA 透传检查                                         | coherent host memory policy                         |
-| NoC               | VC0 command/event、VC1 read response、VC2 write/stream、VC3 collective 预留或最小实现 | hierarchical mesh 参数、QoS aging、adaptive routing |
-| PMU               | queue occupancy、DMA bandwidth、NoC VC congestion、event wait、fault counter          | trace sampling、feedback scheduler                  |
-| Reset             | device/group/tile reset domain、drain protocol、fault record 保留                     | partial context preemption                          |
+| 范围              | First Silicon V1 必须实现                                                                      | Architecture V1 / 后续规格                          |
+| ----------------- | ---------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| Host path         | doorbell、command ring、event/fault MSI/MSI-X 或 SoC interrupt                                 | CXL.cache/coherent attach、复杂虚拟化               |
+| Runtime Processor | command consume、descriptor validation、shape branch 基础路径、reset/drain                     | 高级 priority/preemption、PMU feedback scheduling   |
+| Global Scheduler  | queue dispatch、group task launch、event/barrier、basic resource map                           | 多模型 QoS、跨 group 动态重分配                     |
+| Global DMA        | 1D/2D/strided copy、centralized indirect gather/scatter、async completion event、timeout fault | ordered combine、multicast、复杂 layout transform   |
+| Memory            | HBM/DDR/LPDDR 控制器接口、IOMMU/IOVA 透传检查                                                  | coherent host memory policy                         |
+| NoC               | VC0 command/event、VC1 read response、VC2 write/stream、VC3 collective 预留或最小实现          | hierarchical mesh 参数、QoS aging、adaptive routing |
+| PMU               | queue occupancy、DMA bandwidth、NoC VC congestion、event wait、fault counter                   | trace sampling、feedback scheduler                  |
+| Reset             | device/group/tile reset domain、drain protocol、fault record 保留                              | partial context preemption                          |
 
 所有位宽、队列深度、Tile Group 数、NoC 拓扑参数、SRAM profile、时钟频率和功耗域划分在本文中不冻结，写为 `由后续规格冻结` 或 `由 PPA exploration 冻结`。
 

@@ -8,21 +8,21 @@ Workload Mapping 文档定义 Dense Transformer、Paged Attention、MoE、SSM/Ma
 
 - Dense compute 归 BOA。
 - Irregular compute 归 EVU。
-- 数据相关动态内存访问归 MFE。
+- 数据相关动态内存访问按层分配：page/KV metadata path 归 MFE，HBM-level indexed gather/scatter 归 Group DMA Indirect path。
 - Stateful compute 归 USE。
 - Program control 归 Runtime / Tile Group Sequencer / Tile UCE。
 - 硬件执行 command、descriptor、program，不执行高层 graph。
 
 First Silicon V1 切线：
 
-| Workload        | First Silicon V1                                                                  | 后续扩展                              |
-| --------------- | --------------------------------------------------------------------------------- | ------------------------------------- |
-| GEMM/Conv       | GEMM: BOA INT8/BF16 GEMM、split-K 基础 reduce；Conv: MFE WinGen/im2col + BOA GEMM | epilogue fusion、advanced tiling      |
-| Dense Attention | QK/AV BOA、softmax/norm EVU、event chain                                          | 更复杂 fusion                         |
-| Paged Attention | MFE Page Stream、KV prefetch/reorder、BOA QK/AV、EVU softmax                      | Sparse Block Stream                   |
-| MoE             | router top-k、MFE Segment Stream、expert batching、BOA expert GEMM、combine       | advanced load balance、atomic combine |
-| SSM             | USE scan/recurrence、checkpoint/restore、BOA projection、EVU local op             | advanced recurrence transform         |
-| Multi-model     | group partition、queue priority、SRAM quota metadata                              | preemption、QoS scheduler             |
+| Workload        | First Silicon V1                                                                                         | 后续扩展                              |
+| --------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| GEMM/Conv       | GEMM: BOA INT8/BF16 GEMM、split-K 基础 reduce；Conv: MFE WinGen/im2col + BOA GEMM                        | epilogue fusion、advanced tiling      |
+| Dense Attention | QK/AV BOA、softmax/norm EVU、event chain                                                                 | 更复杂 fusion                         |
+| Paged Attention | MFE Page Stream、KV prefetch/reorder、BOA QK/AV、EVU softmax                                             | Sparse Block Stream                   |
+| MoE             | router top-k、MFE Segment Stream、Indirect DMA gather/scatter、expert batching、BOA expert GEMM、combine | advanced load balance、atomic combine |
+| SSM             | USE scan/recurrence、checkpoint/restore、BOA projection、EVU local op                                    | advanced recurrence transform         |
+| Multi-model     | group partition、queue priority、SRAM quota metadata                                                     | preemption、QoS scheduler             |
 
 ABI v0 结构体和 workload descriptor 都是样例，不是最终冻结定义；未冻结 field、canonical case 参数和 performance target 由后续规格冻结。
 
@@ -48,16 +48,17 @@ Workload mapping 负责：
 
 ### 2.3 Ownership matrix
 
-| Workload component            | Owner                                  | 说明                                   |
-| ----------------------------- | -------------------------------------- | -------------------------------------- |
-| QKV/MLP/expert GEMM           | BOA                                    | Dense compute 主路径                   |
-| softmax/norm/activation/tail  | EVU                                    | Predicated vector 与 mask/tail         |
-| KV page walk/prefetch/reorder | MFE                                    | 数据相关动态地址和 stream fill         |
-| token grouping/segment stream | MFE + EVU + optional USE               | MFE 管数据流，USE 可辅助 state/counter |
-| recurrence/state update       | USE                                    | state slot、checkpoint/restore         |
-| dynamic branch                | Runtime / Tile UCE                     | command path 和 tile-local branch      |
-| role overlap                  | Tile Group Sequencer + Stream Queue    | credit/backpressure/EOS/error          |
-| descriptor patch              | Compiler/Runtime/Tile UCE/MFE/USE 分层 | owner 不得重叠                         |
+| Workload component               | Owner                                  | 说明                                                         |
+| -------------------------------- | -------------------------------------- | ------------------------------------------------------------ |
+| QKV/MLP/expert GEMM              | BOA                                    | Dense compute 主路径                                         |
+| softmax/norm/activation/tail     | EVU                                    | Predicated vector 与 mask/tail                               |
+| KV page walk/prefetch/reorder    | MFE                                    | 数据相关动态地址和 stream fill                               |
+| HBM-level indexed gather/scatter | Tile Group Sequencer + Group DMA IDE   | 显式 L2 index/value/count/scratch slot，统一 event/ownership |
+| token grouping/segment stream    | MFE + EVU + optional USE               | MFE 管 metadata/record，USE 可辅助 state/counter             |
+| recurrence/state update          | USE                                    | state slot、checkpoint/restore                               |
+| dynamic branch                   | Runtime / Tile UCE                     | command path 和 tile-local branch                            |
+| role overlap                     | Tile Group Sequencer + Stream Queue    | credit/backpressure/EOS/error                                |
+| descriptor patch                 | Compiler/Runtime/Tile UCE/MFE/USE 分层 | owner 不得重叠                                               |
 
 ## 3. 微架构和状态机
 
@@ -122,7 +123,7 @@ RouterLogits
   -> ExpertBatch
   -> ExpertGEMM
   -> Combine
-  -> OutputScatterOrReduce
+  -> OutputOwnerPartitionThenScatterOrReduce
 ```
 
 SSM：
@@ -357,12 +358,12 @@ USE 管 state slot、state cache、checkpoint/restore；Tile UCE 发起 launch/w
 
 ```text
 indices / offsets -> MFE Segment Stream
-embedding gather  -> MFE + EVU LSU
+embedding gather  -> Group DMA Indirect Engine
 segment reduce    -> EVU / USE
 feature transform -> BOA
 ```
 
-主要瓶颈是随机访存与 coalescing。MFE 应将 index stream 合并成 burst stream，EVU 处理 tail、duplicate 和局部 reduce。
+主要瓶颈是随机访存与 coalescing。MFE 负责把 segment metadata 规整成 record，Group DMA IDE 负责 HBM-level gather/scatter，EVU 处理 tail、duplicate 和局部 reduce。
 
 ### 5.6 Multi-model mapping
 

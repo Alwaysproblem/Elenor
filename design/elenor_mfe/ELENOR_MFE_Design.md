@@ -2,31 +2,31 @@
 
 ## 1. 定位、目标和 First Silicon cutline
 
-MFE（Memory Flow Engine）是 ELENOR 的 memory-flow engine，负责把动态、不规则、分段、分页的数据流规整成 BOA、EVU、USE 和 SRAM 可以消费的 stream。MFE 是数据相关动态内存访问的 owner：page table walk、block table decode、physical address generation、page gather、KV prefetch、layout transform、reorder、segment gather 和 stream fill。Tile UCE 负责 program control 和 engine orchestration；MFE 不执行 Tile Program PC，不解释高层 graph。
+MFE（Memory Flow Engine）是 ELENOR 的 memory-flow engine，负责把动态、不规则、分段、分页的数据流规整成 BOA、EVU、USE 和 SRAM 可以消费的 stream。MFE owns page-table-based dynamic access（page table walk、block table decode、physical page address generation、KV prefetch、layout transform、reorder、stream fill）以及 segment metadata path（offsets/indices decode、record emit、local reduce）。当 indices/count/value 已经 materialize 到 Group L2 后，HBM-level indexed gather/scatter 由 Group DMA Indirect Engine 执行；Tile UCE 负责 program control 和 engine orchestration；MFE 不执行 Tile Program PC，不解释高层 graph。
 
 MFE 不是通用 memory processor。First Silicon V1 必须控制复杂度，优先覆盖：
 
 - Page Stream：Paged Attention、KV cache、long context。
-- Segment Stream：embedding bag、ragged tensor、MoE token group、recommender/GNN 的基础 gather + local reduce。
+- Segment Stream：embedding bag、ragged tensor、MoE token group、recommender/GNN 的 metadata/record 生成 + local reduce。
 
 Architecture V1 可预留 Sparse Block Stream 和 Persistent Memory Stream；First Silicon V1 不应被这些后续能力阻塞。
 
-| 能力                     | First Silicon V1                                             | 后续能力                                                   |
-| ------------------------ | ------------------------------------------------------------ | ---------------------------------------------------------- |
-| Page Stream              | page walk、KV prefetch、reorder、stream fill、double buffer  | residency predictor、deeper prefetch、跨 group page policy |
-| Segment Stream           | offsets decode、segment gather、local reduce、ordered output | unordered scatter、atomic update、cross-tile reduce        |
-| Sparse Block Stream      | 预留 flags 和 metadata shape                                 | V2 block sparse attention / sparse matmul                  |
-| Persistent Memory Stream | 预留 state/page binding 字段                                 | V3 agent memory / recurrent memory                         |
-| PMU                      | stall、prefetch hit/miss、stream occupancy、backpressure     | trace sampling 和 PMU feedback scheduler                   |
+| 能力                     | First Silicon V1                                            | 后续能力                                                               |
+| ------------------------ | ----------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Page Stream              | page walk、KV prefetch、reorder、stream fill、double buffer | residency predictor、deeper prefetch、跨 group page policy             |
+| Segment Stream           | offsets decode、record emit、local reduce、ordered output   | HBM scatter execution 强化、unordered atomic update、cross-tile reduce |
+| Sparse Block Stream      | 预留 flags 和 metadata shape                                | V2 block sparse attention / sparse matmul                              |
+| Persistent Memory Stream | 预留 state/page binding 字段                                | V3 agent memory / recurrent memory                                     |
+| PMU                      | stall、prefetch hit/miss、stream occupancy、backpressure    | trace sampling 和 PMU feedback scheduler                               |
 
 ## 2. 职责、非职责和 ownership
 
 MFE 负责：
 
 - 解析 page table、block table、offsets、indices、sparse metadata 的 V1 子集。
-- 生成 physical address 或 L2/L1 stream address。
-- 对 page/segment 数据执行 prefetch、coalesce、reorder、double buffering。
-- 将 stream 写入 Tile L1 stream slot / metadata slot，或通过 stream queue 交给 BOA/EVU/USE。
+- 生成 physical page address，或 segment record / L2/L1 stream address。
+- 对 page 数据执行 prefetch、coalesce、reorder、double buffering；对 segment 数据执行 grouping、local reduce 和 ordered record emit。
+- 将 stream 写入 Tile L1 stream slot / metadata slot，或把 indirect DMA record 写入 Group L2 ref / stream queue 交给 BOA/EVU/USE/Group DMA。
 - 维护 Page Stream 和 Segment Stream 的 EOS/error token。
 - 对 invalid page、out-of-bound index、timeout、stream overflow、descriptor fault 产生 fault record。
 - 提供 PMU：prefetch hit/miss、stream stall、reorder occupancy、credit empty/full、fault count。
@@ -45,15 +45,17 @@ MFE 负责：
 
 - 1D / 2D / 3D DMA
 - block load/store
+- page walk / page prefetch
+- segment offsets / indices decode
+- segment record emit 到 Group L2
 - ping-pong buffer
-- basic stride
-- basic padding fill
+- basic stride / padding fill
 - event/token
 - conv window generator
 - pooling window generator
 - layout transform
 - page gather
-- scatter assist
+- indirect-dma assist
 - stream-to-BOA direct feed
 - zero-copy buffer aliasing
 - view descriptor system
@@ -69,17 +71,17 @@ MFE 不负责：
 
 ownership 规则：
 
-| 对象                                     | owner                                        | MFE 行为                                                           |
-| ---------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------ |
-| page table base / block table descriptor | runtime / compiler                           | MFE 读取并 walk，fault 时记录 page id                              |
-| page list / segment offset patch         | MFE                                          | 数据相关动态地址由 MFE 管理                                        |
-| Tile Program control                     | Tile UCE                                     | MFE 只响应 launch/wait/cancel                                      |
-| metadata/page-list slot                  | MFE writer，UCE/USE reader                   | 写入 owner 必须唯一                                                |
-| stream buffer                            | MFE producer，BOA/EVU/USE consumer           | credit/EOS/error 明确                                              |
-| segment reduce partial owner             | descriptor 声明为 MFE、EVU 或 Collective     | 不能隐式共享                                                       |
-| duplicate index                          | descriptor mode                              | 未声明行为必须 fault 或 ordered fallback                           |
-| TensorView / view binding                | compiler / runtime 定义，MFE 消费            | 复用共享 TensorView 语义解释 zero-copy view，不单独发明平行 schema |
-| alias lifecycle / release                | producer owner + runtime / Tile UCE contract | backing store 在所有 alias view release / barrier 完成前不得回收   |
+| 对象                                     | owner                                        | MFE 行为                                                                          |
+| ---------------------------------------- | -------------------------------------------- | --------------------------------------------------------------------------------- |
+| page table base / block table descriptor | runtime / compiler                           | MFE 读取并 walk，fault 时记录 page id                                             |
+| page list / segment offset patch         | MFE                                          | 管理 page/segment metadata；final HBM gather/scatter commit 由 Group DMA IDE 执行 |
+| Tile Program control                     | Tile UCE                                     | MFE 只响应 launch/wait/cancel                                                     |
+| metadata/page-list slot                  | MFE writer，UCE/USE reader                   | 写入 owner 必须唯一                                                               |
+| stream buffer / Group L2 record ref      | MFE producer，BOA/EVU/USE/DMA consumer       | credit/EOS/error、GroupL2Ref legality明确                                         |
+| segment reduce partial owner             | descriptor 声明为 MFE、EVU 或 Collective     | 不能隐式共享                                                                      |
+| duplicate index                          | descriptor mode / IDE conflict policy        | 未声明行为必须 fault、ordered fallback 或 owner-partition path                    |
+| TensorView / view binding                | compiler / runtime 定义，MFE 消费            | 复用共享 TensorView 语义解释 zero-copy view，不单独发明平行 schema                |
+| alias lifecycle / release                | producer owner + runtime / Tile UCE contract | backing store 在所有 alias view release / barrier 完成前不得回收                  |
 
 ## 3. 微架构和状态机
 
@@ -107,22 +109,22 @@ Consumer Handoff / Commit
 
 内部模块：
 
-| 模块                  | 说明                                                                  | 关键点                          |
-| --------------------- | --------------------------------------------------------------------- | ------------------------------- |
-| Launch Frontend       | 接收 Tile UCE launch、读取 descriptor                                 | command id、event id、mode      |
-| Descriptor Validator  | 检查 ABI、mode、slot、bounds、reserved bits                           | 输出 fault record               |
-| Metadata Decoder      | 解析 page table、offsets、indices、block metadata                     | 格式由后续规格冻结              |
-| Page Walker           | page id -> physical page / L2 address                                 | invalid page fail-fast          |
-| Segment Walker        | offsets/indices -> segment item stream                                | duplicate policy descriptor 化  |
-| Address Generator     | base + stride + index + segment + page offset                         | boundary check                  |
-| Prefetch Queue        | 提前发起 KV page、embedding row、expert weight 请求                   | hit/miss 统计                   |
-| Request Tracker       | 管理 outstanding request、timeout、cancel                             | tag、age、fault                 |
-| Async LD/ST Queues    | 分离 load / store 接受与完成；为 V1.x window overlap 提供 credit 边界 | queue credit、epoch、visibility |
-| Reorder Buffer        | 合并乱序返回，恢复 logical order                                      | page/segment order policy       |
-| Coalescer             | 合并相邻地址，提高 burst efficiency                                   | 不改变可见顺序                  |
-| Stream Buffer         | ping-pong buffer，写入 L1 stream slot                                 | credit、EOS/error               |
-| Store Visibility Unit | store payload 对 L1/L2 consumer 可见后产生 completion identity        | event sequence、fence           |
-| Commit Unit           | event、fault、PMU snapshot                                            | done/fault 原子提交             |
+| 模块                  | 说明                                                                       | 关键点                             |
+| --------------------- | -------------------------------------------------------------------------- | ---------------------------------- |
+| Launch Frontend       | 接收 Tile UCE launch、读取 descriptor                                      | command id、event id、mode         |
+| Descriptor Validator  | 检查 ABI、mode、slot、bounds、reserved bits                                | 输出 fault record                  |
+| Metadata Decoder      | 解析 page table、offsets、indices、block metadata                          | 格式由后续规格冻结                 |
+| Page Walker           | page id -> physical page / L2 address                                      | invalid page fail-fast             |
+| Segment Walker        | offsets/indices -> ordered segment record                                  | duplicate policy descriptor 化     |
+| Address Generator     | page offset、segment record / local stream address                         | boundary check                     |
+| Prefetch Queue        | 提前发起 KV page 请求，或为 indirect DMA 准备 record staging               | hit/miss 统计                      |
+| Request Tracker       | 管理 Page Stream outstanding、record handoff、timeout、cancel              | tag、age、fault                    |
+| Async LD/ST Queues    | 分离 Page Stream load/store 与 record handoff；为 V1.x overlap 提供 credit | queue credit、EventRef、visibility |
+| Reorder Buffer        | 合并乱序返回，恢复 logical order                                           | page/segment order policy          |
+| Coalescer             | 合并相邻地址，提高 burst efficiency                                        | 不改变可见顺序                     |
+| Stream Buffer         | ping-pong buffer，写入 L1 stream slot 或 Group L2 record                   | credit、EOS/error、GroupL2Ref      |
+| Store Visibility Unit | store payload 对 L1/L2 consumer 可见后产生 completion identity             | event sequence、fence              |
+| Commit Unit           | event、fault、PMU snapshot                                                 | done/fault 原子提交                |
 
 #### 3.1.1 Queue 架构和 ingress 分层
 
@@ -270,10 +272,10 @@ SEG_EOS
 Segment Stream V1 推荐：
 
 ```text
-Segment gather + local reduce + ordered output
+Segment record emit + local reduce + ordered output
 ```
 
-V1 不默认支持跨 tile unordered atomic update。需要全局一致性的 scatter/update，优先通过 runtime 分桶、group-level reduce 或后续 atomic path 解决。
+V1 不默认支持跨 tile unordered atomic update。需要全局一致性的 scatter/update，优先通过 runtime 分桶、group-level reduce 或 Group DMA IDE ordered/unique path 解决。
 
 ## 4. 接口、descriptor、寄存器和协议
 
@@ -410,16 +412,16 @@ typedef struct {
 
 MFE 的一致性边界必须 descriptor 化：
 
-| 边界              | V1 行为                                                               | 后续能力                                        |
-| ----------------- | --------------------------------------------------------------------- | ----------------------------------------------- |
-| Page Stream order | logical token order；乱序返回由 reorder buffer 恢复                   | 更复杂 page residency policy                    |
-| Page fault        | first fault record + EOS/error token；不 silent skip                  | fault recovery policy 由后续规格冻结            |
-| Segment gather    | indices 顺序或 segment order 输出，由 descriptor 声明                 | coalesced reorder 但可见顺序不变                |
-| Local reduce      | partial owner 为 MFE 时只在 tile-local scope 内有效                   | group/global reduce 交给 Collective             |
-| Duplicate index   | `duplicate_policy` 明确 first/last/sum/fault/ordered                  | atomic add 由后续规格冻结                       |
-| Scatter           | V1 仅 ordered scatter 可选；unordered atomic 不默认支持               | V2 atomic path                                  |
-| Cross-tile update | 不在 MFE V1 内解决                                                    | runtime 分桶、group reduce、atomic path         |
-| View alias        | 复用共享 TensorView 语义；只读 alias 或 phase-disjoint handoff 才允许 | 更细粒度 alias policy / writable alias contract |
+| 边界              | V1 行为                                                                                | 后续能力                                        |
+| ----------------- | -------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| Page Stream order | logical token order；乱序返回由 reorder buffer 恢复                                    | 更复杂 page residency policy                    |
+| Page fault        | first fault record + EOS/error token；不 silent skip                                   | fault recovery policy 由后续规格冻结            |
+| Segment gather    | 先按 indices 顺序或 segment order 生成 record；真正的 HBM gather 由 Group DMA IDE 执行 | coalesced reorder 但可见顺序不变                |
+| Local reduce      | partial owner 为 MFE 时只在 tile-local scope 内有效                                    | group/global reduce 交给 Collective             |
+| Duplicate index   | `duplicate_policy` 明确 first/last/sum/fault/ordered                                   | atomic add 由后续规格冻结                       |
+| Scatter           | V1 通过 Group DMA IDE ordered/unique path 提交；MFE 只负责 emit ordered record         | V2 atomic path                                  |
+| Cross-tile update | 不在 MFE V1 内解决                                                                     | runtime 分桶、group reduce、atomic path         |
+| View alias        | 复用共享 TensorView 语义；只读 alias 或 phase-disjoint handoff 才允许                  | 更细粒度 alias policy / writable alias contract |
 
 ### 4.4 协议
 

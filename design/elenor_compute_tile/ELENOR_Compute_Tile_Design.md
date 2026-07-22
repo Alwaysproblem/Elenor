@@ -34,7 +34,7 @@ First Silicon V1 cutline：
 | ---------------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------- |
 | 控制面           | tile task receive、prepared local program handle check、PC 推进、wait/fence、tile done event | priority、preemption、多上下文 tile-local time slicing      |
 | UCE issue window | 单 active Tile Program、`event_id + sequence` completion、slot hazard 可观测                 | V1.x/V2 `window_size=2~4` issue/preparation overlap         |
-| L1 / DMA         | slot frame binding、1D/2D/strided L2->L1、L1->L2、async event                                | multicast、gather list、复杂 layout transform               |
+| L1 / DMA         | slot frame binding、1D/2D/strided L2->L1、L1->L2、async event                                | 与 Group DMA indirect 的更深 overlap、复杂 layout transform |
 | BOA              | INT8/BF16 GEMM、QK/AV 基础路径、split-K reduce 接口                                          | 复杂 epilogue fusion、稀疏 matmul                           |
 | EVU              | elementwise、mask/tail、softmax/norm、基础 gather                                            | full scatter、atomic update、复杂 permutation               |
 | MFE port         | Page Stream minimal token 到 L1 stream slot、error/EOS 传播                                  | Segment Stream full update、Sparse Block、Persistent Stream |
