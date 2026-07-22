@@ -9,10 +9,11 @@ USE 不是通用 CPU，不是 Tile Program 主控制器，也不是 memory proce
 ```text
 Tile UCE = program control and engine orchestration
 USE      = state compute and state lifecycle
-MFE      = most data-related dynamic memory access
+MFE      = page/segment metadata path and stream shaping
+Group DMA IDE = HBM-level indexed gather/scatter
 ```
 
-UCE 负责 Tile Program PC、launch/wait/branch、stream token、descriptor patch 和 engine 编排；USE 负责 state register/cache、scan、recurrence、checkpoint/restore 和 local state/event fast path；MFE 负责 page walk、segment decode、address generation、prefetch、reorder 和 stream fill。USE 可以读取 MFE 产生的 metadata stream，也可以更新 token routing metadata，但不接管 page/segment 数据流主路径。
+UCE 负责 Tile Program PC、launch/wait/branch、stream token、descriptor patch 和 engine 编排；USE 负责 state register/cache、scan、recurrence、checkpoint/restore 和 local state/event fast path；MFE 负责 page walk、segment decode、record emit、prefetch、reorder 和 stream fill；Group DMA IDE 负责基于已 materialize L2 indices/count/value 的 HBM↔L2 indirect gather/scatter。USE 可以读取 MFE 产生的 metadata stream，也可以更新 token routing metadata，但不接管 page/segment 数据流主路径。
 
 Architecture V1 目标：
 

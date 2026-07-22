@@ -37,7 +37,7 @@ First Silicon V1 cutline：
 - 不在本文件冻结具体工艺节点、标准单元库、SRAM compiler、封装和电压角。
 - 不把 High End 的 1.5 GB 级片上 SRAM 当作普通 6T SRAM 默认实现。
 - 不把 PMU counter 当作 signoff 替代品；PMU 是 silicon/runtime 观测，不替代 STA/power/CDC/RDC。
-- 不改变架构 ownership：UCE 负责 program control，USE 负责 state，MFE 负责 data-related dynamic memory access。
+- 不改变架构 ownership：UCE 负责 program control，USE 负责 state，MFE 负责 page/segment metadata path，Group DMA IDE 负责 HBM-level indexed gather/scatter。
 
 ### 2.3 ownership 矩阵
 

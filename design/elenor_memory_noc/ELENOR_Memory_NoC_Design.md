@@ -15,14 +15,14 @@ Architecture V1 覆盖 Edge、Balanced、High End 三档配置；First Silicon V
 
 First Silicon cutline：
 
-| 项目     | First Silicon V1                                                               | V1.x / V2 保留                                           |
-| -------- | ------------------------------------------------------------------------------ | -------------------------------------------------------- |
-| 外部内存 | 单 HBM stack 或高带宽 DDR/LPDDR profile，由封装选择冻结                        | 多 HBM stack、CXL.mem、chiplet memory fabric             |
-| NoC 拓扑 | Edge crossbar / small mesh；Balanced 2D mesh 或 hierarchical mesh 的最小子集   | adaptive routing、QoS scheduler、multi-die global fabric |
-| VC       | VC0 command/event、VC1 DMA read response、VC2 DMA write/stream、VC3 collective | 更多 QoS / debug / isolation VC                          |
-| DMA      | 1D、2D、strided copy、async completion event                                   | multicast、gather list、coherent host page migration     |
-| SRAM     | L1 slot frame、Group L2 stream/prefetch buffer、bank conflict PMU              | 动态 SRAM repartition、SRAM compression                  |
-| 错误恢复 | poison/fault record、tile/group/device reset domain、drain                     | preemption、retry-once memory replay                     |
+| 项目     | First Silicon V1                                                                  | V1.x / V2 保留                                           |
+| -------- | --------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| 外部内存 | 单 HBM stack 或高带宽 DDR/LPDDR profile，由封装选择冻结                           | 多 HBM stack、CXL.mem、chiplet memory fabric             |
+| NoC 拓扑 | Edge crossbar / small mesh；Balanced 2D mesh 或 hierarchical mesh 的最小子集      | adaptive routing、QoS scheduler、multi-die global fabric |
+| VC       | VC0 command/event、VC1 DMA read response、VC2 DMA write/stream、VC3 collective    | 更多 QoS / debug / isolation VC                          |
+| DMA      | 1D、2D、strided copy、centralized indirect gather/scatter、async completion event | ordered combine、多播、coherent host page migration      |
+| SRAM     | L1 slot frame、Group L2 stream/prefetch buffer、bank conflict PMU                 | 动态 SRAM repartition、SRAM compression                  |
+| 错误恢复 | poison/fault record、tile/group/device reset domain、drain                        | preemption、retry-once memory replay                     |
 
 ## 2. 职责、非职责和 ownership
 

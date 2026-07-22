@@ -163,42 +163,48 @@ PMU 采用 primary stall owner 层级。每个 engine 每个周期最多产生�
 
 ### 4.2 counter map
 
-| counter id 名称            | scope             | primary owner | 含义                                  | 验证方法                |
-| -------------------------- | ----------------- | ------------- | ------------------------------------- | ----------------------- |
-| `PMU_GLOBAL_CYCLES`        | Global            | Global PMU    | 全局参考周期                          | timestamp 对齐          |
-| `PMU_GLOBAL_CMD_ISSUED`    | Global            | command queue | firmware 接受的 command 数            | command ABI test        |
-| `PMU_GLOBAL_CMD_DONE`      | Global            | event table   | done event 数                         | event scoreboard        |
-| `PMU_GLOBAL_FAULT_COUNT`   | Global            | fault unit    | fault record 写入数                   | fault injection         |
-| `PMU_NOC_VC0_CONGEST`      | Global/Group      | NoC           | command/event VC 阻塞周期             | router random test      |
-| `PMU_NOC_VC1_CONGEST`      | Global/Group      | NoC           | DMA read response VC 阻塞周期         | DMA stress              |
-| `PMU_NOC_VC2_CONGEST`      | Global/Group      | NoC           | DMA write/stream VC 阻塞周期          | stream stress           |
-| `PMU_NOC_VC3_CONGEST`      | Global/Group      | NoC           | collective VC 阻塞周期                | collective test         |
-| `PMU_DMA_BYTES_READ`       | Global/Group/Tile | DMA           | DMA 读字节                            | descriptor compare      |
-| `PMU_DMA_BYTES_WRITE`      | Global/Group/Tile | DMA           | DMA 写字节                            | descriptor compare      |
-| `PMU_DMA_STALL_MEMORY`     | Global/Group/Tile | DMA           | memory 返回受限周期                   | memory model            |
-| `PMU_SRAM_BANK_CONFLICT`   | Group/Tile        | SRAM          | bank conflict 或 replay 次数          | SRAM arbiter SVA        |
-| `PMU_STREAM_OCCUPANCY_ACC` | Group/Tile        | Stream Queue  | occupancy 累计值                      | queue model             |
-| `PMU_STREAM_CREDIT_EMPTY`  | Group/Tile        | Stream Queue  | consumer 等空队列周期                 | constrained random      |
-| `PMU_STREAM_CREDIT_FULL`   | Group/Tile        | Stream Queue  | producer 等满队列周期                 | constrained random      |
-| `PMU_EVENT_WAIT_CYCLES`    | Global/Group/Tile | Event Unit    | wait_event/barrier 等待周期           | event dependency test   |
-| `PMU_UCE_PATCH_STALL`      | Tile              | Tile UCE      | descriptor patch stall                | patch fault/path test   |
-| `PMU_UCE_FETCH_STALL`      | Tile              | Tile UCE      | Tile Program fetch/cache stall        | cold/warm launch test   |
-| `PMU_BOA_ACTIVE`           | Engine            | BOA           | BOA 有效计算周期                      | GEMM waveform           |
-| `PMU_BOA_OPERAND_STALL`    | Engine            | BOA           | A/B operand 不足                      | double-buffer stress    |
-| `PMU_BOA_ACC_STALL`        | Engine            | BOA           | accumulator RMW 阻塞                  | SRAM conflict test      |
-| `PMU_BOA_WRITEBACK_STALL`  | Engine            | BOA           | output/writeback 阻塞                 | DMA/storeback test      |
-| `PMU_EVU_ACTIVE`           | Engine            | EVU           | EVU 有效执行周期                      | softmax/norm test       |
-| `PMU_EVU_LSU_REPLAY`       | Engine            | EVU           | gather/scatter 或 strided load replay | bank replay test        |
-| `PMU_EVU_MASKED_LANE`      | Engine            | EVU           | mask/tail 无效 lane 累计              | tail corner test        |
-| `PMU_MFE_ACTIVE`           | Engine            | MFE           | MFE page/segment 有效工作周期         | MFE trace test          |
-| `PMU_MFE_PREFETCH_HIT`     | Engine            | MFE           | prefetch 命中次数                     | paged attention trace   |
-| `PMU_MFE_PREFETCH_MISS`    | Engine            | MFE           | prefetch 未命中次数                   | invalid/reorder case    |
-| `PMU_MFE_STREAM_STALL`     | Engine            | MFE           | stream fill/backpressure stall        | stream queue test       |
-| `PMU_USE_ACTIVE`           | Engine            | USE           | scan/recurrence/state 有效周期        | recurrence golden       |
-| `PMU_USE_STATE_HIT`        | Engine            | USE           | state cache 命中                      | state trace             |
-| `PMU_USE_STATE_MISS`       | Engine            | USE           | state cache 未命中                    | checkpoint/restore test |
-| `PMU_POWER_CG_ELIGIBLE`    | Global/Group/Tile | power monitor | 可 clock-gate 周期估计                | power sim               |
-| `PMU_POWER_SRAM_SLEEP`     | Group/Tile        | SRAM power    | SRAM sleep/retention 周期             | power intent test       |
+| counter id 名称                   | scope             | primary owner | 含义                                        | 验证方法                     |
+| --------------------------------- | ----------------- | ------------- | ------------------------------------------- | ---------------------------- |
+| `PMU_GLOBAL_CYCLES`               | Global            | Global PMU    | 全局参考周期                                | timestamp 对齐               |
+| `PMU_GLOBAL_CMD_ISSUED`           | Global            | command queue | firmware 接受的 command 数                  | command ABI test             |
+| `PMU_GLOBAL_CMD_DONE`             | Global            | event table   | done event 数                               | event scoreboard             |
+| `PMU_GLOBAL_FAULT_COUNT`          | Global            | fault unit    | fault record 写入数                         | fault injection              |
+| `PMU_NOC_VC0_CONGEST`             | Global/Group      | NoC           | command/event VC 阻塞周期                   | router random test           |
+| `PMU_NOC_VC1_CONGEST`             | Global/Group      | NoC           | DMA read response VC 阻塞周期               | DMA stress                   |
+| `PMU_NOC_VC2_CONGEST`             | Global/Group      | NoC           | DMA write/stream VC 阻塞周期                | stream stress                |
+| `PMU_NOC_VC3_CONGEST`             | Global/Group      | NoC           | collective VC 阻塞周期                      | collective test              |
+| `PMU_DMA_BYTES_READ`              | Global/Group/Tile | DMA           | DMA 读字节                                  | descriptor compare           |
+| `PMU_DMA_BYTES_WRITE`             | Global/Group/Tile | DMA           | DMA 写字节                                  | descriptor compare           |
+| `PMU_DMA_STALL_MEMORY`            | Global/Group/Tile | DMA           | memory 返回受限周期                         | memory model                 |
+| `PMU_SRAM_BANK_CONFLICT`          | Group/Tile        | SRAM          | bank conflict 或 replay 次数                | SRAM arbiter SVA             |
+| `PMU_STREAM_OCCUPANCY_ACC`        | Group/Tile        | Stream Queue  | occupancy 累计值                            | queue model                  |
+| `PMU_STREAM_CREDIT_EMPTY`         | Group/Tile        | Stream Queue  | consumer 等空队列周期                       | constrained random           |
+| `PMU_STREAM_CREDIT_FULL`          | Group/Tile        | Stream Queue  | producer 等满队列周期                       | constrained random           |
+| `PMU_EVENT_WAIT_CYCLES`           | Global/Group/Tile | Event Unit    | wait_event/barrier 等待周期                 | event dependency test        |
+| `PMU_UCE_PATCH_STALL`             | Tile              | Tile UCE      | descriptor patch stall                      | patch fault/path test        |
+| `PMU_UCE_FETCH_STALL`             | Tile              | Tile UCE      | Tile Program fetch/cache stall              | cold/warm launch test        |
+| `PMU_BOA_ACTIVE`                  | Engine            | BOA           | BOA 有效计算周期                            | GEMM waveform                |
+| `PMU_BOA_OPERAND_STALL`           | Engine            | BOA           | A/B operand 不足                            | double-buffer stress         |
+| `PMU_BOA_ACC_STALL`               | Engine            | BOA           | accumulator RMW 阻塞                        | SRAM conflict test           |
+| `PMU_BOA_WRITEBACK_STALL`         | Engine            | BOA           | output/writeback 阻塞                       | DMA/storeback test           |
+| `PMU_EVU_ACTIVE`                  | Engine            | EVU           | EVU 有效执行周期                            | softmax/norm test            |
+| `PMU_EVU_LSU_REPLAY`              | Engine            | EVU           | local gather/scatter 或 strided load replay | bank replay test             |
+| `PMU_EVU_MASKED_LANE`             | Engine            | EVU           | mask/tail 无效 lane 累计                    | tail corner test             |
+| `PMU_MFE_ACTIVE`                  | Engine            | MFE           | MFE page/segment 有效工作周期               | MFE trace test               |
+| `PMU_MFE_PREFETCH_HIT`            | Engine            | MFE           | prefetch 命中次数                           | paged attention trace        |
+| `PMU_MFE_PREFETCH_MISS`           | Engine            | MFE           | prefetch 未命中次数                         | invalid/reorder case         |
+| `PMU_MFE_STREAM_STALL`            | Engine            | MFE           | stream fill/backpressure stall              | stream queue test            |
+| `PMU_DMA_INDIRECT_GATHER_LINES`   | Group/Tile        | DMA           | indirect gather 物理 line request 数        | indirect gather stress       |
+| `PMU_DMA_INDIRECT_REORDER_HWM`    | Group/Tile        | DMA           | gather reorder 高水位                       | out-of-order response test   |
+| `PMU_DMA_INDIRECT_COMBINE_HIT`    | Group/Tile        | DMA           | scatter combine hit 次数                    | duplicate target test        |
+| `PMU_DMA_INDIRECT_WRITE_AMP`      | Group/Tile        | DMA           | scatter write amplification                 | random scalar scatter        |
+| `PMU_DMA_INDIRECT_CONFLICT_STALL` | Group/Tile        | DMA           | ownership/conflict/combine stall 周期       | ordered/owner-partition case |
+| `PMU_DMA_INDIRECT_OWNER_BYTES`    | Group/Tile        | DMA           | owner-routed bytes                          | MoE/embedding backward trace |
+| `PMU_USE_ACTIVE`                  | Engine            | USE           | scan/recurrence/state 有效周期              | recurrence golden            |
+| `PMU_USE_STATE_HIT`               | Engine            | USE           | state cache 命中                            | state trace                  |
+| `PMU_USE_STATE_MISS`              | Engine            | USE           | state cache 未命中                          | checkpoint/restore test      |
+| `PMU_POWER_CG_ELIGIBLE`           | Global/Group/Tile | power monitor | 可 clock-gate 周期估计                      | power sim                    |
+| `PMU_POWER_SRAM_SLEEP`            | Group/Tile        | SRAM power    | SRAM sleep/retention 周期                   | power intent test            |
 
 ### 4.3 访问协议
 
@@ -271,14 +277,14 @@ PMU 需要给出填入这些公式的观测值：effective ops、active cycles�
 
 ### 6.2 per-workload PMU 签名
 
-| workload        | 期望主路径                           | PMU 签名                                                                               | 异常解释                                                                |
-| --------------- | ------------------------------------ | -------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| Dense GEMM      | DMA -> BOA -> DMA                    | `BOA_ACTIVE` 高，`BOA_OPERAND_STALL` 低，SRAM conflict 可控                            | operand stall 高表示 double buffer 或 SRAM bank placement 问题          |
-| Dense Attention | BOA QK/AV + EVU softmax              | BOA 与 EVU active 分阶段上升，collective stall 与 split-K/score merge 对齐             | EVU stall 高表示 softmax/norm buffer 或 mask/tail 实现问题              |
-| Paged Attention | MFE Page Stream + BOA + EVU          | `MFE_PREFETCH_HIT` 增加，`T_prefetch <= T_qk` case 下 BOA operand stall 下降           | prefetch miss 与 BOA stall 同升表示 page depth/stream queue 不足        |
-| MoE Dispatch    | MFE Segment + EVU + BOA              | routing imbalance counter、stream full/empty、BOA utilization 随 expert imbalance 变化 | BOA active 低但 MFE stall 高表示 segment gather 或 expert batching 问题 |
-| SSM/Mamba/RWKV  | USE scan/recurrence + BOA projection | `USE_ACTIVE`、state hit/miss、event wait 可解释 recurrence phase                       | state miss 高表示 state cache profile 或 checkpoint policy 问题         |
-| 多模型并发      | context partition + priority queue   | per-context queue occupancy、QoS latency、SRAM quota 命中、fault isolation             | 一个 context fault 后其他 context counter 不应污染                      |
+| workload        | 期望主路径                              | PMU 签名                                                                                                           | 异常解释                                                             |
+| --------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
+| Dense GEMM      | DMA -> BOA -> DMA                       | `BOA_ACTIVE` 高，`BOA_OPERAND_STALL` 低，SRAM conflict 可控                                                        | operand stall 高表示 double buffer 或 SRAM bank placement 问题       |
+| Dense Attention | BOA QK/AV + EVU softmax                 | BOA 与 EVU active 分阶段上升，collective stall 与 split-K/score merge 对齐                                         | EVU stall 高表示 softmax/norm buffer 或 mask/tail 实现问题           |
+| Paged Attention | MFE Page Stream + BOA + EVU             | `MFE_PREFETCH_HIT` 增加，`T_prefetch <= T_qk` case 下 BOA operand stall 下降                                       | prefetch miss 与 BOA stall 同升表示 page depth/stream queue 不足     |
+| MoE Dispatch    | MFE Segment + Group DMA IDE + EVU + BOA | routing imbalance、indirect owner bytes、combine hit/write amplification、BOA utilization 随 expert imbalance 变化 | BOA active 低但 IDE stall 高表示 owner 路由或 scatter/writeback 问题 |
+| SSM/Mamba/RWKV  | USE scan/recurrence + BOA projection    | `USE_ACTIVE`、state hit/miss、event wait 可解释 recurrence phase                                                   | state miss 高表示 state cache profile 或 checkpoint policy 问题      |
+| 多模型并发      | context partition + priority queue      | per-context queue occupancy、QoS latency、SRAM quota 命中、fault isolation                                         | 一个 context fault 后其他 context counter 不应污染                   |
 
 ### 6.3 PPA 成本控制
 
@@ -340,15 +346,15 @@ PMU 自身也是验证对象。每个 phase exit 不只要求功能正确，还�
 
 ### 8.2 phase exit criteria
 
-| Phase   | PMU 必须通过                                                                            |
-| ------- | --------------------------------------------------------------------------------------- |
-| Phase 0 | counter map、stall attribution、snapshot ABI 草案、canonical trace 格式冻结到可评审状态 |
-| Phase 1 | command queue 触发 BOA GEMM，event completion 与 BOA active/stall counter 对齐          |
-| Phase 2 | EVU softmax/norm/tail 的 active、LSU replay、masked lane counter 可解释误差和 tail 行为 |
-| Phase 3 | MFE prefetch hit/miss、stream stall、BOA operand stall 能证明 paged attention overlap   |
-| Phase 4 | MoE routing imbalance 与 segment gather/reduce counter、BOA utilization 相关            |
-| Phase 5 | USE active、state hit/miss、checkpoint/restore counter 与 recurrence golden 对齐        |
-| Phase 6 | multi-context counter isolation、QoS latency/throughput、roofline validation 完成       |
+| Phase   | PMU 必须通过                                                                                          |
+| ------- | ----------------------------------------------------------------------------------------------------- |
+| Phase 0 | counter map、stall attribution、snapshot ABI 草案、canonical trace 格式冻结到可评审状态               |
+| Phase 1 | command queue 触发 BOA GEMM，event completion 与 BOA active/stall counter 对齐                        |
+| Phase 2 | EVU softmax/norm/tail 的 active、LSU replay、masked lane counter 可解释误差和 tail 行为               |
+| Phase 3 | MFE prefetch hit/miss、stream stall、BOA operand stall 能证明 paged attention overlap                 |
+| Phase 4 | MoE routing imbalance 与 indirect DMA owner/combine/write-amplification counter、BOA utilization 相关 |
+| Phase 5 | USE active、state hit/miss、checkpoint/restore counter 与 recurrence golden 对齐                      |
+| Phase 6 | multi-context counter isolation、QoS latency/throughput、roofline validation 完成                     |
 
 ### 8.3 静态和动态检查
 

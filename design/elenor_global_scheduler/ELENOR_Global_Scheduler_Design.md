@@ -76,8 +76,8 @@ Runtime Processor / Queue Fetcher
 - 不解释高层 graph，不执行 MLIR/ONNX/PyTorch 语义。
 - 不执行 Tile Program；Tile Program PC、launch/wait/branch 归 Tile UCE。
 - 不拥有 USE state；USE owns state，UCE owns tile program control。
-- 不直接管理 MFE 的数据相关动态内存访问；MFE owns page/segment walk、address generation、stream fill。
-- 不执行 Global DMA data movement；只发 launch 和接收 completion/fault。
+- 不直接管理 MFE 的 page/segment metadata path；MFE owns page/segment walk、record emit、stream fill。
+- 不执行 Global DMA data movement 或 indirect HBM↔L2 gather/scatter；只发 launch 和接收 completion/fault。
 - 不修改 program text；warm launch 只能更新 descriptor/context/shape metadata，并遵守 descriptor cache coherence。
 
 ### 2.3 Ownership matrix
