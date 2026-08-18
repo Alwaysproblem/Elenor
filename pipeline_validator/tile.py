@@ -21,7 +21,7 @@ from .engines import (
   MFEEngine,
   USEEngine,
 )
-from .ir import EngineDesc, TileInst, TileOp, TileProgram
+from .execution_ir import ExecEngineDesc, ExecTileInst, ExecTileOp, ExecTileProgram
 from .memory.l1_slot_frame import SlotFrame
 from .pmu import PMUCounter, StallReason
 from .stream_queue import StreamQueue, StreamToken
@@ -67,7 +67,7 @@ class _UCETerminalEvent:
 class _UCEContext:
   ctx_id: int
   state: _UCEContextState = _UCEContextState.EMPTY
-  program: TileProgram | None = None
+  program: ExecTileProgram | None = None
   pc: int = 0
   role_id: int | None = None
   role_event_id: str | None = None
@@ -88,7 +88,7 @@ class _EngineQueueEntry:
   ctx_id: int
   event_ref: _UCEEventRef
   desc_ref: str
-  op: TileOp
+  op: ExecTileOp
   engine_kind: str
   launch_params: dict = field(default_factory=dict)
 
@@ -144,7 +144,7 @@ class TileUCE:
   def can_accept_context(self) -> bool:
     return any(self._context_available(ctx) for ctx in self.contexts)
 
-  def bind_context(self, program: TileProgram, role_id: int | None,
+  def bind_context(self, program: ExecTileProgram, role_id: int | None,
                    role_event_id: str | None,
                    prepare_cycles: int = 0) -> int | None:
     for ctx in self.contexts:
@@ -405,7 +405,7 @@ class TileUCE:
     if ctx.program is None or ctx.pc >= len(ctx.program.insts):
       return False
     ins = ctx.program.insts[ctx.pc]
-    if ins.op == TileOp.STREAM_POP:
+    if ins.op == ExecTileOp.STREAM_POP:
       qid = ins.args[0]
       q = tile.get_stream(qid)
       tok = q.pop(cycle)
@@ -416,7 +416,7 @@ class TileUCE:
       self.pmu.add_event("stream_pop")
       ctx.pc += 1
       return True
-    if ins.op == TileOp.STREAM_ACQUIRE:
+    if ins.op == ExecTileOp.STREAM_ACQUIRE:
       qid = ins.args[0]
       if qid < 0:
         ctx.pc += 1
@@ -464,7 +464,7 @@ class TileUCE:
         return idx
     return None
 
-  def _trace_issue(self, ctx: _UCEContext, ins: TileInst, cycle: int) -> None:
+  def _trace_issue(self, ctx: _UCEContext, ins: ExecTileInst, cycle: int) -> None:
     if self.tracer is None:
       return
     issue_args = {
@@ -532,51 +532,51 @@ class TileUCE:
 
     prog = ctx.program
     op = ins.op
-    if op == TileOp.NOP:
+    if op == ExecTileOp.NOP:
       ctx.pc += 1
-    elif op in (TileOp.MOV, TileOp.ADD, TileOp.CMP, TileOp.LOAD_DESC,
-                TileOp.STORE_DESC, TileOp.PROF_BEGIN, TileOp.PROF_END):
+    elif op in (ExecTileOp.MOV, ExecTileOp.ADD, ExecTileOp.CMP, ExecTileOp.LOAD_DESC,
+                ExecTileOp.STORE_DESC, ExecTileOp.PROF_BEGIN, ExecTileOp.PROF_END):
       ctx.pc += 1
-    elif op == TileOp.BR:
+    elif op == ExecTileOp.BR:
       ctx.pc = prog.label_index(ins.args[0])
-    elif op == TileOp.BRP:
+    elif op == ExecTileOp.BRP:
       ctx.pc = prog.label_index(ins.args[0])
-    elif op == TileOp.BR_EOS:
+    elif op == ExecTileOp.BR_EOS:
       tok = ctx.tokens.get(ins.args[0])
       if tok is not None and tok.is_eos:
         ctx.pc = prog.label_index(ins.args[1])
       else:
         ctx.pc += 1
-    elif op == TileOp.WAIT:
+    elif op == ExecTileOp.WAIT:
       self._issue_wait(ctx, cycle, (ins.args[0],), wait_all=False)
-    elif op == TileOp.WAITALL:
+    elif op == ExecTileOp.WAITALL:
       self._issue_wait(ctx, cycle, tuple(ins.args), wait_all=True)
-    elif op == TileOp.FENCE:
+    elif op == ExecTileOp.FENCE:
       self.pmu.add_cycle("fence", 1)
       ctx.pc += 1
-    elif op == TileOp.LAUNCH_BOA:
+    elif op == ExecTileOp.LAUNCH_BOA:
       self._enqueue_engine_launch(ctx, "BOA", ins, cycle)
-    elif op == TileOp.LAUNCH_EVU:
+    elif op == ExecTileOp.LAUNCH_EVU:
       self._enqueue_engine_launch(ctx, "EVU", ins, cycle)
-    elif op == TileOp.LAUNCH_USE:
+    elif op == ExecTileOp.LAUNCH_USE:
       self._enqueue_engine_launch(ctx, "USE", ins, cycle)
-    elif op == TileOp.LAUNCH_MFE:
+    elif op == ExecTileOp.LAUNCH_MFE:
       self._enqueue_engine_launch(ctx, self._queue_key_for_launch(ctx, ins), ins, cycle)
-    elif op == TileOp.LAUNCH_DMA_LOAD:
+    elif op == ExecTileOp.LAUNCH_DMA_LOAD:
       self._enqueue_engine_launch(ctx, "MFE_LOAD", ins, cycle)
-    elif op == TileOp.LAUNCH_DMA_STORE:
+    elif op == ExecTileOp.LAUNCH_DMA_STORE:
       self._enqueue_engine_launch(ctx, "MFE_STORE", ins, cycle)
-    elif op == TileOp.STREAM_POP:
+    elif op == ExecTileOp.STREAM_POP:
       if not self._retry_wait_stream(ctx, cycle, tile):
         self.pmu.add(StallReason.STREAM_CREDIT, 1)
         self.pmu.add_cycle("stream_empty", 1)
         self._set_context_state(ctx, _UCEContextState.WAIT_STREAM, cycle)
-    elif op == TileOp.STREAM_ACQUIRE:
+    elif op == ExecTileOp.STREAM_ACQUIRE:
       if not self._retry_wait_stream(ctx, cycle, tile):
         self.pmu.add(StallReason.STREAM_CREDIT, 1)
         self.pmu.add_cycle("stream_full", 1)
         self._set_context_state(ctx, _UCEContextState.WAIT_STREAM, cycle)
-    elif op == TileOp.STREAM_PUSH:
+    elif op == ExecTileOp.STREAM_PUSH:
       qid, tok_reg, producer_id = ins.args
       if qid >= 0:
         q = tile.get_stream(qid)
@@ -589,7 +589,7 @@ class TileUCE:
         q.push(tok, cycle)
         self.pmu.add_event("stream_push")
       ctx.pc += 1
-    elif op == TileOp.STREAM_RELEASE:
+    elif op == ExecTileOp.STREAM_RELEASE:
       qid, tok_reg = ins.args
       if qid >= 0:
         q = tile.get_stream(qid)
@@ -599,19 +599,19 @@ class TileUCE:
           del ctx.tokens[tok_reg]
           self.pmu.add_event("stream_release")
       ctx.pc += 1
-    elif op == TileOp.STREAM_PUSH_EOS:
+    elif op == ExecTileOp.STREAM_PUSH_EOS:
       qid, producer_id = ins.args
       if qid >= 0:
         q = tile.get_stream(qid)
         q.push_eos(producer_id, cycle)
         self.pmu.add_event("stream_eos")
       ctx.pc += 1
-    elif op == TileOp.PATCH_DESC:
+    elif op == ExecTileOp.PATCH_DESC:
       self.pmu.add_cycle("patch_desc", 1)
       ctx.pc += 1
-    elif op == TileOp.TRAP:
+    elif op == ExecTileOp.TRAP:
       self._fault_context(ctx, "trap", cycle)
-    elif op == TileOp.RET:
+    elif op == ExecTileOp.RET:
       self._complete_context(ctx, cycle)
     else:
       ctx.pc += 1
@@ -634,7 +634,7 @@ class TileUCE:
     self._set_context_state(ctx, _UCEContextState.WAIT_EVENT, cycle)
 
   def _enqueue_engine_launch(self, ctx: _UCEContext, queue_key: str,
-                             ins: TileInst, cycle: int) -> bool:
+                             ins: ExecTileInst, cycle: int) -> bool:
     fifo = self._engine_queues[queue_key]
     if len(fifo) >= self._engine_queue_depths[queue_key]:
       self.pmu.add(StallReason.WAIT_OPERAND, 1)
@@ -647,7 +647,7 @@ class TileUCE:
     self._local_event_owner[event_ref.runtime_id] = event_ref
     desc_ref = ins.args[0] if ins.args else ""
     launch_params = {}
-    if ins.op in (TileOp.LAUNCH_DMA_LOAD, TileOp.LAUNCH_DMA_STORE):
+    if ins.op in (ExecTileOp.LAUNCH_DMA_LOAD, ExecTileOp.LAUNCH_DMA_STORE):
       launch_params["bytes"] = ins.args[1] if len(ins.args) > 1 else 4096
       desc_ref = "dma"
     engine_kind = "MFE" if queue_key in ("MFE_LOAD", "MFE_STORE") else queue_key
@@ -661,7 +661,7 @@ class TileUCE:
     ctx.pc += 1
     return True
 
-  def _queue_key_for_launch(self, ctx: _UCEContext, ins: TileInst) -> str:
+  def _queue_key_for_launch(self, ctx: _UCEContext, ins: ExecTileInst) -> str:
     desc_ref = ins.args[0] if ins.args else ""
     desc = ctx.program.descriptors.get(desc_ref) if ctx.program is not None else None
     if desc is not None and desc.op in ("store", "dma_store"):
@@ -703,13 +703,13 @@ class TileUCE:
     return tile.use
 
   def _build_engine_desc(self, ctx: _UCEContext,
-                         entry: _EngineQueueEntry) -> EngineDesc:
+                         entry: _EngineQueueEntry) -> ExecEngineDesc:
     assert ctx.program is not None
-    if entry.op in (TileOp.LAUNCH_DMA_LOAD, TileOp.LAUNCH_DMA_STORE):
-      desc = EngineDesc(
+    if entry.op in (ExecTileOp.LAUNCH_DMA_LOAD, ExecTileOp.LAUNCH_DMA_STORE):
+      desc = ExecEngineDesc(
         name="dma",
         kind="MFE",
-        op="dma_load" if entry.op == TileOp.LAUNCH_DMA_LOAD else "dma_store",
+        op="dma_load" if entry.op == ExecTileOp.LAUNCH_DMA_LOAD else "dma_store",
         params={
           "bytes": entry.launch_params.get("bytes", 4096),
           "ops": 0,
@@ -717,7 +717,7 @@ class TileUCE:
       )
     else:
       base = ctx.program.descriptors[entry.desc_ref]
-      desc = EngineDesc(base.name, base.kind, base.op, dict(base.params))
+      desc = ExecEngineDesc(base.name, base.kind, base.op, dict(base.params))
     desc.params = {
       **desc.params,
       "tile_id": self.tile_id,
@@ -891,7 +891,7 @@ class ComputeTile:
   def get_stream(self, qid: int) -> StreamQueue:
     return self.streams[qid]
 
-  def load_program(self, program: TileProgram, role_id: int | None,
+  def load_program(self, program: ExecTileProgram, role_id: int | None,
                    role_event_id: str | None,
                    prepare_cycles: int = 0) -> int | None:
     return self.uce.bind_context(program,

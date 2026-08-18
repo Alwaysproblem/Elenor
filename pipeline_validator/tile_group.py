@@ -12,7 +12,7 @@ import zlib
 from dataclasses import dataclass
 
 from .config import HardwareConfig
-from .ir import StreamDesc, TileGroupTask, TileRoleBinding
+from .execution_ir import ExecStreamDesc, ExecTileGroupTask, ExecTileRoleBinding
 from .memory import L2SRAM, NoCRouter, PayloadTracker
 from .pmu import PMUCounter
 from .runtime import (
@@ -126,7 +126,7 @@ class TileGroup:
 
   # ---- setup ----------------------------------------------------------
 
-  def init_stream(self, desc: StreamDesc) -> StreamQueue:
+  def init_stream(self, desc: ExecStreamDesc) -> StreamQueue:
     # masks are tile-bit masks: a bit set means that tile participates
     producers = frozenset(i for i in range(self.cfg.num_tiles)
                           if desc.producer_mask & (1 << i))
@@ -201,14 +201,14 @@ class TileGroup:
         participant_mask=participant_mask,
       ))
 
-  def can_dispatch_role(self, binding: TileRoleBinding) -> bool:
+  def can_dispatch_role(self, binding: ExecTileRoleBinding) -> bool:
     return all(t.can_accept_context()
                for t in self.tiles
                if binding.tile_mask & (1 << t.tile_id))
 
   def dispatch_role(
     self,
-    binding: TileRoleBinding,
+    binding: ExecTileRoleBinding,
     cycle: int,
     event_id: str | None = None,
   ) -> None:
@@ -515,7 +515,7 @@ class TileGroup:
 
   # ---- lifecycle ------------------------------------------------------
 
-  def load_task(self, task: TileGroupTask) -> None:
+  def load_task(self, task: ExecTileGroupTask) -> None:
     # reset everything
     for t in self.tiles:
       t.reset()

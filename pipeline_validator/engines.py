@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from .config import HardwareConfig
-from .ir import EngineDesc
+from .execution_ir import ExecEngineDesc
 from .pmu import PMUCounter, StallReason
 from .trace import Tracer
 
@@ -42,7 +42,7 @@ class EngineState(Enum):
 class EngineJob:
     """One in-flight or queued engine descriptor."""
 
-    desc: EngineDesc
+    desc: ExecEngineDesc
     start_cycle: int       # actual service-start (may be later than UCE launch)
     finish_cycle: int
     event_id: str
@@ -75,7 +75,7 @@ class Engine:
         self._running: EngineJob | None = None
         self._queue: deque[EngineJob] = deque()
 
-    def latency(self, desc: EngineDesc) -> int:
+    def latency(self, desc: ExecEngineDesc) -> int:
         raise NotImplementedError
 
     @property
@@ -90,7 +90,7 @@ class Engine:
         accepted = len(self._queue) + (1 if self._running else 0)
         return accepted >= self._pipeline_depth
 
-    def launch(self, desc: EngineDesc, cycle: int,
+    def launch(self, desc: ExecEngineDesc, cycle: int,
                event_id: str) -> EngineJob | None:
         """Launch a descriptor.  Returns None if the engine cannot accept
         (queue full); the caller retries next cycle.
@@ -179,7 +179,7 @@ class BOAEngine(Engine):
 
     kind = "BOA"
 
-    def latency(self, desc: EngineDesc) -> int:
+    def latency(self, desc: ExecEngineDesc) -> int:
         ops = desc.params.get("ops", 0)
         macs = ops // 2 if ops else 0
         peak_macs = (self.cfg.boa_num_opa * self.cfg.boa_opa_rows *
@@ -203,7 +203,7 @@ class EVUEngine(Engine):
 
     kind = "EVU"
 
-    def latency(self, desc: EngineDesc) -> int:
+    def latency(self, desc: ExecEngineDesc) -> int:
         ops = desc.params.get("ops", 0)
         peak = self.cfg.evu_lanes * 2
         compute = (ops + peak - 1) // peak if peak else 0
@@ -226,7 +226,7 @@ class MFEEngine(Engine):
         super().__init__(cfg, tile_id, tracer,
                          pipeline_depth=cfg.mfe_pipeline_depth)
 
-    def latency(self, desc: EngineDesc) -> int:
+    def latency(self, desc: ExecEngineDesc) -> int:
         nbytes = desc.params.get("bytes", 0)
         bw_bytes_per_cycle = self.cfg.mfe_bandwidth_gbs * 1e9 / (
             self.cfg.clock_mhz * 1e6)
@@ -234,7 +234,7 @@ class MFEEngine(Engine):
                   1) // bw_bytes_per_cycle if bw_bytes_per_cycle else 0
         return self.cfg.mfe_launch_cycles + cycles
 
-    def launch(self, desc: EngineDesc, cycle: int,
+    def launch(self, desc: ExecEngineDesc, cycle: int,
                event_id: str) -> EngineJob | None:
         """Validate page-stream prefetch capacity before delegating to
         ``Engine.launch()``.  Raises ``ValueError`` when an explicit
@@ -245,7 +245,7 @@ class MFEEngine(Engine):
         self._validate_stream_buffer(desc)
         return super().launch(desc, cycle, event_id)
 
-    def _validate_stream_buffer(self, desc: EngineDesc) -> None:
+    def _validate_stream_buffer(self, desc: ExecEngineDesc) -> None:
         """Enforce page-stream prefetch capacity when the buffer size is
         frozen (non-zero).  Non-page-stream ops and descriptors without an
         explicit ``prefetch_depth`` are always accepted.
@@ -279,7 +279,7 @@ class USEEngine(Engine):
 
     kind = "USE"
 
-    def latency(self, desc: EngineDesc) -> int:
+    def latency(self, desc: ExecEngineDesc) -> int:
         ops = desc.params.get("ops", 0)
         ratio = self.cfg.use_clock_mhz / self.cfg.clock_mhz
         cycles = (ops / ratio) if ratio else 0

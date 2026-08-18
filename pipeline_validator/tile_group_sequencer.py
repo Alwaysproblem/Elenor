@@ -1,6 +1,6 @@
 """Tile Group Sequencer controller.
 
-Executes a TileGroupTask (design/elenor_tile_group_sequencer/ and
+Executes an ExecTileGroupTask (design/elenor_tile_group_sequencer/ and
 Architecture doc 16.5) on the Tile Group.  The sequencer:
 
   - inits stream queues,
@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .ir import GroupAction, GroupActionOp, StreamDesc, TileGroupTask
+from .execution_ir import ExecGroupAction, ExecGroupActionOp, ExecStreamDesc, ExecTileGroupTask
 from .pmu import PMUCounter, StallReason
 from .runtime import EventStatus
 
@@ -35,14 +35,14 @@ class _GroupTaskWait:
 
 
 class TileGroupSequencer:
-  """The Tile Group Sequencer: advances a TileGroupTask action by action."""
+  """The Tile Group Sequencer: advances a ExecTileGroupTask action by action."""
 
   def __init__(self, group: TileGroup):
     self.group = group
     self.cfg = group.cfg
     self.pmu = PMUCounter()
     self.action_index = 0
-    self.task: TileGroupTask | None = None
+    self.task: ExecTileGroupTask | None = None
     self._events_done: set[str] = set()
     self._pending: _GroupTaskWait | None = None
     # role_id -> completion event id
@@ -53,7 +53,7 @@ class TileGroupSequencer:
     # round-robin DMA channel allocation
     self._next_dma_channel: int = 0
 
-  def load(self, task: TileGroupTask) -> None:
+  def load(self, task: ExecTileGroupTask) -> None:
     self.task = task
     self.action_index = 0
     self._events_done.clear()
@@ -107,18 +107,18 @@ class TileGroupSequencer:
 
   # ---- action issue ----------------------------------------------
 
-  def _issue(self, ins: GroupAction, cycle: int) -> tuple[int, str] | None:
+  def _issue(self, ins: ExecGroupAction, cycle: int) -> tuple[int, str] | None:
     op = ins.op
-    if op == GroupActionOp.INIT_STREAM:
+    if op == ExecGroupActionOp.INIT_STREAM:
       qid, depth, pmask, cmask = ins.args
-      sdesc = StreamDesc(queue_id=qid,
+      sdesc = ExecStreamDesc(queue_id=qid,
                          depth=depth,
                          producer_mask=pmask,
                          consumer_mask=cmask)
       self.group.init_stream(sdesc)
       self.pmu.add_event("tgs_init_stream")
       self.action_index += 1
-    elif op == GroupActionOp.DMA_PREFETCH:
+    elif op == ExecGroupActionOp.DMA_PREFETCH:
       # Group DMA HBM->L2: model as latency, produces an event.
       if ins.dst is None:
         raise ValueError("DMA_PREFETCH requires dst event id")
@@ -152,7 +152,7 @@ class TileGroupSequencer:
       )
       self.pmu.add_event("tgs_dma_prefetch")
       self.action_index += 1
-    elif op == GroupActionOp.DMA_STORE:
+    elif op == ExecGroupActionOp.DMA_STORE:
       if ins.dst is None:
         raise ValueError("DMA_STORE requires dst event id")
       desc_id, src_l2 = ins.args[0], ins.args[1]
@@ -174,7 +174,7 @@ class TileGroupSequencer:
       )
       self.pmu.add_event("tgs_dma_store")
       self.action_index += 1
-    elif op == GroupActionOp.DISPATCH_ROLE:
+    elif op == ExecGroupActionOp.DISPATCH_ROLE:
       role_id, = ins.args
       assert self.task is not None
       binding = self.task.role_bindings.get(role_id)
@@ -190,14 +190,14 @@ class TileGroupSequencer:
       self.pmu.add_event("tgs_dispatch_role")
       self.action_index += 1
       return (role_id, ev)
-    elif op == GroupActionOp.WAIT_EVENT:
+    elif op == ExecGroupActionOp.WAIT_EVENT:
       ev = ins.args[0]
       self._pending = _GroupTaskWait(events=(ev, ), started_cycle=cycle)
       self.action_index += 1
-    elif op == GroupActionOp.BARRIER_GROUP:
+    elif op == ExecGroupActionOp.BARRIER_GROUP:
       self.pmu.add_event("tgs_barrier")
       self.action_index += 1
-    elif op == GroupActionOp.COLLECTIVE_RUN:
+    elif op == ExecGroupActionOp.COLLECTIVE_RUN:
       if ins.dst is None:
         raise ValueError("COLLECTIVE_RUN requires dst event id")
       desc_id, op_name, bytes_total, participant_mask = ins.args
@@ -211,7 +211,7 @@ class TileGroupSequencer:
       )
       self.pmu.add_event("tgs_collective_run")
       self.action_index += 1
-    elif op == GroupActionOp.SIGNAL_EVENT:
+    elif op == ExecGroupActionOp.SIGNAL_EVENT:
       self._events_done.add(ins.args[0])
       self.pmu.add_event("tgs_signal_event")
       self.action_index += 1

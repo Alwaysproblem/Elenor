@@ -1,12 +1,15 @@
 """Event Table with event_id + sequence (Runtime ABI 3.2, review P0-4).
 
 The simulator keeps the existing *symbolic string event names* as the public
-IR (TileInst.dst, GroupAction.dst, trace args["event_id"] are all strings).
+IR.  In the xDSL workload IR these live in event-related properties
+(``elenor.runtime.group.*.event``, ``elenor.runtime.tile.wait.event``,
+``elenor.runtime.tile.launch.*.event``); after lowering they populate the
+private execution DTO event fields and trace ``args["event_id"]``.
 This EventTable is an overlay used in runtime/full_memory fidelity: it maps
 each symbolic event name to a (numeric id, sequence) pair and enforces the
 P0-4 rule that wait must match expected_sequence, not just status.
 
-This keeps V1 builders / tests / traces unchanged while adding the
+This keeps builders / tests / traces unchanged while adding the
 sequence/generation semantics that prevent stale-completion reuse after
 event table wrap or reset.
 """

@@ -130,7 +130,11 @@ these expectations and prints `PASS` / `FAIL`.
 pipeline_validator/
 ├── __init__.py          # public API
 ├── config.py            # HardwareConfig / WorkloadConfig / SimConfig
-├── ir.py                # Tile/TileGroupTask IR + builders (mirrors arch §16-17)
+├── dialects/            # xDSL `elenor` dialect definitions
+├── workload_ir.py       # parse / print / verify / load public xDSL IR API
+├── workload_builders.py # direct xDSL workload builders (20 public builders)
+├── execution_ir.py      # private execution DTOs for the hot path
+├── ir_lowering.py       # xDSL -> execution DTO lowering boundary
 ├── stream_queue.py      # StreamQueue (credit, backpressure, EOS, PMU)
 ├── engines.py           # BOA/EVU/MFE/USE timing models
 ├── pmu.py               # PMU counters + unique stall attribution
