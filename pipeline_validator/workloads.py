@@ -1,17 +1,18 @@
 """Workload definitions.
 
-Each workload builds a TileGroupTask (and its TilePrograms) plus a
-human-readable description.  The validator runs the task and compares
-the measured PMU fingerprint against the architecture's predictions.
+Each workload builds one xDSL ModuleOp plus a human-readable description.
+The validator runs the module and compares the measured PMU fingerprint
+against the architecture's predictions.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from xdsl.dialects.builtin import ModuleOp
+
 from .config import WorkloadConfig
-from .ir import (
-  TileGroupTask,
+from .workload_builders import (
   make_attention_task,
   make_conv_relu_task,
   make_matmul_task,
@@ -28,10 +29,10 @@ from .ir import (
 
 @dataclass
 class Workload:
-  """Base workload: a name + a TileGroupTask + expected PMU observations."""
+  """Base workload: a name + a ModuleOp + expected PMU observations."""
 
   name: str
-  task: TileGroupTask
+  module: ModuleOp
   expected: dict = field(default_factory=dict)
   description: str = ""
   config: WorkloadConfig | None = None
@@ -46,23 +47,25 @@ class MatmulWorkload(Workload):
 
   def __init__(self, cfg: WorkloadConfig | None = None):
     cfg = cfg or WorkloadConfig(name="matmul")
-    task = make_matmul_task()
+    module = make_matmul_task()
     super().__init__(
-        name="matmul",
-        description=("Dense GEMM (128x128x256 BF16 per tile) across 4 tiles. "
-                     "Same per-tile BOA work as tiled_matmul (4x128x128x64). "
-                     "Single role, no inter-tile stream. "
-                     "Validates BOA peak compute + MFE/DMA load overlap. "
-                     "Group DMA prefetches A/B HBM->L2, "
-                     "then dispatches a single role, then stores C L2->HBM."),
-        task=task,
-        expected={
-            "primary_bottleneck": "BOA",
-            "boa_active_ratio_min": 0.40,
-            "stream_stall_ratio_max": 0.05,
-            "mfe_active_ratio_min": 0.09,
-        },
-        config=cfg,
+      name="matmul",
+      description=(
+        "Dense GEMM (128x128x256 BF16 per tile) across 4 tiles. "
+        "Same per-tile BOA work as tiled_matmul (4x128x128x64). "
+        "Single role, no inter-tile stream. "
+        "Validates BOA peak compute + MFE/DMA load overlap. "
+        "Group DMA prefetches A/B HBM->L2, "
+        "then dispatches a single role, then stores C L2->HBM."
+      ),
+      module=module,
+      expected={
+        "primary_bottleneck": "BOA",
+        "boa_active_ratio_min": 0.40,
+        "stream_stall_ratio_max": 0.05,
+        "mfe_active_ratio_min": 0.09,
+      },
+      config=cfg,
     )
 
 
@@ -85,32 +88,32 @@ class TiledMatmulWorkload(Workload):
       the pipeline overlap.
   """
 
-  def __init__(self,
-               cfg: WorkloadConfig | None = None,
-               num_k_chunks: int = 4):
+  def __init__(self, cfg: WorkloadConfig | None = None, num_k_chunks: int = 4):
     cfg = cfg or WorkloadConfig(name="tiled_matmul")
-    task = make_tiled_matmul_task(num_k_chunks=num_k_chunks)
+    module = make_tiled_matmul_task(num_k_chunks=num_k_chunks)
     super().__init__(
-        name="tiled_matmul",
-        task=task,
-        description=(
-            "Multi-level tiled GEMM (128x128 per tile, K split into "
-            f"{num_k_chunks} chunks of 64, BF16) across 4 tiles. "
-            "Same per-tile BOA work as matmul (4x128x128x64 = 128x128x256). "
-            "Double-buffered MFE prefetch overlaps BOA compute. "
-            "12 MFE ops/tile (8 loads + 4 per-chunk stores) vs matmul's 3 — "
-            "extra launch overhead + store traffic, not a pure tiling speedup. "
-            "Group DMA prefetches A/B HBM->L2 before the role, "
-            "then stores C L2->HBM after."),
-        expected={
-            "primary_bottleneck": "BOA",
-            "boa_active_ratio_min": 0.40,
-            "mfe_active_ratio_min": 0.10,
-            "stream_stall_ratio_max": 0.05,
-            "tiled_overlap": True,
-        },
-        config=cfg,
+      name="tiled_matmul",
+      module=module,
+      description=(
+        "Multi-level tiled GEMM (128x128 per tile, K split into "
+        f"{num_k_chunks} chunks of 64, BF16) across 4 tiles. "
+        "Same per-tile BOA work as matmul (4x128x128x64 = 128x128x256). "
+        "Double-buffered MFE prefetch overlaps BOA compute. "
+        "12 MFE ops/tile (8 loads + 4 per-chunk stores) vs matmul's 3 — "
+        "extra launch overhead + store traffic, not a pure tiling speedup. "
+        "Group DMA prefetches A/B HBM->L2 before the role, "
+        "then stores C L2->HBM after."
+      ),
+      expected={
+        "primary_bottleneck": "BOA",
+        "boa_active_ratio_min": 0.40,
+        "mfe_active_ratio_min": 0.10,
+        "stream_stall_ratio_max": 0.05,
+        "tiled_overlap": True,
+      },
+      config=cfg,
     )
+
 
 class TiledMatmulPipelinedWorkload(Workload):
   """Tiled matmul timing proxy with group-level async IO pipeline.
@@ -135,68 +138,60 @@ class TiledMatmulPipelinedWorkload(Workload):
 
   """
 
-  def __init__(self,
-               cfg: WorkloadConfig | None = None,
-               num_group_chunks: int = 4,
-               num_k_chunks: int = 4):
+  def __init__(self, cfg: WorkloadConfig | None = None, num_group_chunks: int = 4, num_k_chunks: int = 4):
     cfg = cfg or WorkloadConfig(name="tiled_matmul_pipelined")
-    task = make_tiled_matmul_pipelined_task(
-        num_group_chunks=num_group_chunks,
-        num_k_chunks=num_k_chunks)
+    module = make_tiled_matmul_pipelined_task(num_group_chunks=num_group_chunks, num_k_chunks=num_k_chunks)
     super().__init__(
-        name="tiled_matmul_pipelined",
-        task=task,
-        description=(
-            "Timing proxy for multi-stage tiled GEMM (128x128 per tile, "
-            f"{num_group_chunks} group stages x {num_k_chunks} inner "
-            f"K-chunks of 64, BF16) across 4 tiles. "
-            "Group-level IO pipeline: DMA_PREFETCH for stage g+1 overlaps "
-            "tile compute for stage g.  Tile-level K-chunk pipeline: MFE "
-            "prefetch for chunk k+1 overlaps BOA for chunk k.  "
-            f"Per-stage: {num_k_chunks}x2 MFE loads + {num_k_chunks} BOA "
-            f"accumulates + {num_k_chunks} MFE stores per tile.  "
-            f"Group DMA: {num_group_chunks}x2 prefetches + "
-            f"{num_group_chunks} stores.  "
-            "Each stage independently stores its result; cross-stage "
-            "accumulation semantics are not modelled."),
-        expected={
-            "primary_bottleneck": "BOA",
-            "boa_active_ratio_min": 0.35,
-            "mfe_active_ratio_min": 0.08,
-            "stream_stall_ratio_max": 0.05,
-            "multi_stage_group_io": True,
-        },
-        config=cfg,
+      name="tiled_matmul_pipelined",
+      module=module,
+      description=(
+        "Timing proxy for multi-stage tiled GEMM (128x128 per tile, "
+        f"{num_group_chunks} group stages x {num_k_chunks} inner "
+        f"K-chunks of 64, BF16) across 4 tiles. "
+        "Group-level IO pipeline: DMA_PREFETCH for stage g+1 overlaps "
+        "tile compute for stage g.  Tile-level K-chunk pipeline: MFE "
+        "prefetch for chunk k+1 overlaps BOA for chunk k.  "
+        f"Per-stage: {num_k_chunks}x2 MFE loads + {num_k_chunks} BOA "
+        f"accumulates + {num_k_chunks} MFE stores per tile.  "
+        f"Group DMA: {num_group_chunks}x2 prefetches + "
+        f"{num_group_chunks} stores.  "
+        "Each stage independently stores its result; cross-stage "
+        "accumulation semantics are not modelled."
+      ),
+      expected={
+        "primary_bottleneck": "BOA",
+        "boa_active_ratio_min": 0.35,
+        "mfe_active_ratio_min": 0.08,
+        "stream_stall_ratio_max": 0.05,
+        "multi_stage_group_io": True,
+      },
+      config=cfg,
     )
 
 
 class TiledMatmulTopWorkload(Workload):
   """Topology (without Software Pipelining) tiled matmul workload matching ``tiled_matmul_top.ir``."""
 
-  def __init__(self,
-               cfg: WorkloadConfig | None = None,
-               num_group_chunks: int = 4,
-               num_k_chunks: int = 4):
+  def __init__(self, cfg: WorkloadConfig | None = None, num_group_chunks: int = 4, num_k_chunks: int = 4):
     cfg = cfg or WorkloadConfig(name="tiled_matmul_top")
-    task = make_tiled_matmul_top_task(
-        num_group_chunks=num_group_chunks,
-        num_k_chunks=num_k_chunks)
+    module = make_tiled_matmul_top_task(num_group_chunks=num_group_chunks, num_k_chunks=num_k_chunks)
     super().__init__(
-        name="tiled_matmul_top",
-        task=task,
-        description=(
-            "Topology (without Software Pipelining) tiled GEMM workload matching `tiled_matmul_top.ir`: "
-            f"{num_group_chunks} staged group chunks x {num_k_chunks} inner "
-            "K-chunks of 64, BF16, across 4 tiles.  All group-DMA prefetches "
-            "are hoisted before dispatch, then wait/dispatch pairs, then "
-            "wait/store pairs, then store drains."),
-        expected={
-            "boa_active_ratio_min": 0.35,
-            "mfe_active_ratio_min": 0.08,
-            "stream_stall_ratio_max": 0.05,
-            "multi_stage_group_io": True,
-        },
-        config=cfg,
+      name="tiled_matmul_top",
+      module=module,
+      description=(
+        "Topology (without Software Pipelining) tiled GEMM workload matching `tiled_matmul_top.ir`: "
+        f"{num_group_chunks} staged group chunks x {num_k_chunks} inner "
+        "K-chunks of 64, BF16, across 4 tiles.  All group-DMA prefetches "
+        "are hoisted before dispatch, then wait/dispatch pairs, then "
+        "wait/store pairs, then store drains."
+      ),
+      expected={
+        "boa_active_ratio_min": 0.35,
+        "mfe_active_ratio_min": 0.08,
+        "stream_stall_ratio_max": 0.05,
+        "multi_stage_group_io": True,
+      },
+      config=cfg,
     )
 
 
@@ -222,39 +217,37 @@ class TiledMatmulPipelinedPowWorkload(Workload):
     - No stream stall (no inter-tile Stream Queue).
   """
 
-  def __init__(self,
-               cfg: WorkloadConfig | None = None,
-               num_group_chunks: int = 4,
-               num_k_chunks: int = 4):
+  def __init__(self, cfg: WorkloadConfig | None = None, num_group_chunks: int = 4, num_k_chunks: int = 4):
     cfg = cfg or WorkloadConfig(name="tiled_matmul_pipelined_pow")
-    task = make_tiled_matmul_pipelined_pow_task(
-        num_group_chunks=num_group_chunks,
-        num_k_chunks=num_k_chunks)
+    module = make_tiled_matmul_pipelined_pow_task(
+      num_group_chunks=num_group_chunks, num_k_chunks=num_k_chunks
+    )
     super().__init__(
-        name="tiled_matmul_pipelined_pow",
-        task=task,
-        description=(
-            "Two-stage tiled GEMM (128x128 per tile, "
-            f"{num_group_chunks} group stages x {num_k_chunks} inner "
-            f"K-chunks of 64, BF16) across 4 tiles, followed by an EVU "
-            f"elementwise pow(x, 2) on each stage's output ({num_group_chunks} "
-            "pow chunks).  Matmul phase: group-level IO pipeline with "
-            "DMA prefetch for stage g+1 overlapping tile compute for stage g. "
-            "Pow phase: strict fence — starts only after all matmul stores "
-            "drain to HBM; all pow prefetches issue up front, each chunk "
-            "dispatches when its input is visible in L2.  "
-            f"Per-stage matmul: {num_k_chunks}x2 MFE loads + "
-            f"{num_k_chunks} BOA accumulates + {num_k_chunks} MFE stores. "
-            f"Per-stage pow: 1 MFE load + 1 EVU pow + 1 MFE store."),
-        expected={
-            "primary_bottleneck": "BOA",
-            "boa_active_ratio_min": 0.35,
-            "mfe_active_ratio_min": 0.08,
-            "evu_active_ratio_min": 0.01,
-            "stream_stall_ratio_max": 0.05,
-            "multi_stage_group_io": True,
-        },
-        config=cfg,
+      name="tiled_matmul_pipelined_pow",
+      module=module,
+      description=(
+        "Two-stage tiled GEMM (128x128 per tile, "
+        f"{num_group_chunks} group stages x {num_k_chunks} inner "
+        f"K-chunks of 64, BF16) across 4 tiles, followed by an EVU "
+        f"elementwise pow(x, 2) on each stage's output ({num_group_chunks} "
+        "pow chunks).  Matmul phase: group-level IO pipeline with "
+        "DMA prefetch for stage g+1 overlapping tile compute for stage g. "
+        "Pow phase: strict fence — starts only after all matmul stores "
+        "drain to HBM; all pow prefetches issue up front, each chunk "
+        "dispatches when its input is visible in L2.  "
+        f"Per-stage matmul: {num_k_chunks}x2 MFE loads + "
+        f"{num_k_chunks} BOA accumulates + {num_k_chunks} MFE stores. "
+        f"Per-stage pow: 1 MFE load + 1 EVU pow + 1 MFE store."
+      ),
+      expected={
+        "primary_bottleneck": "BOA",
+        "boa_active_ratio_min": 0.35,
+        "mfe_active_ratio_min": 0.08,
+        "evu_active_ratio_min": 0.01,
+        "stream_stall_ratio_max": 0.05,
+        "multi_stage_group_io": True,
+      },
+      config=cfg,
     )
 
 
@@ -263,25 +256,25 @@ class TiledMatmulPowNodepWorkload(Workload):
 
   def __init__(self, cfg: WorkloadConfig | None = None):
     cfg = cfg or WorkloadConfig(name="tiled_matmul_pow_nodep")
-    task = make_tiled_matmul_pow_nodep_task()
+    module = make_tiled_matmul_pow_nodep_task()
     super().__init__(
-        name="tiled_matmul_pow_nodep",
-        task=task,
-        description=(
-            "Nodep tiled GEMM + EVU pow trace fixture matching "
-            "`tiled_matmul_pow_nodep.ir`: pow inputs are prefetched first; "
-            "pow role dispatches are issued before any A/B prefetch or "
-            "matmul role dispatch; matmul C stores are issued before pow "
-            "output stores drain in the fixture order."
-        ),
-        expected={
-            "boa_active_ratio_min": 0.20,
-            "mfe_active_ratio_min": 0.05,
-            "evu_active_ratio_min": 0.01,
-            "stream_stall_ratio_max": 0.05,
-            "multi_stage_group_io": True,
-        },
-        config=cfg,
+      name="tiled_matmul_pow_nodep",
+      module=module,
+      description=(
+        "Nodep tiled GEMM + EVU pow trace fixture matching "
+        "`tiled_matmul_pow_nodep.ir`: pow inputs are prefetched first; "
+        "pow role dispatches are issued before any A/B prefetch or "
+        "matmul role dispatch; matmul C stores are issued before pow "
+        "output stores drain in the fixture order."
+      ),
+      expected={
+        "boa_active_ratio_min": 0.20,
+        "mfe_active_ratio_min": 0.05,
+        "evu_active_ratio_min": 0.01,
+        "stream_stall_ratio_max": 0.05,
+        "multi_stage_group_io": True,
+      },
+      config=cfg,
     )
 
 
@@ -294,27 +287,26 @@ class PowWorkload(Workload):
   No BOA role participates in this workload.
   """
 
-  def __init__(self,
-               cfg: WorkloadConfig | None = None,
-               num_group_chunks: int = 4):
+  def __init__(self, cfg: WorkloadConfig | None = None, num_group_chunks: int = 4):
     cfg = cfg or WorkloadConfig(name="pow")
-    task = make_pow_task(num_group_chunks=num_group_chunks)
+    module = make_pow_task(num_group_chunks=num_group_chunks)
     super().__init__(
-        name="pow",
-        task=task,
-        description=(
-            "Standalone EVU pow(x, 2) workload across 4 tiles. "
-            f"{num_group_chunks} group chunks; each chunk prefetches one "
-            "pow input tile group to L2, dispatches role 1 "
-            "(`pow_4k_tile`) once visible, then stores the output back "
-            "to HBM.  Per-tile work: 1 MFE load + 1 EVU pow + 1 MFE store."),
-        expected={
-            "evu_active_ratio_min": 0.01,
-            "mfe_active_ratio_min": 0.05,
-            "stream_stall_ratio_max": 0.05,
-            "multi_stage_group_io": True,
-        },
-        config=cfg,
+      name="pow",
+      module=module,
+      description=(
+        "Standalone EVU pow(x, 2) workload across 4 tiles. "
+        f"{num_group_chunks} group chunks; each chunk prefetches one "
+        "pow input tile group to L2, dispatches role 1 "
+        "(`pow_4k_tile`) once visible, then stores the output back "
+        "to HBM.  Per-tile work: 1 MFE load + 1 EVU pow + 1 MFE store."
+      ),
+      expected={
+        "evu_active_ratio_min": 0.01,
+        "mfe_active_ratio_min": 0.05,
+        "stream_stall_ratio_max": 0.05,
+        "multi_stage_group_io": True,
+      },
+      config=cfg,
     )
 
 
@@ -326,24 +318,24 @@ class AttentionWorkload(Workload):
   """
 
   def __init__(self, cfg: WorkloadConfig | None = None):
-    cfg = cfg or WorkloadConfig(
-        name="attention", seq_len=2048, head_dim=64)
-    task = make_attention_task()
+    cfg = cfg or WorkloadConfig(name="attention", seq_len=2048, head_dim=64)
+    module = make_attention_task()
     super().__init__(
-        name="attention",
-        description=(
-            "Two-role attention: role0 QK matmul (tiles 0-1) -> "
-            "role1 softmax+AV (tiles 2-3), connected by Stream Queue S0. "
-            "Validates stream pipeline, credit backpressure, and "
-            "BOA/EVU cross-engine overlap."),
-        task=task,
-        expected={
-            "primary_bottleneck": "BOA",
-            "stream_s0_occupancy_seen": True,
-            "producer_consumer_overlap": True,
-            "evu_active_ratio_min": 0.10,
-        },
-        config=cfg,
+      name="attention",
+      description=(
+        "Two-role attention: role0 QK matmul (tiles 0-1) -> "
+        "role1 softmax+AV (tiles 2-3), connected by Stream Queue S0. "
+        "Validates stream pipeline, credit backpressure, and "
+        "BOA/EVU cross-engine overlap."
+      ),
+      module=module,
+      expected={
+        "primary_bottleneck": "BOA",
+        "stream_s0_occupancy_seen": True,
+        "producer_consumer_overlap": True,
+        "evu_active_ratio_min": 0.10,
+      },
+      config=cfg,
     )
 
 
@@ -355,23 +347,18 @@ class MoEWorkload(Workload):
   """
 
   def __init__(self, cfg: WorkloadConfig | None = None):
-    cfg = cfg or WorkloadConfig(
-        name="moe", num_experts=8, tokens_per_batch=1024)
-    task = make_moe_task(num_experts=cfg.num_experts)
+    cfg = cfg or WorkloadConfig(name="moe", num_experts=8, tokens_per_batch=1024)
+    module = make_moe_task(num_experts=cfg.num_experts)
     super().__init__(
-        name="moe",
-        description=(
-            "MoE expert MLP: role0 MFE segment-stream groups tokens "
-            "(tiles 0-1) -> role1 BOA expert matmul (tiles 2-3). "
-            "Validates MFE segment stream + BOA expert batch utilization."
-        ),
-        task=task,
-        expected={
-            "primary_bottleneck": "BOA",
-            "mfe_segment_active": True,
-            "boa_imbalance_effect": True,
-        },
-        config=cfg,
+      name="moe",
+      description=(
+        "MoE expert MLP: role0 MFE segment-stream groups tokens "
+        "(tiles 0-1) -> role1 BOA expert matmul (tiles 2-3). "
+        "Validates MFE segment stream + BOA expert batch utilization."
+      ),
+      module=module,
+      expected={"primary_bottleneck": "BOA", "mfe_segment_active": True, "boa_imbalance_effect": True},
+      config=cfg,
     )
 
 
@@ -389,24 +376,25 @@ class ConvReLuWorkload(Workload):
 
   def __init__(self, cfg: WorkloadConfig | None = None):
     cfg = cfg or WorkloadConfig(name="conv_relu")
-    task = make_conv_relu_task()
+    module = make_conv_relu_task()
     super().__init__(
-        name="conv_relu",
-        description=(
-            "Fused Conv (128x128, 3x3 kernel, im2col K=1152, BF16) + "
-            "ReLU epilogue across 4 tiles.  Single role, no inter-tile "
-            "stream.  MFE im2col/window generation feeds BOA GEMM, then "
-            "EVU ReLU epilogue.  Validates explicit MFE windowing before "
-            "dense BOA compute."),
-        task=task,
-        expected={
-            "primary_bottleneck": "BOA",
-            "boa_active_ratio_min": 0.40,
-            "evu_active_ratio_min": 0.01,
-            "mfe_active_ratio_min": 0.01,
-            "stream_stall_ratio_max": 0.05,
-        },
-        config=cfg,
+      name="conv_relu",
+      description=(
+        "Fused Conv (128x128, 3x3 kernel, im2col K=1152, BF16) + "
+        "ReLU epilogue across 4 tiles.  Single role, no inter-tile "
+        "stream.  MFE im2col/window generation feeds BOA GEMM, then "
+        "EVU ReLU epilogue.  Validates explicit MFE windowing before "
+        "dense BOA compute."
+      ),
+      module=module,
+      expected={
+        "primary_bottleneck": "BOA",
+        "boa_active_ratio_min": 0.40,
+        "evu_active_ratio_min": 0.01,
+        "mfe_active_ratio_min": 0.01,
+        "stream_stall_ratio_max": 0.05,
+      },
+      config=cfg,
     )
 
 
@@ -430,34 +418,43 @@ class PagedAttentionWorkload(Workload):
   """
 
   def __init__(self, cfg: WorkloadConfig | None = None):
-    cfg = cfg or WorkloadConfig(
-        name="paged_attention", seq_len=128, head_dim=64)
-    task = make_paged_attention_task()
+    cfg = cfg or WorkloadConfig(name="paged_attention", seq_len=128, head_dim=64)
+    module = make_paged_attention_task()
     super().__init__(
-        name="paged_attention",
-        description=(
-            "Full paged-attention pipeline (Architecture 20.2): "
-            "MFE page-stream gathers K/V pages (8 pages x 16 tokens, "
-            "head_dim=64, BF16) -> BOA QK^T -> EVU scale/mask -> "
-            "EVU softmax -> BOA PV -> MFE store.  Single role across "
-            "4 tiles, no inter-tile stream.  Validates MFE Page Stream "
-            "+ dual-BOA (QK+PV) + multi-step EVU + the T_prefetch <= "
-            "T_qk overlap condition."),
-        task=task,
-        expected={
-            "primary_bottleneck": "BOA",
-            "boa_active_ratio_min": 0.40,
-            "evu_active_ratio_min": 0.05,
-            "mfe_active_ratio_min": 0.01,
-            "stream_stall_ratio_max": 0.05,
-            "mfe_page_stream_active": True,
-            "dual_boa_qk_pv": True,
-        },
-        config=cfg,
+      name="paged_attention",
+      description=(
+        "Full paged-attention pipeline (Architecture 20.2): "
+        "MFE page-stream gathers K/V pages (8 pages x 16 tokens, "
+        "head_dim=64, BF16) -> BOA QK^T -> EVU scale/mask -> "
+        "EVU softmax -> BOA PV -> MFE store.  Single role across "
+        "4 tiles, no inter-tile stream.  Validates MFE Page Stream "
+        "+ dual-BOA (QK+PV) + multi-step EVU + the T_prefetch <= "
+        "T_qk overlap condition."
+      ),
+      module=module,
+      expected={
+        "primary_bottleneck": "BOA",
+        "boa_active_ratio_min": 0.40,
+        "evu_active_ratio_min": 0.05,
+        "mfe_active_ratio_min": 0.01,
+        "stream_stall_ratio_max": 0.05,
+        "mfe_page_stream_active": True,
+        "dual_boa_qk_pv": True,
+      },
+      config=cfg,
     )
+
+
 ALL_WORKLOADS: list = [
-    MatmulWorkload, TiledMatmulWorkload, TiledMatmulPipelinedWorkload,
-    TiledMatmulTopWorkload, PowWorkload, TiledMatmulPipelinedPowWorkload,
-    TiledMatmulPowNodepWorkload, ConvReLuWorkload, PagedAttentionWorkload,
-    AttentionWorkload, MoEWorkload
+  MatmulWorkload,
+  TiledMatmulWorkload,
+  TiledMatmulPipelinedWorkload,
+  TiledMatmulTopWorkload,
+  PowWorkload,
+  TiledMatmulPipelinedPowWorkload,
+  TiledMatmulPowNodepWorkload,
+  ConvReLuWorkload,
+  PagedAttentionWorkload,
+  AttentionWorkload,
+  MoEWorkload,
 ]
