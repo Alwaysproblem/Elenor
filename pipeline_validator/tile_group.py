@@ -98,6 +98,7 @@ class TileGroup:
     # role dispatch fan-in by event id: event_id -> tile_mask / done tiles
     self._role_event_tile_mask: dict[str, int] = {}
     self._role_done_tiles: dict[str, set[int]] = {}
+    self._role_phase_events: dict[str, dict[str, str]] = {}
     # role trace bookkeeping: event_id -> _RoleTrace
     self._role_trace: dict[str, _RoleTrace] = {}
     # task trace bookkeeping
@@ -211,6 +212,7 @@ class TileGroup:
     binding: ExecTileRoleBinding,
     cycle: int,
     event_id: str | None = None,
+    phase_event_ids: dict[str, str] | None = None,
   ) -> None:
     """Load the role's Tile Program onto the selected tiles and mark them."""
     role_id = binding.role_id
@@ -218,6 +220,7 @@ class TileGroup:
     ev = event_id or f"ev_role{role_id}"
     self._role_event_tile_mask[ev] = tile_mask
     self._role_done_tiles[ev] = set()
+    self._role_phase_events[ev] = phase_event_ids or {}
     self._role_trace.pop(ev, None)
     total_cold = 0
     prog = binding.tile_program
@@ -248,6 +251,7 @@ class TileGroup:
       ctx_ids.append(ctx_id)
       if self.runtime_enabled:
         t.uce._event_done_callback = self._make_event_callback()
+      t.uce._phase_signal_callback = self._on_phase_signal
       for qid, q in self.queues.items():
         t.bind_stream(qid, q)
       for done_ev in sorted(self.sequencer._events_done):
@@ -282,6 +286,24 @@ class TileGroup:
       )
     if total_cold > 0:
       self.pmu.add_cycle("program_cold_load", total_cold)
+
+  def _on_phase_signal(self, role_event_id: str, phase: str, tile_id: int) -> None:
+    phase_map = self._role_phase_events.get(role_event_id, {})
+    phase_ev = phase_map.get(phase)
+    if phase_ev is None or not phase_ev:
+      return
+    mask = self._role_event_tile_mask.get(role_event_id, 0)
+    if mask == 0:
+      return
+    self._role_event_tile_mask.setdefault(phase_ev, mask)
+    done = self._role_done_tiles.setdefault(phase_ev, set())
+    if tile_id in done:
+      return
+    done.add(tile_id)
+    expected = bin(mask).count("1")
+    if len(done) >= expected:
+      self.sequencer.notify_event(phase_ev)
+
   @staticmethod
   def _program_bytes(prog) -> int:
     """Estimate *program text* size for residency (install to tile program SRAM).
@@ -527,6 +549,7 @@ class TileGroup:
     self._role_event_tile_mask.clear()
     self._role_done_tiles.clear()
     self._role_trace.clear()
+    self._role_phase_events.clear()
     # runtime-level: clear event/fault tables, but PRESERVE program residency
     # so warm launch works across tasks.  _registered_programs and
     # program_table are intentionally NOT cleared here — a program installed
@@ -560,6 +583,7 @@ class TileGroup:
     self._role_event_tile_mask.clear()
     self._role_done_tiles.clear()
     self._role_trace.clear()
+    self._role_phase_events.clear()
     self._task_trace_name = None
     self._task_start_cycle = None
     self._task_done_traced = False

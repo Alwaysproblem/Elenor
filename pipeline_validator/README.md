@@ -9,6 +9,43 @@ control flow, the Stream Queue producer-consumer pipeline, and the
 BOA / EVU / MFE / USE engine partition, then reports a PMU fingerprint
 with pass/fail checks against the architecture's predicted bottlenecks.
 
+## IR Dialect
+
+The validator uses a **function-call style** xDSL dialect (see
+`reference.mlir`). The module contains top-level named definitions:
+`nest.context @name { ... }` and `tile.program @name { ... }`. The
+context body dispatches tile programs by symbol reference
+(`@prog_name`), producing SSA event values typed
+`!nest.event<tag>` / `!tile.event<tag>`.
+
+### Prefix hierarchy
+
+| Prefix    | Level        | Examples                                                                             |
+| --------- | ------------ | ------------------------------------------------------------------------------------ |
+| `tile.*`  | Tile program | `tile.program`, `tile.load.async`, `tile.pow.async`, `tile.await`, `tile.signal`     |
+| `nest.*`  | Tile group   | `nest.context`, `nest.dispatch.tasks.async`, `nest.dma.prefetch.async`, `nest.await` |
+| `nexus.*` | Host / CPU   | (deferred — not yet implemented)                                                     |
+
+### Key IR design points (per `reference.mlir`)
+
+- **Placement** lives on `nest.context` (`placement = 0xF`), not on dispatch.
+- **Dispatch** (`nest.dispatch.tasks.async @prog`) consumes a logical task
+  range, ins/outs L2 buffers, and a `depends_on` event. It returns THREE
+  aggregated events: `grid_done`, `input_released`, `output_ready`.
+- **Tile phase signals** (`tile.signal input_released` / `tile.signal
+output_ready`) drive the dispatch phase events: when every dispatched
+  task signals a phase, the corresponding dispatch result fires.
+- **Buffers** are SSA values (`!nest.l2_buffer<slot>`); the event type tag
+  doubles as the runtime event id shared by the simulator and the trace.
+- **`depends_on(%e)`** expresses data dependencies directly on async ops
+  (dispatch, store, release), lowered to wait actions by the lowering.
+
+### Print / parse
+
+The IR is printed and parsed in **custom-assembly format** (not generic
+xDSL). `--print-ir` outputs the custom assembly; `--ir-file` loads
+custom-assembly IR from disk.
+
 ## Scope
 
 | Aspect               | Modelled                                                  | Source spec                                     |
@@ -16,7 +53,7 @@ with pass/fail checks against the architecture's predicted bottlenecks.
 | Tile Group           | 1 group, 4 tiles                                          | `design/elenor_tile_group/`                     |
 | Tile Group Sequencer | Group Task actions, role dispatch, DMA prefetch, barriers | `design/elenor_tile_group_sequencer/`, arch §16 |
 | Compute Tile         | UCE + BOA/EVU/MFE/USE + L1 SRAM bandwidth                 | `design/elenor_compute_tile/`                   |
-| Tile UCE             | Tile Program ISA: launch/wait/stream/branch               | arch §16.4, §17.6                               |
+| Tile UCE             | Tile Program ISA: launch/wait/signal                      | arch §16.4, §17.6                               |
 | Stream Queue         | credit invariant, backpressure, EOS, reset/drain, PMU     | `design/elenor_stream_queue/`                   |
 | BOA                  | 4×OPA (16×16) MAC throughput, bandwidth ceiling           | `design/elenor_boa/`                            |
 | EVU                  | 32-lane vector FMA throughput                             | `design/elenor_evu/`                            |
@@ -38,28 +75,26 @@ conda activate elenor-validator
 ## Run
 
 ```bash
-# run the default matmul workload
-python -m pipeline_validator -w matmul
-
-# run all workloads and write a report
-python -m pipeline_validator --all --report report.txt
+# run the default pow workload
+python -m pipeline_validator -w pow
 
 # list workloads
 python -m pipeline_validator -l
 
 # override a hardware param (e.g. faster clock)
-python -m pipeline_validator -w attention --hw-override clock_mhz=2000
-# override MFE ingress queue depths and stream-buffer capacity
-python -m pipeline_validator -w tiled_matmul --hw-override mfe_load_queue_depth=2 --hw-override mfe_store_queue_depth=2 --hw-override mfe_stream_buffer_bytes=65536
-# mfe_stream_buffer_bytes=0 keeps the default unfrozen/non-enforcing buffer
-# baseline; a finite value enables page-stream prefetch-capacity validation
-# when descriptors provide prefetch_depth.
+python -m pipeline_validator -w pow --hw-override clock_mhz=2000
+
+# print the IR (custom assembly) without simulating
+python -m pipeline_validator -w pow --print-ir
+
+# load and run an external IR file
+python -m pipeline_validator --ir-file path/to/workload.mlir
 
 # JSON output
-python -m pipeline_validator --all --json
+python -m pipeline_validator -w pow --json
 
 # run with dual tile-UCE contexts and emit an HTML trace
-python -m pipeline_validator -w <workload> --context-mode 2 --trace-html ctx2.html
+python -m pipeline_validator -w pow --context-mode 2 --trace-html ctx2.html
 ```
 
 ### Profiling / Trace Visualization
@@ -70,13 +105,10 @@ queue occupancy, and task/tile lifecycle event.
 
 ```bash
 # write a Perfetto-loadable trace.json (load at perfetto.dev or chrome://tracing)
-python -m pipeline_validator -w paged_attention --trace-json trace.json
+python -m pipeline_validator -w pow --trace-json trace.json
 
 # write a standalone trace.html (open in any browser, no server needed)
-python -m pipeline_validator -w paged_attention --trace-html trace.html
-
-# both at once, for all workloads (auto-suffixes _<workload>.json/.html)
-python -m pipeline_validator --all --trace-json all.json --trace-html all.html
+python -m pipeline_validator -w pow --trace-html trace.html
 ```
 
 **Trace contents:**
@@ -88,20 +120,11 @@ python -m pipeline_validator --all --trace-json all.json --trace-html all.html
   `TileGroup/TileRole` (role dispatch→complete), `TileGroup/Global DMA`
   (HBM↔L2 prefetch/store), `TileGroup/Collective` (reduce/broadcast).
   Tile L2↔L1 traffic is MFE load/store on each tile track.
-- **Counters** (line graphs): Stream Queue occupancy and credit_available
-  sampled per cycle — only for workloads with streams (attention, moe).
-- **Instant markers**: `tile_done`, `tile_role_dispatch`, `tile_role_complete`,
-  `group_task_done`, `dma_complete`, `collective_complete`.
+- **Instant markers**: `tile_done`, `tile_signal`, `tile_role_dispatch`,
+  `tile_role_complete`, `group_task_done`, `dma_complete`, `collective_complete`.
 - **Multi-context trace details**: with `--context-mode 2`, tile tracks expose
   `UCE CTX0` / `UCE CTX1` lanes, `ctx_switch` instants, and
   `active_context_count` / `ready_context_count` counters.
-
-To view:
-
-- **`trace.json`**: drag into [Perfetto UI](https://ui.perfetto.dev) or
-  open `chrome://tracing` in Chrome/Edge and "Load file".
-- **`trace.html`**: open directly in any browser — a self-contained
-  Gantt chart with hover tooltips.
 
 ## Tests
 
@@ -111,16 +134,11 @@ python -m pytest pipeline_validator/tests/ -v
 
 ## Workloads
 
-| Workload          | Roles                                   | Validates                                                                      |
-| ----------------- | --------------------------------------- | ------------------------------------------------------------------------------ |
-| `matmul`          | single (4 tiles)                        | BOA peak compute + MFE/DMA load overlap                                        |
-| `tiled_matmul`    | single (4 tiles)                        | K-dimension tiling + double-buffer MFE/BOA pipeline overlap                    |
-| `conv_relu`       | single (4 tiles)                        | MFE im2col/window stream -> BOA GEMM -> EVU relu epilogue                      |
-| `paged_attention` | single (4 tiles)                        | full paged-attention pipeline: MFE page-stream → BOA QK → EVU softmax → BOA PV |
-| `attention`       | 2 (QK → softmax+AV via Stream Queue S0) | stream pipeline, credit backpressure, BOA/EVU overlap                          |
-| `moe`             | 2 (MFE segment-stream → BOA expert MLP) | MFE segment stream + BOA batch utilization                                     |
+| Workload | Roles            | Validates                                                  |
+| -------- | ---------------- | ---------------------------------------------------------- |
+| `pow`    | single (4 tiles) | EVU elementwise pow + MFE load/store + pipelined group DMA |
 
-Each workload declares an **expected PMU fingerprint** (e.g. BOA-bound,
+Each workload declares an **expected PMU fingerprint** (e.g. EVU-active,
 low stream stall). The report checks the measured fingerprint against
 these expectations and prints `PASS` / `FAIL`.
 
@@ -130,21 +148,21 @@ these expectations and prints `PASS` / `FAIL`.
 pipeline_validator/
 ├── __init__.py          # public API
 ├── config.py            # HardwareConfig / WorkloadConfig / SimConfig
-├── dialects/            # xDSL `elenor` dialect definitions
-├── workload_ir.py       # parse / print / verify / load public xDSL IR API
-├── workload_builders.py # direct xDSL workload builders (20 public builders)
+├── dialects/            # xDSL `elenor` dialect (function-call style: tile.*/nest.* ops)
+├── workload_ir.py       # parse / print / verify / load custom-assembly IR
+├── workload_builders.py # direct xDSL workload builders (pow + identity)
 ├── execution_ir.py      # private execution DTOs for the hot path
-├── ir_lowering.py       # xDSL -> execution DTO lowering boundary
+├── ir_lowering.py       # xDSL -> execution DTO lowering (1:1 walk of IR body)
 ├── stream_queue.py      # StreamQueue (credit, backpressure, EOS, PMU)
 ├── engines.py           # BOA/EVU/MFE/USE timing models
 ├── pmu.py               # PMU counters + unique stall attribution
 ├── tile.py              # ComputeTile + TileUCE controller
 ├── tile_group_sequencer.py  # TileGroupSequencer controller
-├── tile_group.py        # TileGroup (sequencer + 4 tiles + streams)
+├── tile_group.py        # TileGroup (sequencer + 4 tiles + phase aggregation)
 ├── simulator.py         # cycle-accurate driver
-├── workloads.py         # Matmul / Attention / MoE workloads
+├── workloads.py         # PowWorkload
 ├── report.py            # PMU fingerprint + pass/fail checks
 ├── cli.py               # CLI entry point
-├── tests/__init__.py    # pytest suite
+├── tests/               # pytest suite
 └── environment.yml      # conda env spec
 ```

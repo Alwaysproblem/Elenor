@@ -8,6 +8,7 @@ stream operations against shared Stream Queues.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -125,7 +126,8 @@ class TileUCE:
     self._local_event_owner: dict[str, _UCEEventRef] = {}
     self._external_events_done: set[str] = set()
     self._completion_queue: deque[_UCEEventRef] = deque()
-    self._event_done_callback = None
+    self._event_done_callback: Callable[[str], None] | None = None
+    self._phase_signal_callback: Callable[[str, str, int], None] | None = None
     self._engine_queues: dict[str, deque[_EngineQueueEntry]] = {
       "BOA": deque(),
       "EVU": deque(),
@@ -312,6 +314,7 @@ class TileUCE:
     self._external_events_done.clear()
     self._completion_queue.clear()
     self._event_done_callback = None
+    self._phase_signal_callback = None
     self._clear_engine_queues(unregister=False)
     self.pmu.reset()
 
@@ -553,6 +556,12 @@ class TileUCE:
       self._issue_wait(ctx, cycle, tuple(ins.args), wait_all=True)
     elif op == ExecTileOp.FENCE:
       self.pmu.add_cycle("fence", 1)
+      ctx.pc += 1
+    elif op == ExecTileOp.SIGNAL_PHASE:
+      phase = ins.args[0]
+      if self._phase_signal_callback is not None and ctx.role_event_id is not None:
+        self._phase_signal_callback(ctx.role_event_id, phase, self.tile_id)
+      self.pmu.add_event("tile_signal")
       ctx.pc += 1
     elif op == ExecTileOp.LAUNCH_BOA:
       self._enqueue_engine_launch(ctx, "BOA", ins, cycle)

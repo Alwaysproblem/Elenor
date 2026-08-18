@@ -14,9 +14,7 @@ from .simulator import Simulator
 from .trace import trace_to_html
 from .workload_ir import (
   load_workload_ir,
-  load_workload_ir_pretty,
   print_workload_ir,
-  print_workload_ir_pretty,
   verify_workload_ir,
 )
 from .workloads import ALL_WORKLOADS, Workload
@@ -57,10 +55,7 @@ def main(argv=None) -> int:
   mode.add_argument("-l", "--list", action="store_true", help="list available workloads and exit")
   mode.add_argument("-w", "--workload", default=None, help="workload to run")
   mode.add_argument("-a", "--all", action="store_true", help="run all workloads")
-  mode.add_argument("--ir-file", metavar="PATH", help="load and run one external xDSL/MLIR module")
-  mode.add_argument(
-    "--ir-file-pretty", metavar="PATH", help="load and run one short custom-assembly IR module"
-  )
+  mode.add_argument("--ir-file", metavar="PATH", help="load and run one external IR module")
   parser.add_argument(
     "--hw-override",
     action="append",
@@ -97,16 +92,10 @@ def main(argv=None) -> int:
     metavar="PATH",
     help="write standalone trace.html to PATH (enables tracing)",
   )
-  print_mode = parser.add_mutually_exclusive_group()
-  print_mode.add_argument(
+  parser.add_argument(
     "--print-ir",
     action="store_true",
-    help="print canonical generic xDSL/MLIR workload IR and exit (no simulation)",
-  )
-  print_mode.add_argument(
-    "--print-ir-pretty",
-    action="store_true",
-    help="print short custom-assembly workload IR and exit (no simulation)",
+    help="print workload IR (custom assembly) and exit (no simulation)",
   )
   parser.add_argument("--json", action="store_true", help="emit JSON instead of text")
   parser.add_argument("--report", default=None, help="write report to this path (default: stdout)")
@@ -127,27 +116,24 @@ def main(argv=None) -> int:
   sim_cfg = SimConfig().with_overrides(**sim_overrides)
 
   workloads: list[Workload] = []
-  if args.ir_file is not None or args.ir_file_pretty is not None:
-    ir_path = args.ir_file if args.ir_file is not None else args.ir_file_pretty
+  if args.ir_file is not None:
+    ir_path = args.ir_file
     try:
-      if args.ir_file is not None:
-        module = load_workload_ir(args.ir_file)
-      else:
-        module = load_workload_ir_pretty(args.ir_file_pretty)
+      module = load_workload_ir(args.ir_file)
       task = verify_workload_ir(module)
     except (OSError, UnicodeError, ParseError, VerifyException) as exc:
       print(f"failed to load IR '{ir_path}': {exc}", file=sys.stderr)
       return 2
     workloads.append(
       Workload(
-        name=task.task_name.data,
+        name=task.sym_name.data,
         module=module,
         expected={},
-        description=f"External xDSL IR: {ir_path}",
+        description=f"External IR: {ir_path}",
       )
     )
   else:
-    names = [args.workload or "matmul"]
+    names = [args.workload or "pow"]
     if args.all:
       names = [c().name for c in ALL_WORKLOADS]
     for name in names:
@@ -158,12 +144,11 @@ def main(argv=None) -> int:
         return 2
       workloads.append(match())
 
-  if args.print_ir or args.print_ir_pretty:
-    printer = print_workload_ir if args.print_ir else print_workload_ir_pretty
+  if args.print_ir:
     for idx, wl in enumerate(workloads):
       if idx:
         sys.stdout.write("\n")
-      sys.stdout.write(printer(wl.module))
+      sys.stdout.write(print_workload_ir(wl.module))
     return 0
 
   outputs = []

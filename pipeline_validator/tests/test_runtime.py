@@ -7,7 +7,7 @@ These tests exercise the runtime / full_memory fidelity modes:
   - event_id + sequence (P0-4 stale rejection)
   - fault ring + reset/drain FSM
   - L2 capacity gate
-  - L1 slot frame bind
+  - L1 slot frame
   - NoC VC model
   - payload tracker
   - backward compat: timing_only unaffected
@@ -15,32 +15,30 @@ These tests exercise the runtime / full_memory fidelity modes:
 
 from __future__ import annotations
 
+from xdsl.dialects.builtin import ModuleOp
+
 from pipeline_validator.config import HardwareConfig, SimConfig
 from pipeline_validator.dialects.elenor import (
-  DispatchRoleOp,
-  EVUDescriptorOp,
-  GroupWaitEventOp,
-  LaunchEVUOp,
-  LaunchMFEOp,
-  MFEDescriptorOp,
-  ReturnOp,
-  SignalEventOp,
-  TileGroupTaskOp,
-  TileProgramOp,
-  TileRoleBindingOp,
-  WaitOp,
-  GroupActionLike,
-  TileInstructionLike,
+  NestAllocOp,
+  NestAwaitOp,
+  NestContextOp,
+  NestDispatchOp,
+  NestReturnOp,
+  NestTaskRangeOp,
+  TileAwaitOp,
+  TileEvuOp,
+  TileLoadOp,
+  TileProgramDefOp,
+  TileReturnOp,
 )
-from xdsl.dialects.builtin import ModuleOp
+from pipeline_validator.ir_lowering import lower_workload_ir
 from pipeline_validator.memory import L2SRAM, NoCRouter, PayloadTracker
 from pipeline_validator.runtime import EventStatus, EventTable, FaultCode, FaultRing
 from pipeline_validator.runtime.fault_ring import FaultDomain, FaultRecord
 from pipeline_validator.runtime.reset_domain import ResetDomain, ResetRequest
 from pipeline_validator.simulator import Simulator
-from pipeline_validator.ir_lowering import lower_workload_ir
 from pipeline_validator.workload_ir import parse_workload_ir, print_workload_ir
-from pipeline_validator.workloads import ALL_WORKLOADS, MatmulWorkload
+from pipeline_validator.workloads import ALL_WORKLOADS, PowWorkload
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -53,44 +51,55 @@ def make_sim(fidelity: str = "runtime") -> Simulator:
   return Simulator(hw, sim)
 
 
-def make_waiting_mfe_program(name: str = "ctx_wait_mfe") -> TileProgramOp:
-  """Tile program that launches one MFE load and waits for it."""
-  descriptors = [MFEDescriptorOp("mfe_load", "load", {"bytes": 128 * 1024, "ops": 0})]
-  instructions: list[TileInstructionLike] = [
-    LaunchMFEOp(descriptor="mfe_load", event="e_load"),
-    WaitOp(event="e_load"),
-    ReturnOp(),
-  ]
-  return TileProgramOp(name=name, descriptors=descriptors, instructions=instructions)
+def make_waiting_mfe_program(name: str = "ctx_wait_mfe") -> TileProgramDefOp:
+  load = TileLoadOp(bytes_total=128 * 1024, tag="e_load")
+  return TileProgramDefOp(name, [load, TileAwaitOp([load.result]), TileReturnOp()])
 
 
-def make_short_evu_program(name: str = "ctx_short_evu") -> TileProgramOp:
-  """Tile program that launches one short EVU op and waits for it."""
-  descriptors = [EVUDescriptorOp("evu_short", "relu", {"ops": 16})]
-  instructions: list[TileInstructionLike] = [
-    LaunchEVUOp(descriptor="evu_short", event="e_evu"),
-    WaitOp(event="e_evu"),
-    ReturnOp(),
-  ]
-  return TileProgramOp(name=name, descriptors=descriptors, instructions=instructions)
+def make_short_evu_program(name: str = "ctx_short_evu") -> TileProgramDefOp:
+  evu = TileEvuOp(op_name="relu", evu_ops=16, tag="e_evu")
+  return TileProgramDefOp(name, [evu, TileAwaitOp([evu.result]), TileReturnOp()])
 
 
 def make_two_role_same_tile_task() -> ModuleOp:
-  """Two roles bound to the same tile (mask 0x01) to exercise UCE context
-  switching.  Returns a ``ModuleOp`` containing one ``TileGroupTaskOp``."""
-  roles = [
-    TileRoleBindingOp(role_id=0, tile_mask=0x01, program=make_waiting_mfe_program()),
-    TileRoleBindingOp(role_id=1, tile_mask=0x01, program=make_short_evu_program()),
-  ]
-  actions: list[GroupActionLike] = [
-    DispatchRoleOp(role_id=0, event="ev_role0"),
-    DispatchRoleOp(role_id=1, event="ev_role1"),
-    GroupWaitEventOp(event="ev_role0"),
-    GroupWaitEventOp(event="ev_role1"),
-    SignalEventOp(event="group_task_done"),
-  ]
-  task = TileGroupTaskOp(name="two_role_same_tile", streams=[], roles=roles, actions=actions)
-  return ModuleOp([task])
+  """Dispatch two programs to one tile to exercise context switching."""
+  prog0 = make_waiting_mfe_program()
+  prog1 = make_short_evu_program()
+  tasks = NestTaskRangeOp(0, 1)
+  buffer = NestAllocOp("l2_buf", 4096)
+  dispatch0 = NestDispatchOp(
+    "ctx_wait_mfe",
+    tasks.result,
+    buffer.result,
+    buffer.result,
+    "ev_role0",
+    "",
+    "",
+  )
+  dispatch1 = NestDispatchOp(
+    "ctx_short_evu",
+    tasks.result,
+    buffer.result,
+    buffer.result,
+    "ev_role1",
+    "",
+    "",
+  )
+  context = NestContextOp(
+    "two_role_same_tile",
+    [
+      buffer,
+      tasks,
+      dispatch0,
+      dispatch1,
+      NestAwaitOp([dispatch0.grid_done, dispatch1.grid_done]),
+      NestReturnOp(),
+    ],
+    placement=1,
+  )
+  return ModuleOp([prog0, prog1, context])
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +111,7 @@ class TestRuntimeColdWarm:
   def test_cold_launch_includes_program_load(self):
     """Cold launch's PMU records program_cold_load > 0."""
     s = make_sim("runtime")
-    wl = MatmulWorkload()
+    wl = PowWorkload()
     r = s.run(wl.module)
     assert r.completed
     cold = r.pmu.named_cycles.get("program_cold_load", 0)
@@ -111,7 +120,7 @@ class TestRuntimeColdWarm:
   def test_warm_launch_no_program_reload(self):
     """Second launch of same program: 0 new cold-load cycles."""
     s = make_sim("runtime")
-    wl = MatmulWorkload()
+    wl = PowWorkload()
     _r1 = s.run(wl.module)
     c1 = s.group.program_table.cold_load_cycles
     r2 = s.run(wl.module)
@@ -122,7 +131,7 @@ class TestRuntimeColdWarm:
   def test_warm_faster_than_cold(self):
     """Warm launch completes in fewer cycles than cold."""
     s = make_sim("runtime")
-    wl = MatmulWorkload()
+    wl = PowWorkload()
     r1 = s.run(wl.module)
     r2 = s.run(wl.module)
     assert r2.cycles < r1.cycles, f"warm {r2.cycles} should be < cold {r1.cycles}"
@@ -130,7 +139,7 @@ class TestRuntimeColdWarm:
   def test_program_epoch_invalidate_on_group_reset(self):
     """Group reset bumps epoch; next dispatch is cold again."""
     s = make_sim("runtime")
-    wl = MatmulWorkload()
+    wl = PowWorkload()
     s.run(wl.module)
     c1 = s.group.program_table.cold_load_cycles
     s.group.program_table.invalidate_group()
@@ -141,7 +150,7 @@ class TestRuntimeColdWarm:
   def test_tile_reset_invalidates_residency(self):
     """Per-tile reset makes that tile cold again."""
     s = make_sim("runtime")
-    wl = MatmulWorkload()
+    wl = PowWorkload()
     s.run(wl.module)
     c1 = s.group.program_table.cold_load_cycles
     s.group.program_table.invalidate_tile(0)
@@ -154,7 +163,7 @@ class TestRuntimeColdWarm:
     produce the same program_id/program_hash; changing a descriptor scalar
     changes the hash and triggers a fresh cold install."""
     s = make_sim("runtime")
-    wl = MatmulWorkload()
+    wl = PowWorkload()
 
     before = print_workload_ir(wl.module)
     lowered1 = lower_workload_ir(wl.module)
@@ -180,7 +189,8 @@ class TestRuntimeColdWarm:
     assert after2 == before
     assert r2.pmu.named_cycles.get("program_cold_load", 0) == 0
 
-    mutated_text = before.replace("k = 256 : index", "k = 255 : index", 1)
+    # Mutate a pow descriptor scalar (exponent 2 -> 3) to force hash change
+    mutated_text = before.replace("exponent = 2 ops = 65536", "exponent = 3 ops = 65536", 1)
     mutated_module = parse_workload_ir(mutated_text, source_name="<mutated>")
     lowered3 = lower_workload_ir(mutated_module)
     s._assign_program_ids(lowered3)
@@ -268,7 +278,7 @@ class TestFaultReset:
 
   def test_trigger_fault_writes_record_and_starts_drain(self):
     s = make_sim("runtime")
-    wl = MatmulWorkload()
+    wl = PowWorkload()
     s.run(wl.module)
     idx = s.group.trigger_fault(FaultCode.ENGINE_INTERNAL_FAULT, tile_id=1, cycle=100)
     assert idx >= 0
@@ -295,10 +305,37 @@ class TestFaultReset:
     hw = hw.with_overrides(group_sram_bytes=1024)  # 1 KB — too small
     sim = SimConfig(fidelity="full_memory", max_cycles=10000)
     s = Simulator(hw, sim)
-    wl = MatmulWorkload()
+    wl = PowWorkload()
     r = s.run(wl.module)
     assert not r.completed
     assert "faulted" in r.reason
+
+  def test_l2_exact_capacity_completes_and_overshoot_faults(self):
+    """4 pow chunks (4 x 128 KiB per chunk) fit exactly in a 512 KiB L2
+    and complete; a 5th chunk overshoots capacity and faults.  This
+    proves the alloc/store/release accounting stays balanced (no double
+    accounting on DMA_STORE touching an existing slot)."""
+    chunk_bytes = 128 * 128 * 2  # per-tile plane
+    bytes_per_chunk = chunk_bytes * 4  # 4 tiles' input per group chunk
+    hw = HardwareConfig()
+    hw = hw.with_overrides(group_sram_bytes=4 * bytes_per_chunk)
+    sim = SimConfig(fidelity="full_memory", max_cycles=50000)
+    s = Simulator(hw, sim)
+    wl = PowWorkload()
+    r = s.run(wl.module)
+    assert r.completed, r.reason
+
+    # overshoot: 5 chunks need 5 x bytes_per_chunk but only 4 x fit
+    from pipeline_validator.workload_builders import make_pow_task
+
+    module5 = make_pow_task(num_group_chunks=5)
+    hw2 = HardwareConfig()
+    hw2 = hw2.with_overrides(group_sram_bytes=4 * bytes_per_chunk)
+    sim2 = SimConfig(fidelity="full_memory", max_cycles=50000)
+    s2 = Simulator(hw2, sim2)
+    r2 = s2.run(module5)
+    assert not r2.completed
+    assert "faulted" in r2.reason
 
 
 # ---------------------------------------------------------------------------
