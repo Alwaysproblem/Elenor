@@ -40,7 +40,15 @@ class L2SRAM:
 
   def alloc_slot(self, name: str, size: int,
                  bank_policy: str = "DEFAULT") -> L2Slot | None:
-    """Allocate an L2 slot.  Returns None if capacity exhausted (fault)."""
+    """Allocate an L2 slot.  Returns None if capacity exhausted (fault).
+
+    Idempotent: if a slot with the same name already exists, it is
+    returned as-is (no double accounting).  This covers DMA_STORE
+    addressing a slot that the matching prefetch already allocated.
+    """
+    existing = self._slots.get(name)
+    if existing is not None:
+      return existing
     if not self.capacity_ok(size):
       self.pmu_capacity_fault_count += 1
       return None

@@ -175,7 +175,9 @@ class TileGroupSequencer:
       self.pmu.add_event("tgs_dma_store")
       self.action_index += 1
     elif op == ExecGroupActionOp.DISPATCH_ROLE:
-      role_id, = ins.args
+      role_id = ins.args[0]
+      inrel_tag = ins.args[1] if len(ins.args) > 1 else ""
+      outready_tag = ins.args[2] if len(ins.args) > 2 else ""
       assert self.task is not None
       binding = self.task.role_bindings.get(role_id)
       if binding is None:
@@ -186,7 +188,13 @@ class TileGroupSequencer:
         return None
       ev = ins.dst or f"ev_role{role_id}"
       self._role_events[role_id] = ev
-      self.group.dispatch_role(binding, cycle, event_id=ev)
+      phase_event_ids = {}
+      if inrel_tag:
+        phase_event_ids["input_released"] = inrel_tag
+      if outready_tag:
+        phase_event_ids["output_ready"] = outready_tag
+      self.group.dispatch_role(
+        binding, cycle, event_id=ev, phase_event_ids=phase_event_ids or None)
       self.pmu.add_event("tgs_dispatch_role")
       self.action_index += 1
       return (role_id, ev)
@@ -214,6 +222,12 @@ class TileGroupSequencer:
     elif op == ExecGroupActionOp.SIGNAL_EVENT:
       self._events_done.add(ins.args[0])
       self.pmu.add_event("tgs_signal_event")
+      self.action_index += 1
+    elif op == ExecGroupActionOp.RELEASE_L2:
+      slot = ins.args[0]
+      if self.group.memory_enabled:
+        self.group.l2_sram.free_slot(slot)
+      self.pmu.add_event("tgs_release_l2")
       self.action_index += 1
     else:
       self.action_index += 1

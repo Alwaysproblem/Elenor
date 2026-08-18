@@ -1,4 +1,25 @@
-"""ELENOR xDSL dialect for pipeline validator workload IR."""
+"""ELENOR xDSL dialect for pipeline validator workload IR.
+
+Function-call style IR (see reference.mlir): the module contains top-level
+named definitions - ``nest.context @name { ... }`` and ``tile.program @name
+{ ... }`` - and the context body dispatches tile programs by symbol
+reference.  Async engine/DMA ops produce SSA event values typed
+``!nest.event<tag>`` / ``!tile.event<tag>``; ``await`` consumes them.
+
+Key design points mirrored from reference.mlir:
+
+  - placement (tile mask) lives on ``nest.context``, not on dispatch;
+  - dispatch consumes a logical task range plus ins/outs L2 buffers and a
+    ``depends_on`` event, and returns THREE aggregated events:
+    ``grid_done`` / ``input_released`` / ``output_ready``;
+  - tile programs mark their L2-read / L2-write phases with
+    ``tile.signal``, which drives the dispatch phase events;
+  - buffers are SSA values (``!nest.l2_buffer<slot>``), and the event type
+    tag doubles as the runtime event id shared by the simulator and trace.
+
+Prefix hierarchy: ``tile.*`` (tile level), ``nest.*`` (group level),
+``nexus.*`` (host level, deferred - not yet implemented).
+"""
 
 from __future__ import annotations
 
@@ -6,34 +27,82 @@ from collections.abc import Sequence
 from typing import ClassVar, Self, TypeAlias
 
 from xdsl.dialects.builtin import (
-  ArrayAttr,
-  DictionaryAttr,
-  FloatAttr,
   IndexType,
   IntegerAttr,
   StringAttr,
-  f64,
-  i1,
 )
-from xdsl.ir import Attribute, Block, Dialect, Operation, Region
-from xdsl.irdl import IRDLOperation, irdl_op_definition, opt_prop_def, prop_def, region_def, traits_def
-from xdsl.parser import Parser
+from xdsl.ir import (
+  Attribute,
+  Block,
+  Dialect,
+  Operation,
+  ParametrizedAttribute,
+  Region,
+  TypeAttribute,
+)
+from xdsl.irdl import (
+  IRDLOperation,
+  irdl_attr_definition,
+  irdl_op_definition,
+  operand_def,
+  opt_prop_def,
+  prop_def,
+  region_def,
+  result_def,
+  traits_def,
+  var_operand_def,
+)
+from xdsl.parser import AttrParser, Parser
 from xdsl.printer import Printer
 from xdsl.traits import NoTerminator
 
-ScalarParam: TypeAlias = bool | int | float | str
+# ---------------------------------------------------------------------------
+# SSA types: events, L2 buffers, task range
+# ---------------------------------------------------------------------------
+
+
+@irdl_attr_definition
+class NestEvent(ParametrizedAttribute, TypeAttribute):
+  """Group-level async event: ``!nest.event<tag>``.
+
+  The tag is the runtime event id shared by the simulator and the trace.
+  """
+
+  name = "nest.event"
+  tag: StringAttr
+
+
+@irdl_attr_definition
+class TileEvent(ParametrizedAttribute, TypeAttribute):
+  """Tile-level async event: ``!tile.event<tag>``."""
+
+  name = "tile.event"
+  tag: StringAttr
+
+
+@irdl_attr_definition
+class NestBuffer(ParametrizedAttribute, TypeAttribute):
+  """Context-owned L2 buffer: ``!nest.l2_buffer<slot>``.
+
+  The slot name is the L2 slot id used by the group DMA latency model.
+  """
+
+  name = "nest.l2_buffer"
+  slot: StringAttr
+
+
+@irdl_attr_definition
+class TaskRange(ParametrizedAttribute, TypeAttribute):
+  """Logical task domain: ``!nest.task_range``.
+
+  Logical task ids are NOT physical Tile ids (reference.mlir section 3).
+  """
+
+  name = "nest.task_range"
 
 
 def _index_attr(value: int) -> IntegerAttr:
   return IntegerAttr(value, IndexType())
-
-
-def _i1_attr(value: bool) -> IntegerAttr:
-  return IntegerAttr(1 if value else 0, i1)
-
-
-def _string_attr(value: str | None) -> StringAttr | None:
-  return None if value is None else StringAttr(value)
 
 
 def _props(mapping: dict[str, Attribute | None]) -> dict[str, Attribute]:
@@ -44,68 +113,33 @@ def _single_block_region(ops: Sequence[IRDLOperation]) -> Region:
   return Region([Block(list(ops))])
 
 
-def _encode_scalar(value: ScalarParam) -> Attribute:
-  if isinstance(value, bool):
-    return _i1_attr(value)
-  if isinstance(value, int):
-    return _index_attr(value)
-  if isinstance(value, float):
-    return FloatAttr(value, f64)
-  if isinstance(value, str):
-    return StringAttr(value)
-  raise TypeError(f"descriptor param must be bool/int/float/str, got {type(value).__name__}")
-
-
-def _decode_scalar(attr: Attribute) -> ScalarParam:
-  if isinstance(attr, IntegerAttr):
-    if attr.type == i1:
-      return attr.value.data != 0
-    return int(attr.value.data)
-  if isinstance(attr, FloatAttr):
-    return float(attr.value.data)
-  if isinstance(attr, StringAttr):
-    return attr.data
-  raise TypeError(f"cannot decode attribute {attr!r} to scalar")
-
-
-def _encode_params(params: dict[str, ScalarParam]) -> DictionaryAttr:
-  return DictionaryAttr({k: _encode_scalar(v) for k, v in sorted(params.items())})
-
-
-def _decode_params(attr: DictionaryAttr) -> dict[str, ScalarParam]:
-  return {k: _decode_scalar(v) for k, v in attr.data.items()}
-
-
-def _encode_array(items: tuple[ScalarParam, ...]) -> ArrayAttr:
-  return ArrayAttr([_encode_scalar(item) for item in items])
-
-def _decode_array(attr: ArrayAttr) -> tuple[ScalarParam, ...]:
-  return tuple(_decode_scalar(item) for item in attr.data)
-
-
-def _print_optional_comment(printer: Printer, comment: StringAttr | None) -> None:
-  if comment is not None:
-    printer.print_string(" comment=")
-    printer.print_string_literal(comment.data)
-
-
-def _parse_optional_comment(parser: Parser) -> str | None:
-  if parser.parse_optional_keyword("comment") is None:
-    return None
-  parser.parse_punctuation("=")
-  return parser.parse_str_literal()
-
-
-def _print_optional_int_kw(printer: Printer, keyword: str, value: int) -> None:
-  printer.print_string(f" {keyword}=")
+def _print_int_kw(printer: Printer, keyword: str, value: int) -> None:
+  printer.print_string(f" {keyword} = ")
   printer.print_int(value)
 
 
-def _parse_optional_int_kw(parser: Parser, keyword: str) -> int | None:
+def _parse_int_kw(parser: Parser, keyword: str) -> int:
+  parser.parse_keyword(keyword)
+  parser.parse_punctuation("=")
+  return parser.parse_integer()
+
+
+def _parse_opt_int_kw(parser: Parser, keyword: str) -> int | None:
   if parser.parse_optional_keyword(keyword) is None:
     return None
   parser.parse_punctuation("=")
   return parser.parse_integer()
+
+
+def _print_str_kw(printer: Printer, keyword: str, value: str) -> None:
+  printer.print_string(f" {keyword} = ")
+  printer.print_string_literal(value)
+
+
+def _parse_str_kw(parser: Parser, keyword: str) -> str:
+  parser.parse_keyword(keyword)
+  parser.parse_punctuation("=")
+  return parser.parse_str_literal()
 
 
 def _print_region(printer: Printer, region: Region) -> None:
@@ -113,1443 +147,890 @@ def _print_region(printer: Printer, region: Region) -> None:
   printer.print_region(region, print_empty_block=False)
 
 
-def _parse_region(parser: Parser) -> Region:
+def _parse_region_ops(parser: Parser) -> list:
   region = parser.parse_region()
   if not region.blocks:
     region.add_block(Block())
   if len(region.blocks) != 1:
     parser.raise_error("expected exactly one block in region")
-  return region
-
-def _parse_region_ops(parser: Parser) -> list:
-  region = _parse_region(parser)
   ops = list(region.blocks[0].ops)
   for op in ops:
     op.detach()
   return ops
 
 
-def _parse_array_attr(parser: Parser, context_msg: str) -> ArrayAttr:
+def _parse_event_type(parser: AttrParser, cls: type[Attribute]) -> Attribute:
+  parser.parse_punctuation(":")
   attr = parser.parse_attribute()
-  if not isinstance(attr, ArrayAttr):
-    parser.raise_error(f"expected {context_msg}")
+  if not isinstance(attr, cls):
+    parser.raise_error(f"expected {cls.name} type")
   return attr
 
 
-EngineDescriptorLike: TypeAlias = "BOADescriptorOp | EVUDescriptorOp | MFEDescriptorOp | USEDescriptorOp"
-GroupActionLike: TypeAlias = (
-  "InitStreamOp | GroupDMAPrefetchOp | GroupDMAStoreOp | DispatchRoleOp"
-  " | GroupWaitEventOp | GroupBarrierOp | CollectiveRunOp | SignalEventOp"
+def _print_event_type(printer: Printer, event_type: Attribute) -> None:
+  printer.print_string(" : ")
+  printer.print_attribute(event_type)
+
+
+def _parse_symbol(parser: Parser) -> str:
+  return parser.parse_symbol_name().data
+
+
+def _print_symbol(printer: Printer, sym: str) -> None:
+  printer.print_string(" ")
+  printer.print_symbol_name(sym)
+
+
+def _parse_operand_group(parser: Parser, keyword: str) -> list:
+  parser.parse_keyword(keyword)
+  return parser.parse_comma_separated_list(
+    parser.Delimiter.PAREN, parser.parse_operand, f" in {keyword}(...) operand list"
+  )
+
+
+def _print_operand_group(printer: Printer, keyword: str, operands: Sequence) -> None:
+  printer.print_string(f" {keyword}(")
+  for i, operand in enumerate(operands):
+    if i:
+      printer.print_string(", ")
+    printer.print_operand(operand)
+  printer.print_string(")")
+
+
+def _parse_depends_on(parser: Parser) -> list:
+  if parser.parse_optional_keyword("depends_on") is None:
+    return []
+  return list(
+    parser.parse_comma_separated_list(
+      parser.Delimiter.PAREN, parser.parse_operand, " in depends_on(...) operand list"
+    )
+  )
+
+
+def _print_depends_on(printer: Printer, operands: Sequence) -> None:
+  if not operands:
+    return
+  _print_operand_group(printer, "depends_on", operands)
+
+
+NestActionLike: TypeAlias = (  # noqa: UP040
+  "NestAllocOp | NestTaskRangeOp | NestPrefetchOp | NestDMAStoreOp"
+  " | NestDispatchOp | NestCollectiveOp | NestReleaseOp | NestAwaitOp"
+  " | NestBarrierOp | NestReturnOp"
 )
-TileInstructionLike: TypeAlias = (
-  "LabelOp | NopOp | MoveOp | AddOp | CompareOp | BranchOp | BranchPredicateOp"
-  " | BranchEosOp | ReturnOp | LaunchBOAOp | LaunchEVUOp | LaunchMFEOp"
-  " | LaunchUSEOp | DMALoadOp | DMAStoreOp | WaitOp | WaitAllOp | FenceOp"
-  " | StreamPopOp | StreamPushOp | StreamAcquireOp | StreamReleaseOp"
-  " | StreamEosOp | PatchDescriptorOp | LoadDescriptorOp | StoreDescriptorOp"
-  " | ProfileBeginOp | ProfileEndOp | TrapOp"
+TileActionLike: TypeAlias = (  # noqa: UP040
+  "TileLoadOp | TileStoreOp | TilePowOp | TileEvuOp | TileBoaOp"
+  " | TileAwaitOp | TileSignalOp | TileReturnOp"
 )
 
 
-class _BaseDescriptorOp(IRDLOperation):
-  ENGINE_KIND: ClassVar[str] = ""
-
-  descriptor_name = prop_def(StringAttr)
-  op_name = prop_def(StringAttr)
-  params = prop_def(DictionaryAttr)
-  comment = opt_prop_def(StringAttr)
-
-  def __init__(self, name: str, op_name: str, params: dict[str, ScalarParam], comment: str | None = None):
-    super().__init__(
-      properties=_props(
-        {
-          "descriptor_name": StringAttr(name),
-          "op_name": StringAttr(op_name),
-          "params": _encode_params(params),
-          "comment": _string_attr(comment),
-        }
-      )
-    )
-
-  def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_string_literal(self.descriptor_name.data)
-    printer.print_string(" ")
-    printer.print_string_literal(self.op_name.data)
-    printer.print_string(" ")
-    printer.print_attribute(self.params)
-    _print_optional_comment(printer, self.comment)
-
-  @classmethod
-  def parse(cls, parser: Parser) -> Self:
-    name = parser.parse_str_literal()
-    op_name = parser.parse_str_literal()
-    params_attr = parser.parse_attribute()
-    if not isinstance(params_attr, DictionaryAttr):
-      parser.raise_error("expected descriptor parameter dictionary")
-    comment = _parse_optional_comment(parser)
-    return cls(name, op_name, _decode_params(params_attr), comment)
+# ---------------------------------------------------------------------------
+# Top-level definitions
+# ---------------------------------------------------------------------------
 
 
 @irdl_op_definition
-class BOADescriptorOp(_BaseDescriptorOp):
-  name = "elenor.boa.descriptor"
-  ENGINE_KIND: ClassVar[str] = "BOA"
+class NestContextOp(IRDLOperation):
+  """``nest.context @name placement = M { ... }`` - one tile-group context.
 
+  ``placement`` is the tile-group placement mask (reference.mlir
+  ``#nest.tile_group<mask = 0xF>``): the physical tile set every dispatch
+  in this context runs on.
+  """
 
-@irdl_op_definition
-class EVUDescriptorOp(_BaseDescriptorOp):
-  name = "elenor.evu.descriptor"
-  ENGINE_KIND: ClassVar[str] = "EVU"
+  name = "nest.context"
 
+  sym_name = prop_def(StringAttr)
+  placement = prop_def(IntegerAttr)
+  completion_event = prop_def(StringAttr, default_value=StringAttr("context_done"))
 
-@irdl_op_definition
-class MFEDescriptorOp(_BaseDescriptorOp):
-  name = "elenor.mfe.descriptor"
-  ENGINE_KIND: ClassVar[str] = "MFE"
-
-
-@irdl_op_definition
-class USEDescriptorOp(_BaseDescriptorOp):
-  name = "elenor.use.descriptor"
-  ENGINE_KIND: ClassVar[str] = "USE"
-
-
-@irdl_op_definition
-class TileProgramOp(IRDLOperation):
-  name = "elenor.runtime.tile_program"
-
-  program_name = prop_def(StringAttr)
-  version = prop_def(IntegerAttr, default_value=_index_attr(1))
-  comment = opt_prop_def(StringAttr)
-
-  descriptors = region_def("single_block")
-  instructions = region_def("single_block")
+  body = region_def("single_block")
 
   traits = traits_def(NoTerminator())
 
   def __init__(
     self,
-    name: str,
-    descriptors: Sequence[EngineDescriptorLike],
-    instructions: Sequence[TileInstructionLike],
-    version: int = 1,
-    comment: str | None = None,
+    sym_name: str,
+    body: Sequence[NestActionLike],
+    placement: int = 0x0F,
+    completion_event: str = "context_done",
   ):
     super().__init__(
       properties=_props(
         {
-          "program_name": StringAttr(name),
-          "version": _index_attr(version),
-          "comment": _string_attr(comment),
-        }
-      ),
-      regions=[_single_block_region(list(descriptors)), _single_block_region(list(instructions))],
-    )
-
-  def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_string_literal(self.program_name.data)
-    if self.version.value.data != 1:
-      _print_optional_int_kw(printer, "version", self.version.value.data)
-    _print_optional_comment(printer, self.comment)
-    _print_region(printer, self.descriptors)
-    _print_region(printer, self.instructions)
-
-  @classmethod
-  def parse(cls, parser: Parser) -> Self:
-    name = parser.parse_str_literal()
-    version = _parse_optional_int_kw(parser, "version")
-    comment = _parse_optional_comment(parser)
-    descriptors = _parse_region_ops(parser)
-    instructions = _parse_region_ops(parser)
-    return cls(
-      name,
-      descriptors,
-      instructions,
-      version=1 if version is None else version,
-      comment=comment,
-    )
-
-
-@irdl_op_definition
-class StreamDescOp(IRDLOperation):
-  name = "elenor.runtime.stream_desc"
-
-  queue_id = prop_def(IntegerAttr)
-  depth = prop_def(IntegerAttr)
-  producer_mask = prop_def(IntegerAttr)
-  consumer_mask = prop_def(IntegerAttr)
-  payload_slot_id = prop_def(IntegerAttr, default_value=_index_attr(0))
-  token_stride = prop_def(IntegerAttr, default_value=_index_attr(32))
-  pmu_stream_id = prop_def(IntegerAttr, default_value=_index_attr(0))
-  comment = opt_prop_def(StringAttr)
-
-  def __init__(
-    self,
-    queue_id: int,
-    depth: int,
-    producer_mask: int,
-    consumer_mask: int,
-    payload_slot_id: int = 0,
-    token_stride: int = 32,
-    pmu_stream_id: int = 0,
-    comment: str | None = None,
-  ):
-    super().__init__(
-      properties=_props(
-        {
-          "queue_id": _index_attr(queue_id),
-          "depth": _index_attr(depth),
-          "producer_mask": _index_attr(producer_mask),
-          "consumer_mask": _index_attr(consumer_mask),
-          "payload_slot_id": _index_attr(payload_slot_id),
-          "token_stride": _index_attr(token_stride),
-          "pmu_stream_id": _index_attr(pmu_stream_id),
-          "comment": _string_attr(comment),
-        }
-      )
-    )
-
-  def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_int(self.queue_id.value.data)
-    printer.print_string(" ")
-    printer.print_int(self.depth.value.data)
-    printer.print_string(" ")
-    printer.print_int(self.producer_mask.value.data)
-    printer.print_string(" ")
-    printer.print_int(self.consumer_mask.value.data)
-    if self.payload_slot_id.value.data != 0:
-      _print_optional_int_kw(printer, "payload_slot", self.payload_slot_id.value.data)
-    if self.token_stride.value.data != 32:
-      _print_optional_int_kw(printer, "token_stride", self.token_stride.value.data)
-    if self.pmu_stream_id.value.data != 0:
-      _print_optional_int_kw(printer, "pmu_stream", self.pmu_stream_id.value.data)
-    _print_optional_comment(printer, self.comment)
-
-  @classmethod
-  def parse(cls, parser: Parser) -> Self:
-    queue_id = parser.parse_integer()
-    depth = parser.parse_integer()
-    producer_mask = parser.parse_integer()
-    consumer_mask = parser.parse_integer()
-    payload_slot_id = _parse_optional_int_kw(parser, "payload_slot")
-    token_stride = _parse_optional_int_kw(parser, "token_stride")
-    pmu_stream_id = _parse_optional_int_kw(parser, "pmu_stream")
-    comment = _parse_optional_comment(parser)
-    return cls(
-      queue_id,
-      depth,
-      producer_mask,
-      consumer_mask,
-      payload_slot_id=0 if payload_slot_id is None else payload_slot_id,
-      token_stride=32 if token_stride is None else token_stride,
-      pmu_stream_id=0 if pmu_stream_id is None else pmu_stream_id,
-      comment=comment,
-    )
-
-
-@irdl_op_definition
-class TileRoleBindingOp(IRDLOperation):
-  name = "elenor.runtime.tile_role"
-
-  role_id = prop_def(IntegerAttr)
-  tile_mask = prop_def(IntegerAttr)
-  in_stream = opt_prop_def(IntegerAttr)
-  out_stream = opt_prop_def(IntegerAttr)
-  comment = opt_prop_def(StringAttr)
-
-  program = region_def("single_block")
-
-  traits = traits_def(NoTerminator())
-
-  def __init__(
-    self,
-    role_id: int,
-    tile_mask: int,
-    program: TileProgramOp,
-    in_stream: int | None = None,
-    out_stream: int | None = None,
-    comment: str | None = None,
-  ):
-    super().__init__(
-      properties=_props(
-        {
-          "role_id": _index_attr(role_id),
-          "tile_mask": _index_attr(tile_mask),
-          "in_stream": None if in_stream is None else _index_attr(in_stream),
-          "out_stream": None if out_stream is None else _index_attr(out_stream),
-          "comment": _string_attr(comment),
-        }
-      ),
-      regions=[_single_block_region([program])],
-    )
-
-  def print(self, printer: Printer) -> None:
-    printer.print_string(" role=")
-    printer.print_int(self.role_id.value.data)
-    printer.print_string(" tile_mask=")
-    printer.print_int(self.tile_mask.value.data)
-    if self.in_stream is not None:
-      _print_optional_int_kw(printer, "in", self.in_stream.value.data)
-    if self.out_stream is not None:
-      _print_optional_int_kw(printer, "out", self.out_stream.value.data)
-    _print_optional_comment(printer, self.comment)
-    _print_region(printer, self.program)
-
-  @classmethod
-  def parse(cls, parser: Parser) -> Self:
-    parser.parse_keyword("role")
-    parser.parse_punctuation("=")
-    role_id = parser.parse_integer()
-    parser.parse_keyword("tile_mask")
-    parser.parse_punctuation("=")
-    tile_mask = parser.parse_integer()
-    in_stream = _parse_optional_int_kw(parser, "in")
-    out_stream = _parse_optional_int_kw(parser, "out")
-    comment = _parse_optional_comment(parser)
-    program = _parse_region_ops(parser)
-    if len(program) != 1:
-      parser.raise_error("expected exactly one elenor.runtime.tile_program in role region")
-    return cls(
-      role_id,
-      tile_mask,
-      program[0],
-      in_stream=in_stream,
-      out_stream=out_stream,
-      comment=comment,
-    )
-
-
-@irdl_op_definition
-class TileGroupTaskOp(IRDLOperation):
-  name = "elenor.runtime.tile_group_task"
-
-  task_name = prop_def(StringAttr)
-  completion_event = prop_def(StringAttr, default_value=StringAttr("group_task_done"))
-  comment = opt_prop_def(StringAttr)
-
-  streams = region_def("single_block")
-  roles = region_def("single_block")
-  actions = region_def("single_block")
-
-  traits = traits_def(NoTerminator())
-
-  def __init__(
-    self,
-    name: str,
-    streams: Sequence[StreamDescOp],
-    roles: Sequence[TileRoleBindingOp],
-    actions: Sequence[GroupActionLike],
-    completion_event: str = "group_task_done",
-    comment: str | None = None,
-  ):
-    super().__init__(
-      properties=_props(
-        {
-          "task_name": StringAttr(name),
+          "sym_name": StringAttr(sym_name),
+          "placement": _index_attr(placement),
           "completion_event": StringAttr(completion_event),
-          "comment": _string_attr(comment),
         }
       ),
-      regions=[
-        _single_block_region(list(streams)),
-        _single_block_region(list(roles)),
-        _single_block_region(list(actions)),
-      ],
+      regions=[_single_block_region(list(body))],
     )
 
   def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_string_literal(self.task_name.data)
-    if self.completion_event.data != "group_task_done":
-      printer.print_string(" completion=")
-      printer.print_string_literal(self.completion_event.data)
-    _print_optional_comment(printer, self.comment)
-    _print_region(printer, self.streams)
-    _print_region(printer, self.roles)
-    _print_region(printer, self.actions)
+    _print_symbol(printer, self.sym_name.data)
+    _print_int_kw(printer, "placement", self.placement.value.data)
+    if self.completion_event.data != "context_done":
+      _print_str_kw(printer, "completion", self.completion_event.data)
+    _print_region(printer, self.body)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    task_name = parser.parse_str_literal()
-    completion_event = "group_task_done"
+    sym_name = _parse_symbol(parser)
+    placement = _parse_int_kw(parser, "placement")
+    completion_event = "context_done"
     if parser.parse_optional_keyword("completion") is not None:
       parser.parse_punctuation("=")
       completion_event = parser.parse_str_literal()
-    comment = _parse_optional_comment(parser)
-    streams = _parse_region_ops(parser)
-    roles = _parse_region_ops(parser)
-    actions = _parse_region_ops(parser)
-    return cls(
-      task_name,
-      streams,
-      roles,
-      actions,
-      completion_event=completion_event,
-      comment=comment,
-    )
+    body = _parse_region_ops(parser)
+    return cls(sym_name, body, placement=placement, completion_event=completion_event)
 
 
 @irdl_op_definition
-class InitStreamOp(IRDLOperation):
-  name = "elenor.runtime.group.init_stream"
+class TileProgramDefOp(IRDLOperation):
+  """``tile.program @name { ... }`` - one tile program definition."""
 
-  queue_id = prop_def(IntegerAttr)
-  depth = prop_def(IntegerAttr)
-  producer_mask = prop_def(IntegerAttr)
-  consumer_mask = prop_def(IntegerAttr)
-  comment = opt_prop_def(StringAttr)
+  name = "tile.program"
 
-  def __init__(
-    self, queue_id: int, depth: int, producer_mask: int, consumer_mask: int, comment: str | None = None
-  ):
+  sym_name = prop_def(StringAttr)
+
+  body = region_def("single_block")
+
+  traits = traits_def(NoTerminator())
+
+  def __init__(self, sym_name: str, body: Sequence[TileActionLike]):
     super().__init__(
+      properties=_props({"sym_name": StringAttr(sym_name)}),
+      regions=[_single_block_region(list(body))],
+    )
+
+  def print(self, printer: Printer) -> None:
+    _print_symbol(printer, self.sym_name.data)
+    _print_region(printer, self.body)
+
+  @classmethod
+  def parse(cls, parser: Parser) -> Self:
+    sym_name = _parse_symbol(parser)
+    body = _parse_region_ops(parser)
+    return cls(sym_name, body)
+
+
+# ---------------------------------------------------------------------------
+# nest.* context-body actions
+# ---------------------------------------------------------------------------
+
+
+@irdl_op_definition
+class NestAllocOp(IRDLOperation):
+  """``%b = nest.alloc slot = "s" bytes = N : !nest.l2_buffer<s>``.
+
+  Context-owned L2 buffer (reference.mlir section 1).
+  """
+
+  name = "nest.alloc"
+
+  slot = prop_def(StringAttr)
+  bytes_total = prop_def(IntegerAttr)
+
+  result = result_def(NestBuffer)
+
+  def __init__(self, slot: str, bytes_total: int):
+    super().__init__(
+      result_types=[NestBuffer(StringAttr(slot))],
       properties=_props(
         {
-          "queue_id": _index_attr(queue_id),
-          "depth": _index_attr(depth),
-          "producer_mask": _index_attr(producer_mask),
-          "consumer_mask": _index_attr(consumer_mask),
-          "comment": _string_attr(comment),
+          "slot": StringAttr(slot),
+          "bytes_total": _index_attr(bytes_total),
         }
-      )
+      ),
+    )
+    self.result.name_hint = slot
+
+  def print(self, printer: Printer) -> None:
+    _print_str_kw(printer, "slot", self.slot.data)
+    _print_int_kw(printer, "bytes", self.bytes_total.value.data)
+    _print_event_type(printer, self.result.type)
+
+  @classmethod
+  def parse(cls, parser: Parser) -> Self:
+    slot = _parse_str_kw(parser, "slot")
+    bytes_total = _parse_int_kw(parser, "bytes")
+    buffer_type = _parse_event_type(parser, NestBuffer)
+    if buffer_type.slot.data != slot:  # type: ignore[attr-defined]
+      parser.raise_error("nest.alloc slot and !nest.l2_buffer tag must match")
+    return cls(slot, bytes_total)
+
+
+@irdl_op_definition
+class NestTaskRangeOp(IRDLOperation):
+  """``%t = nest.task.range from = 0 to = 4 : !nest.task_range``.
+
+  Logical task domain (reference.mlir section 3): task ids are logical,
+  not physical Tile ids.
+  """
+
+  name = "nest.task.range"
+
+  from_task = prop_def(IntegerAttr)
+  to_task = prop_def(IntegerAttr)
+
+  result = result_def(TaskRange)
+
+  def __init__(self, from_task: int, to_task: int):
+    super().__init__(
+      result_types=[TaskRange()],
+      properties=_props(
+        {
+          "from_task": _index_attr(from_task),
+          "to_task": _index_attr(to_task),
+        }
+      ),
+    )
+
+  @property
+  def num_tasks(self) -> int:
+    return self.to_task.value.data - self.from_task.value.data
+
+  def print(self, printer: Printer) -> None:
+    _print_int_kw(printer, "from", self.from_task.value.data)
+    _print_int_kw(printer, "to", self.to_task.value.data)
+    printer.print_string(" : ")
+    printer.print_attribute(self.result.type)
+
+  @classmethod
+  def parse(cls, parser: Parser) -> Self:
+    from_task = _parse_int_kw(parser, "from")
+    to_task = _parse_int_kw(parser, "to")
+    parser.parse_punctuation(":")
+    attr = parser.parse_attribute()
+    if not isinstance(attr, TaskRange):
+      parser.raise_error("expected !nest.task_range type")
+    return cls(from_task, to_task)
+
+
+class _NestAsyncOp(IRDLOperation):
+  """Base for nest-body async ops producing ``!nest.event<tag>``."""
+
+  result = result_def(NestEvent)
+
+  def _finish(self, tag: str, **kwargs) -> None:
+    super().__init__(result_types=[NestEvent(StringAttr(tag))], **kwargs)
+    self.result.name_hint = tag
+
+
+@irdl_op_definition
+class NestPrefetchOp(_NestAsyncOp):
+  """``%e = nest.dma.prefetch.async %buf bytes = N : !nest.event<t>``
+
+  HBM -> L2 prefetch into the context-owned buffer.
+  """
+
+  name = "nest.dma.prefetch.async"
+
+  buffer = operand_def(NestBuffer)
+  bytes_total = prop_def(IntegerAttr)
+
+  def __init__(self, buffer, bytes_total: int, tag: str):
+    self._finish(
+      tag,
+      properties=_props({"bytes_total": _index_attr(bytes_total)}),
+      operands=[buffer],
     )
 
   def print(self, printer: Printer) -> None:
     printer.print_string(" ")
-    printer.print_int(self.queue_id.value.data)
-    printer.print_string(" ")
-    printer.print_int(self.depth.value.data)
-    printer.print_string(" ")
-    printer.print_int(self.producer_mask.value.data)
-    printer.print_string(" ")
-    printer.print_int(self.consumer_mask.value.data)
-    _print_optional_comment(printer, self.comment)
+    printer.print_operand(self.buffer)
+    _print_int_kw(printer, "bytes", self.bytes_total.value.data)
+    _print_event_type(printer, self.result.type)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    queue_id = parser.parse_integer()
-    depth = parser.parse_integer()
-    producer_mask = parser.parse_integer()
-    consumer_mask = parser.parse_integer()
-    comment = _parse_optional_comment(parser)
-    return cls(queue_id, depth, producer_mask, consumer_mask, comment)
+    buffer = parser.parse_operand()
+    bytes_total = _parse_int_kw(parser, "bytes")
+    event_type = _parse_event_type(parser, NestEvent)
+    tag = event_type.tag.data  # type: ignore[attr-defined]
+    return cls(buffer, bytes_total, tag)
 
 
 @irdl_op_definition
-class GroupDMAPrefetchOp(IRDLOperation):
-  name = "elenor.runtime.group.dma_prefetch"
+class NestDMAStoreOp(_NestAsyncOp):
+  """``%e = nest.dma.store.async %buf bytes = N depends_on(%o) : !nest.event<t>``
 
-  descriptor = prop_def(StringAttr)
-  l2_slot = prop_def(StringAttr)
-  event = prop_def(StringAttr)
-  bytes_total = opt_prop_def(IntegerAttr)
-  comment = opt_prop_def(StringAttr)
+  L2 -> HBM final store, gated on the dispatch ``output_ready`` event.
+  """
+
+  name = "nest.dma.store.async"
+
+  buffer = operand_def(NestBuffer)
+  bytes_total = prop_def(IntegerAttr)
+  depends_on = var_operand_def(NestEvent)
+
+  def __init__(self, buffer, bytes_total: int, tag: str, depends_on: Sequence = ()):
+    self._finish(
+      tag,
+      properties=_props({"bytes_total": _index_attr(bytes_total)}),
+      operands=[[buffer], list(depends_on)],
+    )
+
+  def print(self, printer: Printer) -> None:
+    printer.print_string(" ")
+    printer.print_operand(self.buffer)
+    _print_int_kw(printer, "bytes", self.bytes_total.value.data)
+    _print_depends_on(printer, self.depends_on)
+    _print_event_type(printer, self.result.type)
+
+  @classmethod
+  def parse(cls, parser: Parser) -> Self:
+    buffer = parser.parse_operand()
+    bytes_total = _parse_int_kw(parser, "bytes")
+    depends_on = _parse_depends_on(parser)
+    event_type = _parse_event_type(parser, NestEvent)
+    tag = event_type.tag.data  # type: ignore[attr-defined]
+    return cls(buffer, bytes_total, tag, depends_on=depends_on)
+
+
+@irdl_op_definition
+class NestDispatchOp(IRDLOperation):
+  """``%grid, %inrel, %out = nest.dispatch.tasks.async @prog``
+
+  ``tasks(%t) ins(%b) outs(%b) depends_on(%e) : (three !nest.event types)``
+
+  Function-call dispatch per reference.mlir section 4: the tile program is
+  referenced by symbol; the placement comes from the enclosing
+  ``nest.context``.  Returns three aggregated events:
+
+    - grid_done      - all logical tasks returned;
+    - input_released - all tasks completed their L2 read phase
+                       (``tile.signal input_released``);
+    - output_ready   - all tasks completed their L2 write phase
+                       (``tile.signal output_ready``).
+  """
+
+  name = "nest.dispatch.tasks.async"
+
+  program = prop_def(StringAttr)
+  tasks = operand_def(TaskRange)
+  ins = operand_def(NestBuffer)
+  outs = operand_def(NestBuffer)
+  depends_on = var_operand_def(NestEvent)
+
+  grid_done = result_def(NestEvent)
+  input_released = result_def(NestEvent)
+  output_ready = result_def(NestEvent)
 
   def __init__(
     self,
-    descriptor: str,
-    l2_slot: str,
-    event: str,
-    bytes_total: int | None = None,
-    comment: str | None = None,
+    program: str,
+    tasks,
+    ins,
+    outs,
+    grid_tag: str,
+    inrel_tag: str,
+    outready_tag: str,
+    depends_on: Sequence = (),
   ):
     super().__init__(
-      properties=_props(
-        {
-          "descriptor": StringAttr(descriptor),
-          "l2_slot": StringAttr(l2_slot),
-          "event": StringAttr(event),
-          "bytes_total": None if bytes_total is None else _index_attr(bytes_total),
-          "comment": _string_attr(comment),
-        }
-      )
+      result_types=[
+        NestEvent(StringAttr(grid_tag)),
+        NestEvent(StringAttr(inrel_tag)),
+        NestEvent(StringAttr(outready_tag)),
+      ],
+      properties=_props({"program": StringAttr(program)}),
+      operands=[[tasks], ins, outs, list(depends_on)],
     )
+    self.grid_done.name_hint = grid_tag
+    if inrel_tag:
+      self.input_released.name_hint = inrel_tag
+    if outready_tag:
+      self.output_ready.name_hint = outready_tag
 
   def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_string_literal(self.descriptor.data)
-    printer.print_string(" ")
-    printer.print_string_literal(self.l2_slot.data)
-    printer.print_string(" -> ")
-    printer.print_string_literal(self.event.data)
-    if self.bytes_total is not None:
-      _print_optional_int_kw(printer, "bytes", self.bytes_total.value.data)
-    _print_optional_comment(printer, self.comment)
+    _print_symbol(printer, self.program.data)
+    printer.print_string(" tasks(")
+    printer.print_operand(self.tasks)
+    printer.print_string(")")
+    printer.print_string(" ins(")
+    printer.print_operand(self.ins)
+    printer.print_string(") outs(")
+    printer.print_operand(self.outs)
+    printer.print_string(")")
+    _print_depends_on(printer, self.depends_on)
+    printer.print_string(" : (")
+    for i, result in enumerate(self.results):
+      if i:
+        printer.print_string(", ")
+      printer.print_attribute(result.type)
+    printer.print_string(")")
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    descriptor = parser.parse_str_literal()
-    l2_slot = parser.parse_str_literal()
-    parser.parse_punctuation("->")
-    event = parser.parse_str_literal()
-    bytes_total = _parse_optional_int_kw(parser, "bytes")
-    comment = _parse_optional_comment(parser)
-    return cls(descriptor, l2_slot, event, bytes_total=bytes_total, comment=comment)
-
-
-@irdl_op_definition
-class GroupDMAStoreOp(IRDLOperation):
-  name = "elenor.runtime.group.dma_store"
-
-  descriptor = prop_def(StringAttr)
-  l2_slot = prop_def(StringAttr)
-  event = prop_def(StringAttr)
-  bytes_total = opt_prop_def(IntegerAttr)
-  comment = opt_prop_def(StringAttr)
-
-  def __init__(
-    self,
-    descriptor: str,
-    l2_slot: str,
-    event: str,
-    bytes_total: int | None = None,
-    comment: str | None = None,
-  ):
-    super().__init__(
-      properties=_props(
-        {
-          "descriptor": StringAttr(descriptor),
-          "l2_slot": StringAttr(l2_slot),
-          "event": StringAttr(event),
-          "bytes_total": None if bytes_total is None else _index_attr(bytes_total),
-          "comment": _string_attr(comment),
-        }
-      )
+    program = _parse_symbol(parser)
+    tasks = _parse_operand_group(parser, "tasks")
+    parser.parse_keyword("ins")
+    parser.parse_punctuation("(")
+    ins_op = parser.parse_operand()
+    parser.parse_punctuation(")")
+    parser.parse_keyword("outs")
+    parser.parse_punctuation("(")
+    outs_op = parser.parse_operand()
+    parser.parse_punctuation(")")
+    depends_on = _parse_depends_on(parser)
+    if len(tasks) != 1:
+      parser.raise_error("dispatch tasks(...) expects exactly one task range")
+    parser.parse_punctuation(":")
+    parser.parse_punctuation("(")
+    types = parser.parse_comma_separated_list(
+      parser.Delimiter.NONE, parser.parse_attribute, " in dispatch result types"
     )
-
-  def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_string_literal(self.descriptor.data)
-    printer.print_string(" ")
-    printer.print_string_literal(self.l2_slot.data)
-    printer.print_string(" -> ")
-    printer.print_string_literal(self.event.data)
-    if self.bytes_total is not None:
-      _print_optional_int_kw(printer, "bytes", self.bytes_total.value.data)
-    _print_optional_comment(printer, self.comment)
-
-  @classmethod
-  def parse(cls, parser: Parser) -> Self:
-    descriptor = parser.parse_str_literal()
-    l2_slot = parser.parse_str_literal()
-    parser.parse_punctuation("->")
-    event = parser.parse_str_literal()
-    bytes_total = _parse_optional_int_kw(parser, "bytes")
-    comment = _parse_optional_comment(parser)
-    return cls(descriptor, l2_slot, event, bytes_total=bytes_total, comment=comment)
+    parser.parse_punctuation(")")
+    if len(types) != 3 or not all(isinstance(t, NestEvent) for t in types):
+      parser.raise_error("dispatch expects three !nest.event results")
+    tags = [t.tag.data for t in types]  # type: ignore[attr-defined]
+    return cls(program, tasks[0], ins_op, outs_op, tags[0], tags[1], tags[2], depends_on=depends_on)
 
 
 @irdl_op_definition
-class DispatchRoleOp(IRDLOperation):
-  name = "elenor.runtime.group.dispatch_role"
+class NestCollectiveOp(_NestAsyncOp):
+  """``%e = nest.collective.async "reduce" bytes = N mask = M : !nest.event<t>``"""
 
-  role_id = prop_def(IntegerAttr)
-  event = prop_def(StringAttr)
-  comment = opt_prop_def(StringAttr)
+  name = "nest.collective.async"
 
-  def __init__(self, role_id: int, event: str, comment: str | None = None):
-    super().__init__(
-      properties=_props(
-        {"role_id": _index_attr(role_id), "event": StringAttr(event), "comment": _string_attr(comment)}
-      )
-    )
-
-  def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_int(self.role_id.value.data)
-    printer.print_string(" -> ")
-    printer.print_string_literal(self.event.data)
-    _print_optional_comment(printer, self.comment)
-
-  @classmethod
-  def parse(cls, parser: Parser) -> Self:
-    role_id = parser.parse_integer()
-    parser.parse_punctuation("->")
-    event = parser.parse_str_literal()
-    comment = _parse_optional_comment(parser)
-    return cls(role_id, event, comment)
-
-
-@irdl_op_definition
-class GroupWaitEventOp(IRDLOperation):
-  name = "elenor.runtime.group.wait_event"
-
-  event = prop_def(StringAttr)
-  comment = opt_prop_def(StringAttr)
-
-  def __init__(self, event: str, comment: str | None = None):
-    super().__init__(properties=_props({"event": StringAttr(event), "comment": _string_attr(comment)}))
-
-  def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_string_literal(self.event.data)
-    _print_optional_comment(printer, self.comment)
-
-  @classmethod
-  def parse(cls, parser: Parser) -> Self:
-    event = parser.parse_str_literal()
-    comment = _parse_optional_comment(parser)
-    return cls(event, comment)
-
-
-@irdl_op_definition
-class GroupBarrierOp(IRDLOperation):
-  name = "elenor.runtime.group.barrier"
-
-  comment = opt_prop_def(StringAttr)
-
-  def __init__(self, comment: str | None = None):
-    super().__init__(properties=_props({"comment": _string_attr(comment)}))
-
-  def print(self, printer: Printer) -> None:
-    _print_optional_comment(printer, self.comment)
-
-  @classmethod
-  def parse(cls, parser: Parser) -> Self:
-    return cls(_parse_optional_comment(parser))
-
-
-@irdl_op_definition
-class CollectiveRunOp(IRDLOperation):
-  name = "elenor.runtime.group.collective_run"
-
-  descriptor = prop_def(StringAttr)
   collective = prop_def(StringAttr)
   bytes_total = prop_def(IntegerAttr)
   participant_mask = prop_def(IntegerAttr)
-  event = prop_def(StringAttr)
-  comment = opt_prop_def(StringAttr)
 
-  def __init__(
-    self,
-    descriptor: str,
-    collective: str,
-    bytes_total: int,
-    participant_mask: int,
-    event: str,
-    comment: str | None = None,
-  ):
-    super().__init__(
+  def __init__(self, collective: str, bytes_total: int, participant_mask: int, tag: str):
+    self._finish(
+      tag,
       properties=_props(
         {
-          "descriptor": StringAttr(descriptor),
           "collective": StringAttr(collective),
           "bytes_total": _index_attr(bytes_total),
           "participant_mask": _index_attr(participant_mask),
-          "event": StringAttr(event),
-          "comment": _string_attr(comment),
         }
-      )
+      ),
     )
 
   def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_string_literal(self.descriptor.data)
     printer.print_string(" ")
     printer.print_string_literal(self.collective.data)
-    printer.print_string(" ")
-    printer.print_int(self.bytes_total.value.data)
-    printer.print_string(" ")
-    printer.print_int(self.participant_mask.value.data)
-    printer.print_string(" -> ")
-    printer.print_string_literal(self.event.data)
-    _print_optional_comment(printer, self.comment)
+    _print_int_kw(printer, "bytes", self.bytes_total.value.data)
+    _print_int_kw(printer, "mask", self.participant_mask.value.data)
+    _print_event_type(printer, self.result.type)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    descriptor = parser.parse_str_literal()
     collective = parser.parse_str_literal()
-    bytes_total = parser.parse_integer()
-    participant_mask = parser.parse_integer()
-    parser.parse_punctuation("->")
-    event = parser.parse_str_literal()
-    comment = _parse_optional_comment(parser)
-    return cls(descriptor, collective, bytes_total, participant_mask, event, comment)
+    bytes_total = _parse_int_kw(parser, "bytes")
+    participant_mask = _parse_int_kw(parser, "mask")
+    event_type = _parse_event_type(parser, NestEvent)
+    tag = event_type.tag.data  # type: ignore[attr-defined]
+    return cls(collective, bytes_total, participant_mask, tag)
 
 
 @irdl_op_definition
-class SignalEventOp(IRDLOperation):
-  name = "elenor.runtime.group.signal_event"
+class NestReleaseOp(IRDLOperation):
+  """``nest.release %buf depends_on(%e)`` - reclaim the context-owned buffer."""
 
-  event = prop_def(StringAttr)
-  comment = opt_prop_def(StringAttr)
+  name = "nest.release"
 
-  def __init__(self, event: str, comment: str | None = None):
-    super().__init__(properties=_props({"event": StringAttr(event), "comment": _string_attr(comment)}))
+  buffer = operand_def(NestBuffer)
+  depends_on = var_operand_def(NestEvent)
+
+  def __init__(self, buffer, depends_on: Sequence = ()):
+    super().__init__(operands=[[buffer], list(depends_on)])
 
   def print(self, printer: Printer) -> None:
     printer.print_string(" ")
-    printer.print_string_literal(self.event.data)
-    _print_optional_comment(printer, self.comment)
+    printer.print_operand(self.buffer)
+    _print_depends_on(printer, self.depends_on)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    event = parser.parse_str_literal()
-    comment = _parse_optional_comment(parser)
-    return cls(event, comment)
-
-
-class _CommentOnlyTileOp(IRDLOperation):
-  comment = opt_prop_def(StringAttr)
-
-  def __init__(self, comment: str | None = None):
-    super().__init__(properties=_props({"comment": _string_attr(comment)}))
-
-  def print(self, printer: Printer) -> None:
-    _print_optional_comment(printer, self.comment)
-
-  @classmethod
-  def parse(cls, parser: Parser) -> Self:
-    return cls(_parse_optional_comment(parser))
+    buffer = parser.parse_operand()
+    depends_on = _parse_depends_on(parser)
+    return cls(buffer, depends_on=depends_on)
 
 
 @irdl_op_definition
-class LabelOp(IRDLOperation):
-  name = "elenor.runtime.tile.label"
+class NestAwaitOp(IRDLOperation):
+  """``nest.await %e0, %e1`` - wait for one or more nest events."""
 
-  label = prop_def(StringAttr)
-  comment = opt_prop_def(StringAttr)
+  name = "nest.await"
 
-  def __init__(self, name: str, comment: str | None = None):
-    super().__init__(properties=_props({"label": StringAttr(name), "comment": _string_attr(comment)}))
+  events = var_operand_def(NestEvent)
+
+  def __init__(self, events: Sequence):
+    super().__init__(operands=[list(events)])
 
   def print(self, printer: Printer) -> None:
     printer.print_string(" ")
-    printer.print_string_literal(self.label.data)
-    _print_optional_comment(printer, self.comment)
+    for i, operand in enumerate(self.events):
+      if i:
+        printer.print_string(", ")
+      printer.print_operand(operand)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    name = parser.parse_str_literal()
-    comment = _parse_optional_comment(parser)
-    return cls(name, comment)
-
-
-@irdl_op_definition
-class NopOp(_CommentOnlyTileOp):
-  name = "elenor.runtime.tile.nop"
-
-
-@irdl_op_definition
-class MoveOp(IRDLOperation):
-  name = "elenor.runtime.tile.move"
-
-  dst = prop_def(StringAttr)
-  args = prop_def(ArrayAttr)
-  comment = opt_prop_def(StringAttr)
-
-  def __init__(self, dst: str, args: tuple[ScalarParam, ...], comment: str | None = None):
-    super().__init__(
-      properties=_props(
-        {"dst": StringAttr(dst), "args": _encode_array(args), "comment": _string_attr(comment)}
-      )
+    events = parser.parse_comma_separated_list(
+      parser.Delimiter.NONE, parser.parse_operand, " in nest.await event list"
     )
-
-  def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_string_literal(self.dst.data)
-    printer.print_string(" ")
-    printer.print_attribute(self.args)
-    _print_optional_comment(printer, self.comment)
-
-  @classmethod
-  def parse(cls, parser: Parser) -> Self:
-    dst = parser.parse_str_literal()
-    args = _parse_array_attr(parser, "argument array")
-    comment = _parse_optional_comment(parser)
-    return cls(dst, _decode_array(args), comment)
+    return cls(events)
 
 
 @irdl_op_definition
-class AddOp(IRDLOperation):
-  name = "elenor.runtime.tile.add"
+class NestBarrierOp(IRDLOperation):
+  """``nest.barrier`` - group barrier."""
 
-  dst = prop_def(StringAttr)
-  args = prop_def(ArrayAttr)
-  comment = opt_prop_def(StringAttr)
+  name = "nest.barrier"
 
-  def __init__(self, dst: str, args: tuple[ScalarParam, ...], comment: str | None = None):
-    super().__init__(
-      properties=_props(
-        {"dst": StringAttr(dst), "args": _encode_array(args), "comment": _string_attr(comment)}
-      )
-    )
+  def __init__(self):
+    super().__init__()
 
   def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_string_literal(self.dst.data)
-    printer.print_string(" ")
-    printer.print_attribute(self.args)
-    _print_optional_comment(printer, self.comment)
+    pass
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    dst = parser.parse_str_literal()
-    args = _parse_array_attr(parser, "argument array")
-    comment = _parse_optional_comment(parser)
-    return cls(dst, _decode_array(args), comment)
+    return cls()
 
 
 @irdl_op_definition
-class CompareOp(IRDLOperation):
-  name = "elenor.runtime.tile.cmp"
+class NestReturnOp(IRDLOperation):
+  """``nest.return`` - context completion (signals the completion event)."""
 
-  dst = prop_def(StringAttr)
-  args = prop_def(ArrayAttr)
-  comment = opt_prop_def(StringAttr)
+  name = "nest.return"
 
-  def __init__(self, dst: str, args: tuple[ScalarParam, ...], comment: str | None = None):
-    super().__init__(
-      properties=_props(
-        {"dst": StringAttr(dst), "args": _encode_array(args), "comment": _string_attr(comment)}
-      )
-    )
+  def __init__(self):
+    super().__init__()
 
   def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_string_literal(self.dst.data)
-    printer.print_string(" ")
-    printer.print_attribute(self.args)
-    _print_optional_comment(printer, self.comment)
+    pass
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    dst = parser.parse_str_literal()
-    args = _parse_array_attr(parser, "argument array")
-    comment = _parse_optional_comment(parser)
-    return cls(dst, _decode_array(args), comment)
+    return cls()
+
+
+# ---------------------------------------------------------------------------
+# tile.* program-body actions
+# ---------------------------------------------------------------------------
+
+
+class _TileAsyncOp(IRDLOperation):
+  """Base for tile-body async ops producing ``!tile.event<tag>``."""
+
+  result = result_def(TileEvent)
+
+  def _finish(self, tag: str, **kwargs) -> None:
+    super().__init__(result_types=[TileEvent(StringAttr(tag))], **kwargs)
+    self.result.name_hint = tag
 
 
 @irdl_op_definition
-class BranchOp(IRDLOperation):
-  name = "elenor.runtime.tile.br"
+class TileLoadOp(_TileAsyncOp):
+  """``%e = tile.load.async bytes = N : !tile.event<t>`` - MFE L2->L1 load."""
 
-  target = prop_def(StringAttr)
-  comment = opt_prop_def(StringAttr)
+  name = "tile.load.async"
 
-  def __init__(self, target: str, comment: str | None = None):
-    super().__init__(properties=_props({"target": StringAttr(target), "comment": _string_attr(comment)}))
+  bytes_total = prop_def(IntegerAttr)
+
+  def __init__(self, bytes_total: int, tag: str):
+    self._finish(tag, properties=_props({"bytes_total": _index_attr(bytes_total)}))
 
   def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_string_literal(self.target.data)
-    _print_optional_comment(printer, self.comment)
+    _print_int_kw(printer, "bytes", self.bytes_total.value.data)
+    _print_event_type(printer, self.result.type)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    target = parser.parse_str_literal()
-    comment = _parse_optional_comment(parser)
-    return cls(target, comment)
+    bytes_total = _parse_int_kw(parser, "bytes")
+    event_type = _parse_event_type(parser, TileEvent)
+    tag = event_type.tag.data  # type: ignore[attr-defined]
+    return cls(bytes_total, tag)
 
 
 @irdl_op_definition
-class BranchPredicateOp(IRDLOperation):
-  name = "elenor.runtime.tile.brp"
+class TileStoreOp(_TileAsyncOp):
+  """``%e = tile.store.async bytes = N : !tile.event<t>`` - MFE L1->L2 store."""
 
-  target = prop_def(StringAttr)
-  comment = opt_prop_def(StringAttr)
+  name = "tile.store.async"
 
-  def __init__(self, target: str, comment: str | None = None):
-    super().__init__(properties=_props({"target": StringAttr(target), "comment": _string_attr(comment)}))
+  bytes_total = prop_def(IntegerAttr)
+
+  def __init__(self, bytes_total: int, tag: str):
+    self._finish(tag, properties=_props({"bytes_total": _index_attr(bytes_total)}))
 
   def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_string_literal(self.target.data)
-    _print_optional_comment(printer, self.comment)
+    _print_int_kw(printer, "bytes", self.bytes_total.value.data)
+    _print_event_type(printer, self.result.type)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    target = parser.parse_str_literal()
-    comment = _parse_optional_comment(parser)
-    return cls(target, comment)
+    bytes_total = _parse_int_kw(parser, "bytes")
+    event_type = _parse_event_type(parser, TileEvent)
+    tag = event_type.tag.data  # type: ignore[attr-defined]
+    return cls(bytes_total, tag)
 
 
 @irdl_op_definition
-class BranchEosOp(IRDLOperation):
-  name = "elenor.runtime.tile.br_eos"
+class TilePowOp(_TileAsyncOp):
+  """``%e = tile.pow.async bytes = N exponent = E ops = K : !tile.event<t>``"""
 
-  token_register = prop_def(StringAttr)
-  target = prop_def(StringAttr)
-  comment = opt_prop_def(StringAttr)
+  name = "tile.pow.async"
 
-  def __init__(self, token_register: str, target: str, comment: str | None = None):
-    super().__init__(
+  bytes_total = prop_def(IntegerAttr)
+  exponent = prop_def(IntegerAttr)
+  pow_ops = prop_def(IntegerAttr)
+
+  def __init__(self, bytes_total: int, exponent: int, pow_ops: int, tag: str):
+    self._finish(
+      tag,
       properties=_props(
         {
-          "token_register": StringAttr(token_register),
-          "target": StringAttr(target),
-          "comment": _string_attr(comment),
+          "bytes_total": _index_attr(bytes_total),
+          "exponent": _index_attr(exponent),
+          "pow_ops": _index_attr(pow_ops),
         }
-      )
+      ),
     )
 
   def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_string_literal(self.token_register.data)
-    printer.print_string(" ")
-    printer.print_string_literal(self.target.data)
-    _print_optional_comment(printer, self.comment)
+    _print_int_kw(printer, "bytes", self.bytes_total.value.data)
+    _print_int_kw(printer, "exponent", self.exponent.value.data)
+    _print_int_kw(printer, "ops", self.pow_ops.value.data)
+    _print_event_type(printer, self.result.type)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    token_register = parser.parse_str_literal()
-    target = parser.parse_str_literal()
-    comment = _parse_optional_comment(parser)
-    return cls(token_register, target, comment)
+    bytes_total = _parse_int_kw(parser, "bytes")
+    exponent = _parse_int_kw(parser, "exponent")
+    pow_ops = _parse_int_kw(parser, "ops")
+    event_type = _parse_event_type(parser, TileEvent)
+    tag = event_type.tag.data  # type: ignore[attr-defined]
+    return cls(bytes_total, exponent, pow_ops, tag)
 
 
 @irdl_op_definition
-class ReturnOp(_CommentOnlyTileOp):
-  name = "elenor.runtime.tile.ret"
+class TileEvuOp(_TileAsyncOp):
+  """``%e = tile.evu.async "relu" ops = K : !tile.event<t>`` - generic EVU op."""
 
+  name = "tile.evu.async"
 
-class _BaseLaunchOp(IRDLOperation):
-  descriptor = prop_def(StringAttr)
-  event = prop_def(StringAttr)
-  comment = opt_prop_def(StringAttr)
+  op_name = prop_def(StringAttr)
+  evu_ops = prop_def(IntegerAttr)
 
-  def __init__(self, descriptor: str, event: str, comment: str | None = None):
-    super().__init__(
-      properties=_props(
-        {"descriptor": StringAttr(descriptor), "event": StringAttr(event), "comment": _string_attr(comment)}
-      )
-    )
-
-  def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_string_literal(self.descriptor.data)
-    printer.print_string(" -> ")
-    printer.print_string_literal(self.event.data)
-    _print_optional_comment(printer, self.comment)
-
-  @classmethod
-  def parse(cls, parser: Parser) -> Self:
-    descriptor = parser.parse_str_literal()
-    parser.parse_punctuation("->")
-    event = parser.parse_str_literal()
-    comment = _parse_optional_comment(parser)
-    return cls(descriptor, event, comment)
-
-
-@irdl_op_definition
-class LaunchBOAOp(_BaseLaunchOp):
-  name = "elenor.runtime.tile.launch.boa"
-
-
-@irdl_op_definition
-class LaunchEVUOp(_BaseLaunchOp):
-  name = "elenor.runtime.tile.launch.evu"
-
-
-@irdl_op_definition
-class LaunchMFEOp(_BaseLaunchOp):
-  name = "elenor.runtime.tile.launch.mfe"
-
-
-@irdl_op_definition
-class LaunchUSEOp(_BaseLaunchOp):
-  name = "elenor.runtime.tile.launch.use"
-
-
-@irdl_op_definition
-class DMALoadOp(IRDLOperation):
-  name = "elenor.runtime.tile.dma_load"
-
-  event = prop_def(StringAttr)
-  bytes_total = opt_prop_def(IntegerAttr)
-  comment = opt_prop_def(StringAttr)
-
-  def __init__(self, event: str, bytes_total: int | None = None, comment: str | None = None):
-    super().__init__(
+  def __init__(self, op_name: str, evu_ops: int, tag: str):
+    self._finish(
+      tag,
       properties=_props(
         {
-          "event": StringAttr(event),
-          "bytes_total": None if bytes_total is None else _index_attr(bytes_total),
-          "comment": _string_attr(comment),
+          "op_name": StringAttr(op_name),
+          "evu_ops": _index_attr(evu_ops),
         }
-      )
+      ),
     )
 
   def print(self, printer: Printer) -> None:
     printer.print_string(" ")
-    printer.print_string_literal(self.event.data)
-    if self.bytes_total is not None:
-      _print_optional_int_kw(printer, "bytes", self.bytes_total.value.data)
-    _print_optional_comment(printer, self.comment)
+    printer.print_string_literal(self.op_name.data)
+    _print_int_kw(printer, "ops", self.evu_ops.value.data)
+    _print_event_type(printer, self.result.type)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    event = parser.parse_str_literal()
-    bytes_total = _parse_optional_int_kw(parser, "bytes")
-    comment = _parse_optional_comment(parser)
-    return cls(event, bytes_total=bytes_total, comment=comment)
+    op_name = parser.parse_str_literal()
+    evu_ops = _parse_int_kw(parser, "ops")
+    event_type = _parse_event_type(parser, TileEvent)
+    tag = event_type.tag.data  # type: ignore[attr-defined]
+    return cls(op_name, evu_ops, tag)
 
 
 @irdl_op_definition
-class DMAStoreOp(IRDLOperation):
-  name = "elenor.runtime.tile.dma_store"
+class TileBoaOp(_TileAsyncOp):
+  """``%e = tile.boa.async "matmul" m = M n = N k = K ops = S : !tile.event<t>``"""
 
-  event = prop_def(StringAttr)
-  bytes_total = opt_prop_def(IntegerAttr)
-  comment = opt_prop_def(StringAttr)
+  name = "tile.boa.async"
 
-  def __init__(self, event: str, bytes_total: int | None = None, comment: str | None = None):
-    super().__init__(
+  op_name = prop_def(StringAttr)
+  m = prop_def(IntegerAttr)
+  n = prop_def(IntegerAttr)
+  k = prop_def(IntegerAttr)
+  boa_ops = prop_def(IntegerAttr)
+  accumulate = opt_prop_def(IntegerAttr)
+
+  def __init__(
+    self,
+    op_name: str,
+    m: int,
+    n: int,
+    k: int,
+    boa_ops: int,
+    tag: str,
+    accumulate: bool = False,
+  ):
+    self._finish(
+      tag,
       properties=_props(
         {
-          "event": StringAttr(event),
-          "bytes_total": None if bytes_total is None else _index_attr(bytes_total),
-          "comment": _string_attr(comment),
+          "op_name": StringAttr(op_name),
+          "m": _index_attr(m),
+          "n": _index_attr(n),
+          "k": _index_attr(k),
+          "boa_ops": _index_attr(boa_ops),
+          "accumulate": None if not accumulate else _index_attr(1),
         }
-      )
+      ),
     )
 
   def print(self, printer: Printer) -> None:
     printer.print_string(" ")
-    printer.print_string_literal(self.event.data)
-    if self.bytes_total is not None:
-      _print_optional_int_kw(printer, "bytes", self.bytes_total.value.data)
-    _print_optional_comment(printer, self.comment)
+    printer.print_string_literal(self.op_name.data)
+    _print_int_kw(printer, "m", self.m.value.data)
+    _print_int_kw(printer, "n", self.n.value.data)
+    _print_int_kw(printer, "k", self.k.value.data)
+    _print_int_kw(printer, "ops", self.boa_ops.value.data)
+    if self.accumulate is not None:
+      printer.print_string(" accumulate")
+    _print_event_type(printer, self.result.type)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    event = parser.parse_str_literal()
-    bytes_total = _parse_optional_int_kw(parser, "bytes")
-    comment = _parse_optional_comment(parser)
-    return cls(event, bytes_total=bytes_total, comment=comment)
+    op_name = parser.parse_str_literal()
+    m = _parse_int_kw(parser, "m")
+    n = _parse_int_kw(parser, "n")
+    k = _parse_int_kw(parser, "k")
+    boa_ops = _parse_int_kw(parser, "ops")
+    accumulate = parser.parse_optional_keyword("accumulate") is not None
+    event_type = _parse_event_type(parser, TileEvent)
+    tag = event_type.tag.data  # type: ignore[attr-defined]
+    return cls(op_name, m, n, k, boa_ops, tag, accumulate=accumulate)
 
 
 @irdl_op_definition
-class WaitOp(IRDLOperation):
-  name = "elenor.runtime.tile.wait"
+class TileAwaitOp(IRDLOperation):
+  """``tile.await %e0, %e1`` - wait for one or more tile events."""
 
-  event = prop_def(StringAttr)
-  comment = opt_prop_def(StringAttr)
+  name = "tile.await"
 
-  def __init__(self, event: str, comment: str | None = None):
-    super().__init__(properties=_props({"event": StringAttr(event), "comment": _string_attr(comment)}))
+  events = var_operand_def(TileEvent)
+
+  def __init__(self, events: Sequence):
+    super().__init__(operands=[list(events)])
 
   def print(self, printer: Printer) -> None:
     printer.print_string(" ")
-    printer.print_string_literal(self.event.data)
-    _print_optional_comment(printer, self.comment)
+    for i, operand in enumerate(self.events):
+      if i:
+        printer.print_string(", ")
+      printer.print_operand(operand)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    event = parser.parse_str_literal()
-    comment = _parse_optional_comment(parser)
-    return cls(event, comment)
-
-
-@irdl_op_definition
-class WaitAllOp(IRDLOperation):
-  name = "elenor.runtime.tile.waitall"
-
-  events = prop_def(ArrayAttr)
-  comment = opt_prop_def(StringAttr)
-
-  def __init__(self, events: Sequence[str], comment: str | None = None):
-    super().__init__(
-      properties=_props(
-        {"events": ArrayAttr([StringAttr(event) for event in events]), "comment": _string_attr(comment)}
-      )
+    events = parser.parse_comma_separated_list(
+      parser.Delimiter.NONE, parser.parse_operand, " in tile.await event list"
     )
+    return cls(events)
+
+
+@irdl_op_definition
+class TileSignalOp(IRDLOperation):
+  """``tile.signal input_released`` / ``tile.signal output_ready``.
+
+  Phase signal (reference.mlir tile.signal): when every dispatched task of
+  one dispatch has signalled a phase, the corresponding dispatch result
+  event fires.  ``input_released`` = this task will not read its L2 input
+  subview again; ``output_ready`` = this task's output is visible in L2.
+  """
+
+  name = "tile.signal"
+
+  phase = prop_def(StringAttr)
+
+  PHASES: ClassVar[tuple[str, ...]] = ("input_released", "output_ready")
+
+  def __init__(self, phase: str):
+    super().__init__(properties=_props({"phase": StringAttr(phase)}))
 
   def print(self, printer: Printer) -> None:
     printer.print_string(" ")
-    printer.print_attribute(self.events)
-    _print_optional_comment(printer, self.comment)
+    printer.print_string(self.phase.data)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    events = _parse_array_attr(parser, "event array")
-    names = []
-    for attr in events.data:
-      if not isinstance(attr, StringAttr):
-        parser.raise_error("waitall events must be strings")
-      names.append(attr.data)
-    comment = _parse_optional_comment(parser)
-    return cls(names, comment)
+    phase = parser.parse_identifier()
+    if phase not in cls.PHASES:
+      parser.raise_error(f"unknown tile.signal phase '{phase}'")
+    return cls(phase)
 
 
 @irdl_op_definition
-class FenceOp(_CommentOnlyTileOp):
-  name = "elenor.runtime.tile.fence"
+class TileReturnOp(IRDLOperation):
+  """``tile.return`` - tile program completion (contributes to grid_done)."""
 
+  name = "tile.return"
 
-@irdl_op_definition
-class StreamPopOp(IRDLOperation):
-  name = "elenor.runtime.tile.stream.pop"
-
-  queue_id = prop_def(IntegerAttr)
-  destination_token = prop_def(StringAttr)
-  comment = opt_prop_def(StringAttr)
-
-  def __init__(self, queue_id: int, destination_token: str, comment: str | None = None):
-    super().__init__(
-      properties=_props(
-        {
-          "queue_id": _index_attr(queue_id),
-          "destination_token": StringAttr(destination_token),
-          "comment": _string_attr(comment),
-        }
-      )
-    )
+  def __init__(self):
+    super().__init__()
 
   def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_int(self.queue_id.value.data)
-    printer.print_string(" ")
-    printer.print_string_literal(self.destination_token.data)
-    _print_optional_comment(printer, self.comment)
+    pass
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    queue_id = parser.parse_integer()
-    destination_token = parser.parse_str_literal()
-    comment = _parse_optional_comment(parser)
-    return cls(queue_id, destination_token, comment)
-
-
-@irdl_op_definition
-class StreamPushOp(IRDLOperation):
-  name = "elenor.runtime.tile.stream.push"
-
-  queue_id = prop_def(IntegerAttr)
-  token_register = prop_def(StringAttr)
-  producer_id = prop_def(IntegerAttr)
-  comment = opt_prop_def(StringAttr)
-
-  def __init__(self, queue_id: int, token_register: str, producer_id: int, comment: str | None = None):
-    super().__init__(
-      properties=_props(
-        {
-          "queue_id": _index_attr(queue_id),
-          "token_register": StringAttr(token_register),
-          "producer_id": _index_attr(producer_id),
-          "comment": _string_attr(comment),
-        }
-      )
-    )
-
-  def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_int(self.queue_id.value.data)
-    printer.print_string(" ")
-    printer.print_string_literal(self.token_register.data)
-    printer.print_string(" ")
-    printer.print_int(self.producer_id.value.data)
-    _print_optional_comment(printer, self.comment)
-
-  @classmethod
-  def parse(cls, parser: Parser) -> Self:
-    queue_id = parser.parse_integer()
-    token_register = parser.parse_str_literal()
-    producer_id = parser.parse_integer()
-    comment = _parse_optional_comment(parser)
-    return cls(queue_id, token_register, producer_id, comment)
-
-
-@irdl_op_definition
-class StreamAcquireOp(IRDLOperation):
-  name = "elenor.runtime.tile.stream.acquire"
-
-  queue_id = prop_def(IntegerAttr)
-  destination_token = prop_def(StringAttr)
-  comment = opt_prop_def(StringAttr)
-
-  def __init__(self, queue_id: int, destination_token: str, comment: str | None = None):
-    super().__init__(
-      properties=_props(
-        {
-          "queue_id": _index_attr(queue_id),
-          "destination_token": StringAttr(destination_token),
-          "comment": _string_attr(comment),
-        }
-      )
-    )
-
-  def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_int(self.queue_id.value.data)
-    printer.print_string(" ")
-    printer.print_string_literal(self.destination_token.data)
-    _print_optional_comment(printer, self.comment)
-
-  @classmethod
-  def parse(cls, parser: Parser) -> Self:
-    queue_id = parser.parse_integer()
-    destination_token = parser.parse_str_literal()
-    comment = _parse_optional_comment(parser)
-    return cls(queue_id, destination_token, comment)
-
-
-@irdl_op_definition
-class StreamReleaseOp(IRDLOperation):
-  name = "elenor.runtime.tile.stream.release"
-
-  queue_id = prop_def(IntegerAttr)
-  token_register = prop_def(StringAttr)
-  comment = opt_prop_def(StringAttr)
-
-  def __init__(self, queue_id: int, token_register: str, comment: str | None = None):
-    super().__init__(
-      properties=_props(
-        {
-          "queue_id": _index_attr(queue_id),
-          "token_register": StringAttr(token_register),
-          "comment": _string_attr(comment),
-        }
-      )
-    )
-
-  def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_int(self.queue_id.value.data)
-    printer.print_string(" ")
-    printer.print_string_literal(self.token_register.data)
-    _print_optional_comment(printer, self.comment)
-
-  @classmethod
-  def parse(cls, parser: Parser) -> Self:
-    queue_id = parser.parse_integer()
-    token_register = parser.parse_str_literal()
-    comment = _parse_optional_comment(parser)
-    return cls(queue_id, token_register, comment)
-
-
-@irdl_op_definition
-class StreamEosOp(IRDLOperation):
-  name = "elenor.runtime.tile.stream.eos"
-
-  queue_id = prop_def(IntegerAttr)
-  producer_id = prop_def(IntegerAttr)
-  comment = opt_prop_def(StringAttr)
-
-  def __init__(self, queue_id: int, producer_id: int, comment: str | None = None):
-    super().__init__(
-      properties=_props(
-        {
-          "queue_id": _index_attr(queue_id),
-          "producer_id": _index_attr(producer_id),
-          "comment": _string_attr(comment),
-        }
-      )
-    )
-
-  def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_int(self.queue_id.value.data)
-    printer.print_string(" ")
-    printer.print_int(self.producer_id.value.data)
-    _print_optional_comment(printer, self.comment)
-
-  @classmethod
-  def parse(cls, parser: Parser) -> Self:
-    queue_id = parser.parse_integer()
-    producer_id = parser.parse_integer()
-    comment = _parse_optional_comment(parser)
-    return cls(queue_id, producer_id, comment)
-
-
-@irdl_op_definition
-class PatchDescriptorOp(IRDLOperation):
-  name = "elenor.runtime.tile.patch.desc"
-
-  args = prop_def(ArrayAttr)
-  comment = opt_prop_def(StringAttr)
-
-  def __init__(self, args: tuple[ScalarParam, ...], comment: str | None = None):
-    super().__init__(properties=_props({"args": _encode_array(args), "comment": _string_attr(comment)}))
-
-  def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_attribute(self.args)
-    _print_optional_comment(printer, self.comment)
-
-  @classmethod
-  def parse(cls, parser: Parser) -> Self:
-    args = _parse_array_attr(parser, "argument array")
-    comment = _parse_optional_comment(parser)
-    return cls(_decode_array(args), comment)
-
-
-@irdl_op_definition
-class LoadDescriptorOp(IRDLOperation):
-  name = "elenor.runtime.tile.load.desc"
-
-  destination = prop_def(StringAttr)
-  args = prop_def(ArrayAttr)
-  comment = opt_prop_def(StringAttr)
-
-  def __init__(self, destination: str, args: tuple[ScalarParam, ...], comment: str | None = None):
-    super().__init__(
-      properties=_props(
-        {
-          "destination": StringAttr(destination),
-          "args": _encode_array(args),
-          "comment": _string_attr(comment),
-        }
-      )
-    )
-
-  def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_string_literal(self.destination.data)
-    printer.print_string(" ")
-    printer.print_attribute(self.args)
-    _print_optional_comment(printer, self.comment)
-
-  @classmethod
-  def parse(cls, parser: Parser) -> Self:
-    destination = parser.parse_str_literal()
-    args = _parse_array_attr(parser, "argument array")
-    comment = _parse_optional_comment(parser)
-    return cls(destination, _decode_array(args), comment)
-
-
-@irdl_op_definition
-class StoreDescriptorOp(IRDLOperation):
-  name = "elenor.runtime.tile.store.desc"
-
-  args = prop_def(ArrayAttr)
-  comment = opt_prop_def(StringAttr)
-
-  def __init__(self, args: tuple[ScalarParam, ...], comment: str | None = None):
-    super().__init__(properties=_props({"args": _encode_array(args), "comment": _string_attr(comment)}))
-
-  def print(self, printer: Printer) -> None:
-    printer.print_string(" ")
-    printer.print_attribute(self.args)
-    _print_optional_comment(printer, self.comment)
-
-  @classmethod
-  def parse(cls, parser: Parser) -> Self:
-    args = _parse_array_attr(parser, "argument array")
-    comment = _parse_optional_comment(parser)
-    return cls(_decode_array(args), comment)
-
-
-@irdl_op_definition
-class ProfileBeginOp(_CommentOnlyTileOp):
-  name = "elenor.runtime.tile.prof.begin"
-
-
-@irdl_op_definition
-class ProfileEndOp(_CommentOnlyTileOp):
-  name = "elenor.runtime.tile.prof.end"
-
-
-@irdl_op_definition
-class TrapOp(_CommentOnlyTileOp):
-  name = "elenor.runtime.tile.trap"
+    return cls()
 
 
 operations: list[type[Operation]] = [
-  BOADescriptorOp,
-  EVUDescriptorOp,
-  MFEDescriptorOp,
-  USEDescriptorOp,
-  TileGroupTaskOp,
-  StreamDescOp,
-  TileRoleBindingOp,
-  TileProgramOp,
-  InitStreamOp,
-  GroupDMAPrefetchOp,
-  GroupDMAStoreOp,
-  DispatchRoleOp,
-  GroupWaitEventOp,
-  GroupBarrierOp,
-  CollectiveRunOp,
-  SignalEventOp,
-  LabelOp,
-  NopOp,
-  MoveOp,
-  AddOp,
-  CompareOp,
-  BranchOp,
-  BranchPredicateOp,
-  BranchEosOp,
-  ReturnOp,
-  LaunchBOAOp,
-  LaunchEVUOp,
-  LaunchMFEOp,
-  LaunchUSEOp,
-  DMALoadOp,
-  DMAStoreOp,
-  WaitOp,
-  WaitAllOp,
-  FenceOp,
-  StreamPopOp,
-  StreamPushOp,
-  StreamAcquireOp,
-  StreamReleaseOp,
-  StreamEosOp,
-  PatchDescriptorOp,
-  LoadDescriptorOp,
-  StoreDescriptorOp,
-  ProfileBeginOp,
-  ProfileEndOp,
-  TrapOp,
+  NestContextOp,
+  NestAllocOp,
+  NestTaskRangeOp,
+  NestPrefetchOp,
+  NestDMAStoreOp,
+  NestDispatchOp,
+  NestCollectiveOp,
+  NestReleaseOp,
+  NestAwaitOp,
+  NestBarrierOp,
+  NestReturnOp,
+  TileProgramDefOp,
+  TileLoadOp,
+  TileStoreOp,
+  TilePowOp,
+  TileEvuOp,
+  TileBoaOp,
+  TileAwaitOp,
+  TileSignalOp,
+  TileReturnOp,
 ]
 
-Elenor = Dialect("elenor", operations, [])
+Elenor = Dialect("elenor", operations, [NestEvent, TileEvent, NestBuffer, TaskRange])
 
 __all__ = [
-  "AddOp",
-  "BOADescriptorOp",
-  "BranchEosOp",
-  "BranchOp",
-  "BranchPredicateOp",
-  "CollectiveRunOp",
-  "CompareOp",
-  "DMALoadOp",
-  "DMAStoreOp",
-  "DispatchRoleOp",
-  "EVUDescriptorOp",
   "Elenor",
-  "EngineDescriptorLike",
-  "FenceOp",
-  "GroupActionLike",
-  "GroupBarrierOp",
-  "GroupDMAPrefetchOp",
-  "GroupDMAStoreOp",
-  "GroupWaitEventOp",
-  "InitStreamOp",
-  "LabelOp",
-  "LaunchBOAOp",
-  "LaunchEVUOp",
-  "LaunchMFEOp",
-  "LaunchUSEOp",
-  "LoadDescriptorOp",
-  "MFEDescriptorOp",
-  "MoveOp",
-  "NopOp",
-  "PatchDescriptorOp",
-  "ProfileBeginOp",
-  "ProfileEndOp",
-  "ReturnOp",
-  "ScalarParam",
-  "SignalEventOp",
-  "StoreDescriptorOp",
-  "StreamAcquireOp",
-  "StreamDescOp",
-  "StreamEosOp",
-  "StreamPopOp",
-  "StreamPushOp",
-  "StreamReleaseOp",
-  "TileGroupTaskOp",
-  "TileInstructionLike",
-  "TileProgramOp",
-  "TileRoleBindingOp",
-  "TrapOp",
-  "USEDescriptorOp",
-  "WaitAllOp",
-  "WaitOp",
-  "_decode_array",
-  "_decode_params",
-  "_decode_scalar",
+  "NestActionLike",
+  "NestAllocOp",
+  "NestAwaitOp",
+  "NestBarrierOp",
+  "NestBuffer",
+  "NestCollectiveOp",
+  "NestContextOp",
+  "NestDMAStoreOp",
+  "NestDispatchOp",
+  "NestEvent",
+  "NestPrefetchOp",
+  "NestReleaseOp",
+  "NestReturnOp",
+  "NestTaskRangeOp",
+  "TaskRange",
+  "TileActionLike",
+  "TileAwaitOp",
+  "TileBoaOp",
+  "TileEvent",
+  "TileEvuOp",
+  "TileLoadOp",
+  "TilePowOp",
+  "TileProgramDefOp",
+  "TileReturnOp",
+  "TileSignalOp",
+  "TileStoreOp",
 ]

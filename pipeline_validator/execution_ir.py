@@ -41,6 +41,7 @@ class ExecTileOp(Enum):
   PROF_BEGIN = "prof.begin"
   PROF_END = "prof.end"
   TRAP = "trap"
+  SIGNAL_PHASE = "signal.phase"
 
 
 class ExecGroupActionOp(Enum):
@@ -52,6 +53,7 @@ class ExecGroupActionOp(Enum):
   BARRIER_GROUP = "barrier.group"
   COLLECTIVE_RUN = "collective.run"
   SIGNAL_EVENT = "signal.event"
+  RELEASE_L2 = "release.l2"
 
 
 @dataclass
