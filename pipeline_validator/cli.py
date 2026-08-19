@@ -8,7 +8,7 @@ import sys
 
 from xdsl.utils.exceptions import ParseError, VerifyException
 
-from .config import HardwareConfig, SimConfig
+from .config import MAX_CONTEXT_COUNT, HardwareConfig, SimConfig
 from .report import build_report, report_to_json, report_to_text
 from .simulator import Simulator
 from .trace import trace_to_html
@@ -73,10 +73,9 @@ def main(argv=None) -> int:
   parser.add_argument(
     "--context-mode",
     type=int,
-    choices=(1, 2),
     default=None,
     metavar="N",
-    help="Tile UCE execution context count: 1 or 2 (default: 1)",
+    help="Tile UCE execution context count: 1-8 (default: 1)",
   )
   parser.add_argument("--max-cycles", type=int, default=None, help="cycle cap (default 2_000_000)")
   parser.add_argument("--trace", action="store_true", help="enable per-cycle trace dump")
@@ -100,6 +99,9 @@ def main(argv=None) -> int:
   parser.add_argument("--json", action="store_true", help="emit JSON instead of text")
   parser.add_argument("--report", default=None, help="write report to this path (default: stdout)")
   args = parser.parse_args(argv)
+
+  if args.context_mode is not None and not 1 <= args.context_mode <= MAX_CONTEXT_COUNT:
+    parser.error("--context-mode must be between 1 and 8")
 
   if args.list:
     _list_workloads()

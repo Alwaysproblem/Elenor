@@ -15,6 +15,9 @@ These tests exercise the runtime / full_memory fidelity modes:
 
 from __future__ import annotations
 
+import json
+
+import pytest
 from xdsl.dialects.builtin import ModuleOp
 
 from pipeline_validator.config import HardwareConfig, SimConfig
@@ -37,6 +40,7 @@ from pipeline_validator.runtime import EventStatus, EventTable, FaultCode, Fault
 from pipeline_validator.runtime.fault_ring import FaultDomain, FaultRecord
 from pipeline_validator.runtime.reset_domain import ResetDomain, ResetRequest
 from pipeline_validator.simulator import Simulator
+from pipeline_validator.tile import TileUCE
 from pipeline_validator.workload_ir import parse_workload_ir, print_workload_ir
 from pipeline_validator.workloads import ALL_WORKLOADS, PowWorkload
 
@@ -61,43 +65,22 @@ def make_short_evu_program(name: str = "ctx_short_evu") -> TileProgramDefOp:
   return TileProgramDefOp(name, [evu, TileAwaitOp([evu.result]), TileReturnOp()])
 
 
-def make_two_role_same_tile_task() -> ModuleOp:
-  """Dispatch two programs to one tile to exercise context switching."""
-  prog0 = make_waiting_mfe_program()
-  prog1 = make_short_evu_program()
+def make_same_tile_roles_task(role_count: int) -> ModuleOp:
+  """Dispatch role_count programs to one tile to exercise context switching."""
+  names = ["ctx_wait_mfe"] + [f"ctx_short_evu{i}" for i in range(role_count - 1)]
+  progs = [make_waiting_mfe_program(names[0])] + [make_short_evu_program(n) for n in names[1:]]
   tasks = NestTaskRangeOp(0, 1)
   buffer = NestAllocOp("l2_buf", 4096)
-  dispatch0 = NestDispatchOp(
-    "ctx_wait_mfe",
-    tasks.result,
-    buffer.result,
-    buffer.result,
-    "ev_role0",
-    "",
-    "",
-  )
-  dispatch1 = NestDispatchOp(
-    "ctx_short_evu",
-    tasks.result,
-    buffer.result,
-    buffer.result,
-    "ev_role1",
-    "",
-    "",
-  )
+  dispatches = [
+    NestDispatchOp(name, tasks.result, buffer.result, buffer.result, f"ev_role{i}", "", "")
+    for i, name in enumerate(names)
+  ]
   context = NestContextOp(
-    "two_role_same_tile",
-    [
-      buffer,
-      tasks,
-      dispatch0,
-      dispatch1,
-      NestAwaitOp([dispatch0.grid_done, dispatch1.grid_done]),
-      NestReturnOp(),
-    ],
+    "same_tile_roles",
+    [buffer, tasks, *dispatches, NestAwaitOp([d.grid_done for d in dispatches]), NestReturnOp()],
     placement=1,
   )
-  return ModuleOp([prog0, prog1, context])
+  return ModuleOp([*progs, context])
 
 
 
@@ -484,9 +467,33 @@ class TestFidelityModes:
         signal.alarm(0)
         assert r.completed, f"{wl.name} failed in {fidelity}: {r.reason}"
 
+
   def test_runtime_context_count_two_runs_two_same_tile_roles(self):
     sim = Simulator(HardwareConfig(), SimConfig(fidelity="runtime", context_count=2, max_cycles=10000))
-    result = sim.run(make_two_role_same_tile_task())
+    result = sim.run(make_same_tile_roles_task(2))
     assert result.completed, result.reason
     assert result.pmu.events.get("uce_context_switch", 0) > 0
     assert result.pmu.named_cycles.get("task_accept", 0) > 0
+
+  def test_runtime_context_count_three_overlaps_three_roles(self):
+    sim = Simulator(
+      HardwareConfig(),
+      SimConfig(fidelity="runtime", context_count=3, max_cycles=10000),
+      enable_tracer=True,
+    )
+    result = sim.run(make_same_tile_roles_task(3))
+    assert result.completed, result.reason
+    assert result.tracer is not None
+    events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
+    peak = max(
+      e["args"]["active_context_count"] for e in events if e.get("name") == "active_context_count"
+    )
+    assert peak == 3
+
+  def test_context_count_bounds(self):
+    with pytest.raises(ValueError, match="context_count must be between 1 and 8"):
+      SimConfig(context_count=0)
+    with pytest.raises(ValueError, match="context_count must be between 1 and 8"):
+      SimConfig(context_count=9)
+    with pytest.raises(ValueError, match="context_count must be between 1 and 8"):
+      TileUCE(0, HardwareConfig(), context_count=9)

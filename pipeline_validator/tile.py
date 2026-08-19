@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
-from .config import HardwareConfig
+from .config import MAX_CONTEXT_COUNT, HardwareConfig
 from .engines import (
   BOAEngine,
   Engine,
@@ -104,7 +104,7 @@ _ACTIVE_CONTEXT_STATES = {
 
 
 class TileUCE:
-  """Tile Unified Control Engine with 1 or 2 execution contexts."""
+  """Tile Unified Control Engine with 1..MAX_CONTEXT_COUNT execution contexts."""
 
   def __init__(self,
                tile_id: int,
@@ -112,8 +112,8 @@ class TileUCE:
                tracer: Tracer | None = None,
                context_count: int = 1,
                runtime_enabled: bool = False):
-    if context_count < 1 or context_count > 2:
-      raise ValueError("context_count must be 1 or 2")
+    if context_count < 1 or context_count > MAX_CONTEXT_COUNT:
+      raise ValueError("context_count must be between 1 and 8")
     self.tile_id = tile_id
     self.cfg = cfg
     self.tracer = tracer

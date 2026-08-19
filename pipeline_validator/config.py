@@ -10,6 +10,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+# Tile UCE execution contexts per tile.  Hardware V1.x caps at 2
+# (design/elenor_tile_uce §3.2.1); the validator allows up to 8 for
+# what-if exploration.
+MAX_CONTEXT_COUNT = 8
+
 
 @dataclass(frozen=True)
 class HardwareConfig:
@@ -184,8 +189,8 @@ class SimConfig:
     context_count: int = 1
 
     def __post_init__(self) -> None:
-        if self.context_count < 1 or self.context_count > 2:
-            raise ValueError("context_count must be 1 or 2")
+        if self.context_count < 1 or self.context_count > MAX_CONTEXT_COUNT:
+            raise ValueError("context_count must be between 1 and 8")
 
     def with_overrides(self, **kw) -> SimConfig:
         return replace(self, **kw)

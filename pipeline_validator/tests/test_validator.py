@@ -296,6 +296,14 @@ class TestExternalIRCLI:
     assert "failed to load IR" in malformed_res.stderr
     assert str(malformed) in malformed_res.stderr
 
+  def test_context_mode_cli_bounds(self):
+    ok = self._run_cli("-w", "pow", "--context-mode", "3", "--max-cycles", "200000")
+    assert ok.returncode == 0, ok.stderr
+    for bad in ("0", "9"):
+      res = self._run_cli("-w", "pow", "--context-mode", bad)
+      assert res.returncode == 2
+      assert "--context-mode must be between 1 and 8" in res.stderr
+
 
 # ---------------------------------------------------------------------------
 # Stream Queue unit tests
