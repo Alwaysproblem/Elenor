@@ -28,7 +28,7 @@ CPU/IR does NOT specify physical Tile IDs or Hardware Context IDs.
   §27-33, §188-189).
 - **Validator mapping**: In this validator the mapping is 1:1 (logical
   task i → tile i), so `placement = 0xF` (4 bits set) with `task.range
-  0..4` dispatches 4 tasks across 4 tiles.
+0..4` dispatches 4 tasks across 4 tiles.
 - **Verifier**: placement must be non-zero.
 
 ### 1.2 `tile.program @name { ... }`
@@ -63,7 +63,7 @@ Produced by `nest.alloc`.
 Logical task domain. Produced by `nest.task.range`. Task IDs are logical
 IDs, NOT physical Tile IDs or Hardware Context IDs (reference.mlir §170-171).
 
-## 3. nest.* Context-Body Ops
+## 3. nest.\* Context-Body Ops
 
 ### 3.1 `nest.alloc`
 
@@ -115,6 +115,7 @@ referenced by symbol. Placement comes from the enclosing `nest.context`,
 not from this op.
 
 Returns THREE aggregated events:
+
 - `grid_done` — all logical tasks returned (`tile.return`).
 - `input_released` — all tasks completed their L2 read phase
   (`tile.signal input_released`). Aggregated across the placement mask:
@@ -170,7 +171,7 @@ Context completion. Signals the context's `completion_event` (default
 `context_done` covers both `grid_done` (all tasks returned) and the
 final store reaching HBM (reference.mlir §284-289).
 
-## 4. tile.* Program-Body Ops
+## 4. tile.\* Program-Body Ops
 
 ### 4.1 `tile.load.async`
 
@@ -236,6 +237,7 @@ tile.signal output_ready
 
 Phase signal (reference.mlir §378-379, §414-415). Drives the dispatch
 phase events:
+
 - `input_released` — this task will not read its L2 input subview again.
 - `output_ready` — this task's output is now visible in L2.
 
@@ -291,31 +293,31 @@ to the IR ops.
 
 ### 6.1 Context body → ExecGroupAction list
 
-| IR op | ExecGroupAction |
-|---|---|
-| `nest.alloc` | (no action; L2 slot allocated lazily by DMA latency model) |
-| `nest.task.range` | (no action; validated by verifier) |
-| `nest.dma.prefetch.async` | `DMA_PREFETCH` args=(desc_id, slot, bytes) |
-| `nest.dma.store.async` | `WAIT_EVENT` per depends_on; then `DMA_STORE` args=(desc_id, slot, bytes) |
+| IR op                       | ExecGroupAction                                                                           |
+| --------------------------- | ----------------------------------------------------------------------------------------- |
+| `nest.alloc`                | (no action; L2 slot allocated lazily by DMA latency model)                                |
+| `nest.task.range`           | (no action; validated by verifier)                                                        |
+| `nest.dma.prefetch.async`   | `DMA_PREFETCH` args=(desc_id, slot, bytes)                                                |
+| `nest.dma.store.async`      | `WAIT_EVENT` per depends_on; then `DMA_STORE` args=(desc_id, slot, bytes)                 |
 | `nest.dispatch.tasks.async` | `WAIT_EVENT` per depends_on; then `DISPATCH_ROLE` args=(role_id, inrel_tag, outready_tag) |
-| `nest.collective.async` | `COLLECTIVE_RUN` args=(name, op, bytes, mask) |
-| `nest.release` | `WAIT_EVENT` per depends_on; then `RELEASE_L2` args=(slot) |
-| `nest.await` | `WAIT_EVENT` per operand |
-| `nest.barrier` | `BARRIER_GROUP` |
-| `nest.return` | `SIGNAL_EVENT` args=(completion_event) |
+| `nest.collective.async`     | `COLLECTIVE_RUN` args=(name, op, bytes, mask)                                             |
+| `nest.release`              | `WAIT_EVENT` per depends_on; then `RELEASE_L2` args=(slot)                                |
+| `nest.await`                | `WAIT_EVENT` per operand                                                                  |
+| `nest.barrier`              | `BARRIER_GROUP`                                                                           |
+| `nest.return`               | `SIGNAL_EVENT` args=(completion_event)                                                    |
 
 ### 6.2 Tile program body → ExecTileInst list
 
-| IR op | ExecTileInst |
-|---|---|
-| `tile.load.async` | `LAUNCH_MFE` (MFE "load") |
-| `tile.store.async` | `LAUNCH_MFE` (MFE "store") |
-| `tile.pow.async` | `LAUNCH_EVU` (EVU "pow") |
-| `tile.evu.async` | `LAUNCH_EVU` (EVU op_name) |
-| `tile.boa.async` | `LAUNCH_BOA` (BOA op_name) |
-| `tile.await` | `WAIT` (1 operand) or `WAITALL` (2+) |
-| `tile.signal` | `SIGNAL_PHASE` args=(phase_name) |
-| `tile.return` | `RET` |
+| IR op              | ExecTileInst                         |
+| ------------------ | ------------------------------------ |
+| `tile.load.async`  | `LAUNCH_MFE` (MFE "load")            |
+| `tile.store.async` | `LAUNCH_MFE` (MFE "store")           |
+| `tile.pow.async`   | `LAUNCH_EVU` (EVU "pow")             |
+| `tile.evu.async`   | `LAUNCH_EVU` (EVU op_name)           |
+| `tile.boa.async`   | `LAUNCH_BOA` (BOA op_name)           |
+| `tile.await`       | `WAIT` (1 operand) or `WAITALL` (2+) |
+| `tile.signal`      | `SIGNAL_PHASE` args=(phase_name)     |
+| `tile.return`      | `RET`                                |
 
 ### 6.3 Role binding
 
@@ -329,6 +331,7 @@ When a tile executes `tile.signal <phase>`, the UCE calls
 `_phase_signal_callback(role_event_id, phase, tile_id)`.
 
 `TileGroup._on_phase_signal`:
+
 1. Looks up the dispatch's `phase_event_ids` map for the phase event id.
 2. Adds `tile_id` to the phase event's done-tile set.
 3. When the done count reaches `popcount(placement_mask)`, calls
