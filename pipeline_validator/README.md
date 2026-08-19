@@ -28,17 +28,36 @@ context body dispatches tile programs by symbol reference
 
 ### Key IR design points (per `reference.mlir`)
 
-- **Placement** lives on `nest.context` (`placement = 0xF`), not on dispatch.
-- **Dispatch** (`nest.dispatch.tasks.async @prog`) consumes a logical task
-  range, ins/outs L2 buffers, and a `depends_on` event. It returns THREE
-  aggregated events: `grid_done`, `input_released`, `output_ready`.
-- **Tile phase signals** (`tile.signal input_released` / `tile.signal
-output_ready`) drive the dispatch phase events: when every dispatched
-  task signals a phase, the corresponding dispatch result fires.
-- **Buffers** are SSA values (`!nest.l2_buffer<slot>`); the event type tag
-  doubles as the runtime event id shared by the simulator and the trace.
-- **`depends_on(%e)`** expresses data dependencies directly on async ops
-  (dispatch, store, release), lowered to wait actions by the lowering.
+**Placement** — `nest.context @name placement = M` declares the Tile
+Group placement mask (`0xF` = all 4 placement slots in the group).
+This is a **group-level** constraint: the CPU/IR does NOT specify
+physical Tile IDs or Hardware Context IDs. The tile-local scheduler
+maps logical tasks to physical tiles/contexts at runtime (reference.mlir
+§27-33, §188-189). In this validator the mapping is 1:1 (logical task
+i → tile i), so `placement = 0xF` with `task.range 0..4` dispatches
+4 tasks across 4 tiles.
+
+**Dispatch** — `nest.dispatch.tasks.async @prog` consumes a logical
+task range, ins/outs L2 buffers, and a `depends_on` event. It returns
+THREE aggregated events: `grid_done` (all tasks returned),
+`input_released` (all tasks completed their L2 read phase), and
+`output_ready` (all tasks completed their L2 write phase).
+
+**Tile phase signals** — `tile.signal input_released` /
+`tile.signal output_ready` drive the dispatch phase events: when every
+dispatched task signals a phase, the corresponding dispatch result
+fires. The phase event is aggregated across the placement mask, not
+across logical task IDs — it fires when every physical tile in the
+placement has signalled.
+
+**Buffers** — `nest.alloc` produces SSA values typed
+`!nest.l2_buffer<slot>`; the slot name is the L2 slot id used by the
+group DMA latency model. `nest.release` frees the slot (in
+`full_memory` fidelity). The event type tag doubles as the runtime
+event id shared by the simulator and the trace.
+
+**`depends_on(%e)`** expresses data dependencies directly on async ops
+(dispatch, store, release), lowered to wait actions by the lowering.
 
 ### Print / parse
 
