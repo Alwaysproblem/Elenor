@@ -187,10 +187,13 @@ class SimConfig:
     seed: int = 0
     fidelity: str = "timing_only"  # "timing_only" | "runtime" | "full_memory"
     context_count: int = 1
+    device_context_count: int = 1
 
     def __post_init__(self) -> None:
         if self.context_count < 1 or self.context_count > MAX_CONTEXT_COUNT:
             raise ValueError("context_count must be between 1 and 8")
+        if self.device_context_count < 1 or self.device_context_count > MAX_CONTEXT_COUNT:
+            raise ValueError("device_context_count must be between 1 and 8")
 
     def with_overrides(self, **kw) -> SimConfig:
         return replace(self, **kw)

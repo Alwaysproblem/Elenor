@@ -6,8 +6,9 @@ pipeline validator. The design follows `reference.mlir` at
 
 ## 1. Module Structure
 
-A valid module contains exactly one `nest.context` definition and zero or
-more `tile.program` definitions, as top-level siblings:
+A valid module is one of two shapes:
+
+**Legacy** (exactly one `nest.context`, no `nexus.program`):
 
 ```mlir
 builtin.module {
@@ -16,29 +17,69 @@ builtin.module {
 }
 ```
 
-### 1.1 `nest.context @name placement = M { ... }`
+**Model** (exactly one `nexus.program` + one or more `nest.context`):
+
+```mlir
+builtin.module {
+  tile.program @pow_4k_tile { ... }
+  nest.context @pow_task placement = 15 { ... }
+  nexus.program @run_pow (%Y : !nest.global_memref<4x128x128xbf16>) { ... }
+}
+```
+
+### 1.1 `nest.context @name placement = M context = N { ... }`
 
 Defines one Tile Group context. The `placement` property is the Tile Group
 placement mask (integer bitmask). This is a **group-level** constraint: the
 CPU/IR does NOT specify physical Tile IDs or Hardware Context IDs, except
-that `nest.dispatch.tasks.async` may carry an optional `context = N` that
-specifies the tile-local UCE context index (a validator extension to
-reference.mlir); see §3.5.
+that `nest.context` and `nest.dispatch.tasks.async` may carry an optional
+`context = N` (see §3.5 for dispatch semantics).
 
 - **Semantics**: The placement mask selects which placement slots in the
   Tile Group participate in dispatches. The tile-local scheduler maps
   logical tasks to physical tiles/contexts at runtime (reference.mlir
   §27-33, §188-189).
+- **Device slot pin**: `nest.context` may carry `context = N` to pin
+  this context to **device execution slot N** when submitted via
+  `nexus.submit_context.async` (mirrors the UCE context pin of
+  `nest.dispatch.tasks.async` one level up). Omitted = first available
+  slot; occupied slot = submission waits (backpressure, PMU
+  `device_submit_wait`). Legal range `0..device_context_count-1`;
+  out-of-range rejected at model/task load. In a legacy single-context
+  module the pin selects the (only) slot and must be 0.
 - **Validator mapping**: In this validator the mapping is 1:1 (logical
   task i → tile i), so `placement = 0xF` (4 bits set) with `task.range
 0..4` dispatches 4 tasks across 4 tiles.
-- **Verifier**: placement must be non-zero.
+- **Verifier**: placement must be non-zero; `context = N` (if present)
+  must be >= 0 and < `device_context_count` (upper bound checked at
+  model/task load).
 
 ### 1.2 `tile.program @name { ... }`
 
 Defines one tile program. The body contains tile-level async engine ops,
 `tile.await`, `tile.signal`, and `tile.return`. The program is referenced
 by `nest.dispatch.tasks.async` via its symbol name.
+
+### 1.3 `nexus.program @name (%a : !nest.global_memref<...>) { ... }`
+
+Model entry point. A model-mode module contains exactly one
+`nexus.program`. The body is a linear device-level program consisting of
+`nexus.submit_context.async`, `nexus.await`, and `nexus.return` (ending
+with return). Entry block args are declarative (V1: parsed/printed only;
+body ops must not reference them — no memref plumbing yet).
+
+**Device slot scheduling**: The device has `device_context_count`
+execution slots that all share the **same physical TileGroup** (the
+base `num_tiles` tiles are shared, not duplicated). When
+`nexus.submit_context.async @ctx` is reached, the context is assigned to
+a slot: if `@ctx`'s `nest.context` carries `context = N`, it is pinned to
+slot N (must be free); otherwise the first free slot is used. If no slot
+is free, the submission waits (backpressure, PMU `device_submit_wait`).
+Each slot runs its task concurrently on the shared tiles via UCE
+context switching: unpinned dispatch bindings auto-assign UCE context
+`slot_index`, requiring `context_count >= device_context_count`. When
+the context finishes, the slot is released and a `!nexus.event` fires;
+`nexus.await` blocks the device PC until the awaited event has fired.
 
 ## 2. SSA Types
 
@@ -65,6 +106,18 @@ Produced by `nest.alloc`.
 
 Logical task domain. Produced by `nest.task.range`. Task IDs are logical
 IDs, NOT physical Tile IDs or Hardware Context IDs (reference.mlir §170-171).
+
+### 2.5 `!nexus.event<"tag">`
+
+Device-level async event. The `tag` is the runtime event id shared by
+the device scheduler and the trace. Produced by
+`nexus.submit_context.async`; consumed by `nexus.await`.
+
+### 2.6 `!nest.global_memref<DxDx...xdtype>`
+
+Declarative global memref type, e.g. `!nest.global_memref<4x128x128xbf16>`.
+V1: parse/print only — no runtime data movement. Used as a
+declaration-only entry-block argument type for `nexus.program`.
 
 ## 3. nest.\* Context-Body Ops
 
@@ -130,12 +183,12 @@ Returns THREE aggregated events:
 
 Optional `context = N` pins every task of this dispatch to the
 tile-local UCE context index `N` — the same index on every tile in the
-placement, not a physical tile id. Omitted = first available context
-(existing behaviour). When the pinned context is occupied the dispatch
-waits for it to be released (`dispatch_wait` stall), reusing the
-existing backpressure path — no new fault mode. Legal range is
-`0..context_count-1`; an out-of-range pin is rejected at task load
-(not at IR verify) to avoid a silent deadlock to the cycle cap.
+placement, not a physical tile id. Omitted = first available context.
+When the pinned context is occupied the dispatch waits for it to be
+released (`dispatch_wait` stall), reusing the existing backpressure
+path — no new fault mode. Legal range is `0..context_count-1`; an
+out-of-range pin is rejected at task load (not at IR verify) to avoid
+a silent deadlock to the cycle cap.
 
 ### 3.6 `nest.collective.async`
 
@@ -270,14 +323,16 @@ Tile program completion. Contributes to `grid_done` (reference.mlir
 
 ### 5.1 Module-level
 
-- Exactly one `nest.context` op.
-- Zero or more `tile.program` ops.
+- **Legacy mode**: exactly one `nest.context`, no `nexus.program`.
+- **Model mode**: exactly one `nexus.program` + one or more
+  `nest.context` ops.
+- Zero or more `tile.program` ops (both modes).
 - No other top-level ops.
 - Tile program symbol names must be unique.
+- `nest.context` symbol names must be unique.
 
-### 5.2 Context body
-
-- `placement` must be non-zero.
+- `context = N` on `nest.context` (if present) must be >= 0 and <
+  `device_context_count` (upper bound checked at model/task load).
 - All event tags (from `!nest.event<tag>` results) must be unique within
   the context body. Empty tags (for unused phase events) are skipped.
 - `nest.dispatch.tasks.async`:
@@ -296,6 +351,17 @@ Tile program completion. Contributes to `grid_done` (reference.mlir
   the program body.
 - `tile.await` operands must be events defined earlier.
 - `tile.signal` phase must be `input_released` or `output_ready`.
+
+### 5.4 `nexus.program` body
+
+- `nexus.submit_context.async` `@ctx` must reference a defined
+  `nest.context`.
+- Event tags (from `!nexus.event<"tag">` results) must be non-empty and
+  unique within the program body.
+- `nexus.await` operands must be events defined earlier in the body
+  (by a prior `nexus.submit_context.async`).
+- The body must end with `nexus.return`.
+- No other ops are allowed in the body.
 
 ## 6. Lowering (IR → Runtime)
 
@@ -338,6 +404,27 @@ to the IR ops.
 Each unique `(program, placement_mask)` pair gets an auto-assigned
 `role_id` (starting from 0). Re-dispatching the same program with the
 same mask reuses the existing binding.
+
+### 6.4 Model lowering (`nexus.*` → `ExecDeviceOp`)
+
+In model mode, `lower_model_ir` produces an `ExecModel` containing:
+
+- `tasks`: `nest.context` ops lowered to `ExecTileGroupTask` (same as
+  §6.1) keyed by context symbol name.
+- `context_pins`: per-context device slot pin (from `nest.context`
+  `context = N`, or `None`).
+- `body`: `nexus.submit_context.async` → `ExecDeviceOp("submit", ...)`,
+  `nexus.await` → `ExecDeviceOp("await", ...)` per operand,
+  `nexus.return` → `ExecDeviceOp("return")`.
+
+The device PC loop (`Simulator._run_model`) walks `body` linearly:
+submit assigns a slot (pin or first-free), await blocks until the event
+fires, return completes. Slots share ONE `TileGroup` instance; each
+submit deep-clones its `ExecTileGroupTask` and namespaces event/stream
+IDs with a monotonic launch ID (`s{slot}l{launch}_`), then registers a
+fresh `TileGroupSequencer` advanced in lockstep each cycle. Completing
+sequencers are pruned; when all slots drain and `return` was reached,
+the model completes.
 
 ## 7. Runtime: Phase Signal Aggregation
 

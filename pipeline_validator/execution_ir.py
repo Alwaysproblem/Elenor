@@ -122,3 +122,22 @@ class ExecTileGroupTask:
   streams: list[ExecStreamDesc] = field(default_factory=list)
   role_bindings: dict[int, ExecTileRoleBinding] = field(default_factory=dict)
   completion_event: str = "group_task_done"
+
+
+@dataclass
+class ExecDeviceOp:
+  """One device-level instruction in a model execution body."""
+
+  op: str  # "submit" | "await" | "return"
+  ctx_name: str = ""
+  event_tag: str = ""
+
+
+@dataclass
+class ExecModel:
+  """Lowered model: name, per-context tasks, context pin map, body ops."""
+
+  name: str
+  tasks: dict[str, ExecTileGroupTask] = field(default_factory=dict)
+  context_pins: dict[str, int | None] = field(default_factory=dict)
+  body: list[ExecDeviceOp] = field(default_factory=list)
