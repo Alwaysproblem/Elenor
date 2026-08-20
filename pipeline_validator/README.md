@@ -136,11 +136,14 @@ python -m pipeline_validator -w pow --trace-html trace.html
   ops/bytes, event_id, tile_id. Each tile gets its own track
   (Tile0/Tile1/Tile2/Tile3) with sub-tracks per engine (BOA/EVU/MFE/USE).
   TileGroup runtime windows: `TileGroup/Task` (task begin→end),
-  `TileGroup/TileRole` (role dispatch→complete), `TileGroup/Global DMA`
+  `TileGroup/TileRole:{role_id}` (one track lane per dispatched role,
+  showing that role's dispatch→complete window), `TileGroup/Global DMA`
   (HBM↔L2 prefetch/store), `TileGroup/Collective` (reduce/broadcast).
   Tile L2↔L1 traffic is MFE load/store on each tile track.
 - **Instant markers**: `tile_done`, `tile_signal`, `tile_role_dispatch`,
   `tile_role_complete`, `group_task_done`, `dma_complete`, `collective_complete`.
+  `tile_role_dispatch` / `tile_role_complete` land on the per-role lane
+  `TileRole:{role_id}` so concurrent roles are visually separated.
 - **Multi-context trace details**: with `--context-mode 2`, tile tracks expose
   `UCE CTX0` / `UCE CTX1` lanes, `ctx_switch` instants, and
   `active_context_count` / `ready_context_count` counters.

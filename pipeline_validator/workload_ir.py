@@ -139,6 +139,8 @@ def _verify_context(context: NestContextOp, programs: dict[str, TileProgramDefOp
       continue
 
     if isinstance(op, NestDispatchOp):
+      if op.context_id is not None and int(op.context_id.value.data) < 0:
+        raise VerifyException("dispatch context must be >= 0")
       prog_sym = op.program.data
       if prog_sym not in programs:
         raise VerifyException(f"dispatch references unknown tile program '@{prog_sym}'")

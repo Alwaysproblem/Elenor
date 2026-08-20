@@ -113,7 +113,7 @@ class ExecTileRoleBinding:
   tile_program: ExecTileProgram
   in_stream: int | None = None
   out_stream: int | None = None
-
+  context_id: int | None = None
 
 @dataclass
 class ExecTileGroupTask:

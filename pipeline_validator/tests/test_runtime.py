@@ -65,14 +65,24 @@ def make_short_evu_program(name: str = "ctx_short_evu") -> TileProgramDefOp:
   return TileProgramDefOp(name, [evu, TileAwaitOp([evu.result]), TileReturnOp()])
 
 
-def make_same_tile_roles_task(role_count: int) -> ModuleOp:
-  """Dispatch role_count programs to one tile to exercise context switching."""
+def make_same_tile_roles_task(
+  role_count: int,
+  pins: list[int | None] | None = None,
+) -> ModuleOp:
+  """Dispatch role_count programs to one tile to exercise context switching.
+
+  When ``pins`` is given, dispatch ``i`` is pinned to ``pins[i]``
+  (None = no pin).  ``pins`` must have at least ``role_count`` entries.
+  """
   names = ["ctx_wait_mfe"] + [f"ctx_short_evu{i}" for i in range(role_count - 1)]
   progs = [make_waiting_mfe_program(names[0])] + [make_short_evu_program(n) for n in names[1:]]
   tasks = NestTaskRangeOp(0, 1)
   buffer = NestAllocOp("l2_buf", 4096)
   dispatches = [
-    NestDispatchOp(name, tasks.result, buffer.result, buffer.result, f"ev_role{i}", "", "")
+    NestDispatchOp(
+      name, tasks.result, buffer.result, buffer.result, f"ev_role{i}", "", "",
+      context_id=None if pins is None else pins[i],
+    )
     for i, name in enumerate(names)
   ]
   context = NestContextOp(
@@ -497,3 +507,55 @@ class TestFidelityModes:
       SimConfig(context_count=9)
     with pytest.raises(ValueError, match="context_count must be between 1 and 8"):
       TileUCE(0, HardwareConfig(), context_count=9)
+
+  def test_dispatch_pinned_same_context_serializes(self):
+    """Two roles pinned to the same context serialize: zero context switches."""
+    sim = Simulator(HardwareConfig(), SimConfig(fidelity="runtime", context_count=2, max_cycles=10000))
+    result = sim.run(make_same_tile_roles_task(2, pins=[0, 0]))
+    assert result.completed, result.reason
+    assert result.pmu.events.get("uce_context_switch", 0) == 0
+
+  def test_dispatch_pinned_context_binds_requested_index(self):
+    """Pinned dispatch lands on the requested tile-local context index."""
+    sim = Simulator(
+      HardwareConfig(),
+      SimConfig(fidelity="runtime", context_count=2, max_cycles=10000),
+      enable_tracer=True,
+    )
+    result = sim.run(make_same_tile_roles_task(2, pins=[1, 1]))
+    assert result.completed, result.reason
+    assert result.tracer is not None
+    events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
+    dispatch_ctxs = [e["args"]["ctx_id"] for e in events if e.get("name") == "tile_role_dispatch"]
+    assert dispatch_ctxs == [1, 1]
+
+  def test_dispatch_pinned_context_out_of_range_fails_at_load(self):
+    """Out-of-range context pin fails fast at task load, not silent deadlock."""
+    sim = Simulator(HardwareConfig(), SimConfig(fidelity="runtime", context_count=2, max_cycles=10000))
+    with pytest.raises(ValueError, match="pins context 2 but context_count is 2"):
+      sim.run(make_same_tile_roles_task(2, pins=[2, None]))
+
+  def test_same_program_different_pins_make_distinct_roles(self):
+    """Same program + mask but different context pins produce distinct roles."""
+    prog = make_waiting_mfe_program()
+    tasks = NestTaskRangeOp(0, 1)
+    buffer = NestAllocOp("l2_buf", 4096)
+    disp0 = NestDispatchOp("ctx_wait_mfe", tasks.result, buffer.result, buffer.result,
+                           "ev_a", "", "", context_id=0)
+    disp1 = NestDispatchOp("ctx_wait_mfe", tasks.result, buffer.result, buffer.result,
+                           "ev_b", "", "", context_id=1)
+    module = ModuleOp([
+      prog,
+      NestContextOp(
+        "same_prog_two_pins",
+        [buffer, tasks, disp0, disp1,
+         NestAwaitOp([disp0.grid_done, disp1.grid_done]), NestReturnOp()],
+        placement=1,
+      ),
+    ])
+    task = lower_workload_ir(module)
+    assert sorted(b.context_id for b in task.role_bindings.values()) == [0, 1]
+    result = Simulator(
+      HardwareConfig(), SimConfig(fidelity="runtime", context_count=2, max_cycles=10000)
+    ).run(module)
+    assert result.completed, result.reason
