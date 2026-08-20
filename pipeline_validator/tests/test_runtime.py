@@ -28,11 +28,25 @@ from pipeline_validator.dialects.elenor import (
   NestDispatchOp,
   NestReturnOp,
   NestTaskRangeOp,
+  NexusAwaitOp,
+  NexusProgramOp,
+  NexusReturnOp,
+  NexusSubmitContextOp,
   TileAwaitOp,
   TileEvuOp,
   TileLoadOp,
   TileProgramDefOp,
   TileReturnOp,
+)
+from pipeline_validator.execution_ir import (
+  ExecGroupAction,
+  ExecGroupActionOp,
+  ExecStreamDesc,
+  ExecTileGroupTask,
+  ExecTileInst,
+  ExecTileOp,
+  ExecTileProgram,
+  ExecTileRoleBinding,
 )
 from pipeline_validator.ir_lowering import lower_workload_ir
 from pipeline_validator.memory import L2SRAM, NoCRouter, PayloadTracker
@@ -91,6 +105,29 @@ def make_same_tile_roles_task(
     placement=1,
   )
   return ModuleOp([*progs, context])
+
+
+def make_two_context_model(pins: tuple[int | None, ...] = (None, None)) -> ModuleOp:
+  """Two single-dispatch nest.contexts + one nexus.program submitting both."""
+  prog = make_waiting_mfe_program("model_wait_mfe")
+  ctxs = []
+  for i, pin in enumerate(pins):
+    buffer = NestAllocOp(f"l2_buf_c{i}", 4096)
+    tasks = NestTaskRangeOp(0, 1)
+    disp = NestDispatchOp("model_wait_mfe", tasks.result, buffer.result,
+                          buffer.result, f"ev_grid_c{i}", "", "")
+    ctxs.append(NestContextOp(
+      f"ctx{i}",
+      [buffer, tasks, disp, NestAwaitOp([disp.grid_done]), NestReturnOp()],
+      placement=1,
+      context_id=pin,
+    ))
+  submits = [NexusSubmitContextOp(f"ctx{i}", f"done_c{i}") for i in range(len(pins))]
+  program = NexusProgramOp(
+    "run_model",
+    [*submits, NexusAwaitOp([s.result for s in submits]), NexusReturnOp()],
+  )
+  return ModuleOp([prog, *ctxs, program])
 
 
 
@@ -559,3 +596,300 @@ class TestFidelityModes:
       HardwareConfig(), SimConfig(fidelity="runtime", context_count=2, max_cycles=10000)
     ).run(module)
     assert result.completed, result.reason
+
+
+# ---------------------------------------------------------------------------
+# Model mode (nexus.program + device slot scheduling)
+# ---------------------------------------------------------------------------
+
+
+class TestModelMode:
+  @staticmethod
+  def _submit_done_cycles(result):
+    events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
+    submits = {
+      e["args"]["context"]: e["args"]["cycle"]
+      for e in events if e.get("name") == "context_submit"
+    }
+    dones = {
+      e["args"]["context"]: e["args"]["cycle"]
+      for e in events if e.get("name") == "context_done"
+    }
+    slots = {
+      e["args"]["context"]: e["args"]["slot"]
+      for e in events if e.get("name") == "context_submit"
+    }
+    return submits, dones, slots
+
+  def test_two_contexts_run_concurrently_on_two_slots(self):
+    sim = Simulator(
+      HardwareConfig(),
+      SimConfig(fidelity="runtime", device_context_count=2, max_cycles=10000),
+      enable_tracer=True,
+    )
+    result = sim.run(make_two_context_model())
+    assert result.completed, result.reason
+    submits, dones, slots = self._submit_done_cycles(result)
+    assert sorted(slots.values()) == [0, 1]
+    assert submits["ctx1"] < dones["ctx0"], (submits, dones)
+
+  def test_backpressure_serializes_on_one_slot(self):
+    sim = Simulator(
+      HardwareConfig(),
+      SimConfig(fidelity="runtime", device_context_count=1, max_cycles=10000),
+      enable_tracer=True,
+    )
+    result = sim.run(make_two_context_model())
+    assert result.completed, result.reason
+    submits, dones, _ = self._submit_done_cycles(result)
+    assert submits["ctx1"] > dones["ctx0"], (submits, dones)
+    assert result.pmu.named_cycles.get("device_submit_wait", 0) > 0
+
+  def test_context_pin_selects_slot(self):
+    sim = Simulator(
+      HardwareConfig(),
+      SimConfig(fidelity="runtime", device_context_count=2, max_cycles=10000),
+      enable_tracer=True,
+    )
+    result = sim.run(make_two_context_model(pins=(1, 0)))
+    assert result.completed, result.reason
+    _, _, slots = self._submit_done_cycles(result)
+    assert slots == {"ctx0": 1, "ctx1": 0}
+
+  def test_pin_out_of_range_fails_at_load(self):
+    sim = Simulator(
+      HardwareConfig(),
+      SimConfig(fidelity="runtime", device_context_count=2, max_cycles=10000),
+    )
+    with pytest.raises(ValueError, match="pins device context 2 but device_context_count is 2"):
+      sim.run(make_two_context_model(pins=(2, None)))
+
+  def test_legacy_module_rejects_out_of_range_context_pin(self):
+    prog = make_waiting_mfe_program()
+    tasks = NestTaskRangeOp(0, 1)
+    buffer = NestAllocOp("l2_buf", 4096)
+    disp = NestDispatchOp("ctx_wait_mfe", tasks.result, buffer.result, buffer.result,
+                         "ev_a", "", "")
+    module = ModuleOp([
+      prog,
+      NestContextOp(
+        "legacy_pinned",
+        [buffer, tasks, disp, NestAwaitOp([disp.grid_done]), NestReturnOp()],
+        placement=1,
+        context_id=1,
+      ),
+    ])
+    sim = Simulator(
+      HardwareConfig(),
+      SimConfig(fidelity="runtime", device_context_count=1, max_cycles=10000),
+    )
+    with pytest.raises(ValueError, match="pins device context 1 but device_context_count is 1"):
+      sim.run(module)
+
+  def test_sequential_slot_reuse_gets_fresh_launch_namespace(self):
+    """Submitting the same context twice on one slot must not alias
+    stale completions from the first launch (launch-ID namespacing)."""
+    prog = make_waiting_mfe_program("model_wait_mfe")
+    buffer = NestAllocOp("l2_buf_c0", 4096)
+    tasks = NestTaskRangeOp(0, 1)
+    disp = NestDispatchOp("model_wait_mfe", tasks.result, buffer.result,
+                          buffer.result, "ev_grid_c0", "", "")
+    ctx = NestContextOp(
+      "ctx0",
+      [buffer, tasks, disp, NestAwaitOp([disp.grid_done]), NestReturnOp()],
+      placement=1,
+    )
+    sub0 = NexusSubmitContextOp("ctx0", "done_c0")
+    sub1 = NexusSubmitContextOp("ctx0", "done_c0_1")
+    program = NexusProgramOp(
+      "run_model",
+      [sub0, NexusAwaitOp([sub0.result]),
+       sub1, NexusAwaitOp([sub1.result]), NexusReturnOp()],
+    )
+    module = ModuleOp([prog, ctx, program])
+    sim = Simulator(
+      HardwareConfig(),
+      SimConfig(fidelity="runtime", device_context_count=1, max_cycles=10000),
+      enable_tracer=True,
+    )
+    result = sim.run(module)
+    assert result.completed, result.reason
+    events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
+    submit_cycles = [e["args"]["cycle"] for e in events
+                     if e.get("name") == "context_submit"]
+    done_cycles = [e["args"]["cycle"] for e in events
+                   if e.get("name") == "context_done"]
+    assert len(submit_cycles) == 2 and len(done_cycles) == 2, (submit_cycles, done_cycles)
+    # both submissions on slot 0; the second starts after the first completes
+    assert sorted(e["args"]["slot"] for e in events
+                  if e.get("name") == "context_submit") == [0, 0]
+    assert submit_cycles[1] >= done_cycles[0], (submit_cycles, done_cycles)
+
+  def test_concurrent_contexts_with_same_stream_ids_namespaced(self):
+    """Two concurrent contexts using the same original stream queue IDs
+    must get slot/launch-namespaced queues: both complete, credit
+    invariants hold, and two distinct queues exist (no overwrite)."""
+    def make_stream_task(name: str) -> ExecTileGroupTask:
+      prog = ExecTileProgram(
+        name=f"{name}_prog",
+        insts=[
+          ExecTileInst(ExecTileOp.STREAM_ACQUIRE, dst="tok0", args=(0,)),
+          ExecTileInst(ExecTileOp.STREAM_PUSH, args=(0, "tok0", 0)),
+          ExecTileInst(ExecTileOp.STREAM_POP, dst="tok1", args=(0,)),
+          ExecTileInst(ExecTileOp.STREAM_RELEASE, args=(0, "tok1")),
+          ExecTileInst(ExecTileOp.RET),
+        ],
+      )
+      return ExecTileGroupTask(
+        name=name,
+        actions=[
+          ExecGroupAction(ExecGroupActionOp.INIT_STREAM, args=(0, 1, 1, 1)),
+          ExecGroupAction(ExecGroupActionOp.DISPATCH_ROLE,
+                          args=(0, "", ""), dst="ev_grid"),
+          ExecGroupAction(ExecGroupActionOp.WAIT_EVENT, args=("ev_grid",)),
+        ],
+        streams=[
+          ExecStreamDesc(queue_id=0, depth=1, producer_mask=1, consumer_mask=1),
+        ],
+        role_bindings={
+          0: ExecTileRoleBinding(
+            role_id=0, tile_mask=1, tile_program=prog,
+            in_stream=0, out_stream=0,
+          ),
+        },
+      )
+
+    sim = Simulator(
+      HardwareConfig(),
+      SimConfig(fidelity="runtime", device_context_count=2, max_cycles=10000),
+    )
+    seq0 = sim.group.load_context_task(make_stream_task("ctx0"), slot_index=0)
+    seq1 = sim.group.load_context_task(make_stream_task("ctx1"), slot_index=1)
+    seen_qids: set[int] = set()
+    for cycle in range(10000):
+      seen_qids |= set(sim.group.queues.keys())
+      if sim.group.step(cycle):
+        break
+    assert seq0.done and seq1.done, f"seq0={seq0.done} seq1={seq1.done}"
+    assert not seq0.faulted and not seq1.faulted
+    # Two distinct namespaced queues existed while both launches ran:
+    # launch 0/slot 0 keeps qid 0; launch 1/slot 1 offsets to 1_010_000.
+    # Without the rewrite the second INIT_STREAM would overwrite the
+    # first queue (only qid 0 would ever be seen).
+    assert 0 in seen_qids and 1_010_000 in seen_qids, seen_qids
+    # After both sequencers drain, their queues and tile bindings are
+    # reclaimed (no unbounded growth across sequential submits).
+    assert sim.group.queues == {}, sim.group.queues
+    assert all(t.streams == {} for t in sim.group.tiles), [
+      t.streams for t in sim.group.tiles]
+    assert sim.group.credit_invariants_hold()
+
+  def test_sequential_stream_reuse_reclaims_queues(self):
+    """Repeatedly submitting a stream-bearing context on one slot must
+    reclaim each launch's queues on drain (no queue/binding growth)."""
+    def make_stream_task(name: str) -> ExecTileGroupTask:
+      prog = ExecTileProgram(
+        name=f"{name}_prog",
+        insts=[
+          ExecTileInst(ExecTileOp.STREAM_ACQUIRE, dst="tok0", args=(0,)),
+          ExecTileInst(ExecTileOp.STREAM_PUSH, args=(0, "tok0", 0)),
+          ExecTileInst(ExecTileOp.STREAM_POP, dst="tok1", args=(0,)),
+          ExecTileInst(ExecTileOp.STREAM_RELEASE, args=(0, "tok1")),
+          ExecTileInst(ExecTileOp.RET),
+        ],
+      )
+      return ExecTileGroupTask(
+        name=name,
+        actions=[
+          ExecGroupAction(ExecGroupActionOp.INIT_STREAM, args=(0, 1, 1, 1)),
+          ExecGroupAction(ExecGroupActionOp.DISPATCH_ROLE,
+                          args=(0, "", ""), dst="ev_grid"),
+          ExecGroupAction(ExecGroupActionOp.WAIT_EVENT, args=("ev_grid",)),
+        ],
+        streams=[
+          ExecStreamDesc(queue_id=0, depth=1, producer_mask=1, consumer_mask=1),
+        ],
+        role_bindings={
+          0: ExecTileRoleBinding(
+            role_id=0, tile_mask=1, tile_program=prog,
+            in_stream=0, out_stream=0,
+          ),
+        },
+      )
+
+    sim = Simulator(
+      HardwareConfig(),
+      SimConfig(fidelity="runtime", device_context_count=1, max_cycles=10000),
+    )
+    for round_idx in range(3):
+      seq = sim.group.load_context_task(make_stream_task(f"ctx{round_idx}"),
+                                        slot_index=0)
+      for cycle in range(10000):
+        if sim.group.step(cycle):
+          break
+      assert seq.done and not seq.faulted
+      # After each drain, queues and tile bindings are fully reclaimed.
+      assert sim.group.queues == {}, sim.group.queues
+      assert all(t.streams == {} for t in sim.group.tiles), [
+        t.streams for t in sim.group.tiles]
+      assert sim.group.credit_invariants_hold()
+
+  def test_drain_gate_holds_until_unawaited_role_completes(self):
+    """A context whose actions end without awaiting its dispatch must
+    not finish (and must not reclaim its stream queues) until the
+    launched role's tile program completes (IR_SPEC §3.10)."""
+    prog = ExecTileProgram(
+      name="stream_prog",
+      insts=[
+        ExecTileInst(ExecTileOp.STREAM_ACQUIRE, dst="tok0", args=(0,)),
+        ExecTileInst(ExecTileOp.STREAM_PUSH, args=(0, "tok0", 0)),
+        ExecTileInst(ExecTileOp.STREAM_POP, dst="tok1", args=(0,)),
+        ExecTileInst(ExecTileOp.STREAM_RELEASE, args=(0, "tok1")),
+        ExecTileInst(ExecTileOp.RET),
+      ],
+    )
+    task = ExecTileGroupTask(
+      name="ctx0",
+      actions=[
+        ExecGroupAction(ExecGroupActionOp.INIT_STREAM, args=(0, 1, 1, 1)),
+        # no WAIT_EVENT after the dispatch: actions end while the role
+        # is still running on the tile.
+        ExecGroupAction(ExecGroupActionOp.DISPATCH_ROLE,
+                        args=(0, "", ""), dst="ev_grid"),
+      ],
+      streams=[
+        ExecStreamDesc(queue_id=0, depth=1, producer_mask=1, consumer_mask=1),
+      ],
+      role_bindings={
+        0: ExecTileRoleBinding(
+          role_id=0, tile_mask=1, tile_program=prog,
+          in_stream=0, out_stream=0,
+        ),
+      },
+    )
+    sim = Simulator(
+      HardwareConfig(),
+      SimConfig(fidelity="runtime", device_context_count=1, max_cycles=10000),
+    )
+    seq = sim.group.load_context_task(task, slot_index=0)
+    # Step until the sequencer exhausts its actions while the role is
+    # still running: the drain gate must hold it not-done and keep its
+    # queues alive.
+    gate_held = False
+    for cycle in range(10000):
+      if sim.group.step(cycle):
+        break
+      if seq.action_index >= len(task.actions) and not seq.done:
+        assert sim.group.queues != {}, "queues reclaimed before role drained"
+        gate_held = True
+        break
+    assert gate_held, "sequencer never hit the end-of-actions drain gate"
+    # Drain to completion: role finishes, queues reclaimed.
+    for cycle in range(cycle + 1, 10000):
+      if sim.group.step(cycle):
+        break
+    assert seq.done and not seq.faulted
+    assert sim.group.queues == {}, sim.group.queues
+    assert all(t.streams == {} for t in sim.group.tiles), [
+      t.streams for t in sim.group.tiles]
+    assert sim.group.credit_invariants_hold()

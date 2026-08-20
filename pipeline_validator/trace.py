@@ -226,6 +226,37 @@ class Tracer:
         return len(self._events)
 
 
+
+class ScopedTracer:
+    """Tracer wrapper prefixing every track (process lane) name.
+
+    Thread names (and thus ``cat``) are unchanged, so per-thread
+    assertions and HTML colors are unaffected.  Gives each device
+    execution slot its own lane set (``G0:Tile0``, ``G0:TileGroup``...).
+    """
+
+    def __init__(self, inner: Tracer, prefix: str):
+        self._inner = inner
+        self._prefix = prefix
+
+    def cycle_to_us(self, cycle: int) -> float:
+        return self._inner.cycle_to_us(cycle)
+
+    def begin(self, track, thread, name, cycle, args=None):
+        self._inner.begin(self._prefix + track, thread, name, cycle, args)
+
+    def end(self, track, thread, name, cycle):
+        self._inner.end(self._prefix + track, thread, name, cycle)
+
+    def complete(self, track, thread, name, start_cycle, end_cycle, args=None):
+        self._inner.complete(self._prefix + track, thread, name, start_cycle, end_cycle, args)
+
+    def counter(self, track, name, cycle, value, unit=""):
+        self._inner.counter(self._prefix + track, name, cycle, value, unit)
+
+    def instant(self, track, thread, name, cycle, args=None):
+        self._inner.instant(self._prefix + track, thread, name, cycle, args)
+
 # ---------------------------------------------------------------------------
 # Standalone HTML wrapper
 # ---------------------------------------------------------------------------

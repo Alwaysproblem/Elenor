@@ -8,11 +8,18 @@ advancing the Tile Group Sequencer and every Compute Tile in lockstep.
 
 from __future__ import annotations
 
+import copy
 import zlib
 from dataclasses import dataclass
 
 from .config import HardwareConfig
-from .execution_ir import ExecStreamDesc, ExecTileGroupTask, ExecTileRoleBinding
+from .execution_ir import (
+  ExecGroupActionOp,
+  ExecStreamDesc,
+  ExecTileGroupTask,
+  ExecTileOp,
+  ExecTileRoleBinding,
+)
 from .memory import L2SRAM, NoCRouter, PayloadTracker
 from .pmu import PMUCounter
 from .runtime import (
@@ -42,6 +49,7 @@ class _DMAJob:
   l2_slot: str
   bytes_total: int
   channel: int
+  sequencer: TileGroupSequencer | None = None  # sequencer that issued this job
 
 
 @dataclass
@@ -54,6 +62,7 @@ class _CollectiveJob:
   op: str
   bytes_total: int
   participant_mask: int
+  sequencer: TileGroupSequencer | None = None  # sequencer that issued this job
 
 
 @dataclass
@@ -71,24 +80,29 @@ class _RoleTrace:
   tile_mask: int
   out_stream: int | None
   in_stream: int | None
+  sequencer: TileGroupSequencer | None = None  # sequencer that dispatched this role
+
 
 
 class TileGroup:
   """One ELENOR Tile Group with 4 Compute Tiles."""
 
   def __init__(self, cfg: HardwareConfig, tracer: Tracer | None = None,
-               fidelity: str = "timing_only", context_count: int = 1):
+               fidelity: str = "timing_only", context_count: int = 1,
+               trace_prefix: str = ""):
     self.cfg = cfg
     self.tracer = tracer
     self.fidelity = fidelity
     rt = fidelity in ("runtime", "full_memory")
     mem = fidelity == "full_memory"
     self.tiles: list[ComputeTile] = [
-      ComputeTile(i, cfg, tracer, runtime_enabled=rt,
+      ComputeTile(i, cfg, self.tracer, runtime_enabled=rt,  # type: ignore[arg-type]
                   memory_enabled=mem, context_count=context_count)
       for i in range(cfg.num_tiles)
     ]
     self.sequencer = TileGroupSequencer(self)
+    self._active_sequencers: list[TileGroupSequencer] = [self.sequencer]
+    self._next_launch_id: int = 0
     self.queues: dict[int, StreamQueue] = {}
     self._dma_jobs: list[_DMAJob] = []
     # per-channel "free cycle" for serializing DMA jobs on each channel
@@ -160,6 +174,7 @@ class TileGroup:
     l2_slot: str,
     bytes_total: int,
     channel: int = 0,
+    sequencer: TileGroupSequencer | None = None,
   ) -> None:
     # Each channel serializes jobs: a new job starts only after the previous
     # one on the same channel finishes.  This models a real DMA channel with
@@ -178,7 +193,10 @@ class TileGroup:
         l2_slot=l2_slot,
         bytes_total=bytes_total,
         channel=channel,
+        sequencer=sequencer,
       ))
+    if sequencer is not None:
+      sequencer.note_job_started()
 
   def schedule_collective(
     self,
@@ -188,6 +206,7 @@ class TileGroup:
     bytes_total: int,
     participant_mask: int,
     cycle: int,
+    sequencer: TileGroupSequencer | None = None,
   ) -> None:
     # One-cycle runtime window: numeric reduce datapath/bandwidth is left to
     # SRAM profile/PPA exploration per the collective design spec.
@@ -200,8 +219,10 @@ class TileGroup:
         op=op,
         bytes_total=bytes_total,
         participant_mask=participant_mask,
+        sequencer=sequencer,
       ))
-
+    if sequencer is not None:
+      sequencer.note_job_started()
   def can_dispatch_role(self, binding: ExecTileRoleBinding) -> bool:
     return all(t.can_accept_context(binding.context_id)
                for t in self.tiles
@@ -213,11 +234,13 @@ class TileGroup:
     cycle: int,
     event_id: str | None = None,
     phase_event_ids: dict[str, str] | None = None,
+    sequencer: TileGroupSequencer | None = None,
   ) -> None:
     """Load the role's Tile Program onto the selected tiles and mark them."""
     role_id = binding.role_id
     tile_mask = binding.tile_mask
     ev = event_id or f"ev_role{role_id}"
+    seq = sequencer or self.sequencer
     self._role_event_tile_mask[ev] = tile_mask
     self._role_done_tiles[ev] = set()
     self._role_phase_events[ev] = phase_event_ids or {}
@@ -255,9 +278,20 @@ class TileGroup:
       t.uce._phase_signal_callback = self._on_phase_signal
       for qid, q in self.queues.items():
         t.bind_stream(qid, q)
-      for done_ev in sorted(self.sequencer._events_done):
-        if done_ev.startswith("ev_dma_"):
+      for done_ev in sorted(seq._events_done):
+        if "ev_dma_" in done_ev:
           t.uce.notify_event(done_ev)
+    # Register _RoleTrace unconditionally: completion/phase routing
+    # depends on its sequencer reference (not just trace emission).
+    self._role_trace[ev] = _RoleTrace(
+      role_id=role_id,
+      event_id=ev,
+      start_cycle=cycle,
+      tile_mask=tile_mask,
+      out_stream=binding.out_stream,
+      in_stream=binding.in_stream,
+      sequencer=seq,
+    )
     tr = self.tracer
     if tr is not None:
       ctx_trace_arg = ctx_ids[0] if len(set(ctx_ids)) == 1 else ctx_ids
@@ -278,14 +312,6 @@ class TileGroup:
           "context_count": self.tiles[0].uce.context_count,
         },
       )
-      self._role_trace[ev] = _RoleTrace(
-        role_id=role_id,
-        event_id=ev,
-        start_cycle=cycle,
-        tile_mask=tile_mask,
-        out_stream=binding.out_stream,
-        in_stream=binding.in_stream,
-      )
     if total_cold > 0:
       self.pmu.add_cycle("program_cold_load", total_cold)
 
@@ -304,7 +330,10 @@ class TileGroup:
     done.add(tile_id)
     expected = bin(mask).count("1")
     if len(done) >= expected:
-      self.sequencer.notify_event(phase_ev)
+      rt = self._role_trace.get(role_event_id)
+      phase_seq = (rt.sequencer if rt is not None and rt.sequencer is not None
+                   else self.sequencer)
+      phase_seq.notify_event(phase_ev)
 
   @staticmethod
   def _program_bytes(prog) -> int:
@@ -332,8 +361,10 @@ class TileGroup:
     remaining_dma: list[_DMAJob] = []
     for job in self._dma_jobs:
       if cycle >= job.finish_cycle:
-        self.sequencer.notify_event(job.event_id)
-        # Cross-level event bridge: forward group DMA completion to
+        seq = job.sequencer or self.sequencer
+        seq.notify_event(job.event_id)
+        if job.sequencer is not None:
+          job.sequencer.note_job_done()
         # active tiles so a persistent tile program can WAIT on
         # sequencer-issued DMA events (e.g. ev_dma_A{g}).  Tiles not
         # waiting on this event ignore it.
@@ -382,7 +413,10 @@ class TileGroup:
     remaining_coll: list[_CollectiveJob] = []
     for cjob in self._collective_jobs:
       if cycle >= cjob.finish_cycle:
-        self.sequencer.notify_event(cjob.event_id)
+        seq = cjob.sequencer or self.sequencer
+        seq.notify_event(cjob.event_id)
+        if cjob.sequencer is not None:
+          cjob.sequencer.note_job_done()
         self.pmu.add_event("collective_complete")
         if tr is not None:
           tr.complete(
@@ -416,17 +450,23 @@ class TileGroup:
     if self.memory_enabled:
       self.noc.step(cycle)
 
-    # 3. tick the Tile Group Sequencer
-    self.sequencer.step(cycle)
+    # 3. tick all active Tile Group Sequencers
+    for seq in self._active_sequencers:
+      seq.step(cycle)
 
     # 4. tick all compute tiles; collect role completions by event id
     for t in self.tiles:
       t.step(cycle)
       for term in t.drain_context_terminals():
         if term.status == "fault":
-          self.sequencer.faulted = True
-          self.sequencer.fault_reason = f"tile{term.tile_id}: {term.reason}"
-          self.sequencer.done = True
+          # Route fault to the sequencer that dispatched this role
+          rid = term.role_event_id
+          rt = self._role_trace.get(rid) if rid is not None else None
+          fault_seq = (rt.sequencer if rt is not None and rt.sequencer is not None
+                       else self.sequencer)
+          fault_seq.faulted = True
+          fault_seq.fault_reason = f"tile{term.tile_id}: {term.reason}"
+          fault_seq.done = True
           self.pmu.add_event("tile_fault")
           self._aggregate_pmu()
           return True
@@ -448,7 +488,10 @@ class TileGroup:
         mask = self._role_event_tile_mask.get(term.role_event_id, 0)
         expected = bin(mask).count("1")
         if len(done_set) >= expected:
-          self.sequencer.notify_event(term.role_event_id)
+          # Route completion to the sequencer that dispatched this role
+          done_seq = (rt.sequencer if rt is not None and rt.sequencer is not None
+                      else self.sequencer)
+          done_seq.notify_event(term.role_event_id)
           if tr is not None:
             if rt is not None:
               tr.complete(
@@ -483,7 +526,20 @@ class TileGroup:
     if self.runtime_enabled and self.reset_domain.is_active:
       self.reset_domain.step(cycle, group=self)
     self._aggregate_pmu()
-    if self.sequencer.done and tr is not None:
+    # Prune completed sequencers; reclaim their namespaced stream queues
+    # and tile bindings so repeated submits don't grow them unboundedly.
+    remaining: list[TileGroupSequencer] = []
+    for s in self._active_sequencers:
+      if s.done:
+        for qid in s.owned_queue_ids:
+          self.queues.pop(qid, None)
+          for t in self.tiles:
+            t.unbind_stream(qid)
+      else:
+        remaining.append(s)
+    self._active_sequencers = remaining
+    all_done = len(self._active_sequencers) == 0
+    if all_done and tr is not None:
       if not self._task_done_traced:
         start = self._task_start_cycle if self._task_start_cycle is not None else cycle
         if self._task_trace_name is not None:
@@ -501,12 +557,13 @@ class TileGroup:
                if self.sequencer.task is not None else "group_task_done")
         tr.instant("TileGroup", "Task", "group_task_done", cycle, {"event": cev})
         self._task_done_traced = True
-    return self.sequencer.done
+    return all_done
 
   def _aggregate_pmu(self) -> None:
-    # merge sequencer + all tiles + all queues into group PMU
-    self.pmu.merge(self.sequencer.pmu)
-    self.sequencer.pmu.reset()
+    # merge all active sequencers + all tiles + all queues into group PMU
+    for seq in self._active_sequencers:
+      self.pmu.merge(seq.pmu)
+      seq.pmu.reset()
     for t in self.tiles:
       self.pmu.merge(t.pmu)
       t.pmu.reset()
@@ -544,6 +601,7 @@ class TileGroup:
     for t in self.tiles:
       t.reset()
     self.sequencer.reset()
+    self._active_sequencers = [self.sequencer]
     self.queues.clear()
     self._channel_free_cycle.clear()
     self._dma_jobs.clear()
@@ -579,10 +637,122 @@ class TileGroup:
     for s in task.streams:
       self.init_stream(s)
 
+  def load_context_task(self, task: ExecTileGroupTask,
+                        slot_index: int = 0) -> TileGroupSequencer:
+    """Load a model-mode context task without resetting shared state.
+
+    Deep-clones the task, then namespaces every event ID and stream
+    queue ID with a monotonic launch ID (``s{slot}l{launch}_`` for
+    events; integer queue offset for streams) so sequential
+    re-submissions on the same slot cannot consume stale completions
+    and concurrent tasks cannot collide on shared group-level tracking.
+
+    Creates a fresh TileGroupSequencer for this task and adds it to the
+    active sequencer list.  Tiles, DMA channels, L2, and program
+    residency are shared across all concurrently-loaded context tasks.
+
+    Dispatch bindings with ``context_id = None`` are auto-assigned to
+    UCE context ``slot_index`` so each device slot runs on its own UCE
+    context, enabling true concurrency on the shared tiles.  Explicit
+    dispatch ``context_id`` pins are preserved (IR_SPEC §3.5); callers
+    must ensure they don't conflict across concurrent slots.  Requires
+    ``context_count >= device_context_count``.
+    Returns the new sequencer so the caller can track its completion.
+    """
+    max_ctx = self.tiles[0].uce.context_count
+    if slot_index >= max_ctx:
+      raise ValueError(
+        f"device slot {slot_index} requires UCE context {slot_index}"
+        f" but context_count is {max_ctx}")
+    launch_id = self._next_launch_id
+    self._next_launch_id += 1
+    # Deep-clone so the caller's task stays pristine: re-submitting the
+    # same context re-namespaces from the clean original.
+    task = copy.deepcopy(task)
+    # Auto-assign unpinned dispatches to the slot's UCE context.
+    for binding in task.role_bindings.values():
+      if binding.context_id is None:
+        binding.context_id = slot_index
+      elif binding.context_id >= max_ctx:
+        raise ValueError(
+          f"role {binding.role_id} pins context {binding.context_id} but context_count is {max_ctx}"
+        )
+    # Namespace event IDs with (slot, launch) so sequential slot reuse
+    # cannot collide with stale completions.
+    prefix = f"s{slot_index}l{launch_id}_"
+    for action in task.actions:
+      if action.dst is not None:
+        action.dst = prefix + action.dst
+      if action.op == ExecGroupActionOp.WAIT_EVENT:
+        action.args = tuple(prefix + a if isinstance(a, str) else a
+                            for a in action.args)
+      elif action.op == ExecGroupActionOp.SIGNAL_EVENT:
+        action.args = tuple(prefix + a if isinstance(a, str) else a
+                            for a in action.args)
+      elif action.op == ExecGroupActionOp.DISPATCH_ROLE:
+        # args = (role_id, inrel_tag, outready_tag)
+        action.args = tuple(
+          prefix + a if isinstance(a, str) and a else a
+          for a in action.args)
+    # Namespace stream IDs into the launch's integer queue space.
+    qid_offset = (launch_id * 100 + slot_index) * 10000
+    owned_qids: set[int] = set()
+    for action in task.actions:
+      if action.op == ExecGroupActionOp.INIT_STREAM:
+        # args = (queue_id, depth, producer_mask, consumer_mask)
+        action.args = (
+          int(action.args[0]) + qid_offset,
+          *action.args[1:],
+        )
+        owned_qids.add(int(action.args[0]))
+    for s in task.streams:
+      s.queue_id += qid_offset
+      owned_qids.add(s.queue_id)
+    for binding in task.role_bindings.values():
+      if binding.out_stream is not None:
+        binding.out_stream += qid_offset
+      if binding.in_stream is not None:
+        binding.in_stream += qid_offset
+    stream_ops = {
+      ExecTileOp.STREAM_PUSH, ExecTileOp.STREAM_POP,
+      ExecTileOp.STREAM_ACQUIRE, ExecTileOp.STREAM_RELEASE,
+      ExecTileOp.STREAM_PUSH_EOS,
+    }
+    seen_progs: set[int] = set()
+    for binding in task.role_bindings.values():
+      prog = binding.tile_program
+      if id(prog) in seen_progs:
+        continue
+      seen_progs.add(id(prog))
+      for inst in prog.insts:
+        if inst.op in stream_ops and len(inst.args) >= 1:
+          inst.args = (
+            int(inst.args[0]) + qid_offset,
+            *inst.args[1:],
+          )
+        elif inst.op in (ExecTileOp.WAIT, ExecTileOp.WAITALL):
+          # Namespace external group-DMA waits so the tile sees the
+          # forwarded namespaced DMA completion (TileUCE matches by
+          # exact id against _external_events_done).
+          inst.args = tuple(
+            prefix + a if isinstance(a, str) and "ev_dma_" in a else a
+            for a in inst.args)
+    # Also namespace the completion event
+    task.completion_event = prefix + task.completion_event
+    seq = TileGroupSequencer(self)
+    seq.load(task)
+    seq.owned_queue_ids = owned_qids
+    self._active_sequencers.append(seq)
+    for s in task.streams:
+      self.init_stream(s)
+    return seq
   def reset(self) -> None:
     for t in self.tiles:
       t.reset()
     self.sequencer.reset()
+    self._active_sequencers = [self.sequencer]
+    self._next_launch_id = 0
+    self._active_sequencers = [self.sequencer]
     for q in self.queues.values():
       q.reset()
     self._channel_free_cycle.clear()

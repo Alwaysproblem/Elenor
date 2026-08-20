@@ -25,10 +25,15 @@ from pipeline_validator.dialects.elenor import (
   NestDispatchOp,
   NestDMAStoreOp,
   NestEvent,
+  NestGlobalMemref,
   NestPrefetchOp,
   NestReleaseOp,
   NestReturnOp,
   NestTaskRangeOp,
+  NexusAwaitOp,
+  NexusProgramOp,
+  NexusReturnOp,
+  NexusSubmitContextOp,
   TaskRange,
   TileAwaitOp,
   TileBoaOp,
@@ -271,6 +276,135 @@ class TestXDSLIR:
     ])
     self._assert_verify_failure(module, "dispatch context must be >= 0")
 
+  def test_context_level_context_attribute_round_trip(self):
+    """``context = N`` on ``nest.context`` (device slot pin) prints, parses, and round-trips."""
+    prog = make_identity_tile_program()
+    buffer = NestAllocOp(slot="l2_buf", bytes_total=256)
+    tasks = NestTaskRangeOp(from_task=0, to_task=1)
+    dispatch = NestDispatchOp(
+      prog.sym_name.data,
+      tasks.result,
+      buffer.result,
+      buffer.result,
+      "grid_done",
+      "input_released",
+      "output_ready",
+    )
+    module = ModuleOp([
+      prog,
+      NestContextOp(
+        "ctx_default_pin",
+        [buffer, tasks, dispatch, NestAwaitOp([dispatch.grid_done]), NestReturnOp()],
+        placement=1,
+        context_id=1,
+      ),
+    ])
+    verify_workload_ir(module)
+    text = print_workload_ir(module)
+    assert "context = 1" in text
+    reparsed = parse_workload_ir(text, source_name="<ctx-pin>")
+    verify_workload_ir(reparsed)
+    ctx_op = next(op for op in reparsed.ops if isinstance(op, NestContextOp))
+    assert ctx_op.context_id is not None
+    assert int(ctx_op.context_id.value.data) == 1
+    # Unpinned context must NOT print the attribute.
+    assert "context = " not in print_workload_ir(PowWorkload().module)
+
+  def test_verifier_rejects_negative_context_level_context(self):
+    prog = make_identity_tile_program()
+    buffer = NestAllocOp(slot="l2_buf", bytes_total=256)
+    tasks = NestTaskRangeOp(from_task=0, to_task=1)
+    dispatch = NestDispatchOp(
+      prog.sym_name.data,
+      tasks.result,
+      buffer.result,
+      buffer.result,
+      "grid_done",
+      "input_released",
+      "output_ready",
+    )
+    module = ModuleOp([
+      prog,
+      NestContextOp(
+        "neg_ctx_pin",
+        [buffer, tasks, dispatch, NestReturnOp()],
+        placement=1,
+        context_id=-1,
+      ),
+    ])
+    self._assert_verify_failure(module, "nest.context context must be >= 0")
+
+  def test_nexus_program_round_trip(self):
+    """nexus.program with submit/await/return round-trips in custom assembly."""
+    prog = make_identity_tile_program()
+    ctxs = []
+    for i in range(2):
+      buf = NestAllocOp(slot="l2_buf", bytes_total=256)
+      tasks = NestTaskRangeOp(from_task=0, to_task=1)
+      disp = NestDispatchOp(
+        prog.sym_name.data, tasks.result, buf.result, buf.result,
+        f"ev_grid_c{i}", "", "",
+      )
+      ctxs.append(NestContextOp(
+        f"ctx{i}",
+        [buf, tasks, disp, NestAwaitOp([disp.grid_done]), NestReturnOp()],
+        placement=1, context_id=i,
+      ))
+    sub0 = NexusSubmitContextOp("ctx0", "done0")
+    sub1 = NexusSubmitContextOp("ctx1", "done1")
+    program = NexusProgramOp(
+      "run_model",
+      [sub0, sub1, NexusAwaitOp([sub0.result, sub1.result]), NexusReturnOp()],
+      arg_types=[NestGlobalMemref.of([4, 128, 128], "bf16")],
+    )
+    module = ModuleOp([prog, *ctxs, program])
+    verify_workload_ir(module)
+    text = print_workload_ir(module)
+    assert "nexus.program" in text
+    assert "nexus.submit_context.async" in text
+    assert '!nexus.event<"' in text
+    assert "!nest.global_memref<4x128x128xbf16>" in text
+    reparsed = parse_workload_ir(text)
+    verify_workload_ir(reparsed)
+    assert print_workload_ir(reparsed) == text
+
+  def test_verifier_rejects_unknown_submit_context(self):
+    """submit_context referencing an undefined nest.context is rejected."""
+    prog = make_identity_tile_program()
+    buf = NestAllocOp(slot="l2_buf", bytes_total=256)
+    tasks = NestTaskRangeOp(from_task=0, to_task=1)
+    disp = NestDispatchOp(
+      prog.sym_name.data, tasks.result, buf.result, buf.result, "ev0", "", "",
+    )
+    ctx0 = NestContextOp(
+      "ctx0", [buf, tasks, disp, NestAwaitOp([disp.grid_done]), NestReturnOp()],
+      placement=1, context_id=0,
+    )
+    program = NexusProgramOp(
+      "bad", [NexusSubmitContextOp("missing", "done0"), NexusReturnOp()],
+    )
+    module = ModuleOp([prog, ctx0, program])
+    self._assert_verify_failure(module, "submit_context references unknown nest.context '@missing'")
+
+  def test_verifier_rejects_undefined_nexus_await(self):
+    """nexus.await referencing an event not yet submitted is rejected."""
+    prog = make_identity_tile_program()
+    sub = NexusSubmitContextOp("ctx0", "done0")
+    buf = NestAllocOp(slot="l2_buf", bytes_total=256)
+    tasks = NestTaskRangeOp(from_task=0, to_task=1)
+    disp = NestDispatchOp(
+      prog.sym_name.data, tasks.result, buf.result, buf.result, "ev0", "", "",
+    )
+    ctx0 = NestContextOp(
+      "ctx0", [buf, tasks, disp, NestAwaitOp([disp.grid_done]), NestReturnOp()],
+      placement=1, context_id=0,
+    )
+    program = NexusProgramOp(
+      "bad",
+      [NexusAwaitOp([sub.result]), sub, NexusReturnOp()],
+    )
+    module = ModuleOp([prog, ctx0, program])
+    self._assert_verify_failure(module, "nexus.await references undefined event 'done0'")
 
 class TestExternalIRCLI:
   def _run_cli(self, *args: str):
@@ -368,6 +502,20 @@ class TestExternalIRCLI:
       assert res.returncode == 2
       assert "--context-mode must be between 1 and 8" in res.stderr
 
+  def test_example_mlir_runs_on_two_device_contexts(self):
+    res = self._run_cli(
+      "--ir-file", "examples/example.mlir",
+      "--device-context-mode", "2",
+      "--max-cycles", "200000",
+    )
+    assert res.returncode == 0, res.stderr
+    assert "Completed:" in res.stdout and "True" in res.stdout
+
+  def test_device_context_mode_cli_bounds(self):
+    for bad in ("0", "9"):
+      res = self._run_cli("-w", "pow", "--device-context-mode", bad)
+      assert res.returncode == 2
+      assert "--device-context-mode must be between 1 and 8" in res.stderr
 
 # ---------------------------------------------------------------------------
 # Stream Queue unit tests

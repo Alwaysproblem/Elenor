@@ -77,6 +77,13 @@ def main(argv=None) -> int:
     metavar="N",
     help="Tile UCE execution context count: 1-8 (default: 1)",
   )
+  parser.add_argument(
+    "--device-context-mode",
+    type=int,
+    default=None,
+    metavar="N",
+    help="device execution context (TileGroup slot) count: 1-8 (default: 1)",
+  )
   parser.add_argument("--max-cycles", type=int, default=None, help="cycle cap (default 2_000_000)")
   parser.add_argument("--trace", action="store_true", help="enable per-cycle trace dump")
   parser.add_argument(
@@ -102,7 +109,8 @@ def main(argv=None) -> int:
 
   if args.context_mode is not None and not 1 <= args.context_mode <= MAX_CONTEXT_COUNT:
     parser.error("--context-mode must be between 1 and 8")
-
+  if args.device_context_mode is not None and not 1 <= args.device_context_mode <= MAX_CONTEXT_COUNT:
+    parser.error("--device-context-mode must be between 1 and 8")
   if args.list:
     _list_workloads()
     return 0
@@ -113,6 +121,8 @@ def main(argv=None) -> int:
     sim_overrides["max_cycles"] = args.max_cycles
   if args.context_mode is not None:
     sim_overrides["context_count"] = args.context_mode
+  if args.device_context_mode is not None:
+    sim_overrides["device_context_count"] = args.device_context_mode
   if args.trace:
     sim_overrides["trace"] = True
   sim_cfg = SimConfig().with_overrides(**sim_overrides)

@@ -27,6 +27,10 @@ from .dialects.elenor import (
   NestContextOp,
   NestEvent,
   NestTaskRangeOp,
+  NexusAwaitOp,
+  NexusProgramOp,
+  NexusReturnOp,
+  NexusSubmitContextOp,
   TileEvent,
   TileProgramDefOp,
 )
@@ -58,13 +62,14 @@ def load_workload_ir(path: str | Path) -> ModuleOp:
   text = actual.read_text(encoding="utf-8")
   return parse_workload_ir(text, source_name=str(actual))
 
-
-def verify_workload_ir(module: ModuleOp) -> NestContextOp:
+def verify_workload_ir(module: ModuleOp) -> NestContextOp | NexusProgramOp:
   module.verify()
   top_ops = list(module.body.block.ops)
 
   context: NestContextOp | None = None
+  contexts: dict[str, NestContextOp] = {}
   programs: dict[str, TileProgramDefOp] = {}
+  nexus_programs: list[NexusProgramOp] = []
 
   for op in top_ops:
     if isinstance(op, TileProgramDefOp):
@@ -73,26 +78,47 @@ def verify_workload_ir(module: ModuleOp) -> NestContextOp:
         raise VerifyException(f"duplicate tile program '@{name}'")
       programs[name] = op
     elif isinstance(op, NestContextOp):
-      if context is not None:
-        raise VerifyException("expected exactly one nest.context")
+      name = op.sym_name.data
+      if name in contexts:
+        raise VerifyException(f"duplicate nest.context name '@{name}'")
+      contexts[name] = op
       context = op
+    elif isinstance(op, NexusProgramOp):
+      nexus_programs.append(op)
     else:
       raise VerifyException(f"unexpected top-level op '{op.name}'")
 
-  if context is None:
-    raise VerifyException("expected exactly one nest.context")
+  if not nexus_programs:
+    # Legacy path: exactly one nest.context, no nexus.program
+    if context is None:
+      raise VerifyException("expected exactly one nest.context")
+    if len(contexts) > 1:
+      raise VerifyException("expected exactly one nest.context")
+    _verify_context(context, programs)
+    for prog in programs.values():
+      _verify_program(prog)
+    return context
 
-  _verify_context(context, programs)
+  # Model path: exactly one nexus.program + at least one nest.context
+  if len(nexus_programs) != 1:
+    raise VerifyException("expected exactly one nexus.program")
+  if not contexts:
+    raise VerifyException("model requires at least one nest.context")
+  program = nexus_programs[0]
+  for ctx in contexts.values():
+    _verify_context(ctx, programs)
   for prog in programs.values():
     _verify_program(prog)
-
-  return context
+  _verify_nexus_program(program, contexts)
+  return program
 
 
 def _verify_context(context: NestContextOp, programs: dict[str, TileProgramDefOp]) -> None:
   placement = int(context.placement.value.data)
   if placement == 0:
     raise VerifyException("nest.context placement must be non-zero")
+  if context.context_id is not None and int(context.context_id.value.data) < 0:
+    raise VerifyException("nest.context context must be >= 0")
 
   from .dialects.elenor import (
     NestAllocOp,
@@ -250,3 +276,38 @@ def _body_ops(op) -> list:
   if len(region.blocks) != 1:
     raise VerifyException("expected exactly one block in body region")
   return list(region.blocks[0].ops)
+
+
+def _verify_nexus_program(program: NexusProgramOp, contexts: dict[str, NestContextOp]) -> None:
+  body = _body_ops(program)
+  if not body or not isinstance(body[-1], NexusReturnOp):
+    raise VerifyException("nexus.program body must end with nexus.return")
+
+  seen_events: set[str] = set()
+  defined_events: set[str] = set()
+
+  for op in body:
+    if isinstance(op, NexusSubmitContextOp):
+      ctx_sym = op.context_sym.data
+      if ctx_sym not in contexts:
+        raise VerifyException(f"submit_context references unknown nest.context '@{ctx_sym}'")
+      tag = op.result.type.tag.data
+      if not tag:
+        raise VerifyException("submit_context event tag must be non-empty")
+      if tag in seen_events:
+        raise VerifyException(f"duplicate event tag '{tag}'")
+      seen_events.add(tag)
+      defined_events.add(tag)
+      continue
+
+    if isinstance(op, NexusAwaitOp):
+      for operand in op.events:
+        tag = operand.type.tag.data  # type: ignore[attr-defined]
+        if tag not in defined_events:
+          raise VerifyException(f"nexus.await references undefined event '{tag}'")
+      continue
+
+    if isinstance(op, NexusReturnOp):
+      continue
+
+    raise VerifyException(f"unexpected nexus.program body op '{op.name}'")

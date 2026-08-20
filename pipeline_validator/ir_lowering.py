@@ -24,6 +24,11 @@ from .dialects.elenor import (
   NestReleaseOp,
   NestReturnOp,
   NestTaskRangeOp,
+  NexusAwaitOp,
+  NexusEvent,
+  NexusProgramOp,
+  NexusReturnOp,
+  NexusSubmitContextOp,
   TileAwaitOp,
   TileBoaOp,
   TileEvent,
@@ -36,9 +41,11 @@ from .dialects.elenor import (
   TileStoreOp,
 )
 from .execution_ir import (
+  ExecDeviceOp,
   ExecEngineDesc,
   ExecGroupAction,
   ExecGroupActionOp,
+  ExecModel,
   ExecTileGroupTask,
   ExecTileInst,
   ExecTileOp,
@@ -50,7 +57,42 @@ from .workload_ir import verify_workload_ir
 
 def lower_workload_ir(module) -> ExecTileGroupTask:
   context = verify_workload_ir(module)
+  assert isinstance(context, NestContextOp)
   return _lower_context(module, context)
+
+
+def lower_model_ir(module) -> ExecModel:
+  program = verify_workload_ir(module)
+  assert isinstance(program, NexusProgramOp)
+  tasks: dict[str, ExecTileGroupTask] = {}
+  context_pins: dict[str, int | None] = {}
+  for op in module.body.block.ops:
+    if isinstance(op, NestContextOp):
+      tasks[op.sym_name.data] = _lower_context(module, op)
+      context_pins[op.sym_name.data] = (
+        None if op.context_id is None else int(op.context_id.value.data)
+      )
+  body: list[ExecDeviceOp] = []
+  for body_op in _body_ops(program):
+    if isinstance(body_op, NexusSubmitContextOp):
+      body.append(ExecDeviceOp(
+        "submit",
+        ctx_name=body_op.context_sym.data,
+        event_tag=_event_tag(body_op.result.type),
+      ))
+    elif isinstance(body_op, NexusAwaitOp):
+      for ev in body_op.events:
+        body.append(ExecDeviceOp("await", event_tag=_event_tag(ev.type)))
+    elif isinstance(body_op, NexusReturnOp):
+      body.append(ExecDeviceOp("return"))
+    else:
+      raise VerifyException(f"unexpected nexus.program body op '{body_op.name}'")
+  return ExecModel(
+    name=program.sym_name.data,
+    tasks=tasks,
+    context_pins=context_pins,
+    body=body,
+  )
 
 
 # ---------------------------------------------------------------------------
@@ -321,9 +363,9 @@ def _body_ops(op) -> list:
 
 
 def _event_tag(event_type) -> str:
-  """Extract the runtime event id from a ``!nest.event<tag>`` or
-  ``!tile.event<tag>`` type."""
-  if not isinstance(event_type, (NestEvent, TileEvent)):
+  """Extract the runtime event id from a ``!nest.event<tag>``,
+  ``!tile.event<tag>``, or ``!nexus.event<"tag">`` type."""
+  if not isinstance(event_type, (NestEvent, TileEvent, NexusEvent)):
     raise VerifyException(f"expected event type, got {type(event_type).__name__}")
   return event_type.tag.data
 

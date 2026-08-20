@@ -24,7 +24,7 @@ context body dispatches tile programs by symbol reference
 | --------- | ------------ | ------------------------------------------------------------------------------------ |
 | `tile.*`  | Tile program | `tile.program`, `tile.load.async`, `tile.pow.async`, `tile.await`, `tile.signal`     |
 | `nest.*`  | Tile group   | `nest.context`, `nest.dispatch.tasks.async`, `nest.dma.prefetch.async`, `nest.await` |
-| `nexus.*` | Host / CPU   | (deferred — not yet implemented)                                                     |
+| `nexus.*` | Host / CPU   | `nexus.program`, `nexus.submit_context.async`, `nexus.await`, `nexus.return`         |
 
 ### Key IR design points (per `reference.mlir`)
 
@@ -93,7 +93,7 @@ conda activate elenor-validator
 
 ## Run
 
-```bash
+````bash
 # run the default pow workload
 python -m pipeline_validator -w pow
 
@@ -114,7 +114,9 @@ python -m pipeline_validator -w pow --json
 
 # run with dual tile-UCE contexts and emit an HTML trace
 python -m pipeline_validator -w pow --context-mode 2 --trace-html ctx2.html
-```
+
+# run a model-mode IR (nexus.program) with two device execution slots
+python -m pipeline_validator --ir-file examples/example.mlir --device-context-mode 2
 
 ### Profiling / Trace Visualization
 
@@ -128,7 +130,7 @@ python -m pipeline_validator -w pow --trace-json trace.json
 
 # write a standalone trace.html (open in any browser, no server needed)
 python -m pipeline_validator -w pow --trace-html trace.html
-```
+````
 
 **Trace contents:**
 
@@ -147,6 +149,10 @@ python -m pipeline_validator -w pow --trace-html trace.html
 - **Multi-context trace details**: with `--context-mode 2`, tile tracks expose
   `UCE CTX0` / `UCE CTX1` lanes, `ctx_switch` instants, and
   `active_context_count` / `ready_context_count` counters.
+- **Multi-device-slot trace details**: with `--device-context-mode N`,
+  all slots share the same Tile0-3 lanes (shared physical tiles), and a
+  `Device/Slot:{i}` lane shows `context_submit` → `context_done` windows
+  for device-level scheduling.
 
 ## Tests
 

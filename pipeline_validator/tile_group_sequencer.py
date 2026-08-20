@@ -45,13 +45,28 @@ class TileGroupSequencer:
     self.task: ExecTileGroupTask | None = None
     self._events_done: set[str] = set()
     self._pending: _GroupTaskWait | None = None
-    # role_id -> completion event id
+    # role_id -> completion event id (informational)
     self._role_events: dict[int, str] = {}
+    # every grid event this sequencer issued; done is gated until all
+    # fire (role re-dispatch overwrites _role_events, not this set).
+    self._issued_role_events: set[str] = set()
     self.done = False
     self.faulted = False
     self.fault_reason: str = ""
     # round-robin DMA channel allocation
     self._next_dma_channel: int = 0
+    # stream queue ids created by this sequencer's task (namespaced);
+    # reclaimed by the TileGroup when this sequencer drains.
+    self.owned_queue_ids: set[int] = set()
+    # outstanding DMA/collective jobs issued by this sequencer; done is
+    # gated until they drain (context_done covers the final store).
+    self._outstanding_jobs: int = 0
+
+  def note_job_started(self) -> None:
+    self._outstanding_jobs += 1
+
+  def note_job_done(self) -> None:
+    self._outstanding_jobs -= 1
 
   def load(self, task: ExecTileGroupTask) -> None:
     self.task = task
@@ -59,7 +74,10 @@ class TileGroupSequencer:
     self._events_done.clear()
     self._pending = None
     self._role_events.clear()
+    self._issued_role_events.clear()
     self._next_dma_channel = 0
+    self.owned_queue_ids.clear()
+    self._outstanding_jobs = 0
     self.done = False
     self.faulted = False
     self.fault_reason = ""
@@ -95,9 +113,16 @@ class TileGroupSequencer:
         self.pmu.add_cycle("wait_event", 1)
         self.pmu.add_cycle("total", 1)
         return None
-
     if self.action_index >= len(self.task.actions):
-      self.done = True
+      # context_done covers grid_done and the final store (IR_SPEC
+      # §3.10): don't mark done until every issued role completed
+      # and every DMA/collective job this sequencer issued drained.
+      roles_done = all(ev in self._events_done
+                       for ev in self._issued_role_events)
+      if roles_done and self._outstanding_jobs == 0:
+        self.done = True
+      else:
+        self.pmu.add_cycle("drain_wait", 1)
       self.pmu.add_cycle("total", 1)
       return None
 
@@ -149,6 +174,7 @@ class TileGroupSequencer:
           l2_slot=dst_l2,
           bytes_total=resolved_bytes,
           channel=ch,
+          sequencer=self,
       )
       self.pmu.add_event("tgs_dma_prefetch")
       self.action_index += 1
@@ -161,7 +187,6 @@ class TileGroupSequencer:
       lat = self._dma_latency(resolved_bytes, l2_slot=src_l2)
       # round-robin DMA channel allocation
       ch = self._next_dma_channel % self.cfg.num_dma_channels
-      self._next_dma_channel += 1
       self.group.schedule_dma(
           ins.dst,
           lat,
@@ -171,6 +196,7 @@ class TileGroupSequencer:
           l2_slot=src_l2,
           bytes_total=resolved_bytes,
           channel=ch,
+          sequencer=self,
       )
       self.pmu.add_event("tgs_dma_store")
       self.action_index += 1
@@ -188,13 +214,16 @@ class TileGroupSequencer:
         return None
       ev = ins.dst or f"ev_role{role_id}"
       self._role_events[role_id] = ev
+      self._issued_role_events.add(ev)
       phase_event_ids = {}
       if inrel_tag:
         phase_event_ids["input_released"] = inrel_tag
       if outready_tag:
         phase_event_ids["output_ready"] = outready_tag
       self.group.dispatch_role(
-        binding, cycle, event_id=ev, phase_event_ids=phase_event_ids or None)
+        binding, cycle, event_id=ev,
+        phase_event_ids=phase_event_ids or None,
+        sequencer=self)
       self.pmu.add_event("tgs_dispatch_role")
       self.action_index += 1
       return (role_id, ev)
@@ -216,6 +245,7 @@ class TileGroupSequencer:
           bytes_total,
           participant_mask,
           cycle,
+          sequencer=self,
       )
       self.pmu.add_event("tgs_collective_run")
       self.action_index += 1

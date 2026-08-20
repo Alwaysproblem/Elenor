@@ -234,7 +234,7 @@ class TileUCE:
     if ref is not None:
       self._completion_queue.append(ref)
       return
-    if runtime_id.startswith("ev_dma_"):
+    if "ev_dma_" in runtime_id:
       self._external_events_done.add(runtime_id)
       return
     self.pmu.add_event("uce_unknown_event")
@@ -334,7 +334,7 @@ class TileUCE:
 
   def _make_wait_ref(self, ctx: _UCEContext, local_name: str,
                      cycle: int) -> _UCEEventRef | None:
-    if local_name.startswith("ev_dma_"):
+    if "ev_dma_" in local_name:
       return self._make_external_event_ref(local_name)
     ref = ctx.event_records.get(local_name)
     if ref is not None:
@@ -900,6 +900,8 @@ class ComputeTile:
 
   def bind_stream(self, qid: int, q: StreamQueue) -> None:
     self.streams[qid] = q
+  def unbind_stream(self, qid: int) -> None:
+    self.streams.pop(qid, None)
   def get_stream(self, qid: int) -> StreamQueue:
     return self.streams[qid]
   def load_program(self, program: ExecTileProgram, role_id: int | None,
