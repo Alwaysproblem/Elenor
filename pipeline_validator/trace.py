@@ -325,7 +325,8 @@ const TRACE = __TRACE_JSON__;
       bar.className = "bar";
       bar.style.left = x + "px"; bar.style.top = y + "px";
       bar.style.width = w + "px";
-      bar.style.background = colors[s.cat] || colors.default;
+      const isRole = s.cat && s.cat.startsWith("TileRole");
+      bar.style.background = isRole ? colors.TileRole : (colors[s.cat] || colors.default);
       bar.textContent = s.name + (w > 50 ? "" : "");
       chart.appendChild(bar);
       bar.addEventListener("mouseenter", (ev) => {{

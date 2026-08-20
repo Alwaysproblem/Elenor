@@ -503,11 +503,18 @@ class NestDispatchOp(IRDLOperation):
                        (``tile.signal input_released``);
     - output_ready   - all tasks completed their L2 write phase
                        (``tile.signal output_ready``).
+
+  Optional ``context = N`` pins every task of this dispatch to the
+  tile-local UCE context index ``N`` (same index on every tile in the
+  placement, not a physical tile id).  Omitted = first available
+  context (existing behaviour).  Legal range is ``0..context_count-1``;
+  out-of-range is rejected at task load, not at IR verify.
   """
 
   name = "nest.dispatch.tasks.async"
 
   program = prop_def(StringAttr)
+  context_id = opt_prop_def(IntegerAttr)
   tasks = operand_def(TaskRange)
   ins = operand_def(NestBuffer)
   outs = operand_def(NestBuffer)
@@ -527,6 +534,7 @@ class NestDispatchOp(IRDLOperation):
     inrel_tag: str,
     outready_tag: str,
     depends_on: Sequence = (),
+    context_id: int | None = None,
   ):
     super().__init__(
       result_types=[
@@ -534,7 +542,10 @@ class NestDispatchOp(IRDLOperation):
         NestEvent(StringAttr(inrel_tag)),
         NestEvent(StringAttr(outready_tag)),
       ],
-      properties=_props({"program": StringAttr(program)}),
+      properties=_props({
+        "program": StringAttr(program),
+        "context_id": None if context_id is None else _index_attr(context_id),
+      }),
       operands=[[tasks], ins, outs, list(depends_on)],
     )
     self.grid_done.name_hint = grid_tag
@@ -545,6 +556,8 @@ class NestDispatchOp(IRDLOperation):
 
   def print(self, printer: Printer) -> None:
     _print_symbol(printer, self.program.data)
+    if self.context_id is not None:
+      _print_int_kw(printer, "context", self.context_id.value.data)
     printer.print_string(" tasks(")
     printer.print_operand(self.tasks)
     printer.print_string(")")
@@ -564,6 +577,7 @@ class NestDispatchOp(IRDLOperation):
   @classmethod
   def parse(cls, parser: Parser) -> Self:
     program = _parse_symbol(parser)
+    context_id = _parse_opt_int_kw(parser, "context")
     tasks = _parse_operand_group(parser, "tasks")
     parser.parse_keyword("ins")
     parser.parse_punctuation("(")
@@ -585,7 +599,8 @@ class NestDispatchOp(IRDLOperation):
     if len(types) != 3 or not all(isinstance(t, NestEvent) for t in types):
       parser.raise_error("dispatch expects three !nest.event results")
     tags = [t.tag.data for t in types]  # type: ignore[attr-defined]
-    return cls(program, tasks[0], ins_op, outs_op, tags[0], tags[1], tags[2], depends_on=depends_on)
+    return cls(program, tasks[0], ins_op, outs_op, tags[0], tags[1], tags[2],
+               depends_on=depends_on, context_id=context_id)
 
 
 @irdl_op_definition

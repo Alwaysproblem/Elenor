@@ -207,6 +207,70 @@ class TestXDSLIR:
     )
     self._assert_verify_failure(module, "duplicate event tag 'duplicate'")
 
+  def test_dispatch_context_attribute_round_trip(self):
+    """``context = N`` prints, parses, and round-trips; absent when not pinned."""
+    prog = make_identity_tile_program()
+    buffer = NestAllocOp(slot="l2_buf", bytes_total=256)
+    tasks = NestTaskRangeOp(from_task=0, to_task=1)
+    dispatch = NestDispatchOp(
+      prog.sym_name.data,
+      tasks.result,
+      buffer.result,
+      buffer.result,
+      "grid_done",
+      "input_released",
+      "output_ready",
+      context_id=1,
+    )
+    module = ModuleOp([
+      prog,
+      NestContextOp(
+        "pinned_ctx",
+        [buffer, tasks, dispatch, NestAwaitOp([dispatch.grid_done]), NestReturnOp()],
+        placement=1,
+      ),
+    ])
+    verify_workload_ir(module)
+    text = print_workload_ir(module)
+    assert "context = 1" in text
+    reparsed = parse_workload_ir(text, source_name="<pinned>")
+    verify_workload_ir(reparsed)
+    found = False
+    for op in reparsed.ops:
+      if isinstance(op, NestContextOp):
+        for body_op in op.body.blocks[0].ops:
+          if isinstance(body_op, NestDispatchOp):
+            assert body_op.context_id is not None
+            assert int(body_op.context_id.value.data) == 1
+            found = True
+    assert found, "no NestDispatchOp found in reparsed context body"
+    # Unpinned dispatch must NOT print the attribute.
+    assert "context = " not in print_workload_ir(PowWorkload().module)
+
+  def test_verifier_rejects_negative_dispatch_context(self):
+    prog = make_identity_tile_program()
+    buffer = NestAllocOp(slot="l2_buf", bytes_total=256)
+    tasks = NestTaskRangeOp(from_task=0, to_task=1)
+    dispatch = NestDispatchOp(
+      prog.sym_name.data,
+      tasks.result,
+      buffer.result,
+      buffer.result,
+      "grid_done",
+      "input_released",
+      "output_ready",
+      context_id=-1,
+    )
+    module = ModuleOp([
+      prog,
+      NestContextOp(
+        "neg_ctx",
+        [buffer, tasks, dispatch, NestReturnOp()],
+        placement=1,
+      ),
+    ])
+    self._assert_verify_failure(module, "dispatch context must be >= 0")
+
 
 class TestExternalIRCLI:
   def _run_cli(self, *args: str):

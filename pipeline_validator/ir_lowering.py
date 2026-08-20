@@ -104,7 +104,8 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
       for dep in body_op.depends_on:
         actions.append(ExecGroupAction(ExecGroupActionOp.WAIT_EVENT, args=(_event_tag(dep.type),)))
       prog_sym = body_op.program.data
-      role_id = _register_role(role_bindings, programs, prog_sym, placement)
+      ctx_id = None if body_op.context_id is None else int(body_op.context_id.value.data)
+      role_id = _register_role(role_bindings, programs, prog_sym, placement, context_id=ctx_id)
       grid_tag = _event_tag(body_op.grid_done.type)
       inrel_tag = _event_tag(body_op.input_released.type)
       outready_tag = _event_tag(body_op.output_ready.type)
@@ -158,20 +159,23 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
     completion_event=context.completion_event.data,
   )
 
-
 def _register_role(
   bindings: dict[int, ExecTileRoleBinding],
   programs: dict[str, ExecTileProgram],
   prog_sym: str,
   tile_mask: int,
+  context_id: int | None = None,
 ) -> int:
-  """Register a (program, tile_mask) binding if not already registered.
+  """Register a (program, tile_mask, context_id) binding if not already registered.
 
   Returns the role_id.  Re-dispatching the same program with the same
-  mask reuses the existing binding (matching the old role semantics).
+  mask and context pin reuses the existing binding (matching the old
+  role semantics).  Different context pins produce distinct roles.
   """
   for rid, binding in bindings.items():
-    if binding.tile_program.name == prog_sym and binding.tile_mask == tile_mask:
+    if (binding.tile_program.name == prog_sym
+            and binding.tile_mask == tile_mask
+            and binding.context_id == context_id):
       return rid
   role_id = len(bindings)
   prog = programs.get(prog_sym)
@@ -181,6 +185,7 @@ def _register_role(
     role_id=role_id,
     tile_mask=tile_mask,
     tile_program=prog,
+    context_id=context_id,
   )
   return role_id
 

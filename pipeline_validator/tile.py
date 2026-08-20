@@ -143,13 +143,17 @@ class TileUCE:
       "MFE_STORE": cfg.mfe_store_queue_depth,
     }
 
-  def can_accept_context(self) -> bool:
-    return any(self._context_available(ctx) for ctx in self.contexts)
+  def can_accept_context(self, context_id: int | None = None) -> bool:
+    if context_id is None:
+      return any(self._context_available(ctx) for ctx in self.contexts)
+    return self._context_available(self.contexts[context_id])
 
   def bind_context(self, program: ExecTileProgram, role_id: int | None,
                    role_event_id: str | None,
-                   prepare_cycles: int = 0) -> int | None:
-    for ctx in self.contexts:
+                   prepare_cycles: int = 0,
+                   context_id: int | None = None) -> int | None:
+    candidates = self.contexts if context_id is None else (self.contexts[context_id],)
+    for ctx in candidates:
       if not self._context_available(ctx):
         continue
       self._unregister_context_events(ctx)
@@ -896,20 +900,20 @@ class ComputeTile:
 
   def bind_stream(self, qid: int, q: StreamQueue) -> None:
     self.streams[qid] = q
-
   def get_stream(self, qid: int) -> StreamQueue:
     return self.streams[qid]
-
   def load_program(self, program: ExecTileProgram, role_id: int | None,
                    role_event_id: str | None,
-                   prepare_cycles: int = 0) -> int | None:
+                   prepare_cycles: int = 0,
+                   context_id: int | None = None) -> int | None:
     return self.uce.bind_context(program,
                                  role_id=role_id,
                                  role_event_id=role_event_id,
-                                 prepare_cycles=prepare_cycles)
+                                 prepare_cycles=prepare_cycles,
+                                 context_id=context_id)
 
-  def can_accept_context(self) -> bool:
-    return self.uce.can_accept_context()
+  def can_accept_context(self, context_id: int | None = None) -> bool:
+    return self.uce.can_accept_context(context_id)
 
   def drain_context_terminals(self) -> list[_UCETerminalEvent]:
     return self.uce.drain_terminal_events()

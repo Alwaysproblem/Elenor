@@ -20,7 +20,10 @@ builtin.module {
 
 Defines one Tile Group context. The `placement` property is the Tile Group
 placement mask (integer bitmask). This is a **group-level** constraint: the
-CPU/IR does NOT specify physical Tile IDs or Hardware Context IDs.
+CPU/IR does NOT specify physical Tile IDs or Hardware Context IDs, except
+that `nest.dispatch.tasks.async` may carry an optional `context = N` that
+specifies the tile-local UCE context index (a validator extension to
+reference.mlir); see §3.5.
 
 - **Semantics**: The placement mask selects which placement slots in the
   Tile Group participate in dispatches. The tile-local scheduler maps
@@ -105,7 +108,7 @@ L2 → HBM final store, gated on the dispatch `output_ready` event via
 ### 3.5 `nest.dispatch.tasks.async`
 
 ```mlir
-%grid, %inrel, %out = nest.dispatch.tasks.async @pow_4k_tile
+%grid, %inrel, %out = nest.dispatch.tasks.async @pow_4k_tile context = 1
     tasks(%t) ins(%buf) outs(%buf) depends_on(%pref)
     : (!nest.event<"grid">, !nest.event<"inrel">, !nest.event<"out">)
 ```
@@ -124,6 +127,15 @@ Returns THREE aggregated events:
   (`tile.signal output_ready`). Same aggregation.
 
 `depends_on` is optional (omitted if the dispatch has no dependency).
+
+Optional `context = N` pins every task of this dispatch to the
+tile-local UCE context index `N` — the same index on every tile in the
+placement, not a physical tile id. Omitted = first available context
+(existing behaviour). When the pinned context is occupied the dispatch
+waits for it to be released (`dispatch_wait` stall), reusing the
+existing backpressure path — no new fault mode. Legal range is
+`0..context_count-1`; an out-of-range pin is rejected at task load
+(not at IR verify) to avoid a silent deadlock to the cycle cap.
 
 ### 3.6 `nest.collective.async`
 
@@ -272,6 +284,8 @@ Tile program completion. Contributes to `grid_done` (reference.mlir
   - `@prog` must reference a defined `tile.program`.
   - Task range count must equal `popcount(placement)` (1:1 mapping).
   - `depends_on` operands must be events defined earlier in the body.
+  - `context = N` (if present) must be >= 0; the upper bound is the
+    simulator's `context_count` (checked at task load, not at IR verify).
 - `nest.await` operands must be events defined earlier.
 - `nest.dma.store.async` / `nest.release` `depends_on` operands must be
   events defined earlier.

@@ -203,7 +203,7 @@ class TileGroup:
       ))
 
   def can_dispatch_role(self, binding: ExecTileRoleBinding) -> bool:
-    return all(t.can_accept_context()
+    return all(t.can_accept_context(binding.context_id)
                for t in self.tiles
                if binding.tile_mask & (1 << t.tile_id))
 
@@ -246,7 +246,8 @@ class TileGroup:
       ctx_id = t.load_program(binding.tile_program,
                               role_id=role_id,
                               role_event_id=ev,
-                              prepare_cycles=prepare)
+                              prepare_cycles=prepare,
+                              context_id=binding.context_id)
       assert ctx_id is not None
       ctx_ids.append(ctx_id)
       if self.runtime_enabled:
@@ -262,7 +263,7 @@ class TileGroup:
       ctx_trace_arg = ctx_ids[0] if len(set(ctx_ids)) == 1 else ctx_ids
       tr.instant(
         "TileGroup",
-        "TileRole",
+        f"TileRole:{role_id}",
         "tile_role_dispatch",
         cycle,
         {
@@ -273,6 +274,7 @@ class TileGroup:
           "out_stream": binding.out_stream,
           "in_stream": binding.in_stream,
           "ctx_id": ctx_trace_arg,
+          "pinned_context": binding.context_id,
           "context_count": self.tiles[0].uce.context_count,
         },
       )
@@ -451,7 +453,7 @@ class TileGroup:
             if rt is not None:
               tr.complete(
                 "TileGroup",
-                "TileRole",
+                f"TileRole:{rt.role_id}",
                 f"dispatch:role{rt.role_id}:{term.role_event_id}:run",
                 rt.start_cycle,
                 cycle,
@@ -465,7 +467,7 @@ class TileGroup:
               )
             tr.instant(
               "TileGroup",
-              "TileRole",
+              f"TileRole:{term.role_id}",
               "tile_role_complete",
               cycle,
               {
@@ -566,6 +568,12 @@ class TileGroup:
     self._task_start_cycle = None
     self._task_done_traced = False
     self.pmu.reset()
+    max_ctx = self.tiles[0].uce.context_count
+    for binding in task.role_bindings.values():
+      if binding.context_id is not None and binding.context_id >= max_ctx:
+        raise ValueError(
+          f"role {binding.role_id} pins context {binding.context_id} but context_count is {max_ctx}"
+        )
     self.sequencer.load(task)
     # pre-init streams declared in the task (some tasks init inline)
     for s in task.streams:
