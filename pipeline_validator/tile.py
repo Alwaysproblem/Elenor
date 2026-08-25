@@ -731,6 +731,8 @@ class TileUCE:
     else:
       base = ctx.program.descriptors[entry.desc_ref]
       desc = ExecEngineDesc(base.name, base.kind, base.op, dict(base.params))
+      if base.transfer is not None:
+        desc.params["bytes"] = base.transfer.bytes
     desc.params = {
       **desc.params,
       "tile_id": self.tile_id,

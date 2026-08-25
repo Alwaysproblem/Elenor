@@ -9,6 +9,7 @@ import sys
 from xdsl.utils.exceptions import ParseError, VerifyException
 
 from .config import MAX_CONTEXT_COUNT, HardwareConfig, SimConfig
+from .execution_ir import GlobalBinding
 from .report import build_report, report_to_json, report_to_text
 from .simulator import Simulator
 from .trace import trace_to_html
@@ -18,6 +19,21 @@ from .workload_ir import (
   verify_workload_ir,
 )
 from .workloads import ALL_WORKLOADS, Workload
+
+
+def _parse_input_binding(spec: str) -> GlobalBinding:
+  """Parse ``NAME=BASE:SIZE:PERM`` into a global launch binding."""
+  error = (
+    f"invalid --input-binding '{spec}': expected NAME=BASE:SIZE:PERM"
+  )
+  try:
+    name, value = spec.split("=", 1)
+    base, size, permissions = value.split(":")
+    if not name or permissions not in {"r", "w", "rw"}:
+      raise ValueError
+    return GlobalBinding(name, int(base, 0), int(size, 0), permissions)
+  except ValueError:
+    raise ValueError(error) from None
 
 
 def _list_workloads() -> None:
@@ -56,6 +72,13 @@ def main(argv=None) -> int:
   mode.add_argument("-w", "--workload", default=None, help="workload to run")
   mode.add_argument("-a", "--all", action="store_true", help="run all workloads")
   mode.add_argument("--ir-file", metavar="PATH", help="load and run one external IR module")
+  parser.add_argument(
+    "--input-binding",
+    action="append",
+    default=[],
+    metavar="NAME=BASE:SIZE:PERM",
+    help="bind a global input: NAME=BASE:SIZE:PERM",
+  )
   parser.add_argument(
     "--hw-override",
     action="append",
@@ -113,6 +136,12 @@ def main(argv=None) -> int:
   parser.add_argument("--json", action="store_true", help="emit JSON instead of text")
   parser.add_argument("--report", default=None, help="write report to this path (default: stdout)")
   args = parser.parse_args(argv)
+
+  try:
+    bindings = {b.name: b for b in (_parse_input_binding(s) for s in args.input_binding)}
+  except ValueError as exc:
+    parser.error(str(exc))
+
 
   if args.context_mode is not None and not 1 <= args.context_mode <= MAX_CONTEXT_COUNT:
     parser.error("--context-mode must be between 1 and 8")
@@ -180,7 +209,11 @@ def main(argv=None) -> int:
   enable_tracer = bool(args.trace_json or args.trace_html)
   for wl in workloads:
     sim = Simulator(hw, sim_cfg, enable_tracer=enable_tracer)
-    result = sim.run(wl.module)
+    try:
+      result = sim.run(wl.module, input_bindings=bindings)
+    except ValueError as exc:
+      print(f"invalid input: {exc}", file=sys.stderr)
+      return 2
     rep = build_report(wl, result)
     outputs.append(rep)
     if not all(ch.get("pass", False) for ch in rep.checks):
