@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 from xdsl.dialects.builtin import ModuleOp
-from xdsl.utils.exceptions import VerifyException
+from xdsl.utils.exceptions import ParseError, VerifyException
 
 from pipeline_validator.config import (
   _HW_YAML_PATH_TO_FIELD,
@@ -83,12 +83,125 @@ from pipeline_validator.execution_ir import GlobalBinding
 
 POW_BINDINGS = {"Y": GlobalBinding("Y", 0x100000, 524288, "rw")}
 
+MODEL_CHAIN_IR = """builtin.module {
+  tile.program @pow_4k_tile(
+      %task : !nest.task,
+      %l2_buf : !nest.l2_buffer<4x128x128xbf16>) {
+    %l2_tile = tile.subview %l2_buf task = %task task_dim = 0
+        offsets = [0, 0, 0] sizes = [1, 128, 128] strides = [1, 1, 1]
+        : !nest.l2_view<1x128x128xbf16>
+    %l1 = tile.alloc shape = [128, 128] dtype = "bf16" alignment = 256
+        : !tile.l1_buffer<128x128xbf16>
+    %e_load = tile.load.async %l2_tile into %l1
+        : !tile.event<"e_load">
+    tile.await %e_load
+    %e_pow = tile.pow.async bytes = 32768 exponent = 2 pow_ops = 65536
+        : !tile.event<"e_pow">
+    tile.await %e_pow
+    %e_store = tile.store.async %l1 into %l2_tile
+        : !tile.event<"e_store">
+    tile.await %e_store
+    tile.signal input_released
+    tile.signal output_ready
+    tile.return
+  }
+
+  nest.context @pow_task(
+      %Y : !nest.global_memref<4x128x128xbf16>)
+      placement = 15 context = 0 {
+    %l2_buf = nest.alloc slot = "l2_buf_pow0" role = "inout"
+        shape = [4, 128, 128] dtype = "bf16" alignment = 256
+        : !nest.l2_buffer<4x128x128xbf16>
+    %src = nest.subview %Y offsets = [0, 0, 0] sizes = [4, 128, 128]
+        strides = [1, 1, 1]
+        : !nest.global_view<4x128x128xbf16>
+    %ev_in = nest.dma.prefetch.async %src into %l2_buf
+        : !nest.event<"ev_dma_pow_in0">
+    %0 = nest.task.range from = 0 to = 4 : !nest.task_range
+    %ev_role, %ev_inrel, %ev_outready = nest.dispatch.tasks.async
+        @pow_4k_tile context = 0
+        tasks(%0) ins(%l2_buf) outs(%l2_buf) depends_on(%ev_in)
+        : (!nest.event<"ev_role_pow0">, !nest.event<"ev_inrel_pow0">,
+           !nest.event<"ev_outready_pow0">)
+    %ev_out = nest.dma.store.async %l2_buf into %src
+        depends_on(%ev_outready) : !nest.event<"ev_dma_pow_out0">
+    nest.release %l2_buf depends_on(%ev_out)
+    nest.await %ev_role, %ev_out
+    nest.return
+  }
+
+  nexus.program @run_pow(
+      %Y0 : !nest.global_memref<4x128x128xbf16>,
+      %Y1 : !nest.global_memref<4x128x128xbf16>) {
+    %done0 = nexus.submit_context.async @pow_task(%Y0)
+        : !nexus.event<"context_done">
+    %done1 = nexus.submit_context.async @pow_task(%Y1)
+        : !nexus.event<"context_done_1">
+    nexus.await %done0
+    nexus.await %done1
+    nexus.return
+  }
+}
+"""
+
+DISPATCH_TYPE_MISMATCH_IR = """builtin.module {
+  tile.program @p(%task : !nest.task, %l2 : !nest.l2_buffer<4x128x128xbf16>) {
+    tile.return
+  }
+  nest.context @c placement = 1 {
+    %bad = nest.alloc slot = "bad" role = "in" shape = [2, 128, 128]
+        dtype = "bf16" : !nest.l2_buffer<2x128x128xbf16>
+    %0 = nest.task.range from = 0 to = 1 : !nest.task_range
+    %g, %i, %o = nest.dispatch.tasks.async @p
+        tasks(%0) ins(%bad) outs(%bad)
+        : (!nest.event<"g">, !nest.event<"i">, !nest.event<"o">)
+    nest.await %g
+    nest.return
+  }
+}
+"""
+
+TRANSFER_BYTE_MISMATCH_IR = """builtin.module {
+  tile.program @p(%task : !nest.task) {
+    tile.return
+  }
+  nest.context @c(%Y : !nest.global_memref<4x128x128xbf16>) placement = 1 {
+    %buf = nest.alloc slot = "buf" role = "in" shape = [2, 128, 128]
+        dtype = "bf16" : !nest.l2_buffer<2x128x128xbf16>
+    %src = nest.subview %Y offsets = [0, 0, 0] sizes = [4, 128, 128]
+        strides = [1, 1, 1] : !nest.global_view<4x128x128xbf16>
+    %ev = nest.dma.prefetch.async %src into %buf : !nest.event<"ev_in">
+    nest.await %ev
+    nest.return
+  }
+}
+"""
+
+TILE_PROGRAM_NO_TASK_IR = """builtin.module {
+  tile.program @p(%l2 : !nest.l2_buffer<4x128x128xbf16>) {
+    tile.return
+  }
+  nest.context @c placement = 1 {
+    %buf = nest.alloc slot = "buf" role = "in" shape = [4, 128, 128]
+        dtype = "bf16" : !nest.l2_buffer<4x128x128xbf16>
+    %0 = nest.task.range from = 0 to = 1 : !nest.task_range
+    %g, %i, %o = nest.dispatch.tasks.async @p
+        tasks(%0) ins(%buf) outs()
+        : (!nest.event<"g">, !nest.event<"i">, !nest.event<"o">)
+    nest.await %g
+    nest.return
+  }
+}
+"""
 
 class TestXDSLIR:
   def _assert_verify_failure(self, module: ModuleOp, message: str) -> None:
     with pytest.raises(VerifyException, match=message):
       verify_workload_ir(module)
 
+  def _assert_parse_failure(self, text: str) -> None:
+    with pytest.raises(ParseError):
+      parse_workload_ir(text, source_name="<negative>")
 
   def test_pow_workload_round_trip_uses_function_calls(self):
     """PowWorkload IR round-trips in the function-call dialect."""
@@ -101,6 +214,17 @@ class TestXDSLIR:
     verify_workload_ir(reparsed)
     assert print_workload_ir(reparsed) == text
 
+  def test_model_input_chain_round_trip_byte_stable(self):
+    """The full global-input chain parses, verifies, and prints byte-stable."""
+    module = parse_workload_ir(MODEL_CHAIN_IR, source_name="<chain>")
+    text1 = print_workload_ir(module)
+    reparsed = parse_workload_ir(text1, source_name="<chain-rt>")
+    text2 = print_workload_ir(reparsed)
+    assert text1 == text2
+    for fragment in ("nest.subview", "tile.subview", "tile.alloc", "into",
+                     "!nest.global_view", "!nest.l2_view", "!tile.l1_buffer",
+                     "!nest.task", "@pow_task(%Y0)"):
+      assert fragment in text1
 
   def test_function_call_op_builders_verify(self):
     """Every function-call operation can participate in a verified module."""
@@ -400,6 +524,107 @@ class TestXDSLIR:
     module = ModuleOp([*ops, program])
     self._assert_verify_failure(module, "nexus.await references undefined event 'done0'")
 
+  def test_submit_context_arity_mismatch_fails(self):
+    text = MODEL_CHAIN_IR.replace(
+      "@pow_task(%Y0)", "@pow_task(%Y0, %Y1)", 1)
+    with pytest.raises(VerifyException, match=(
+        r"submit_context '@pow_task' passes 2 actuals"
+        r" but nest.context '@pow_task' declares 1 formals")):
+      parse_workload_ir(text, source_name="<arity>")
+
+  def test_submit_context_type_mismatch_fails(self):
+    text = MODEL_CHAIN_IR.replace(
+      "%Y1 : !nest.global_memref<4x128x128xbf16>",
+      "%Y1 : !nest.global_memref<8x128x128xbf16>", 1).replace(
+      "@pow_task(%Y0)", "@pow_task(%Y1)", 1)
+    with pytest.raises(VerifyException, match=(
+        r"submit_context actual 0 type does not match"
+        r" nest.context '@pow_task' formal 0")):
+      parse_workload_ir(text, source_name="<type>")
+
+  def test_dispatch_actual_arity_mismatch_fails(self):
+    text = MODEL_CHAIN_IR.replace(
+      "tasks(%0) ins(%l2_buf) outs(%l2_buf)",
+      "tasks(%0) ins(%l2_buf, %l2_buf) outs(%l2_buf)", 1)
+    with pytest.raises(VerifyException, match=(
+        r"dispatch '@pow_4k_tile' passes 3 actuals"
+        r" but tile.program declares 1 l2 formals")):
+      parse_workload_ir(text, source_name="<dispatch-arity>")
+
+  def test_dispatch_actual_type_mismatch_fails(self):
+    with pytest.raises(VerifyException, match=(
+        r"dispatch actual 0 type does not match"
+        r" tile.program '@p' formal 0")):
+      parse_workload_ir(DISPATCH_TYPE_MISMATCH_IR, source_name="<dispatch-type>")
+
+  def test_nest_subview_out_of_bounds_fails(self):
+    text = MODEL_CHAIN_IR.replace(
+      "nest.subview %Y offsets = [0, 0, 0] sizes = [4, 128, 128]",
+      "nest.subview %Y offsets = [5, 0, 0] sizes = [4, 128, 128]", 1)
+    with pytest.raises(VerifyException, match=(
+        r"nest.subview exceeds bounds of 'Y' dim 0:"
+        r" offset 5 \+ size 4 > 4")):
+      parse_workload_ir(text, source_name="<oob>")
+
+  def test_tile_subview_task_range_overflow_fails(self):
+    text = MODEL_CHAIN_IR.replace(
+      "sizes = [1, 128, 128]", "sizes = [2, 128, 128]", 1).replace(
+      ": !nest.l2_view<1x128x128xbf16>", ": !nest.l2_view<2x128x128xbf16>", 1).replace(
+      "shape = [128, 128] dtype = \"bf16\" alignment = 256",
+      "shape = [256, 128] dtype = \"bf16\" alignment = 256", 1).replace(
+      ": !tile.l1_buffer<128x128xbf16>", ": !tile.l1_buffer<256x128xbf16>", 1)
+    with pytest.raises(VerifyException, match=(
+        r"tile.subview on formal 0 dim 0:"
+        r" offset 0 \+ max task 3 \+ size 2 exceeds 4")):
+      parse_workload_ir(text, source_name="<task-overflow>")
+
+  def test_non_unit_stride_rejected(self):
+    text = MODEL_CHAIN_IR.replace(
+      "strides = [1, 1, 1]", "strides = [1, 2, 1]", 1)
+    with pytest.raises(VerifyException, match="non-unit strides are not supported in V1"):
+      parse_workload_ir(text, source_name="<stride>")
+
+  def test_transfer_byte_mismatch_fails(self):
+    with pytest.raises(VerifyException, match=(
+        r"transfer 'nest.dma.prefetch.async' src bytes \(131072\)"
+        r" != dst bytes \(65536\)")):
+      parse_workload_ir(TRANSFER_BYTE_MISMATCH_IR, source_name="<bytes>")
+
+  def test_tile_program_requires_task_formal(self):
+    with pytest.raises(VerifyException, match=(
+        r"tile.program '@p' first formal must be !nest.task")):
+      parse_workload_ir(TILE_PROGRAM_NO_TASK_IR, source_name="<no-task>")
+
+  @pytest.mark.parametrize("old_text", [
+    '%e = tile.load.async bytes = 32768 : !tile.event<"e">',
+    '%e = tile.store.async bytes = 32768 : !tile.event<"e">',
+    '%ev = nest.dma.prefetch.async %buf bytes = 131072 : !nest.event<"ev">',
+    '%ev = nest.dma.store.async %buf bytes = 131072 : !nest.event<"ev">',
+  ])
+  def test_legacy_addressless_syntax_rejected(self, old_text):
+    if old_text.startswith("%e"):
+      text = (
+        "builtin.module {\n"
+        "  tile.program @p(%task : !nest.task) {\n"
+        f"    {old_text}\n"
+        "    tile.await %e\n"
+        "    tile.return\n"
+        "  }\n"
+        "}\n"
+      )
+    else:
+      text = (
+        "builtin.module {\n"
+        "  nest.context @c placement = 1 {\n"
+        '    %buf = nest.alloc slot = "buf" role = "in" shape = [1, 128, 128]'
+        ' dtype = "bf16" : !nest.l2_buffer<1x128x128xbf16>\n'
+        f"    {old_text}\n"
+        "    nest.await %ev\n"
+        "    nest.return\n"
+        "  }\n"
+        "}\n"
+      )
+    self._assert_parse_failure(text)
 
 class TestExternalIRCLI:
   def _run_cli(self, *args: str):
@@ -512,6 +737,14 @@ class TestExternalIRCLI:
     assert res.returncode == 0, res.stderr
     assert "Completed:" in res.stdout and "True" in res.stdout
 
+  def test_missing_input_binding_exits_2(self):
+    res = self._run_cli(
+      "--ir-file", "examples/example.mlir",
+      "--device-context-mode", "2",
+      "--max-cycles", "200000",
+    )
+    assert res.returncode == 2
+    assert "missing input binding for global 'Y0'" in res.stderr
 
   def test_device_context_mode_cli_bounds(self):
     for bad in ("0", "9"):
