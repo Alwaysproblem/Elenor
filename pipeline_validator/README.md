@@ -94,29 +94,34 @@ conda activate elenor-validator
 ## Run
 
 ````bash
-# run the default pow workload
-python -m pipeline_validator -w pow
+# run the default pow workload (bind its global input Y)
+python -m pipeline_validator -w pow --input-binding Y=0x100000:524288:rw
 
 # list workloads
 python -m pipeline_validator -l
 
 # override a hardware param (e.g. faster clock)
-python -m pipeline_validator -w pow --hw-override clock_mhz=2000
+python -m pipeline_validator -w pow --input-binding Y=0x100000:524288:rw \
+  --hw-override clock_mhz=2000
 
 # print the IR (custom assembly) without simulating
 python -m pipeline_validator -w pow --print-ir
 
-# load and run an external IR file
-python -m pipeline_validator --ir-file path/to/workload.mlir
+# load and run an external IR file (model IR that declares global inputs
+# requires one --input-binding NAME=BASE:SIZE:PERM per input)
+python -m pipeline_validator --ir-file path/to/workload.mlir --input-binding Y=0x100000:131072:rw
 
 # JSON output
-python -m pipeline_validator -w pow --json
+python -m pipeline_validator -w pow --input-binding Y=0x100000:524288:rw --json
 
 # run with dual tile-UCE contexts and emit an HTML trace
-python -m pipeline_validator -w pow --context-mode 2 --trace-html ctx2.html
+python -m pipeline_validator -w pow --input-binding Y=0x100000:524288:rw \
+  --context-mode 2 --trace-html ctx2.html
 
 # run a model-mode IR (nexus.program) with two device execution slots
-python -m pipeline_validator --ir-file examples/example.mlir --device-context-mode 2
+# (model IR declares global inputs; bind each by name: NAME=BASE:SIZE:PERM)
+python -m pipeline_validator --ir-file examples/example.mlir --device-context-mode 2 \
+  --input-binding Y0=0x100000:131072:rw --input-binding Y1=0x200000:131072:rw
 
 ### Profiling / Trace Visualization
 
@@ -126,10 +131,12 @@ queue occupancy, and task/tile lifecycle event.
 
 ```bash
 # write a Perfetto-loadable trace.json (load at perfetto.dev or chrome://tracing)
-python -m pipeline_validator -w pow --trace-json trace.json
+python -m pipeline_validator -w pow --input-binding Y=0x100000:524288:rw \
+  --trace-json trace.json
 
 # write a standalone trace.html (open in any browser, no server needed)
-python -m pipeline_validator -w pow --trace-html trace.html
+python -m pipeline_validator -w pow --input-binding Y=0x100000:524288:rw \
+  --trace-html trace.html
 ````
 
 **Trace contents:**
