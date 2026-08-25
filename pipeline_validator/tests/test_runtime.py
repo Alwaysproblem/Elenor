@@ -236,6 +236,31 @@ class TestRuntimeColdWarm:
 
 
 # ---------------------------------------------------------------------------
+# Global DMA channel allocation
+# ---------------------------------------------------------------------------
+
+
+class TestDMAChannelScheduling:
+  def test_two_channels_round_robin_dma_stores(self):
+    """DMA stores must advance the shared round-robin channel selector."""
+    sim = Simulator(
+      HardwareConfig(num_dma_channels=2),
+      SimConfig(fidelity="runtime", max_cycles=200_000),
+      enable_tracer=True,
+    )
+    result = sim.run(PowWorkload().module)
+    assert result.completed, result.reason
+    assert result.tracer is not None
+    events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
+    store_channels = [
+      event["args"]["channel"]
+      for event in events
+      if event.get("name", "").startswith("dma.store:")
+    ]
+    assert store_channels == [0, 1, 0, 1]
+
+
+# ---------------------------------------------------------------------------
 # Event sequence (P0-4)
 # ---------------------------------------------------------------------------
 

@@ -187,6 +187,7 @@ class TileGroupSequencer:
       lat = self._dma_latency(resolved_bytes, l2_slot=src_l2)
       # round-robin DMA channel allocation
       ch = self._next_dma_channel % self.cfg.num_dma_channels
+      self._next_dma_channel += 1
       self.group.schedule_dma(
           ins.dst,
           lat,
