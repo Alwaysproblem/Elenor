@@ -176,6 +176,7 @@ these expectations and prints `PASS` / `FAIL`.
 pipeline_validator/
 ├── __init__.py          # public API
 ├── config.py            # HardwareConfig / WorkloadConfig / SimConfig
+├── hardware_config.yaml # HardwareConfig 默认值（分组 YAML 单一事实来源）
 ├── dialects/            # xDSL `elenor` dialect (function-call style: tile.*/nest.* ops)
 ├── workload_ir.py       # parse / print / verify / load custom-assembly IR
 ├── workload_builders.py # direct xDSL workload builders (pow + identity)

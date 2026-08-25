@@ -8,13 +8,19 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from dataclasses import asdict, fields
 from pathlib import Path
 
 import pytest
 from xdsl.dialects.builtin import ModuleOp
 from xdsl.utils.exceptions import VerifyException
 
-from pipeline_validator.config import HardwareConfig, SimConfig
+from pipeline_validator.config import (
+  _HW_YAML_PATH_TO_FIELD,
+  HardwareConfig,
+  SimConfig,
+  _load_hw_yaml,
+)
 from pipeline_validator.dialects.elenor import (
   NestAllocOp,
   NestAwaitOp,
@@ -654,3 +660,185 @@ class TestPowSimulation:
     text = report_to_text(rep)
     assert "Workload: pow" in text
     assert "Checks:" in text
+
+
+# ---------------------------------------------------------------------------
+# HardwareConfig grouped YAML tests
+# ---------------------------------------------------------------------------
+
+
+class TestHardwareConfigYaml:
+  """Grouped YAML maps losslessly to the flat HardwareConfig API."""
+
+  def _write_yaml(self, tmp_path, text: str) -> Path:
+    path = tmp_path / "hw.yaml"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+  def test_defaults_frozen(self):
+    # 53 个字段逐一列出, 值等于迁移前 config.py 的字面量。
+    expected = {
+      "profile": "balanced-small",
+      "num_tiles": 4,
+      "clock_mhz": 1000.0,
+      "group_sram_bytes": 8388608,
+      "group_sram_banks": 16,
+      "hbm_bandwidth_gbs": 819.2,
+      "group_dma_bandwidth_gbs": 204.8,
+      "num_dma_channels": 2,
+      "tile_l1_bytes": 1048576,
+      "tile_l1_banks": 16,
+      "tile_l1_bandwidth_gbs": 512.0,
+      "boa_num_opa": 4,
+      "boa_opa_rows": 16,
+      "boa_opa_cols": 16,
+      "boa_clock_multiplier": 1.0,
+      "boa_dtype_bytes": 2,
+      "boa_acc_bytes": 4,
+      "evu_lanes": 32,
+      "evu_clock_multiplier": 1.0,
+      "evu_dtype_bytes": 2,
+      "mfe_bandwidth_gbs": 256.0,
+      "mfe_clock_multiplier": 1.0,
+      "use_clock_mhz": 500.0,
+      "use_state_cache_bytes": 131072,
+      "uce_clock_mhz": 1000.0,
+      "uce_dispatch_per_cycle": 1,
+      "stream_depth_default": 3,
+      "stream_token_overhead_cycles": 1,
+      "stream_fence_cycles": 1,
+      "boa_launch_cycles": 4,
+      "evu_launch_cycles": 3,
+      "mfe_launch_cycles": 3,
+      "mfe_pipeline_depth": 4,
+      "mfe_load_queue_depth": 1,
+      "mfe_store_queue_depth": 1,
+      "mfe_stream_buffer_bytes": 0,
+      "use_launch_cycles": 2,
+      "dma_launch_cycles": 2,
+      "hbm_capacity_bytes": 17179869184,
+      "hbm_outstanding_limit": 32,
+      "l2_bank_bandwidth_gbs": 12.8,
+      "tile_program_sram_bytes": 65536,
+      "noc_vc_depth": 8,
+      "noc_router_latency_cycles": 4,
+      "dma_desc_cycles": 2,
+      "dma_issue_cycles": 1,
+      "dma_completion_cycles": 1,
+      "host_validate_cycles": 50,
+      "host_patch_cycles": 10,
+      "doorbell_latency_cycles": 5,
+      "firmware_fetch_cycles": 3,
+      "firmware_validate_cycles": 5,
+      "frame_bind_cycles": 8,
+    }
+    assert asdict(HardwareConfig()) == expected
+
+  def test_schema_maps_every_field_once(self):
+    mapped = list(_HW_YAML_PATH_TO_FIELD.values())
+    field_names = {field.name for field in fields(HardwareConfig)}
+    assert len(_HW_YAML_PATH_TO_FIELD) == 53
+    assert len(mapped) == len(set(mapped))
+    assert set(mapped) == field_names
+
+  def test_bundled_yaml_roundtrip(self):
+    default_path = Path(__file__).resolve().parents[1] / "hardware_config.yaml"
+    assert asdict(HardwareConfig.from_yaml(default_path)) == asdict(HardwareConfig())
+
+  def test_from_yaml_partial_nested_override(self, tmp_path):
+    path = self._write_yaml(
+      tmp_path,
+      "system:\n"
+      "  clock:\n"
+      "    core_mhz: 2000.0\n"
+      "  topology:\n"
+      "    tiles_per_group: 8\n"
+      "engines:\n"
+      "  boa:\n"
+      "    opa:\n"
+      "      count: 8\n",
+    )
+    cfg = HardwareConfig.from_yaml(path)
+    assert cfg.clock_mhz == 2000.0
+    assert cfg.num_tiles == 8
+    assert cfg.boa_num_opa == 8
+    assert cfg.group_sram_bytes == 8 * 1024 * 1024
+    assert cfg.with_overrides(clock_mhz=1500.0).clock_mhz == 1500.0
+
+  def test_from_yaml_empty_file_uses_defaults(self, tmp_path):
+    path = self._write_yaml(tmp_path, "")
+    assert HardwareConfig.from_yaml(path) == HardwareConfig()
+
+  def test_from_yaml_rejects_unknown_nested_path(self, tmp_path):
+    path = self._write_yaml(tmp_path, "engines:\n  boa:\n    unknown_lanes: 4\n")
+    with pytest.raises(ValueError, match=r"engines\.boa\.unknown_lanes"):
+      HardwareConfig.from_yaml(path)
+
+  def test_from_yaml_rejects_scalar_group(self, tmp_path):
+    path = self._write_yaml(tmp_path, "engines:\n  boa: 4\n")
+    with pytest.raises(ValueError, match=r"engines\.boa.*mapping"):
+      HardwareConfig.from_yaml(path)
+
+  def test_from_yaml_rejects_mapping_leaf(self, tmp_path):
+    path = self._write_yaml(tmp_path, "engines:\n  boa:\n    launch_cycles:\n      value: 4\n")
+    with pytest.raises(ValueError, match=r"engines\.boa\.launch_cycles.*scalar"):
+      HardwareConfig.from_yaml(path)
+
+  def test_from_yaml_rejects_sequence(self, tmp_path):
+    path = self._write_yaml(tmp_path, "engines:\n  boa:\n    launch_cycles: [4]\n")
+    with pytest.raises(ValueError, match="scalar"):
+      HardwareConfig.from_yaml(path)
+
+  def test_from_yaml_rejects_unsupported_schema_version(self, tmp_path):
+    path = self._write_yaml(tmp_path, "schema_version: 2\n")
+    with pytest.raises(ValueError, match="schema_version"):
+      HardwareConfig.from_yaml(path)
+
+  def test_from_yaml_rejects_duplicate_key(self, tmp_path):
+    path = self._write_yaml(
+      tmp_path,
+      "engines:\n"
+      "  boa:\n"
+      "    launch_cycles: 4\n"
+      "    launch_cycles: 8\n",
+    )
+    with pytest.raises(ValueError, match="duplicate YAML key"):
+      HardwareConfig.from_yaml(path)
+
+  def test_required_yaml_rejects_missing_leaf_before_class_defaults(self, tmp_path):
+    path = self._write_yaml(tmp_path, "schema_version: 1\nsystem:\n  profile: balanced-small\n")
+    with pytest.raises(ValueError, match="missing required HardwareConfig fields"):
+      _load_hw_yaml(path, required=True)
+
+
+class TestHardwareConfigCLI:
+  """--hw-config 端到端 (复用 TestExternalIRCLI 的 subprocess 模式)。"""
+
+  def _run_cli(self, *args: str):
+    return subprocess.run(
+      [sys.executable, "-m", "pipeline_validator", *args],
+      cwd=Path(__file__).resolve().parents[2],
+      capture_output=True,
+      text=True,
+    )
+
+  def test_hw_config_file_runs(self, tmp_path):
+    path = tmp_path / "hw.yaml"
+    path.write_text(
+      "memory:\n  group_sram:\n    capacity_bytes: 16777216\n",
+      encoding="utf-8",
+    )
+    result = self._run_cli(
+      "-w",
+      "pow",
+      "--hw-config",
+      str(path),
+      "--max-cycles",
+      "200000",
+    )
+    assert result.returncode == 0, result.stderr
+
+  def test_hw_config_missing_file(self, tmp_path):
+    result = self._run_cli("-w", "pow", "--hw-config", str(tmp_path / "nope.yaml"))
+    assert result.returncode == 2
+    assert "failed to load hardware config" in result.stderr
