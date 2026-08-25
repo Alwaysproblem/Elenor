@@ -16,3 +16,4 @@ dependencies:
   - pip
   - pip:
       - xdsl==0.69.0
+      - pyyaml

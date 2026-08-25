@@ -64,6 +64,13 @@ def main(argv=None) -> int:
     help="override a HardwareConfig field, e.g. clock_mhz=2000",
   )
   parser.add_argument(
+    "--hw-config",
+    default=None,
+    metavar="PATH",
+    help="load grouped HardwareConfig values from a YAML file "
+    "(omitted groups and fields keep bundled defaults)",
+  )
+  parser.add_argument(
     "--sim-override",
     action="append",
     default=[],
@@ -115,7 +122,12 @@ def main(argv=None) -> int:
     _list_workloads()
     return 0
 
-  hw = HardwareConfig().with_overrides(**_parse_overrides(args.hw_override))
+  try:
+    hw = HardwareConfig.from_yaml(args.hw_config) if args.hw_config else HardwareConfig()
+  except (OSError, ValueError) as exc:
+    print(f"failed to load hardware config '{args.hw_config}': {exc}", file=sys.stderr)
+    return 2
+  hw = hw.with_overrides(**_parse_overrides(args.hw_override))
   sim_overrides = _parse_overrides(args.sim_override)
   if args.max_cycles is not None:
     sim_overrides["max_cycles"] = args.max_cycles
