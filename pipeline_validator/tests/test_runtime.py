@@ -972,3 +972,97 @@ class TestModelMode:
     assert all(t.streams == {} for t in sim.group.tiles), [
       t.streams for t in sim.group.tiles]
     assert sim.group.credit_invariants_hold()
+
+
+  # -----------------------------------------------------------------------
+  # Input binding contract tests (PR 1, §2.5 / §3 Step 5)
+  # -----------------------------------------------------------------------
+
+  def test_missing_binding_fails(self):
+    sim = Simulator(HardwareConfig(), SimConfig(fidelity="runtime", max_cycles=10000))
+    with pytest.raises(ValueError, match="missing input binding for global 'Y0'"):
+      sim.run(make_two_context_model(), input_bindings={})
+
+  def test_unused_binding_fails(self):
+    sim = Simulator(HardwareConfig(), SimConfig(fidelity="runtime", max_cycles=10000))
+    bindings = {**MODEL_BINDINGS, "ZZ": GlobalBinding("ZZ", 0x300000, 1024, "rw")}
+    with pytest.raises(ValueError, match="input binding 'ZZ' does not match any program input"):
+      sim.run(make_two_context_model(), input_bindings=bindings)
+
+  def test_binding_too_small_fails(self):
+    sim = Simulator(HardwareConfig(), SimConfig(fidelity="runtime", max_cycles=10000))
+    bindings = {
+      "Y0": GlobalBinding("Y0", 0x100000, 64, "rw"),
+      "Y1": GlobalBinding("Y1", 0x200000, L2_WAIT_BYTES, "rw"),
+    }
+    with pytest.raises(ValueError, match="input binding 'Y0' size 64 is smaller than required"):
+      sim.run(make_two_context_model(), input_bindings=bindings)
+
+  def test_binding_overlap_fails(self):
+    sim = Simulator(HardwareConfig(), SimConfig(fidelity="runtime", max_cycles=10000))
+    bindings = {
+      "Y0": GlobalBinding("Y0", 0x100000, L2_WAIT_BYTES, "rw"),
+      "Y1": GlobalBinding("Y1", 0x100000, L2_WAIT_BYTES, "rw"),
+    }
+    with pytest.raises(ValueError, match="input bindings 'Y0' and 'Y1' overlap"):
+      sim.run(make_two_context_model(), input_bindings=bindings)
+
+  def test_binding_exceeds_hbm_capacity_fails(self):
+    hw = HardwareConfig()
+    sim = Simulator(hw, SimConfig(fidelity="runtime", max_cycles=10000))
+    cap = hw.hbm_capacity_bytes
+    bindings = {
+      "Y0": GlobalBinding("Y0", cap, L2_WAIT_BYTES, "rw"),
+      "Y1": GlobalBinding("Y1", 0x100000, L2_WAIT_BYTES, "rw"),
+    }
+    with pytest.raises(ValueError, match="input binding 'Y0' exceeds HBM capacity"):
+      sim.run(make_two_context_model(), input_bindings=bindings)
+
+  def test_readonly_binding_rejects_store(self):
+    """A read-only binding used as a store destination is rejected."""
+    from pipeline_validator.dialects.elenor import (
+      NestDispatchOp,
+      NestDMAStoreOp,
+      NestPrefetchOp,
+      NestReleaseOp,
+    )
+    prog = make_pow_tile_program()
+    ctx = NestContextOp(
+      "pow_task", [],
+      arg_types=[NestGlobalMemref.of([4, 128, 128], "bf16")],
+      arg_names=["Y"],
+      placement=15,
+    )
+    y_arg = ctx.body.block.args[0]
+    buf = NestAllocOp("l2_buf", "inout", [4, 128, 128], "bf16", alignment=256)
+    src = NestSubviewOp(
+      y_arg, [0, 0, 0], [4, 128, 128], [1, 1, 1],
+      NestGlobalView.of([4, 128, 128], "bf16"),
+    )
+    pref = NestPrefetchOp(src.result, buf.result, "ev_in")
+    tasks = NestTaskRangeOp(0, 4)
+    disp = NestDispatchOp(
+      "pow_4k_tile", tasks.result, [buf.result], [buf.result],
+      "ev_grid", "ev_inrel", "ev_outready", depends_on=[pref.result],
+    )
+    store = NestDMAStoreOp(
+      buf.result, src.result, "ev_out",
+      depends_on=[disp.output_ready],
+    )
+    release = NestReleaseOp(buf.result, depends_on=[store.result])
+    ctx.body.block.add_ops([
+      buf, src, pref, tasks, disp, store, release,
+      NestAwaitOp([disp.grid_done, store.result]), NestReturnOp(),
+    ])
+    program = NexusProgramOp(
+      "run_pow", [],
+      arg_types=[NestGlobalMemref.of([4, 128, 128], "bf16")],
+      arg_names=["Y0"],
+    )
+    y0 = program.body.block.args[0]
+    sub = NexusSubmitContextOp("pow_task", "done0", actuals=[y0])
+    program.body.block.add_ops([sub, NexusAwaitOp([sub.result]), NexusReturnOp()])
+    module = ModuleOp([prog, ctx, program])
+    sim = Simulator(HardwareConfig(), SimConfig(fidelity="runtime", max_cycles=10000))
+    with pytest.raises(ValueError, match="is not writable but is used as store destination"):
+      sim.run(module, input_bindings={"Y0": GlobalBinding("Y0", 0x100000, 131072, "r")})
