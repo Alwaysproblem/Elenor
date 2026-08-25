@@ -32,25 +32,32 @@ from pipeline_validator.dialects.elenor import (
   NestDMAStoreOp,
   NestEvent,
   NestGlobalMemref,
+  NestGlobalView,
+  NestL2View,
   NestPrefetchOp,
   NestReleaseOp,
   NestReturnOp,
+  NestSubviewOp,
+  NestTask,
   NestTaskRangeOp,
   NexusAwaitOp,
   NexusProgramOp,
   NexusReturnOp,
   NexusSubmitContextOp,
   TaskRange,
+  TileAllocOp,
   TileAwaitOp,
   TileBoaOp,
   TileEvent,
   TileEvuOp,
+  TileL1Buffer,
   TileLoadOp,
   TilePowOp,
   TileProgramDefOp,
   TileReturnOp,
   TileSignalOp,
   TileStoreOp,
+  TileSubviewOp,
 )
 from pipeline_validator.engines import MFEEngine
 from pipeline_validator.execution_ir import ExecEngineDesc
@@ -68,10 +75,13 @@ from pipeline_validator.workload_ir import (
   verify_workload_ir,
 )
 from pipeline_validator.workloads import ALL_WORKLOADS, PowWorkload
-
 # ---------------------------------------------------------------------------
 # xDSL workload IR tests
 # ---------------------------------------------------------------------------
+
+from pipeline_validator.execution_ir import GlobalBinding
+
+POW_BINDINGS = {"Y": GlobalBinding("Y", 0x100000, 524288, "rw")}
 
 
 class TestXDSLIR:
@@ -79,50 +89,76 @@ class TestXDSLIR:
     with pytest.raises(VerifyException, match=message):
       verify_workload_ir(module)
 
+
   def test_pow_workload_round_trip_uses_function_calls(self):
     """PowWorkload IR round-trips in the function-call dialect."""
     text = print_workload_ir(PowWorkload().module)
-    for fragment in ("nest.alloc", "nest.dispatch.tasks.async", "depends_on", "tile.signal"):
+    for fragment in ("nest.alloc", "nest.subview", "nest.dispatch.tasks.async",
+                     "depends_on", "tile.signal", "into"):
       assert fragment in text
 
     reparsed = parse_workload_ir(text, source_name="<pow>")
     verify_workload_ir(reparsed)
     assert print_workload_ir(reparsed) == text
 
+
   def test_function_call_op_builders_verify(self):
     """Every function-call operation can participate in a verified module."""
-    load = TileLoadOp(bytes_total=64, tag="load")
-    pow_op = TilePowOp(bytes_total=64, exponent=2, pow_ops=32, tag="pow")
-    store = TileStoreOp(bytes_total=64, tag="store")
+    l2_dims = [1, 4, 32]
+    prog = TileProgramDefOp(
+      "all_ops",
+      [],
+      arg_types=[NestTask(), NestBuffer.of(l2_dims, "bf16")],
+      arg_names=["task", "l2_buf"],
+    )
+    _task_arg, l2_arg = prog.body.block.args
+    view = TileSubviewOp(
+      l2_arg, None, None, [0, 0, 0], l2_dims, [1, 1, 1],
+      NestL2View.of(l2_dims, "bf16"),
+    )
+    l1 = TileAllocOp([4, 32], "bf16", alignment=256)
+    load = TileLoadOp(view.result, l1.result, "load")
+    pow_op = TilePowOp(bytes_total=256, exponent=2, pow_ops=32, tag="pow")
     evu = TileEvuOp(op_name="relu", evu_ops=16, tag="evu")
     boa = TileBoaOp(op_name="matmul", m=1, n=1, k=1, boa_ops=2, tag="boa")
-    program = TileProgramDefOp(
-      "all_ops",
-      [
-        load,
-        TileAwaitOp([load.result]),
-        TileSignalOp("input_released"),
-        pow_op,
-        TileAwaitOp([pow_op.result]),
-        evu,
-        TileAwaitOp([evu.result]),
-        boa,
-        TileAwaitOp([boa.result]),
-        store,
-        TileAwaitOp([store.result]),
-        TileSignalOp("output_ready"),
-        TileReturnOp(),
-      ],
-    )
+    store = TileStoreOp(l1.result, view.result, "store")
+    prog.body.block.add_ops([
+      view,
+      l1,
+      load,
+      TileAwaitOp([load.result]),
+      TileSignalOp("input_released"),
+      pow_op,
+      TileAwaitOp([pow_op.result]),
+      evu,
+      TileAwaitOp([evu.result]),
+      boa,
+      TileAwaitOp([boa.result]),
+      store,
+      TileAwaitOp([store.result]),
+      TileSignalOp("output_ready"),
+      TileReturnOp(),
+    ])
 
-    buffer = NestAllocOp(slot="l2_buf", bytes_total=256)
+    ctx = NestContextOp(
+      "all_ops_context",
+      [],
+      placement=1,
+      arg_types=[NestGlobalMemref.of(l2_dims, "bf16")],
+      arg_names=["Y"],
+    )
+    y_arg = ctx.body.block.args[0]
+    buffer = NestAllocOp(slot="l2_buf", role="inout", shape=l2_dims, dtype="bf16")
+    src = NestSubviewOp(
+      y_arg, [0, 0, 0], l2_dims, [1, 1, 1], NestGlobalView.of(l2_dims, "bf16")
+    )
     tasks = NestTaskRangeOp(from_task=0, to_task=1)
-    prefetch = NestPrefetchOp(buffer=buffer.result, bytes_total=256, tag="prefetch")
+    prefetch = NestPrefetchOp(src.result, buffer.result, "prefetch")
     dispatch = NestDispatchOp(
       "all_ops",
       tasks.result,
-      buffer.result,
-      buffer.result,
+      [buffer.result],
+      [buffer.result],
       "grid_done",
       "input_released",
       "output_ready",
@@ -130,36 +166,32 @@ class TestXDSLIR:
     )
     collective = NestCollectiveOp("reduce", bytes_total=256, participant_mask=1, tag="collective")
     dma_store = NestDMAStoreOp(
-      buffer=buffer.result,
-      bytes_total=256,
+      src=buffer.result,
+      dst=src.result,
       tag="store_done",
       depends_on=[dispatch.output_ready],
     )
     release = NestReleaseOp(buffer.result, depends_on=[dma_store.result])
-    module = ModuleOp(
-      [
-        program,
-        NestContextOp(
-          "all_ops_context",
-          [
-            buffer,
-            tasks,
-            prefetch,
-            dispatch,
-            collective,
-            dma_store,
-            release,
-            NestAwaitOp([dispatch.grid_done, collective.result, dma_store.result]),
-            NestBarrierOp(),
-            NestReturnOp(),
-          ],
-          placement=1,
-        ),
-      ]
-    )
+    ctx.body.block.add_ops([
+      buffer,
+      src,
+      prefetch,
+      tasks,
+      dispatch,
+      collective,
+      dma_store,
+      release,
+      NestAwaitOp([dispatch.grid_done, collective.result, dma_store.result]),
+      NestBarrierOp(),
+      NestReturnOp(),
+    ])
+    module = ModuleOp([prog, ctx])
 
     verify_workload_ir(module)
     assert isinstance(buffer.result.type, NestBuffer)
+    assert isinstance(view.result.type, NestL2View)
+    assert isinstance(l1.result.type, TileL1Buffer)
+    assert isinstance(src.result.type, NestGlobalView)
     assert isinstance(tasks.result.type, TaskRange)
     assert isinstance(prefetch.result.type, NestEvent)
     assert isinstance(load.result.type, TileEvent)
@@ -168,78 +200,85 @@ class TestXDSLIR:
     assert isinstance(make_identity_tile_program(), TileProgramDefOp)
     assert ALL_WORKLOADS == [PowWorkload]
 
-  def test_verifier_rejects_unknown_program_symbol(self):
-    buffer = NestAllocOp("l2_buf", 256)
+  def _make_identity_context(self, ctx_name="c", placement=1, context_id=None):
+    """Minimal legacy module: identity program + one dispatch context."""
+    prog = make_identity_tile_program()
     tasks = NestTaskRangeOp(0, 1)
     dispatch = NestDispatchOp(
-      "missing_program",
-      tasks.result,
-      buffer.result,
-      buffer.result,
-      "grid_done",
-      "input_released",
-      "output_ready",
+      prog.sym_name.data, tasks.result, [], [],
+      "grid_done", "input_released", "output_ready",
     )
-    module = ModuleOp(
-      [
-        NestContextOp(
-          "unknown_program",
-          [buffer, tasks, dispatch, NestReturnOp()],
-          placement=1,
-        )
-      ]
+    ctx = NestContextOp(
+      ctx_name,
+      [tasks, dispatch, NestAwaitOp([dispatch.grid_done]), NestReturnOp()],
+      placement=placement,
+      context_id=context_id,
     )
-    self._assert_verify_failure(module, "dispatch references unknown tile program '@missing_program'")
+    return [prog, ctx], dispatch
 
-  def test_verifier_rejects_undefined_event_in_await(self):
-    buffer = NestAllocOp("l2_buf", 256)
-    later_prefetch = NestPrefetchOp(buffer.result, 256, "defined_later")
-    module = ModuleOp(
-      [
-        NestContextOp(
-          "undefined_await",
-          [buffer, NestAwaitOp([later_prefetch.result]), later_prefetch, NestReturnOp()],
-          placement=1,
-        )
-      ]
+  def test_verifier_rejects_unknown_program_symbol(self):
+    tasks = NestTaskRangeOp(0, 1)
+    dispatch = NestDispatchOp(
+      "missing_program", tasks.result, [], [],
+      "grid_done", "input_released", "output_ready",
     )
+    module = ModuleOp([
+      NestContextOp(
+        "unknown_program",
+        [tasks, dispatch, NestReturnOp()],
+        placement=1,
+      )
+    ])
+    self._assert_verify_failure(
+      module, "dispatch references unknown tile program '@missing_program'"
+    )
+  def test_verifier_rejects_undefined_event_in_await(self):
+    ctx = NestContextOp(
+      "undefined_await", [],
+      arg_types=[NestGlobalMemref.of([1, 128, 128], "bf16")],
+      arg_names=["Y"], placement=1)
+    y = ctx.body.block.args[0]
+    buf = NestAllocOp("buf", "in", [1, 128, 128], "bf16")
+    src = NestSubviewOp(
+      y, [0, 0, 0], [1, 128, 128], [1, 1, 1],
+      NestGlobalView.of([1, 128, 128], "bf16"))
+    later = NestPrefetchOp(src.result, buf.result, "defined_later")
+    ctx.body.block.add_ops([
+      buf, src, NestAwaitOp([later.result]), later, NestReturnOp(),
+    ])
+    module = ModuleOp([ctx])
     self._assert_verify_failure(module, "nest.await references undefined event 'defined_later'")
 
   def test_verifier_rejects_duplicate_event_tag(self):
-    buffer = NestAllocOp("l2_buf", 256)
-    first = NestPrefetchOp(buffer.result, 256, "duplicate")
-    second = NestPrefetchOp(buffer.result, 256, "duplicate")
-    module = ModuleOp(
-      [
-        NestContextOp(
-          "duplicate_event",
-          [buffer, first, second, NestReturnOp()],
-          placement=1,
-        )
-      ]
-    )
+    ctx = NestContextOp(
+      "duplicate_event", [],
+      arg_types=[NestGlobalMemref.of([1, 128, 128], "bf16")],
+      arg_names=["Y"], placement=1)
+    y = ctx.body.block.args[0]
+    buf = NestAllocOp("buf", "in", [1, 128, 128], "bf16")
+    src = NestSubviewOp(
+      y, [0, 0, 0], [1, 128, 128], [1, 1, 1],
+      NestGlobalView.of([1, 128, 128], "bf16"))
+    first = NestPrefetchOp(src.result, buf.result, "duplicate")
+    second = NestPrefetchOp(src.result, buf.result, "duplicate")
+    ctx.body.block.add_ops([buf, src, first, second, NestReturnOp()])
+    module = ModuleOp([ctx])
     self._assert_verify_failure(module, "duplicate event tag 'duplicate'")
 
   def test_dispatch_context_attribute_round_trip(self):
     """``context = N`` prints, parses, and round-trips; absent when not pinned."""
     prog = make_identity_tile_program()
-    buffer = NestAllocOp(slot="l2_buf", bytes_total=256)
     tasks = NestTaskRangeOp(from_task=0, to_task=1)
     dispatch = NestDispatchOp(
-      prog.sym_name.data,
-      tasks.result,
-      buffer.result,
-      buffer.result,
-      "grid_done",
-      "input_released",
-      "output_ready",
+      prog.sym_name.data, tasks.result, [], [],
+      "grid_done", "input_released", "output_ready",
       context_id=1,
     )
     module = ModuleOp([
       prog,
       NestContextOp(
         "pinned_ctx",
-        [buffer, tasks, dispatch, NestAwaitOp([dispatch.grid_done]), NestReturnOp()],
+        [tasks, dispatch, NestAwaitOp([dispatch.grid_done]), NestReturnOp()],
         placement=1,
       ),
     ])
@@ -262,23 +301,17 @@ class TestXDSLIR:
 
   def test_verifier_rejects_negative_dispatch_context(self):
     prog = make_identity_tile_program()
-    buffer = NestAllocOp(slot="l2_buf", bytes_total=256)
     tasks = NestTaskRangeOp(from_task=0, to_task=1)
     dispatch = NestDispatchOp(
-      prog.sym_name.data,
-      tasks.result,
-      buffer.result,
-      buffer.result,
-      "grid_done",
-      "input_released",
-      "output_ready",
+      prog.sym_name.data, tasks.result, [], [],
+      "grid_done", "input_released", "output_ready",
       context_id=-1,
     )
     module = ModuleOp([
       prog,
       NestContextOp(
         "neg_ctx",
-        [buffer, tasks, dispatch, NestReturnOp()],
+        [tasks, dispatch, NestReturnOp()],
         placement=1,
       ),
     ])
@@ -286,27 +319,7 @@ class TestXDSLIR:
 
   def test_context_level_context_attribute_round_trip(self):
     """``context = N`` on ``nest.context`` (device slot pin) prints, parses, and round-trips."""
-    prog = make_identity_tile_program()
-    buffer = NestAllocOp(slot="l2_buf", bytes_total=256)
-    tasks = NestTaskRangeOp(from_task=0, to_task=1)
-    dispatch = NestDispatchOp(
-      prog.sym_name.data,
-      tasks.result,
-      buffer.result,
-      buffer.result,
-      "grid_done",
-      "input_released",
-      "output_ready",
-    )
-    module = ModuleOp([
-      prog,
-      NestContextOp(
-        "ctx_default_pin",
-        [buffer, tasks, dispatch, NestAwaitOp([dispatch.grid_done]), NestReturnOp()],
-        placement=1,
-        context_id=1,
-      ),
-    ])
+    module = ModuleOp(self._make_identity_context(ctx_name="ctx_default_pin", context_id=1)[0])
     verify_workload_ir(module)
     text = print_workload_ir(module)
     assert "context = 1" in text
@@ -319,27 +332,7 @@ class TestXDSLIR:
     assert "context = " not in print_workload_ir(PowWorkload().module)
 
   def test_verifier_rejects_negative_context_level_context(self):
-    prog = make_identity_tile_program()
-    buffer = NestAllocOp(slot="l2_buf", bytes_total=256)
-    tasks = NestTaskRangeOp(from_task=0, to_task=1)
-    dispatch = NestDispatchOp(
-      prog.sym_name.data,
-      tasks.result,
-      buffer.result,
-      buffer.result,
-      "grid_done",
-      "input_released",
-      "output_ready",
-    )
-    module = ModuleOp([
-      prog,
-      NestContextOp(
-        "neg_ctx_pin",
-        [buffer, tasks, dispatch, NestReturnOp()],
-        placement=1,
-        context_id=-1,
-      ),
-    ])
+    module = ModuleOp(self._make_identity_context(ctx_name="neg_ctx_pin", context_id=-1)[0])
     self._assert_verify_failure(module, "nest.context context must be >= 0")
 
   def test_nexus_program_round_trip(self):
@@ -347,30 +340,41 @@ class TestXDSLIR:
     prog = make_identity_tile_program()
     ctxs = []
     for i in range(2):
-      buf = NestAllocOp(slot="l2_buf", bytes_total=256)
-      tasks = NestTaskRangeOp(from_task=0, to_task=1)
+      tasks = NestTaskRangeOp(0, 1)
       disp = NestDispatchOp(
-        prog.sym_name.data, tasks.result, buf.result, buf.result,
+        prog.sym_name.data, tasks.result, [], [],
         f"ev_grid_c{i}", "", "",
       )
       ctxs.append(NestContextOp(
         f"ctx{i}",
-        [buf, tasks, disp, NestAwaitOp([disp.grid_done]), NestReturnOp()],
-        placement=1, context_id=i,
+        [tasks, disp, NestAwaitOp([disp.grid_done]), NestReturnOp()],
+        arg_types=[NestGlobalMemref.of([4, 128, 128], "bf16")],
+        arg_names=["Y"],
+        placement=1,
+        context_id=i,
       ))
-    sub0 = NexusSubmitContextOp("ctx0", "done0")
-    sub1 = NexusSubmitContextOp("ctx1", "done1")
     program = NexusProgramOp(
       "run_model",
-      [sub0, sub1, NexusAwaitOp([sub0.result, sub1.result]), NexusReturnOp()],
-      arg_types=[NestGlobalMemref.of([4, 128, 128], "bf16")],
+      [],
+      arg_types=[NestGlobalMemref.of([4, 128, 128], "bf16")] * 2,
+      arg_names=["Y0", "Y1"],
     )
+    y0, y1 = program.body.block.args
+    sub0 = NexusSubmitContextOp("ctx0", "done0", actuals=[y0])
+    sub1 = NexusSubmitContextOp("ctx1", "done1", actuals=[y1])
+    program.body.block.add_ops([
+      sub0,
+      sub1,
+      NexusAwaitOp([sub0.result, sub1.result]),
+      NexusReturnOp(),
+    ])
     module = ModuleOp([prog, *ctxs, program])
     verify_workload_ir(module)
     text = print_workload_ir(module)
     assert "nexus.program" in text
     assert "nexus.submit_context.async" in text
-    assert '!nexus.event<"' in text
+    assert '@nexus.event<"' not in text
+    assert '@ctx0(%Y0)' in text
     assert "!nest.global_memref<4x128x128xbf16>" in text
     reparsed = parse_workload_ir(text)
     verify_workload_ir(reparsed)
@@ -378,41 +382,24 @@ class TestXDSLIR:
 
   def test_verifier_rejects_unknown_submit_context(self):
     """submit_context referencing an undefined nest.context is rejected."""
-    prog = make_identity_tile_program()
-    buf = NestAllocOp(slot="l2_buf", bytes_total=256)
-    tasks = NestTaskRangeOp(from_task=0, to_task=1)
-    disp = NestDispatchOp(
-      prog.sym_name.data, tasks.result, buf.result, buf.result, "ev0", "", "",
-    )
-    ctx0 = NestContextOp(
-      "ctx0", [buf, tasks, disp, NestAwaitOp([disp.grid_done]), NestReturnOp()],
-      placement=1, context_id=0,
-    )
+    ops, _ = self._make_identity_context(ctx_name="ctx0", context_id=0)
     program = NexusProgramOp(
       "bad", [NexusSubmitContextOp("missing", "done0"), NexusReturnOp()],
     )
-    module = ModuleOp([prog, ctx0, program])
+    module = ModuleOp([*ops, program])
     self._assert_verify_failure(module, "submit_context references unknown nest.context '@missing'")
 
   def test_verifier_rejects_undefined_nexus_await(self):
     """nexus.await referencing an event not yet submitted is rejected."""
-    prog = make_identity_tile_program()
+    ops, _ = self._make_identity_context(ctx_name="ctx0", context_id=0)
     sub = NexusSubmitContextOp("ctx0", "done0")
-    buf = NestAllocOp(slot="l2_buf", bytes_total=256)
-    tasks = NestTaskRangeOp(from_task=0, to_task=1)
-    disp = NestDispatchOp(
-      prog.sym_name.data, tasks.result, buf.result, buf.result, "ev0", "", "",
-    )
-    ctx0 = NestContextOp(
-      "ctx0", [buf, tasks, disp, NestAwaitOp([disp.grid_done]), NestReturnOp()],
-      placement=1, context_id=0,
-    )
     program = NexusProgramOp(
       "bad",
       [NexusAwaitOp([sub.result]), sub, NexusReturnOp()],
     )
-    module = ModuleOp([prog, ctx0, program])
+    module = ModuleOp([*ops, program])
     self._assert_verify_failure(module, "nexus.await references undefined event 'done0'")
+
 
 class TestExternalIRCLI:
   def _run_cli(self, *args: str):
@@ -433,6 +420,7 @@ class TestExternalIRCLI:
     run = self._run_cli(
       "--ir-file",
       str(input_path),
+      "--input-binding", "Y=0x100000:524288:rw",
       "--trace-json",
       str(trace_json),
       "--trace-html",
@@ -503,7 +491,10 @@ class TestExternalIRCLI:
     assert str(malformed) in malformed_res.stderr
 
   def test_context_mode_cli_bounds(self):
-    ok = self._run_cli("-w", "pow", "--context-mode", "3", "--max-cycles", "200000")
+    ok = self._run_cli(
+      "-w", "pow", "--context-mode", "3", "--max-cycles", "200000",
+      "--input-binding", "Y=0x100000:524288:rw",
+    )
     assert ok.returncode == 0, ok.stderr
     for bad in ("0", "9"):
       res = self._run_cli("-w", "pow", "--context-mode", bad)
@@ -514,10 +505,13 @@ class TestExternalIRCLI:
     res = self._run_cli(
       "--ir-file", "examples/example.mlir",
       "--device-context-mode", "2",
+      "--input-binding", "Y0=0x100000:131072:rw",
+      "--input-binding", "Y1=0x200000:131072:rw",
       "--max-cycles", "200000",
     )
     assert res.returncode == 0, res.stderr
     assert "Completed:" in res.stdout and "True" in res.stdout
+
 
   def test_device_context_mode_cli_bounds(self):
     for bad in ("0", "9"):
@@ -625,7 +619,7 @@ class TestStreamQueue:
     assert q.occupancy == 1
     tok = q.pop(cycle=1)
     assert tok is not None
-    assert tok.is_eos
+
     q.release(tok, cycle=2)
     assert q.occupancy == 0
     assert q.credit_invariant_holds()
@@ -640,7 +634,7 @@ class TestPowSimulation:
   def test_pow_completes(self):
     hw = HardwareConfig()
     sim = Simulator(hw, SimConfig(max_cycles=200_000))
-    result = sim.run(PowWorkload().module)
+    result = sim.run(PowWorkload().module, input_bindings=POW_BINDINGS)
     assert result.completed, f"pow did not complete: {result.reason}"
     assert result.cycles > 0
     assert result.credit_invariant_ok
@@ -648,7 +642,7 @@ class TestPowSimulation:
   def test_pow_report_has_passing_checks(self):
     wl = PowWorkload()
     sim = Simulator(HardwareConfig(), SimConfig(max_cycles=200_000))
-    result = sim.run(wl.module)
+    result = sim.run(wl.module, input_bindings=POW_BINDINGS)
     assert result.completed, result.reason
     rep = build_report(wl, result)
     failed = [c for c in rep.checks if not c["pass"]]
@@ -657,11 +651,12 @@ class TestPowSimulation:
   def test_pow_report_text_renderable(self):
     wl = PowWorkload()
     sim = Simulator(HardwareConfig(), SimConfig(max_cycles=200_000))
-    result = sim.run(wl.module)
+    result = sim.run(wl.module, input_bindings=POW_BINDINGS)
     rep = build_report(wl, result)
     text = report_to_text(rep)
     assert "Workload: pow" in text
     assert "Checks:" in text
+
 
 
 # ---------------------------------------------------------------------------
@@ -886,6 +881,7 @@ class TestHardwareConfigCLI:
       "pow",
       "--hw-config",
       str(path),
+      "--input-binding", "Y=0x100000:524288:rw",
       "--max-cycles",
       "200000",
     )

@@ -14,17 +14,20 @@ Key design points mirrored from reference.mlir:
     ``grid_done`` / ``input_released`` / ``output_ready``;
   - tile programs mark their L2-read / L2-write phases with
     ``tile.signal``, which drives the dispatch phase events;
-  - buffers are SSA values (``!nest.l2_buffer<slot>``), and the event type
-    tag doubles as the runtime event id shared by the simulator and trace.
+  - global inputs flow as real SSA values: ``nexus.program`` block args
+    → ``nexus.submit_context.async`` actuals → ``nest.context`` formals
+    → ``nest.subview`` → prefetch/store; tile-side L2 formals →
+    ``tile.subview`` → load/store.  Bytes derive from view/buffer shapes,
+    not from a ``bytes`` property on transfer ops.
 
 Prefix hierarchy: ``tile.*`` (tile level), ``nest.*`` (group level),
-``nexus.*`` (host level, deferred - not yet implemented).
+``nexus.*`` (host level).
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import ClassVar, Self, TypeAlias
+from typing import ClassVar, Self, TypeAlias, cast
 
 from xdsl.dialects.builtin import (
   ArrayAttr,
@@ -42,6 +45,7 @@ from xdsl.ir import (
   TypeAttribute,
 )
 from xdsl.irdl import (
+  AttrSizedOperandSegments,
   IRDLOperation,
   irdl_attr_definition,
   irdl_op_definition,
@@ -58,7 +62,42 @@ from xdsl.printer import Printer
 from xdsl.traits import NoTerminator
 
 # ---------------------------------------------------------------------------
-# SSA types: events, L2 buffers, task range
+# Element byte widths and shape-type parse/print helpers
+# ---------------------------------------------------------------------------
+
+DTYPE_BYTES: dict[str, int] = {"i8": 1, "bf16": 2, "f16": 2, "i32": 4, "f32": 4}
+"""Element byte widths accepted by every shape-typed ELENOR type."""
+
+def _parse_dims_dtype(parser: AttrParser) -> tuple[list[int], str]:
+  """Parse ``<Dx...xDtype>`` returning (dims, dtype).
+
+  The lexer treats ``4x128x128xbf16`` as ``4`` then a single BARE_IDENT
+  ``x128x128xbf16``; we split on ``x`` to recover dims + dtype.
+  """
+  parser.parse_punctuation("<")
+  first = parser.parse_integer()
+  rest = parser.parse_identifier()
+  parser.parse_punctuation(">")
+  parts = rest.split("x")
+  dims = [first] + [int(p) for p in parts[1:-1]]
+  dtype = parts[-1]
+  if dtype not in DTYPE_BYTES:
+    parser.raise_error(f"unknown dtype '{dtype}'")
+  return dims, dtype
+
+
+def _print_dims_dtype(printer: Printer, dims: ArrayAttr, dtype: str) -> None:
+  printer.print_string("<")
+  printer.print_string("x".join(str(d.value.data) for d in dims.data))  # type: ignore[attr-defined]
+  printer.print_string("x" + dtype + ">")
+
+
+def _int_list(arr: ArrayAttr) -> list[int]:
+  return [int(d.value.data) for d in arr.data]  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# SSA types: events, buffers, views, task handles
 # ---------------------------------------------------------------------------
 
 
@@ -88,27 +127,42 @@ class TileEvent(ParametrizedAttribute, TypeAttribute):
   name = "tile.event"
   tag: StringAttr
 
+
 @irdl_attr_definition
 class NestBuffer(ParametrizedAttribute, TypeAttribute):
-  """Context-owned L2 buffer: ``!nest.l2_buffer<slot>``.
+  """Context-owned L2 buffer: ``!nest.l2_buffer<4x128x128xbf16>``.
 
-  The slot name is the L2 slot id used by the group DMA latency model.
+  Shape-typed; the L2 slot id lives on the defining ``nest.alloc``.
   """
 
   name = "nest.l2_buffer"
-  slot: StringAttr
+  dims: ArrayAttr
+  dtype: StringAttr
+
+  @staticmethod
+  def of(dims: Sequence[int], dtype: str) -> NestBuffer:
+    return NestBuffer(
+      ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype))
+
+  @classmethod
+  def parse_parameters(cls, parser: AttrParser) -> list:
+    dims, dtype = _parse_dims_dtype(parser)
+    return [ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype)]
+
+  def print_parameters(self, printer: Printer) -> None:
+    _print_dims_dtype(printer, self.dims, self.dtype.data)
 
 
 @irdl_attr_definition
 class NestGlobalMemref(ParametrizedAttribute, TypeAttribute):
   """Declarative global memref: ``!nest.global_memref<4x128x128xbf16>``.
 
-  V1: parse/print only — no runtime data movement.  Used as a
-  declaration-only entry-block argument type for ``nexus.program``.
+  Host-visible global input; appears as a ``nexus.program`` or
+  ``nest.context`` block-arg formal.
   """
 
   name = "nest.global_memref"
-  dims: ArrayAttr  # list of IntegerAttr(IndexType)
+  dims: ArrayAttr
   dtype: StringAttr
 
   @staticmethod
@@ -118,23 +172,97 @@ class NestGlobalMemref(ParametrizedAttribute, TypeAttribute):
 
   @classmethod
   def parse_parameters(cls, parser: AttrParser) -> list:
-    # The lexer treats ``4x128x128xbf16`` as ``4`` then a single identifier
-    # ``x128x128xbf16`` (BARE_IDENT), so we parse the first integer and the
-    # trailing identifier, then split on ``x``: dims + dtype.
-    parser.parse_punctuation("<")
-    first = parser.parse_integer()
-    rest = parser.parse_identifier()
-    parser.parse_punctuation(">")
-    # rest starts with 'x': 'x128x128xbf16' -> split -> ['', '128', '128', 'bf16']
-    parts = rest.split("x")
-    dims = [first] + [int(p) for p in parts[1:-1]]
-    dtype = parts[-1]
+    dims, dtype = _parse_dims_dtype(parser)
     return [ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype)]
 
   def print_parameters(self, printer: Printer) -> None:
-    printer.print_string("<")
-    printer.print_string("x".join(str(d.value.data) for d in self.dims.data))  # type: ignore[attr-defined]
-    printer.print_string("x" + self.dtype.data + ">")
+    _print_dims_dtype(printer, self.dims, self.dtype.data)
+
+
+@irdl_attr_definition
+class NestGlobalView(ParametrizedAttribute, TypeAttribute):
+  """Logical view of a global memref: ``!nest.global_view<4x128x128xbf16>``.
+
+  Produced by ``nest.subview``; consumed by prefetch/store.
+  """
+
+  name = "nest.global_view"
+  dims: ArrayAttr
+  dtype: StringAttr
+
+  @staticmethod
+  def of(dims: Sequence[int], dtype: str) -> NestGlobalView:
+    return NestGlobalView(
+      ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype))
+
+  @classmethod
+  def parse_parameters(cls, parser: AttrParser) -> list:
+    dims, dtype = _parse_dims_dtype(parser)
+    return [ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype)]
+
+  def print_parameters(self, printer: Printer) -> None:
+    _print_dims_dtype(printer, self.dims, self.dtype.data)
+
+
+@irdl_attr_definition
+class NestL2View(ParametrizedAttribute, TypeAttribute):
+  """Logical per-task view of an L2 buffer: ``!nest.l2_view<1x128x128xbf16>``.
+
+  Produced by ``tile.subview``; consumed by tile.load/store.
+  """
+
+  name = "nest.l2_view"
+  dims: ArrayAttr
+  dtype: StringAttr
+
+  @staticmethod
+  def of(dims: Sequence[int], dtype: str) -> NestL2View:
+    return NestL2View(
+      ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype))
+
+  @classmethod
+  def parse_parameters(cls, parser: AttrParser) -> list:
+    dims, dtype = _parse_dims_dtype(parser)
+    return [ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype)]
+
+  def print_parameters(self, printer: Printer) -> None:
+    _print_dims_dtype(printer, self.dims, self.dtype.data)
+
+
+@irdl_attr_definition
+class TileL1Buffer(ParametrizedAttribute, TypeAttribute):
+  """Tile-local L1 buffer: ``!tile.l1_buffer<128x128xbf16>``.
+
+  Produced by ``tile.alloc``; consumed by tile.load (dst) / store (src).
+  """
+
+  name = "tile.l1_buffer"
+  dims: ArrayAttr
+  dtype: StringAttr
+
+  @staticmethod
+  def of(dims: Sequence[int], dtype: str) -> TileL1Buffer:
+    return TileL1Buffer(
+      ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype))
+
+  @classmethod
+  def parse_parameters(cls, parser: AttrParser) -> list:
+    dims, dtype = _parse_dims_dtype(parser)
+    return [ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype)]
+
+  def print_parameters(self, printer: Printer) -> None:
+    _print_dims_dtype(printer, self.dims, self.dtype.data)
+
+
+@irdl_attr_definition
+class NestTask(ParametrizedAttribute, TypeAttribute):
+  """Logical task handle: ``!nest.task``.
+
+  First formal of every ``tile.program``; ``tile.subview task = %task``
+  offsets a view by the logical task id along ``task_dim``.
+  """
+  name = "nest.task"
+
 
 @irdl_attr_definition
 class TaskRange(ParametrizedAttribute, TypeAttribute):
@@ -144,6 +272,11 @@ class TaskRange(ParametrizedAttribute, TypeAttribute):
   """
 
   name = "nest.task_range"
+
+
+# ---------------------------------------------------------------------------
+# Shared parse/print helpers
+# ---------------------------------------------------------------------------
 
 
 def _index_attr(value: int) -> IntegerAttr:
@@ -176,6 +309,25 @@ def _parse_opt_int_kw(parser: Parser, keyword: str) -> int | None:
   return parser.parse_integer()
 
 
+def _print_int_list_kw(printer: Printer, keyword: str, values: Sequence[int]) -> None:
+  printer.print_string(f" {keyword} = [")
+  for i, value in enumerate(values):
+    if i:
+      printer.print_string(", ")
+    printer.print_int(value)
+  printer.print_string("]")
+
+
+def _parse_int_list_kw(parser: Parser, keyword: str) -> list[int]:
+  parser.parse_keyword(keyword)
+  parser.parse_punctuation("=")
+  return list(
+    parser.parse_comma_separated_list(
+      parser.Delimiter.SQUARE, parser.parse_integer, f" in {keyword} = [...] list"
+    )
+  )
+
+
 def _print_str_kw(printer: Printer, keyword: str, value: str) -> None:
   printer.print_string(f" {keyword} = ")
   printer.print_string_literal(value)
@@ -186,22 +338,50 @@ def _parse_str_kw(parser: Parser, keyword: str) -> str:
   parser.parse_punctuation("=")
   return parser.parse_str_literal()
 
-
-def _print_region(printer: Printer, region: Region) -> None:
+def _print_body_region(printer: Printer, region: Region) -> None:
   printer.print_string(" ")
-  printer.print_region(region, print_empty_block=False)
+  printer.print_region(region, print_entry_block_args=False, print_empty_block=False)
 
+def _parse_body_region(parser: Parser, arguments: list | None = None) -> Region:
+  """Parse one single-block region, preserving SSA identity of block args.
 
-def _parse_region_ops(parser: Parser) -> list:
-  region = parser.parse_region()
+  Returns the Region intact (block args + ops still attached) so that
+  body ops referencing block-arg formals keep their SSA identity.
+  """
+  region = parser.parse_region(arguments=arguments if arguments else None)
   if not region.blocks:
     region.add_block(Block())
   if len(region.blocks) != 1:
     parser.raise_error("expected exactly one block in region")
-  ops = list(region.blocks[0].ops)
-  for op in ops:
-    op.detach()
-  return ops
+  return region
+
+
+
+
+def _parse_block_args(parser: Parser) -> list:
+  """Parse an optional ``(%a : type, %b : type)`` signature."""
+  arguments: list = []
+  if parser.parse_optional_punctuation("(") is None:
+    return arguments
+  while True:
+    arg = parser.parse_optional_argument()
+    if arg is not None:
+      arguments.append(arg)
+    if parser.parse_optional_punctuation(",") is None:
+      break
+  parser.parse_punctuation(")")
+  return arguments
+
+
+def _print_block_args(printer: Printer, block: Block) -> None:
+  if not block.args:
+    return
+  printer.print_string(" (")
+  for i, arg in enumerate(block.args):
+    if i:
+      printer.print_string(", ")
+    printer.print_block_argument(arg)
+  printer.print_string(")")
 
 
 def _parse_event_type(parser: AttrParser, cls: type[Attribute]) -> Attribute:
@@ -210,7 +390,6 @@ def _parse_event_type(parser: AttrParser, cls: type[Attribute]) -> Attribute:
   if not isinstance(attr, cls):
     parser.raise_error(f"expected {cls.name} type")
   return attr
-
 
 def _print_event_type(printer: Printer, event_type: Attribute) -> None:
   printer.print_string(" : ")
@@ -258,14 +437,20 @@ def _print_depends_on(printer: Printer, operands: Sequence) -> None:
   _print_operand_group(printer, "depends_on", operands)
 
 
+def _set_arg_names(block: Block, arg_names: Sequence[str]) -> None:
+  for arg, name in zip(block.args, arg_names):
+    if name:
+      arg.name_hint = name
+
+
 NestActionLike: TypeAlias = (  # noqa: UP040
-  "NestAllocOp | NestTaskRangeOp | NestPrefetchOp | NestDMAStoreOp"
-  " | NestDispatchOp | NestCollectiveOp | NestReleaseOp | NestAwaitOp"
-  " | NestBarrierOp | NestReturnOp"
+  "NestAllocOp | NestTaskRangeOp | NestSubviewOp | NestPrefetchOp"
+  " | NestDMAStoreOp | NestDispatchOp | NestCollectiveOp | NestReleaseOp"
+  " | NestAwaitOp | NestBarrierOp | NestReturnOp"
 )
 TileActionLike: TypeAlias = (  # noqa: UP040
-  "TileLoadOp | TileStoreOp | TilePowOp | TileEvuOp | TileBoaOp"
-  " | TileAwaitOp | TileSignalOp | TileReturnOp"
+  "TileSubviewOp | TileAllocOp | TileLoadOp | TileStoreOp | TilePowOp"
+  " | TileEvuOp | TileBoaOp | TileAwaitOp | TileSignalOp | TileReturnOp"
 )
 NexusActionLike: TypeAlias = (  # noqa: UP040
   "NexusSubmitContextOp | NexusAwaitOp | NexusReturnOp"
@@ -279,19 +464,11 @@ NexusActionLike: TypeAlias = (  # noqa: UP040
 
 @irdl_op_definition
 class NestContextOp(IRDLOperation):
-  """``nest.context @name placement = M context = N { ... }`` - one tile-group context.
+  """``nest.context @name(%Y : !nest.global_memref<...>) placement = M ... { ... }``.
 
-  ``placement`` is the tile-group placement mask (reference.mlir
-  ``#nest.tile_group<mask = 0xF>``): the physical tile set every dispatch
-  in this context runs on.
-
-  Optional ``context = N`` pins this context to **device execution slot N**
-  when submitted via ``nexus.submit_context.async`` (mirrors the UCE
-  context pin of ``nest.dispatch.tasks.async`` one level up).  Omitted =
-  first available slot; occupied slot = submission waits (backpressure).
-  Legal range ``0..device_context_count-1``; out-of-range rejected at
-  model load.  In a legacy single-context module the pin selects the
-  (only) slot and must be 0.
+  One tile-group context.  Entry block args are the context's global
+  formals (HBM inputs); the body dispatches tile programs by symbol
+  reference.
   """
 
   name = "nest.context"
@@ -308,11 +485,19 @@ class NestContextOp(IRDLOperation):
   def __init__(
     self,
     sym_name: str,
-    body: Sequence[NestActionLike],
+    body: Sequence[NestActionLike] = (),
     placement: int = 0x0F,
     completion_event: str = "context_done",
     context_id: int | None = None,
+    arg_types: Sequence = (),
+    arg_names: Sequence[str] = (),
+    _region: Region | None = None,
   ):
+    if _region is not None:
+      region = _region
+    else:
+      region = Region([Block(list(body), arg_types=list(arg_types))])
+      _set_arg_names(region.blocks[0], arg_names)
     super().__init__(
       properties=_props(
         {
@@ -322,35 +507,43 @@ class NestContextOp(IRDLOperation):
           "completion_event": StringAttr(completion_event),
         }
       ),
-      regions=[_single_block_region(list(body))],
+      regions=[region],
     )
 
   def print(self, printer: Printer) -> None:
     _print_symbol(printer, self.sym_name.data)
+    _print_block_args(printer, self.body.block)
     _print_int_kw(printer, "placement", self.placement.value.data)
     if self.context_id is not None:
       _print_int_kw(printer, "context", self.context_id.value.data)
     if self.completion_event.data != "context_done":
       _print_str_kw(printer, "completion", self.completion_event.data)
-    _print_region(printer, self.body)
+    _print_body_region(printer, self.body)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
     sym_name = _parse_symbol(parser)
+    arguments = _parse_block_args(parser)
     placement = _parse_int_kw(parser, "placement")
     context_id = _parse_opt_int_kw(parser, "context")
     completion_event = "context_done"
     if parser.parse_optional_keyword("completion") is not None:
       parser.parse_punctuation("=")
       completion_event = parser.parse_str_literal()
-    body = _parse_region_ops(parser)
-    return cls(sym_name, body, placement=placement,
-               completion_event=completion_event, context_id=context_id)
-
+    region = _parse_body_region(parser, arguments)
+    return cls(
+      sym_name, placement=placement,
+      completion_event=completion_event, context_id=context_id,
+      _region=region,
+    )
 
 @irdl_op_definition
 class TileProgramDefOp(IRDLOperation):
-  """``tile.program @name { ... }`` - one tile program definition."""
+  """``tile.program @name(%task : !nest.task, %l2 : !nest.l2_buffer<...>) { ... }``.
+
+  One tile program definition.  The first formal must be ``!nest.task``;
+  remaining formals are ``!nest.l2_buffer`` L2 inputs/outputs.
+  """
 
   name = "tile.program"
 
@@ -360,23 +553,30 @@ class TileProgramDefOp(IRDLOperation):
 
   traits = traits_def(NoTerminator())
 
-  def __init__(self, sym_name: str, body: Sequence[TileActionLike]):
+  def __init__(self, sym_name: str, body: Sequence[TileActionLike] = (),
+               arg_types: Sequence = (), arg_names: Sequence[str] = (),
+               _region: Region | None = None):
+    if _region is not None:
+      region = _region
+    else:
+      region = Region([Block(list(body), arg_types=list(arg_types))])
+      _set_arg_names(region.blocks[0], arg_names)
     super().__init__(
       properties=_props({"sym_name": StringAttr(sym_name)}),
-      regions=[_single_block_region(list(body))],
+      regions=[region],
     )
 
   def print(self, printer: Printer) -> None:
     _print_symbol(printer, self.sym_name.data)
-    _print_region(printer, self.body)
+    _print_block_args(printer, self.body.block)
+    _print_body_region(printer, self.body)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
     sym_name = _parse_symbol(parser)
-    body = _parse_region_ops(parser)
-    return cls(sym_name, body)
-
-
+    arguments = _parse_block_args(parser)
+    region = _parse_body_region(parser, arguments)
+    return cls(sym_name, _region=region)
 # ---------------------------------------------------------------------------
 # nest.* context-body actions
 # ---------------------------------------------------------------------------
@@ -384,25 +584,33 @@ class TileProgramDefOp(IRDLOperation):
 
 @irdl_op_definition
 class NestAllocOp(IRDLOperation):
-  """``%b = nest.alloc slot = "s" bytes = N : !nest.l2_buffer<s>``.
+  """``%b = nest.alloc slot = "s" role = "inout" shape = [..] dtype = "bf16" : !nest.l2_buffer<..>``.
 
-  Context-owned L2 buffer (reference.mlir section 1).
+  Context-owned L2 buffer (reference.mlir section 1).  ``slot`` is the
+  runtime L2 object id; bytes derive from shape x dtype.
   """
 
   name = "nest.alloc"
 
   slot = prop_def(StringAttr)
-  bytes_total = prop_def(IntegerAttr)
+  role = prop_def(StringAttr)
+  shape = prop_def(ArrayAttr)
+  dtype = prop_def(StringAttr)
+  alignment = opt_prop_def(IntegerAttr)
 
   result = result_def(NestBuffer)
 
-  def __init__(self, slot: str, bytes_total: int):
+  def __init__(self, slot: str, role: str, shape: Sequence[int], dtype: str,
+               alignment: int | None = None):
     super().__init__(
-      result_types=[NestBuffer(StringAttr(slot))],
+      result_types=[NestBuffer.of(shape, dtype)],
       properties=_props(
         {
           "slot": StringAttr(slot),
-          "bytes_total": _index_attr(bytes_total),
+          "role": StringAttr(role),
+          "shape": ArrayAttr([_index_attr(d) for d in shape]),
+          "dtype": StringAttr(dtype),
+          "alignment": None if alignment is None else _index_attr(alignment),
         }
       ),
     )
@@ -410,17 +618,25 @@ class NestAllocOp(IRDLOperation):
 
   def print(self, printer: Printer) -> None:
     _print_str_kw(printer, "slot", self.slot.data)
-    _print_int_kw(printer, "bytes", self.bytes_total.value.data)
+    _print_str_kw(printer, "role", self.role.data)
+    _print_int_list_kw(printer, "shape", _int_list(self.shape))
+    _print_str_kw(printer, "dtype", self.dtype.data)
+    if self.alignment is not None:
+      _print_int_kw(printer, "alignment", self.alignment.value.data)
     _print_event_type(printer, self.result.type)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
     slot = _parse_str_kw(parser, "slot")
-    bytes_total = _parse_int_kw(parser, "bytes")
-    buffer_type = _parse_event_type(parser, NestBuffer)
-    if buffer_type.slot.data != slot:  # type: ignore[attr-defined]
-      parser.raise_error("nest.alloc slot and !nest.l2_buffer tag must match")
-    return cls(slot, bytes_total)
+    role = _parse_str_kw(parser, "role")
+    shape = _parse_int_list_kw(parser, "shape")
+    dtype = _parse_str_kw(parser, "dtype")
+    alignment = _parse_opt_int_kw(parser, "alignment")
+    buffer_type = cast(NestBuffer, _parse_event_type(parser, NestBuffer))
+    buf_dims = _int_list(buffer_type.dims)
+    if buf_dims != shape or buffer_type.dtype.data != dtype:
+      parser.raise_error("nest.alloc shape/dtype and !nest.l2_buffer type must match")
+    return cls(slot, role, shape, dtype, alignment=alignment)
 
 
 @irdl_op_definition
@@ -470,6 +686,59 @@ class NestTaskRangeOp(IRDLOperation):
     return cls(from_task, to_task)
 
 
+@irdl_op_definition
+class NestSubviewOp(IRDLOperation):
+  """``%v = nest.subview %Y offsets = [..] sizes = [..] strides = [..] : !nest.global_view<..>``.
+
+  Logical view of one context global formal (HBM side of a transfer).
+  The source must be a ``nest.context`` block arg; V1 disallows view chains.
+  """
+
+  name = "nest.subview"
+
+  src = operand_def(NestGlobalMemref)
+  offsets = prop_def(ArrayAttr)
+  sizes = prop_def(ArrayAttr)
+  strides = prop_def(ArrayAttr)
+
+  result = result_def(NestGlobalView)
+
+  def __init__(self, src, offsets: Sequence[int], sizes: Sequence[int],
+               strides: Sequence[int], view_type: NestGlobalView):
+    super().__init__(
+      operands=[src],
+      result_types=[view_type],
+      properties=_props(
+        {
+          "offsets": ArrayAttr([_index_attr(v) for v in offsets]),
+          "sizes": ArrayAttr([_index_attr(v) for v in sizes]),
+          "strides": ArrayAttr([_index_attr(v) for v in strides]),
+        }
+      ),
+    )
+
+  def print(self, printer: Printer) -> None:
+    printer.print_string(" ")
+    printer.print_operand(self.src)
+    _print_int_list_kw(printer, "offsets", _int_list(self.offsets))
+    _print_int_list_kw(printer, "sizes", _int_list(self.sizes))
+    _print_int_list_kw(printer, "strides", _int_list(self.strides))
+    printer.print_string(" : ")
+    printer.print_attribute(self.result.type)
+
+  @classmethod
+  def parse(cls, parser: Parser) -> Self:
+    src = parser.parse_operand()
+    offsets = _parse_int_list_kw(parser, "offsets")
+    sizes = _parse_int_list_kw(parser, "sizes")
+    strides = _parse_int_list_kw(parser, "strides")
+    parser.parse_punctuation(":")
+    attr = parser.parse_attribute()
+    if not isinstance(attr, NestGlobalView):
+      parser.raise_error("expected !nest.global_view type")
+    return cls(src, offsets, sizes, strides, attr)
+
+
 class _NestAsyncOp(IRDLOperation):
   """Base for nest-body async ops producing ``!nest.event<tag>``."""
 
@@ -482,84 +751,82 @@ class _NestAsyncOp(IRDLOperation):
 
 @irdl_op_definition
 class NestPrefetchOp(_NestAsyncOp):
-  """``%e = nest.dma.prefetch.async %buf bytes = N : !nest.event<t>``
+  """``%e = nest.dma.prefetch.async %src into %dst : !nest.event<t>``
 
-  HBM -> L2 prefetch into the context-owned buffer.
+  HBM -> L2 prefetch from a global view into the context-owned buffer.
   """
 
   name = "nest.dma.prefetch.async"
 
-  buffer = operand_def(NestBuffer)
-  bytes_total = prop_def(IntegerAttr)
+  src = operand_def(NestGlobalView)
+  dst = operand_def(NestBuffer)
 
-  def __init__(self, buffer, bytes_total: int, tag: str):
-    self._finish(
-      tag,
-      properties=_props({"bytes_total": _index_attr(bytes_total)}),
-      operands=[buffer],
-    )
+  def __init__(self, src, dst, tag: str):
+    self._finish(tag, operands=[src, dst])
 
   def print(self, printer: Printer) -> None:
     printer.print_string(" ")
-    printer.print_operand(self.buffer)
-    _print_int_kw(printer, "bytes", self.bytes_total.value.data)
+    printer.print_operand(self.src)
+    printer.print_string(" into ")
+    printer.print_operand(self.dst)
     _print_event_type(printer, self.result.type)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    buffer = parser.parse_operand()
-    bytes_total = _parse_int_kw(parser, "bytes")
+    src = parser.parse_operand()
+    parser.parse_keyword("into")
+    dst = parser.parse_operand()
     event_type = _parse_event_type(parser, NestEvent)
     tag = event_type.tag.data  # type: ignore[attr-defined]
-    return cls(buffer, bytes_total, tag)
+    return cls(src, dst, tag)
 
 
 @irdl_op_definition
 class NestDMAStoreOp(_NestAsyncOp):
-  """``%e = nest.dma.store.async %buf bytes = N depends_on(%o) : !nest.event<t>``
+  """``%e = nest.dma.store.async %src into %dst depends_on(%o) : !nest.event<t>``
 
   L2 -> HBM final store, gated on the dispatch ``output_ready`` event.
   """
 
   name = "nest.dma.store.async"
 
-  buffer = operand_def(NestBuffer)
-  bytes_total = prop_def(IntegerAttr)
+  src = operand_def(NestBuffer)
+  dst = operand_def(NestGlobalView)
   depends_on = var_operand_def(NestEvent)
 
-  def __init__(self, buffer, bytes_total: int, tag: str, depends_on: Sequence = ()):
-    self._finish(
-      tag,
-      properties=_props({"bytes_total": _index_attr(bytes_total)}),
-      operands=[[buffer], list(depends_on)],
-    )
+  def __init__(self, src, dst, tag: str, depends_on: Sequence = ()):
 
+    self._finish(tag, operands=[src, dst, list(depends_on)])
   def print(self, printer: Printer) -> None:
     printer.print_string(" ")
-    printer.print_operand(self.buffer)
-    _print_int_kw(printer, "bytes", self.bytes_total.value.data)
+    printer.print_operand(self.src)
+    printer.print_string(" into ")
+    printer.print_operand(self.dst)
     _print_depends_on(printer, self.depends_on)
     _print_event_type(printer, self.result.type)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    buffer = parser.parse_operand()
-    bytes_total = _parse_int_kw(parser, "bytes")
+    src = parser.parse_operand()
+    parser.parse_keyword("into")
+    dst = parser.parse_operand()
     depends_on = _parse_depends_on(parser)
     event_type = _parse_event_type(parser, NestEvent)
     tag = event_type.tag.data  # type: ignore[attr-defined]
-    return cls(buffer, bytes_total, tag, depends_on=depends_on)
+    return cls(src, dst, tag, depends_on=depends_on)
 
 
 @irdl_op_definition
 class NestDispatchOp(IRDLOperation):
   """``%grid, %inrel, %out = nest.dispatch.tasks.async @prog``
 
-  ``tasks(%t) ins(%b) outs(%b) depends_on(%e) : (three !nest.event types)``
+  ``tasks(%t) ins(%b...) outs(%b...) depends_on(%e) : (three !nest.event types)``
 
   Function-call dispatch per reference.mlir section 4: the tile program is
   referenced by symbol; the placement comes from the enclosing
-  ``nest.context``.  Returns three aggregated events:
+  ``nest.context``.  ``ins`` + ``outs`` bind positionally to the tile
+  program's L2 formals (formal 0 is ``!nest.task``, formals 1..N are L2).
+  Returns three aggregated events:
 
     - grid_done      - all logical tasks returned;
     - input_released - all tasks completed their L2 read phase
@@ -568,19 +835,18 @@ class NestDispatchOp(IRDLOperation):
                        (``tile.signal output_ready``).
 
   Optional ``context = N`` pins every task of this dispatch to the
-  tile-local UCE context index ``N`` (same index on every tile in the
-  placement, not a physical tile id).  Omitted = first available
-  context (existing behaviour).  Legal range is ``0..context_count-1``;
-  out-of-range is rejected at task load, not at IR verify.
+  tile-local UCE context index ``N``.
   """
 
   name = "nest.dispatch.tasks.async"
 
+  irdl_options = (AttrSizedOperandSegments(),)
+
   program = prop_def(StringAttr)
   context_id = opt_prop_def(IntegerAttr)
   tasks = operand_def(TaskRange)
-  ins = operand_def(NestBuffer)
-  outs = operand_def(NestBuffer)
+  ins = var_operand_def(NestBuffer)
+  outs = var_operand_def(NestBuffer)
   depends_on = var_operand_def(NestEvent)
 
   grid_done = result_def(NestEvent)
@@ -609,7 +875,7 @@ class NestDispatchOp(IRDLOperation):
         "program": StringAttr(program),
         "context_id": None if context_id is None else _index_attr(context_id),
       }),
-      operands=[[tasks], ins, outs, list(depends_on)],
+      operands=[[tasks], list(ins), list(outs), list(depends_on)],
     )
     self.grid_done.name_hint = grid_tag
     if inrel_tag:
@@ -624,11 +890,8 @@ class NestDispatchOp(IRDLOperation):
     printer.print_string(" tasks(")
     printer.print_operand(self.tasks)
     printer.print_string(")")
-    printer.print_string(" ins(")
-    printer.print_operand(self.ins)
-    printer.print_string(") outs(")
-    printer.print_operand(self.outs)
-    printer.print_string(")")
+    _print_operand_group(printer, "ins", self.ins)
+    _print_operand_group(printer, "outs", self.outs)
     _print_depends_on(printer, self.depends_on)
     printer.print_string(" : (")
     for i, result in enumerate(self.results):
@@ -642,14 +905,8 @@ class NestDispatchOp(IRDLOperation):
     program = _parse_symbol(parser)
     context_id = _parse_opt_int_kw(parser, "context")
     tasks = _parse_operand_group(parser, "tasks")
-    parser.parse_keyword("ins")
-    parser.parse_punctuation("(")
-    ins_op = parser.parse_operand()
-    parser.parse_punctuation(")")
-    parser.parse_keyword("outs")
-    parser.parse_punctuation("(")
-    outs_op = parser.parse_operand()
-    parser.parse_punctuation(")")
+    ins_ops = _parse_operand_group(parser, "ins")
+    outs_ops = _parse_operand_group(parser, "outs")
     depends_on = _parse_depends_on(parser)
     if len(tasks) != 1:
       parser.raise_error("dispatch tasks(...) expects exactly one task range")
@@ -662,7 +919,7 @@ class NestDispatchOp(IRDLOperation):
     if len(types) != 3 or not all(isinstance(t, NestEvent) for t in types):
       parser.raise_error("dispatch expects three !nest.event results")
     tags = [t.tag.data for t in types]  # type: ignore[attr-defined]
-    return cls(program, tasks[0], ins_op, outs_op, tags[0], tags[1], tags[2],
+    return cls(program, tasks[0], ins_ops, outs_ops, tags[0], tags[1], tags[2],
                depends_on=depends_on, context_id=context_id)
 
 
@@ -787,6 +1044,8 @@ class NestReturnOp(IRDLOperation):
   @classmethod
   def parse(cls, parser: Parser) -> Self:
     return cls()
+
+
 # ---------------------------------------------------------------------------
 # nexus.* model-level ops
 # ---------------------------------------------------------------------------
@@ -797,11 +1056,8 @@ class NexusProgramOp(IRDLOperation):
   """``nexus.program @name (%a : !nest.global_memref<...>) { ... }`` - model entry.
 
   Body: ``nexus.submit_context.async`` / ``nexus.await`` / ``nexus.return``.
-  V1: entry block args are declarative (parsed/printed); body ops must
-  not reference them (no memref plumbing yet).  The block carries real
-  args (``Block(..., arg_types=...)``); the signature is printed from
-  those args, and the region is printed with
-  ``print_entry_block_args=False`` so no duplicate ``^bb0`` label appears.
+  Entry block args are the model's named global inputs; submit ops pass
+  them as actuals to ``nest.context`` formals.
   """
 
   name = "nexus.program"
@@ -809,78 +1065,78 @@ class NexusProgramOp(IRDLOperation):
   body = region_def("single_block")
   traits = traits_def(NoTerminator())
 
-  def __init__(self, sym_name: str, body: Sequence, arg_types: Sequence = ()):
+  def __init__(self, sym_name: str, body: Sequence = (), arg_types: Sequence = (),
+               arg_names: Sequence[str] = (), _region: Region | None = None):
+    if _region is not None:
+      region = _region
+    else:
+      region = Region([Block(list(body), arg_types=list(arg_types))])
+      _set_arg_names(region.blocks[0], arg_names)
     super().__init__(
       properties=_props({"sym_name": StringAttr(sym_name)}),
-      regions=[Region([Block(list(body), arg_types=list(arg_types))])],
+      regions=[region],
     )
 
   def print(self, printer: Printer) -> None:
     _print_symbol(printer, self.sym_name.data)
-    block = self.body.block
-    if block.args:
-      printer.print_string(" (")
-      for i, arg in enumerate(block.args):
-        if i:
-          printer.print_string(", ")
-        printer.print_block_argument(arg)
-      printer.print_string(")")
+    _print_block_args(printer, self.body.block)
     printer.print_string(" ")
     printer.print_region(self.body, print_entry_block_args=False, print_empty_block=False)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
     sym_name = _parse_symbol(parser)
-    # Parse signature args without registering SSA names
-    arguments = []
-    if parser.parse_optional_punctuation("(") is not None:
-      while True:
-        arg = parser.parse_optional_argument()
-        if arg is not None:
-          arguments.append(arg)
-        if parser.parse_optional_punctuation(",") is None:
-          break
-      parser.parse_punctuation(")")
-    # Parse the region, passing arguments so parse_region creates real
-    # block args and registers them.
-    region = parser.parse_region(arguments=arguments if arguments else None)
-    if not region.blocks:
-      region.add_block(Block())
-    if len(region.blocks) != 1:
-      parser.raise_error("expected exactly one block in region")
-    block = region.blocks[0]
-    arg_types = [a.type for a in block.args]
-    ops = list(block.ops)
-    for op in ops:
-      op.detach()
-    return cls(sym_name, ops, arg_types=arg_types)
-
+    arguments = _parse_block_args(parser)
+    region = _parse_body_region(parser, arguments)
+    return cls(sym_name, _region=region)
 
 @irdl_op_definition
 class NexusSubmitContextOp(IRDLOperation):
-  """``%e = nexus.submit_context.async @ctx : !nexus.event<"tag">``"""
+  """``%e = nexus.submit_context.async @ctx(%Y) : !nexus.event<"tag">``
+
+  Submits a ``nest.context`` for execution, passing global-input actuals
+  that bind positionally to the context's formals.  Zero-actual form
+  ``@ctx : ...`` is accepted for legacy modules without global inputs.
+  """
 
   name = "nexus.submit_context.async"
   context_sym = prop_def(StringAttr)
+  actuals = var_operand_def(NestGlobalMemref)
   result = result_def(NexusEvent)
 
-  def __init__(self, context_sym: str, tag: str):
+  def __init__(self, context_sym: str, tag: str, actuals: Sequence = ()):
     super().__init__(
       result_types=[NexusEvent(StringAttr(tag))],
       properties=_props({"context_sym": StringAttr(context_sym)}),
+      operands=[list(actuals)],
     )
     self.result.name_hint = tag
 
   def print(self, printer: Printer) -> None:
     _print_symbol(printer, self.context_sym.data)
+    if self.actuals:
+      printer.print_string("(")
+      for i, operand in enumerate(self.actuals):
+        if i:
+          printer.print_string(", ")
+        printer.print_operand(operand)
+      printer.print_string(")")
     _print_event_type(printer, self.result.type)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
     context_sym = _parse_symbol(parser)
+    actuals: list = []
+    if parser.parse_optional_punctuation("(") is not None:
+      actuals = list(
+        parser.parse_comma_separated_list(
+          parser.Delimiter.NONE, parser.parse_operand, " in submit actuals list"
+        )
+      )
+      parser.parse_punctuation(")")
     event_type = _parse_event_type(parser, NexusEvent)
     tag = event_type.tag.data  # type: ignore[attr-defined]
-    return cls(context_sym, tag)
+    return cls(context_sym, tag, actuals=actuals)
 
 
 @irdl_op_definition
@@ -924,6 +1180,7 @@ class NexusReturnOp(IRDLOperation):
   def parse(cls, parser: Parser) -> Self:
     return cls()
 
+
 # ---------------------------------------------------------------------------
 # tile.* program-body actions
 # ---------------------------------------------------------------------------
@@ -940,49 +1197,178 @@ class _TileAsyncOp(IRDLOperation):
 
 
 @irdl_op_definition
-class TileLoadOp(_TileAsyncOp):
-  """``%e = tile.load.async bytes = N : !tile.event<t>`` - MFE L2->L1 load."""
+class TileSubviewOp(IRDLOperation):
+  """``%v = tile.subview %l2_buf task = %task task_dim = 0 offsets = [..] sizes = [..] : !nest.l2_view<..>``
 
-  name = "tile.load.async"
+  Logical per-task view of one tile.program L2 formal.  ``task_dim``
+  (requires the ``task = %task`` operand) adds the logical task id to
+  ``offsets[task_dim]``.  V1 strides must be unit; V1 disallows view chains.
+  """
 
-  bytes_total = prop_def(IntegerAttr)
+  name = "tile.subview"
 
-  def __init__(self, bytes_total: int, tag: str):
-    self._finish(tag, properties=_props({"bytes_total": _index_attr(bytes_total)}))
+  irdl_options = (AttrSizedOperandSegments(),)
+
+  src = operand_def(NestBuffer)
+  task = var_operand_def(NestTask)
+  task_dim = opt_prop_def(IntegerAttr)
+  offsets = prop_def(ArrayAttr)
+  sizes = prop_def(ArrayAttr)
+  strides = prop_def(ArrayAttr)
+
+  result = result_def(NestL2View)
+
+  def __init__(self, src, task, task_dim: int | None,
+               offsets: Sequence[int], sizes: Sequence[int],
+               strides: Sequence[int], view_type: NestL2View):
+    super().__init__(
+      operands=[[src], [task] if task is not None else []],
+      result_types=[view_type],
+
+      properties=_props(
+        {
+          "task_dim": None if task_dim is None else _index_attr(task_dim),
+          "offsets": ArrayAttr([_index_attr(v) for v in offsets]),
+          "sizes": ArrayAttr([_index_attr(v) for v in sizes]),
+          "strides": ArrayAttr([_index_attr(v) for v in strides]),
+        }
+      ),
+    )
 
   def print(self, printer: Printer) -> None:
-    _print_int_kw(printer, "bytes", self.bytes_total.value.data)
+    printer.print_string(" ")
+    printer.print_operand(self.src)
+    if self.task:
+      printer.print_string(" task = ")
+      printer.print_operand(self.task[0])
+    if self.task_dim is not None:
+      _print_int_kw(printer, "task_dim", self.task_dim.value.data)
+    _print_int_list_kw(printer, "offsets", _int_list(self.offsets))
+    _print_int_list_kw(printer, "sizes", _int_list(self.sizes))
+    _print_int_list_kw(printer, "strides", _int_list(self.strides))
+    printer.print_string(" : ")
+    printer.print_attribute(self.result.type)
+
+  @classmethod
+  def parse(cls, parser: Parser) -> Self:
+    src = parser.parse_operand()
+    task = None
+    if parser.parse_optional_keyword("task") is not None:
+      parser.parse_punctuation("=")
+      task = parser.parse_operand()
+    task_dim = _parse_opt_int_kw(parser, "task_dim")
+    offsets = _parse_int_list_kw(parser, "offsets")
+    sizes = _parse_int_list_kw(parser, "sizes")
+    strides = _parse_int_list_kw(parser, "strides")
+    parser.parse_punctuation(":")
+    attr = parser.parse_attribute()
+    if not isinstance(attr, NestL2View):
+      parser.raise_error("expected !nest.l2_view type")
+    return cls(src, task, task_dim, offsets, sizes, strides, attr)
+
+
+@irdl_op_definition
+class TileAllocOp(IRDLOperation):
+  """``%l1 = tile.alloc shape = [..] dtype = "bf16" alignment = 256 : !tile.l1_buffer<..>``
+
+  Tile-local L1 scratch buffer.  Bytes derive from shape x dtype.
+  """
+
+  name = "tile.alloc"
+
+  shape = prop_def(ArrayAttr)
+  dtype = prop_def(StringAttr)
+  alignment = opt_prop_def(IntegerAttr)
+
+  result = result_def(TileL1Buffer)
+
+  def __init__(self, shape: Sequence[int], dtype: str, alignment: int | None = None):
+    super().__init__(
+      result_types=[TileL1Buffer.of(shape, dtype)],
+      properties=_props(
+        {
+          "shape": ArrayAttr([_index_attr(d) for d in shape]),
+          "dtype": StringAttr(dtype),
+          "alignment": None if alignment is None else _index_attr(alignment),
+        }
+      ),
+    )
+
+  def print(self, printer: Printer) -> None:
+    _print_int_list_kw(printer, "shape", _int_list(self.shape))
+    _print_str_kw(printer, "dtype", self.dtype.data)
+    if self.alignment is not None:
+      _print_int_kw(printer, "alignment", self.alignment.value.data)
     _print_event_type(printer, self.result.type)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    bytes_total = _parse_int_kw(parser, "bytes")
+    shape = _parse_int_list_kw(parser, "shape")
+    dtype = _parse_str_kw(parser, "dtype")
+    alignment = _parse_opt_int_kw(parser, "alignment")
+    buf_type = cast(TileL1Buffer, _parse_event_type(parser, TileL1Buffer))
+    buf_dims = _int_list(buf_type.dims)
+    if buf_dims != shape or buf_type.dtype.data != dtype:
+      parser.raise_error("tile.alloc shape/dtype and !tile.l1_buffer type must match")
+    return cls(shape, dtype, alignment=alignment)
+
+
+@irdl_op_definition
+class TileLoadOp(_TileAsyncOp):
+  """``%e = tile.load.async %src into %dst : !tile.event<t>`` - MFE L2->L1 load."""
+
+  name = "tile.load.async"
+
+  src = operand_def(NestL2View)
+  dst = operand_def(TileL1Buffer)
+
+  def __init__(self, src, dst, tag: str):
+    self._finish(tag, operands=[src, dst])
+
+  def print(self, printer: Printer) -> None:
+    printer.print_string(" ")
+    printer.print_operand(self.src)
+    printer.print_string(" into ")
+    printer.print_operand(self.dst)
+    _print_event_type(printer, self.result.type)
+
+  @classmethod
+  def parse(cls, parser: Parser) -> Self:
+    src = parser.parse_operand()
+    parser.parse_keyword("into")
+    dst = parser.parse_operand()
     event_type = _parse_event_type(parser, TileEvent)
     tag = event_type.tag.data  # type: ignore[attr-defined]
-    return cls(bytes_total, tag)
+    return cls(src, dst, tag)
 
 
 @irdl_op_definition
 class TileStoreOp(_TileAsyncOp):
-  """``%e = tile.store.async bytes = N : !tile.event<t>`` - MFE L1->L2 store."""
+  """``%e = tile.store.async %src into %dst : !tile.event<t>`` - MFE L1->L2 store."""
 
   name = "tile.store.async"
 
-  bytes_total = prop_def(IntegerAttr)
+  src = operand_def(TileL1Buffer)
+  dst = operand_def(NestL2View)
 
-  def __init__(self, bytes_total: int, tag: str):
-    self._finish(tag, properties=_props({"bytes_total": _index_attr(bytes_total)}))
+  def __init__(self, src, dst, tag: str):
+    self._finish(tag, operands=[src, dst])
 
   def print(self, printer: Printer) -> None:
-    _print_int_kw(printer, "bytes", self.bytes_total.value.data)
+    printer.print_string(" ")
+    printer.print_operand(self.src)
+    printer.print_string(" into ")
+    printer.print_operand(self.dst)
     _print_event_type(printer, self.result.type)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
-    bytes_total = _parse_int_kw(parser, "bytes")
+    src = parser.parse_operand()
+    parser.parse_keyword("into")
+    dst = parser.parse_operand()
     event_type = _parse_event_type(parser, TileEvent)
     tag = event_type.tag.data  # type: ignore[attr-defined]
-    return cls(bytes_total, tag)
+    return cls(src, dst, tag)
 
 
 @irdl_op_definition
@@ -1010,14 +1396,14 @@ class TilePowOp(_TileAsyncOp):
   def print(self, printer: Printer) -> None:
     _print_int_kw(printer, "bytes", self.bytes_total.value.data)
     _print_int_kw(printer, "exponent", self.exponent.value.data)
-    _print_int_kw(printer, "ops", self.pow_ops.value.data)
+    _print_int_kw(printer, "pow_ops", self.pow_ops.value.data)
     _print_event_type(printer, self.result.type)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
     bytes_total = _parse_int_kw(parser, "bytes")
     exponent = _parse_int_kw(parser, "exponent")
-    pow_ops = _parse_int_kw(parser, "ops")
+    pow_ops = _parse_int_kw(parser, "pow_ops")
     event_type = _parse_event_type(parser, TileEvent)
     tag = event_type.tag.data  # type: ignore[attr-defined]
     return cls(bytes_total, exponent, pow_ops, tag)
@@ -1197,6 +1583,7 @@ operations: list[type[Operation]] = [
   NestContextOp,
   NestAllocOp,
   NestTaskRangeOp,
+  NestSubviewOp,
   NestPrefetchOp,
   NestDMAStoreOp,
   NestDispatchOp,
@@ -1206,6 +1593,8 @@ operations: list[type[Operation]] = [
   NestBarrierOp,
   NestReturnOp,
   TileProgramDefOp,
+  TileSubviewOp,
+  TileAllocOp,
   TileLoadOp,
   TileStoreOp,
   TilePowOp,
@@ -1221,9 +1610,24 @@ operations: list[type[Operation]] = [
 ]
 
 Elenor = Dialect(
-  "elenor", operations, [NestEvent, TileEvent, NestBuffer, TaskRange, NexusEvent, NestGlobalMemref])
+  "elenor",
+  operations,
+  [
+    NestEvent,
+    TileEvent,
+    NestBuffer,
+    NestGlobalView,
+    NestL2View,
+    TileL1Buffer,
+    NestTask,
+    TaskRange,
+    NexusEvent,
+    NestGlobalMemref,
+  ],
+)
 
 __all__ = [
+  "DTYPE_BYTES",
   "Elenor",
   "NestActionLike",
   "NestAllocOp",
@@ -1236,9 +1640,13 @@ __all__ = [
   "NestDispatchOp",
   "NestEvent",
   "NestGlobalMemref",
+  "NestGlobalView",
+  "NestL2View",
   "NestPrefetchOp",
   "NestReleaseOp",
   "NestReturnOp",
+  "NestSubviewOp",
+  "NestTask",
   "NestTaskRangeOp",
   "NexusActionLike",
   "NexusAwaitOp",
@@ -1248,14 +1656,17 @@ __all__ = [
   "NexusSubmitContextOp",
   "TaskRange",
   "TileActionLike",
+  "TileAllocOp",
   "TileAwaitOp",
   "TileBoaOp",
   "TileEvent",
   "TileEvuOp",
+  "TileL1Buffer",
   "TileLoadOp",
   "TilePowOp",
   "TileProgramDefOp",
   "TileReturnOp",
   "TileSignalOp",
   "TileStoreOp",
+  "TileSubviewOp",
 ]

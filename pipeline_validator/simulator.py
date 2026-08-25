@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import zlib
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from itertools import pairwise
 
 from xdsl.dialects.builtin import ModuleOp
 
 from .config import HardwareConfig, SimConfig
 from .dialects.elenor import NestContextOp, NexusProgramOp
-from .execution_ir import ExecTileGroupTask
+from .execution_ir import (
+  ExecGlobalInput,
+  ExecGroupActionOp,
+  ExecTileGroupTask,
+  GlobalBinding,
+)
 from .ir_lowering import lower_model_ir, lower_workload_ir
 from .pmu import PMUCounter
 from .tile_group import TileGroup
@@ -30,9 +37,76 @@ class SimResult:
   credit_invariant_ok: bool = True
   tracer: Tracer | None = None
   slot_count: int = 1
+  input_bindings: dict[str, GlobalBinding] = field(default_factory=dict)
 
   def utilization(self, num_tiles: int = 4) -> float:
     return self.pmu.utilization(self.cycles * num_tiles)
+
+
+def _validate_input_bindings(
+  inputs: list[ExecGlobalInput],
+  bindings: Mapping[str, GlobalBinding],
+  hw: HardwareConfig,
+) -> None:
+  if bindings and not inputs:
+    raise ValueError("input bindings provided but module declares no global inputs")
+
+  inputs_by_name = {input_.name: input_ for input_ in inputs}
+  for input_ in inputs:
+    if input_.name not in bindings:
+      raise ValueError(f"missing input binding for global '{input_.name}'")
+  for name in bindings:
+    if name not in inputs_by_name:
+      raise ValueError(
+        f"input binding '{name}' does not match any program input"
+      )
+  for input_ in inputs:
+    binding = bindings[input_.name]
+    if binding.size_bytes < input_.size_bytes:
+      raise ValueError(
+        f"input binding '{binding.name}' size {binding.size_bytes} is smaller"
+        f" than required {input_.size_bytes} bytes"
+      )
+
+  ordered = sorted(bindings.values(), key=lambda binding: binding.base_iova)
+  for left, right in pairwise(ordered):
+    if right.base_iova < left.base_iova + left.size_bytes:
+      raise ValueError(
+        f"input bindings '{left.name}' and '{right.name}' overlap"
+      )
+  for binding in bindings.values():
+    if binding.base_iova + binding.size_bytes > hw.hbm_capacity_bytes:
+      raise ValueError(f"input binding '{binding.name}' exceeds HBM capacity")
+
+
+def _validate_binding_permissions(
+  tasks_with_maps: list[tuple[ExecTileGroupTask, Mapping[str, str]]],
+  bindings: Mapping[str, GlobalBinding],
+) -> None:
+  for task, name_map in tasks_with_maps:
+    for action in task.actions:
+      if action.op not in (
+        ExecGroupActionOp.DMA_PREFETCH,
+        ExecGroupActionOp.DMA_STORE,
+      ):
+        continue
+      transfer = action.args[1]
+      if transfer.src.space == "global":
+        formal_name = transfer.src.base.removeprefix("global:")
+        input_name = name_map[formal_name]
+        if "r" not in bindings[input_name].permissions:
+          raise ValueError(
+            f"input binding '{input_name}' is not readable but is used as"
+            " prefetch source"
+          )
+      if transfer.dst.space == "global":
+        formal_name = transfer.dst.base.removeprefix("global:")
+        input_name = name_map[formal_name]
+        if "w" not in bindings[input_name].permissions:
+          raise ValueError(
+            f"input binding '{input_name}' is not writable but is used as"
+            " store destination"
+          )
 
 
 class Simulator:
@@ -52,10 +126,20 @@ class Simulator:
     self._program_name_registry: dict[str, int] = {}
     self._next_program_id: int = 1
 
-  def run(self, module: ModuleOp) -> SimResult:
+  def run(
+    self,
+    module: ModuleOp,
+    input_bindings: Mapping[str, GlobalBinding] | None = None,
+  ) -> SimResult:
+    bindings = {} if input_bindings is None else input_bindings
     if any(isinstance(op, NexusProgramOp) for op in module.body.block.ops):
-      return self._run_model(module)
+      return self._run_model(module, bindings)
     task = lower_workload_ir(module)
+    _validate_input_bindings(list(task.global_inputs), bindings, self.hw)
+    _validate_binding_permissions(
+      [(task, {input_.name: input_.name for input_ in task.global_inputs})],
+      bindings,
+    )
     self._assign_program_ids(task)
     # Legacy pin validation
     ctx_op = next(op for op in module.body.block.ops if isinstance(op, NestContextOp))
@@ -103,10 +187,30 @@ class Simulator:
       trace=self._trace,
       credit_invariant_ok=self.group.credit_invariants_hold(),
       tracer=self.tracer,
+      input_bindings=dict(bindings),
     )
 
-  def _run_model(self, module: ModuleOp) -> SimResult:
+  def _run_model(
+    self,
+    module: ModuleOp,
+    bindings: Mapping[str, GlobalBinding],
+  ) -> SimResult:
     model = lower_model_ir(module)
+    _validate_input_bindings(list(model.inputs), bindings, self.hw)
+    tasks_with_maps: list[tuple[ExecTileGroupTask, Mapping[str, str]]] = []
+    for device_op in model.body:
+      if device_op.op != "submit":
+        continue
+      task = model.tasks[device_op.ctx_name]
+      name_map = {
+        formal.name: model.inputs[actual_index].name
+        for formal, actual_index in zip(
+          task.global_inputs,
+          device_op.actual_inputs,
+        )
+      }
+      tasks_with_maps.append((task, name_map))
+    _validate_binding_permissions(tasks_with_maps, bindings)
     for task in model.tasks.values():
       self._assign_program_ids(task)
     count = self.sim.device_context_count
@@ -223,11 +327,17 @@ class Simulator:
     # Merge the group PMU (accumulates all sequencer/tile/queue counters)
     pmu.merge(self.group.pmu)
     return SimResult(
-      cycles=self.cycle, completed=completed, reason=reason, pmu=pmu,
+      cycles=self.cycle,
+      completed=completed,
+      reason=reason,
+      pmu=pmu,
       group_snapshot=self.group.snapshot(),
       trace=self._trace,
       credit_invariant_ok=self.group.credit_invariants_hold(),
-      tracer=self.tracer, slot_count=count)
+      tracer=self.tracer,
+      slot_count=count,
+      input_bindings=dict(bindings),
+    )
     for g in self.groups:
       g.reset()
     self.cycle = 0

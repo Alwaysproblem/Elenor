@@ -147,9 +147,12 @@ class TileGroupSequencer:
       # Group DMA HBM->L2: model as latency, produces an event.
       if ins.dst is None:
         raise ValueError("DMA_PREFETCH requires dst event id")
-      desc_id, dst_l2 = ins.args[0], ins.args[1]
-      bytes_total = ins.args[2] if len(ins.args) > 2 else None
-      resolved_bytes = bytes_total if bytes_total and bytes_total > 0 else 1024 * 1024
+      desc_id, transfer = ins.args[0], ins.args[1]
+      dst_l2 = transfer.dst.base
+      bytes_total = transfer.bytes
+      resolved_bytes = (
+        bytes_total if bytes_total and bytes_total > 0 else 1024 * 1024
+      )
       lat = self._dma_latency(resolved_bytes, l2_slot=dst_l2)
       if lat < 0:
         # L2 capacity fault: terminate the task with a fault rather than
@@ -181,9 +184,12 @@ class TileGroupSequencer:
     elif op == ExecGroupActionOp.DMA_STORE:
       if ins.dst is None:
         raise ValueError("DMA_STORE requires dst event id")
-      desc_id, src_l2 = ins.args[0], ins.args[1]
-      bytes_total = ins.args[2] if len(ins.args) > 2 else None
-      resolved_bytes = bytes_total if bytes_total and bytes_total > 0 else 1024 * 1024
+      desc_id, transfer = ins.args[0], ins.args[1]
+      src_l2 = transfer.src.base
+      bytes_total = transfer.bytes
+      resolved_bytes = (
+        bytes_total if bytes_total and bytes_total > 0 else 1024 * 1024
+      )
       lat = self._dma_latency(resolved_bytes, l2_slot=src_l2)
       # round-robin DMA channel allocation
       ch = self._next_dma_channel % self.cfg.num_dma_channels

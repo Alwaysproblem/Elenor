@@ -56,6 +56,96 @@ class ExecGroupActionOp(Enum):
   RELEASE_L2 = "release.l2"
 
 
+# ---------------------------------------------------------------------------
+# Frozen value objects (logical address IR, PR 1)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GlobalBinding:
+  """User-side launch binding (API + CLI)."""
+
+  name: str
+  base_iova: int
+  size_bytes: int
+  permissions: str  # "r" | "w" | "rw"
+
+
+@dataclass(frozen=True)
+class ExecGlobalInput:
+  """Program/context global signature item."""
+
+  name: str
+  dims: tuple[int, ...]
+  dtype: str
+  size_bytes: int
+
+
+@dataclass(frozen=True)
+class ExecMemoryView:
+  """Logical view; physical address materialized in PR 2."""
+
+  space: str  # "global" | "l2" | "l1"
+  base: str  # "global:<name>" | <l2 slot> | "formal:<i>" | "l1:<k>"
+  dims: tuple[int, ...]  # view extents
+  offsets: tuple[int, ...]  # element offsets
+  dtype: str
+  bytes: int
+  task_dim: int | None = None
+
+
+@dataclass(frozen=True)
+class ExecTransfer:
+  """One DMA or MFE transfer with explicit src/dst views."""
+
+  src: ExecMemoryView
+  dst: ExecMemoryView
+  bytes: int
+
+
+@dataclass(frozen=True)
+class ExecL2Buffer:
+  """Context-owned L2 buffer descriptor."""
+
+  slot: str
+  dims: tuple[int, ...]
+  dtype: str
+  role: str  # "in" | "out" | "inout"
+  bytes: int
+
+
+@dataclass(frozen=True)
+class ExecL1Buffer:
+  """Tile-local L1 buffer descriptor."""
+
+  name: str
+  dims: tuple[int, ...]
+  dtype: str
+  bytes: int
+
+
+@dataclass(frozen=True)
+class ExecTileFormal:
+  """Tile program formal parameter descriptor."""
+
+  space: str  # "task" | "l2"
+  dims: tuple[int, ...]  # task is ()
+  dtype: str  # task is ""
+
+
+@dataclass(frozen=True)
+class ExecTaskDomain:
+  """Logical task range."""
+
+  from_task: int
+  to_task: int
+
+
+# ---------------------------------------------------------------------------
+# Container DTOs (mutable — sequencer rewrites args in place)
+# ---------------------------------------------------------------------------
+
+
 @dataclass
 class ExecTileInst:
   op: ExecTileOp
@@ -90,6 +180,7 @@ class ExecEngineDesc:
   kind: str
   op: str
   params: dict = field(default_factory=dict)
+  transfer: ExecTransfer | None = None
 
 
 @dataclass
@@ -101,6 +192,8 @@ class ExecTileProgram:
   program_id: int = 0
   version: int = 1
   program_hash: int = 0
+  formals: tuple[ExecTileFormal, ...] = ()
+  l1_buffers: tuple[ExecL1Buffer, ...] = ()
 
   def label_index(self, label: str) -> int:
     return self.labels[label]
@@ -114,6 +207,8 @@ class ExecTileRoleBinding:
   in_stream: int | None = None
   out_stream: int | None = None
   context_id: int | None = None
+  task_domain: ExecTaskDomain | None = None
+  actuals: tuple[str, ...] = ()
 
 @dataclass
 class ExecTileGroupTask:
@@ -122,6 +217,8 @@ class ExecTileGroupTask:
   streams: list[ExecStreamDesc] = field(default_factory=list)
   role_bindings: dict[int, ExecTileRoleBinding] = field(default_factory=dict)
   completion_event: str = "group_task_done"
+  global_inputs: tuple[ExecGlobalInput, ...] = ()
+  l2_buffers: tuple[ExecL2Buffer, ...] = ()
 
 
 @dataclass
@@ -131,6 +228,7 @@ class ExecDeviceOp:
   op: str  # "submit" | "await" | "return"
   ctx_name: str = ""
   event_tag: str = ""
+  actual_inputs: tuple[int, ...] = ()
 
 
 @dataclass
@@ -141,3 +239,4 @@ class ExecModel:
   tasks: dict[str, ExecTileGroupTask] = field(default_factory=dict)
   context_pins: dict[str, int | None] = field(default_factory=dict)
   body: list[ExecDeviceOp] = field(default_factory=list)
+  inputs: tuple[ExecGlobalInput, ...] = ()
