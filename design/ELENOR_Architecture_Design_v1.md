@@ -894,14 +894,14 @@ IDLE
 
 MFE 的 queue 架构应保持 **external command ingress** 与 **internal data/event pipeline** 分层，而不是为每个功能复制独立 queue：
 
-- Tile UCE 到 MFE 至少区分 load/store 两类 command ingress（可实现为 `LD_CMD_Q` / `ST_CMD_Q` 或等价 launch class）；精确深度、仲裁和是否共享物理 storage 由后续规格冻结。
+- Tile UCE 到 MFE 的 command ingress 按可配置 load/store channel 复制（N 条 `LD_CMD_Q[i]` + M 条 `ST_CMD_Q[j]`，N,M ≥ 1，V1 建议 1/1，见 `elenor_mfe` §3.1.4）；MFE 前端按 descriptor 方向分类 + 同类 channel 内 first-free 分配，跨 channel 无隐式完成/可见顺序保证（同步走 event sequence / stream token / barrier）；每 channel 深度、仲裁和是否共享物理 storage 由后续规格冻结。
 - MFE 内部保留 `RD_REQ`、`RD_RESP`、`WR_REQ` 和 event/commit path 的最小 queue 组合；精确 entries / beats 预算由 SRAM profile、NoC profile 和 PPA exploration 冻结。
 - 现有 **Prefetch Queue** 继续作为 MFE 内部预取/请求跟踪路径的一部分存在；它不是 UCE→MFE 的 external command ingress 替代物。
 - **Window Generator** 是 streaming address-generation stage，直接喂给 read-request path；V1 不建议把它做成独立 command queue。
 - **Layout Transform** 在 streaming case 走 `DMA -> XFORM -> SRAM` 或带小 skid buffer 的路径；只有当可见顺序真的需要时才引入 reorder buffer，不建议给 layout transform 单独建 command queue。
 - V1 避免的默认结构：per-feature command queue、WindowGen queue、LayoutTransform queue、full-tile write-data staging FIFO。
 
-推荐的数据路径形态：
+推荐的数据路径形态（每条路径按 load/store channel 复制；下图是单 channel 内部形态）：
 
 ```text
 Load:

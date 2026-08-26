@@ -52,6 +52,8 @@ from pipeline_validator.dialects.elenor import (
   TileSignalOp,
   TileStoreOp,
 )
+from pipeline_validator.engines import MFEEngine
+from pipeline_validator.execution_ir import ExecEngineDesc
 from pipeline_validator.report import build_report, report_to_text
 from pipeline_validator.simulator import Simulator
 from pipeline_validator.stream_queue import EOSPolicy, StreamQueue, StreamToken
@@ -676,7 +678,7 @@ class TestHardwareConfigYaml:
     return path
 
   def test_defaults_frozen(self):
-    # 53 个字段逐一列出, 值等于迁移前 config.py 的字面量。
+    # 55 个字段逐一列出, 值等于迁移前 config.py 的字面量。
     expected = {
       "profile": "balanced-small",
       "num_tiles": 4,
@@ -711,6 +713,8 @@ class TestHardwareConfigYaml:
       "evu_launch_cycles": 3,
       "mfe_launch_cycles": 3,
       "mfe_pipeline_depth": 4,
+      "mfe_load_channels": 1,
+      "mfe_store_channels": 1,
       "mfe_load_queue_depth": 1,
       "mfe_store_queue_depth": 1,
       "mfe_stream_buffer_bytes": 0,
@@ -737,7 +741,7 @@ class TestHardwareConfigYaml:
   def test_schema_maps_every_field_once(self):
     mapped = list(_HW_YAML_PATH_TO_FIELD.values())
     field_names = {field.name for field in fields(HardwareConfig)}
-    assert len(_HW_YAML_PATH_TO_FIELD) == 53
+    assert len(_HW_YAML_PATH_TO_FIELD) == 55
     assert len(mapped) == len(set(mapped))
     assert set(mapped) == field_names
 
@@ -809,6 +813,55 @@ class TestHardwareConfigYaml:
     path = self._write_yaml(tmp_path, "schema_version: 1\nsystem:\n  profile: balanced-small\n")
     with pytest.raises(ValueError, match="missing required HardwareConfig fields"):
       _load_hw_yaml(path, required=True)
+
+
+# ---------------------------------------------------------------------------
+# MFE channelization (engines.py)
+# ---------------------------------------------------------------------------
+
+
+class TestMFEChannels:
+  """MFE = N 条 load lane + M 条 store lane（design/elenor_mfe §3.1.4）。"""
+
+  @staticmethod
+  def _desc(op: str, name: str) -> ExecEngineDesc:
+    return ExecEngineDesc(name=name, kind="MFE", op=op, params={"bytes": 4096})
+
+  def test_config_rejects_zero_load_channels(self):
+    with pytest.raises(ValueError, match="mfe_load_channels must be >= 1"):
+      HardwareConfig(mfe_load_channels=0)
+
+  def test_config_rejects_zero_store_channels(self):
+    with pytest.raises(ValueError, match="mfe_store_channels must be >= 1"):
+      HardwareConfig(mfe_store_channels=0)
+
+  def test_two_load_channels_run_in_parallel(self):
+    eng = MFEEngine(HardwareConfig(mfe_load_channels=2), tile_id=0)
+    j0 = eng.launch(self._desc("load", "ld0"), cycle=10, event_id="e0")
+    j1 = eng.launch(self._desc("load", "ld1"), cycle=10, event_id="e1")
+    assert j0 is not None and j1 is not None
+    assert j0.start_cycle == j1.start_cycle == 10
+
+  def test_single_load_channel_chains_serially(self):
+    eng = MFEEngine(HardwareConfig(), tile_id=0)  # V1 基线: 1 load channel
+    j0 = eng.launch(self._desc("load", "ld0"), cycle=10, event_id="e0")
+    j1 = eng.launch(self._desc("load", "ld1"), cycle=10, event_id="e1")
+    assert j0 is not None and j1 is not None
+    assert j1.start_cycle == j0.finish_cycle  # lane 内链式串行
+
+  def test_load_and_store_are_independent_lanes(self):
+    # 默认 1/1：跨 class 并行 —— store 与 load 不再共用一个资源。
+    eng = MFEEngine(HardwareConfig(), tile_id=0)
+    j_ld = eng.launch(self._desc("load", "ld"), cycle=10, event_id="e_ld")
+    j_st = eng.launch(self._desc("store", "st"), cycle=10, event_id="e_st")
+    assert j_ld is not None and j_st is not None
+    assert j_ld.start_cycle == j_st.start_cycle == 10
+
+  def test_full_lane_returns_none_for_backpressure(self):
+    eng = MFEEngine(
+      HardwareConfig(mfe_load_channels=1, mfe_pipeline_depth=1), tile_id=0)
+    assert eng.launch(self._desc("load", "ld0"), 10, "e0") is not None
+    assert eng.launch(self._desc("load", "ld1"), 10, "e1") is None
 
 
 class TestHardwareConfigCLI:

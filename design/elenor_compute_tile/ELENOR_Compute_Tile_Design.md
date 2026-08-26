@@ -186,7 +186,7 @@ L1 SRAM 逻辑分区：
 | USE state cache              | 由 SRAM profile 冻结                    | USE、checkpoint/restore DMA       | protected region，不被临时 DMA 覆盖       |
 | DMA staging/shared           | 由 SRAM profile 冻结                    | DMA、UCE                          | 只作为显式 workspace 使用                 |
 
-Arbiter 至少应区分：BOA operand read、BOA accumulator RMW、EVU LSU、MFE stream write/read、DMA load/store、USE state、UCE program/descriptor/event。带宽峰值和端口数由 SRAM profile 冻结；文档只冻结归因和隔离原则。
+Arbiter 至少应区分：BOA operand read、BOA accumulator RMW、EVU LSU、MFE stream write/read、DMA load/store、USE state、UCE program/descriptor/event。MFE stream write/read 的并发度 = load + store channel 数（可配置，见 `elenor_mfe` §3.1.4），带宽峰值与端口数由 SRAM profile 冻结；文档只冻结归因和隔离原则。
 
 Sliding window 不改变 L1 分配模型：V1 仍是固定 slot frame；V1.x 的 `window_size=2~4` 只能消费 compiler/runtime 预先规划好的 ping-pong / multi-buffer slot set，不能在硬件中引入新的动态 slot allocator。Arbiter 和 PMU 必须能把 window admission stall、slot hazard stall 与真实 SRAM bank conflict 分开归因。
 

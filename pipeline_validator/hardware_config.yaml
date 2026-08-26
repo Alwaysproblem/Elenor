@@ -57,12 +57,15 @@ engines:
     bandwidth_gbs: 256.0 # page/segment stream into L1
     clock_multiplier: 1.0
     launch_cycles: 3
-    pipeline_depth: 4 # descriptor-accept queue depth
+    pipeline_depth: 4 # per-channel descriptor-accept queue depth
 
     command_queues:
       load_depth: 1 # UCE -> MFE load ingress FIFO
       store_depth: 1 # UCE -> MFE store ingress FIFO
 
+    channels:
+      load: 1 # 并行 load channel 数，V1 基线 1；由 SRAM/NoC profile 冻结
+      store: 1 # 并行 store channel 数，V1 基线 1
     # 0 = unfrozen / non-enforcing baseline（由 SRAM profile 冻结）。
     stream_buffer_bytes: 0
 

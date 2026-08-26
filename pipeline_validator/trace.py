@@ -357,7 +357,9 @@ const TRACE = __TRACE_JSON__;
       bar.style.left = x + "px"; bar.style.top = y + "px";
       bar.style.width = w + "px";
       const isRole = s.cat && s.cat.startsWith("TileRole");
-      bar.style.background = isRole ? colors.TileRole : (colors[s.cat] || colors.default);
+      const isMfe = s.cat && s.cat.startsWith("MFE");
+      const bg = colors[s.cat] || (isMfe ? colors.MFE : colors.default);
+      bar.style.background = isRole ? colors.TileRole : bg;
       bar.textContent = s.name + (w > 50 ? "" : "");
       chart.appendChild(bar);
       bar.addEventListener("mouseenter", (ev) => {{

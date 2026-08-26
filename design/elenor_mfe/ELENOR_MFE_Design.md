@@ -11,13 +11,14 @@ MFE 不是通用 memory processor。First Silicon V1 必须控制复杂度，优
 
 Architecture V1 可预留 Sparse Block Stream 和 Persistent Memory Stream；First Silicon V1 不应被这些后续能力阻塞。
 
-| 能力                     | First Silicon V1                                             | 后续能力                                                   |
-| ------------------------ | ------------------------------------------------------------ | ---------------------------------------------------------- |
-| Page Stream              | page walk、KV prefetch、reorder、stream fill、double buffer  | residency predictor、deeper prefetch、跨 group page policy |
-| Segment Stream           | offsets decode、segment gather、local reduce、ordered output | unordered scatter、atomic update、cross-tile reduce        |
-| Sparse Block Stream      | 预留 flags 和 metadata shape                                 | V2 block sparse attention / sparse matmul                  |
-| Persistent Memory Stream | 预留 state/page binding 字段                                 | V3 agent memory / recurrent memory                         |
-| PMU                      | stall、prefetch hit/miss、stream occupancy、backpressure     | trace sampling 和 PMU feedback scheduler                   |
+| 能力                     | First Silicon V1                                                       | 后续能力                                                   |
+| ------------------------ | ---------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Page Stream              | page walk、KV prefetch、reorder、stream fill、double buffer            | residency predictor、deeper prefetch、跨 group page policy |
+| Segment Stream           | offsets decode、segment gather、local reduce、ordered output           | unordered scatter、atomic update、cross-tile reduce        |
+| Sparse Block Stream      | 预留 flags 和 metadata shape                                           | V2 block sparse attention / sparse matmul                  |
+| Persistent Memory Stream | 预留 state/page binding 字段                                           | V3 agent memory / recurrent memory                         |
+| PMU                      | stall、prefetch hit/miss、stream occupancy、backpressure               | trace sampling 和 PMU feedback scheduler                   |
+| load/store channel       | 通道数可配置（load N / store M，N,M ≥ 1），方向分类 + 动态分配语义冻结 | 动态 re-partition、更深通道并发                            |
 
 ## 2. 职责、非职责和 ownership
 
@@ -107,28 +108,28 @@ Consumer Handoff / Commit
 
 内部模块：
 
-| 模块                  | 说明                                                                  | 关键点                          |
-| --------------------- | --------------------------------------------------------------------- | ------------------------------- |
-| Launch Frontend       | 接收 Tile UCE launch、读取 descriptor                                 | command id、event id、mode      |
-| Descriptor Validator  | 检查 ABI、mode、slot、bounds、reserved bits                           | 输出 fault record               |
-| Metadata Decoder      | 解析 page table、offsets、indices、block metadata                     | 格式由后续规格冻结              |
-| Page Walker           | page id -> physical page / L2 address                                 | invalid page fail-fast          |
-| Segment Walker        | offsets/indices -> segment item stream                                | duplicate policy descriptor 化  |
-| Address Generator     | base + stride + index + segment + page offset                         | boundary check                  |
-| Prefetch Queue        | 提前发起 KV page、embedding row、expert weight 请求                   | hit/miss 统计                   |
-| Request Tracker       | 管理 outstanding request、timeout、cancel                             | tag、age、fault                 |
-| Async LD/ST Queues    | 分离 load / store 接受与完成；为 V1.x window overlap 提供 credit 边界 | queue credit、epoch、visibility |
-| Reorder Buffer        | 合并乱序返回，恢复 logical order                                      | page/segment order policy       |
-| Coalescer             | 合并相邻地址，提高 burst efficiency                                   | 不改变可见顺序                  |
-| Stream Buffer         | ping-pong buffer，写入 L1 stream slot                                 | credit、EOS/error               |
-| Store Visibility Unit | store payload 对 L1/L2 consumer 可见后产生 completion identity        | event sequence、fence           |
-| Commit Unit           | event、fault、PMU snapshot                                            | done/fault 原子提交             |
+| 模块                  | 说明                                                                                                   | 关键点                          |
+| --------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------- |
+| Launch Frontend       | 接收 Tile UCE launch、读取 descriptor                                                                  | command id、event id、mode      |
+| Descriptor Validator  | 检查 ABI、mode、slot、bounds、reserved bits                                                            | 输出 fault record               |
+| Metadata Decoder      | 解析 page table、offsets、indices、block metadata                                                      | 格式由后续规格冻结              |
+| Page Walker           | page id -> physical page / L2 address                                                                  | invalid page fail-fast          |
+| Segment Walker        | offsets/indices -> segment item stream                                                                 | duplicate policy descriptor 化  |
+| Address Generator     | base + stride + index + segment + page offset                                                          | boundary check                  |
+| Prefetch Queue        | 提前发起 KV page、embedding row、expert weight 请求                                                    | hit/miss 统计                   |
+| Request Tracker       | 管理 outstanding request、timeout、cancel                                                              | tag、age、fault                 |
+| Async LD/ST Queues    | 按 load/store channel 复制；每 channel 一条 ingress；为 V1.x window overlap 提供 per-class credit 边界 | queue credit、epoch、visibility |
+| Reorder Buffer        | 合并乱序返回，恢复 logical order                                                                       | page/segment order policy       |
+| Coalescer             | 合并相邻地址，提高 burst efficiency                                                                    | 不改变可见顺序                  |
+| Stream Buffer         | ping-pong buffer，写入 L1 stream slot                                                                  | credit、EOS/error               |
+| Store Visibility Unit | store payload 对 L1/L2 consumer 可见后产生 completion identity                                         | event sequence、fence           |
+| Commit Unit           | event、fault、PMU snapshot                                                                             | done/fault 原子提交             |
 
 #### 3.1.1 Queue 架构和 ingress 分层
 
 MFE 的 queue 架构应保持 **external command ingress** 与 **internal data/event pipeline** 分层，而不是把所有功能都做成独立 queue：
 
-- Tile UCE 到 MFE 至少区分 load/store 两类 command ingress（可实现为 `LD_CMD_Q` / `ST_CMD_Q` 或等价 launch class）；精确深度、仲裁和是否共享物理 storage 由后续规格冻结。
+- Tile UCE 到 MFE 的 command ingress 按 channel 复制：N 条 `LD_CMD_Q[i]` + M 条 `ST_CMD_Q[j]`（或等价 launch class；N/M 为可配置 load/store channel 数，见 §3.1.4）；每 channel 深度、仲裁和是否共享物理 storage 由后续规格冻结。
 - MFE 内部保留 `RD_REQ`、`RD_RESP`、`WR_REQ` 和 event/commit path 的最小 queue 组合；精确 entries / beats 预算由 SRAM profile、NoC profile 和 PPA exploration 冻结。
 - 现有 **Prefetch Queue** 继续作为 MFE 内部预取/请求跟踪路径的一部分存在；它不是 UCE→MFE 的 external command ingress 替代物。
 - 只有当可见顺序、burst 拼接或 layout reorder 确实需要时，才引入小型 skid buffer 或 reorder buffer；默认 V1 不做 full-tile write-data staging FIFO。
@@ -142,7 +143,7 @@ MFE 的 queue 架构应保持 **external command ingress** 与 **internal data/e
 
 #### 3.1.2 Load/Store 路径
 
-推荐的数据路径形态：
+推荐的数据路径形态（每条路径按 load/store channel 复制；下图是单 channel 内部形态）：
 
 ```text
 Load:
@@ -166,7 +167,7 @@ Store:
     -> event / commit path
 ```
 
-这个拆分的目的不是把 MFE 变成两个独立 engine，而是在同一个 MFE 中保持 **load/store orchestration、data movement 和 completion/event** 三条路径的边界清晰。
+MFE 仍是单一 engine：控制面/提交面统一，数据面按可配置的 load/store channel 复制，并在同一个 MFE 中保持 **load/store orchestration、data movement 和 completion/event** 三条路径的边界清晰。
 
 #### 3.1.3 Window Generator 和 Layout Transform 规则
 
@@ -174,6 +175,36 @@ Store:
 - Layout Transform 在 streaming case 走 `DMA -> XFORM -> SRAM` 或带小 skid buffer 的路径；只有当可见顺序必须恢复时才引入 reorder buffer。
 - Layout Transform 不应拥有独立 command queue；它属于 load/store pipeline 内部 stage。
 - 对 CONV / pooling 的 window 生成，复用现有 window generator / line-buffer 逻辑即可；不要再额外复制一套 feature queue。
+
+#### 3.1.4 Channel 架构和方向配置
+
+MFE 的数据面按 **可配置的 load/store channel** 组织：`mfe_load_channels = N`（N ≥ 1）条 load channel + `mfe_store_channels = M`（M ≥ 1）条 store channel。V1 建议起点 1/1（Edge / 最小配置）；Balanced / High End 可扩展到 2/1 或更高（如 K/V 双流）。精确数量由 SRAM/NoC profile 和 PPA exploration 冻结。
+
+```text
+Tile UCE launch.mfe（ISA 不变，不携带 channel 字段）
+     |
+MFE 前端（共享控制面）：descriptor fetch/validate + 方向分类 + first-free 分配
+     |-- load ch0 .. N-1:  LD_CMD_Q[i] -> Window/AddrGen -> RD_REQ/RD_RESP -> reorder / stream fill
+     |-- store ch0 .. M-1: ST_CMD_Q[j] -> L1 read -> (optional) layout transform -> WR_REQ -> visibility/event
+     v
+共享：fault 聚合 / event-commit path / PMU 聚合 / L1-NoC-L2 port 仲裁
+```
+
+控制面与数据面的划分：
+
+| 面                   | 复制粒度         | 内容                                                                                           |
+| -------------------- | ---------------- | ---------------------------------------------------------------------------------------------- |
+| 控制面（共享）       | 每 MFE 一份      | descriptor fetch/validate、fault 聚合、event/commit path、PMU 聚合                             |
+| load channel 数据面  | 每 load channel  | `LD_CMD_Q[i]` ingress + Window/AddrGen + RD_REQ/RD_RESP + reorder / stream fill port           |
+| store channel 数据面 | 每 store channel | `ST_CMD_Q[j]` ingress + L1 read + 可选 layout transform + WR_REQ + store visibility/event path |
+
+规则：
+
+1. **channel 分配策略**：`launch.mfe` ISA 不变，不加 channel 字段。MFE 前端按 descriptor 方向分类（store 类 op → store channel，其余 → load channel），同类内动态 first-free 分配。
+2. **顺序语义**：跨 channel 不保证隐式完成/可见顺序；同步只能依赖 `event_id + sequence`、stream token/EOS、barrier（与现有契约一致）。
+3. **hazard 不放宽**：channel 并行不改变 Slot Frame writable-alias / UCE hazard 规则；UCE hazard table 仍是唯一准入检查，同 slot 冲突照常 stall。
+4. **共享 backend**：channel 共享 L1/NoC/L2 port 仲裁；聚合带宽上限由 SRAM/NoC profile 冻结。
+5. **credit/backpressure**：Async LD/ST queue credit 为 per-class——该方向所有 channel ingress 满时 `launch.mfe` / window admission stall，不丢请求。
 
 ### 3.2 总状态机
 
@@ -450,7 +481,9 @@ mfe_stream_credit
 - stream buffer overflow 必须 fault，不能覆盖未消费数据。
 - UCE V1.x 可以在 P0 store 未完成时发起 P1 load，条件是 Slot Frame / UCE hazard table 证明二者不访问同一 active buffer。
 - MFE store completion event 表示 store visibility，而不是仅表示请求被接受；event 必须匹配 `event_id + sequence`。
-- Async LD/ST queue credit 是 MFE 的 backpressure 边界；queue full 时 UCE window admission 或 `launch.mfe` 必须 stall，不得丢弃请求。
+- Async LD/ST queue credit 按 load/store class 计算（覆盖该方向所有 channel 的 ingress），是 MFE 的 backpressure 边界；任一方向的所有 channel ingress 满时，UCE window admission 或 `launch.mfe` 必须 stall，不得丢弃请求。
+- `launch.mfe` 不指定 channel：MFE 前端按 descriptor 方向分类并在同类 channel 内 first-free 分配。
+- 跨 channel 无隐式完成/可见顺序保证；同步必须依赖 `event_id + sequence`、stream token/EOS 或 barrier。
 
 #### Store visibility model
 
@@ -491,7 +524,9 @@ ready_table[region][tile][version]
 | `MFE_CMD_ID`                  | 当前 command id                                                                                   |
 | `MFE_FAULT_CODE`              | invalid descriptor、invalid page、address fault、timeout、stream overflow、duplicate policy fault |
 | `MFE_FAULT_INDEX`             | page id、segment id 或 index id                                                                   |
-| `MFE_PMU_ACTIVE`              | active cycles                                                                                     |
+| `MFE_PMU_ACTIVE`              | 任一 channel 活跃即计入 active cycles                                                             |
+| `MFE_PMU_CHANNEL_ACTIVE`      | 运行中 channel 计数（counter 编号由后续规格冻结）                                                 |
+| `MFE_PMU_CHANNEL_OCC`         | per-channel ingress occupancy high-watermark（counter 编号由后续规格冻结）                        |
 | `MFE_PMU_STALL`               | primary stall cycles                                                                              |
 | `MFE_PMU_PREFETCH_HIT`        | prefetch hit count                                                                                |
 | `MFE_PMU_PREFETCH_MISS`       | prefetch miss count                                                                               |
@@ -598,18 +633,20 @@ MoE 中，MFE 主要用于 token grouping、expert batching 和 expert weight/to
 
 ### 6.1 配置
 
-| 参数                 | First Silicon V1 建议                            | 冻结方式                   |
-| -------------------- | ------------------------------------------------ | -------------------------- |
-| stream buffer        | K/V 或 segment ping-pong                         | 由 SRAM profile 冻结       |
-| prefetch depth       | 支持隐藏 canonical QK latency                    | 由后续规格冻结             |
-| reorder depth        | 覆盖 page return jitter                          | 由 PPA exploration 冻结    |
-| outstanding requests | 匹配 L2/HBM path                                 | 由 NoC/memory profile 冻结 |
-| Page Stream format   | page table + block table V1                      | 由后续规格冻结             |
-| Segment mode         | gather only、gather local reduce、ordered output | atomic add 后续冻结        |
+| 参数                 | First Silicon V1 建议                            | 冻结方式                                    |
+| -------------------- | ------------------------------------------------ | ------------------------------------------- |
+| stream buffer        | K/V 或 segment ping-pong                         | 由 SRAM profile 冻结                        |
+| prefetch depth       | 支持隐藏 canonical QK latency                    | 由后续规格冻结                              |
+| reorder depth        | 覆盖 page return jitter                          | 由 PPA exploration 冻结                     |
+| outstanding requests | 匹配 L2/HBM path                                 | 由 NoC/memory profile 冻结                  |
+| Page Stream format   | page table + block table V1                      | 由后续规格冻结                              |
+| Segment mode         | gather only、gather local reduce、ordered output | atomic add 后续冻结                         |
+| load channels        | V1 建议 1 起步；Balanced+ 可 2（K/V 双流）       | 由 SRAM/NoC profile 和 PPA exploration 冻结 |
+| store channels       | V1 建议 1                                        | 由 SRAM/NoC profile 和 PPA exploration 冻结 |
 
 补充约束：
 
-- queue budget 默认保持最小分层：load/store command ingress + request/response/event path；精确容量由后续规格冻结，不在本规格中伪造 `2~4` / `4~8` 数值。
+- queue budget 默认保持最小分层：per-channel load/store command ingress + 共享 request/response/event path 预算；精确容量由后续规格冻结，不在本规格中伪造 `2~4` / `4~8` 数值。
 - flow control 默认采用 **buffer reservation + outstanding tracking + registered backpressure**，而不是为每个功能堆深 FIFO。
 - 只有当 reorder、visibility isolation 或跨时钟边界真的需要时，才引入额外 staging buffer。
 
@@ -686,6 +723,8 @@ PMU 唯一归因：当 MFE 因 consumer 不读而阻塞时，MFE primary stall �
 - Window Generator 作为 sequencer 内 streaming stage 实现；Layout Transform 默认走 pipeline stage + skid buffer，不单独建 command queue。
 - event/commit path 应覆盖 accepted、L2-visible、fault/timeout 以及 barrier-arrival 一类语义提交；gather 释放点由上层 barrier-complete 决定，literal event 名称由后续共享规格冻结。
 - 默认避免 full-tile WR data FIFO；只有当 store visibility isolation 或 reorder 需求证明必须时才引入。
+- load/store channel 的 datapath 复制，但 metadata decode / page-segment walker 可共享仲裁；共享程度是实现选择，由 PPA exploration 冻结。
+- channel-to-backend 仲裁必须保证公平性：不得让单 channel 独占带宽导致 command/event path 饿死。
 
 ### 7.2 软件和 compiler
 
@@ -714,6 +753,9 @@ PMU 唯一归因：当 MFE 因 consumer 不读而阻塞时，MFE primary stall �
 - store accepted / L2-visible / global-visible 三层语义单调推进，不允许 consumer 在 L2-visible 之前观察到可见数据。
 - 对当前 `matmul -> L2 barrier -> gather` 路径，barrier complete 之前不得启动 gather；partial matmul store 不得错误释放 gather。
 - TensorView / view binding 的 zero-copy alias 不得绕过 Slot Frame writable alias 规则；backing store release 必须晚于所有 alias consumer 完成。
+- 跨 channel 完成顺序不被隐式假设：乱序完成合法，同步只依赖 event sequence / stream token / barrier。
+- 两条 channel 并发写同一 slot 必须 stall 或 fault（复用现有 Slot Frame / UCE hazard 检查；channel 并行不放宽 alias 规则）。
+- per-class channel credit 满时 `launch.mfe` / window admission stall 可观测，不得丢请求。
 
 ### 8.2 Bring-up 顺序
 
@@ -748,5 +790,6 @@ PMU 唯一归因：当 MFE 因 consumer 不读而阻塞时，MFE primary stall �
 | MFE/BOA/EVU SRAM 冲突                  | stream stall、BOA operand stall 上升 | bank-aware slot planning 和 PMU 归因                     |
 | async store visibility 过早 DONE       | 后续 window 读到旧数据或未写完数据   | event sequence + visibility point SVA + UCE hazard stall |
 | fault 后旧 response 污染新 command     | 高可靠性风险                         | request epoch、drain、SVA 覆盖                           |
+| channel 数量超出 SRAM port/bank 预算   | stream stall、bank conflict 上升     | 通道数随 SRAM/NoC profile 冻结，PMU 分 channel 归因      |
 
 后续需要冻结：Page Stream binary format、Segment Stream duplicate policy、prefetch/reorder depth、stream token ABI、timeout policy、SRAM/NoC bandwidth profile、PMU counter 编号和 Paged Attention canonical case。
