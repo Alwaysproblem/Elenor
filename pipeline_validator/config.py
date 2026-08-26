@@ -55,6 +55,8 @@ _HW_YAML_PATH_TO_FIELD = {
     "engines.mfe.clock_multiplier": "mfe_clock_multiplier",
     "engines.mfe.launch_cycles": "mfe_launch_cycles",
     "engines.mfe.pipeline_depth": "mfe_pipeline_depth",
+    "engines.mfe.channels.load": "mfe_load_channels",
+    "engines.mfe.channels.store": "mfe_store_channels",
     "engines.mfe.command_queues.load_depth": "mfe_load_queue_depth",
     "engines.mfe.command_queues.store_depth": "mfe_store_queue_depth",
     "engines.mfe.stream_buffer_bytes": "mfe_stream_buffer_bytes",
@@ -267,7 +269,9 @@ class HardwareConfig:
     boa_launch_cycles: int = _HW_DEFAULTS["boa_launch_cycles"]
     evu_launch_cycles: int = _HW_DEFAULTS["evu_launch_cycles"]
     mfe_launch_cycles: int = _HW_DEFAULTS["mfe_launch_cycles"]
-    mfe_pipeline_depth: int = _HW_DEFAULTS["mfe_pipeline_depth"]  # descriptor-accept queue
+    mfe_pipeline_depth: int = _HW_DEFAULTS["mfe_pipeline_depth"]  # per-channel accept queue
+    mfe_load_channels: int = _HW_DEFAULTS["mfe_load_channels"]  # parallel load channels
+    mfe_store_channels: int = _HW_DEFAULTS["mfe_store_channels"]  # parallel store channels
     mfe_load_queue_depth: int = _HW_DEFAULTS["mfe_load_queue_depth"]  # UCE→MFE load FIFO
     mfe_store_queue_depth: int = _HW_DEFAULTS["mfe_store_queue_depth"]  # UCE→MFE store FIFO
     # 0 = unfrozen / non-enforcing baseline (由 SRAM profile 冻结);
@@ -299,6 +303,10 @@ class HardwareConfig:
     def __post_init__(self) -> None:
         if self.mfe_pipeline_depth < 1:
             raise ValueError("mfe_pipeline_depth must be >= 1")
+        if self.mfe_load_channels < 1:
+            raise ValueError("mfe_load_channels must be >= 1")
+        if self.mfe_store_channels < 1:
+            raise ValueError("mfe_store_channels must be >= 1")
         if self.mfe_load_queue_depth < 1:
             raise ValueError("mfe_load_queue_depth must be >= 1")
         if self.mfe_store_queue_depth < 1:

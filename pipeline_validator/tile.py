@@ -923,8 +923,7 @@ class ComputeTile:
   def step(self, cycle: int) -> EngineJob | None:
     completed = None
     for eng in (self.boa, self.evu, self.mfe, self.use):
-      job = eng.tick(cycle)
-      if job is not None:
+      for job in eng.tick(cycle):
         completed = job
         self.uce.notify_event(job.event_id)
     self.uce.step(cycle, self)
