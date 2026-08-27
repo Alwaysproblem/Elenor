@@ -2061,6 +2061,10 @@ class TestL2AdmissionWait:
     assert snap["memory"]["l2"]["live_allocations"] == 0
     for tile_id, l1 in snap["memory"]["l1"].items():
       assert l1["allocator"]["live_allocations"] == 0, tile_id
+    assert snap["memory"]["transfers"]["inflight"] == 0
+    assert result.credit_invariant_ok
+    for vc in snap["memory"]["noc"].values():
+      assert vc["credit"] == sim.hw.noc_vc_depth
     events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
 
     def to_cycle(us: float) -> int:
@@ -2192,6 +2196,14 @@ class TestAdmissionFaultAndQueue:
   """PR 3.5: permanent oversized faults never queue; transient waits
   are strict FIFO; reset cancels pending tickets."""
 
+  def test_standalone_load_sets_active_admission_status(self):
+    group = TileGroup(HardwareConfig(), fidelity="runtime")
+    task = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
+    group.load_task(task, input_bindings=POW_BINDINGS)
+    assert group.sequencer.admission_status is ContextAdmissionStatus.ACTIVE
+    group.reset()
+
+
   def test_oversized_bundle_faults_without_queueing(self):
     sim = Simulator(
       HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10,
@@ -2249,10 +2261,110 @@ class TestAdmissionFaultAndQueue:
     assert group.l2_sram.snapshot()["live_allocations"] == 2
     group.reset()
 
+  def test_fragmentation_waiter_wakes_after_release_merges_extent(self):
+    """A release_l2 final-free merges an aligned extent and wakes the
+    queued fragmentation waiter through the real admission queue."""
+    from pipeline_validator.execution_ir import ExecL2Buffer, ExecReleaseRequest
+
+    hw = HardwareConfig().with_overrides(
+      group_sram_bytes=64, group_sram_banks=2)
+    group = TileGroup(hw, fidelity="full_memory", context_count=2)
+    blocker = ExecTileGroupTask(
+      name="fragmentation_blocker",
+      l2_buffers=(
+        ExecL2Buffer("a", (16,), "i8", "in", 1, 32, 16),
+        ExecL2Buffer("b", (16,), "i8", "in", 1, 32, 16),
+      ),
+    )
+    waiter = ExecTileGroupTask(
+      name="fragmentation_waiter",
+      l2_buffers=(
+        ExecL2Buffer("merged", (32,), "i8", "in", 1, 32, 32),
+      ),
+    )
+    seq_a = group.load_context_task(
+      blocker, slot_index=0, context_name="fragmentation_blocker", cycle=0)
+    seq_b = group.load_context_task(
+      waiter, slot_index=1, context_name="fragmentation_waiter", cycle=0)
+    assert seq_a.admission_status is ContextAdmissionStatus.ACTIVE
+    assert seq_b.admission_status is ContextAdmissionStatus.WAIT_CAPACITY
+    assert group.l2_sram.snapshot()["free_bytes"] == 32
+
+    group.release_l2(
+      ExecReleaseRequest(
+        buffer_slot="a",
+        buffer_role="in",
+        consumer_dispatch_ordinals=(),
+        dependency_events=(),
+      ),
+      sequencer=seq_a,
+      cycle=5,
+    )
+    group._retry_pending_context_admissions(5)
+    assert group._pending_activations
+    for ticket in group._pending_activations:
+      group._activate_admitted_context(ticket, 5)
+    group._pending_activations.clear()
+    assert seq_b.admission_status is ContextAdmissionStatus.ACTIVE
+    assert not group._pending_context_admissions
+    assert (seq_b.context_launch_generation, "merged") in group._l2_handles
+    group.reset()
+
+  def test_reset_unwinds_committed_staged_activation(self):
+    """A ticket between retry and activation already owns L2; reset must
+    release those committed handles instead of treating it as a waiter."""
+    from pipeline_validator.execution_ir import ExecL2Buffer, ExecReleaseRequest
+
+    hw = HardwareConfig().with_overrides(
+      group_sram_bytes=64, group_sram_banks=2)
+    group = TileGroup(hw, fidelity="full_memory", context_count=2)
+    blocker = ExecTileGroupTask(
+      name="staged_blocker",
+      l2_buffers=(
+        ExecL2Buffer("a", (16,), "i8", "in", 1, 32, 16),
+        ExecL2Buffer("b", (16,), "i8", "in", 1, 32, 16),
+      ),
+    )
+    waiter = ExecTileGroupTask(
+      name="staged_waiter",
+      l2_buffers=(
+        ExecL2Buffer("merged", (32,), "i8", "in", 1, 32, 32),
+      ),
+    )
+    seq_a = group.load_context_task(
+      blocker, slot_index=0, context_name="staged_blocker", cycle=0)
+    seq_b = group.load_context_task(
+      waiter, slot_index=1, context_name="staged_waiter", cycle=0)
+    group.release_l2(
+      ExecReleaseRequest(
+        buffer_slot="a",
+        buffer_role="in",
+        consumer_dispatch_ordinals=(),
+        dependency_events=(),
+      ),
+      sequencer=seq_a,
+      cycle=5,
+    )
+    group._retry_pending_context_admissions(5)
+    assert group._pending_activations
+    assert (seq_b.context_launch_generation, "merged") in group._l2_handles
+    assert group.l2_sram.snapshot()["live_allocations"] == 2
+
+    group.reset()
+    assert seq_b.admission_status is ContextAdmissionStatus.CANCELLED
+    assert not group._pending_context_admissions
+    assert not group._pending_activations
+    assert not group._l2_handles
+    assert group.l2_sram.snapshot()["live_allocations"] == 0
+
   def test_reset_cancels_pending_without_release(self):
+    from pipeline_validator.trace import Tracer
+
     hw = HardwareConfig().with_overrides(
       hbm_fixed_latency_cycles=10, group_sram_bytes=L2_WAIT_BYTES)
-    group = TileGroup(hw, fidelity="full_memory", context_count=2)
+    tracer = Tracer(hw)
+    group = TileGroup(
+      hw, tracer=tracer, fidelity="full_memory", context_count=2)
     blocker = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
     group.load_task(blocker, input_bindings=POW_BINDINGS)
     waiter_task = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
@@ -2264,8 +2376,17 @@ class TestAdmissionFaultAndQueue:
     assert len(group._pending_context_admissions) == 1
     # the waiting ticket owns no allocation — reset must not release it
     assert not [k for k in group._l2_handles if k[0] == gen_b]
+    for cycle in range(8, 11):
+      group.step(cycle)
+      assert seq_b.admission_status is ContextAdmissionStatus.WAIT_CAPACITY
     group.reset()
     assert seq_b.admission_status is ContextAdmissionStatus.CANCELLED
+    assert group.pmu.named_cycles["l2_admission_wait_cycles"] == 3
+    events = json.loads(tracer.to_chrome_json())["traceEvents"]
+    cancelled = next(
+      e["args"] for e in events
+      if e.get("name") == "context_admission_cancelled")
+    assert cancelled["cycle"] == 10
     assert not group._pending_context_admissions
     assert not group._pending_activations
     assert not group._live_launches
@@ -2274,6 +2395,47 @@ class TestAdmissionFaultAndQueue:
       assert t.l1_allocator.snapshot()["live_allocations"] == 0
     assert not group._grid_l2_pins
     assert group.transfer_manager.inflight_count == 0
+
+  def test_active_fault_cancels_pending_model_context(self, monkeypatch):
+    """An active A fault preserves the original fault result while the
+    ResetDomain cancels pending B and drains every resource."""
+    from pipeline_validator.tile_group_sequencer import TileGroupSequencer
+
+    sim, module = _admission_wait_sim()
+    original_step = sim.group.step
+    pending: list[TileGroupSequencer] = []
+    fault_injected = False
+
+    def faulting_step(cycle: int) -> bool:
+      nonlocal fault_injected
+      done = original_step(cycle)
+      if not fault_injected and sim.group._pending_context_admissions:
+        active_a = next(
+          seq for seq in sim.group._active_sequencers
+          if seq.context_name == "ctx_a")
+        pending.append(
+          sim.group._pending_context_admissions[0].sequencer)
+        active_a.faulted = True
+        active_a.fault_reason = "injected active context fault"
+        active_a.done = True
+        fault_injected = True
+      return done
+
+    monkeypatch.setattr(sim.group, "step", faulting_step)
+    result = sim.run(module, input_bindings=ADMISSION_WAIT_BINDINGS)
+    assert not result.completed
+    assert "injected active context fault" in result.reason
+    assert pending
+    assert pending[0].admission_status is ContextAdmissionStatus.CANCELLED
+    assert sim.group.reset_domain.is_done
+    snap = result.group_snapshot
+    assert not snap["pending_context_admissions"]
+    assert snap["memory"]["l2"]["live_allocations"] == 0
+    assert snap["memory"]["transfers"]["inflight"] == 0
+    for l1 in snap["memory"]["l1"].values():
+      assert l1["allocator"]["live_allocations"] == 0
+    for vc in snap["memory"]["noc"].values():
+      assert vc["credit"] == sim.hw.noc_vc_depth
 
   def test_same_formal_name_bindings_stay_launch_scoped(self):
     """Both contexts use the formal name 'Y' (A's store destination and
