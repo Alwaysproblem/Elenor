@@ -91,6 +91,23 @@ context switching: unpinned dispatch bindings auto-assign UCE context
 the context finishes, the slot is released and a `!nexus.event` fires;
 `nexus.await` blocks the device PC until the awaited event has fired.
 
+**L2 admission wait (PR 3.5)**: accepting a submit reserves the device
+slot but does not guarantee immediate L2 capacity. If the context's L2
+bundle (every `nest.alloc` slot as one atomic allocation) transiently
+cannot fit the live free map, the context enters `ADMISSION_WAIT`: the
+slot stays busy but no UCE context, L1 frame, stream queue, L2 handle or
+DMA/engine work is held, and no fault is recorded. A legal
+`nest.release` whose allocator final-free makes capacity available
+wakes the strict-FIFO wait queue in the same cycle; the admitted context
+issues its first group action the next cycle. Invalid bundles
+(size/alignment) and bundles that can never fit an empty L2 fault
+immediately and never queue. The submit result event still means the
+**full context completion**, not admission acceptance; two submits with
+no intermediate `nexus.await` may therefore be ACTIVE and
+ADMISSION_WAIT concurrently. PMU: `l2_admission_wait`,
+`l2_admission_retry`, `l2_admission_wakeup`, `l2_admission_wait_cycles`,
+`l2_admission_queue_peak`, `l2_admission_permanent_fault`.
+
 ## 2. SSA Types
 
 ### 2.1 `!nest.event<tag>`
@@ -633,8 +650,13 @@ the aggregation key.
   every `l2_buffers` entry is planned and committed as one atomic
   bundle on the L2 `BankedFreeExtentAllocator` (owner
   `ContextBufferOwner`, launch generation, alignment, bank segments).
-  An L2 capacity failure at admission faults the sequencer before any
-  DMA starts.
+  A typed `AdmissionFailureKind` classifies a failed plan:
+  `INVALID_REQUEST` (size/alignment never legal) and
+  `PERMANENT_CAPACITY` (cannot fit even an empty pool) fault the
+  sequencer before any DMA starts; `TEMPORARY_CAPACITY` (legally
+  placeable but not under the current live free map) enters the
+  strict-FIFO admission wait queue instead. A failed plan never
+  mutates the free map, pool version, counters or peak.
 - `nest.release` - `RELEASE_L2` first requires every explicit dependency
   event to be complete, then validates the buffer role, owner, generation,
   live handle, and required pin state before calling `request_release`.
@@ -642,6 +664,14 @@ the aggregation key.
   `output_ready` only makes L2 output visible; role=`"out"`/`"inout"`
   pins remain until their final-store-gated release. An unsatisfied or
   inconsistent release is an invariant fault, never a silent success.
-- `L2SRAM` capacity fault: if `plan_bundle` returns `AdmissionFailure`,
-  the sequencer faults with `L2 capacity fault during context
-admission` and no completion event is produced.
+  Only an allocator **final-free** (request_release returning with no
+  remaining pins) marks a capacity change: signal aggregates and unpins
+  alone never wake the admission queue.
+- `L2SRAM` capacity fault: a permanent/invalid `AdmissionFailure`
+  faults the sequencer with `L2 capacity fault during context
+admission` and no completion event is produced; a transient miss
+  never writes the fault ring. The strict-FIFO wait queue retries only
+  on a release final-free; the head is admitted in that same cycle and
+  issues its first group action the next cycle. Reset/fault cleanup
+  cancels waiting tickets (they own no allocation) and accumulates
+  `l2_admission_wait_cycles = terminal - enqueue` exactly once.
