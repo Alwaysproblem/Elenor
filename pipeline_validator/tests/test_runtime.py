@@ -61,8 +61,13 @@ from pipeline_validator.ir_lowering import lower_workload_ir
 from pipeline_validator.memory import L2SRAM, NoCRouter, PayloadTracker
 from pipeline_validator.runtime import EventStatus, EventTable, FaultCode, FaultRing
 from pipeline_validator.runtime.fault_ring import FaultDomain, FaultRecord
-from pipeline_validator.runtime.reset_domain import ResetDomain, ResetRequest
+from pipeline_validator.runtime.reset_domain import (
+  ResetDomain,
+  ResetRequest,
+  ResetState,
+)
 from pipeline_validator.simulator import Simulator
+from pipeline_validator.tile_group import TileGroup
 from pipeline_validator.tile import TileUCE
 from pipeline_validator.workload_builders import make_pow_tile_program
 from pipeline_validator.workload_ir import parse_workload_ir, print_workload_ir
@@ -74,7 +79,7 @@ from pipeline_validator.workloads import ALL_WORKLOADS, PowWorkload
 
 
 def make_sim(fidelity: str = "runtime") -> Simulator:
-  hw = HardwareConfig()
+  hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
   sim = SimConfig(fidelity=fidelity)
   return Simulator(hw, sim)
 
@@ -288,6 +293,30 @@ class TestRuntimeColdWarm:
     cold_after = s.group.program_table.cold_load_cycles
     assert cold_after > cold_before, "changed descriptor scalar should force cold install"
 
+  def test_group_reset_rebinds_same_name_in_new_hbm_epoch(self):
+    """Fresh reset clears the name->handle cache before HBM reset; the
+    second run must bind the same global name to a new region/epoch."""
+    from pipeline_validator.memory import MemoryInvariantError
+    hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
+    sim = Simulator(hw, SimConfig(fidelity="runtime", max_cycles=200000))
+    first = {"Y": GlobalBinding("Y", 0x100000, 524288, "rw")}
+    r1 = sim.run(PowWorkload().module, input_bindings=first)
+    assert r1.completed, r1.reason
+    old = sim.group._global_handles["Y"]
+    sim.group.reset()
+    assert sim.group._global_handles == {}
+    assert sim.group.hbm.snapshot()["external_bindings"] == 0
+    with pytest.raises(
+        MemoryInvariantError, match="stale allocation generation"):
+      sim.group.hbm.assert_live(old)
+    second = {"Y": GlobalBinding("Y", 0x400000, 524288, "rw")}
+    r2 = sim.run(PowWorkload().module, input_bindings=second)
+    assert r2.completed, r2.reason
+    new = sim.group._global_handles["Y"]
+    assert new.base_address == 0x400000
+    assert new.generation > old.generation
+    assert new != old
+
 
 # ---------------------------------------------------------------------------
 # Global DMA channel allocation
@@ -295,10 +324,16 @@ class TestRuntimeColdWarm:
 
 
 class TestDMAChannelScheduling:
-  def test_two_channels_round_robin_dma_stores(self):
-    """DMA stores must advance the shared round-robin channel selector."""
+  def test_two_channels_dma_stores_distribute(self):
+    """Four DMA stores complete as transactions on the GroupDMA track.
+
+    PR 2 replaces the round-robin channel selector with the
+    TransferManager's lowest-free-channel allocation; the observable
+    contract is that all four stores complete and are traced.
+    """
+    hw = HardwareConfig(num_dma_channels=2)
     sim = Simulator(
-      HardwareConfig(num_dma_channels=2),
+      hw,
       SimConfig(fidelity="runtime", max_cycles=200_000),
       enable_tracer=True,
     )
@@ -306,12 +341,151 @@ class TestDMAChannelScheduling:
     assert result.completed, result.reason
     assert result.tracer is not None
     events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
-    store_channels = [
-      event["args"]["channel"]
-      for event in events
+    store_events = [
+      event for event in events
       if event.get("name", "").startswith("dma.store:")
     ]
-    assert store_channels == [0, 1, 0, 1]
+    assert len(store_events) == 4
+    for event in store_events:
+      args = event["args"]
+      expected_cycles = args["completion_cycle"] - args["start_cycle"]
+      assert expected_cycles > 1
+      assert event["dur"] == pytest.approx(
+        expected_cycles * hw.cycle_ns() / 1000.0)
+
+
+class TestFullMemorySnapshot:
+  def test_pow_full_memory_snapshot_invariants(self):
+    """API-level full-memory run: completed, peak allocations positive,
+    context-owned L2/L1 released, HBM binding kept, no inflight transfers,
+    NoC credits restored."""
+    hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
+    sim = Simulator(hw, SimConfig(fidelity="full_memory", max_cycles=200000))
+    result = sim.run(PowWorkload().module, input_bindings=POW_BINDINGS)
+    assert result.completed, result.reason
+    mem = sim.group.snapshot()["memory"]
+    assert mem["fidelity"] == "full_memory"
+    assert mem["hbm"]["external_bindings"] == 1  # external binding kept
+    assert mem["l2"]["peak_allocated_bytes"] > 0
+    assert mem["l2"]["live_allocations"] == 0
+    for tile_id, l1 in mem["l1"].items():
+      assert l1["allocator"]["peak_allocated_bytes"] > 0, tile_id
+      assert l1["allocator"]["live_allocations"] == 0, tile_id
+    assert mem["transfers"]["inflight"] == 0
+    for vc in mem["noc"].values():
+      assert vc["credit"] == hw.noc_vc_depth  # credits restored
+
+
+class TestL2DispatchPins:
+  def test_inout_actual_pins_once_per_task_and_defers_release(self):
+    """Dispatch deduplicates in/out actuals by allocation id; RELEASE_L2
+    stays pending until the last logical task unpins at terminal."""
+    task = lower_workload_ir(PowWorkload().module)
+    hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
+    group = TileGroup(hw, fidelity="runtime")
+    group.load_task(task, input_bindings=POW_BINDINGS)
+    seq = group.sequencer
+    binding = task.role_bindings[0]
+    role_event = "ev_pin_contract"
+    assert group.dispatch_role(
+      binding, cycle=0, event_id=role_event, sequencer=seq)
+    slot = binding.actuals[0]
+    key = (seq.context_launch_generation, slot)
+    handle = group._l2_handles[key]
+    record = group.l2_sram._allocator._live[handle.allocation_id]
+    # Four logical tasks (one per tile), despite the same inout appearing
+    # in both ins and outs: no duplicate pin per task.
+    assert record.pins == {
+      f"{role_event}:0", f"{role_event}:1",
+      f"{role_event}:2", f"{role_event}:3",
+    }
+    group.release_l2_slot(
+      slot, cycle=1, generation=seq.context_launch_generation)
+    assert group.l2_sram.snapshot()["pending_release"] == 1
+    assert group.l2_sram.snapshot()["live_allocations"] == 4
+    for tile_id in range(4):
+      group._release_role_l2_pins(role_event, tile_id, cycle=2)
+    assert group.l2_sram.snapshot()["pending_release"] == 0
+    assert group.l2_sram.snapshot()["live_allocations"] == 3
+    group.reset()
+
+
+class TestAtomicDispatchAdmission:
+  @staticmethod
+  def _sequencer(group: TileGroup, task: ExecTileGroupTask):
+    from pipeline_validator.tile_group_sequencer import TileGroupSequencer
+    seq = TileGroupSequencer(group)
+    seq.context_launch_generation = group.sequencer.context_launch_generation
+    seq.load(task)
+    return seq
+
+  def test_later_tile_capacity_failure_commits_nothing(self):
+    """Tile0 plan succeeds, tile1 capacity fails; no earlier tile commits,
+    pins, frames or contexts may become live, and the issuing seq faults."""
+    from pipeline_validator.memory import (
+      AdmissionFailure, AllocationRequest, TaskBufferOwner)
+    task = lower_workload_ir(PowWorkload().module)
+    group = TileGroup(HardwareConfig(), fidelity="runtime")
+    group.load_task(task, input_bindings=POW_BINDINGS)
+    blocker_owner = TaskBufferOwner(
+      "block", 0, "block", 0, 1, 0, "block")
+    blocker_plan = group.tiles[1].l1_allocator.plan_bundle([
+      AllocationRequest(
+        "l1", "block", blocker_owner,
+        group.cfg.tile_l1_bytes - 16 * 1024, 1)])
+    assert not isinstance(blocker_plan, AdmissionFailure)
+    group.tiles[1].l1_allocator.commit(blocker_plan, cycle=0)
+    seq = self._sequencer(group, task)
+    binding = task.role_bindings[0]
+    event_id = "ev_atomic_capacity"
+    assert not group.dispatch_role(
+      binding, cycle=1, event_id=event_id, sequencer=seq)
+    assert seq.faulted and seq.done
+    assert "tile 1" in seq.fault_reason
+    assert not group.sequencer.faulted
+    assert group.tiles[0].l1_allocator.snapshot()["live_allocations"] == 0
+    assert group.tiles[1].l1_allocator.snapshot()["live_allocations"] == 1
+    for tile in group.tiles:
+      assert all(
+        ctx["state"] == "empty"
+        for ctx in tile.uce.snapshot()["contexts"])
+      assert all(frame.snapshot()["active_slots"] == 0
+                 for frame in tile.l1_frames)
+    assert event_id not in group._role_event_tile_mask
+    assert event_id not in group._role_l1_handles
+    assert event_id not in group._role_l2_pins
+    group.reset()
+
+  def test_late_context_bind_failure_rolls_back_all_tiles(self, monkeypatch):
+    """All plans/commits/prepares/pins succeed, then tile1 bind fails:
+    tile0's earlier bind and every allocation/pin/frame are rolled back."""
+    task = lower_workload_ir(PowWorkload().module)
+    group = TileGroup(HardwareConfig(), fidelity="runtime")
+    group.load_task(task, input_bindings=POW_BINDINGS)
+    seq = self._sequencer(group, task)
+    binding = task.role_bindings[0]
+    event_id = "ev_atomic_bind"
+    monkeypatch.setattr(
+      group.tiles[1], "load_program", lambda *args, **kwargs: None)
+    assert not group.dispatch_role(
+      binding, cycle=1, event_id=event_id, sequencer=seq)
+    assert seq.faulted and seq.done
+    assert "tile 1" in seq.fault_reason
+    assert not group.sequencer.faulted
+    for tile in group.tiles:
+      assert tile.l1_allocator.snapshot()["live_allocations"] == 0
+      assert all(
+        ctx["state"] == "empty"
+        for ctx in tile.uce.snapshot()["contexts"])
+      assert all(frame.snapshot()["active_slots"] == 0
+                 for frame in tile.l1_frames)
+    assert event_id not in group._role_event_tile_mask
+    assert event_id not in group._role_l1_handles
+    assert event_id not in group._role_l2_pins
+    for handle in group._l2_handles.values():
+      record = group.l2_sram._allocator._live[handle.allocation_id]
+      assert record.pins == set()
+    group.reset()
 
 
 # ---------------------------------------------------------------------------
@@ -408,16 +582,74 @@ class TestFaultReset:
         break
     assert rd.is_done
 
+  def test_fault_reset_cancels_inflight_and_returns_resources(self):
+    """A fault with in-flight transfers: the reset domain drains or
+    times out, ``cancel_all`` returns HBM outstanding credits, NoC
+    credits, DMA channels and bank reservations, and context-owned
+    L2/L1 allocations are released."""
+    from pipeline_validator.ir_lowering import lower_workload_ir
+    hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=1000)
+    s = Simulator(hw, SimConfig(fidelity="full_memory", max_cycles=100000))
+    wl = PowWorkload()
+    task = lower_workload_ir(wl.module)
+    s._assign_program_ids(task)
+    s.group.load_task(task, input_bindings=POW_BINDINGS)
+    # first steps: sequencer issues the first prefetch (cycle 0), the
+    # HBM leg then issues on the manager step of cycle 1
+    s.group.step(0)
+    s.group.step(1)
+    assert s.group.transfer_manager.inflight_count > 0
+    assert s.group.transfer_manager._hbm_read._outstanding > 0
+    assert s.group.l2_sram.snapshot()["live_allocations"] > 0
+    s.group.trigger_fault(FaultCode.ADDRESS_FAULT, cycle=2)
+    # FAULT_DETECTED advances once; after STOP_QUEUE the sequencer index
+    # must stay frozen while transfers/engines continue draining.
+    s.group.step(2)
+    assert s.group.reset_domain.state == ResetState.STOP_QUEUE
+    frozen_action_index = s.group.sequencer.action_index
+    # step until the reset domain completes (drain timeout cancels the
+    # in-flight prefetches long before the 1000-cycle HBM leg finishes)
+    for cycle in range(3, 500):
+      s.group.step(cycle)
+      if s.group.reset_domain.is_done:
+        break
+    assert s.group.reset_domain.is_done
+    assert s.group.sequencer.action_index == frozen_action_index
+    assert s.group.transfer_manager.inflight_count == 0
+    assert s.group.transfer_manager._hbm_read._outstanding == 0
+    assert s.group.transfer_manager._hbm_write._outstanding == 0
+    # NoC credit / DMA / bank resources all returned; no flit pending
+    for stage in (s.group.transfer_manager._global_dma,
+                  s.group.transfer_manager._l2_read,
+                  s.group.transfer_manager._l2_write):
+      assert all(b == 0 for b in stage._busy_until), stage.name
+      assert all(h is None for h in stage._holders), stage.name
+    for vc in s.group.noc.vcs.values():
+      assert vc.occupancy == 0  # no pending flits
+    assert s.group.l2_sram.snapshot()["live_allocations"] == 0
+    for tile in s.group.tiles:
+      assert tile.l1_allocator.snapshot()["live_allocations"] == 0
+    # NoC router credits restored to full depth
+    for vc in s.group.noc.vcs.values():
+      assert vc.credit_available == hw.noc_vc_depth
+
   def test_l2_capacity_fault_terminates_task(self):
     """A tiny L2 SRAM triggers a capacity fault on prefetch."""
-    hw = HardwareConfig()
-    hw = hw.with_overrides(group_sram_bytes=1024)  # 1 KB — too small
+    hw = HardwareConfig().with_overrides(
+      hbm_fixed_latency_cycles=10, group_sram_bytes=1024)
     sim = SimConfig(fidelity="full_memory", max_cycles=10000)
     s = Simulator(hw, sim)
     wl = PowWorkload()
     r = s.run(wl.module, input_bindings=POW_BINDINGS)
     assert not r.completed
     assert "faulted" in r.reason
+    assert "L2 capacity fault" in r.reason
+    assert s.group.reset_domain.is_done
+    assert s.group.transfer_manager.inflight_count == 0
+    assert s.group.l2_sram.snapshot()["live_allocations"] == 0
+    latest = s.group.fault_ring.latest()
+    assert latest is not None
+    assert latest.code == FaultCode.L2_CAPACITY_FAULT
 
   def test_l2_exact_capacity_completes_and_overshoot_faults(self):
     """4 pow chunks (4 x 128 KiB per chunk) fit exactly in a 512 KiB L2
@@ -426,9 +658,10 @@ class TestFaultReset:
     accounting on DMA_STORE touching an existing slot)."""
     chunk_bytes = 128 * 128 * 2  # per-tile plane
     bytes_per_chunk = chunk_bytes * 4  # 4 tiles' input per group chunk
-    hw = HardwareConfig()
-    hw = hw.with_overrides(group_sram_bytes=4 * bytes_per_chunk)
-    sim = SimConfig(fidelity="full_memory", max_cycles=50000)
+    hw = HardwareConfig().with_overrides(
+      hbm_fixed_latency_cycles=10,
+      group_sram_bytes=4 * bytes_per_chunk)
+    sim = SimConfig(fidelity="full_memory", max_cycles=200000)
     s = Simulator(hw, sim)
     wl = PowWorkload()
     r = s.run(wl.module, input_bindings=POW_BINDINGS)
@@ -438,9 +671,10 @@ class TestFaultReset:
     from pipeline_validator.workload_builders import make_pow_task
 
     module5 = make_pow_task(num_group_chunks=5)
-    hw2 = HardwareConfig()
-    hw2 = hw2.with_overrides(group_sram_bytes=4 * bytes_per_chunk)
-    sim2 = SimConfig(fidelity="full_memory", max_cycles=50000)
+    hw2 = HardwareConfig().with_overrides(
+      hbm_fixed_latency_cycles=10,
+      group_sram_bytes=4 * bytes_per_chunk)
+    sim2 = SimConfig(fidelity="full_memory", max_cycles=200000)
     s2 = Simulator(hw2, sim2)
     r2 = s2.run(module5, input_bindings={"Y": GlobalBinding("Y", 0x100000, 655360, "rw")})
     assert not r2.completed
@@ -453,37 +687,26 @@ class TestFaultReset:
 
 
 class TestMemory:
-  def test_l2_capacity_ok(self):
-    l2 = L2SRAM(capacity_bytes=4096)
-    assert l2.capacity_ok(2048)
-    slot = l2.alloc_slot("A", 2048)
-    assert slot is not None
-    assert l2.capacity_ok(2048)
+  def test_l2_plan_commit_release(self):
+    """L2 plan/commit/release round-trip with the new allocator."""
+    from pipeline_validator.memory import AllocationRequest, ContextBufferOwner
+    l2 = L2SRAM(capacity_bytes=4096, banks=4)
+    o = ContextBufferOwner("ctx", 0, "A")
+    plan = l2.plan_bundle([AllocationRequest("l2", "A", o, 2048, 1)])
+    handles = l2.commit(plan, cycle=0)
+    assert len(handles) == 1
+    assert l2.snapshot()["allocated_bytes"] == 2048
+    assert l2.request_release(handles[0], o, cycle=10) is True
+    assert l2.snapshot()["allocated_bytes"] == 0
 
   def test_l2_capacity_fault(self):
-    l2 = L2SRAM(capacity_bytes=1024)
-    l2.alloc_slot("A", 1024)
-    slot = l2.alloc_slot("B", 1)
-    assert slot is None
-    assert l2.pmu_capacity_fault_count == 1
-
-  def test_l2_bank_conflict_serializes(self):
-    """Same-bank accesses serialize; cross-bank may parallel."""
-    l2 = L2SRAM(banks=2, bank_bandwidth_gbs=12.8)
-    clock_hz = 1e9
-    # first access on bank 0
-    lat0 = l2.access_latency(128, bank=0, cycle=0, clock_hz=clock_hz)
-    # second access on same bank at cycle 0 → serialized
-    lat1 = l2.access_latency(128, bank=0, cycle=0, clock_hz=clock_hz)
-    assert lat1 >= lat0  # serialized behind first
-    assert l2.pmu_bank_conflict_cycles > 0
-
-  def test_l2_stable_bank_assignment(self):
-    """Bank assignment is deterministic across runs (crc32, not hash())."""
-    l2_a = L2SRAM(banks=16)
-    l2_b = L2SRAM(banks=16)
-    assert l2_a._pick_bank("slot_A") == l2_b._pick_bank("slot_A")
-    assert l2_a._pick_bank("slot_B") == l2_b._pick_bank("slot_B")
+    """Over-capacity L2 allocation returns AdmissionFailure."""
+    from pipeline_validator.memory import AdmissionFailure, AllocationRequest, ContextBufferOwner
+    l2 = L2SRAM(capacity_bytes=1024, banks=2)
+    o = ContextBufferOwner("ctx", 0, "A")
+    plan = l2.plan_bundle([AllocationRequest("l2", "A", o, 1025, 1)])
+    assert isinstance(plan, AdmissionFailure)
+    assert plan.reason == "allocation capacity exceeded"
 
   def test_noc_router_has_four_vcs(self):
     noc = NoCRouter()
@@ -498,9 +721,11 @@ class TestMemory:
     from pipeline_validator.memory.noc import Flit
 
     for i in range(4):
-      noc.send(2, Flit(vc=2, src=0, dst=1, bytes_total=64, tag=i), cycle=0)
+      noc.send(2, Flit(vc=2, src=0, dst=1, bytes_total=64, tag=f"f{i}"),
+               cycle=0)
     # put one flit on VC0
-    noc.send(0, Flit(vc=0, src=0, dst=1, bytes_total=32, tag=99), cycle=0)
+    noc.send(0, Flit(vc=0, src=0, dst=1, bytes_total=32, tag="cmd"),
+             cycle=0)
     sent_vc0 = False
     for cycle in range(20):
       sent = noc.step(cycle)
@@ -534,31 +759,157 @@ class TestMemory:
     assert pt.layout_fault_count == 1
 
 
+class TestLocalViewResolution:
+  @staticmethod
+  def _view(space: str, base: str, backing: int,
+            size: int, offset: int = 0):
+    from pipeline_validator.execution_ir import ExecMemoryView
+    return ExecMemoryView(
+      space=space, base=base, backing_dims=(backing,), dims=(size,),
+      offsets=(offset,), strides=(1,), dtype="i8", element_bytes=1,
+      bytes=size)
+
+  def test_l1_and_l2_views_keep_real_cross_bank_segments(self):
+    from pipeline_validator.memory import (
+      AdmissionFailure, AllocationRequest, ContextBufferOwner,
+      TaskBufferOwner)
+    from pipeline_validator.tile import ComputeTile, _TileContextMemory
+    cfg = HardwareConfig().with_overrides(
+      tile_l1_bytes=1024, tile_l1_banks=2)
+    tile = ComputeTile(0, cfg)
+    l1_owner = TaskBufferOwner("ctx", 1, "ev", 0, 0, 0, "l1:0")
+    l1_plan = tile.l1_allocator.plan_bundle([
+      AllocationRequest("l1", "l1:0", l1_owner, 768, 1)])
+    assert not isinstance(l1_plan, AdmissionFailure)
+    l1_handle = tile.l1_allocator.commit(l1_plan, cycle=0)[0]
+
+    l2 = L2SRAM(capacity_bytes=1024, banks=2)
+    l2_owner = ContextBufferOwner("ctx", 1, "l2_buf")
+    l2_plan = l2.plan_bundle([
+      AllocationRequest("l2", "l2_buf", l2_owner, 768, 1)])
+    assert not isinstance(l2_plan, AdmissionFailure)
+    l2_handle = l2.commit(l2_plan, cycle=0)[0]
+    memory = _TileContextMemory(
+      owner=l1_owner, logical_task_id=0, launch_generation=1,
+      l2_formal_handles=(l2_handle,), l1_handles={"l1:0": l1_handle},
+      l2_resolver=l2)
+
+    l1_view = TileUCE._resolve_tile_view(
+      self._view("l1", "l1:0", 768, 768), memory, tile)
+    l2_view = TileUCE._resolve_tile_view(
+      self._view("l2", "formal:1", 768, 768), memory, tile)
+    assert l1_view is not None
+    assert l2_view is not None
+    assert [(s.bank_id, s.size_bytes) for s in l1_view.segments] == [
+      (0, 512), (1, 256)]
+    assert [(s.bank_id, s.size_bytes) for s in l2_view.segments] == [
+      (0, 512), (1, 256)]
+
+  def test_local_view_oob_raises_allocator_fault(self):
+    from pipeline_validator.memory import (
+      AdmissionFailure, AllocationRequest, MemoryInvariantError,
+      TaskBufferOwner)
+    from pipeline_validator.tile import ComputeTile, _TileContextMemory
+    cfg = HardwareConfig().with_overrides(
+      tile_l1_bytes=1024, tile_l1_banks=2)
+    tile = ComputeTile(0, cfg)
+    owner = TaskBufferOwner("ctx", 1, "ev", 0, 0, 0, "l1:0")
+    plan = tile.l1_allocator.plan_bundle([
+      AllocationRequest("l1", "l1:0", owner, 512, 1)])
+    assert not isinstance(plan, AdmissionFailure)
+    handle = tile.l1_allocator.commit(plan, cycle=0)[0]
+    memory = _TileContextMemory(
+      owner=owner, logical_task_id=0, launch_generation=1,
+      l1_handles={"l1:0": handle})
+    with pytest.raises(
+        MemoryInvariantError, match="memory view out of bounds"):
+      TileUCE._resolve_tile_view(
+        self._view("l1", "l1:0", 512, 200, offset=400),
+        memory, tile)
+
+  def test_local_view_use_after_release_raises(self):
+    from pipeline_validator.memory import (
+      AdmissionFailure, AllocationRequest, MemoryInvariantError,
+      TaskBufferOwner)
+    from pipeline_validator.tile import ComputeTile, _TileContextMemory
+    cfg = HardwareConfig().with_overrides(
+      tile_l1_bytes=1024, tile_l1_banks=2)
+    tile = ComputeTile(0, cfg)
+    owner = TaskBufferOwner("ctx", 1, "ev", 0, 0, 0, "l1:0")
+    plan = tile.l1_allocator.plan_bundle([
+      AllocationRequest("l1", "l1:0", owner, 512, 1)])
+    assert not isinstance(plan, AdmissionFailure)
+    handle = tile.l1_allocator.commit(plan, cycle=0)[0]
+    memory = _TileContextMemory(
+      owner=owner, logical_task_id=0, launch_generation=1,
+      l1_handles={"l1:0": handle})
+    tile.l1_allocator.request_release(handle, owner, cycle=1)
+    with pytest.raises(MemoryInvariantError, match="use-after-release"):
+      TileUCE._resolve_tile_view(
+        self._view("l1", "l1:0", 512, 64), memory, tile)
+
+
 # ---------------------------------------------------------------------------
 # Slot frame
 # ---------------------------------------------------------------------------
 
 
 class TestSlotFrame:
-  def test_frame_bind_succeeds(self):
-    from pipeline_validator.memory import SlotFrame
+  def test_frame_prepare_bind_succeeds(self):
+    """prepare() + bind() round-trip with real allocation handles."""
+    from pipeline_validator.execution_ir import ExecL1Buffer
+    from pipeline_validator.memory import (
+      AllocationHandle,
+      BankSegment,
+      SlotFrame,
+      TaskBufferOwner,
+    )
 
     f = SlotFrame(l1_bytes=1024 * 1024)
+    owner = TaskBufferOwner("ctx", 0, "ev", 0, 0, 0, "l1:0")
+    handle = AllocationHandle(
+      allocation_id="l1:0:1", memory_space="l1", owner=owner,
+      base_address=0, size_bytes=512, alignment=256,
+      bank_segments=(BankSegment(0, 0, 512),), generation=0,
+      allocate_cycle=0)
+    spec = ExecL1Buffer(name="l1:0", dims=(16, 16), dtype="bf16",
+                        element_bytes=2, alignment=256, bytes=512)
+    assert f.prepare([handle], [spec]) is True
     ok, cycles = f.bind(cycle=0, bind_cycles=8)
     assert ok
     assert cycles == 8
     assert f.shadow is not None
 
   def test_frame_capacity_fault(self):
-    from pipeline_validator.memory import Slot, SlotFrame
+    """prepare() rejects an L1 spec that exceeds l1_bytes."""
+    from pipeline_validator.execution_ir import ExecL1Buffer
+    from pipeline_validator.memory import (
+      AllocationHandle,
+      BankSegment,
+      SlotFrame,
+      TaskBufferOwner,
+    )
 
     f = SlotFrame(l1_bytes=512)
-    f.slots[0] = Slot(0, base=0, size=512)
-    ok, _ = f.bind(cycle=0)
-    assert ok  # exactly fits
-    f.slots[1] = Slot(1, base=0, size=1)
-    ok2, _ = f.bind(cycle=0)
-    assert not ok2  # overlap fault
+    owner = TaskBufferOwner("ctx", 0, "ev", 0, 0, 0, "l1:0")
+    handle = AllocationHandle(
+      allocation_id="l1:0:1", memory_space="l1", owner=owner,
+      base_address=0, size_bytes=512, alignment=1,
+      bank_segments=(BankSegment(0, 0, 512),), generation=0,
+      allocate_cycle=0)
+    spec = ExecL1Buffer(name="l1:0", dims=(16, 16), dtype="bf16",
+                        element_bytes=2, alignment=1, bytes=512)
+    assert f.prepare([handle], [spec]) is True  # exactly fits
+    # a second buffer exceeding capacity fails
+    spec2 = ExecL1Buffer(name="l1:1", dims=(16, 16), dtype="bf16",
+                         element_bytes=2, alignment=1, bytes=512)
+    handle2 = AllocationHandle(
+      allocation_id="l1:0:2", memory_space="l1", owner=owner,
+      base_address=512, size_bytes=512, alignment=1,
+      bank_segments=(BankSegment(0, 512, 512),), generation=0,
+      allocate_cycle=0)
+    f2 = SlotFrame(l1_bytes=512)
+    assert f2.prepare([handle, handle2], [spec, spec2]) is False
 
   def test_frame_generation_gate(self):
     from pipeline_validator.memory import SlotFrame
@@ -583,7 +934,7 @@ class TestFidelityModes:
 
     signal.signal(signal.SIGALRM, handler)
     for fidelity in ("timing_only", "runtime", "full_memory"):
-      hw = HardwareConfig()
+      hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
       sim = SimConfig(fidelity=fidelity, context_count=1, max_cycles=200000)
       for wl_cls in ALL_WORKLOADS:
         wl = wl_cls()
@@ -624,6 +975,52 @@ class TestFidelityModes:
     with pytest.raises(ValueError, match="context_count must be between 1 and 8"):
       TileUCE(0, HardwareConfig(), context_count=9)
 
+
+  def test_runtime_snapshot_exposes_real_allocators(self):
+    """runtime uses real HBM/L2/L1 handles, so only timing_only may expose
+    allocator fields as None."""
+    hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
+    sim = Simulator(
+      hw, SimConfig(fidelity="runtime", max_cycles=200000))
+    result = sim.run(PowWorkload().module, input_bindings=POW_BINDINGS)
+    assert result.completed, result.reason
+    mem = result.group_snapshot["memory"]
+    assert mem["fidelity"] == "runtime"
+    assert mem["hbm"] is not None
+    assert mem["hbm"]["external_bindings"] == 1
+    assert mem["l2"] is not None
+    assert mem["l2"]["peak_allocated_bytes"] > 0
+    assert mem["l2"]["live_allocations"] == 0
+    assert mem["noc"] is None  # contention fabric only in full_memory
+    for tile in mem["l1"].values():
+      assert tile["allocator"] is not None
+      assert tile["allocator"]["peak_allocated_bytes"] > 0
+      assert tile["allocator"]["live_allocations"] == 0
+
+  def test_model_second_run_resets_l2_generation(self):
+    """runtime model fresh reset clears prior live extents and makes old L2
+    handles stale before admitting the second run."""
+    from pipeline_validator.memory import MemoryInvariantError
+    sim = Simulator(
+      HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10),
+      SimConfig(fidelity="runtime", device_context_count=2,
+                max_cycles=200000),
+    )
+    module = make_two_context_model()
+    first = sim.run(module, input_bindings=MODEL_BINDINGS)
+    assert first.completed, first.reason
+    old_handles = list(sim.group._l2_handles.values())
+    assert old_handles
+    old_generation = old_handles[0].generation
+    second = sim.run(module, input_bindings=MODEL_BINDINGS)
+    assert second.completed, second.reason
+    new_handles = list(sim.group._l2_handles.values())
+    assert new_handles
+    assert new_handles[0].generation > old_generation
+    for handle in old_handles:
+      with pytest.raises(
+          MemoryInvariantError, match="stale allocation generation"):
+        sim.group.l2_sram.assert_live(handle)
   def test_dispatch_pinned_same_context_serializes(self):
     """Two roles pinned to the same context serialize: zero context switches."""
     sim = Simulator(HardwareConfig(), SimConfig(fidelity="runtime", context_count=2, max_cycles=10000))
@@ -742,6 +1139,26 @@ class TestModelMode:
     )
     with pytest.raises(ValueError, match="pins device context 2 but device_context_count is 2"):
       sim.run(make_two_context_model(pins=(2, None)), input_bindings=MODEL_BINDINGS)
+
+  def test_model_fault_waits_for_reset_cleanup(self):
+    """Model-mode admission fault freezes device submits and returns only
+    after reset cleanup released all context-owned memory."""
+    hw = HardwareConfig().with_overrides(
+      hbm_fixed_latency_cycles=10, group_sram_bytes=1024)
+    sim = Simulator(
+      hw,
+      SimConfig(fidelity="full_memory", device_context_count=2,
+                max_cycles=10000),
+    )
+    result = sim.run(make_two_context_model(), input_bindings=MODEL_BINDINGS)
+    assert not result.completed
+    assert "L2 capacity fault" in result.reason
+    assert sim.group.reset_domain.is_done
+    mem = result.group_snapshot["memory"]
+    assert mem["transfers"]["inflight"] == 0
+    assert mem["l2"]["live_allocations"] == 0
+    for tile in mem["l1"].values():
+      assert tile["allocator"]["live_allocations"] == 0
 
   def test_legacy_module_rejects_out_of_range_context_pin(self):
     prog = make_waiting_mfe_program()

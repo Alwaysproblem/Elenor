@@ -166,7 +166,11 @@ def main(argv=None) -> int:
     sim_overrides["device_context_count"] = args.device_context_mode
   if args.trace:
     sim_overrides["trace"] = True
-  sim_cfg = SimConfig().with_overrides(**sim_overrides)
+  try:
+    sim_cfg = SimConfig().with_overrides(**sim_overrides)
+  except ValueError as exc:
+    print(f"invalid input: {exc}", file=sys.stderr)
+    return 2
 
   workloads: list[Workload] = []
   if args.ir_file is not None:

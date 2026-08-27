@@ -14,6 +14,7 @@ from xdsl.ir import Attribute, SSAValue
 from xdsl.utils.exceptions import VerifyException
 
 from .dialects.elenor import (
+  DTYPE_BYTES,
   NestAllocOp,
   NestAwaitOp,
   NestBarrierOp,
@@ -143,6 +144,10 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
     arg: global_input.name
     for arg, global_input in zip(context_args, global_inputs)
   }
+  formal_dims: dict[SSAValue, tuple[int, ...]] = {
+    arg: global_input.dims
+    for arg, global_input in zip(context_args, global_inputs)
+  }
   objects: dict[SSAValue, ExecMemoryView | ExecL2Buffer] = {}
   task_domains: dict[SSAValue, ExecTaskDomain] = {}
   l2_buffers: list[ExecL2Buffer] = []
@@ -153,11 +158,16 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
   for body_op in _body_ops(context):
     if isinstance(body_op, NestAllocOp):
       dims, dtype = _dims_dtype(body_op.result.type)
+      element_bytes = DTYPE_BYTES[dtype]
+      alignment = (int(body_op.alignment.value.data)
+                   if body_op.alignment is not None else 1)
       buffer = ExecL2Buffer(
         slot=body_op.slot.data,
         dims=dims,
         dtype=dtype,
         role=body_op.role.data,
+        element_bytes=element_bytes,
+        alignment=alignment,
         bytes=_view_bytes(dims, dtype),
       )
       l2_buffers.append(buffer)
@@ -171,14 +181,21 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
       formal_name = formal_names.get(body_op.src)
       if formal_name is None:
         raise VerifyException("nest.subview source has no lowered global formal")
+      backing_dims = formal_dims.get(body_op.src)
+      if backing_dims is None:
+        raise VerifyException("nest.subview source has no backing shape")
       dims = tuple(_int_list(body_op.sizes))
       dtype = body_op.result.type.dtype.data
+      element_bytes = DTYPE_BYTES[dtype]
       objects[body_op.result] = ExecMemoryView(
         space="global",
         base=f"global:{formal_name}",
+        backing_dims=backing_dims,
         dims=dims,
         offsets=tuple(_int_list(body_op.offsets)),
+        strides=tuple(_int_list(body_op.strides)),
         dtype=dtype,
+        element_bytes=element_bytes,
         bytes=_view_bytes(dims, dtype),
       )
     elif isinstance(body_op, NestPrefetchOp):
@@ -370,9 +387,12 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
     objects[arg] = ExecMemoryView(
       space="l2",
       base=f"formal:{i}",
+      backing_dims=dims,
       dims=dims,
       offsets=(0,) * len(dims),
+      strides=(1,) * len(dims),
       dtype=dtype,
+      element_bytes=DTYPE_BYTES[dtype],
       bytes=_view_bytes(dims, dtype),
     )
 
@@ -381,6 +401,9 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
   for body_op in _body_ops(op):
     if isinstance(body_op, TileAllocOp):
       dims, dtype = _dims_dtype(body_op.result.type)
+      element_bytes = DTYPE_BYTES[dtype]
+      alignment = (int(body_op.alignment.value.data)
+                   if body_op.alignment is not None else 1)
       name = f"l1:{l1_counter}"
       l1_counter += 1
       l1_buffers.append(
@@ -388,15 +411,20 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
           name=name,
           dims=dims,
           dtype=dtype,
+          element_bytes=element_bytes,
+          alignment=alignment,
           bytes=_view_bytes(dims, dtype),
         )
       )
       objects[body_op.result] = ExecMemoryView(
         space="l1",
         base=name,
+        backing_dims=dims,
         dims=dims,
         offsets=(0,) * len(dims),
+        strides=(1,) * len(dims),
         dtype=dtype,
+        element_bytes=element_bytes,
         bytes=_view_bytes(dims, dtype),
       )
     elif isinstance(body_op, TileSubviewOp):
@@ -406,9 +434,12 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
       objects[body_op.result] = ExecMemoryView(
         space="l2",
         base=src.base,
+        backing_dims=src.backing_dims,
         dims=dims,
         offsets=tuple(_int_list(body_op.offsets)),
+        strides=tuple(_int_list(body_op.strides)),
         dtype=dtype,
+        element_bytes=src.element_bytes,
         bytes=_view_bytes(dims, dtype),
         task_dim=(
           None
@@ -617,8 +648,11 @@ def _l2_buffer_view(buffer: ExecL2Buffer) -> ExecMemoryView:
   return ExecMemoryView(
     space="l2",
     base=buffer.slot,
+    backing_dims=buffer.dims,
     dims=buffer.dims,
     offsets=(0,) * len(buffer.dims),
+    strides=(1,) * len(buffer.dims),
     dtype=buffer.dtype,
+    element_bytes=buffer.element_bytes,
     bytes=buffer.bytes,
   )

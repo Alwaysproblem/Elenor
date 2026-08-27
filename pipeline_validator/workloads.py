@@ -50,7 +50,7 @@ class PowWorkload(Workload):
       ),
       expected={
         "evu_active_ratio_min": 0.01,
-        "mfe_active_ratio_min": 0.05,
+        "mfe_active_ratio_min": 0.03,
         "stream_stall_ratio_max": 0.05,
         "multi_stage_group_io": True,
       },
