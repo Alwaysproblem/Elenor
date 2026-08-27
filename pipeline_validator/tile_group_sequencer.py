@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .execution_ir import (
+  ContextAdmissionStatus,
   ExecDispatchRequest,
   ExecGroupAction,
   ExecGroupActionOp,
@@ -79,6 +80,14 @@ class TileGroupSequencer:
     # (context symbol, device slot, launch generation).
     self.context_name: str = ""
     self.device_slot: int = 0
+    # PR 3.5: context admission lifecycle + launch-scoped formal bindings
+    self.admission_status: ContextAdmissionStatus = (
+      ContextAdmissionStatus.PREPARED)
+    self.admission_wait_start_cycle: int | None = None
+    self.admission_retry_count: int = 0
+    self.formal_bindings: dict[str, str] = {}
+    # PR 3.5: first-action marker (trace evidence for admission timing)
+    self._first_action_emitted: bool = False
 
   def note_job_started(self) -> None:
     self._outstanding_jobs += 1
@@ -109,6 +118,11 @@ class TileGroupSequencer:
     self.done = False
     self.faulted = False
     self.fault_reason = ""
+    # PR 3.5: admission lifecycle restarts at PREPARED on a fresh load
+    self.admission_status = ContextAdmissionStatus.PREPARED
+    self.admission_wait_start_cycle = None
+    self.admission_retry_count = 0
+    self._first_action_emitted = False
 
   # ---- per-cycle step -------------------------------------------------
 
@@ -157,8 +171,19 @@ class TileGroupSequencer:
 
     ins = self.task.actions[self.action_index]
     self.pmu.add_cycle("total", 1)
-    return self._issue(ins, cycle)
-
+    result = self._issue(ins, cycle)
+    if (self.action_index > 0 and not self._first_action_emitted
+        and self.group.tracer is not None):
+      self._first_action_emitted = True
+      self.group.tracer.instant("TileGroup", "Admission",
+                                "context_first_action", cycle, {
+                                  "context": self.context_name,
+                                  "slot": self.device_slot,
+                                  "launch_generation":
+                                    self.context_launch_generation,
+                                  "cycle": cycle,
+                                })
+    return result
   # ---- action issue ----------------------------------------------
 
   def _issue(self, ins: ExecGroupAction, cycle: int) -> tuple[int, str] | None:
@@ -305,4 +330,10 @@ class TileGroupSequencer:
     self.done = False
     self.faulted = False
     self.fault_reason = ""
+    # PR 3.5: reset clears the admission lifecycle and launch bindings
+    self.admission_status = ContextAdmissionStatus.PREPARED
+    self.admission_wait_start_cycle = None
+    self.admission_retry_count = 0
+    self.formal_bindings.clear()
+    self._first_action_emitted = False
     self.pmu.reset()

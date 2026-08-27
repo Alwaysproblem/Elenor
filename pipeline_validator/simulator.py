@@ -283,7 +283,8 @@ class Simulator:
             task, slot_index=slot,
             context_name=dop.ctx_name,
             input_bindings=bindings,
-            formal_bindings=name_map)
+            formal_bindings=name_map,
+            cycle=self.cycle)
           slot_busy[slot] = True
           slot_seq[slot] = seq
           slot_tag[slot] = dop.event_tag

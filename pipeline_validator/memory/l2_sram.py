@@ -36,6 +36,11 @@ class L2SRAM:
       banks=self.banks,
     )
 
+  @property
+  def pool_version(self) -> int:
+    """Live free-map version of the backing allocator (PR 3.5)."""
+    return self._allocator.pool_version
+
   def plan_bundle(
     self, requests: list[AllocationRequest],
   ) -> AllocationPlan | AdmissionFailure:

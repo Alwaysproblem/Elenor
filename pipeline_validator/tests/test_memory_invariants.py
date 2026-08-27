@@ -14,6 +14,7 @@ from pipeline_validator.execution_ir import GlobalBinding
 from pipeline_validator.memory import (
   L2SRAM,
   AdmissionFailure,
+  AdmissionFailureKind,
   AllocationRequest,
   BankedFreeExtentAllocator,
   ContextBufferOwner,
@@ -818,3 +819,93 @@ class TestHBMChannelMapping:
     tm.step(cycle=1)
     assert tm._hbm_outstanding_txns == {"write"}
     assert tm._hbm_write._holders == [None, "write"]
+
+
+# ---------------------------------------------------------------------------
+# Admission failure classification (PR 3.5)
+# ---------------------------------------------------------------------------
+
+
+class TestAdmissionClassification:
+  """Typed admission failures: invalid / permanent / temporary, and
+  zero side effects on every failed ``plan_bundle``."""
+
+  @staticmethod
+  def _state(alloc: BankedFreeExtentAllocator) -> dict:
+    snap = alloc.snapshot()
+    return {
+      "free": alloc._free,
+      "live": dict(alloc._live),
+      "version": alloc._pool_version,
+      "counter": alloc._counter,
+      "peak": alloc._peak_allocated,
+      "allocated": snap["allocated_bytes"],
+    }
+
+  def test_invalid_size_and_alignment_are_invalid_request(self):
+    alloc = BankedFreeExtentAllocator("l2", 1024, 2)
+    zero = alloc.plan_bundle([_req(_ctx_owner(), 0)])
+    assert isinstance(zero, AdmissionFailure)
+    assert zero.kind is AdmissionFailureKind.INVALID_REQUEST
+    assert zero.reason == "invalid allocation size"
+    bad_align = alloc.plan_bundle([_req(_ctx_owner(), 64, align=3)])
+    assert isinstance(bad_align, AdmissionFailure)
+    assert bad_align.kind is AdmissionFailureKind.INVALID_REQUEST
+    assert bad_align.reason == "invalid allocation alignment"
+
+  def test_empty_pool_impossible_bundle_is_permanent(self):
+    alloc = BankedFreeExtentAllocator("l2", 1024, 2)
+    plan = alloc.plan_bundle([_req(_ctx_owner(), 1025)])
+    assert isinstance(plan, AdmissionFailure)
+    assert plan.kind is AdmissionFailureKind.PERMANENT_CAPACITY
+    assert plan.reason == "allocation capacity exceeded"
+    # a multi-request bundle whose sum exceeds capacity is also permanent
+    plan = alloc.plan_bundle([
+      _req(_ctx_owner(buf="b1"), 512),
+      _req(_ctx_owner(buf="b2"), 513),
+    ])
+    assert isinstance(plan, AdmissionFailure)
+    assert plan.kind is AdmissionFailureKind.PERMANENT_CAPACITY
+
+  def test_fragmentation_miss_is_temporary_and_merges(self):
+    # 2 banks x 32 bytes.  Two 16-byte requests aligned to 32 force one
+    # 16-byte gap per bank (free = 32 >= 32) yet no single aligned
+    # extent: a 32-byte aligned request fails on the live map but fits
+    # the empty pool — temporary, not permanent.  Releasing one blocker
+    # merges its bank back into a 32-byte extent and the retry fits.
+    alloc = BankedFreeExtentAllocator("l2", 64, 2)
+    for name in ("a", "b"):
+      plan = alloc.plan_bundle([
+        _req(_ctx_owner(gen=1, buf=name), 16, align=32, buf_id=name)])
+      assert not isinstance(plan, AdmissionFailure)
+      alloc.commit(plan, 0)
+    assert alloc.snapshot()["free_bytes"] == 32
+    frag_req = [AllocationRequest(
+      "l2", "frag", _ctx_owner(gen=2, buf="frag"), 32, 32)]
+    before = self._state(alloc)
+    frag = alloc.plan_bundle(frag_req)
+    assert isinstance(frag, AdmissionFailure)
+    assert frag.kind is AdmissionFailureKind.TEMPORARY_CAPACITY
+    assert self._state(alloc) == before
+    assert alloc.can_ever_fit_bundle(frag_req)
+    # release blocker a: bank 0 merges back into one 32-byte extent
+    handle_a = next(h for h in alloc._live.values()
+                    if h.handle.owner.buffer_id == "a").handle
+    assert alloc.request_release(handle_a, handle_a.owner, 1)
+    retry = alloc.plan_bundle(frag_req)
+    assert not isinstance(retry, AdmissionFailure)
+
+  def test_failed_plan_never_mutates_free_map(self):
+    alloc = BankedFreeExtentAllocator("l2", 1024, 2)
+    committed = alloc.plan_bundle([_req(_ctx_owner(gen=1), 256)])
+    alloc.commit(committed, 0)
+    before = self._state(alloc)
+    outcomes = [
+      alloc.plan_bundle([_req(_ctx_owner(), 0)]),
+      alloc.plan_bundle([_req(_ctx_owner(), 8, align=3)]),
+      alloc.plan_bundle([_req(_ctx_owner(), 4096)]),
+      alloc.plan_bundle([_req(_ctx_owner(), 1024)]),
+    ]
+    assert all(isinstance(o, AdmissionFailure) for o in outcomes)
+    after = self._state(alloc)
+    assert after == before

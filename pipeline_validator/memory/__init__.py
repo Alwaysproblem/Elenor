@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .allocator import (
   AdmissionFailure,
+  AdmissionFailureKind,
   AllocationHandle,
   AllocationPlan,
   AllocationRequest,
@@ -39,6 +40,7 @@ from .transfer import (
 __all__ = [
   "L2SRAM",
   "AdmissionFailure",
+  "AdmissionFailureKind",
   "AllocationHandle",
   "AllocationPlan",
   "AllocationRequest",
