@@ -1997,3 +1997,331 @@ class TestReleaseFaultPath:
     assert group.reset_domain.is_done
     self._assert_zero_leak(group)
     group.reset()
+
+
+# ---------------------------------------------------------------------------
+# PR 3.5: L2 admission wait queue + release-driven cross-context wakeup
+# ---------------------------------------------------------------------------
+
+
+ADMISSION_WAIT_BINDINGS = {
+  "A_IN": GlobalBinding("A_IN", 0x100000, L2_WAIT_BYTES, "rw"),
+  "A_OUT": GlobalBinding("A_OUT", 0x200000, L2_WAIT_BYTES, "rw"),
+  "B_IN": GlobalBinding("B_IN", 0x300000, L2_WAIT_BYTES, "rw"),
+}
+
+
+def _admission_wait_sim() -> tuple[Simulator, ModuleOp]:
+  hw = HardwareConfig().with_overrides(
+    hbm_fixed_latency_cycles=10, group_sram_bytes=2 * L2_WAIT_BYTES)
+  sim = Simulator(
+    hw,
+    SimConfig(fidelity="full_memory", device_context_count=2,
+              max_cycles=500000),
+    enable_tracer=True)
+  module = load_workload_ir("examples/example_l2_admission_wait.mlir")
+  return sim, module
+
+
+def _admission_model_names(sim: Simulator, module: ModuleOp) -> dict[str, dict[str, str]]:
+  """Lower ``module`` into the fresh group and return per-context
+  formal→actual binding maps (same computation as ``_run_model``)."""
+  model = lower_model_ir(module)
+  for task in model.tasks.values():
+    sim._assign_program_ids(task)
+  sim.group.reset()
+  name_maps: dict[str, dict[str, str]] = {}
+  for dop in model.body:
+    if dop.op != "submit":
+      continue
+    task = model.tasks[dop.ctx_name]
+    name_maps[dop.ctx_name] = {
+      formal.name: model.inputs[actual_index].name
+      for formal, actual_index in zip(task.global_inputs, dop.actual_inputs)
+    }
+  return name_maps
+
+
+class TestL2AdmissionWait:
+  """PR 3.5: A fills L2 exactly, B submits in the same device-PC cycle
+  and waits; A's legal input release final-free admits B in the same
+  cycle while A still holds its output buffer."""
+
+  def test_full_run_ab_overlap_release_wakes_b(self):
+    sim, module = _admission_wait_sim()
+    result = sim.run(module, input_bindings=ADMISSION_WAIT_BINDINGS)
+    assert result.completed, result.reason
+    ev = result.pmu.events
+    assert ev.get("l2_admission_wait") == 1
+    assert ev.get("l2_admission_wakeup") == 1
+    assert ev.get("l2_admission_permanent_fault", 0) == 0
+    assert ev.get("release_invariant_fault", 0) == 0
+    snap = result.group_snapshot
+    assert snap["pending_context_admissions"] == []
+    assert snap["memory"]["l2"]["live_allocations"] == 0
+    for tile_id, l1 in snap["memory"]["l1"].items():
+      assert l1["allocator"]["live_allocations"] == 0, tile_id
+    events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
+
+    def to_cycle(us: float) -> int:
+      return round(us * 1000.0 / sim.hw.cycle_ns())
+
+    submits = [e["args"] for e in events if e.get("name") == "context_submit"]
+    assert len(submits) == 2
+    assert submits[0]["cycle"] == submits[1]["cycle"]  # same device-PC cycle
+    b_wait = next(e["args"] for e in events
+                  if e.get("name") == "context_admission_wait"
+                  and e["args"].get("context") == "ctx_b")
+    b_retry = next(e["args"] for e in events
+                   if e.get("name") == "context_admission_retry"
+                   and e["args"].get("context") == "ctx_b")
+    b_admit = next(e["args"] for e in events
+                   if e.get("name") == "context_admitted"
+                   and e["args"].get("context") == "ctx_b")
+    b_first = next(e["args"] for e in events
+                   if e.get("name") == "context_first_action"
+                   and e["args"].get("context") == "ctx_b")
+    a_done = next(e["args"] for e in events
+                  if e.get("name") == "context_done"
+                  and e["args"].get("context") == "ctx_a")
+    release_cycle = b_retry["capacity_change_cycle"]
+    assert b_wait["cycle"] < release_cycle
+    assert b_admit["cycle"] == release_cycle
+    assert b_first["cycle"] == b_admit["cycle"] + 1
+    assert b_admit["l2_live_allocations"] == 2  # A output still live
+    b_dispatch = next(
+      to_cycle(e["ts"]) for e in events
+      if e.get("name") == "tile_role_dispatch" and e["args"]["ctx_id"] == 1)
+    store_done = next(e["args"]["completion_cycle"] for e in events
+                      if e.get("name", "").startswith("dma.store:"))
+    assert b_dispatch < store_done
+    assert b_dispatch < a_done["cycle"]
+
+  def test_wait_gating_at_signal_and_release_boundaries(self):
+    """3/4 input signals keep B WAIT; the 4/4 aggregate alone does not
+    wake B; only the release final-free admits B in the same cycle and
+    B's first action issues exactly one cycle later."""
+    sim, module = _admission_wait_sim()
+    name_maps = _admission_model_names(sim, module)
+    group = sim.group
+    model = lower_model_ir(module)
+    seq_a = group.load_context_task(
+      model.tasks["ctx_a"],
+      slot_index=0, context_name="ctx_a",
+      input_bindings=ADMISSION_WAIT_BINDINGS,
+      formal_bindings=name_maps["ctx_a"], cycle=0)
+    seq_b = group.load_context_task(
+      model.tasks["ctx_b"],
+      slot_index=1, context_name="ctx_b",
+      input_bindings=ADMISSION_WAIT_BINDINGS,
+      formal_bindings=name_maps["ctx_b"], cycle=0)
+    # A active with both buffers; B waiting with zero resources
+    assert seq_a.admission_status is ContextAdmissionStatus.ACTIVE
+    assert seq_b.admission_status is ContextAdmissionStatus.WAIT_CAPACITY
+    assert not seq_b.faulted and not seq_b.done
+    assert group.l2_sram.snapshot()["live_allocations"] == 2
+    assert group.l2_sram.snapshot()["free_bytes"] == 0
+    assert seq_b not in group._active_sequencers
+    assert (seq_b.context_name, 1, seq_b.context_launch_generation) \
+      not in group._live_launches
+    assert group._role_l1_handles == {}
+    assert all(not t.uce.has_active_contexts() for t in group.tiles)
+    assert len(group.queues) == 0
+    gen_b = seq_b.context_launch_generation
+    assert not [k for k in group._l2_handles if k[0] == gen_b]
+    # step until A's grid registers
+    grid_a = None
+    for c in range(5000):
+      group.step(c)
+      grid_a = next((g for g in group._grid_signals
+                     if g.context_name == "ctx_a"), None)
+      if grid_a is not None:
+        break
+    assert grid_a is not None
+    # Step until all four tiles finished their L2 loads: the manual
+    # signal injection below must not race an in-flight load (releasing
+    # a_input while a tile still reads it is a real use-after-release).
+    for c1 in range(c + 1, c + 5000):
+      group.step(c1)
+      if all("e_load" in t.uce.contexts[0].events_done for t in group.tiles):
+        break
+    assert all("e_load" in t.uce.contexts[0].events_done for t in group.tiles)
+    # 3/4 signals: aggregate incomplete, no capacity change, B still waits
+    for tid in range(3):
+      group._on_phase_signal(
+        PhaseSignal(TaskIdentity(grid_a, tid), "input_released"), c1)
+    group.step(c1)
+    assert seq_b.admission_status is ContextAdmissionStatus.WAIT_CAPACITY
+    assert group._pending_context_admissions[0].sequencer is seq_b
+    # 4th signal completes the aggregate; B must still wait until the
+    # release action final-frees (a signal alone never wakes).
+    group._on_phase_signal(
+      PhaseSignal(TaskIdentity(grid_a, 3), "input_released"), c1 + 1)
+    admit_cycle = None
+    for c2 in range(c1 + 1, c1 + 1000):
+      group.step(c2)
+      if seq_b.admission_status is ContextAdmissionStatus.ACTIVE:
+        admit_cycle = c2
+        break
+    assert admit_cycle is not None
+    assert group._l2_capacity_change_cycle == admit_cycle
+    # A's output handle still live/pinned at B admission
+    out_handle = group._l2_handles[(seq_a.context_launch_generation, "a_output")]
+    assert not group.l2_sram.is_released(out_handle)
+    assert group._grid_l2_pins
+    # B first action issues exactly one cycle later
+    assert seq_b.action_index == 0
+    group.step(admit_cycle + 1)
+    assert seq_b.action_index == 1
+    # drive to completion: both contexts drain with zero leak
+    for c3 in range(admit_cycle + 2, admit_cycle + 500000):
+      group.step(c3)
+      if seq_a.done and seq_b.done:
+        break
+    assert seq_a.done and seq_b.done, (seq_a.fault_reason, seq_b.fault_reason)
+    assert not group._pending_context_admissions
+    assert group.l2_sram.snapshot()["live_allocations"] == 0
+    for t in group.tiles:
+      assert t.l1_allocator.snapshot()["live_allocations"] == 0
+    assert not group._grid_l2_pins
+    assert group.transfer_manager.inflight_count == 0
+    group.reset()
+
+
+class TestAdmissionFaultAndQueue:
+  """PR 3.5: permanent oversized faults never queue; transient waits
+  are strict FIFO; reset cancels pending tickets."""
+
+  def test_oversized_bundle_faults_without_queueing(self):
+    sim = Simulator(
+      HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10,
+                                      group_sram_bytes=1024),
+      SimConfig(fidelity="full_memory", device_context_count=2,
+                max_cycles=10000))
+    result = sim.run(make_two_context_model(), input_bindings=MODEL_BINDINGS)
+    assert not result.completed
+    assert "L2 capacity fault" in result.reason
+    assert not sim.group._pending_context_admissions
+    assert sim.group.pmu.events.get("l2_admission_permanent_fault", 0) >= 1
+    assert sim.group.pmu.events.get("l2_admission_wait", 0) == 0
+
+  def test_three_waiters_strict_fifo_order(self):
+    """Three same-size waiters behind a full L2: a final-free admits
+    strictly the head; head-of-line waiters never bypass."""
+    chunk = L2_WAIT_BYTES
+    hw = HardwareConfig().with_overrides(
+      hbm_fixed_latency_cycles=10, group_sram_bytes=2 * chunk)
+    group = TileGroup(hw, fidelity="full_memory", context_count=2)
+    blocker = lower_workload_ir(PowWorkload(num_group_chunks=2).module)
+    group.load_task(blocker, input_bindings=POW_BINDINGS)
+    assert group.l2_sram.snapshot()["free_bytes"] == 0
+    group._next_launch_id = 100  # keep waiter generations distinct
+    waiters = []
+    for i in range(3):
+      task = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
+      seq = group.load_context_task(
+        task, slot_index=1, context_name=f"w{i}",
+        input_bindings=POW_BINDINGS, cycle=0)
+      waiters.append(seq)
+      assert seq.admission_status is ContextAdmissionStatus.WAIT_CAPACITY
+    assert len(group._pending_context_admissions) == 3
+    # release one blocker buffer, then run the retry barrier once
+    handles = [h for (gen, _slot), h in group._l2_handles.items()
+               if gen == group.sequencer.context_launch_generation]
+    assert len(handles) == 2
+    assert group.l2_sram.request_release(handles[0], handles[0].owner, 1)
+    group._l2_capacity_change_cycle = 1
+    group._retry_pending_context_admissions(1)
+    for ticket in group._pending_activations:
+      group._activate_admitted_context(ticket, 1)
+    group._pending_activations.clear()
+    assert waiters[0].admission_status is ContextAdmissionStatus.ACTIVE
+    assert waiters[1].admission_status is ContextAdmissionStatus.WAIT_CAPACITY
+    assert waiters[2].admission_status is ContextAdmissionStatus.WAIT_CAPACITY
+    assert len(group._pending_context_admissions) == 2
+    # duplicate notification for the same release: no new pass, no
+    # double commit, no extra retry event
+    retries_before = group.pmu.events.get("l2_admission_retry", 0)
+    group._retry_pending_context_admissions(1)
+    assert waiters[1].admission_status is ContextAdmissionStatus.WAIT_CAPACITY
+    assert len(group._pending_context_admissions) == 2
+    assert group.pmu.events.get("l2_admission_retry", 0) == retries_before
+    assert group.l2_sram.snapshot()["live_allocations"] == 2
+    group.reset()
+
+  def test_reset_cancels_pending_without_release(self):
+    hw = HardwareConfig().with_overrides(
+      hbm_fixed_latency_cycles=10, group_sram_bytes=L2_WAIT_BYTES)
+    group = TileGroup(hw, fidelity="full_memory", context_count=2)
+    blocker = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
+    group.load_task(blocker, input_bindings=POW_BINDINGS)
+    waiter_task = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
+    seq_b = group.load_context_task(
+      waiter_task, slot_index=1, context_name="waiter",
+      input_bindings=POW_BINDINGS, cycle=7)
+    assert seq_b.admission_status is ContextAdmissionStatus.WAIT_CAPACITY
+    gen_b = seq_b.context_launch_generation
+    assert len(group._pending_context_admissions) == 1
+    # the waiting ticket owns no allocation — reset must not release it
+    assert not [k for k in group._l2_handles if k[0] == gen_b]
+    group.reset()
+    assert seq_b.admission_status is ContextAdmissionStatus.CANCELLED
+    assert not group._pending_context_admissions
+    assert not group._pending_activations
+    assert not group._live_launches
+    assert group.l2_sram.snapshot()["live_allocations"] == 0
+    for t in group.tiles:
+      assert t.l1_allocator.snapshot()["live_allocations"] == 0
+    assert not group._grid_l2_pins
+    assert group.transfer_manager.inflight_count == 0
+
+  def test_same_formal_name_bindings_stay_launch_scoped(self):
+    """Both contexts use the formal name 'Y' (A's store destination and
+    B's prefetch source) with different actuals.  B's submit must not
+    overwrite A's mapping: A's final store still lands in A's IOVA
+    range and B's prefetch in B's."""
+    text = Path("examples/example_l2_admission_wait.mlir").read_text()
+    # rename A's output formal and B's input formal to the shared name Y
+    start_a = text.index("nest.context @ctx_a")
+    start_b = text.index("nest.context @ctx_b")
+    prog_idx = text.index("nexus.program")
+    ctx_a = text[start_a:start_b].replace("%A_OUT", "%Y")
+    ctx_b = text[start_b:prog_idx].replace("%B_IN", "%Y")
+    module = parse_workload_ir(
+      text[:start_a] + ctx_a + ctx_b + text[prog_idx:])
+    sim, _ = _admission_wait_sim()
+    name_maps = _admission_model_names(sim, module)
+    group = sim.group
+    model = lower_model_ir(module)
+    assert name_maps["ctx_a"]["Y"] == "A_OUT"
+    assert name_maps["ctx_b"]["Y"] == "B_IN"
+    seq_a = group.load_context_task(
+      model.tasks["ctx_a"], slot_index=0, context_name="ctx_a",
+      input_bindings=ADMISSION_WAIT_BINDINGS,
+      formal_bindings=name_maps["ctx_a"], cycle=0)
+    seq_b = group.load_context_task(
+      model.tasks["ctx_b"], slot_index=1, context_name="ctx_b",
+      input_bindings=ADMISSION_WAIT_BINDINGS,
+      formal_bindings=name_maps["ctx_b"], cycle=0)
+    assert seq_b.admission_status is ContextAdmissionStatus.WAIT_CAPACITY
+    for c in range(500000):
+      group.step(c)
+      if seq_a.done and seq_b.done:
+        break
+    assert seq_a.done and seq_b.done, (seq_a.fault_reason, seq_b.fault_reason)
+    events = json.loads(sim.tracer.to_chrome_json())["traceEvents"]
+    a_out = ADMISSION_WAIT_BINDINGS["A_OUT"]
+    b_in = ADMISSION_WAIT_BINDINGS["B_IN"]
+    a_in = ADMISSION_WAIT_BINDINGS["A_IN"]
+    store_addrs = [e["args"]["destination_address"] for e in events
+                   if e.get("name", "").startswith("dma.store:")]
+    pref_srcs = [e["args"]["source_address"] for e in events
+                 if e.get("name", "").startswith("dma.prefetch:")]
+    assert store_addrs, "no store transactions traced"
+    assert all(a_out.base_iova <= a < a_out.base_iova + a_out.size_bytes
+               for a in store_addrs), store_addrs
+    assert any(b_in.base_iova <= a < b_in.base_iova + b_in.size_bytes
+               for a in pref_srcs), pref_srcs
+    assert any(a_in.base_iova <= a < a_in.base_iova + a_in.size_bytes
+               for a in pref_srcs), pref_srcs
+    group.reset()
