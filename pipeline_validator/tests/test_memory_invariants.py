@@ -715,8 +715,7 @@ class TestHBMChannelMapping:
   @staticmethod
   def _view(address: int):
     from pipeline_validator.memory import ExternalOwner
-    from pipeline_validator.memory.allocator import (
-      AllocationHandle, BankSegment)
+    from pipeline_validator.memory.allocator import AllocationHandle, BankSegment
     from pipeline_validator.memory.transfer import ResolvedMemoryView
     owner = ExternalOwner("Y")
     segments = (BankSegment(0, address, 64),)
@@ -730,8 +729,7 @@ class TestHBMChannelMapping:
 
   @staticmethod
   def _txn(tm, txn_id: str, address: int, kind, op, owner=None):
-    from pipeline_validator.memory.transfer import (
-      MemoryTransaction, TransferLeg)
+    from pipeline_validator.memory.transfer import MemoryTransaction, TransferLeg
     view = TestHBMChannelMapping._view(address)
     txn = MemoryTransaction(
       transaction_id=txn_id, op=op,
@@ -748,7 +746,11 @@ class TestHBMChannelMapping:
     the second HBM read must wait rather than take a free channel 1."""
     from pipeline_validator.config import HardwareConfig
     from pipeline_validator.memory.transfer import (
-      StageWaitReason, TransferLegKind, TransferManager, TransferOp)
+      StageWaitReason,
+      TransferLegKind,
+      TransferManager,
+      TransferOp,
+    )
     cfg = HardwareConfig().with_overrides(
       hbm_channels=2, hbm_burst_bytes=64,
       hbm_fixed_latency_cycles=100)
@@ -767,8 +769,7 @@ class TestHBMChannelMapping:
     """Addresses 0 and 64 map to channels 0 and 1, so HBM writes issue
     in the same cycle and overlap."""
     from pipeline_validator.config import HardwareConfig
-    from pipeline_validator.memory.transfer import (
-      TransferLegKind, TransferManager, TransferOp)
+    from pipeline_validator.memory.transfer import TransferLegKind, TransferManager, TransferOp
     cfg = HardwareConfig().with_overrides(
       hbm_channels=2, hbm_burst_bytes=64,
       hbm_fixed_latency_cycles=100)
@@ -790,7 +791,11 @@ class TestHBMChannelMapping:
     address-derived channels differ."""
     from pipeline_validator.config import HardwareConfig
     from pipeline_validator.memory.transfer import (
-      StageWaitReason, TransferLegKind, TransferManager, TransferOp)
+      StageWaitReason,
+      TransferLegKind,
+      TransferManager,
+      TransferOp,
+    )
     cfg = HardwareConfig().with_overrides(
       hbm_channels=2, hbm_burst_bytes=64,
       hbm_fixed_latency_cycles=100, hbm_outstanding_limit=1)

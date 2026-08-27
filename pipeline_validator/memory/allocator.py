@@ -466,6 +466,11 @@ class BankedFreeExtentAllocator:
 
   # -- reset / snapshot -------------------------------------------------
 
+  def is_released(self, handle: AllocationHandle) -> bool:
+    """True if the allocation has been freed (RELEASED)."""
+    rec = self._live.get(handle.allocation_id)
+    return rec is None or rec.state == AllocationState.RELEASED
+
   def reset(self) -> None:
     self._generation += 1
     self._counter = 0

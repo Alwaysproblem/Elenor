@@ -67,6 +67,9 @@ class L2SRAM:
   ) -> tuple[BankSegment, ...]:
     return self._allocator.resolve_segments(handle, offset_bytes, size_bytes)
 
+  def is_released(self, handle: AllocationHandle) -> bool:
+    return self._allocator.is_released(handle)
+
   def reset(self) -> None:
     self._allocator.reset()
 
