@@ -20,9 +20,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .execution_ir import ExecGroupAction, ExecGroupActionOp, ExecStreamDesc, ExecTileGroupTask
+from .execution_ir import (
+  ExecDispatchRequest,
+  ExecGroupAction,
+  ExecGroupActionOp,
+  ExecReleaseRequest,
+  ExecStreamDesc,
+  ExecTileGroupTask,
+  GridInstanceId,
+)
+from .memory.allocator import MemoryInvariantError
 from .pmu import PMUCounter, StallReason
-from .runtime import EventStatus
+from .runtime import EventStatus, FaultCode
 
 if TYPE_CHECKING:
   from .tile_group import TileGroup
@@ -63,12 +72,28 @@ class TileGroupSequencer:
     self._outstanding_jobs: int = 0
     # PR 2: this sequencer's launch generation (set by TileGroup at load)
     self.context_launch_generation: int = 0
+    # PR 3: phase events issued by this sequencer's dispatches; done is
+    # gated until every one fires.
+    self._issued_phase_events: set[str] = set()
+    # PR 3: launch identity of the context this sequencer executes
+    # (context symbol, device slot, launch generation).
+    self.context_name: str = ""
+    self.device_slot: int = 0
 
   def note_job_started(self) -> None:
     self._outstanding_jobs += 1
 
   def note_job_done(self) -> None:
     self._outstanding_jobs -= 1
+
+  def grid_id(self, dispatch_ordinal: int) -> GridInstanceId:
+    """Identity of one dispatched grid in this launch (PR 3)."""
+    return GridInstanceId(
+      context_name=self.context_name,
+      device_slot=self.device_slot,
+      launch_generation=self.context_launch_generation,
+      dispatch_ordinal=dispatch_ordinal,
+    )
 
   def load(self, task: ExecTileGroupTask) -> None:
     self.task = task
@@ -77,6 +102,7 @@ class TileGroupSequencer:
     self._pending = None
     self._role_events.clear()
     self._issued_role_events.clear()
+    self._issued_phase_events.clear()
     self._next_dma_channel = 0
     self.owned_queue_ids.clear()
     self._outstanding_jobs = 0
@@ -118,10 +144,11 @@ class TileGroupSequencer:
     if self.action_index >= len(self.task.actions):
       # context_done covers grid_done and the final store (IR_SPEC
       # §3.10): don't mark done until every issued role completed
-      # and every DMA/collective job this sequencer issued drained.
       roles_done = all(ev in self._events_done
                        for ev in self._issued_role_events)
-      if roles_done and self._outstanding_jobs == 0:
+      phases_done = all(ev in self._events_done
+                        for ev in self._issued_phase_events)
+      if (roles_done and phases_done and self._outstanding_jobs == 0):
         self.done = True
       else:
         self.pmu.add_cycle("drain_wait", 1)
@@ -175,9 +202,9 @@ class TileGroupSequencer:
       self.pmu.add_event("tgs_dma_store")
       self.action_index += 1
     elif op == ExecGroupActionOp.DISPATCH_ROLE:
-      role_id = ins.args[0]
-      inrel_tag = ins.args[1] if len(ins.args) > 1 else ""
-      outready_tag = ins.args[2] if len(ins.args) > 2 else ""
+      request = ins.args[0]
+      assert isinstance(request, ExecDispatchRequest)
+      role_id = request.role_id
       assert self.task is not None
       binding = self.task.role_bindings.get(role_id)
       if binding is None:
@@ -187,18 +214,15 @@ class TileGroupSequencer:
         self.pmu.add_cycle("dispatch_wait", 1)
         return None
       ev = ins.dst or f"ev_role{role_id}"
-      phase_event_ids = {}
-      if inrel_tag:
-        phase_event_ids["input_released"] = inrel_tag
-      if outready_tag:
-        phase_event_ids["output_ready"] = outready_tag
       if not self.group.dispatch_role(
-          binding, cycle, event_id=ev,
-          phase_event_ids=phase_event_ids or None,
-          sequencer=self):
+          binding, cycle, request=request, event_id=ev, sequencer=self):
         return None
       self._role_events[role_id] = ev
       self._issued_role_events.add(ev)
+      if request.input_released_event:
+        self._issued_phase_events.add(request.input_released_event)
+      if request.output_ready_event:
+        self._issued_phase_events.add(request.output_ready_event)
       self.pmu.add_event("tgs_dispatch_role")
       self.action_index += 1
       return (role_id, ev)
@@ -229,12 +253,34 @@ class TileGroupSequencer:
       self.pmu.add_event("tgs_signal_event")
       self.action_index += 1
     elif op == ExecGroupActionOp.RELEASE_L2:
-      slot = ins.args[0]
-      self.group.release_l2_slot(
-        slot, cycle, generation=self.context_launch_generation)
+      request = ins.args[0]
+      assert isinstance(request, ExecReleaseRequest)
+      # Gate on the declared dependency events; keep the action pending
+      # via the existing wait mechanism (no new busy-poll state).
+      pending_events = tuple(
+        ev for ev in request.dependency_events
+        if ev not in self._events_done)
+      if pending_events:
+        self._pending = _GroupTaskWait(
+          events=pending_events, started_cycle=cycle)
+        self.pmu.add(StallReason.WAIT_EVENT, 1)
+        self.pmu.add_cycle("wait_event", 1)
+        return None
+      if self.group.runtime_enabled or self.group.memory_enabled:
+        try:
+          self.group.release_l2(request, sequencer=self, cycle=cycle)
+        except MemoryInvariantError as exc:
+          self.pmu.add_event("release_invariant_fault")
+          self.faulted = True
+          self.fault_reason = f"release invariant fault: {exc}"
+          self.done = True
+          if (self.group.runtime_enabled
+              and not (self.group.reset_domain.is_active
+                       or self.group.reset_domain.is_done)):
+            self.group.trigger_fault(
+              FaultCode.ADDRESS_FAULT, cycle=cycle, desc_id=str(exc))
+          return None
       self.pmu.add_event("tgs_release_l2")
-      self.action_index += 1
-    else:
       self.action_index += 1
     return None
 
@@ -251,7 +297,11 @@ class TileGroupSequencer:
     self._events_done.clear()
     self._pending = None
     self._role_events.clear()
+    self._issued_role_events.clear()
+    self._issued_phase_events.clear()
     self._next_dma_channel = 0
+    self.owned_queue_ids.clear()
+    self._outstanding_jobs = 0
     self.done = False
     self.faulted = False
     self.fault_reason = ""

@@ -26,7 +26,7 @@ Prefix hierarchy: ``tile.*`` (tile level), ``nest.*`` (group level),
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import ClassVar, Self, TypeAlias, cast
 
 from xdsl.dialects.builtin import (
@@ -274,6 +274,40 @@ class TaskRange(ParametrizedAttribute, TypeAttribute):
   name = "nest.task_range"
 
 
+@irdl_attr_definition
+class NestAggregate(ParametrizedAttribute):
+  """Signal aggregation policy: ``#nest.aggregate<all_tasks>``.
+
+  Declares how one dispatch aggregates ``tile.signal`` phase events
+  (PR 3).  V1 supports only ``all_tasks``: the phase result fires when
+  every logical task of the dispatch's task range has signalled.
+  """
+
+  name = "nest.aggregate"
+
+  mode: StringAttr
+
+  MODES: ClassVar[tuple[str, ...]] = ("all_tasks",)
+
+  @staticmethod
+  def of(mode: str) -> NestAggregate:
+    if mode not in NestAggregate.MODES:
+      raise ValueError(f"unsupported nest.aggregate mode '{mode}'")
+    return NestAggregate(StringAttr(mode))
+
+  @classmethod
+  def parse_parameters(cls, parser: AttrParser) -> list:
+    parser.parse_punctuation("<")
+    mode = parser.parse_identifier()
+    parser.parse_punctuation(">")
+    if mode not in cls.MODES:
+      parser.raise_error(f"unsupported nest.aggregate mode '{mode}'")
+    return [StringAttr(mode)]
+
+  def print_parameters(self, printer: Printer) -> None:
+    printer.print_string(f"<{self.mode.data}>")
+
+
 # ---------------------------------------------------------------------------
 # Shared parse/print helpers
 # ---------------------------------------------------------------------------
@@ -403,6 +437,44 @@ def _parse_symbol(parser: Parser) -> str:
 def _print_symbol(printer: Printer, sym: str) -> None:
   printer.print_string(" ")
   printer.print_symbol_name(sym)
+
+
+def _parse_signal_policy(parser: Parser) -> dict[str, str]:
+  """Parse the mandatory ``signal_policy { ... }`` block (PR 3).
+
+  Entries are ``<phase> = #nest.aggregate<mode>`` in any order; the
+  printer always emits ``input_released`` before ``output_ready``.
+  """
+  parser.parse_keyword("signal_policy")
+  parser.parse_punctuation("{")
+  policy: dict[str, str] = {}
+  while parser.parse_optional_punctuation("}") is None:
+    phase = parser.parse_identifier()
+    if phase not in TileSignalOp.PHASES:
+      parser.raise_error(f"unknown signal policy phase '{phase}'")
+    if phase in policy:
+      parser.raise_error(f"duplicate signal policy phase '{phase}'")
+    parser.parse_punctuation("=")
+    attr = parser.parse_attribute()
+    if not isinstance(attr, NestAggregate):
+      parser.raise_error(
+        f"signal policy phase '{phase}' expects a #nest.aggregate attribute")
+    policy[phase] = attr.mode.data
+    parser.parse_optional_punctuation(",")
+  return policy
+
+
+def _print_signal_policy(printer: Printer, op: NestDispatchOp) -> None:
+  printer.print_string(" signal_policy {")
+  policy = op.signal_policy
+  entries = [p for p in TileSignalOp.PHASES if p in policy]
+  for i, phase in enumerate(entries):
+    if i:
+      printer.print_string(", ")
+    printer.print_string(f" {phase} = #nest.aggregate<{policy[phase]}>")
+  if entries:
+    printer.print_string(" ")
+  printer.print_string("}")
 
 
 def _parse_operand_group(parser: Parser, keyword: str) -> list:
@@ -820,7 +892,7 @@ class NestDMAStoreOp(_NestAsyncOp):
 class NestDispatchOp(IRDLOperation):
   """``%grid, %inrel, %out = nest.dispatch.tasks.async @prog``
 
-  ``tasks(%t) ins(%b...) outs(%b...) depends_on(%e) : (three !nest.event types)``
+  ``tasks(%t) ins(%b...) outs(%b...) signal_policy { ... } depends_on(%e)``
 
   Function-call dispatch per reference.mlir section 4: the tile program is
   referenced by symbol; the placement comes from the enclosing
@@ -830,9 +902,14 @@ class NestDispatchOp(IRDLOperation):
 
     - grid_done      - all logical tasks returned;
     - input_released - all tasks completed their L2 read phase
-                       (``tile.signal input_released``);
+                       (``tile.signal input_released(%task)``);
     - output_ready   - all tasks completed their L2 write phase
-                       (``tile.signal output_ready``).
+                       (``tile.signal output_ready(%task)``).
+
+  ``signal_policy`` declares, per phase, how the dispatch aggregates
+  task signals (``#nest.aggregate<all_tasks>``).  The block is always
+  printed, possibly empty; a phase with a policy entry must carry a
+  non-empty result tag and a phase without entry an empty tag.
 
   Optional ``context = N`` pins every task of this dispatch to the
   tile-local UCE context index ``N``.
@@ -844,6 +921,8 @@ class NestDispatchOp(IRDLOperation):
 
   program = prop_def(StringAttr)
   context_id = opt_prop_def(IntegerAttr)
+  input_released_policy = opt_prop_def(NestAggregate)
+  output_ready_policy = opt_prop_def(NestAggregate)
   tasks = operand_def(TaskRange)
   ins = var_operand_def(NestBuffer)
   outs = var_operand_def(NestBuffer)
@@ -862,9 +941,16 @@ class NestDispatchOp(IRDLOperation):
     grid_tag: str,
     inrel_tag: str,
     outready_tag: str,
+    *,
+    signal_policy: Mapping[str, str],
     depends_on: Sequence = (),
     context_id: int | None = None,
   ):
+    for phase, mode in signal_policy.items():
+      if phase not in TileSignalOp.PHASES:
+        raise ValueError(f"unknown signal policy phase '{phase}'")
+      if mode not in NestAggregate.MODES:
+        raise ValueError(f"unsupported signal policy mode '{mode}'")
     super().__init__(
       result_types=[
         NestEvent(StringAttr(grid_tag)),
@@ -874,6 +960,12 @@ class NestDispatchOp(IRDLOperation):
       properties=_props({
         "program": StringAttr(program),
         "context_id": None if context_id is None else _index_attr(context_id),
+        "input_released_policy": (
+          None if "input_released" not in signal_policy
+          else NestAggregate.of(signal_policy["input_released"])),
+        "output_ready_policy": (
+          None if "output_ready" not in signal_policy
+          else NestAggregate.of(signal_policy["output_ready"])),
       }),
       operands=[[tasks], list(ins), list(outs), list(depends_on)],
     )
@@ -882,6 +974,16 @@ class NestDispatchOp(IRDLOperation):
       self.input_released.name_hint = inrel_tag
     if outready_tag:
       self.output_ready.name_hint = outready_tag
+
+  @property
+  def signal_policy(self) -> dict[str, str]:
+    """Declared phase → aggregation mode (source contract, PR 3)."""
+    policy: dict[str, str] = {}
+    if self.input_released_policy is not None:
+      policy["input_released"] = self.input_released_policy.mode.data
+    if self.output_ready_policy is not None:
+      policy["output_ready"] = self.output_ready_policy.mode.data
+    return policy
 
   def print(self, printer: Printer) -> None:
     _print_symbol(printer, self.program.data)
@@ -892,6 +994,7 @@ class NestDispatchOp(IRDLOperation):
     printer.print_string(")")
     _print_operand_group(printer, "ins", self.ins)
     _print_operand_group(printer, "outs", self.outs)
+    _print_signal_policy(printer, self)
     _print_depends_on(printer, self.depends_on)
     printer.print_string(" : (")
     for i, result in enumerate(self.results):
@@ -907,6 +1010,7 @@ class NestDispatchOp(IRDLOperation):
     tasks = _parse_operand_group(parser, "tasks")
     ins_ops = _parse_operand_group(parser, "ins")
     outs_ops = _parse_operand_group(parser, "outs")
+    signal_policy = _parse_signal_policy(parser)
     depends_on = _parse_depends_on(parser)
     if len(tasks) != 1:
       parser.raise_error("dispatch tasks(...) expects exactly one task range")
@@ -920,6 +1024,7 @@ class NestDispatchOp(IRDLOperation):
       parser.raise_error("dispatch expects three !nest.event results")
     tags = [t.tag.data for t in types]  # type: ignore[attr-defined]
     return cls(program, tasks[0], ins_ops, outs_ops, tags[0], tags[1], tags[2],
+               signal_policy=signal_policy,
                depends_on=depends_on, context_id=context_id)
 
 
@@ -1533,33 +1638,47 @@ class TileAwaitOp(IRDLOperation):
 
 @irdl_op_definition
 class TileSignalOp(IRDLOperation):
-  """``tile.signal input_released`` / ``tile.signal output_ready``.
+  """``tile.signal input_released(%task)`` / ``tile.signal output_ready(%task)``.
 
-  Phase signal (reference.mlir tile.signal): when every dispatched task of
-  one dispatch has signalled a phase, the corresponding dispatch result
-  event fires.  ``input_released`` = this task will not read its L2 input
-  subview again; ``output_ready`` = this task's output is visible in L2.
+  Phase signal (reference.mlir tile.signal), bound to the logical task
+  that emits it (PR 3): when every dispatched task of one dispatch has
+  signalled a phase, the corresponding dispatch result event fires.
+  ``input_released`` = this task will not read its L2 input subview
+  again; ``output_ready`` = this task's output is visible in L2.
+
+  The operand must be the tile program's ``!nest.task`` formal (block
+  arg 0); the legacy operand-less syntax is a parse error.
   """
 
   name = "tile.signal"
 
   phase = prop_def(StringAttr)
+  task = operand_def(NestTask)
 
   PHASES: ClassVar[tuple[str, ...]] = ("input_released", "output_ready")
 
-  def __init__(self, phase: str):
-    super().__init__(properties=_props({"phase": StringAttr(phase)}))
+  def __init__(self, phase: str, task):
+    super().__init__(
+      properties=_props({"phase": StringAttr(phase)}),
+      operands=[[task]],
+    )
 
   def print(self, printer: Printer) -> None:
     printer.print_string(" ")
     printer.print_string(self.phase.data)
+    printer.print_string("(")
+    printer.print_operand(self.task)
+    printer.print_string(")")
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
     phase = parser.parse_identifier()
     if phase not in cls.PHASES:
       parser.raise_error(f"unknown tile.signal phase '{phase}'")
-    return cls(phase)
+    parser.parse_punctuation("(")
+    task = parser.parse_operand()
+    parser.parse_punctuation(")")
+    return cls(phase, task)
 
 
 @irdl_op_definition
@@ -1621,6 +1740,7 @@ Elenor = Dialect(
     TileL1Buffer,
     NestTask,
     TaskRange,
+    NestAggregate,
     NexusEvent,
     NestGlobalMemref,
   ],
@@ -1630,6 +1750,7 @@ __all__ = [
   "DTYPE_BYTES",
   "Elenor",
   "NestActionLike",
+  "NestAggregate",
   "NestAllocOp",
   "NestAwaitOp",
   "NestBarrierOp",

@@ -2,7 +2,7 @@
 
 ## 这套模型模拟了什么、没模拟什么
 
-模拟了（V1 scope）：
+已模拟能力（V1 scope）：
 
 - 控制流层级 Group Task->Tile role->Engine 的逐周期推进；
 - 4 引擎延迟（Roofline）与 launch/wait 重叠；
@@ -15,6 +15,9 @@
   （owner/generation/pin/对齐/跨 bank segment）、逐腿 transfer route
   （HBM/Global DMA/NoC/L2/L1 bank/Local DMA）、容量/owner/generation/
   use-after-release 错误一律 fault、不产生 success event。
+- PR 3 task-bound phase/release protocol：`tile.signal <phase>(%task)`
+  以 logical task 驱动每个 grid 的 `all_tasks` 聚合；显式 event、
+  owner/generation 和 consumer pin 共同门控 role-aware L2 release。
 
 有意简化/未模拟（需明确告知用户的边界）：
 
@@ -32,6 +35,12 @@
   记录 layout/地址元数据（PR 2 起地址来自真实 transaction，不再 CRC 伪造）；
 - residency/cold-warm load 由 `ProgramResidencyManager` metadata 路径
   管理（program_id/version/hash/epoch）。
+- PR 3 聚合只支持 `#nest.aggregate<all_tasks>`；没有 quorum、subset 或
+  其他 aggregation mode；
+- logical task 到 physical tile 的 scheduler 仍固定为当前 1:1 映射；
+- 未实现 PR 4 gather；
+- 未实现 PR 5 memory trace lane/counter（现有 `tile_signal` instant 是
+  control-flow trace，不是 memory trace lane/counter）。
 
 ## V2 fidelity 边界（PR 2）
 
@@ -59,6 +68,5 @@
 - 子视图必须连续 row-major（对任一 `sizes[i] > 1` 的维度，所有尾随维度
   必须满足 `sizes[j] == backing_dims[j]`）；非连续视图被 verifier 拒绝
   （physical transfer model 只支持单段 byte range）。
-- `tile.signal(%task)` 逻辑 task 绑定属 PR 3。
 - 输入绑定按名字匹配（program block arg name_hint 为键），无按位置
   隐式绑定备选路径。

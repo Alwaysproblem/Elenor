@@ -22,7 +22,14 @@ from .engines import (
   MFEEngine,
   USEEngine,
 )
-from .execution_ir import ExecEngineDesc, ExecTileInst, ExecTileOp, ExecTileProgram
+from .execution_ir import (
+  ExecEngineDesc,
+  ExecTileInst,
+  ExecTileOp,
+  ExecTileProgram,
+  PhaseSignal,
+  TaskIdentity,
+)
 from .memory.l1_slot_frame import SlotFrame
 from .memory.l2_sram import L2SRAM
 from .pmu import PMUCounter, StallReason
@@ -84,11 +91,12 @@ class _UCEContext:
   trace_slice_name: str | None = None
   prepare_total: int = 0
   memory: _TileContextMemory | None = None  # PR 2: per-context memory state
+  task_identity: TaskIdentity | None = None  # PR 3: dispatch grid + logical task
 
 
 @dataclass
 class _TileContextMemory:
-  """Per-context resolved L2/L1 handles + logical task id (§5.2).
+  """Per-context resolved L2/L1 handles + task identity (§5.2, PR 3).
 
   ``l2_formal_handles`` is positional: index i = tile-program formal
   i+1 (formal 0 is the task handle).  ``l1_handles`` maps L1 buffer
@@ -96,11 +104,11 @@ class _TileContextMemory:
   """
 
   owner: object  # MemoryOwner
-  logical_task_id: int
-  launch_generation: int = 0
+  task_identity: TaskIdentity
   l2_formal_handles: tuple = ()
   l1_handles: dict = field(default_factory=dict)
   l2_resolver: L2SRAM | None = None
+
 
 
 @dataclass
@@ -154,7 +162,7 @@ class TileUCE:
     self._external_events_done: set[str] = set()
     self._completion_queue: deque[_UCEEventRef] = deque()
     self._event_done_callback: Callable[[str], None] | None = None
-    self._phase_signal_callback: Callable[[str, str, int], None] | None = None
+    self._phase_signal_callback: Callable[[PhaseSignal, int], None] | None = None
     self._engine_queues: dict[str, deque[_EngineQueueEntry]] = {
       "BOA": deque(),
       "EVU": deque(),
@@ -187,7 +195,8 @@ class TileUCE:
                    role_event_id: str | None,
                    prepare_cycles: int = 0,
                    context_id: int | None = None,
-                   memory: _TileContextMemory | None = None) -> int | None:
+                   memory: _TileContextMemory | None = None,
+                   task_identity: TaskIdentity | None = None) -> int | None:
     candidates = self.contexts if context_id is None else (self.contexts[context_id],)
     for ctx in candidates:
       if not self._context_available(ctx):
@@ -207,7 +216,7 @@ class TileUCE:
       ctx.frame_bind_remaining = (self.cfg.frame_bind_cycles
                                   if self.runtime_enabled else 0)
       ctx.memory = memory
-      ctx.fault_reason = ""
+      ctx.task_identity = task_identity
       if self.runtime_enabled:
         ctx.state = _UCEContextState.ACCEPT
       else:
@@ -620,8 +629,26 @@ class TileUCE:
       ctx.pc += 1
     elif op == ExecTileOp.SIGNAL_PHASE:
       phase = ins.args[0]
-      if self._phase_signal_callback is not None and ctx.role_event_id is not None:
-        self._phase_signal_callback(ctx.role_event_id, phase, self.tile_id)
+      if ctx.task_identity is not None:
+        signal = PhaseSignal(task=ctx.task_identity, phase=phase)
+        if self._phase_signal_callback is not None:
+          self._phase_signal_callback(signal, cycle)
+        if self.tracer is not None:
+          grid = ctx.task_identity.grid
+          self.tracer.instant(
+            f"Tile{self.tile_id}", f"UCE CTX{ctx.ctx_id}", "tile_signal",
+            cycle,
+            {
+              "context_name": grid.context_name,
+              "device_slot": grid.device_slot,
+              "launch_generation": grid.launch_generation,
+              "dispatch_ordinal": grid.dispatch_ordinal,
+              "task_id": ctx.task_identity.task_id,
+              "phase": phase,
+              "tile_id": self.tile_id,
+              "hardware_context_id": ctx.ctx_id,
+            },
+          )
       self.pmu.add_event("tile_signal")
       ctx.pc += 1
     elif op == ExecTileOp.LAUNCH_BOA:
@@ -809,8 +836,8 @@ class TileUCE:
     logical_task = 0
     gen = 0
     if ctx.memory is not None:
-      logical_task = ctx.memory.logical_task_id
-      gen = ctx.memory.launch_generation
+      logical_task = ctx.memory.task_identity.task_id
+      gen = ctx.memory.task_identity.grid.launch_generation
     txn_id = (f"{gen}:{role_ev}:"
               f"t{logical_task}:{entry.event_ref.local_name}")
     src = None
@@ -858,7 +885,7 @@ class TileUCE:
     # Compute byte offset after applying logical-task addressing.
     offsets = list(view.offsets)
     if view.task_dim is not None and view.task_dim < len(offsets):
-      offsets[view.task_dim] += memory.logical_task_id
+      offsets[view.task_dim] += memory.task_identity.task_id
     element_offset = 0
     for i, off in enumerate(offsets):
       stride = 1
@@ -949,6 +976,7 @@ class TileUCE:
     ctx.trace_slice_name = None
     ctx.prepare_total = 0
     ctx.memory = None
+    ctx.task_identity = None
 
   def _state_label(self, ctx: _UCEContext) -> str:
     if ctx.state == _UCEContextState.EMPTY:
@@ -1052,20 +1080,23 @@ class ComputeTile:
     self.streams.pop(qid, None)
   def get_stream(self, qid: int) -> StreamQueue:
     return self.streams[qid]
+
+  def can_accept_context(self, context_id: int | None = None) -> bool:
+    return self.uce.can_accept_context(context_id)
+
   def load_program(self, program: ExecTileProgram, role_id: int | None,
                    role_event_id: str | None,
                    prepare_cycles: int = 0,
                    context_id: int | None = None,
-                   memory: _TileContextMemory | None = None) -> int | None:
+                   memory: _TileContextMemory | None = None,
+                   task_identity: TaskIdentity | None = None) -> int | None:
     return self.uce.bind_context(program,
                                  role_id=role_id,
                                  role_event_id=role_event_id,
                                  prepare_cycles=prepare_cycles,
                                  context_id=context_id,
-                                 memory=memory)
-
-  def can_accept_context(self, context_id: int | None = None) -> bool:
-    return self.uce.can_accept_context(context_id)
+                                 memory=memory,
+                                 task_identity=task_identity)
 
   def available_context_id(self, preferred: int | None = None) -> int | None:
     return self.uce.available_context_id(preferred)

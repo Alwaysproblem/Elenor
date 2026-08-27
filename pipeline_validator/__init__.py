@@ -6,6 +6,7 @@ from .cli import main
 from .config import HardwareConfig, SimConfig, WorkloadConfig
 from .dialects import Elenor
 from .dialects.elenor import (
+  NestAggregate,
   NestAllocOp,
   NestAwaitOp,
   NestBarrierOp,
@@ -101,6 +102,7 @@ __all__ = [
   "HostRuntime",
   "KernelDriver",
   "MFEEngine",
+  "NestAggregate",
   "NestAllocOp",
   "NestAwaitOp",
   "NestBarrierOp",

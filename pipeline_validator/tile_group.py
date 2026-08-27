@@ -9,16 +9,23 @@ advancing the Tile Group Sequencer and every Compute Tile in lockstep.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .config import HardwareConfig
 from .execution_ir import (
+  ExecDispatchRequest,
   ExecGroupActionOp,
+  ExecReleaseRequest,
+  ExecSignalPolicy,
   ExecStreamDesc,
   ExecTileGroupTask,
   ExecTileOp,
   ExecTileRoleBinding,
+  GridInstanceId,
+  PhaseSignal,
+  TaskIdentity,
 )
 from .memory import (
   L2SRAM,
@@ -97,6 +104,35 @@ class _TileAdmission:
   bound: bool = False
 
 
+@dataclass
+class _GridL2Pin:
+  """One logical task's pin on one L2 allocation (PR 3)."""
+
+  task: TaskIdentity
+  buffer_slot: str
+  buffer_role: str
+  handle: AllocationHandle
+  consumer_id: str
+
+
+@dataclass
+class _GridSignalState:
+  """Aggregation state of one dispatched grid (PR 3).
+
+  ``expected_task_ids`` comes from the role binding's task domain;
+  a phase completes exactly once when ``seen[phase]`` equals it.
+  """
+  grid: GridInstanceId
+  expected_task_ids: frozenset[int]
+  policy: ExecSignalPolicy
+  phase_event_ids: dict[str, str]
+  seen: dict[str, set[int]] = field(default_factory=dict)
+  completed_phases: set[str] = field(default_factory=set)
+  sequencer: TileGroupSequencer | None = None
+
+  def phase_declared(self, phase: str) -> bool:
+    return phase in self.phase_event_ids
+
 
 class TileGroup:
   """One ELENOR Tile Group with 4 Compute Tiles."""
@@ -139,13 +175,17 @@ class TileGroup:
     # role dispatch fan-in by event id: event_id -> tile_mask / done tiles
     self._role_event_tile_mask: dict[str, int] = {}
     self._role_done_tiles: dict[str, set[int]] = {}
-    self._role_phase_events: dict[str, dict[str, str]] = {}
-    # role trace bookkeeping: event_id -> _RoleTrace
     self._role_trace: dict[str, _RoleTrace] = {}
-    # task trace bookkeeping
+    # PR 3: structured grid registries - signal aggregation + live launches
+    self._grid_signals: dict[GridInstanceId, _GridSignalState] = {}
+    self._live_launches: dict[
+      tuple[str, int, int], TileGroupSequencer] = {}
+    # PR 3: grid -> {task_id -> {buffer_slot -> pin}}
+    self._grid_l2_pins: dict[
+      GridInstanceId, dict[int, dict[str, _GridL2Pin]]] = {}
+    self._task_done_traced: bool = False
     self._task_trace_name: str | None = None
     self._task_start_cycle: int | None = None
-    self._task_done_traced: bool = False
     self.hbm = HBMRegion(
       base_iova=0,
       size_bytes=cfg.hbm_capacity_bytes,
@@ -155,9 +195,8 @@ class TileGroup:
     self._context_launch_generation: int = 0
     self._global_handles: dict[str, AllocationHandle] = {}  # binding name -> handle
     self._l2_handles: dict[tuple[int, str], AllocationHandle] = {}  # (gen, slot) -> handle
-    # role_event_id -> {tile_id: (logical_task_id, unique L2 handles)}
-    self._role_l2_pins: dict[
-      str, dict[int, tuple[int, list[AllocationHandle]]]] = {}
+    # PR 3: launch generation -> {buffer_slot -> alloc role}
+    self._l2_roles: dict[int, dict[str, str]] = {}
     # formal name -> actual binding name (model mode)
     self._formal_bindings: dict[str, str] = {}
     # PR 2: role_event_id -> {tile_id: [L1 AllocationHandle]}
@@ -352,61 +391,159 @@ class TileGroup:
     handles = self.l2_sram.commit(plan, cycle)
     for buf, handle in zip(task.l2_buffers, handles):
       self._l2_handles[(gen, buf.slot)] = handle
+    self._l2_roles[gen] = {buf.slot: buf.role for buf in task.l2_buffers}
     return True
 
-  def release_l2_slot(self, slot: str, cycle: int,
-                      generation: int | None = None) -> None:
-    """Request release by slot in the owning context launch generation."""
-    gen = (generation if generation is not None
-           else self._context_launch_generation)
-    handle = self._l2_handles.pop((gen, slot), None)
-    if handle is None:
-      return
-    if self.memory_enabled or self.runtime_enabled:
-      self.l2_sram.request_release(handle, handle.owner, cycle)
+  def release_l2(self, request: ExecReleaseRequest,
+                 sequencer: TileGroupSequencer, cycle: int) -> bool:
+    """Gated release of one context-owned L2 buffer (PR 3).
 
-  def _pin_role_l2(self, binding: ExecTileRoleBinding,
-                   role_event_id: str, logical_task_id: int,
-                   tile_id: int, generation: int, cycle: int) -> None:
-    """Pin each unique L2 allocation once for one logical task.
-
-    ``actuals`` contains both ins and outs; allocation-id dedup prevents
-    an inout buffer from receiving a duplicate pin.
+    The issuing sequencer has already confirmed every dependency event
+    fired.  Raises ``MemoryInvariantError`` on any ownership, role,
+    generation or pin violation; never silently succeeds.  The handle
+    stays in ``_l2_handles`` until context cleanup so a duplicate
+    release reaches the allocator's double-release check.
     """
-    unique: dict[str, AllocationHandle] = {}
-    for slot in binding.actuals:
-      handle = self._l2_handles.get((generation, slot))
-      if handle is not None:
-        unique.setdefault(handle.allocation_id, handle)
-    consumer_id = f"{role_event_id}:{logical_task_id}"
-    pinned: list[AllocationHandle] = []
+    gen = sequencer.context_launch_generation
+    slot = request.buffer_slot
+    handle = self._l2_handles.get((gen, slot))
+    if handle is None:
+      raise MemoryInvariantError(
+        f"release references unknown L2 buffer '{slot}'"
+        f" in launch generation {gen}")
+    expected_owner = ContextBufferOwner(
+      sequencer.context_name, gen, slot)
+    declared_role = self._l2_roles.get(gen, {}).get(slot, "")
+    if declared_role != request.buffer_role:
+      raise MemoryInvariantError(
+        f"release role mismatch on slot '{slot}':"
+        f" alloc '{declared_role}' != request '{request.buffer_role}'")
+    self.l2_sram.assert_live(handle, expected_owner)
+    launch_pins = [
+      (grid, pins) for grid, pins in self._grid_l2_pins.items()
+      if (grid.context_name == sequencer.context_name
+          and grid.launch_generation == gen)
+    ]
+    if request.buffer_role == "in":
+      # input pins must already be gone via the input_released aggregates
+      remaining = [
+        (grid, task_id) for grid, pins in launch_pins
+        for task_id, slot_pins in pins.items()
+        if slot in slot_pins]
+      if remaining:
+        raise MemoryInvariantError(
+          f"release of input slot '{slot}' before its input_released"
+          " aggregates unpinned every consumer")
+    else:
+      # out/inout: final store dependency fired; drop every matching
+      # consumer pin of this buffer.
+      for grid, pins in launch_pins:
+        for _task_id, slot_pins in pins.items():
+          pin = slot_pins.get(slot)
+          if pin is None or (pin.task.grid.dispatch_ordinal
+                             not in request.consumer_dispatch_ordinals):
+            continue
+          self.l2_sram.unpin(pin.handle, pin.consumer_id, cycle)
+          slot_pins.pop(slot, None)
+        if pins and all(not sp for sp in pins.values()):
+          self._grid_l2_pins.pop(grid, None)
+      remaining = [
+        (grid, task_id) for grid, pins in self._grid_l2_pins.items()
+        if (grid.context_name == sequencer.context_name
+            and grid.launch_generation == gen)
+        for task_id, slot_pins in pins.items()
+        if slot in slot_pins]
+      if remaining:
+        raise MemoryInvariantError(
+          f"release of slot '{slot}' with undeclared pinned consumers")
+    freed = self.l2_sram.request_release(handle, expected_owner, cycle)
+    if not freed:
+      raise MemoryInvariantError(
+        f"release of slot '{slot}' left pinned consumers")
+    return True
+
+  def _pin_grid_l2(self, grid: GridInstanceId,
+                   binding: ExecTileRoleBinding,
+                   task: TaskIdentity, cycle: int) -> None:
+    """Pin each unique L2 allocation once for one logical task of a grid.
+
+    ``actuals`` contains both ins and outs; slot dedup prevents an
+    inout buffer from receiving a duplicate pin.
+    """
+    if not (self.memory_enabled or self.runtime_enabled):
+      return
+    roles = self._l2_roles.get(grid.launch_generation, {})
+    slot_pins = self._grid_l2_pins.setdefault(
+      grid, {}).setdefault(task.task_id, {})
+    pinned: list[tuple[str, AllocationHandle, str]] = []
     try:
-      for handle in unique.values():
+      for slot in dict.fromkeys(binding.actuals):
+        handle = self._l2_handles.get((grid.launch_generation, slot))
+        if handle is None:
+          continue
+        consumer_id = (
+          f"{grid.context_name}:s{grid.device_slot}"
+          f":g{grid.launch_generation}:d{grid.dispatch_ordinal}"
+          f":t{task.task_id}:{slot}")
         self.l2_sram.pin(handle, consumer_id)
-        pinned.append(handle)
+        pinned.append((slot, handle, consumer_id))
     except MemoryInvariantError:
-      for handle in pinned:
+      for _slot, handle, consumer_id in pinned:
         self.l2_sram.unpin(handle, consumer_id, cycle)
       raise
-    self._role_l2_pins.setdefault(role_event_id, {})[tile_id] = (
-      logical_task_id, list(unique.values()))
+    for slot, handle, consumer_id in pinned:
+      slot_pins[slot] = _GridL2Pin(
+        task=task, buffer_slot=slot,
+        buffer_role=roles.get(slot, "inout"),
+        handle=handle, consumer_id=consumer_id)
 
-  def _release_role_l2_pins(self, role_event_id: str,
-                            tile_id: int, cycle: int) -> None:
-    """Unpin the unique L2 allocations consumed by one terminal task."""
-    tile_pins = self._role_l2_pins.get(role_event_id, {})
-    entry = tile_pins.pop(tile_id, None)
-    if entry is None:
+  def _unpin_grid_inputs(self, grid: GridInstanceId, cycle: int) -> None:
+    """Unpin every role='in' allocation of one grid (input_released)."""
+    pins = self._grid_l2_pins.get(grid)
+    if not pins:
       return
-    logical_task_id, handles = entry
-    consumer_id = f"{role_event_id}:{logical_task_id}"
-    for handle in handles:
-      try:
-        self.l2_sram.unpin(handle, consumer_id, cycle)
-      except MemoryInvariantError:
-        pass
-    if not tile_pins:
-      self._role_l2_pins.pop(role_event_id, None)
+    for task_id in list(pins):
+      for slot in list(pins[task_id]):
+        pin = pins[task_id][slot]
+        if pin.buffer_role != "in":
+          continue
+        try:
+          self.l2_sram.unpin(pin.handle, pin.consumer_id, cycle)
+        except MemoryInvariantError:
+          pass
+        pins[task_id].pop(slot)
+      if not pins[task_id]:
+        pins.pop(task_id)
+    if not pins:
+      self._grid_l2_pins.pop(grid, None)
+
+  def _unwind_grid_l2_pins(self, cycle: int,
+                           grids: list[GridInstanceId] | None = None) -> None:
+    """Idempotently unpin every (or only the selected) grid's L2 pins."""
+    if not (self.memory_enabled or self.runtime_enabled):
+      if grids is None:
+        self._grid_l2_pins.clear()
+      else:
+        for grid in grids:
+          self._grid_l2_pins.pop(grid, None)
+      return
+    targets = list(self._grid_l2_pins.items()) if grids is None else [
+      (grid, self._grid_l2_pins[grid])
+      for grid in grids if grid in self._grid_l2_pins]
+    for _grid, pins in targets:
+      for task_id in list(pins):
+        for slot in list(pins[task_id]):
+          pin = pins[task_id].pop(slot)
+          try:
+            self.l2_sram.unpin(pin.handle, pin.consumer_id, cycle)
+          except MemoryInvariantError:
+            pass
+        pins.pop(task_id, None)
+    if grids is None:
+      self._grid_l2_pins.clear()
+    else:
+      for grid in grids:
+        self._grid_l2_pins.pop(grid, None)
 
   def release_context_memory(self, cycle: int) -> None:
     """Release every context-owned L2/L1 allocation, pin and frame.
@@ -418,12 +555,13 @@ class TileGroup:
     """
     if not (self.memory_enabled or self.runtime_enabled):
       return
-    # Remove consumer pins first.  If RELEASE_L2 already marked a handle
-    # RELEASE_PENDING, the final reset-time unpin performs the actual free.
-    for role_event_id, tile_pins in list(self._role_l2_pins.items()):
-      for tile_id in list(tile_pins):
-        self._release_role_l2_pins(role_event_id, tile_id, cycle)
-    self._role_l2_pins.clear()
+    # PR 3: unwind grid consumer pins first.  If RELEASE_L2 already
+    # marked a handle RELEASE_PENDING, the final reset-time unpin
+    # performs the actual free.
+    self._unwind_grid_l2_pins(cycle)
+    # Structured grid registries belong to the drained launch.
+    self._grid_signals.clear()
+    self._live_launches.clear()
     for handle in list(self._l2_handles.values()):
       try:
         self.l2_sram.request_release(handle, handle.owner, cycle)
@@ -478,8 +616,8 @@ class TileGroup:
     self,
     binding: ExecTileRoleBinding,
     cycle: int,
+    request: ExecDispatchRequest,
     event_id: str | None = None,
-    phase_event_ids: dict[str, str] | None = None,
     sequencer: TileGroupSequencer | None = None,
   ) -> bool:
     """Atomically admit and bind one TileRole across all selected tiles.
@@ -489,6 +627,10 @@ class TileGroup:
     consumers, then binds exact contexts.  Any late failure rolls back
     all earlier commits/pins/frames/contexts and faults the issuing
     sequencer (never the default sequencer by accident).
+
+    PR 3: the dispatch's grid identity registers a ``_GridSignalState``
+    whose expected task set comes from the role binding's task domain;
+    every admitted context receives its ``TaskIdentity``.
     """
     role_id = binding.role_id
     tile_mask = binding.tile_mask
@@ -496,8 +638,17 @@ class TileGroup:
     seq = sequencer or self.sequencer
     prog = binding.tile_program
     gen = seq.context_launch_generation
+    grid = seq.grid_id(request.dispatch_ordinal)
     from_task = (binding.task_domain.from_task
                  if binding.task_domain is not None else 0)
+    to_task = (binding.task_domain.to_task
+               if binding.task_domain is not None else 0)
+    expected_task_ids = frozenset(range(from_task, to_task))
+    phase_event_ids: dict[str, str] = {}
+    if request.input_released_event:
+      phase_event_ids["input_released"] = request.input_released_event
+    if request.output_ready_event:
+      phase_event_ids["output_ready"] = request.output_ready_event
     admissions: list[_TileAdmission] = []
 
     def fail(reason: str) -> bool:
@@ -514,9 +665,9 @@ class TileGroup:
           adm.tile.rollback_program(adm.context_id)
         else:
           adm.tile.l1_frames[adm.context_id].release()
-      # Remove L2 consumer pins created during phase 2.
-      for adm in admissions:
-        self._release_role_l2_pins(ev, adm.tile.tile_id, cycle)
+      # Remove grid L2 consumer pins created during phase 2.
+      self._unwind_grid_l2_pins(cycle, [grid])
+      self._grid_signals.pop(grid, None)
       # Return every committed L1 allocation.
       for adm in admissions:
         for handle in adm.l1_handles:
@@ -528,8 +679,8 @@ class TileGroup:
       self._role_l1_handles.pop(ev, None)
       self._role_event_tile_mask.pop(ev, None)
       self._role_done_tiles.pop(ev, None)
-      self._role_phase_events.pop(ev, None)
       self._role_trace.pop(ev, None)
+
 
     # Phase 1: select exact contexts and plan all L1 bundles.  No commit,
     # frame prepare, pin or context bind is allowed in this phase.
@@ -602,15 +753,16 @@ class TileGroup:
             f"L1 frame prepare failed on tile {adm.tile.tile_id}")
       # Pin each unique L2 allocation once per logical task only after all
       # L1 commits/prepares succeeded.
-      if self.memory_enabled or self.runtime_enabled:
-        for adm in admissions:
-          self._pin_role_l2(
-            binding, ev, adm.logical_task_id,
-            adm.tile.tile_id, gen, cycle)
+      for adm in admissions:
+        self._pin_grid_l2(
+          grid, binding,
+          TaskIdentity(grid=grid, task_id=adm.logical_task_id), cycle)
       # Phase 2b: bind exact contexts.  Single-threaded cycle-step means no
       # other dispatcher can steal a context between plan and bind.
       from .tile import _TileContextMemory
       for adm in admissions:
+        task_identity = TaskIdentity(
+          grid=grid, task_id=adm.logical_task_id)
         l2_handles: tuple = ()
         if self.memory_enabled or self.runtime_enabled:
           l2_handles = tuple(
@@ -621,15 +773,15 @@ class TileGroup:
           for buf, handle in zip(prog.l1_buffers, adm.l1_handles)
         }
         memory = _TileContextMemory(
-          owner=ev, logical_task_id=adm.logical_task_id,
-          launch_generation=gen,
+          owner=ev, task_identity=task_identity,
           l2_formal_handles=l2_handles, l1_handles=l1_map,
           l2_resolver=self.l2_sram
           if (self.memory_enabled or self.runtime_enabled) else None)
         ctx_id = adm.tile.load_program(
           prog, role_id=role_id, role_event_id=ev,
           prepare_cycles=adm.prepare_cycles,
-          context_id=adm.context_id, memory=memory)
+          context_id=adm.context_id, memory=memory,
+          task_identity=task_identity)
         if ctx_id != adm.context_id:
           raise MemoryInvariantError(
             f"UCE context bind failed on tile {adm.tile.tile_id}")
@@ -638,10 +790,17 @@ class TileGroup:
       rollback()
       return fail(str(exc))
 
-    # Publish role bookkeeping only after every tile bound successfully.
+    # Publish role + grid bookkeeping only after every tile bound
+    # successfully.
     self._role_event_tile_mask[ev] = tile_mask
     self._role_done_tiles[ev] = set()
-    self._role_phase_events[ev] = phase_event_ids or {}
+    self._grid_signals[grid] = _GridSignalState(
+      grid=grid,
+      expected_task_ids=expected_task_ids,
+      policy=request.signal_policy,
+      phase_event_ids=phase_event_ids,
+      sequencer=seq,
+    )
     self._role_l1_handles[ev] = {
       adm.tile.tile_id: list(adm.l1_handles) for adm in admissions
       if adm.l1_handles
@@ -682,25 +841,52 @@ class TileGroup:
       self.pmu.add_cycle("program_cold_load", total_cold)
     return True
 
-  def _on_phase_signal(self, role_event_id: str, phase: str, tile_id: int) -> None:
-    phase_map = self._role_phase_events.get(role_event_id, {})
-    phase_ev = phase_map.get(phase)
-    if phase_ev is None or not phase_ev:
+  def _on_phase_signal(self, signal: PhaseSignal, cycle: int) -> None:
+    """Aggregate one task phase signal against its grid (PR 3).
+
+    1. retired launch -> stale, ignored (+PMU ``tile_signal_stale``);
+    2. live launch but unknown grid/task/phase -> invalid signal fault;
+    3. duplicate ``(grid, phase, task)`` -> idempotent ignore;
+    4. first legal signal completes the phase exactly once when every
+       expected task has signalled, then unpins input-role pins.
+    """
+    grid = signal.task.grid
+    launch_key = (
+      grid.context_name, grid.device_slot, grid.launch_generation)
+    seq = self._live_launches.get(launch_key)
+    if seq is None:
+      self.pmu.add_event("tile_signal_stale")
       return
-    mask = self._role_event_tile_mask.get(role_event_id, 0)
-    if mask == 0:
+    state = self._grid_signals.get(grid)
+    if (state is None
+        or signal.task.task_id not in state.expected_task_ids
+        or not state.phase_declared(signal.phase)):
+      self.pmu.add_event("tile_signal_invalid")
+      seq.faulted = True
+      seq.fault_reason = (
+        f"invalid tile signal: grid {grid} task {signal.task.task_id}"
+        f" phase '{signal.phase}'")
+      seq.done = True
+      if (self.runtime_enabled
+          and not (self.reset_domain.is_active
+                   or self.reset_domain.is_done)):
+        self.trigger_fault(
+          FaultCode.ADDRESS_FAULT, tile_id=-1, cycle=cycle,
+          desc_id=seq.fault_reason)
       return
-    self._role_event_tile_mask.setdefault(phase_ev, mask)
-    done = self._role_done_tiles.setdefault(phase_ev, set())
-    if tile_id in done:
+    seen = state.seen.setdefault(signal.phase, set())
+    if signal.task.task_id in seen:
+      self.pmu.add_event("tile_signal_duplicate")
       return
-    done.add(tile_id)
-    expected = bin(mask).count("1")
-    if len(done) >= expected:
-      rt = self._role_trace.get(role_event_id)
-      phase_seq = (rt.sequencer if rt is not None and rt.sequencer is not None
-                   else self.sequencer)
-      phase_seq.notify_event(phase_ev)
+    seen.add(signal.task.task_id)
+    if seen != state.expected_task_ids:
+      return
+    state.completed_phases.add(signal.phase)
+    phase_seq = state.sequencer or self.sequencer
+    phase_ev = state.phase_event_ids[signal.phase]
+    phase_seq.notify_event(phase_ev)
+    if signal.phase == "input_released":
+      self._unpin_grid_inputs(grid, cycle)
 
   @staticmethod
   def _program_bytes(prog) -> int:
@@ -837,7 +1023,9 @@ class TileGroup:
               tile_id=term.tile_id, cycle=cycle, desc_id=term.reason)
         if term.status != "done" or term.role_event_id is None:
           continue
-        # PR 2: release L1 frame + allocations on tile terminal (§5.7)
+        # PR 2: release L1 frame + allocations on tile terminal (§5.7).
+        # PR 3: L2 grid pins outlive the terminal - only the matching
+        # aggregate phase or a gated release may unpin them.
         if self.memory_enabled or self.runtime_enabled:
           t.l1_frames[term.ctx_id].release()
           tile_l1 = self._role_l1_handles.get(term.role_event_id, {})
@@ -846,8 +1034,6 @@ class TileGroup:
               t.l1_allocator.request_release(handle, handle.owner, cycle)
             except MemoryInvariantError:
               pass  # already released or stale - terminal must not fault
-          self._release_role_l2_pins(
-            term.role_event_id, t.tile_id, cycle)
         done_set = self._role_done_tiles.setdefault(term.role_event_id, set())
         if t.tile_id in done_set:
           continue
@@ -902,18 +1088,21 @@ class TileGroup:
     if self.runtime_enabled and self.reset_domain.is_active:
       self.reset_domain.step(cycle, group=self)
     self._aggregate_pmu()
-    # Prune completed sequencers; reclaim their namespaced stream queues
-    # and tile bindings so repeated submits don't grow them unboundedly.
+    # Prune completed sequencers; reclaim their namespaced stream
+    # queues, grid registries and retained handles so repeated submits
+    # don't grow them unboundedly (PR 3 retirement).
     remaining: list[TileGroupSequencer] = []
     for s in self._active_sequencers:
-      if s.done:
-        for qid in s.owned_queue_ids:
-          self.queues.pop(qid, None)
-          for t in self.tiles:
-            t.unbind_stream(qid)
-      else:
+      if not s.done:
         remaining.append(s)
+        continue
+      self._retire_sequencer(s, cycle)
+      for qid in s.owned_queue_ids:
+        self.queues.pop(qid, None)
+        for t in self.tiles:
+          t.unbind_stream(qid)
     self._active_sequencers = remaining
+
     all_done = len(self._active_sequencers) == 0
     if all_done and tr is not None:
       if not self._task_done_traced:
@@ -934,6 +1123,62 @@ class TileGroup:
         tr.instant("TileGroup", "Task", "group_task_done", cycle, {"event": cev})
         self._task_done_traced = True
     return all_done
+
+  def _retire_sequencer(self, s: TileGroupSequencer, cycle: int) -> None:
+    """Retire one completed launch (PR 3).
+
+    Drops the launch's grid signal state and live-launch registration,
+    then removes only the generation's already-RELEASED retained
+    handles.  Any unreleased handle or residual grid pin on a normally
+    completed launch converts to an invariant fault instead of a
+    silent prune.
+    """
+    gen = s.context_launch_generation
+    grids = [g for g, st in self._grid_signals.items() if st.sequencer is s]
+    for grid in grids:
+      self._grid_signals.pop(grid, None)
+    self._live_launches.pop((s.context_name, s.device_slot, gen), None)
+    if not (self.memory_enabled or self.runtime_enabled):
+      self._grid_l2_pins = {
+        g: pins for g, pins in self._grid_l2_pins.items()
+        if g.launch_generation != gen}
+      self._l2_roles.pop(gen, None)
+      return
+    retained = {key: handle for key, handle in self._l2_handles.items()
+                if key[0] == gen}
+    all_released = all(
+      self.l2_sram.is_released(handle) for handle in retained.values())
+    pin_residue = any(
+      any(slot_pins for slot_pins in pins.values())
+      for grid, pins in self._grid_l2_pins.items()
+      if grid.context_name == s.context_name
+      and grid.launch_generation == gen)
+    if not s.faulted and (not all_released or pin_residue):
+      s.faulted = True
+      s.fault_reason = (
+        "launch retirement invariant: unreleased handles or grid pins"
+        f" remain for generation {gen}")
+      self.pmu.add_event("release_invariant_fault")
+      if (self.runtime_enabled
+          and not (self.reset_domain.is_active
+                   or self.reset_domain.is_done)):
+        self.trigger_fault(
+          FaultCode.ADDRESS_FAULT, cycle=cycle, desc_id=s.fault_reason)
+      # Unwind the residue so the run still terminates with the fault
+      # surfaced instead of hanging on dead state.
+      self._unwind_grid_l2_pins(cycle)
+      for key, handle in retained.items():
+        try:
+          self.l2_sram.request_release(handle, handle.owner, cycle)
+        except MemoryInvariantError:
+          pass
+        self._l2_handles.pop(key, None)
+      self._l2_roles.pop(gen, None)
+      return
+    for key, handle in retained.items():
+      if self.l2_sram.is_released(handle):
+        self._l2_handles.pop(key, None)
+    self._l2_roles.pop(gen, None)
 
   def _reset_freezes_new_work(self) -> bool:
     """True after STOP_QUEUE until reset cleanup reaches DONE.
@@ -1023,13 +1268,16 @@ class TileGroup:
     self._role_event_tile_mask.clear()
     self._role_done_tiles.clear()
     self._role_trace.clear()
-    self._role_phase_events.clear()
+    # PR 3: clear structured grid registries
+    self._grid_signals.clear()
+    self._live_launches.clear()
+    self._grid_l2_pins.clear()
+    self._l2_roles.clear()
     # PR 2: bump launch generation, clear admission state
     self._context_launch_generation += 1
     self._global_handles.clear()
     self._l2_handles.clear()
     self._role_l1_handles.clear()
-    self._role_l2_pins.clear()
     self._txn_sequencer.clear()
     self.transfer_manager.reset()
     # A new standalone run is a fresh HBM binding epoch: old handles must
@@ -1067,6 +1315,10 @@ class TileGroup:
       self.sequencer.done = True
       return
     self.sequencer.context_launch_generation = self._context_launch_generation
+    self.sequencer.context_name = task.name
+    self.sequencer.device_slot = 0
+    self._live_launches[
+      (task.name, 0, self._context_launch_generation)] = self.sequencer
     self.sequencer.load(task)
     # pre-init streams declared in the task (some tasks init inline)
     for s in task.streams:
@@ -1131,10 +1383,32 @@ class TileGroup:
         action.args = tuple(prefix + a if isinstance(a, str) else a
                             for a in action.args)
       elif action.op == ExecGroupActionOp.DISPATCH_ROLE:
-        # args = (role_id, inrel_tag, outready_tag)
-        action.args = tuple(
-          prefix + a if isinstance(a, str) and a else a
-          for a in action.args)
+        # PR 3: args = (ExecDispatchRequest,); prefix only the event
+        # strings, never the grid identity (role_id/ordinal/policy).
+        request = action.args[0]
+        if isinstance(request, ExecDispatchRequest):
+          action.args = (
+            dataclasses.replace(
+              request,
+              input_released_event=(
+                prefix + request.input_released_event
+                if request.input_released_event else ""),
+              output_ready_event=(
+                prefix + request.output_ready_event
+                if request.output_ready_event else ""),
+            ),)
+      elif action.op == ExecGroupActionOp.RELEASE_L2:
+        # PR 3: args = (ExecReleaseRequest,); prefix dependency events
+        # only; slot/role/ordinals are grid-relative, not namespaced.
+        request = action.args[0]
+        if isinstance(request, ExecReleaseRequest):
+          action.args = (
+            dataclasses.replace(
+              request,
+              dependency_events=tuple(
+                prefix + ev if isinstance(ev, str) else ev
+                for ev in request.dependency_events),
+            ),)
     # Namespace stream IDs into the launch's integer queue space.
     qid_offset = (launch_id * 100 + slot_index) * 10000
     owned_qids: set[int] = set()
@@ -1195,12 +1469,17 @@ class TileGroup:
       return seq
     seq = TileGroupSequencer(self)
     seq.context_launch_generation = self._context_launch_generation
+    seq.context_name = context_name or task.name
+    seq.device_slot = slot_index
+    self._live_launches[
+      (seq.context_name, slot_index, self._context_launch_generation)] = seq
     seq.load(task)
-    seq.owned_queue_ids = owned_qids
     self._active_sequencers.append(seq)
+    seq.owned_queue_ids = owned_qids
     for s in task.streams:
       self.init_stream(s)
     return seq
+
   def reset(self) -> None:
     for t in self.tiles:
       t.reset()
@@ -1214,7 +1493,11 @@ class TileGroup:
     self._role_event_tile_mask.clear()
     self._role_done_tiles.clear()
     self._role_trace.clear()
-    self._role_phase_events.clear()
+    # PR 3: clear structured grid registries
+    self._grid_signals.clear()
+    self._live_launches.clear()
+    self._grid_l2_pins.clear()
+    self._l2_roles.clear()
     self._task_trace_name = None
     self._task_start_cycle = None
     self._task_done_traced = False
@@ -1225,7 +1508,6 @@ class TileGroup:
     self._global_handles.clear()
     self._l2_handles.clear()
     self._role_l1_handles.clear()
-    self._role_l2_pins.clear()
     self._txn_sequencer.clear()
     self.transfer_manager.reset()
     self.hbm.reset()

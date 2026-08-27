@@ -38,26 +38,33 @@ i → tile i), so `placement = 0xF` with `task.range 0..4` dispatches
 4 tasks across 4 tiles.
 
 **Dispatch** — `nest.dispatch.tasks.async @prog` consumes a logical
-task range, ins/outs L2 buffers, and a `depends_on` event. It returns
-THREE aggregated events: `grid_done` (all tasks returned),
+task range, ins/outs L2 buffers, and an optional `depends_on` event. It
+returns THREE aggregated events: `grid_done` (all tasks returned),
 `input_released` (all tasks completed their L2 read phase), and
-`output_ready` (all tasks completed their L2 write phase).
+`output_ready` (all tasks completed their L2 write phase). Its always
+printed `signal_policy { ... }` block (possibly `signal_policy {}`)
+declares each emitted phase with `#nest.aggregate<all_tasks>`.
 
-**Tile phase signals** — `tile.signal input_released` /
-`tile.signal output_ready` drive the dispatch phase events: when every
-dispatched task signals a phase, the corresponding dispatch result
-fires. The phase event is aggregated across the placement mask, not
-across logical task IDs — it fires when every physical tile in the
-placement has signalled.
+**Tile phase signals** — `tile.signal input_released(%task)` /
+`tile.signal output_ready(%task)` drive per-grid phase aggregation; the
+operand is tile-program block argument 0 (`!nest.task`). Each emission
+is keyed by `(context launch generation, grid instance, phase, logical
+task)`, and a phase result fires exactly once only after every expected
+logical task in that grid has signalled. Physical tile masks and UCE
+hardware-context ids are not aggregation identities.
 
 **Buffers** — `nest.alloc` produces SSA values typed
 `!nest.l2_buffer<slot>`; the slot name is the runtime L2 buffer id.
 At context admission, every `l2_buffers` entry is planned and committed
 as one atomic bundle on the L2 `BankedFreeExtentAllocator` (owner,
-generation, alignment, bank segments). `nest.release` issues a
-request_release on the owner's handle; with pinned consumers the buffer
-returns to the free map when the last pin unpins. The event type tag
-doubles as the runtime event id shared by the simulator and the trace.
+generation, alignment, bank segments). `input_released` aggregation
+unpins only role=`"in"` consumer pins. `output_ready` makes output
+visible in L2 but does not unpin role=`"out"`/`"inout"` consumers; their
+`nest.release` is gated by the final store after all required
+`output_ready` events. Release additionally validates its explicit event,
+owner, generation, live handle, and pin state before reclaiming the
+buffer. The event type tag doubles as the runtime event id shared by the
+simulator and the trace.
 
 **`depends_on(%e)`** expresses data dependencies directly on async ops
 (dispatch, store, release), lowered to wait actions by the lowering.

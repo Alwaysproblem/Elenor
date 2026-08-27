@@ -218,7 +218,12 @@ L2 → HBM final store from the `!nest.l2_buffer` into the
 
 ```mlir
 %grid, %inrel, %out = nest.dispatch.tasks.async @pow_4k_tile context = 1
-    tasks(%t) ins(%buf) outs(%buf) depends_on(%pref)
+    tasks(%t) ins(%buf) outs(%buf)
+    signal_policy {
+      input_released = #nest.aggregate<all_tasks>,
+      output_ready = #nest.aggregate<all_tasks>
+    }
+    depends_on(%pref)
     : (!nest.event<"grid">, !nest.event<"inrel">, !nest.event<"out">)
 ```
 
@@ -229,12 +234,22 @@ positionally to the tile program's L2 formals (after the leading
 shape/dtype exactly match the corresponding formal. Placement comes from
 the enclosing `nest.context`, not from this op.
 
+`signal_policy { ... }` is always printed, possibly as
+`signal_policy {}`. Each entry declares how one program phase aggregates
+with `#nest.aggregate<all_tasks>` (the only V1 mode). A policy entry
+requires the matching non-empty phase result tag; an omitted entry
+requires that result tag to be empty.
+
 - `grid_done` — all logical tasks returned (`tile.return`).
-- `input_released` — all tasks completed their L2 read phase
-  (`tile.signal input_released`). Aggregated across the placement mask:
-  fires when every physical tile in the placement has signalled.
-- `output_ready` — all tasks completed their L2 write phase
-  (`tile.signal output_ready`). Same aggregation.
+- `input_released` — every expected logical task emitted
+  `tile.signal input_released(%task)`.
+- `output_ready` — every expected logical task emitted
+  `tile.signal output_ready(%task)`.
+
+Phase signals are isolated by `(context launch generation, grid instance,
+phase, logical task)`. `GridInstanceId` contains the context name, device
+slot, launch generation, and dispatch ordinal; physical tile and Hardware
+Context are location details, never phase-aggregation identities.
 
 `depends_on` is optional (omitted if the dispatch has no dependency).
 
@@ -261,12 +276,19 @@ Collective engine op (reduce/broadcast/multicast). Produces one event.
 nest.release %buf depends_on(%store_ev)
 ```
 
-Reclaims the context-owned L2 buffer. In `runtime`/`full_memory`
-fidelity, this issues `request_release` on the buffer's
-`AllocationHandle`; if consumers still hold pins the buffer moves to
-`RELEASE_PENDING` and returns to the free map when the last pin unpins
-(tile terminal). `depends_on` is required (the buffer can only be
-reclaimed after the DMA has finished reading it).
+Reclaims the context-owned L2 buffer. `depends_on` is required, and
+release legality is determined by the buffer role from `nest.alloc`:
+
+- role=`"in"` must depend on exactly the `input_released` results of
+  every dispatch that consumes the buffer through `ins`.
+- role=`"out"` and role=`"inout"` must depend only on the final
+  `nest.dma.store.async` result for that buffer. That final store must
+  itself `depends_on` every producing dispatch's `output_ready` result.
+
+Every `nest.alloc` must have exactly one legal `nest.release` in the
+same context before `nest.return`. At runtime, release additionally
+checks the explicit events plus the allocation's owner, generation, live
+state, and consumer pins; it is not a best-effort free.
 
 ### 3.9 `nest.await`
 
@@ -384,19 +406,22 @@ Context (reference.mlir §375-376). Lowered to `WAIT` (1 operand) or
 ### 4.9 `tile.signal`
 
 ```mlir
-tile.signal input_released
-tile.signal output_ready
+tile.signal input_released(%task)
+tile.signal output_ready(%task)
 ```
 
-Phase signal (reference.mlir §378-379, §414-415). Drives the dispatch
-phase events:
+Phase signal (reference.mlir §378-379, §414-415). Its required operand
+must be block argument 0 of the enclosing `tile.program` (the
+`!nest.task` formal), so the runtime binds each emission to a logical
+task:
 
 - `input_released` — this task will not read its L2 input subview again.
 - `output_ready` — this task's output is now visible in L2.
 
-When every dispatched task of one dispatch has signalled a phase, the
-corresponding dispatch result event fires. The aggregation is across
-the placement mask (physical tiles), not across logical task IDs.
+The dispatch's `signal_policy` selects the declared phases. For each
+phase, the event fires exactly once only after every expected logical task
+in that `GridInstanceId` has signalled; duplicate task/phase signals are
+ignored. The physical placement mask does not aggregate phase signals.
 
 ### 4.10 `tile.return`
 
@@ -461,18 +486,28 @@ Tile program completion. Contributes to `grid_done` (reference.mlir
   - `@prog` must reference a defined `tile.program`.
   - Task range count must equal `popcount(placement)` (1:1 mapping).
   - `depends_on` operands must be events defined earlier in the body.
+  - Its `signal_policy` key set must exactly match the referenced
+    program's emitted `tile.signal` phase set; each mode must be
+    `all_tasks`. A declared phase requires a non-empty matching result
+    tag, and an undeclared phase requires an empty tag.
   - `context = N` (if present) must be >= 0; the upper bound is the
     simulator's `context_count` (checked at task load, not at IR verify).
-- `nest.await` operands must be events defined earlier.
 - `nest.dma.store.async` / `nest.release` `depends_on` operands must be
-  events defined earlier.
+  events defined earlier. Every `nest.alloc` has exactly one release
+  before `nest.return`: an `"in"` release's dependency SSA set is exactly
+  all matching consumer `input_released` events; an `"out"`/`"inout"`
+  release depends only on the final store, which waits on all matching
+  producer `output_ready` events.
+- `nest.await` operands must be events defined earlier.
 
 ### 5.4 Tile program body
 
 - All event tags (from `!tile.event<tag>` results) must be unique within
   the program body.
 - `tile.await` operands must be events defined earlier.
-- `tile.signal` phase must be `input_released` or `output_ready`.
+- `tile.signal` phase must be `input_released` or `output_ready`, and
+  its sole operand must be block argument 0 (the program's `!nest.task`
+  formal).
 
 ### 5.5 `nexus.program` body
 
@@ -495,19 +530,19 @@ to the IR ops.
 
 ### 6.1 Context body → ExecGroupAction list
 
-| IR op                       | ExecGroupAction                                                                           |
-| --------------------------- | ----------------------------------------------------------------------------------------- |
-| `nest.alloc`                | (no action; records `ExecL2Buffer`; L2 slot allocated lazily by DMA latency model)        |
-| `nest.subview`              | (no action; records `ExecMemoryView`)                                                     |
-| `nest.task.range`           | (no action; records `ExecTaskDomain`, attached to dispatch role bindings)                 |
-| `nest.dma.prefetch.async`   | `DMA_PREFETCH` args=(desc_id, ExecTransfer)                                               |
-| `nest.dma.store.async`      | `WAIT_EVENT` per depends_on; then `DMA_STORE` args=(desc_id, ExecTransfer)                |
-| `nest.dispatch.tasks.async` | `WAIT_EVENT` per depends_on; then `DISPATCH_ROLE` args=(role_id, inrel_tag, outready_tag) |
-| `nest.collective.async`     | `COLLECTIVE_RUN` args=(name, op, bytes, mask)                                             |
-| `nest.release`              | `WAIT_EVENT` per depends_on; then `RELEASE_L2` args=(slot)                                |
-| `nest.await`                | `WAIT_EVENT` per operand                                                                  |
-| `nest.barrier`              | `BARRIER_GROUP`                                                                           |
-| `nest.return`               | `SIGNAL_EVENT` args=(completion_event)                                                    |
+| IR op                       | ExecGroupAction                                                               |
+| --------------------------- | ----------------------------------------------------------------------------- |
+| `nest.alloc`                | (no action; records `ExecL2Buffer`; L2 bundle admitted at context start)      |
+| `nest.subview`              | (no action; records `ExecMemoryView`)                                         |
+| `nest.task.range`           | (no action; records `ExecTaskDomain`, attached to dispatch role bindings)     |
+| `nest.dma.prefetch.async`   | `DMA_PREFETCH` args=(desc_id, ExecTransfer)                                   |
+| `nest.dma.store.async`      | `WAIT_EVENT` per depends_on; then `DMA_STORE` args=(desc_id, ExecTransfer)    |
+| `nest.dispatch.tasks.async` | `WAIT_EVENT` per depends_on; then `DISPATCH_ROLE` args=(ExecDispatchRequest,) |
+| `nest.collective.async`     | `COLLECTIVE_RUN` args=(name, op, bytes, mask)                                 |
+| `nest.release`              | `WAIT_EVENT` per depends_on; then `RELEASE_L2` args=(ExecReleaseRequest,)     |
+| `nest.await`                | `WAIT_EVENT` per operand                                                      |
+| `nest.barrier`              | `BARRIER_GROUP`                                                               |
+| `nest.return`               | `SIGNAL_EVENT` args=(completion_event)                                        |
 
 `ExecTransfer` carries explicit `src`/`dst` `ExecMemoryView`s and the
 byte count; the sequencer reads `transfer.dst.base`/`transfer.bytes` for
@@ -515,29 +550,39 @@ prefetch and `transfer.src.base`/`transfer.bytes` for store. `global_inputs`,
 `l2_buffers`, `task_domain`, and per-binding `actuals` are recorded on the
 `ExecTileGroupTask`/`ExecTileRoleBinding` DTOs.
 
+`ExecDispatchRequest` preserves the role id, source-order dispatch ordinal,
+per-phase `ExecSignalPolicy`, and phase event ids; its action `dst` remains
+the `grid_done` event. `ExecReleaseRequest` preserves the verified buffer
+slot/role, matching consumer dispatch ordinals, and explicit dependency
+event ids. These structured DTOs are consumed directly by the runtime; it
+does not recover identity or release dependencies by parsing event strings.
+
 ### 6.2 Tile program body → ExecTileInst list
 
-| IR op              | ExecTileInst                                     |
-| ------------------ | ------------------------------------------------ |
-| `tile.alloc`       | (no action; records `ExecL1Buffer`)              |
-| `tile.subview`     | (no action; records `ExecMemoryView`)            |
-| `tile.load.async`  | `LAUNCH_MFE` (MFE "load", transfer on the desc)  |
-| `tile.store.async` | `LAUNCH_MFE` (MFE "store", transfer on the desc) |
-| `tile.pow.async`   | `LAUNCH_EVU` (EVU "pow")                         |
-| `tile.evu.async`   | `LAUNCH_EVU` (EVU op_name)                       |
-| `tile.boa.async`   | `LAUNCH_BOA` (BOA op_name)                       |
-| `tile.await`       | `WAIT` (1 operand) or `WAITALL` (2+)             |
-| `tile.signal`      | `SIGNAL_PHASE` args=(phase_name)                 |
-| `tile.return`      | `RET`                                            |
+| IR op              | ExecTileInst                                        |
+| ------------------ | --------------------------------------------------- |
+| `tile.alloc`       | (no action; records `ExecL1Buffer`)                 |
+| `tile.subview`     | (no action; records `ExecMemoryView`)               |
+| `tile.load.async`  | `LAUNCH_MFE` (MFE "load", transfer on the desc)     |
+| `tile.store.async` | `LAUNCH_MFE` (MFE "store", transfer on the desc)    |
+| `tile.pow.async`   | `LAUNCH_EVU` (EVU "pow")                            |
+| `tile.evu.async`   | `LAUNCH_EVU` (EVU op_name)                          |
+| `tile.boa.async`   | `LAUNCH_BOA` (BOA op_name)                          |
+| `tile.await`       | `WAIT` (1 operand) or `WAITALL` (2+)                |
+| `tile.signal`      | `SIGNAL_PHASE` args=(phase_name, task_formal_index) |
+| `tile.return`      | `RET`                                               |
 
 MFE load/store descriptors carry an `ExecTransfer` (src/dst views +
 bytes); the tile reads `desc.transfer.bytes` for the latency model.
 
 ### 6.3 Role binding
 
-Each unique `(program, placement_mask)` pair gets an auto-assigned
-`role_id` (starting from 0). Re-dispatching the same program with the
-same mask reuses the existing binding.
+Each unique `(program, placement_mask, context identity, task domain,
+actuals)` binding gets an auto-assigned `role_id` (starting from 0).
+Device slot is deliberately not part of this static role-binding identity.
+Each source dispatch still receives its own source-order `dispatch_ordinal`
+inside `ExecDispatchRequest`, which becomes part of `GridInstanceId` at
+runtime.
 
 ### 6.4 Model lowering (`nexus.*` → `ExecDeviceOp`)
 
@@ -562,18 +607,25 @@ the model completes.
 
 ## 7. Runtime: Phase Signal Aggregation
 
-When a tile executes `tile.signal <phase>`, the UCE calls
-`_phase_signal_callback(role_event_id, phase, tile_id)`.
+When a tile executes `tile.signal <phase>(%task)`, the UCE resolves the
+lowered task-formal index against its current `TaskIdentity` and calls
+`_on_phase_signal(PhaseSignal(task, phase), cycle)`.
 
-`TileGroup._on_phase_signal`:
+`TileGroup` keeps one signal state per `GridInstanceId`, with the expected
+logical task-id set, declared `ExecSignalPolicy`, phase event ids, and
+already-seen task ids. A signal is processed as follows:
 
-1. Looks up the dispatch's `phase_event_ids` map for the phase event id.
-2. Adds `tile_id` to the phase event's done-tile set.
-3. When the done count reaches `popcount(placement_mask)`, calls
-   `sequencer.notify_event(phase_event_id)`.
+1. A retired/non-live launch generation is stale and ignored.
+2. A live but unknown grid, task, or phase is invalid and faults the
+   owning sequencer.
+3. A duplicate `(grid, phase, task_id)` is ignored.
+4. A first valid signal is recorded; when its seen task ids exactly equal
+   the grid's expected logical-task set, `notify_event` fires that phase
+   event exactly once.
 
-This fires the `input_released` or `output_ready` dispatch result event,
-which resolves any `nest.await` or `depends_on` waiting on it.
+Thus `input_released` and `output_ready` resolve only the matching grid's
+waiters; physical tile id and UCE hardware-context id do not participate in
+the aggregation key.
 
 ## 8. Runtime: L2 Buffer Lifecycle
 
@@ -583,10 +635,13 @@ which resolves any `nest.await` or `depends_on` waiting on it.
   `ContextBufferOwner`, launch generation, alignment, bank segments).
   An L2 capacity failure at admission faults the sequencer before any
   DMA starts.
-- `nest.release` - `RELEASE_L2` action calls `request_release` on the
-  buffer's immutable handle; with outstanding consumer pins the buffer
-  moves to `RELEASE_PENDING` and returns to the free map when the last
-  pin unpins.
+- `nest.release` - `RELEASE_L2` first requires every explicit dependency
+  event to be complete, then validates the buffer role, owner, generation,
+  live handle, and required pin state before calling `request_release`.
+  `input_released` aggregation unpins only role=`"in"` consumers.
+  `output_ready` only makes L2 output visible; role=`"out"`/`"inout"`
+  pins remain until their final-store-gated release. An unsatisfied or
+  inconsistent release is an invariant fault, never a silent success.
 - `L2SRAM` capacity fault: if `plan_bundle` returns `AdmissionFailure`,
   the sequencer faults with `L2 capacity fault during context
 admission` and no completion event is produced.

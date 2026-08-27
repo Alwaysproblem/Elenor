@@ -14,10 +14,7 @@ from pathlib import Path
 from typing import cast
 
 from xdsl.context import Context
-from xdsl.dialects.builtin import (
-  Builtin,
-  ModuleOp,
-)
+from xdsl.dialects.builtin import Builtin, ModuleOp
 from xdsl.ir import Attribute
 from xdsl.parser import Parser
 from xdsl.printer import Printer
@@ -42,6 +39,7 @@ from .dialects.elenor import (
   TileEvent,
   TileL1Buffer,
   TileProgramDefOp,
+  TileSignalOp,
   TileSubviewOp,
 )
 
@@ -89,12 +87,11 @@ def _view_bytes(dims, dtype: str) -> int:
 def _int_list(arr) -> list[int]:
   return [int(d.value.data) for d in arr.data]
 
+
 def _shape_type(
   type_attr: Attribute,
 ) -> NestBuffer | NestGlobalMemref | NestGlobalView | NestL2View | TileL1Buffer:
-  if not isinstance(
-    type_attr, (NestBuffer, NestGlobalMemref, NestGlobalView, NestL2View, TileL1Buffer)
-  ):
+  if not isinstance(type_attr, (NestBuffer, NestGlobalMemref, NestGlobalView, NestL2View, TileL1Buffer)):
     raise VerifyException(f"expected shape-typed memory attribute, got {type(type_attr).__name__}")
   return type_attr
 
@@ -104,9 +101,7 @@ def _shape_bytes(type_attr: Attribute) -> int:
   return _view_bytes(_int_list(shaped.dims), shaped.dtype.data)
 
 
-def _assert_contiguous_subview(
-  sizes: list[int], backing_dims: list[int], op_name: str,
-) -> None:
+def _assert_contiguous_subview(sizes: list[int], backing_dims: list[int], op_name: str) -> None:
   """V1 only allows contiguous row-major subviews so every transfer resolves
   to one logical byte range.  For any dim ``i`` with ``sizes[i] > 1``, every
   trailing dim ``j > i`` must satisfy ``sizes[j] == backing_dims[j]``."""
@@ -115,10 +110,7 @@ def _assert_contiguous_subview(
       continue
     for j in range(i + 1, len(sizes)):
       if sizes[j] != backing_dims[j]:
-        raise VerifyException(
-          "non-contiguous subviews are not supported by the physical"
-          " transfer model")
-
+        raise VerifyException("non-contiguous subviews are not supported by the physical transfer model")
 
 
 def _shape_key(type_attr: Attribute) -> tuple[tuple[int, ...], str]:
@@ -210,7 +202,8 @@ def _verify_context(context: NestContextOp, programs: dict[str, TileProgramDefOp
   for i, arg in enumerate(ctx_block.args):
     if not isinstance(arg.type, NestGlobalMemref):
       raise VerifyException(
-        f"nest.context '@{context.sym_name.data}' formal {i} must be !nest.global_memref")
+        f"nest.context '@{context.sym_name.data}' formal {i} must be !nest.global_memref"
+      )
 
   body = _body_ops(context)
   seen_events: set[str] = set()
@@ -220,6 +213,8 @@ def _verify_context(context: NestContextOp, programs: dict[str, TileProgramDefOp
   for op in body:
     if isinstance(op, NestAllocOp):
       slot = op.slot.data
+      if op.role.data not in ("in", "out", "inout"):
+        raise VerifyException(f'nest.alloc slot \'{slot}\' role must be "in", "out" or "inout"')
       if slot in seen_buffers:
         raise VerifyException(f"duplicate L2 buffer slot '{slot}'")
       seen_buffers.add(slot)
@@ -243,8 +238,7 @@ def _verify_context(context: NestContextOp, programs: dict[str, TileProgramDefOp
       sizes = _int_list(op.sizes)
       strides = _int_list(op.strides)
       if len(offsets) != len(parent) or len(sizes) != len(parent) or len(strides) != len(parent):
-        raise VerifyException(
-          f"nest.subview rank mismatch on '{name}': expected {len(parent)} dims")
+        raise VerifyException(f"nest.subview rank mismatch on '{name}': expected {len(parent)} dims")
       # Rule 8: V1 strides must be unit
       if any(s != 1 for s in strides):
         raise VerifyException("non-unit strides are not supported in V1")
@@ -253,18 +247,17 @@ def _verify_context(context: NestContextOp, programs: dict[str, TileProgramDefOp
       _assert_contiguous_subview(sizes, parent, "nest.subview")
       view_type = _shape_type(op.result.type)
       if _int_list(view_type.dims) != sizes or view_type.dtype.data != formal_type.dtype.data:
-        raise VerifyException(
-          "nest.subview result type must match sizes and source dtype")
+        raise VerifyException("nest.subview result type must match sizes and source dtype")
       # Rule 6: bounds
       for d, (o, s, pd) in enumerate(zip(offsets, sizes, parent)):
         if o < 0 or s < 1:
-          raise VerifyException(
-            f"nest.subview dim {d} requires offset >= 0 and size >= 1")
+          raise VerifyException(f"nest.subview dim {d} requires offset >= 0 and size >= 1")
         if o + s > pd:
           raise VerifyException(
-            f"nest.subview exceeds bounds of '{name}' dim {d}: offset {o} + size {s} > {pd}")
+            f"nest.subview exceeds bounds of '{name}' dim {d}: offset {o} + size {s} > {pd}"
+          )
       # Rule 6: byte overflow
-      if _view_bytes(sizes, formal_type.dtype.data) >= 2 ** 63:
+      if _view_bytes(sizes, formal_type.dtype.data) >= 2**63:
         raise VerifyException("nest.subview byte count overflows int64")
       continue
 
@@ -275,14 +268,12 @@ def _verify_context(context: NestContextOp, programs: dict[str, TileProgramDefOp
         src_bytes = _shape_bytes(op.src.type)
         dst_bytes = _shape_bytes(op.dst.type)
         if src_bytes != dst_bytes:
-          raise VerifyException(
-            f"transfer '{op.name}' src bytes ({src_bytes}) != dst bytes ({dst_bytes})")
+          raise VerifyException(f"transfer '{op.name}' src bytes ({src_bytes}) != dst bytes ({dst_bytes})")
       elif isinstance(op, NestDMAStoreOp):
         src_bytes = _shape_bytes(op.src.type)
         dst_bytes = _shape_bytes(op.dst.type)
         if src_bytes != dst_bytes:
-          raise VerifyException(
-            f"transfer '{op.name}' src bytes ({src_bytes}) != dst bytes ({dst_bytes})")
+          raise VerifyException(f"transfer '{op.name}' src bytes ({src_bytes}) != dst bytes ({dst_bytes})")
       tag = op.result.type.tag.data
       if tag in seen_events:
         raise VerifyException(f"duplicate event tag '{tag}'")
@@ -309,15 +300,18 @@ def _verify_context(context: NestContextOp, programs: dict[str, TileProgramDefOp
       if len(ins_list) != len(l2_formals) or len(outs_list) != len(l2_formals):
         raise VerifyException(
           f"dispatch '@{prog_sym}' passes {total} actuals"
-          f" but tile.program declares {len(l2_formals)} l2 formals")
+          f" but tile.program declares {len(l2_formals)} l2 formals"
+        )
       for i, (actual, formal) in enumerate(zip(ins_list, l2_formals)):
         if not isinstance(actual.type, NestBuffer) or _shape_key(actual.type) != _shape_key(formal.type):
           raise VerifyException(
-            f"dispatch actual {i} type does not match tile.program '@{prog_sym}' formal {i}")
+            f"dispatch actual {i} type does not match tile.program '@{prog_sym}' formal {i}"
+          )
       for i, (actual, formal) in enumerate(zip(outs_list, l2_formals)):
         if not isinstance(actual.type, NestBuffer) or _shape_key(actual.type) != _shape_key(formal.type):
           raise VerifyException(
-            f"dispatch actual {i} type does not match tile.program '@{prog_sym}' formal {i}")
+            f"dispatch actual {i} type does not match tile.program '@{prog_sym}' formal {i}"
+          )
       # Validate 1:1 logical-task-to-tile mapping
       task_op = cast(NestTaskRangeOp, op.tasks.owner)
       num_tasks = int(task_op.to_task.value.data) - int(task_op.from_task.value.data)
@@ -338,20 +332,43 @@ def _verify_context(context: NestContextOp, programs: dict[str, TileProgramDefOp
             for d, (o, s, pd) in enumerate(zip(offsets, sizes, parent)):
               if o < 0 or s < 1 or o + s > pd:
                 raise VerifyException(
-                  f"tile.subview exceeds bounds of formal {i} dim {d}:"
-                  f" offset {o} + size {s} > {pd}")
+                  f"tile.subview exceeds bounds of formal {i} dim {d}: offset {o} + size {s} > {pd}"
+                )
           else:
             if td < 0 or td >= len(parent):
-              raise VerifyException(
-                "tile.subview task_dim must be a valid dimension index")
+              raise VerifyException("tile.subview task_dim must be a valid dimension index")
             o = offsets[td]
             s = sizes[td]
             pd = parent[td]
             tmax = to_task - 1
             if o + tmax + s > pd:
               raise VerifyException(
-                f"tile.subview on formal {i} dim {td}:"
-                f" offset {o} + max task {tmax} + size {s} exceeds {pd}")
+                f"tile.subview on formal {i} dim {td}: offset {o} + max task {tmax} + size {s} exceeds {pd}"
+              )
+      # PR 3: signal_policy must exactly match the program's emitted
+      # phases; V1 only supports all_tasks aggregation.
+      prog_phases = _program_signal_phases(prog_def)
+      policy = op.signal_policy
+      if set(policy) != prog_phases:
+        raise VerifyException(
+          f"dispatch '@{prog_sym}' signal_policy phases {sorted(policy)}"
+          f" must match tile.program signal phases {sorted(prog_phases)}"
+        )
+      for mode in policy.values():
+        if mode != "all_tasks":
+          raise VerifyException(
+            f"dispatch '@{prog_sym}' signal policy mode '{mode}' is not supported in V1"
+          )
+      inrel_tag = op.input_released.type.tag.data
+      outready_tag = op.output_ready.type.tag.data
+      if ("input_released" in policy) != bool(inrel_tag):
+        raise VerifyException(
+          f"dispatch '@{prog_sym}' input_released policy and event tag must be declared together"
+        )
+      if ("output_ready" in policy) != bool(outready_tag):
+        raise VerifyException(
+          f"dispatch '@{prog_sym}' output_ready policy and event tag must be declared together"
+        )
       # phase tags (input_released / output_ready) are optional (empty = no phase)
       for r in op.results:
         if not isinstance(r.type, NestEvent):
@@ -394,6 +411,99 @@ def _verify_context(context: NestContextOp, programs: dict[str, TileProgramDefOp
 
     raise VerifyException(f"unexpected nest context body op '{op.name}'")
 
+  _verify_release_graph(body)
+
+
+def _program_signal_phases(prog: TileProgramDefOp) -> frozenset[str]:
+  """Phases the tile program actually emits via ``tile.signal``."""
+  return frozenset(op.phase.data for op in _body_ops(prog) if isinstance(op, TileSignalOp))
+
+
+def _verify_release_graph(body: list) -> None:
+  """PR 3 static ownership graph: every ``nest.alloc`` has exactly one
+  role-legal ``nest.release`` before ``nest.return``, gated on the
+  matching aggregate events / final store of its consumers.
+  """
+  from .dialects.elenor import NestAllocOp, NestDispatchOp, NestDMAStoreOp, NestReleaseOp, NestReturnOp
+
+  allocs: dict = {}
+  releases: dict = {}
+  stores: dict = {}
+  dispatches: list = []
+  return_index = len(body)
+  for idx, op in enumerate(body):
+    if isinstance(op, NestAllocOp):
+      allocs[op.result] = op
+    elif isinstance(op, NestReleaseOp):
+      releases.setdefault(op.buffer, []).append((idx, op))
+    elif isinstance(op, NestDMAStoreOp):
+      stores.setdefault(op.src, []).append(op)
+    elif isinstance(op, NestReturnOp):
+      return_index = idx
+    elif isinstance(op, NestDispatchOp):
+      dispatches.append(op)
+
+  for buffer, alloc in allocs.items():
+    slot = alloc.slot.data
+    role = alloc.role.data
+    rels = releases.get(buffer, [])
+    if len(rels) != 1:
+      raise VerifyException(
+        f"nest.alloc slot '{slot}' requires exactly one nest.release in the same context"
+      )
+    rel_idx, rel = rels[0]
+    if rel_idx > return_index:
+      raise VerifyException(f"nest.release of slot '{slot}' must appear before nest.return")
+    if not rel.depends_on:
+      raise VerifyException(f"nest.release of slot '{slot}' requires at least one depends_on event")
+    deps = list(rel.depends_on)
+
+    ins_consumers = [d for d in dispatches if buffer in d.ins]
+    outs_producers = [d for d in dispatches if buffer in d.outs]
+    if role == "in":
+      expected = []
+      for d in ins_consumers:
+        if "input_released" not in d.signal_policy:
+          raise VerifyException(
+            f"release of input slot '{slot}' lacks a matching input_released consumer dispatch"
+          )
+        expected.append(d.input_released)
+      if sorted(deps, key=str) != sorted(expected, key=str) or len(set(deps)) != len(deps):
+        raise VerifyException(
+          f"nest.release of input slot '{slot}' must depend on exactly"
+          " the input_released results of every consuming dispatch"
+        )
+    else:
+      if not outs_producers:
+        raise VerifyException(
+          f"nest.release of slot '{slot}' (role '{role}') lacks a matching dispatch producer in outs"
+        )
+      buffer_stores = stores.get(buffer, [])
+      if not buffer_stores:
+        raise VerifyException(
+          f"nest.release of slot '{slot}' (role '{role}') requires a final nest.dma.store.async"
+        )
+      last_store = buffer_stores[-1]
+      if len(deps) != 1 or deps[0] is not last_store.result:
+        raise VerifyException(
+          f"nest.release of slot '{slot}' (role '{role}') must depend"
+          " only on its final nest.dma.store.async result"
+        )
+      expected_out = []
+      for d in outs_producers:
+        if "output_ready" not in d.signal_policy:
+          raise VerifyException(f"release of slot '{slot}' lacks a matching output_ready producer dispatch")
+        expected_out.append(d.output_ready)
+      missing = [e for e in expected_out if e not in last_store.depends_on]
+      if missing:
+        raise VerifyException(
+          f"final store of slot '{slot}' must depend on every producing dispatch output_ready result"
+        )
+
+  for buffer, _rels in releases.items():
+    if buffer not in allocs:
+      raise VerifyException("nest.release operand must be a nest.alloc result from the same context")
+
 
 def _program_subviews_of_formal(prog: TileProgramDefOp, formal_pos: int) -> list:
   """Return all TileSubviewOp ops in prog whose src is block.args[formal_pos]."""
@@ -424,8 +534,7 @@ def _verify_program(prog: TileProgramDefOp) -> None:
     raise VerifyException(f"tile.program '@{prog.sym_name.data}' first formal must be !nest.task")
   for i, arg in enumerate(args[1:], start=1):
     if not isinstance(arg.type, NestBuffer):
-      raise VerifyException(
-        f"tile.program '@{prog.sym_name.data}' formal {i} must be !nest.l2_buffer")
+      raise VerifyException(f"tile.program '@{prog.sym_name.data}' formal {i} must be !nest.l2_buffer")
 
   body = _body_ops(prog)
   seen_events: set[str] = set()
@@ -446,8 +555,7 @@ def _verify_program(prog: TileProgramDefOp) -> None:
       sizes = _int_list(op.sizes)
       strides = _int_list(op.strides)
       if len(offsets) != len(parent) or len(sizes) != len(parent) or len(strides) != len(parent):
-        raise VerifyException(
-          f"tile.subview rank mismatch: expected {len(parent)} dims")
+        raise VerifyException(f"tile.subview rank mismatch: expected {len(parent)} dims")
       # Rule 8: V1 strides must be unit
       if any(s != 1 for s in strides):
         raise VerifyException("non-unit strides are not supported in V1")
@@ -461,8 +569,7 @@ def _verify_program(prog: TileProgramDefOp) -> None:
       # result type must match sizes and source dtype
       view_type = _shape_type(op.result.type)
       if _int_list(view_type.dims) != sizes or view_type.dtype.data != source_type.dtype.data:
-        raise VerifyException(
-          "tile.subview result type must match sizes and source dtype")
+        raise VerifyException("tile.subview result type must match sizes and source dtype")
       continue
 
     if isinstance(op, (TileLoadOp, TileStoreOp, TilePowOp, TileEvuOp, TileBoaOp)):
@@ -470,9 +577,7 @@ def _verify_program(prog: TileProgramDefOp) -> None:
         raise VerifyException(f"expected tile.event result type in '{op.name}'")
       tag = op.result.type.tag.data
       if tag in seen_events:
-        raise VerifyException(
-          f"duplicate event tag '{tag}' in tile program '@{prog.sym_name.data}'"
-        )
+        raise VerifyException(f"duplicate event tag '{tag}' in tile program '@{prog.sym_name.data}'")
       seen_events.add(tag)
       defined_events.add(tag)
       # Rule 9: transfer byte equality (load/store only)
@@ -480,14 +585,12 @@ def _verify_program(prog: TileProgramDefOp) -> None:
         src_bytes = _shape_bytes(op.src.type)
         dst_bytes = _shape_bytes(op.dst.type)
         if src_bytes != dst_bytes:
-          raise VerifyException(
-            f"transfer '{op.name}' src bytes ({src_bytes}) != dst bytes ({dst_bytes})")
+          raise VerifyException(f"transfer '{op.name}' src bytes ({src_bytes}) != dst bytes ({dst_bytes})")
       elif isinstance(op, TileStoreOp):
         src_bytes = _shape_bytes(op.src.type)
         dst_bytes = _shape_bytes(op.dst.type)
         if src_bytes != dst_bytes:
-          raise VerifyException(
-            f"transfer '{op.name}' src bytes ({src_bytes}) != dst bytes ({dst_bytes})")
+          raise VerifyException(f"transfer '{op.name}' src bytes ({src_bytes}) != dst bytes ({dst_bytes})")
       continue
 
     if isinstance(op, TileAwaitOp):
@@ -502,12 +605,12 @@ def _verify_program(prog: TileProgramDefOp) -> None:
     if isinstance(op, TileSignalOp):
       if op.phase.data not in TileSignalOp.PHASES:
         raise VerifyException(f"unknown tile.signal phase '{op.phase.data}'")
+      if _formal_index(op.task, block) != 0:
+        raise VerifyException("tile.signal operand must be the tile.program task formal (block arg 0)")
       continue
 
     if isinstance(op, TileAllocOp):
       continue
-
-
 
 
 def _body_ops(op) -> list:
@@ -529,7 +632,8 @@ def _verify_nexus_program(program: NexusProgramOp, contexts: dict[str, NestConte
       raise VerifyException(f"nexus.program input {i} must be !nest.global_memref")
     if not (arg.name_hint or "").strip():
       raise VerifyException(
-        f"nexus.program input {i} has no name; global inputs must be named for input binding")
+        f"nexus.program input {i} has no name; global inputs must be named for input binding"
+      )
 
   seen_events: set[str] = set()
   defined_events: set[str] = set()
@@ -551,12 +655,13 @@ def _verify_nexus_program(program: NexusProgramOp, contexts: dict[str, NestConte
       if len(op.actuals) != len(formal_types):
         raise VerifyException(
           f"submit_context '@{ctx_sym}' passes {len(op.actuals)} actuals"
-          f" but nest.context '@{ctx_sym}' declares {len(formal_types)} formals")
+          f" but nest.context '@{ctx_sym}' declares {len(formal_types)} formals"
+        )
       for i, (actual, formal) in enumerate(zip(op.actuals, formal_types)):
         if _shape_key(actual.type) != _shape_key(formal):
           raise VerifyException(
-            f"submit_context actual {i} type does not match"
-            f" nest.context '@{ctx_sym}' formal {i}")
+            f"submit_context actual {i} type does not match nest.context '@{ctx_sym}' formal {i}"
+          )
       continue
 
     if isinstance(op, NexusAwaitOp):

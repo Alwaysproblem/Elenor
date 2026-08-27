@@ -154,6 +154,70 @@ class ExecTaskDomain:
 
 
 # ---------------------------------------------------------------------------
+# Frozen value objects (signal aggregation & gated release, PR 3)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GridInstanceId:
+  """Identity of one dispatched grid (one nest.dispatch.tasks.async).
+
+  Aggregation key for phase signals: device slot, UCE hardware
+  context, physical tile and logical task stay independent fields.
+  """
+
+  context_name: str
+  device_slot: int
+  launch_generation: int
+  dispatch_ordinal: int
+
+
+@dataclass(frozen=True)
+class TaskIdentity:
+  """Identity of one logical task instance inside one grid."""
+
+  grid: GridInstanceId
+  task_id: int
+
+
+@dataclass(frozen=True)
+class PhaseSignal:
+  """One ``tile.signal`` emission bound to its logical task."""
+
+  task: TaskIdentity
+  phase: str
+
+
+@dataclass(frozen=True)
+class ExecSignalPolicy:
+  """Aggregation policy of one dispatch, per phase (``all_tasks``)."""
+
+  input_released: str | None
+  output_ready: str | None
+
+
+@dataclass(frozen=True)
+class ExecDispatchRequest:
+  """Structured DISPATCH_ROLE request; ``dst`` carries grid_done."""
+
+  role_id: int
+  dispatch_ordinal: int
+  signal_policy: ExecSignalPolicy
+  input_released_event: str
+  output_ready_event: str
+
+
+@dataclass(frozen=True)
+class ExecReleaseRequest:
+  """Structured RELEASE_L2 request with verified consumer ordinals."""
+
+  buffer_slot: str
+  buffer_role: str
+  consumer_dispatch_ordinals: tuple[int, ...]
+  dependency_events: tuple[str, ...]
+
+
+# ---------------------------------------------------------------------------
 # Container DTOs (mutable — sequencer rewrites args in place)
 # ---------------------------------------------------------------------------
 

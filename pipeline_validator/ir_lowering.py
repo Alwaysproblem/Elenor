@@ -19,7 +19,6 @@ from .dialects.elenor import (
   NestAwaitOp,
   NestBarrierOp,
   NestBuffer,
-  NestCollectiveOp,
   NestContextOp,
   NestDispatchOp,
   NestDMAStoreOp,
@@ -53,6 +52,7 @@ from .dialects.elenor import (
 )
 from .execution_ir import (
   ExecDeviceOp,
+  ExecDispatchRequest,
   ExecEngineDesc,
   ExecGlobalInput,
   ExecGroupAction,
@@ -61,6 +61,8 @@ from .execution_ir import (
   ExecL2Buffer,
   ExecMemoryView,
   ExecModel,
+  ExecReleaseRequest,
+  ExecSignalPolicy,
   ExecTaskDomain,
   ExecTileFormal,
   ExecTileGroupTask,
@@ -152,6 +154,19 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
   task_domains: dict[SSAValue, ExecTaskDomain] = {}
   l2_buffers: list[ExecL2Buffer] = []
   actions: list[ExecGroupAction] = []
+  # PR 3: pre-index dispatch ordinals and the verifier-confirmed
+  # per-buffer consumer/producer data flow before generating actions.
+  dispatch_ordinals: dict[NestDispatchOp, int] = {}
+  ins_consumers: dict[SSAValue, list[int]] = {}
+  outs_producers: dict[SSAValue, list[int]] = {}
+  for body_op in _body_ops(context):
+    if isinstance(body_op, NestDispatchOp):
+      ordinal = len(dispatch_ordinals)
+      dispatch_ordinals[body_op] = ordinal
+      for actual in body_op.ins:
+        ins_consumers.setdefault(actual, []).append(ordinal)
+      for actual in body_op.outs:
+        outs_producers.setdefault(actual, []).append(ordinal)
   role_bindings: dict[int, ExecTileRoleBinding] = {}
   placement = int(context.placement.value.data)
 
@@ -270,24 +285,22 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
       grid_tag = _event_tag(body_op.grid_done.type)
       inrel_tag = _event_tag(body_op.input_released.type)
       outready_tag = _event_tag(body_op.output_ready.type)
+      policy = body_op.signal_policy
+      request = ExecDispatchRequest(
+        role_id=role_id,
+        dispatch_ordinal=dispatch_ordinals[body_op],
+        signal_policy=ExecSignalPolicy(
+          input_released=policy.get("input_released"),
+          output_ready=policy.get("output_ready"),
+        ),
+        input_released_event=inrel_tag,
+        output_ready_event=outready_tag,
+      )
       actions.append(
         ExecGroupAction(
           ExecGroupActionOp.DISPATCH_ROLE,
-          args=(role_id, inrel_tag, outready_tag),
+          args=(request,),
           dst=grid_tag,
-        )
-      )
-    elif isinstance(body_op, NestCollectiveOp):
-      actions.append(
-        ExecGroupAction(
-          ExecGroupActionOp.COLLECTIVE_RUN,
-          args=(
-            body_op.collective.data,
-            body_op.collective.data,
-            int(body_op.bytes_total.value.data),
-            int(body_op.participant_mask.value.data),
-          ),
-          dst=_event_tag(body_op.result.type),
         )
       )
     elif isinstance(body_op, NestReleaseOp):
@@ -300,8 +313,21 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
           )
         )
       buffer = _l2_buffer(objects, body_op.buffer, body_op.name)
+      if buffer.role == "in":
+        consumers = ins_consumers.get(body_op.buffer, [])
+      else:
+        consumers = outs_producers.get(body_op.buffer, [])
       actions.append(
-        ExecGroupAction(ExecGroupActionOp.RELEASE_L2, args=(buffer.slot,))
+        ExecGroupAction(
+          ExecGroupActionOp.RELEASE_L2,
+          args=(ExecReleaseRequest(
+            buffer_slot=buffer.slot,
+            buffer_role=buffer.role,
+            consumer_dispatch_ordinals=tuple(sorted(set(consumers))),
+            dependency_events=tuple(
+              _event_tag(dep.type) for dep in body_op.depends_on),
+          ),),
+        )
       )
     elif isinstance(body_op, NestAwaitOp):
       for operand in body_op.events:
@@ -554,8 +580,15 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
       else:
         raise VerifyException("tile.await requires at least one event operand")
     elif isinstance(body_op, TileSignalOp):
+      task_index = next(
+        (i for i, arg in enumerate(op.body.block.args) if arg is body_op.task),
+        None,
+      )
+      if task_index is None:
+        raise VerifyException(
+          "tile.signal operand must be a tile.program block argument")
       insts.append(
-        ExecTileInst(ExecTileOp.SIGNAL_PHASE, args=(body_op.phase.data,))
+        ExecTileInst(ExecTileOp.SIGNAL_PHASE, args=(body_op.phase.data, task_index))
       )
     elif isinstance(body_op, TileReturnOp):
       insts.append(ExecTileInst(ExecTileOp.RET))
@@ -570,6 +603,7 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
     formals=tuple(formals),
     l1_buffers=tuple(l1_buffers),
   )
+
 
 
 # ---------------------------------------------------------------------------

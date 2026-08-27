@@ -68,12 +68,12 @@ def make_pow_tile_program(
       l1,
       load,
       TileAwaitOp([load.result]),
-      TileSignalOp("input_released"),
+      TileSignalOp("input_released", task_arg),
       pow_op,
       TileAwaitOp([pow_op.result]),
       store,
       TileAwaitOp([store.result]),
-      TileSignalOp("output_ready"),
+      TileSignalOp("output_ready", task_arg),
       TileReturnOp(),
     ]
   )
@@ -145,6 +145,10 @@ def make_pow_task(num_group_chunks: int = 4) -> ModuleOp:
       f"ev_role_pow{group}",
       f"ev_inrel_pow{group}",
       f"ev_outready_pow{group}",
+      signal_policy={
+        "input_released": "all_tasks",
+        "output_ready": "all_tasks",
+      },
       depends_on=[prefetches[group].result],
     )
     dispatches.append(dispatch)
