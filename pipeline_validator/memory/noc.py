@@ -25,12 +25,13 @@ class VCId(IntEnum):
 
 @dataclass
 class Flit:
-  """One NoC flit."""
+  """One NoC flit.  ``tag`` is a deterministic transaction/leg string
+  used by the TransferManager to query or cancel the pending flit."""
   vc: int
   src: int
   dst: int
   bytes_total: int
-  tag: int = 0
+  tag: str = ""
   arrived_cycle: int = 0
 
 
@@ -145,6 +146,27 @@ class NoCRouter:
         contention += 1
     self.pmu_switch_contention += contention
     return sent
+
+  def contains(self, tag: str) -> bool:
+    """True if a pending (not yet traversed) flit carries ``tag``."""
+    return any(
+      flit.tag == tag
+      for vc in self.vcs.values()
+      for flit in vc._pending)
+
+  def cancel(self, tag: str) -> int | None:
+    """Remove a pending flit with ``tag``; return its VC id, or None.
+
+    Only pending flits are removed here — a traversed flit has already
+    consumed downstream credit and is the manager's responsibility to
+    return via ``return_credit``.
+    """
+    for vc in self.vcs.values():
+      for flit in list(vc._pending):
+        if flit.tag == tag:
+          vc._pending.remove(flit)
+          return vc.vc_id
+    return None
 
   def return_credit(self, vc: int, n: int = 1) -> None:
     self.vcs[vc].return_credit(n)

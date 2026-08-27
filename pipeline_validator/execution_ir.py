@@ -25,8 +25,6 @@ class ExecTileOp(Enum):
   LAUNCH_EVU = "launch.evu"
   LAUNCH_MFE = "launch.mfe"
   LAUNCH_USE = "launch.use"
-  LAUNCH_DMA_LOAD = "dma_load"
-  LAUNCH_DMA_STORE = "dma_store"
   WAIT = "wait"
   WAITALL = "waitall"
   FENCE = "fence"
@@ -83,16 +81,27 @@ class ExecGlobalInput:
 
 @dataclass(frozen=True)
 class ExecMemoryView:
-  """Logical view; physical address materialized in PR 2."""
+  """Logical view; physical address materialized in PR 2.
+
+  Field order is fixed: ``space, base, backing_dims, dims, offsets,
+  strides, dtype, element_bytes, bytes, task_dim``.  ``backing_dims`` is
+  the full shape of the underlying allocation or context global formal;
+  ``dims`` is the view extents.  ``strides`` preserves the source IR
+  unit-stride metadata (V1 only emits unit strides).  ``element_bytes``
+  is the dtype byte width materialized once at lowering; runtime uses it
+  to compute byte offsets without importing the xDSL dialect.
+  """
 
   space: str  # "global" | "l2" | "l1"
   base: str  # "global:<name>" | <l2 slot> | "formal:<i>" | "l1:<k>"
+  backing_dims: tuple[int, ...]  # full shape of the backing allocation/formal
   dims: tuple[int, ...]  # view extents
   offsets: tuple[int, ...]  # element offsets
+  strides: tuple[int, ...]  # source IR strides (V1: all unit)
   dtype: str
+  element_bytes: int  # dtype byte width, materialized at lowering
   bytes: int
   task_dim: int | None = None
-
 
 @dataclass(frozen=True)
 class ExecTransfer:
@@ -102,7 +111,6 @@ class ExecTransfer:
   dst: ExecMemoryView
   bytes: int
 
-
 @dataclass(frozen=True)
 class ExecL2Buffer:
   """Context-owned L2 buffer descriptor."""
@@ -111,6 +119,8 @@ class ExecL2Buffer:
   dims: tuple[int, ...]
   dtype: str
   role: str  # "in" | "out" | "inout"
+  element_bytes: int  # dtype byte width, materialized at lowering
+  alignment: int  # 1 when source op omits alignment
   bytes: int
 
 
@@ -121,6 +131,8 @@ class ExecL1Buffer:
   name: str
   dims: tuple[int, ...]
   dtype: str
+  element_bytes: int  # dtype byte width, materialized at lowering
+  alignment: int  # 1 when source op omits alignment
   bytes: int
 
 

@@ -51,10 +51,13 @@ across logical task IDs — it fires when every physical tile in the
 placement has signalled.
 
 **Buffers** — `nest.alloc` produces SSA values typed
-`!nest.l2_buffer<slot>`; the slot name is the L2 slot id used by the
-group DMA latency model. `nest.release` frees the slot (in
-`full_memory` fidelity). The event type tag doubles as the runtime
-event id shared by the simulator and the trace.
+`!nest.l2_buffer<slot>`; the slot name is the runtime L2 buffer id.
+At context admission, every `l2_buffers` entry is planned and committed
+as one atomic bundle on the L2 `BankedFreeExtentAllocator` (owner,
+generation, alignment, bank segments). `nest.release` issues a
+request_release on the owner's handle; with pinned consumers the buffer
+returns to the free map when the last pin unpins. The event type tag
+doubles as the runtime event id shared by the simulator and the trace.
 
 **`depends_on(%e)`** expresses data dependencies directly on async ops
 (dispatch, store, release), lowered to wait actions by the lowering.
@@ -79,6 +82,30 @@ custom-assembly IR from disk.
 | MFE                  | bandwidth-bound stream shaping                            | `design/elenor_mfe/`                            |
 | USE                  | slower-clock state engine                                 | `design/elenor_use/`                            |
 | PMU                  | unique stall attribution (one primary owner per cycle)    | arch §21.6                                      |
+
+## Fidelity modes
+
+`SimConfig(fidelity=...)` selects the memory model depth (default
+`full_memory`):
+
+| Fidelity      | Handles / addresses                 | Latency model                         |
+| ------------- | ----------------------------------- | ------------------------------------- |
+| `timing_only` | none (src/dst views are null)       | one collapsed bandwidth+launch leg    |
+| `runtime`     | real L1/L2 allocation + HBM binding | one collapsed bandwidth+launch leg    |
+| `full_memory` | real L1/L2 allocation + HBM binding | full per-leg route (HBM/NoC/DMA/bank) |
+
+All three modes enforce the global-binding contract (missing / overlapping /
+out-of-capacity / wrong-permission bindings fail at load time). In
+`runtime`/`full_memory`, every allocation is an immutable
+`AllocationHandle` with owner, generation and bank segments; capacity,
+alignment, owner, generation and use-after-release errors raise
+`MemoryInvariantError` and never produce a success event.
+
+`full_memory` advances each transfer leg-by-leg: prefetch walks
+`HBM_READ → GLOBAL_DMA → NOC_RESPONSE → L2_WRITE`, tile load walks
+`L2_READ → LOCAL_DMA → L1_WRITE`, with per-bank segment issuance
+(same-bank serializes, different banks overlap). `TileGroup.snapshot()`
+exposes `memory.fidelity/hbm/l2/l1/transfers/noc` for verification.
 
 Hardware defaults follow the **Balanced-small** profile (arch §12.3):
 64 tiles / 1 MB L1 per tile / 8 MB Group SRAM. The validator runs a

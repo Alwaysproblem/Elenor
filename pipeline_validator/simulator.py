@@ -126,6 +126,17 @@ class Simulator:
     self._program_name_registry: dict[str, int] = {}
     self._next_program_id: int = 1
 
+  def _ensure_fault_drain(self, reason: str, cycle: int) -> None:
+    """Begin reset/drain once for a sequencer/runtime fault."""
+    if not self.group.runtime_enabled:
+      return
+    rd = self.group.reset_domain
+    if rd.is_active or rd.is_done:
+      return
+    self.group.trigger_fault(
+      self.group._fault_code_for_reason(reason),
+      cycle=cycle, desc_id=reason)
+
   def run(
     self,
     module: ModuleOp,
@@ -148,11 +159,12 @@ class Simulator:
       raise ValueError(
         f"context @{ctx_op.sym_name.data} pins device context {pin}"
         f" but device_context_count is {self.sim.device_context_count}")
-    self.group.load_task(task)
+    self.group.load_task(task, input_bindings=bindings)
     self.cycle = 0
     self._trace.clear()
     completed = False
     reason = ""
+    fault_reason: str | None = None
     trace_tile = self.sim.trace_tile
 
     while self.cycle < self.sim.max_cycles:
@@ -166,13 +178,23 @@ class Simulator:
         reason = f"credit invariant violated at cycle {self.cycle}"
         break
 
-      if done:
-        if self.group.sequencer.faulted:
+      if self.group.sequencer.faulted and fault_reason is None:
+        fault_reason = self.group.sequencer.fault_reason
+        self._ensure_fault_drain(fault_reason, self.cycle)
+      if fault_reason is not None:
+        # Fault result is returned only after drain/reset cleanup completed
+        # in runtime/full_memory. timing_only has no reset domain.
+        if (not self.group.runtime_enabled
+            or self.group.reset_domain.is_done):
           completed = False
-          reason = f"faulted: {self.group.sequencer.fault_reason}"
-        else:
-          completed = True
-          reason = "group task complete"
+          reason = f"faulted: {fault_reason}"
+          break
+        self.cycle += 1
+        continue
+
+      if done:
+        completed = True
+        reason = "group task complete"
         break
       self.cycle += 1
     else:
@@ -235,11 +257,12 @@ class Simulator:
     returned = False
     completed = False
     reason = ""
+    fault_reason: str | None = None
     trace_tile = self.sim.trace_tile
 
     while self.cycle < self.sim.max_cycles:
-      # 1. advance device PC: issue submits / pass awaits / return
-      while pc < len(model.body):
+      # 1. advance device PC only before a fault freezes new submits.
+      while fault_reason is None and pc < len(model.body):
         dop = model.body[pc]
         if dop.op == "submit":
           pin = model.context_pins.get(dop.ctx_name)
@@ -250,8 +273,17 @@ class Simulator:
           if slot is None:
             pmu.add_cycle("device_submit_wait", 1)
             break
+          task = model.tasks[dop.ctx_name]
+          name_map = {
+            formal.name: model.inputs[actual_index].name
+            for formal, actual_index in zip(
+              task.global_inputs, dop.actual_inputs)
+          }
           seq = self.group.load_context_task(
-            model.tasks[dop.ctx_name], slot_index=slot)
+            task, slot_index=slot,
+            context_name=dop.ctx_name,
+            input_bindings=bindings,
+            formal_bindings=name_map)
           slot_busy[slot] = True
           slot_seq[slot] = seq
           slot_tag[slot] = dop.event_tag
@@ -277,43 +309,49 @@ class Simulator:
       self.group.step(self.cycle)
       if self.sim.trace and (trace_tile is None or trace_tile):
         self._trace.append({"cycle": self.cycle, **self.group.snapshot()})
-
       # 3. check which slots' sequencers completed this cycle
-      fault = False
-      for i in range(count):
-        if not slot_busy[i]:
-          continue
-        done_seq = slot_seq[i]
-        if done_seq is not None and not done_seq.done:
-          continue
-        if done_seq is not None and done_seq.faulted:
-          reason = f"faulted: {done_seq.fault_reason}"
-          fault = True
-          break
-        tag = slot_tag[i]
-        assert tag is not None
-        done_events.add(tag)
-        if self.tracer is not None:
-          self.tracer.complete("Device", f"Slot:{i}",
-                               f"context:{slot_ctx[i]}:run",
-                               slot_start[i], self.cycle,
-                               args={"context": slot_ctx[i], "slot": i,
-                                     "event": tag})
-          self.tracer.instant("Device", f"Slot:{i}", "context_done",
-                              self.cycle,
-                              {"context": slot_ctx[i], "slot": i,
-                               "event": tag, "cycle": self.cycle})
-        slot_busy[i] = False
-        slot_seq[i] = None
-        slot_tag[i] = None
-        slot_ctx[i] = None
-      if fault:
-        completed = False
-        break
+      if fault_reason is None:
+        for i in range(count):
+          if not slot_busy[i]:
+            continue
+          done_seq = slot_seq[i]
+          if done_seq is not None and not done_seq.done:
+            continue
+          if done_seq is not None and done_seq.faulted:
+            fault_reason = done_seq.fault_reason
+            self._ensure_fault_drain(fault_reason, self.cycle)
+            break
+          tag = slot_tag[i]
+          assert tag is not None
+          done_events.add(tag)
+          if self.tracer is not None:
+            self.tracer.complete("Device", f"Slot:{i}",
+                                 f"context:{slot_ctx[i]}:run",
+                                 slot_start[i], self.cycle,
+                                 args={"context": slot_ctx[i], "slot": i,
+                                       "event": tag})
+            self.tracer.instant("Device", f"Slot:{i}", "context_done",
+                                self.cycle,
+                                {"context": slot_ctx[i], "slot": i,
+                                 "event": tag, "cycle": self.cycle})
+          slot_busy[i] = False
+          slot_seq[i] = None
+          slot_tag[i] = None
+          slot_ctx[i] = None
+
       if not self.group.credit_invariants_hold():
         completed = False
         reason = f"credit invariant violated at cycle {self.cycle}"
         break
+
+      if fault_reason is not None:
+        if (not self.group.runtime_enabled
+            or self.group.reset_domain.is_done):
+          completed = False
+          reason = f"faulted: {fault_reason}"
+          break
+        self.cycle += 1
+        continue
 
       # 4. termination: return reached and every slot drained
       if returned and not any(slot_busy):

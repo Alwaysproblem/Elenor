@@ -104,6 +104,22 @@ def _shape_bytes(type_attr: Attribute) -> int:
   return _view_bytes(_int_list(shaped.dims), shaped.dtype.data)
 
 
+def _assert_contiguous_subview(
+  sizes: list[int], backing_dims: list[int], op_name: str,
+) -> None:
+  """V1 only allows contiguous row-major subviews so every transfer resolves
+  to one logical byte range.  For any dim ``i`` with ``sizes[i] > 1``, every
+  trailing dim ``j > i`` must satisfy ``sizes[j] == backing_dims[j]``."""
+  for i in range(len(sizes)):
+    if sizes[i] <= 1:
+      continue
+    for j in range(i + 1, len(sizes)):
+      if sizes[j] != backing_dims[j]:
+        raise VerifyException(
+          "non-contiguous subviews are not supported by the physical"
+          " transfer model")
+
+
 
 def _shape_key(type_attr: Attribute) -> tuple[tuple[int, ...], str]:
   """Comparable key for shape-typed attributes (dims tuple + dtype str)."""
@@ -232,6 +248,9 @@ def _verify_context(context: NestContextOp, programs: dict[str, TileProgramDefOp
       # Rule 8: V1 strides must be unit
       if any(s != 1 for s in strides):
         raise VerifyException("non-unit strides are not supported in V1")
+      # Rule 8b: V1 only supports contiguous row-major subviews — every
+      # transfer resolves to one logical byte range (PR 2 physical model).
+      _assert_contiguous_subview(sizes, parent, "nest.subview")
       view_type = _shape_type(op.result.type)
       if _int_list(view_type.dims) != sizes or view_type.dtype.data != formal_type.dtype.data:
         raise VerifyException(
@@ -432,6 +451,8 @@ def _verify_program(prog: TileProgramDefOp) -> None:
       # Rule 8: V1 strides must be unit
       if any(s != 1 for s in strides):
         raise VerifyException("non-unit strides are not supported in V1")
+      # Rule 8b: contiguous row-major subviews only (PR 2 physical model)
+      _assert_contiguous_subview(sizes, parent, "tile.subview")
       # task_dim range
       if op.task_dim is not None:
         td = int(op.task_dim.value.data)

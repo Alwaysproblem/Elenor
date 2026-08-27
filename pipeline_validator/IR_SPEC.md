@@ -261,9 +261,12 @@ Collective engine op (reduce/broadcast/multicast). Produces one event.
 nest.release %buf depends_on(%store_ev)
 ```
 
-Reclaims the context-owned L2 buffer. In `full_memory` fidelity, this
-frees the L2 slot (`L2SRAM.free_slot`). `depends_on` is required (the
-buffer can only be reclaimed after the DMA has finished reading it).
+Reclaims the context-owned L2 buffer. In `runtime`/`full_memory`
+fidelity, this issues `request_release` on the buffer's
+`AllocationHandle`; if consumers still hold pins the buffer moves to
+`RELEASE_PENDING` and returns to the free map when the last pin unpins
+(tile terminal). `depends_on` is required (the buffer can only be
+reclaimed after the DMA has finished reading it).
 
 ### 3.9 `nest.await`
 
@@ -574,13 +577,16 @@ which resolves any `nest.await` or `depends_on` waiting on it.
 
 ## 8. Runtime: L2 Buffer Lifecycle
 
-- `nest.alloc` — no runtime action; L2 slot is allocated lazily by
-  `L2SRAM.alloc_slot` when the DMA latency model runs (prefetch or store).
-- `alloc_slot` is **idempotent**: if a slot with the same name already
-  exists (e.g. store re-addressing a prefetch slot), it is returned
-  as-is — no double accounting.
-- `nest.release` — `RELEASE_L2` action calls `L2SRAM.free_slot(slot)`,
-  decrementing the used capacity. This enables buffer reuse in
-  `full_memory` fidelity.
-- `L2SRAM` capacity fault: if `alloc_slot` returns `None` (capacity
-  exhausted), the sequencer faults and terminates the task.
+- `nest.alloc` - no runtime action at issue time; at context admission
+  every `l2_buffers` entry is planned and committed as one atomic
+  bundle on the L2 `BankedFreeExtentAllocator` (owner
+  `ContextBufferOwner`, launch generation, alignment, bank segments).
+  An L2 capacity failure at admission faults the sequencer before any
+  DMA starts.
+- `nest.release` - `RELEASE_L2` action calls `request_release` on the
+  buffer's immutable handle; with outstanding consumer pins the buffer
+  moves to `RELEASE_PENDING` and returns to the free map when the last
+  pin unpins.
+- `L2SRAM` capacity fault: if `plan_bundle` returns `AdmissionFailure`,
+  the sequencer faults with `L2 capacity fault during context
+admission` and no completion event is produced.

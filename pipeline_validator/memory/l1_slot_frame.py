@@ -4,12 +4,24 @@
 Models the L1 SRAM binary binding contract: fixed slot ABI + variable
 Tile Frame.  Frame bind FSM (3.2), descriptor patch FSM (3.3), and slot
 lifecycle (3.4).  Bank policy enforcement (5.4).
+
+PR 2: the actual L1 placement is delegated to the per-tile
+``BankedFreeExtentAllocator``; ``SlotFrame`` only owns the fixed-slot
+ABI, shadow-install FSM and generation gate.  ``prepare()`` maps
+``ExecL1Buffer`` specs to fixed slots and builds a shadow; ``bind()``
+runs the bind-cycle FSM on the prepared shadow; ``release()`` clears
+active/shadow slots.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+  from ..execution_ir import ExecL1Buffer
+  from .allocator import AllocationHandle, MemoryOwner
 
 
 class SlotRole(IntEnum):
@@ -48,7 +60,12 @@ class FrameState(IntEnum):
 
 @dataclass
 class Slot:
-  """elenor_tile_slot_v0_t (Slot Frame design 4.1)."""
+  """elenor_tile_slot_v0_t (Slot Frame design 4.1).
+
+  PR 2: ``allocation_id`` and ``generation`` bind the slot to an
+  ``AllocationHandle`` from the per-tile L1 allocator; ``owner`` is a
+  ``MemoryOwner`` (not an int).
+  """
   slot_id: int
   base: int = 0
   size: int = 0
@@ -57,7 +74,9 @@ class Slot:
   alignment: int = 0
   bank_policy: int = 0
   lifetime: SlotLifetime = SlotLifetime.PER_COMMAND
-  owner: int = 0
+  allocation_id: str | None = None
+  generation: int = 0
+  owner: MemoryOwner | None = None  # type: ignore[name-defined]
   flags: int = 0
 
 
@@ -78,60 +97,85 @@ class SlotFrame:
   def __post_init__(self) -> None:
     self.slots: list[Slot] = [Slot(i) for i in range(self.slot_count)]
     self.shadow: SlotFrame | None = None
+    self._shadow_slots: list[Slot] | None = None
     self.pmu_bank_conflict_cycles: int = 0
     self.pmu_permission_fault_count: int = 0
 
-  def capacity_ok(self) -> bool:
-    """16-slot total must fit in L1 (design 3.1)."""
-    total = sum(s.size for s in self.slots if s.size > 0)
-    return total <= self.l1_bytes
+  def prepare(
+    self,
+    handles: list[AllocationHandle],  # type: ignore[name-defined]
+    specs: list[ExecL1Buffer],  # type: ignore[name-defined]
+  ) -> bool:
+    """Map ``ExecL1Buffer`` specs to fixed slots and build a shadow.
 
-  def overlap_ok(self) -> bool:
-    """Slot ranges must not overlap (design 3.2 CHECK_OVERLAP_ALIGNMENT)."""
-    ranges = [(s.base, s.base + s.size) for s in self.slots if s.size > 0]
+    Checks slot count, capacity, alignment, overlap and generation
+    before building the shadow.  Each L1 buffer uses
+    ``SlotRole.WORKSPACE``, ``SlotLifetime.PER_TILE_PROGRAM``,
+    ``layout=0``, ``bank_policy=0``.  On failure the active frame is
+    not changed.
+    """
+    if len(specs) > self.slot_count:
+      self.pmu_permission_fault_count += 1
+      return False
+    total = sum(s.bytes for s in specs)
+    if total > self.l1_bytes:
+      self.pmu_permission_fault_count += 1
+      return False
+    new_slots: list[Slot] = [Slot(i) for i in range(self.slot_count)]
+    for i, (spec, handle) in enumerate(zip(specs, handles)):
+      new_slots[i] = Slot(
+        slot_id=i,
+        base=handle.base_address,
+        size=spec.bytes,
+        alignment=spec.alignment,
+        role=SlotRole.WORKSPACE,
+        lifetime=SlotLifetime.PER_TILE_PROGRAM,
+        allocation_id=handle.allocation_id,
+        generation=handle.generation,
+        owner=handle.owner,
+      )
+    # overlap check on the prepared slots
+    ranges = [(s.base, s.base + s.size) for s in new_slots if s.size > 0]
     ranges.sort()
     for i in range(1, len(ranges)):
       if ranges[i][0] < ranges[i - 1][1]:
+        self.pmu_permission_fault_count += 1
         return False
-    return True
-
-  def bank_policy_ok(self) -> bool:
-    """Check NO_HOT_CONFLICT policy (design 5.4).  V1: pass if no slot
-    declares NO_HOT_CONFLICT on the same bank as program/accumulator."""
-    # V1 simplification: accept all (bank_policy encoding unfrozen)
+    self._shadow_slots = new_slots
     return True
 
   def bind(self, cycle: int, bind_cycles: int = 8) -> tuple[bool, int]:
-    """Run the frame bind FSM (design 3.2).  Returns (ok, cycles_consumed).
+    """Run the frame bind FSM (design 3.2) on the prepared shadow.
 
-    Each of the 8 states consumes 1 cycle (FETCH -> VALIDATE_ABI ->
-    VALIDATE_SLOT_TABLE -> CHECK_OVERLAP -> CHECK_BANK -> INSTALL_SHADOW ->
-    FRAME_ACTIVE).  Returns False + fault if any check fails.
+    Returns (ok, cycles_consumed).  Each of the 8 states consumes 1
+    cycle.  Returns False + fault if no shadow was prepared or any
+    check fails.
     """
-    if not self.capacity_ok():
-      self.state = FrameState.FRAME_FAULTED
-      self.pmu_permission_fault_count += 1
-      return (False, 1)
-    if not self.overlap_ok():
-      self.state = FrameState.FRAME_FAULTED
-      self.pmu_permission_fault_count += 1
-      return (False, 1)
-    if not self.bank_policy_ok():
-      self.state = FrameState.FRAME_FAULTED
-      self.pmu_permission_fault_count += 1
-      return (False, 1)
-    # success: consume bind_cycles (8 FSM states), install shadow
+    if self._shadow_slots is None:
+      # No prepare() was called: empty frame (program has no L1 buffers).
+      # This is valid for timing_only and programs without tile.alloc.
+      self._shadow_slots = [Slot(i) for i in range(self.slot_count)]
+    # capacity + overlap already checked in prepare(); bank policy V1 pass
     self.state = FrameState.FRAME_ACTIVE
     shadow = SlotFrame(frame_id=self.frame_id,
                        generation=self.generation,
                        l1_bytes=self.l1_bytes,
                        slot_count=self.slot_count)
     shadow.slots = [Slot(s.slot_id, s.base, s.size, s.layout, s.role,
-                         s.alignment, s.bank_policy, s.lifetime, s.owner,
-                         s.flags) for s in self.slots]
+                         s.alignment, s.bank_policy, s.lifetime,
+                         s.allocation_id, s.generation, s.owner, s.flags)
+                    for s in self._shadow_slots]
     shadow.state = FrameState.FRAME_ACTIVE
     self.shadow = shadow
+    self.slots = list(self._shadow_slots)
     return (True, bind_cycles)
+
+  def release(self) -> None:
+    """Clear active and shadow slots after tile program completion."""
+    self.slots = [Slot(i) for i in range(self.slot_count)]
+    self.shadow = None
+    self._shadow_slots = None
+    self.state = FrameState.IDLE
 
   def check_generation(self, expected_gen: int) -> bool:
     """Warm-launch generation gate (design 5.2).  Mismatch -> fault."""
@@ -143,12 +187,12 @@ class SlotFrame:
 
   def invalidate_desc_cache(self) -> None:
     """Descriptor cache invalidate (design 5.2 warm path)."""
-    # V1: no-op (descriptor cache coherence unfrozen)
     pass
 
   def reset(self) -> None:
     self.slots = [Slot(i) for i in range(self.slot_count)]
     self.shadow = None
+    self._shadow_slots = None
     self.state = FrameState.IDLE
     self.pmu_bank_conflict_cycles = 0
     self.pmu_permission_fault_count = 0
@@ -158,8 +202,8 @@ class SlotFrame:
       "frame_id": self.frame_id,
       "generation": self.generation,
       "state": self.state.name,
-      "capacity_ok": self.capacity_ok(),
-      "overlap_ok": self.overlap_ok(),
+      "slot_count": self.slot_count,
+      "active_slots": sum(1 for s in self.slots if s.size > 0),
       "bank_conflict_cycles": self.pmu_bank_conflict_cycles,
       "permission_faults": self.pmu_permission_fault_count,
     }

@@ -18,11 +18,13 @@ class StallReason(IntEnum):
     WAIT_EVENT = 1
     WAIT_OPERAND = 2
     STREAM_CREDIT = 3
-    SRAM_BANK = 4
-    NOC_VC = 5
-    DMA_MEMORY = 6
-    UCE_PROGRAM_DESC = 7
-    UNKNOWN = 8
+    WAIT_L1_BANK = 4
+    WAIT_L2_BANK = 5
+    WAIT_NOC_CREDIT = 6
+    WAIT_DMA_QUEUE = 7
+    WAIT_HBM_OUTSTANDING = 8
+    UCE_PROGRAM_DESC = 9
+    UNKNOWN = 10
 
     @property
     def label(self) -> str:
@@ -34,9 +36,11 @@ _STALL_LABELS = {
     StallReason.WAIT_EVENT: "engine_wait_event",
     StallReason.WAIT_OPERAND: "engine_wait_operand",
     StallReason.STREAM_CREDIT: "stream_credit_empty_or_full",
-    StallReason.SRAM_BANK: "sram_bank_conflict",
-    StallReason.NOC_VC: "noc_backpressure",
-    StallReason.DMA_MEMORY: "dma_wait_memory",
+    StallReason.WAIT_L1_BANK: "l1_bank_conflict",
+    StallReason.WAIT_L2_BANK: "l2_bank_conflict",
+    StallReason.WAIT_NOC_CREDIT: "noc_credit_backpressure",
+    StallReason.WAIT_DMA_QUEUE: "dma_queue_wait",
+    StallReason.WAIT_HBM_OUTSTANDING: "hbm_outstanding_wait",
     StallReason.UCE_PROGRAM_DESC: "uce_program_or_descriptor_stall",
     StallReason.UNKNOWN: "unknown_or_unclassified",
 }

@@ -33,11 +33,16 @@ _HW_YAML_PATH_TO_FIELD = {
     "memory.hbm.capacity_bytes": "hbm_capacity_bytes",
     "memory.hbm.bandwidth_gbs": "hbm_bandwidth_gbs",
     "memory.hbm.outstanding_limit": "hbm_outstanding_limit",
+    "memory.hbm.channels": "hbm_channels",
+    "memory.hbm.fixed_latency_cycles": "hbm_fixed_latency_cycles",
+    "memory.hbm.burst_bytes": "hbm_burst_bytes",
     "memory.group_sram.capacity_bytes": "group_sram_bytes",
     "memory.group_sram.banks": "group_sram_banks",
+    "memory.group_sram.access_latency_cycles": "l2_access_latency_cycles",
     "memory.group_sram.bank_bandwidth_gbs": "l2_bank_bandwidth_gbs",
     "memory.tile_l1.capacity_bytes": "tile_l1_bytes",
     "memory.tile_l1.banks": "tile_l1_banks",
+    "memory.tile_l1.access_latency_cycles": "l1_access_latency_cycles",
     "memory.tile_l1.bandwidth_gbs": "tile_l1_bandwidth_gbs",
     "memory.tile_program_sram.capacity_bytes": "tile_program_sram_bytes",
     "engines.boa.opa.count": "boa_num_opa",
@@ -286,6 +291,11 @@ class HardwareConfig:
     # simulation is reproducible.
     hbm_capacity_bytes: int = _HW_DEFAULTS["hbm_capacity_bytes"]  # 16 GB, 由后续规格冻结
     hbm_outstanding_limit: int = _HW_DEFAULTS["hbm_outstanding_limit"]  # tag CAM depth
+    hbm_channels: int = _HW_DEFAULTS["hbm_channels"]  # 8 HBM stacks, 由后续规格冻结
+    hbm_fixed_latency_cycles: int = _HW_DEFAULTS["hbm_fixed_latency_cycles"]  # 由后续规格冻结
+    hbm_burst_bytes: int = _HW_DEFAULTS["hbm_burst_bytes"]  # 2^N, 由后续规格冻结
+    l2_access_latency_cycles: int = _HW_DEFAULTS["l2_access_latency_cycles"]  # 由 SRAM profile 冻结
+    l1_access_latency_cycles: int = _HW_DEFAULTS["l1_access_latency_cycles"]  # 由 SRAM profile 冻结
     l2_bank_bandwidth_gbs: float = _HW_DEFAULTS["l2_bank_bandwidth_gbs"]  # per-bank
     tile_program_sram_bytes: int = _HW_DEFAULTS["tile_program_sram_bytes"]  # hot tile kernel
     noc_vc_depth: int = _HW_DEFAULTS["noc_vc_depth"]  # 由 PPA exploration 冻结
@@ -313,6 +323,17 @@ class HardwareConfig:
             raise ValueError("mfe_store_queue_depth must be >= 1")
         if self.mfe_stream_buffer_bytes < 0:
             raise ValueError("mfe_stream_buffer_bytes must be >= 0")
+        if self.hbm_channels < 1:
+            raise ValueError("hbm_channels must be >= 1")
+        if self.hbm_fixed_latency_cycles < 0:
+            raise ValueError("hbm_fixed_latency_cycles must be >= 0")
+        if self.hbm_burst_bytes <= 0 or (self.hbm_burst_bytes &
+                                         (self.hbm_burst_bytes - 1)) != 0:
+            raise ValueError("hbm_burst_bytes must be a positive power of 2")
+        if self.l2_access_latency_cycles < 1:
+            raise ValueError("l2_access_latency_cycles must be >= 1")
+        if self.l1_access_latency_cycles < 1:
+            raise ValueError("l1_access_latency_cycles must be >= 1")
 
     def cycle_ns(self) -> float:
         """Length of one simulator cycle in nanoseconds."""
@@ -392,11 +413,14 @@ class SimConfig:
     trace_html: str | None = None  # write standalone trace.html
     report_path: str | None = None
     seed: int = 0
-    fidelity: str = "timing_only"  # "timing_only" | "runtime" | "full_memory"
+    fidelity: str = "full_memory"  # "timing_only" | "runtime" | "full_memory"
     context_count: int = 1
     device_context_count: int = 1
 
     def __post_init__(self) -> None:
+        if self.fidelity not in ("timing_only", "runtime", "full_memory"):
+            raise ValueError(
+                "fidelity must be one of: timing_only, runtime, full_memory")
         if self.context_count < 1 or self.context_count > MAX_CONTEXT_COUNT:
             raise ValueError("context_count must be between 1 and 8")
         if self.device_context_count < 1 or self.device_context_count > MAX_CONTEXT_COUNT:

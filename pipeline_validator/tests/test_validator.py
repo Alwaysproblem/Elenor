@@ -59,8 +59,13 @@ from pipeline_validator.dialects.elenor import (
   TileStoreOp,
   TileSubviewOp,
 )
-from pipeline_validator.engines import MFEEngine
-from pipeline_validator.execution_ir import ExecEngineDesc
+from pipeline_validator.engines import EngineState, MFEEngine
+from pipeline_validator.execution_ir import (
+  ExecEngineDesc,
+  ExecGroupActionOp,
+  GlobalBinding,
+)
+from pipeline_validator.ir_lowering import lower_workload_ir
 from pipeline_validator.report import build_report, report_to_text
 from pipeline_validator.simulator import Simulator
 from pipeline_validator.stream_queue import EOSPolicy, StreamQueue, StreamToken
@@ -75,11 +80,13 @@ from pipeline_validator.workload_ir import (
   verify_workload_ir,
 )
 from pipeline_validator.workloads import ALL_WORKLOADS, PowWorkload
+
+# Fast config for tests that don't validate the unfrozen 200-cycle HBM
+# latency: lowers it to keep full_memory simulations under seconds.
+FAST_HW = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
 # ---------------------------------------------------------------------------
 # xDSL workload IR tests
 # ---------------------------------------------------------------------------
-
-from pipeline_validator.execution_ir import GlobalBinding
 
 POW_BINDINGS = {"Y": GlobalBinding("Y", 0x100000, 524288, "rw")}
 
@@ -626,6 +633,143 @@ class TestXDSLIR:
       )
     self._assert_parse_failure(text)
 
+
+class TestLoweringDTOFields:
+  """PR 2 §1.4: lowering preserves backing_dims, strides, element_bytes,
+  alignment and task_dim; non-contiguous subviews are rejected."""
+
+  def test_pow_lowering_preserves_dto_fields(self):
+    """Lowered PowWorkload DTOs carry backing_dims, strides, element_bytes,
+    alignment and task_dim exactly as declared in the source IR."""
+    task = lower_workload_ir(PowWorkload().module)
+    # L2 buffer: element_bytes from dtype, alignment from nest.alloc
+    l2 = task.l2_buffers[0]
+    assert l2.element_bytes == 2  # bf16
+    assert l2.alignment == 256
+    assert l2.bytes == 4 * 128 * 128 * 2
+    # prefetch transfer: src is the global subview
+    prog = task.role_bindings[0].tile_program
+    prefetch_action = task.actions[0]
+    assert prefetch_action.op == ExecGroupActionOp.DMA_PREFETCH
+    pref_src = prefetch_action.args[1].src
+    assert pref_src.space == "global"
+    assert pref_src.backing_dims == (16, 128, 128)  # 4 chunks * 4
+    assert pref_src.dims == (4, 128, 128)
+    assert pref_src.strides == (1, 1, 1)
+    assert pref_src.element_bytes == 2
+    assert pref_src.task_dim is None
+    # tile load transfer: src is the tile.subview (l2), dst is l1
+    load_desc = next(iter(prog.descriptors.values()))
+    assert load_desc.op == "load"
+    tile_src = load_desc.transfer.src
+    assert tile_src.space == "l2"
+    assert tile_src.backing_dims == (4, 128, 128)
+    assert tile_src.dims == (1, 128, 128)
+    assert tile_src.strides == (1, 1, 1)
+    assert tile_src.element_bytes == 2
+    assert tile_src.task_dim == 0
+    # L1 buffer: element_bytes + alignment from tile.alloc
+    l1 = prog.l1_buffers[0]
+    assert l1.element_bytes == 2
+    assert l1.alignment == 256
+
+  @staticmethod
+  def _make_subview_module(
+    g_sv_sizes: list[int], l2_formal_sizes: list[int],
+    tile_sv_sizes: list[int], l1_sizes: list[int],
+  ) -> ModuleOp:
+    """Build a module with explicit global + tile subviews.
+
+    ``g_sv_sizes``: nest.subview sizes on a [4,128,128] global formal; the
+    L2 buffer matches these (prefetch byte equality).
+    ``l2_formal_sizes``: the tile.program L2 formal + dispatch actual shape.
+    ``tile_sv_sizes``: the tile.subview slice of the L2 formal.
+    ``l1_sizes``: the tile.alloc shape (must equal tile_sv_sizes bytes).
+    All bf16.  The L2 formal and dispatch actuals use ``l2_formal_sizes``;
+    the prefetch copies ``g_sv_sizes`` bytes into an L2 buffer of the same
+    shape, so ``g_sv_sizes`` must equal ``l2_formal_sizes`` for the
+    prefetch to verify.
+    """
+    g_dims = [4, 128, 128]
+    prog = TileProgramDefOp(
+      "sv_prog", [],
+      arg_types=[NestTask(), NestBuffer.of(l2_formal_sizes, "bf16")],
+      arg_names=["task", "l2_buf"],
+    )
+    _task_arg, l2_arg = prog.body.block.args
+    l2_view = TileSubviewOp(
+      l2_arg, _task_arg, 0, [0] * len(tile_sv_sizes), tile_sv_sizes,
+      [1] * len(tile_sv_sizes), NestL2View.of(tile_sv_sizes, "bf16"),
+    )
+    l1 = TileAllocOp(l1_sizes, "bf16", alignment=256)
+    load = TileLoadOp(l2_view.result, l1.result, "e_load")
+    prog.body.block.add_ops([l2_view, l1, load, TileAwaitOp([load.result]),
+                             TileReturnOp()])
+    ctx = NestContextOp(
+      "sv_ctx", [],
+      arg_types=[NestGlobalMemref.of(g_dims, "bf16")],
+      arg_names=["Y"], placement=1,
+    )
+    y_arg = ctx.body.block.args[0]
+    buf = NestAllocOp("l2_buf", "inout", l2_formal_sizes, "bf16",
+                      alignment=256)
+    src = NestSubviewOp(
+      y_arg, [0] * len(g_sv_sizes), g_sv_sizes, [1] * len(g_sv_sizes),
+      NestGlobalView.of(g_sv_sizes, "bf16"),
+    )
+    pref = NestPrefetchOp(src.result, buf.result, "ev_in")
+    tasks = NestTaskRangeOp(0, 1)
+    disp = NestDispatchOp(
+      "sv_prog", tasks.result, [buf.result], [buf.result],
+      "ev_grid", "", "", depends_on=[pref.result],
+    )
+    ctx.body.block.add_ops([
+      buf, src, pref, tasks, disp, NestAwaitOp([disp.grid_done]),
+      NestReturnOp(),
+    ])
+    return ModuleOp([prog, ctx])
+
+  def test_nest_subview_non_contiguous_rejected(self):
+    """A non-contiguous row-major nest.subview is rejected.
+
+    sizes = [2, 64, 128] on a [4, 128, 128] backing: dim 0 size 2 > 1 but
+    dim 1 size 64 != backing 128 → non-contiguous.
+    """
+    module = self._make_subview_module(
+      g_sv_sizes=[2, 64, 128], l2_formal_sizes=[2, 64, 128],
+      tile_sv_sizes=[1, 64, 128], l1_sizes=[64, 128])
+    with pytest.raises(VerifyException, match=(
+        r"non-contiguous subviews are not supported by the physical"
+        r" transfer model")):
+      verify_workload_ir(module)
+
+  def test_tile_subview_non_contiguous_rejected(self):
+    """A non-contiguous tile.subview is rejected.
+
+    tile.subview sizes = [2, 64, 128] on a [4, 128, 128] L2 formal: dim 0
+    size 2 > 1 but dim 1 size 64 != 128 → non-contiguous.
+    """
+    module = self._make_subview_module(
+      g_sv_sizes=[4, 128, 128], l2_formal_sizes=[4, 128, 128],
+      tile_sv_sizes=[2, 64, 128], l1_sizes=[64, 128])
+    with pytest.raises(VerifyException, match=(
+        r"non-contiguous subviews are not supported by the physical"
+        r" transfer model")):
+      verify_workload_ir(module)
+
+  def test_contiguous_trailing_full_subview_accepted(self):
+    """A contiguous subview where the leading dim is sliced but trailing
+    dims are full is accepted (sizes = [2, 128, 128] on [4,128,128])."""
+    module = self._make_subview_module(
+      g_sv_sizes=[2, 128, 128], l2_formal_sizes=[2, 128, 128],
+      tile_sv_sizes=[1, 128, 128], l1_sizes=[128, 128])
+    verify_workload_ir(module)
+    # lowering must also succeed and preserve the backing shape
+    task = lower_workload_ir(module)
+    pref = task.actions[0]
+    assert pref.args[1].src.backing_dims == (4, 128, 128)
+    assert pref.args[1].src.dims == (2, 128, 128)
+
 class TestExternalIRCLI:
   def _run_cli(self, *args: str):
     return subprocess.run(
@@ -646,6 +790,7 @@ class TestExternalIRCLI:
       "--ir-file",
       str(input_path),
       "--input-binding", "Y=0x100000:524288:rw",
+      "--hw-override", "hbm_fixed_latency_cycles=10",
       "--trace-json",
       str(trace_json),
       "--trace-html",
@@ -718,6 +863,7 @@ class TestExternalIRCLI:
   def test_context_mode_cli_bounds(self):
     ok = self._run_cli(
       "-w", "pow", "--context-mode", "3", "--max-cycles", "200000",
+      "--hw-override", "hbm_fixed_latency_cycles=10",
       "--input-binding", "Y=0x100000:524288:rw",
     )
     assert ok.returncode == 0, ok.stderr
@@ -732,6 +878,7 @@ class TestExternalIRCLI:
       "--device-context-mode", "2",
       "--input-binding", "Y0=0x100000:131072:rw",
       "--input-binding", "Y1=0x200000:131072:rw",
+      "--hw-override", "hbm_fixed_latency_cycles=10",
       "--max-cycles", "200000",
     )
     assert res.returncode == 0, res.stderr
@@ -865,7 +1012,7 @@ class TestStreamQueue:
 
 class TestPowSimulation:
   def test_pow_completes(self):
-    hw = HardwareConfig()
+    hw = FAST_HW
     sim = Simulator(hw, SimConfig(max_cycles=200_000))
     result = sim.run(PowWorkload().module, input_bindings=POW_BINDINGS)
     assert result.completed, f"pow did not complete: {result.reason}"
@@ -874,7 +1021,7 @@ class TestPowSimulation:
 
   def test_pow_report_has_passing_checks(self):
     wl = PowWorkload()
-    sim = Simulator(HardwareConfig(), SimConfig(max_cycles=200_000))
+    sim = Simulator(FAST_HW, SimConfig(max_cycles=200_000))
     result = sim.run(wl.module, input_bindings=POW_BINDINGS)
     assert result.completed, result.reason
     rep = build_report(wl, result)
@@ -883,7 +1030,7 @@ class TestPowSimulation:
 
   def test_pow_report_text_renderable(self):
     wl = PowWorkload()
-    sim = Simulator(HardwareConfig(), SimConfig(max_cycles=200_000))
+    sim = Simulator(FAST_HW, SimConfig(max_cycles=200_000))
     result = sim.run(wl.module, input_bindings=POW_BINDINGS)
     rep = build_report(wl, result)
     text = report_to_text(rep)
@@ -950,6 +1097,11 @@ class TestHardwareConfigYaml:
       "dma_launch_cycles": 2,
       "hbm_capacity_bytes": 17179869184,
       "hbm_outstanding_limit": 32,
+      "hbm_channels": 8,
+      "hbm_fixed_latency_cycles": 200,
+      "hbm_burst_bytes": 64,
+      "l2_access_latency_cycles": 4,
+      "l1_access_latency_cycles": 1,
       "l2_bank_bandwidth_gbs": 12.8,
       "tile_program_sram_bytes": 65536,
       "noc_vc_depth": 8,
@@ -969,7 +1121,7 @@ class TestHardwareConfigYaml:
   def test_schema_maps_every_field_once(self):
     mapped = list(_HW_YAML_PATH_TO_FIELD.values())
     field_names = {field.name for field in fields(HardwareConfig)}
-    assert len(_HW_YAML_PATH_TO_FIELD) == 55
+    assert len(_HW_YAML_PATH_TO_FIELD) == 60
     assert len(mapped) == len(set(mapped))
     assert set(mapped) == field_names
 
@@ -1049,11 +1201,47 @@ class TestHardwareConfigYaml:
 
 
 class TestMFEChannels:
-  """MFE = N 条 load lane + M 条 store lane（design/elenor_mfe §3.1.4）。"""
+  """MFE = N load lanes + M store lanes (design/elenor_mfe 3.1.4).
+
+  PR 2: tile load/store go through the shared ``TransferManager`` as
+  ``MemoryTransaction``s.  These tests submit explicit timing
+  transactions (src/dst=None) and verify lane count, queue depth and
+  parallelism by stepping the manager + engine tick.
+  """
 
   @staticmethod
   def _desc(op: str, name: str) -> ExecEngineDesc:
     return ExecEngineDesc(name=name, kind="MFE", op=op, params={"bytes": 4096})
+
+  @staticmethod
+  def _timing_txn(op: str, txn_id: str, tile_id: int = 0):
+    from pipeline_validator.memory.allocator import TaskBufferOwner
+    from pipeline_validator.memory.transfer import MemoryTransaction, TransferOp
+    return MemoryTransaction(
+      transaction_id=txn_id,
+      op=TransferOp.TILE_LOAD if op == "load" else TransferOp.TILE_STORE,
+      issuer=TaskBufferOwner("ctx", 0, "ev", 0, tile_id, 0, "task"),
+      src=None, dst=None, bytes_total=4096,
+      completion_event=txn_id, tile_id=tile_id)
+
+  @staticmethod
+  def _make_eng(cfg=None, tile_id=0):
+    from pipeline_validator.memory.transfer import TransferManager
+    cfg = cfg or HardwareConfig()
+    tm = TransferManager(cfg)
+    return MFEEngine(cfg, tile_id, transfer_manager=tm), tm
+
+  @staticmethod
+  def _drain(eng, tm, start_cycle=10, max_cycles=2000):
+    """Step tm+eng until all lanes drain; return completed EngineJobs."""
+    completed = []
+    for c in range(start_cycle, start_cycle + max_cycles):
+      tm.step(c)
+      for job in eng.tick(c):
+        completed.append(job)
+      if eng.state == EngineState.IDLE:
+        break
+    return completed
 
   def test_config_rejects_zero_load_channels(self):
     with pytest.raises(ValueError, match="mfe_load_channels must be >= 1"):
@@ -1064,32 +1252,74 @@ class TestMFEChannels:
       HardwareConfig(mfe_store_channels=0)
 
   def test_two_load_channels_run_in_parallel(self):
-    eng = MFEEngine(HardwareConfig(mfe_load_channels=2), tile_id=0)
-    j0 = eng.launch(self._desc("load", "ld0"), cycle=10, event_id="e0")
-    j1 = eng.launch(self._desc("load", "ld1"), cycle=10, event_id="e1")
-    assert j0 is not None and j1 is not None
-    assert j0.start_cycle == j1.start_cycle == 10
+    """Two load channels: both jobs submit and complete."""
+    eng, tm = self._make_eng(HardwareConfig(mfe_load_channels=2))
+    assert eng.launch(self._desc("load", "ld0"), 10, "e0",
+                       transaction=self._timing_txn("load", "t0")) is not None
+    assert eng.launch(self._desc("load", "ld1"), 10, "e1",
+                       transaction=self._timing_txn("load", "t1")) is not None
+    completed = self._drain(eng, tm)
+    assert len(completed) == 2
 
   def test_single_load_channel_chains_serially(self):
-    eng = MFEEngine(HardwareConfig(), tile_id=0)  # V1 基线: 1 load channel
-    j0 = eng.launch(self._desc("load", "ld0"), cycle=10, event_id="e0")
-    j1 = eng.launch(self._desc("load", "ld1"), cycle=10, event_id="e1")
-    assert j0 is not None and j1 is not None
-    assert j1.start_cycle == j0.finish_cycle  # lane 内链式串行
+    """One load channel: two jobs chain serially (second starts after
+    first completes)."""
+    eng, tm = self._make_eng()  # V1 baseline: 1 load channel
+    assert eng.launch(self._desc("load", "ld0"), 10, "e0",
+                       transaction=self._timing_txn("load", "t0")) is not None
+    assert eng.launch(self._desc("load", "ld1"), 10, "e1",
+                       transaction=self._timing_txn("load", "t1")) is not None
+    completed = self._drain(eng, tm)
+    assert len(completed) == 2
+    # serial: second completes after first
+    assert completed[1].finish_cycle >= completed[0].finish_cycle
 
   def test_load_and_store_are_independent_lanes(self):
-    # 默认 1/1：跨 class 并行 —— store 与 load 不再共用一个资源。
-    eng = MFEEngine(HardwareConfig(), tile_id=0)
-    j_ld = eng.launch(self._desc("load", "ld"), cycle=10, event_id="e_ld")
-    j_st = eng.launch(self._desc("store", "st"), cycle=10, event_id="e_st")
-    assert j_ld is not None and j_st is not None
-    assert j_ld.start_cycle == j_st.start_cycle == 10
+    """Default 1/1: load and store run in parallel on separate lanes."""
+    eng, tm = self._make_eng()
+    assert eng.launch(self._desc("load", "ld"), 10, "e_ld",
+                       transaction=self._timing_txn("load", "t_ld")) is not None
+    assert eng.launch(self._desc("store", "st"), 10, "e_st",
+                       transaction=self._timing_txn("store", "t_st")) is not None
+    completed = self._drain(eng, tm)
+    assert len(completed) == 2
 
   def test_full_lane_returns_none_for_backpressure(self):
-    eng = MFEEngine(
-      HardwareConfig(mfe_load_channels=1, mfe_pipeline_depth=1), tile_id=0)
-    assert eng.launch(self._desc("load", "ld0"), 10, "e0") is not None
-    assert eng.launch(self._desc("load", "ld1"), 10, "e1") is None
+    eng, _ = self._make_eng(
+      HardwareConfig(mfe_load_channels=1, mfe_pipeline_depth=1))
+    assert eng.launch(self._desc("load", "ld0"), 10, "e0",
+                       transaction=self._timing_txn("load", "t0")) is not None
+    assert eng.launch(self._desc("load", "ld1"), 10, "e1",
+                       transaction=self._timing_txn("load", "t1")) is None
+
+  def test_reset_freeze_does_not_start_queued_lane_job(self):
+    """A running lane may drain under reset freeze, but its queued job
+    must remain unsubmitted and is cleared by reset cleanup."""
+    cfg = HardwareConfig(mfe_load_channels=1, mfe_pipeline_depth=2)
+    eng, tm = self._make_eng(cfg)
+    assert eng.launch(
+      self._desc("load", "ld0"), 10, "e0",
+      transaction=self._timing_txn("load", "t0")) is not None
+    assert eng.launch(
+      self._desc("load", "ld1"), 10, "e1",
+      transaction=self._timing_txn("load", "t1")) is not None
+    completed = []
+    for cycle in range(10, 100):
+      tm.step(cycle)
+      completed.extend(eng.tick(cycle, start_queued=False))
+      if completed:
+        break
+    assert len(completed) == 1
+    lane = eng._load_lanes[0]
+    assert lane.running is None
+    assert len(lane.queue) == 1
+    assert tm.status("t1").value == "pending"  # never submitted
+    assert tm.pmu_issued_count == 1
+    tm.cancel_all(cycle=cycle)
+    eng.reset()
+    assert tm.inflight_count == 0
+    assert lane.running is None
+    assert len(lane.queue) == 0
 
 
 class TestHardwareConfigCLI:

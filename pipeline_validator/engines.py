@@ -30,6 +30,7 @@ from enum import Enum
 
 from .config import HardwareConfig
 from .execution_ir import ExecEngineDesc
+from .memory.transfer import MemoryTransaction, TransferStatus
 from .pmu import PMUCounter, StallReason
 from .trace import Tracer
 
@@ -95,7 +96,7 @@ class Engine:
         return accepted >= self._pipeline_depth
 
     def launch(self, desc: ExecEngineDesc, cycle: int,
-               event_id: str) -> EngineJob | None:
+               event_id: str, transaction=None) -> object | None:
         """Launch a descriptor.  Returns None if the engine cannot accept
         (queue full); the caller retries next cycle.
 
@@ -225,40 +226,51 @@ class _MFELane:
     def __init__(self, name: str, depth: int):
         self.name = name  # trace track name, e.g. "MFE_LD0" / "MFE_ST0"
         self.depth = depth  # per-lane descriptor-accept queue depth
-        self.running: EngineJob | None = None
-        self.queue: deque[EngineJob] = deque()
+        self.running: _MFETransferJob | None = None
+        self.queue: deque[_MFETransferJob] = deque()
 
     def accepted(self) -> int:
         return len(self.queue) + (1 if self.running else 0)
 
-    def tail(self) -> EngineJob | None:
-        return self.queue[-1] if self.queue else self.running
+
+@dataclass
+class _MFETransferJob:
+    """One in-flight or queued MFE descriptor with a real transfer.
+
+    ``transaction`` is submitted to the shared ``TransferManager`` only
+    when this job becomes the lane head (``start_cycle`` set).  Until
+    then the lane just queues the job without occupying memory
+    resources.
+    """
+
+    desc: ExecEngineDesc
+    event_id: str
+    transaction: MemoryTransaction | None
+    enqueue_cycle: int
+    start_cycle: int | None = None
 
 
 class MFEEngine(Engine):
     """Memory Flow Engine — bandwidth-bound stream shaping.
 
-    latency = launch_overhead + ceil(bytes / (mfe_bw_bytes_per_cycle))
-
-    Channelized data plane: ``mfe_load_channels`` load lanes plus
-    ``mfe_store_channels`` store lanes, each an independent serial resource
-    with per-lane descriptor-accept queuing (``mfe_pipeline_depth``).
-    ``launch`` routes store-class ops (``store`` / ``dma_store``) to store
-    lanes and everything else to load lanes — the same class split as
-    ``TileUCE._queue_key_for_launch`` — assigning first-free within the
-    class.  Load and store lanes run in parallel; PMU and trace stay
-    aggregated at engine level.
+    PR 2 (§5.5): tile load/store go through the shared ``TransferManager``
+    as real ``MemoryTransaction``s.  Lane heads submit on start; the
+    engine polls ``TransferManager.status()`` each ``tick`` and constructs
+    an ``EngineJob`` with the transaction's actual start/completion cycle
+    when the local route finishes.
     """
 
     kind = "MFE"
     _STORE_OPS = ("store", "dma_store")
 
     def __init__(self, cfg: HardwareConfig, tile_id: int,
-                 tracer: Tracer | None = None):
+                 tracer: Tracer | None = None,
+                 transfer_manager=None):
         self.cfg = cfg
         self.tile_id = tile_id
         self.pmu = PMUCounter()
         self.tracer = tracer
+        self.transfer_manager = transfer_manager
         self._load_lanes = [
             _MFELane(f"MFE_LD{i}", cfg.mfe_pipeline_depth)
             for i in range(cfg.mfe_load_channels)
@@ -274,91 +286,65 @@ class MFEEngine(Engine):
 
     @property
     def state(self) -> EngineState:
-        """Aggregated state: RUNNING while any lane services a job."""
         if any(lane.running is not None for lane in self._lanes):
             return EngineState.RUNNING
         return EngineState.IDLE
 
     @state.setter
     def state(self, _value: EngineState) -> None:
-        """State is derived from lane occupancy; writes are ignored."""
+        pass
 
     @property
     def is_busy(self) -> bool:
-        """True → every lane of both classes is full (launch would stall)."""
         return all(lane.accepted() >= lane.depth for lane in self._lanes)
 
-    def latency(self, desc: ExecEngineDesc) -> int:
-        nbytes = desc.params.get("bytes", 0)
-        bw_bytes_per_cycle = self.cfg.mfe_bandwidth_gbs * 1e9 / (
-            self.cfg.clock_mhz * 1e6)
-        cycles = (nbytes + bw_bytes_per_cycle -
-                  1) // bw_bytes_per_cycle if bw_bytes_per_cycle else 0
-        return self.cfg.mfe_launch_cycles + cycles
-
     def launch(self, desc: ExecEngineDesc, cycle: int,
-               event_id: str) -> EngineJob | None:
+               event_id: str,
+               transaction: MemoryTransaction | None = None,
+               ) -> EngineJob | _MFETransferJob | None:
         """Route a descriptor to a first-free lane of its direction class.
 
-        Returns None when every lane of that class is full; the UCE ingress
-        FIFO keeps its entry and retries next cycle.  Raises ``ValueError``
-        on page-stream prefetch-capacity violations (converted into a
-        modeled fault by the tile launch path).
+        Returns None when every lane of that class is full.  Raises
+        ``ValueError`` on page-stream prefetch-capacity violations.
+        ``MemoryInvariantError`` from ``TransferManager.submit`` propagates
+        to ``TileUCE._drain_engine_queues`` which faults the context.
         """
         self._validate_stream_buffer(desc)
         lanes = (self._store_lanes if desc.op in self._STORE_OPS
                  else self._load_lanes)
-        # first-free = prefer an idle lane (starts immediately, giving
-        # cross-lane parallelism); fall back to the first lane with
-        # queue space (chained service start within the lane).
         free = next((lane for lane in lanes if lane.running is None), None)
         if free is None:
             free = next(
                 (lane for lane in lanes if lane.accepted() < lane.depth),
                 None)
             if free is None:
-                return None  # class full -> UCE ingress FIFO retries
-        lat = self.latency(desc)
-        tail = free.tail()
-        service_start = max(cycle, tail.finish_cycle if tail else cycle)
-        job = EngineJob(desc=desc,
-                        start_cycle=service_start,
-                        finish_cycle=service_start + lat,
-                        event_id=event_id,
-                        pmu=PMUCounter())
+                return None
+        job = _MFETransferJob(
+            desc=desc, event_id=event_id, transaction=transaction,
+            enqueue_cycle=cycle)
         free.queue.append(job)
         if free.running is None:
-            self._start_lane(free)
+            self._start_lane(free, cycle)
+        # Return a non-None sentinel so TileUCE pops the FIFO entry.
+        # Actual completion is reported via tick().
         return job
 
-    def _start_lane(self, lane: _MFELane) -> None:
+    def _start_lane(self, lane: _MFELane, cycle: int) -> None:
         """Pop the lane's queue head and begin servicing it."""
         if not lane.queue:
             return
-        lane.running = lane.queue.popleft()
+        job = lane.queue.popleft()
+        job.start_cycle = cycle
+        lane.running = job
         self.pmu.add_event("launch")
-        if self.tracer is not None:
-            self.tracer.complete(
-                f"Tile{self.tile_id}",
-                lane.name,
-                f"MFE:{lane.running.desc.op}",
-                lane.running.start_cycle,
-                lane.running.finish_cycle,
-                args={
-                    "event_id": lane.running.event_id,
-                    "ops": lane.running.desc.params.get("ops", 0),
-                    "bytes": lane.running.desc.params.get("bytes", 0),
-                    "desc": lane.running.desc.name,
-                    "tile_id": self.tile_id,
-                    "ctx_id": lane.running.desc.params.get("ctx_id"),
-                    "program": lane.running.desc.params.get("program"),
-                    "local_event_id":
-                        lane.running.desc.params.get("local_event_id"),
-                })
+        if job.transaction is not None and self.transfer_manager is not None:
+            self.transfer_manager.submit(job.transaction, cycle, self.pmu)
 
-    def tick(self, cycle: int) -> list[EngineJob]:
-        """Advance every lane one cycle (loads before stores, deterministic
-        order); return the jobs that just completed."""
+    def tick(self, cycle: int,
+             start_queued: bool = True) -> list[EngineJob]:
+        """Advance every lane one cycle; return jobs whose local route
+        finished this cycle.  ``start_queued=False`` drains only the
+        running head and must not submit the next queued transfer."""
         completed: list[EngineJob] = []
         active = 0
         for lane in self._lanes:
@@ -366,11 +352,45 @@ class MFEEngine(Engine):
             if job is None:
                 continue
             active += 1
-            if cycle >= job.finish_cycle:
+            done = False
+            if job.transaction is not None and self.transfer_manager is not None:
+                status = self.transfer_manager.status(
+                    job.transaction.transaction_id)
+                if status == TransferStatus.DONE:
+                    done = True
+            elif job.start_cycle is not None:
+                # no transaction (BOA-class fallback path): finish next cycle
+                if cycle > job.start_cycle:
+                    done = True
+            if done:
                 self.pmu.add_event("complete")
-                completed.append(job)
+                start = (job.transaction.start_cycle
+                         if job.transaction is not None
+                         and job.transaction.start_cycle >= 0
+                         else (job.start_cycle or cycle))
+                finish = (job.transaction.completed_cycle
+                          if job.transaction is not None
+                          and job.transaction.completed_cycle >= 0
+                          else cycle)
+                ej = EngineJob(
+                    desc=job.desc, start_cycle=start, finish_cycle=finish,
+                    event_id=job.event_id, pmu=PMUCounter())
+                completed.append(ej)
+                if (job.transaction is not None
+                        and self.transfer_manager is not None):
+                    self.transfer_manager.acknowledge(
+                        job.transaction.transaction_id)
                 lane.running = None
-                self._start_lane(lane)
+                if start_queued:
+                    self._start_lane(lane, cycle)
+                if self.tracer is not None:
+                    self.tracer.complete(
+                        f"Tile{self.tile_id}", lane.name,
+                        f"MFE:{job.desc.op}", start, finish,
+                        args={"event_id": job.event_id,
+                              "bytes": job.desc.params.get("bytes", 0),
+                              "desc": job.desc.name,
+                              "tile_id": self.tile_id})
         if active:
             self.pmu.add_cycle("mfe_active", 1)
             self.pmu.add(StallReason.NONE, 1)
@@ -387,10 +407,6 @@ class MFEEngine(Engine):
         self.pmu.reset()
 
     def _validate_stream_buffer(self, desc: ExecEngineDesc) -> None:
-        """Enforce page-stream prefetch capacity when the buffer size is
-        frozen (non-zero).  Non-page-stream ops and descriptors without an
-        explicit ``prefetch_depth`` are always accepted.
-        """
         if self.cfg.mfe_stream_buffer_bytes == 0:
             return
         if desc.op != "page_stream":
@@ -410,7 +426,6 @@ class MFEEngine(Engine):
                 f"MFE page_stream prefetch requires {required_bytes} bytes, "
                 f"exceeds mfe_stream_buffer_bytes="
                 f"{self.cfg.mfe_stream_buffer_bytes}")
-
 
 class USEEngine(Engine):
     """Unified State Engine — scan/recurrence on a small control core.

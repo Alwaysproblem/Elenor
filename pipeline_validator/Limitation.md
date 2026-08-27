@@ -4,22 +4,43 @@
 
 模拟了（V1 scope）：
 
-- 控制流层级 Group Task→Tile role→Engine 的逐周期推进；
+- 控制流层级 Group Task->Tile role->Engine 的逐周期推进；
 - 4 引擎延迟（Roofline）与 launch/wait 重叠；
 - Stream Queue credit/backpressure/EOS；
-- role 完成聚合 → group task 推进；
-- PMU stall 归因（WAIT_EVENT/WAIT_OPERAND/STREAM_CREDIT/NONE）；
-- credit 不变量每周期校验。
+- role 完成聚合 -> group task 推进；
+- PMU stall 归因（WAIT_EVENT/WAIT_OPERAND/STREAM_CREDIT/WAIT_L1_BANK/
+  WAIT_L2_BANK/WAIT_NOC_CREDIT/WAIT_DMA_QUEUE/WAIT_HBM_OUTSTANDING/NONE）；
+- credit 不变量每周期校验；
+- PR 2 物理内存模型：HBM 外部 binding、L2/L1 free-extent 分配
+  （owner/generation/pin/对齐/跨 bank segment）、逐腿 transfer route
+  （HBM/Global DMA/NoC/L2/L1 bank/Local DMA）、容量/owner/generation/
+  use-after-release 错误一律 fault、不产生 success event。
 
 有意简化/未模拟（需明确告知用户的边界）：
 
-- 单 Tile Group：不模拟多 Group 间的 NoC/Collective 竞争（Collective 有 1-cycle command/window 模型和 trace event，但 reduce datapath/bandwidth 仍未建模）；
-- Group DMA 是纯延迟：不模拟 L2 SRAM 容量、bank 冲突、L2 占用，但 DMA trace slice 现在携带 op/desc/bytes/L2 slot；
-- L1 SRAM 是带宽预算：不模拟容量、bank 冲突（tile.py:8-9 注释明说 V1 leave frozen）；
-- 引擎流水有限：BOA/EVU/USE 单 job 非流水；MFE 通道化（N 条 load lane + M 条 store lane，每 lane 内串行），lane 间不共享资源仲裁；
-- MFE 多 channel 共享 backend（L1 port / NoC / 聚合带宽）竞争未建模：每 channel 按 `mfe_bandwidth_gbs` 独立计带宽；
-- 无真实数据：descriptor 的 bytes/ops 是数值参数，不搬真实 payload，只算延迟；
-- **residency/cold-warm load**：dispatch_role 直接 load_program，不模拟 program residency miss/cold launch（设计文档 15 的 residency 契约未进模型）。
+- 单 Tile Group：不模拟多 Group 间的 NoC/Collective 竞争（Collective 有
+  1-cycle command/window 模型和 trace event，但 reduce datapath/bandwidth
+  仍未建模）；
+- Group DMA 的 HBM outstanding/NoC credit/L2 bank 竞争按
+  `full_memory` 的独立 stage 建模（同 bank 串行、不同 bank 重叠）；
+  `timing_only`/`runtime` 折叠为单腿延迟，不保留 per-bank 计数；
+- L1 SlotFrame 固定 slot ABI（WORKSPACE/PER_TILE_PROGRAM），bank policy
+  编码未冻结（V1 全部通过）；
+- 引擎流水有限：BOA/EVU/USE 单 job 非流水；MFE 通道化（N 条 load lane +
+  M 条 store lane，每 lane 内串行），lane 间不共享资源仲裁；
+- 无真实 tensor 数值：transfer 的 bytes 是数值参数，payload tracker 只
+  记录 layout/地址元数据（PR 2 起地址来自真实 transaction，不再 CRC 伪造）；
+- residency/cold-warm load 由 `ProgramResidencyManager` metadata 路径
+  管理（program_id/version/hash/epoch）。
+
+## V2 fidelity 边界（PR 2）
+
+- `timing_only`：无 handle/allocation，src/dst 视图为空，单腿折叠延迟。
+- `runtime`：真实 L1/L2 分配与 HBM binding（owner/generation/容量/
+  生命周期检查），但 transfer 折叠为单腿带宽+launch 开销。
+- `full_memory`：在 `runtime` 之上增加逐腿 route（HBM channel/outstanding、
+  NoC VC credit、Global DMA channel、L2/L1 per-bank segment、Local DMA）。
+- 三种模式都必须通过全局 binding/permission/静态 view 验证。
 
 ## V1 输入参数与逻辑地址 IR 限制（PR 1 冻结）
 
@@ -28,14 +49,16 @@
 - 无 inline 下标糖（不实现 `%Y[0:4, ...]`），view 必须经显式 subview op。
 - `nest.context` formal 仅限 `!nest.global_memref`；submit actual 仅限
   `nexus.program` block arg（不能传 view/切片）。
-- `tile.subview` 只支持单一 `task_dim`（无 `tile.task.id`）；task 依赖
-  偏移表达式留在 DTO，物理 tile 绑定在 PR 2。
+- `tile.subview` 只支持单一 `task_dim`（无 `tile.task.id`）；logical task
+  依赖偏移由 runtime 在 `tile.subview task_dim` 维度解析。
 - 无 view 链：`nest.subview` src 必须是 context global formal，
   `tile.subview` src 必须是 tile.program L2 formal。
 - dispatch actual 仅限整个 `!nest.l2_buffer`（context body 无 L2 view
   producer）。
 - transfer 字节数从 view/buffer shape 推导；旧 `bytes = N` 语法已删除。
-- 物理地址、IOVA 容量/延迟模型、L2 allocator 消费 `role`/`alignment`
-  属 PR 2；`tile.signal(%task)` 属 PR 3。
+- 子视图必须连续 row-major（对任一 `sizes[i] > 1` 的维度，所有尾随维度
+  必须满足 `sizes[j] == backing_dims[j]`）；非连续视图被 verifier 拒绝
+  （physical transfer model 只支持单段 byte range）。
+- `tile.signal(%task)` 逻辑 task 绑定属 PR 3。
 - 输入绑定按名字匹配（program block arg name_hint 为键），无按位置
   隐式绑定备选路径。

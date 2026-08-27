@@ -80,6 +80,12 @@ class ResetDomain:
         self.drain_cycles += 1
         # bounded drain to avoid deadlock
         if self.drain_cycles > getattr(cfg, "max_drain_cycles", 100):
+          # drain timeout: cancel remaining transfers, returning HBM
+          # outstanding credits, NoC credits, DMA channels and bank
+          # reservations (PR 2 §6.5)
+          tm = getattr(group, "transfer_manager", None)
+          if tm is not None:
+            tm.cancel_all(cycle)
           self.state = ResetState.MARK_EVENTS
     elif self.state == ResetState.MARK_EVENTS:
       # mark pending events as RESET (Runtime ABI 3.2)
@@ -87,6 +93,14 @@ class ResetDomain:
         group.event_table.reset()
       self.state = ResetState.RESET_DOMAIN
     elif self.state == ResetState.RESET_DOMAIN:
+      # reset cleanup: ensure no transfer resources leak (idempotent)
+      tm = getattr(group, "transfer_manager", None)
+      if tm is not None:
+        tm.cancel_all(cycle)
+      # release context-owned L2/L1 allocations, pins and frames
+      releaser = getattr(group, "release_context_memory", None)
+      if releaser is not None:
+        releaser(cycle)
       # invalidate program residency + clear descriptor cache
       if group is not None and hasattr(group, "program_table"):
         if self.request.domain == FaultDomain.TILE:
@@ -107,10 +121,12 @@ class ResetDomain:
     return self.state
 
   def _outstanding_zero(self, group: object) -> bool:
-    """Check that all outstanding DMA/engine jobs have completed."""
-    dma_jobs = getattr(group, "_dma_jobs", [])
+    """Check that all in-flight transfers and engine jobs have completed."""
+    inflight = getattr(group, "transfer_manager", None)
+    if inflight is not None and inflight.inflight_count > 0:
+      return False
     coll_jobs = getattr(group, "_collective_jobs", [])
-    if dma_jobs or coll_jobs:
+    if coll_jobs:
       return False
     for t in getattr(group, "tiles", []):
       if not getattr(t, "done", True):
