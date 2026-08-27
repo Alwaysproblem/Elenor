@@ -16,6 +16,7 @@ These tests exercise the runtime / full_memory fidelity modes:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from xdsl.dialects.builtin import ModuleOp
@@ -49,6 +50,7 @@ from pipeline_validator.dialects.elenor import (
   TileSubviewOp,
 )
 from pipeline_validator.execution_ir import (
+  ContextAdmissionStatus,
   ExecDispatchRequest,
   ExecGroupAction,
   ExecGroupActionOp,
@@ -61,18 +63,19 @@ from pipeline_validator.execution_ir import (
   ExecTileRoleBinding,
   GlobalBinding,
   GridInstanceId,
+  PhaseSignal,
   TaskIdentity,
 )
-from pipeline_validator.ir_lowering import lower_workload_ir
+from pipeline_validator.ir_lowering import lower_model_ir, lower_workload_ir
 from pipeline_validator.memory import L2SRAM, NoCRouter, PayloadTracker
 from pipeline_validator.runtime import EventStatus, EventTable, FaultCode, FaultRing
 from pipeline_validator.runtime.fault_ring import FaultDomain, FaultRecord
 from pipeline_validator.runtime.reset_domain import ResetDomain, ResetRequest, ResetState
 from pipeline_validator.simulator import Simulator
 from pipeline_validator.tile import TileUCE
-from pipeline_validator.tile_group import TileGroup
+from pipeline_validator.tile_group import L2AdmissionStatus, TileGroup
 from pipeline_validator.workload_builders import make_pow_tile_program
-from pipeline_validator.workload_ir import parse_workload_ir, print_workload_ir
+from pipeline_validator.workload_ir import load_workload_ir, parse_workload_ir, print_workload_ir
 from pipeline_validator.workloads import ALL_WORKLOADS, PowWorkload
 
 # ---------------------------------------------------------------------------
@@ -1650,24 +1653,27 @@ class TestSignalGatedRelease:
 
   def test_exact_capacity_blocks_until_release(self):
     """Exact-capacity L2 (one pow chunk = 131072 bytes): first batch
-    admits and holds all L2; second admit_l2_buffers must fail."""
-    from pipeline_validator.tile_group import TileGroup
+    admits and holds all L2; the second bundle is WAIT_CAPACITY."""
+    from pipeline_validator.tile_group import L2AdmissionStatus, TileGroup
 
     hw = HardwareConfig().with_overrides(group_sram_bytes=4 * 128 * 128 * 2)
     group = TileGroup(hw, fidelity="full_memory")
     task1 = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
     task2 = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
     group.load_task(task1, input_bindings=POW_BINDINGS)
-    # L2 is exactly full; a second admission must fail
-    assert not group.admit_l2_buffers(task2, cycle=0)
+    # L2 is exactly full; a second admission must wait, not fault
+    outcome = group.try_admit_l2_buffers(
+      task2, context_name="ctx2",
+      launch_generation=group._context_launch_generation + 1, cycle=0)
+    assert outcome.status is L2AdmissionStatus.WAIT_CAPACITY
     assert group.l2_sram.snapshot()["free_bytes"] == 0
     group.reset()
 
   def test_exact_capacity_retries_after_3_4_barrier_and_release(self):
-    """Exact-capacity L2: after 3/4 signals, second admit returns False
-    (pins hold L2). After 4th signal + legal release, retry returns True."""
+    """Exact-capacity L2: after 3/4 signals, a retry is WAIT_CAPACITY
+    (pins hold L2). After 4th signal + legal release, it is ADMITTED."""
     from pipeline_validator.execution_ir import PhaseSignal, TaskIdentity
-    from pipeline_validator.tile_group import TileGroup
+    from pipeline_validator.tile_group import L2AdmissionStatus, TileGroup
 
     chunk = 4 * 128 * 128 * 2  # one pow allocation = 131072 bytes
     hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10, group_sram_bytes=chunk)
@@ -1687,10 +1693,11 @@ class TestSignalGatedRelease:
     for tid in range(3):
       group._on_phase_signal(PhaseSignal(TaskIdentity(grid, tid), "input_released"), c + 1)
     task2 = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
-    # Second admission must fail: L2 is pinned by the first batch.
-    group._context_launch_generation += 1
-    assert not group.admit_l2_buffers(task2, cycle=c + 2)
-    group._context_launch_generation -= 1  # restore for retry
+    # Second admission must wait: L2 is pinned by the first batch.
+    gen2 = group._context_launch_generation + 1
+    outcome = group.try_admit_l2_buffers(
+      task2, context_name="ctx2", launch_generation=gen2, cycle=c + 2)
+    assert outcome.status is L2AdmissionStatus.WAIT_CAPACITY
     # Complete the 4th signal + all output_ready, then step until
     # the RELEASE_L2 action unpins and releases the handle.
     group._on_phase_signal(PhaseSignal(TaskIdentity(grid, 3), "input_released"), c + 3)
@@ -1703,8 +1710,9 @@ class TestSignalGatedRelease:
     assert seq.done, "sequencer did not complete after release"
     assert group.l2_sram.snapshot()["live_allocations"] == 0
     # Retry: L2 is now free; second admission must succeed.
-    group._context_launch_generation += 1
-    assert group.admit_l2_buffers(task2, cycle=c2)
+    outcome = group.try_admit_l2_buffers(
+      task2, context_name="ctx2", launch_generation=gen2, cycle=c2)
+    assert outcome.status is L2AdmissionStatus.ADMITTED
     assert group.l2_sram.snapshot()["live_allocations"] == 1
     group.reset()
 

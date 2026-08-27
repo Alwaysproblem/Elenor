@@ -16,6 +16,7 @@ become stale.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 
 
 class MemoryInvariantError(Exception):
@@ -125,13 +126,28 @@ class AllocationHandle:
     return self.base_address + self.size_bytes
 
 
+class AdmissionFailureKind(Enum):
+  """Classification of an admission failure (PR 3.5).
+
+  ``INVALID_REQUEST``: size/alignment never legal.
+  ``PERMANENT_CAPACITY``: the whole bundle cannot fit even on an empty
+  pool with the real bank/alignment profile — no future release helps.
+  ``TEMPORARY_CAPACITY``: legally placeable, but the current live free
+  map/fragmentation cannot satisfy it — retry after a capacity change.
+  """
+
+  INVALID_REQUEST = "invalid_request"
+  PERMANENT_CAPACITY = "permanent_capacity"
+  TEMPORARY_CAPACITY = "temporary_capacity"
+
+
 @dataclass(frozen=True)
 class AdmissionFailure:
-  """Result of a failed ``plan_bundle``."""
+  """Typed result of a failed ``plan_bundle`` (PR 3.5)."""
 
+  kind: AdmissionFailureKind
   reason: str
   buffer_id: str = ""
-
 
 @dataclass(frozen=True)
 class AllocationPlan:
@@ -205,6 +221,11 @@ class BankedFreeExtentAllocator:
     self._peak_allocated: int = 0
     self._allocated_bytes: int = 0
 
+  @property
+  def pool_version(self) -> int:
+    """Monotonic live free-map version (bumped on commit/final-free)."""
+    return self._pool_version
+
   # -- planning ---------------------------------------------------------
 
   def plan_bundle(
@@ -215,26 +236,45 @@ class BankedFreeExtentAllocator:
     Deterministic first-fit: request order, bank id ascending, extent
     start ascending.  The first segment's physical address must satisfy
     the request alignment.  On any failure the partial segments are
-    discarded and an ``AdmissionFailure`` is returned.
+    discarded and a typed ``AdmissionFailure`` is returned.
     """
     # validate requests first
     for req in requests:
       if req.size_bytes <= 0:
-        return AdmissionFailure("invalid allocation size", req.buffer_id)
+        return AdmissionFailure(
+          AdmissionFailureKind.INVALID_REQUEST,
+          "invalid allocation size", req.buffer_id)
       if req.alignment <= 0 or (req.alignment & (req.alignment - 1)) != 0:
-        return AdmissionFailure("invalid allocation alignment", req.buffer_id)
+        return AdmissionFailure(
+          AdmissionFailureKind.INVALID_REQUEST,
+          "invalid allocation alignment", req.buffer_id)
     cloned_free = [list(extents) for extents in self._free]
     placements: dict[str, tuple[BankSegment, ...]] = {}
     for req in requests:
       segments = self._plan_one(cloned_free, req)
       if segments is None:
-        return AdmissionFailure("allocation capacity exceeded", req.buffer_id)
+        kind = (
+          AdmissionFailureKind.PERMANENT_CAPACITY
+          if not self.can_ever_fit_bundle(requests)
+          else AdmissionFailureKind.TEMPORARY_CAPACITY)
+        return AdmissionFailure(kind, "allocation capacity exceeded",
+                                req.buffer_id)
       placements[req.buffer_id] = segments
     return AllocationPlan(
       pool_version=self._pool_version,
       requests=tuple(requests),
       placements=placements,
     )
+
+  def can_ever_fit_bundle(self, requests: list[AllocationRequest]) -> bool:
+    """Dry-run the whole bundle on an empty free map with the same bank
+    and alignment profile.  Zero side effects.  ``False`` means no
+    future release can ever satisfy the bundle (permanent capacity)."""
+    empty = [[(0, self.bytes_per_bank)] for _ in range(self.banks)]
+    for req in requests:
+      if self._plan_one(empty, req) is None:
+        return False
+    return True
 
   def _plan_one(
     self, free: list[list[tuple[int, int]]], req: AllocationRequest,

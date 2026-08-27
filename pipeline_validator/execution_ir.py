@@ -54,6 +54,19 @@ class ExecGroupActionOp(Enum):
   RELEASE_L2 = "release.l2"
 
 
+class ContextAdmissionStatus(Enum):
+  """Cross-layer context admission lifecycle (PR 3.5).
+
+  Shared by ``Simulator`` and ``TileGroup``: a submitted context is
+  PREPARED, becomes ACTIVE once its L2 bundle commits, or waits in
+  WAIT_CAPACITY until a release-driven capacity change admits it.
+  CANCELLED marks a reset/fault cleanup of a never-activated context.
+  """
+
+  PREPARED = "prepared"
+  WAIT_CAPACITY = "wait_capacity"
+  ACTIVE = "active"
+  CANCELLED = "cancelled"
 # ---------------------------------------------------------------------------
 # Frozen value objects (logical address IR, PR 1)
 # ---------------------------------------------------------------------------
