@@ -66,6 +66,16 @@ owner, generation, live handle, and pin state before reclaiming the
 buffer. The event type tag doubles as the runtime event id shared by the
 simulator and the trace.
 
+**L2 admission wait (PR 3.5)** — a submit is accepted onto a device slot
+even when its atomic L2 bundle transiently cannot fit: the context
+enters `ADMISSION_WAIT` (slot reserved, no UCE/L1/L2/stream/DMA
+resource held, no fault). Only a `nest.release` allocator final-free
+wakes the strict-FIFO wait queue; the head is admitted in the same
+cycle and issues its first group action the next cycle, so a later
+context can overlap an earlier context's compute/store. Invalid or
+empty-pool-impossible bundles fault immediately and never queue. The
+submit result event still means full context completion.
+
 **`depends_on(%e)`** expresses data dependencies directly on async ops
 (dispatch, store, release), lowered to wait actions by the lowering.
 

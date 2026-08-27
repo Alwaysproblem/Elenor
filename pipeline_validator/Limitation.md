@@ -18,8 +18,13 @@
 - PR 3 task-bound phase/release protocol：`tile.signal <phase>(%task)`
   以 logical task 驱动每个 grid 的 `all_tasks` 聚合；显式 event、
   owner/generation 和 consumer pin 共同门控 role-aware L2 release。
-
-有意简化/未模拟（需明确告知用户的边界）：
+- PR 3.5 L2 admission wait：submit 被 device slot 接受后，若原子 L2
+  bundle 暂时放不下（合法但当前 free map 不满足），context 进入
+  `ADMISSION_WAIT`（占 slot，不占 UCE/L1/L2/stream/DMA，不 fault）；
+  只有 `nest.release` 的 allocator final-free 才会按 strict FIFO 唤醒
+  队首，且唤醒与 first action 固定为 `admit_cycle` / `admit_cycle + 1`。
+  非法或空池也无法容纳的 bundle 立即 fault、永不排队。
+  有意简化/未模拟（需明确告知用户的边界）：
 
 - 单 Tile Group：不模拟多 Group 间的 NoC/Collective 竞争（Collective 有
   1-cycle command/window 模型和 trace event，但 reduce datapath/bandwidth
@@ -37,6 +42,11 @@
   管理（program_id/version/hash/epoch）。
 - PR 3 聚合只支持 `#nest.aggregate<all_tasks>`；没有 quorum、subset 或
   其他 aggregation mode；
+- PR 3.5 admission queue 固定 strict FIFO：没有 utilization-first
+  bypass、优先级或抢占；head-of-line blocking 是 V1 明确行为（PMU
+  `l2_admission_queue_peak`/`l2_admission_wait_cycles` 观测，后续策略
+  独立 PR）；唤醒源只有 release final-free，没有跨层
+  `nexus.await_phase` 或 nest event export；
 - logical task 到 physical tile 的 scheduler 仍固定为当前 1:1 映射；
 - 未实现 PR 4 gather；
 - 未实现 PR 5 memory trace lane/counter（现有 `tile_signal` instant 是
