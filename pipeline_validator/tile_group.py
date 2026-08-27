@@ -241,6 +241,7 @@ class TileGroup:
     self._l2_capacity_change_cycle: int | None = None
     self._last_retried_pool_version: int = -1
     self._last_retried_capacity_change_cycle: int = -1
+    self._last_step_cycle: int = 0
     # PR 2: role_event_id -> {tile_id: [L1 AllocationHandle]}
     self._role_l1_handles: dict[str, dict[int, list]] = {}
     # transaction id -> sequencer
@@ -648,18 +649,25 @@ class TileGroup:
     self._pending_activations.extend(staged)
     self._last_retried_pool_version = self.l2_sram.pool_version
 
-  def _cancel_pending_admissions(self, cycle: int | None = None) -> None:
-    """Cancel every waiting ticket (reset/fault cleanup, PR 3.5).
+  def _cancel_pending_admissions(
+    self, cycle: int | None = None, *, release_staged: bool = False,
+  ) -> None:
+    """Cancel every waiting or staged ticket (reset/fault cleanup).
 
-    Waiting tickets own no allocation, pin, stream or UCE context, so
-    cancellation never calls ``request_release``.
+    FIFO waiters own no allocation.  Staged activations have already
+    committed their L2 bundle; callers that will not run the general
+    context-memory unwind must set ``release_staged`` so those handles
+    are explicitly released before the ticket is discarded.
     """
-    for ticket in self._pending_context_admissions:
+    waiters = list(self._pending_context_admissions)
+    staged = list(self._pending_activations)
+    for ticket in [*waiters, *staged]:
       ticket.sequencer.admission_status = ContextAdmissionStatus.CANCELLED
-      terminal = cycle if cycle is not None else ticket.enqueue_cycle
-      if terminal > ticket.enqueue_cycle:
-        self.pmu.add_cycle("l2_admission_wait_cycles",
-                           terminal - ticket.enqueue_cycle)
+      terminal = (
+        cycle if cycle is not None
+        else max(self._last_step_cycle, ticket.enqueue_cycle))
+      self.pmu.add_cycle(
+        "l2_admission_wait_cycles", terminal - ticket.enqueue_cycle)
       if self.tracer is not None:
         self.tracer.instant("TileGroup", "Admission",
                             "context_admission_cancelled", terminal, {
@@ -668,6 +676,22 @@ class TileGroup:
                               "launch_generation": ticket.launch_generation,
                               "cycle": terminal,
                             })
+    if release_staged and (self.memory_enabled or self.runtime_enabled):
+      for ticket in staged:
+        generation = ticket.launch_generation
+        release_cycle = (
+          cycle if cycle is not None
+          else max(self._last_step_cycle, ticket.enqueue_cycle))
+        for key, handle in list(self._l2_handles.items()):
+          if key[0] != generation:
+            continue
+          try:
+            self.l2_sram.request_release(
+              handle, handle.owner, release_cycle)
+          except MemoryInvariantError:
+            pass
+          self._l2_handles.pop(key, None)
+        self._l2_roles.pop(generation, None)
     self._pending_context_admissions.clear()
     self._pending_activations.clear()
 
@@ -1114,8 +1138,8 @@ class TileGroup:
 
   def step(self, cycle: int) -> bool:
     """Advance one cycle.  Returns True if the whole task is done."""
+    self._last_step_cycle = cycle
     tr = self.tracer
-
     # 0. task trace: capture start cycle on first step
     if tr is not None and self._task_start_cycle is None:
       self._task_start_cycle = cycle
@@ -1488,6 +1512,9 @@ class TileGroup:
     self._role_event_tile_mask.clear()
     self._role_done_tiles.clear()
     self._role_trace.clear()
+    # PR 3.5: staged activations already own L2; unwind them before
+    # clearing handle/role registries for the fresh standalone run.
+    self._cancel_pending_admissions(release_staged=True)
     # PR 3: clear structured grid registries
     self._grid_signals.clear()
     self._live_launches.clear()
@@ -1500,11 +1527,10 @@ class TileGroup:
     self._role_l1_handles.clear()
     self._txn_sequencer.clear()
     self.transfer_manager.reset()
-    # PR 3.5: cancel waiting admissions and reset capacity telemetry
-    self._cancel_pending_admissions()
     self._l2_capacity_change_cycle = None
     self._last_retried_pool_version = -1
     self._last_retried_capacity_change_cycle = -1
+    self._last_step_cycle = 0
     # A new standalone run is a fresh HBM binding epoch: old handles must
     # become stale and same-name bindings must be registered again.
     self.hbm.reset()
@@ -1549,10 +1575,10 @@ class TileGroup:
     self.sequencer.context_launch_generation = self._context_launch_generation
     self.sequencer.context_name = task.name
     self.sequencer.device_slot = 0
-    self.sequencer.admission_status = ContextAdmissionStatus.ACTIVE
     self._live_launches[
       (task.name, 0, self._context_launch_generation)] = self.sequencer
     self.sequencer.load(task)
+    self.sequencer.admission_status = ContextAdmissionStatus.ACTIVE
     # pre-init streams declared in the task (some tasks init inline)
     for s in task.streams:
       self.init_stream(s)
@@ -1780,6 +1806,10 @@ class TileGroup:
     self._role_event_tile_mask.clear()
     self._role_done_tiles.clear()
     self._role_trace.clear()
+    self.pmu.reset()
+    # PR 3.5: staged activations already own L2; unwind them before
+    # clearing the generation-keyed handle/role registries.
+    self._cancel_pending_admissions(release_staged=True)
     # PR 3: clear structured grid registries
     self._grid_signals.clear()
     self._live_launches.clear()
@@ -1788,7 +1818,6 @@ class TileGroup:
     self._task_trace_name = None
     self._task_start_cycle = None
     self._task_done_traced = False
-    self.pmu.reset()
     self._registered_programs.clear()
     # PR 2: clear admission + transfer state
     self._context_launch_generation = 0
@@ -1798,11 +1827,10 @@ class TileGroup:
     self._txn_sequencer.clear()
     self.transfer_manager.reset()
     self.hbm.reset()
-    # PR 3.5: cancel waiting admissions and reset capacity telemetry
-    self._cancel_pending_admissions()
     self._l2_capacity_change_cycle = None
     self._last_retried_pool_version = -1
     self._last_retried_capacity_change_cycle = -1
+    self._last_step_cycle = 0
     for t in self.tiles:
       t.l1_allocator.reset()
     if self.runtime_enabled:
