@@ -10,7 +10,9 @@
 //   * When A's 4/4 input_released aggregate completes and the legal
 //     nest.release final-frees a_input, B's FIFO retry admits b_input in
 //     the same cycle; B issues its first group action the next cycle,
-//     prefetches, dispatches, and computes pow concurrently with A.
+//     prefetches, dispatches, loads, signals input_released and releases
+//     its buffer while A is still computing pow (before A's final DMA
+//     store / context completion).
 //
 // Run (also in run_sim.sh):
 //   conda run -n elenor-validator python -m pipeline_validator.cli \
@@ -51,8 +53,6 @@ builtin.module {
     %e_load_1 = tile.load.async %3 into %4 : !tile.event<"e_load">
     tile.await %e_load_1
     tile.signal input_released(%task_1)
-    %e_pow_1 = tile.pow.async bytes = 32768 exponent = 2 pow_ops = 1048576 : !tile.event<"e_pow_1">
-    tile.await %e_pow_1
     tile.return
   }
   nest.context @ctx_a (%A_IN: !nest.global_memref<4x128x128xbf16>, %A_OUT: !nest.global_memref<4x128x128xbf16>) placement = 15 {
