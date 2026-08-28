@@ -9,18 +9,27 @@
 //     ADMISSION_WAIT (not a fault, no partial allocation).
 //   * When A's 4/4 input_released aggregate completes and the legal
 //     nest.release final-frees a_input, B's FIFO retry admits b_input in
-//     the same cycle; B issues its first group action the next cycle and
-//     dispatches while A is still computing pow and before A's final
-//     DMA store / context completion.
+//     the same cycle; B issues its first group action the next cycle,
+//     prefetches, dispatches, and computes pow concurrently with A.
 //
-// CLI:
-//   python -m pipeline_validator --ir-file examples/example_l2_admission_wait.mlir \
-//     --device-context-mode 2 --hw-override hbm_fixed_latency_cycles=10 \
+// Run (also in run_sim.sh):
+//   conda run -n elenor-validator python -m pipeline_validator.cli \
+//     --ir-file examples/example_l2_admission_wait.mlir \
+//     --sim-override fidelity=full_memory \
 //     --hw-override group_sram_bytes=262144 \
+//     --hw-override hbm_fixed_latency_cycles=10 \
+//     --context-mode 2 --device-context-mode 2 \
 //     --input-binding A_IN=0x100000:131072:rw \
 //     --input-binding A_OUT=0x200000:131072:rw \
 //     --input-binding B_IN=0x300000:131072:rw \
-//     --sim-override fidelity=full_memory --max-cycles 500000
+//     --trace-json /tmp/l2-admission-wait-trace.json --json \
+//     --report /tmp/l2-admission-wait-report.json --max-cycles 500000
+//
+// NOTE: the admission wait only triggers when L2 capacity is exactly
+// exhausted. The required --hw-override group_sram_bytes=262144 (2 x
+// 131072) and --sim-override fidelity=full_memory are load-bearing;
+// with a larger default L2 or runtime-only fidelity, both contexts
+// admit immediately and run concurrently without any wait.
 builtin.module {
   tile.program @prog_a (%task: !nest.task, %in_buf: !nest.l2_buffer<4x128x128xbf16>, %out_buf: !nest.l2_buffer<4x128x128xbf16>) {
     %0 = tile.subview %in_buf task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 128, 128] strides = [1, 1, 1] : !nest.l2_view<1x128x128xbf16>
@@ -42,6 +51,8 @@ builtin.module {
     %e_load_1 = tile.load.async %3 into %4 : !tile.event<"e_load">
     tile.await %e_load_1
     tile.signal input_released(%task_1)
+    %e_pow_1 = tile.pow.async bytes = 32768 exponent = 2 pow_ops = 1048576 : !tile.event<"e_pow_1">
+    tile.await %e_pow_1
     tile.return
   }
   nest.context @ctx_a (%A_IN: !nest.global_memref<4x128x128xbf16>, %A_OUT: !nest.global_memref<4x128x128xbf16>) placement = 15 {
