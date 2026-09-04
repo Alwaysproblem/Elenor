@@ -14,18 +14,11 @@
 //     its buffer while A is still computing pow (before A's final DMA
 //     store / context completion).
 //
-// Run (also in run_sim.sh):
-//   conda run -n elenor-validator python -m pipeline_validator.cli \
-//     --ir-file examples/example_l2_admission_wait.mlir \
-//     --sim-override fidelity=full_memory \
-//     --hw-override group_sram_bytes=262144 \
-//     --hw-override hbm_fixed_latency_cycles=10 \
-//     --context-mode 2 --device-context-mode 2 \
-//     --input-binding A_IN=0x100000:131072:rw \
-//     --input-binding A_OUT=0x200000:131072:rw \
-//     --input-binding B_IN=0x300000:131072:rw \
-//     --trace-json /tmp/l2-admission-wait-trace.json --json \
-//     --report /tmp/l2-admission-wait-report.json --max-cycles 500000
+// Run:
+//   bash examples/run.sh l2-admission-wait \
+//     --trace-json /tmp/l2-admission-wait-trace.json \
+//     --report /tmp/l2-admission-wait-report.json \
+//     --json
 //
 // NOTE: the admission wait only triggers when L2 capacity is exactly
 // exhausted. The required --hw-override group_sram_bytes=262144 (2 x
@@ -63,7 +56,7 @@ builtin.module {
     %ev_pref_in = nest.dma.prefetch.async %5 into %in_buf_a : !nest.event<"ev_pref_in">
     %ev_pref_out = nest.dma.prefetch.async %6 into %out_buf_a : !nest.event<"ev_pref_out">
     %7 = nest.task.range from = 0 to = 4 : !nest.task_range
-    %ev_grid_a, %ev_inrel_a, %ev_outready_a = nest.dispatch.tasks.async @prog_a tasks(%7) ins(%in_buf_a, %out_buf_a) outs(%in_buf_a, %out_buf_a) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%ev_pref_in, %ev_pref_out) : (!nest.event<"ev_grid_a">, !nest.event<"ev_inrel_a">, !nest.event<"ev_outready_a">)
+    %ev_grid_a, %ev_inrel_a, %ev_outready_a = nest.dispatch.tasks.async @prog_a tasks(%7) globals() ins(%in_buf_a, %out_buf_a) outs(%in_buf_a, %out_buf_a) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%ev_pref_in, %ev_pref_out) : (!nest.event<"ev_grid_a">, !nest.event<"ev_inrel_a">, !nest.event<"ev_outready_a">)
     nest.release %in_buf_a depends_on(%ev_inrel_a)
     %ev_store_a = nest.dma.store.async %out_buf_a into %6 depends_on(%ev_outready_a) : !nest.event<"ev_store_a">
     nest.release %out_buf_a depends_on(%ev_store_a)
@@ -75,7 +68,7 @@ builtin.module {
     %8 = nest.subview %B_IN offsets = [0, 0, 0] sizes = [4, 128, 128] strides = [1, 1, 1] : !nest.global_view<4x128x128xbf16>
     %ev_pref_b = nest.dma.prefetch.async %8 into %in_buf_b : !nest.event<"ev_pref_b">
     %9 = nest.task.range from = 0 to = 4 : !nest.task_range
-    %ev_grid_b, %ev_inrel_b, %10 = nest.dispatch.tasks.async @prog_b tasks(%9) ins(%in_buf_b) outs(%in_buf_b) signal_policy { input_released = #nest.aggregate<all_tasks> } depends_on(%ev_pref_b) : (!nest.event<"ev_grid_b">, !nest.event<"ev_inrel_b">, !nest.event<"">)
+    %ev_grid_b, %ev_inrel_b, %10 = nest.dispatch.tasks.async @prog_b tasks(%9) globals() ins(%in_buf_b) outs(%in_buf_b) signal_policy { input_released = #nest.aggregate<all_tasks> } depends_on(%ev_pref_b) : (!nest.event<"ev_grid_b">, !nest.event<"ev_inrel_b">, !nest.event<"">)
     nest.release %in_buf_b depends_on(%ev_inrel_b)
     nest.await %ev_grid_b
     nest.return

@@ -13,6 +13,10 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 from enum import IntEnum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+  from ..trace import MemoryTrace
 
 
 class VCId(IntEnum):
@@ -99,6 +103,7 @@ class NoCRouter:
 
   vc_depth: int = 8
   router_latency_cycles: int = 4
+  trace: MemoryTrace | None = None
 
   def __post_init__(self) -> None:
     self.vcs: dict[int, VirtualChannel] = {
@@ -109,10 +114,28 @@ class NoCRouter:
       for vc_id in VCId
     }
     self.pmu_switch_contention: int = 0
+    # last observed cycle for hooks without a cycle parameter
+    self._last_cycle: int = 0
+
+  def _trace_vc(self, vc_id: int) -> None:
+    """Push per-VC occupancy/credit counters (change-only)."""
+    if self.trace is None:
+      return
+    vc = self.vcs[vc_id]
+    self.trace.noc_vc(vc_id, vc.occupancy, vc.credit_available,
+                      self._last_cycle)
+
+  def _trace_all_vcs(self) -> None:
+    if self.trace is None:
+      return
+    for vc_id in sorted(self.vcs):
+      self._trace_vc(vc_id)
 
   def send(self, vc: int, flit: Flit, cycle: int) -> None:
     """Enqueue a flit onto a VC (upstream side)."""
+    self._last_cycle = cycle
     self.vcs[vc].enqueue(flit, cycle)
+    self._trace_vc(vc)
 
   def step(self, cycle: int) -> list[Flit]:
     """Advance one cycle.  Returns the list of flits that traversed.
@@ -122,6 +145,7 @@ class NoCRouter:
     Returns flits after `router_latency_cycles` (modeled as immediate
     return with the latency added by the caller).
     """
+    self._last_cycle = cycle
     for vc in self.vcs.values():
       vc.tick(cycle)
 
@@ -145,8 +169,8 @@ class NoCRouter:
       elif vc.occupancy > 0:
         contention += 1
     self.pmu_switch_contention += contention
+    self._trace_all_vcs()
     return sent
-
   def contains(self, tag: str) -> bool:
     """True if a pending (not yet traversed) flit carries ``tag``."""
     return any(
@@ -170,6 +194,7 @@ class NoCRouter:
 
   def return_credit(self, vc: int, n: int = 1) -> None:
     self.vcs[vc].return_credit(n)
+    self._trace_vc(vc)
 
   def reset(self) -> None:
     for vc in self.vcs.values():

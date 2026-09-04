@@ -7,7 +7,7 @@ counters against each workload's `expected` fingerprint.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .pmu import StallReason
 from .simulator import SimResult
@@ -29,6 +29,8 @@ class WorkloadReport:
     checks: list[dict]  # pass/fail items
     credit_invariant_ok: bool
     num_tiles: int = 4
+    gather_fidelity: str | None = None
+    memory: dict = field(default_factory=dict)  # PR 5 peak reconciliation
 
 
 def _ratio(counters: dict, total: int) -> float:
@@ -73,7 +75,44 @@ def build_report(wl: Workload,
         checks=checks,
         credit_invariant_ok=result.credit_invariant_ok,
         num_tiles=num_tiles,
+        gather_fidelity=(
+            "deterministic_profiled_not_address_or_value_accurate"
+            if pmu.events.get("gather_requests", 0) > 0
+            else None
+        ),
+        memory=(_memory_summary(result.group_snapshot.get("memory"))
+                if result.memory_trace else {}),
     )
+
+
+def _memory_summary(group_memory: dict | None) -> dict:
+    """Extract memory peak reconciliation values from the group snapshot.
+
+    Values are None (and the corresponding key omitted) when the run
+    used a fidelity without memory accounting - the report never
+    reconstructs memory state from trace events.
+    """
+    if not group_memory:
+        return {}
+    summary: dict = {}
+    l2 = group_memory.get("l2") or {}
+    if l2.get("peak_allocated_bytes") is not None:
+        summary["l2_peak_allocated_bytes"] = l2["peak_allocated_bytes"]
+    l1 = group_memory.get("l1") or {}
+    l1_peaks = {
+        tile_id: (entry or {}).get("allocator", {}).get("peak_allocated_bytes")
+        for tile_id, entry in l1.items()
+        if (entry or {}).get("allocator")
+    }
+    if any(value is not None for value in l1_peaks.values()):
+        summary["l1_peak_allocated_bytes"] = l1_peaks
+    transfers = group_memory.get("transfers") or {}
+    if transfers.get("hbm_outstanding_peak") is not None:
+        summary["hbm_outstanding_peak"] = transfers["hbm_outstanding_peak"]
+    hbm = group_memory.get("hbm") or {}
+    if hbm.get("used_bytes") is not None:
+        summary["hbm_used_bytes"] = hbm["used_bytes"]
+    return summary
 
 
 def _run_checks(wl: Workload, result: SimResult, engine_active: dict,
@@ -200,6 +239,66 @@ def _run_checks(wl: Workload, result: SimResult, engine_active: dict,
             ),
             "pass": ok,
         })
+    gather_requests = result.pmu.events.get("gather_requests", 0)
+    if gather_requests > 0:
+        l1_hits = result.pmu.events.get("gather_l1_hits", 0)
+        l2_hits = result.pmu.events.get("gather_l2_hits", 0)
+        hbm_misses = result.pmu.events.get("gather_hbm_misses", 0)
+        conserved = gather_requests == l1_hits + l2_hits + hbm_misses
+        checks.append({
+            "check": "gather_request_conservation",
+            "expected": True,
+            "actual": {
+                "requests": gather_requests,
+                "l1_hits": l1_hits,
+                "l2_hits": l2_hits,
+                "hbm_misses": hbm_misses,
+            },
+            "pass": conserved,
+        })
+
+        snapshot = result.group_snapshot
+        memory = snapshot.get("memory", {})
+        mshr = memory.get("mshr", {})
+        l2_mshr = mshr.get("l2", {})
+        l1_mshrs = mshr.get("l1", {}).values()
+        transfers = memory.get("transfers", {})
+        stages = transfers.get("stages", {}).values()
+        l2_allocator = memory.get("l2") or {}
+        l1_allocators = [
+            tile_memory.get("allocator") or {}
+            for tile_memory in memory.get("l1", {}).values()
+        ]
+        gather_jobs = [
+            tile.get("gather_active_jobs", 0)
+            for tile in snapshot.get("tiles", [])
+        ]
+        zero_leak = (
+            l2_mshr.get("active", 0) == 0
+            and l2_mshr.get("callbacks", 0) == 0
+            and all(item.get("active", 0) == 0 for item in l1_mshrs)
+            and all(item.get("callbacks", 0) == 0 for item in mshr.get("l1", {}).values())
+            and all(count == 0 for count in gather_jobs)
+            and transfers.get("inflight", 0) == 0
+            and all(
+                stage.get("busy_resources", 0) == 0
+                and stage.get("outstanding", 0) == 0
+                for stage in stages
+            )
+            and l2_allocator.get("live_allocations", 0) == 0
+            and l2_allocator.get("pending_release", 0) == 0
+            and all(
+                allocator.get("live_allocations", 0) == 0
+                and allocator.get("pending_release", 0) == 0
+                for allocator in l1_allocators
+            )
+        )
+        checks.append({
+            "check": "gather_zero_leak",
+            "expected": True,
+            "actual": zero_leak,
+            "pass": zero_leak,
+        })
     return checks
 
 
@@ -214,6 +313,17 @@ def report_to_text(r: WorkloadReport) -> str:
     lines.append(f"  Completed:       {r.completed}  ({r.reason})")
     lines.append(f"  Utilization:     {r.utilization:.1%}")
     lines.append(f"  Credit inv OK:   {r.credit_invariant_ok}")
+    if r.gather_fidelity is not None:
+        lines.append(f"  Gather fidelity: {r.gather_fidelity}")
+    if r.memory:
+        lines.append("  Memory peaks:")
+        for key, value in sorted(r.memory.items()):
+            if isinstance(value, dict):
+                inner = ", ".join(
+                    f"tile{tid}={v}" for tid, v in sorted(value.items()))
+                lines.append(f"    {key:<30}: {inner}")
+            else:
+                lines.append(f"    {key:<30}: {value}")
     lines.append("")
     lines.append("  Engine active cycles:")
     for eng, c in r.engine_active.items():
@@ -271,10 +381,12 @@ def report_to_json(r: WorkloadReport) -> str:
             "reason": r.reason,
             "utilization": r.utilization,
             "credit_invariant_ok": r.credit_invariant_ok,
+            "gather_fidelity": r.gather_fidelity,
             "engine_active": r.engine_active,
             "stall_breakdown": r.stall_breakdown,
             "stream_counters": r.stream_counters,
             "events": r.events,
+            "memory": r.memory,
             "checks": r.checks,
         },
         indent=2)

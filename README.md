@@ -78,10 +78,77 @@ Host / System SoC
 .
 ├── design/             # 架构设计主文档与分模块设计文档
 ├── image/              # 架构图、时序图、模块示意图
+├── pipeline_validator/ # Cycle-accurate runtime / memory pipeline validator
+├── examples/           # 可运行 MLIR、协议场景、fixtures 与 artifacts
 ├── scripts/            # 文档导出脚本
 ├── gen_docs_config/    # PDF 导出模板
 └── LICENSE
 ```
+
+## 运行 Pipeline Validator 示例
+
+`examples/` 已按用途整理，并使用一个统一入口运行：
+
+```text
+examples/
+├── workloads/   # 可直接运行、适合复制修改的完整模型
+├── scenarios/   # admission/release 等 runtime 协议场景
+├── fixtures/    # 测试输入，不作为用户示例入口
+├── artifacts/   # 已生成的 trace/report JSON
+└── run.sh       # 单示例运行入口
+```
+
+查看 catalog：
+
+```bash
+bash examples/run.sh list
+```
+
+运行单个 workload：
+
+```bash
+bash examples/run.sh gather
+bash examples/run.sh gather-matmul
+bash examples/run.sh matmul-gather-add
+bash examples/run.sh gather-matmul-4tiles-2contexts
+bash examples/run.sh matmul-gather-add-4tiles-2contexts
+bash examples/run.sh pow-dual-context
+```
+
+运行协议场景：
+
+```bash
+bash examples/run.sh l2-admission-wait --json
+bash examples/run.sh sequential-release-counterexample
+```
+
+为单次运行追加 trace、JSON 或其他 validator 参数：
+
+```bash
+bash examples/run.sh gather-matmul \
+  --trace-json /tmp/gather-matmul.json \
+  --json
+```
+
+复制并修改自己的 MLIR：
+
+```bash
+cp examples/workloads/gather_profiled.mlir /tmp/my_gather.mlir
+
+bash examples/run.sh file /tmp/my_gather.mlir \
+  --input-binding table=0x200000:8388608:r \
+  --input-binding indices=0xA00000:4096:r \
+  --input-binding output=0xB00000:256:w \
+  --sim-override fidelity=full_memory \
+  --max-cycles 200000 \
+  --json
+```
+
+内置名称会自动带上正确的 input bindings、context 数量和必要的硬件 override；`file`
+模式则要求显式提供自定义模型所需参数。未知示例名会直接失败，不会选择默认模型。
+
+详细的示例说明、文件索引和 MLIR 修改约束见
+[`examples/README.md`](./examples/README.md)。
 
 ## 文档导航
 

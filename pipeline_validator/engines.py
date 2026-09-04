@@ -29,8 +29,21 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from .config import HardwareConfig
-from .execution_ir import ExecEngineDesc
-from .memory.transfer import MemoryTransaction, TransferStatus
+from .execution_ir import (
+    ExecEngineDesc,
+    ExecGatherDesc,
+    ExecGatherOutcome,
+    ExecProfiledAccess,
+)
+from .memory import (
+    DeterministicLRUCache,
+    MemoryOwner,
+    MshrTable,
+    MshrWait,
+    ResolvedMemoryView,
+    slice_resolved_view,
+)
+from .memory.transfer import MemoryTransaction, TransferOp, TransferStatus
 from .pmu import PMUCounter, StallReason
 from .trace import Tracer
 
@@ -250,27 +263,78 @@ class _MFETransferJob:
     start_cycle: int | None = None
 
 
-class MFEEngine(Engine):
-    """Memory Flow Engine — bandwidth-bound stream shaping.
 
-    PR 2 (§5.5): tile load/store go through the shared ``TransferManager``
-    as real ``MemoryTransaction``s.  Lane heads submit on start; the
-    engine polls ``TransferManager.status()`` each ``tick`` and constructs
-    an ``EngineJob`` with the transaction's actual start/completion cycle
-    when the local route finishes.
-    """
+@dataclass
+class _MFEGatherRequest:
+    access: ExecProfiledAccess
+    ordinal: int
+    state: str = "LOOKUP"
+    transaction_id: str | None = None
+    l1_mshr_token: int | None = None
+    l2_mshr_token: int | None = None
+    wait_version: int | None = None
+    response_ready: bool = False
+    merged_counted: bool = False
+
+
+@dataclass
+class _MFEGatherJob:
+    desc: ExecEngineDesc
+    event_id: str
+    source: ResolvedMemoryView | None
+    indices: ResolvedMemoryView | None
+    destination: ResolvedMemoryView | None
+    issuer: MemoryOwner
+    namespace: tuple[int, int, int, int, str]
+    requests: list[_MFEGatherRequest]
+    offsets: tuple[int, ...]
+    start_cycle: int
+    next_write_ordinal: int = 0
+    write_transaction_id: str | None = None
+    transaction_ids: set[str] = field(default_factory=set)
+
+class MFEEngine(Engine):
+    """Memory Flow Engine with load/store lanes and profiled Gather jobs."""
 
     kind = "MFE"
     _STORE_OPS = ("store", "dma_store")
 
-    def __init__(self, cfg: HardwareConfig, tile_id: int,
-                 tracer: Tracer | None = None,
-                 transfer_manager=None):
+    def __init__(
+        self,
+        cfg: HardwareConfig,
+        tile_id: int,
+        tracer: Tracer | None = None,
+        transfer_manager=None,
+        l1_cache: DeterministicLRUCache | None = None,
+        l1_mshr: MshrTable | None = None,
+        l2_cache: DeterministicLRUCache | None = None,
+        l2_mshr: MshrTable | None = None,
+        memory_trace=None,
+    ):
         self.cfg = cfg
         self.tile_id = tile_id
         self.pmu = PMUCounter()
         self.tracer = tracer
         self.transfer_manager = transfer_manager
+        self.memory_trace = memory_trace
+        self.l1_cache = (
+            l1_cache
+            if l1_cache is not None
+            else DeterministicLRUCache(
+                cfg.l1_cache_capacity_bytes,
+                cfg.cache_line_bytes,
+            )
+        )
+        self.l1_mshr = l1_mshr if l1_mshr is not None else MshrTable(cfg.l1_mshr_entries)
+        self.l2_cache = (
+            l2_cache
+            if l2_cache is not None
+            else DeterministicLRUCache(
+                cfg.l2_cache_capacity_bytes,
+                cfg.cache_line_bytes,
+            )
+        )
+        self.l2_mshr = l2_mshr if l2_mshr is not None else MshrTable(cfg.l2_mshr_entries)
         self._load_lanes = [
             _MFELane(f"MFE_LD{i}", cfg.mfe_pipeline_depth)
             for i in range(cfg.mfe_load_channels)
@@ -279,6 +343,21 @@ class MFEEngine(Engine):
             _MFELane(f"MFE_ST{j}", cfg.mfe_pipeline_depth)
             for j in range(cfg.mfe_store_channels)
         ]
+        self._gather_jobs: dict[str, _MFEGatherJob] = {}
+        self._current_cycle = 0
+
+    def _emit_memory_trace(self, cycle: int) -> None:
+        """Push L1/L2 cache + MSHR stats through the memory trace sink.
+
+        Change-only sampling in the sink makes this per-transition call
+        cheap; cache.py/mshr.py stay pure components.
+        """
+        if self.memory_trace is None:
+            return
+        self.memory_trace.cache("l1", self.tile_id, self.l1_cache.stats, cycle)
+        self.memory_trace.mshr("l1", self.tile_id, self.l1_mshr.stats, cycle)
+        self.memory_trace.cache("l2", self.tile_id, self.l2_cache.stats, cycle)
+        self.memory_trace.mshr("l2", self.tile_id, self.l2_mshr.stats, cycle)
 
     @property
     def _lanes(self) -> list[_MFELane]:
@@ -286,7 +365,7 @@ class MFEEngine(Engine):
 
     @property
     def state(self) -> EngineState:
-        if any(lane.running is not None for lane in self._lanes):
+        if self._gather_jobs or any(lane.running is not None for lane in self._lanes):
             return EngineState.RUNNING
         return EngineState.IDLE
 
@@ -296,41 +375,117 @@ class MFEEngine(Engine):
 
     @property
     def is_busy(self) -> bool:
-        return all(lane.accepted() >= lane.depth for lane in self._lanes)
+        lanes_full = all(lane.accepted() >= lane.depth for lane in self._lanes)
+        gather_capacity = self.cfg.mfe_load_channels * self.cfg.mfe_pipeline_depth
+        return lanes_full and len(self._gather_jobs) >= gather_capacity
 
-    def launch(self, desc: ExecEngineDesc, cycle: int,
-               event_id: str,
-               transaction: MemoryTransaction | None = None,
-               ) -> EngineJob | _MFETransferJob | None:
-        """Route a descriptor to a first-free lane of its direction class.
-
-        Returns None when every lane of that class is full.  Raises
-        ``ValueError`` on page-stream prefetch-capacity violations.
-        ``MemoryInvariantError`` from ``TransferManager.submit`` propagates
-        to ``TileUCE._drain_engine_queues`` which faults the context.
-        """
+    def launch(
+        self,
+        desc: ExecEngineDesc,
+        cycle: int,
+        event_id: str,
+        transaction: MemoryTransaction | None = None,
+    ) -> EngineJob | _MFETransferJob | None:
+        """Route a descriptor to a first-free lane of its direction class."""
         self._validate_stream_buffer(desc)
-        lanes = (self._store_lanes if desc.op in self._STORE_OPS
-                 else self._load_lanes)
+        lanes = self._store_lanes if desc.op in self._STORE_OPS else self._load_lanes
         free = next((lane for lane in lanes if lane.running is None), None)
         if free is None:
             free = next(
                 (lane for lane in lanes if lane.accepted() < lane.depth),
-                None)
+                None,
+            )
             if free is None:
                 return None
         job = _MFETransferJob(
-            desc=desc, event_id=event_id, transaction=transaction,
-            enqueue_cycle=cycle)
+            desc=desc,
+            event_id=event_id,
+            transaction=transaction,
+            enqueue_cycle=cycle,
+        )
         free.queue.append(job)
         if free.running is None:
             self._start_lane(free, cycle)
-        # Return a non-None sentinel so TileUCE pops the FIFO entry.
-        # Actual completion is reported via tick().
+        return job
+
+    def launch_gather(
+        self,
+        desc: ExecEngineDesc,
+        cycle: int,
+        event_id: str,
+        *,
+        source: ResolvedMemoryView | None,
+        indices: ResolvedMemoryView | None,
+        destination: ResolvedMemoryView | None,
+        issuer: MemoryOwner,
+        namespace: tuple[int, int, int, int, str],
+    ) -> _MFEGatherJob | None:
+        """Accept one Gather job and issue all profiled lookups concurrently."""
+        capacity = self.cfg.mfe_load_channels * self.cfg.mfe_pipeline_depth
+        if len(self._gather_jobs) >= capacity:
+            return None
+        if event_id in self._gather_jobs:
+            raise ValueError("duplicate gather event id")
+        gather = desc.params.get("gather")
+        if not isinstance(gather, ExecGatherDesc):
+            raise ValueError("gather descriptor is missing")
+        if self.transfer_manager is None:
+            raise ValueError("gather requires a TransferManager")
+
+        offsets: list[int] = []
+        offset = 0
+        requests: list[_MFEGatherRequest] = []
+        for ordinal, access in enumerate(gather.accesses):
+            offsets.append(offset)
+            offset += access.bytes
+            requests.append(_MFEGatherRequest(access=access, ordinal=ordinal))
+        job = _MFEGatherJob(
+            desc=desc,
+            event_id=event_id,
+            source=source,
+            indices=indices,
+            destination=destination,
+            issuer=issuer,
+            namespace=namespace,
+            requests=requests,
+            offsets=tuple(offsets),
+            start_cycle=cycle,
+        )
+        self._gather_jobs[event_id] = job
+        for metric in (
+            "gather_requests",
+            "gather_l1_hits",
+            "gather_l2_hits",
+            "gather_hbm_misses",
+            "gather_mshr_merges",
+            "gather_mshr_stalls",
+            "gather_reorder_wait_cycles",
+            "gather_bytes",
+        ):
+            self.pmu.add_event(metric, 0)
+        self.pmu.add_event("launch")
+        self.pmu.add_event("gather_requests", len(requests))
+        self.pmu.add_event("gather_bytes", gather.result_bytes)
+        for request in requests:
+            if request.access.outcome is ExecGatherOutcome.L1_HIT:
+                self.pmu.add_event("gather_l1_hits")
+                op = TransferOp.GATHER_L1_HIT
+            elif request.access.outcome is ExecGatherOutcome.L2_HIT:
+                self.pmu.add_event("gather_l2_hits")
+                op = TransferOp.GATHER_L2_HIT
+            else:
+                self.pmu.add_event("gather_hbm_misses")
+                op = TransferOp.GATHER_MISS_LOOKUP
+            self._submit_gather_transaction(
+                job,
+                request,
+                op,
+                cycle,
+                phase="lookup",
+            )
         return job
 
     def _start_lane(self, lane: _MFELane, cycle: int) -> None:
-        """Pop the lane's queue head and begin servicing it."""
         if not lane.queue:
             return
         job = lane.queue.popleft()
@@ -340,63 +495,417 @@ class MFEEngine(Engine):
         if job.transaction is not None and self.transfer_manager is not None:
             self.transfer_manager.submit(job.transaction, cycle, self.pmu)
 
-    def tick(self, cycle: int,
-             start_queued: bool = True) -> list[EngineJob]:
-        """Advance every lane one cycle; return jobs whose local route
-        finished this cycle.  ``start_queued=False`` drains only the
-        running head and must not submit the next queued transfer."""
+    def _transaction_id(
+        self,
+        job: _MFEGatherJob,
+        request: _MFEGatherRequest,
+        phase: str,
+    ) -> str:
+        prefix = ":".join(str(value) for value in job.namespace)
+        return f"{prefix}:gather:{request.ordinal}:{phase}"
+
+    def _submit_gather_transaction(
+        self,
+        job: _MFEGatherJob,
+        request: _MFEGatherRequest,
+        op: TransferOp,
+        cycle: int,
+        *,
+        phase: str,
+        src: ResolvedMemoryView | None = None,
+        dst: ResolvedMemoryView | None = None,
+    ) -> None:
+        assert self.transfer_manager is not None
+        transaction_id = self._transaction_id(job, request, phase)
+        transaction = MemoryTransaction(
+            transaction_id=transaction_id,
+            op=op,
+            issuer=job.issuer,
+            src=src,
+            dst=dst,
+            bytes_total=request.access.bytes,
+            completion_event=job.event_id,
+            tile_id=self.tile_id,
+        )
+        self.transfer_manager.submit(transaction, cycle, self.pmu)
+        request.transaction_id = transaction_id
+        request.state = phase.upper()
+        job.transaction_ids.add(transaction_id)
+
+    def _transaction_done(self, request: _MFEGatherRequest) -> bool:
+        if request.transaction_id is None or self.transfer_manager is None:
+            return False
+        return self.transfer_manager.status(request.transaction_id) is TransferStatus.DONE
+
+    def _acknowledge_request_transaction(self, request: _MFEGatherRequest) -> None:
+        if request.transaction_id is None or self.transfer_manager is None:
+            return
+        self.transfer_manager.acknowledge(request.transaction_id)
+        request.transaction_id = None
+
+    def _note_merge(self, request: _MFEGatherRequest) -> None:
+        if request.merged_counted:
+            return
+        request.merged_counted = True
+        self.pmu.add_event("gather_mshr_merges")
+
+    def _enter_mshr_wait(
+        self,
+        request: _MFEGatherRequest,
+        state: str,
+        wait: MshrWait,
+    ) -> None:
+        if request.state != state:
+            self.pmu.add_event("gather_mshr_stalls")
+        request.state = state
+        request.wait_version = wait.version
+        request.transaction_id = None
+
+    def _mark_response_ready(
+        self,
+        job: _MFEGatherJob,
+        request: _MFEGatherRequest,
+        cycle: int,
+    ) -> None:
+        if request.response_ready:
+            return
+        if job.event_id not in self._gather_jobs:
+            return
+        request.response_ready = True
+        request.state = "RESPONSE_READY"
+        request.wait_version = None
+        if self.tracer is not None:
+            self.tracer.instant(
+                f"Tile{self.tile_id}",
+                "MFE",
+                "gather_response",
+                cycle,
+                {
+                    "request_id": request.access.request_id,
+                    "ordinal": request.ordinal,
+                    "outcome": request.access.outcome.value,
+                    "event_id": job.event_id,
+                },
+            )
+
+    def _invoke_callbacks(self, callbacks) -> None:
+        for callback in callbacks:
+            callback()
+
+    def _try_l1_mshr(
+        self,
+        job: _MFEGatherJob,
+        request: _MFEGatherRequest,
+        cycle: int,
+    ) -> None:
+        allocation = self.l1_mshr.allocate(request.access.merge_group)
+        if isinstance(allocation, MshrWait):
+            self._enter_mshr_wait(request, "WAIT_L1_MSHR", allocation)
+            return
+        request.l1_mshr_token = allocation.token
+        request.wait_version = None
+        if not allocation.leader:
+            self._note_merge(request)
+            request.state = "WAIT_L1_FILL"
+            self.l1_mshr.wait(
+                allocation.token,
+                lambda: self._mark_response_ready(
+                    job,
+                    request,
+                    self._current_cycle,
+                ),
+            )
+            return
+        self._try_l2_mshr(job, request, cycle)
+
+    def _try_l2_mshr(
+        self,
+        job: _MFEGatherJob,
+        request: _MFEGatherRequest,
+        cycle: int,
+    ) -> None:
+        allocation = self.l2_mshr.allocate(request.access.merge_group)
+        if isinstance(allocation, MshrWait):
+            self._enter_mshr_wait(request, "WAIT_L2_MSHR", allocation)
+            return
+        request.l2_mshr_token = allocation.token
+        request.wait_version = None
+        if not allocation.leader:
+            self._note_merge(request)
+            request.state = "WAIT_L2_FILL"
+            self.l2_mshr.wait(
+                allocation.token,
+                lambda: self._submit_l2_refill(
+                    job,
+                    request,
+                    self._current_cycle,
+                ),
+            )
+            return
+        source = slice_resolved_view(job.source, 0, request.access.bytes)
+        self._submit_gather_transaction(
+            job,
+            request,
+            TransferOp.GATHER_HBM_REFILL,
+            cycle,
+            phase="hbm_refill",
+            src=source,
+        )
+
+    def _submit_l2_refill(
+        self,
+        job: _MFEGatherJob,
+        request: _MFEGatherRequest,
+        cycle: int,
+    ) -> None:
+        if job.event_id not in self._gather_jobs:
+            return
+        self._submit_gather_transaction(
+            job,
+            request,
+            TransferOp.GATHER_L2_REFILL,
+            cycle,
+            phase="l2_refill",
+        )
+
+    def _tick_gather_request(
+        self,
+        job: _MFEGatherJob,
+        request: _MFEGatherRequest,
+        cycle: int,
+    ) -> None:
+        if request.state == "WAIT_L1_MSHR":
+            if request.wait_version != self.l1_mshr.version:
+                self._try_l1_mshr(job, request, cycle)
+            return
+        if request.state == "WAIT_L2_MSHR":
+            if request.wait_version != self.l2_mshr.version:
+                self._try_l2_mshr(job, request, cycle)
+            return
+        if request.state in (
+            "WAIT_L1_FILL",
+            "WAIT_L2_FILL",
+            "RESPONSE_READY",
+            "WRITE",
+            "DONE",
+        ):
+            return
+        if not self._transaction_done(request):
+            return
+
+        state = request.state
+        self._acknowledge_request_transaction(request)
+        token = request.access.line_token
+        if state == "LOOKUP":
+            if request.access.outcome is ExecGatherOutcome.L1_HIT:
+                self.l1_cache.record_hit(token)
+                self._mark_response_ready(job, request, cycle)
+            elif request.access.outcome is ExecGatherOutcome.L2_HIT:
+                self.l1_cache.record_miss()
+                self.l2_cache.record_hit(token)
+                self.l1_cache.refill(token)
+                self._mark_response_ready(job, request, cycle)
+            else:
+                self.l1_cache.record_miss()
+                self.l2_cache.record_miss()
+                self._try_l1_mshr(job, request, cycle)
+            return
+
+        if state == "HBM_REFILL":
+            self.l2_cache.refill(token)
+            assert request.l2_mshr_token is not None
+            callbacks = self.l2_mshr.complete(request.l2_mshr_token)
+            request.l2_mshr_token = None
+            self._invoke_callbacks(callbacks)
+            self._submit_l2_refill(job, request, cycle)
+            return
+
+        if state == "L2_REFILL":
+            self.l1_cache.refill(token)
+            assert request.l1_mshr_token is not None
+            callbacks = self.l1_mshr.complete(request.l1_mshr_token)
+            request.l1_mshr_token = None
+            self._mark_response_ready(job, request, cycle)
+            self._invoke_callbacks(callbacks)
+
+    def _tick_gather_materialization(
+        self,
+        job: _MFEGatherJob,
+        cycle: int,
+    ) -> EngineJob | None:
+        if job.write_transaction_id is not None:
+            assert self.transfer_manager is not None
+            if self.transfer_manager.status(job.write_transaction_id) is TransferStatus.DONE:
+                request = job.requests[job.next_write_ordinal]
+                self.transfer_manager.acknowledge(job.write_transaction_id)
+                request.transaction_id = None
+                if self.tracer is not None:
+                    self.tracer.instant(
+                        f"Tile{self.tile_id}",
+                        "MFE",
+                        "gather_destination_write",
+                        cycle,
+                        {
+                            "request_id": request.access.request_id,
+                            "ordinal": request.ordinal,
+                            "outcome": request.access.outcome.value,
+                            "event_id": job.event_id,
+                        },
+                    )
+                request.state = "DONE"
+                job.write_transaction_id = None
+                job.next_write_ordinal += 1
+
+        if job.next_write_ordinal >= len(job.requests):
+            self.pmu.add_event("complete")
+            final_request = job.requests[-1]
+            if self.tracer is not None:
+                self.tracer.instant(
+                    f"Tile{self.tile_id}",
+                    "MFE",
+                    "gather_done",
+                    cycle,
+                    {
+                        "request_id": final_request.access.request_id,
+                        "ordinal": final_request.ordinal,
+                        "outcome": final_request.access.outcome.value,
+                        "event_id": job.event_id,
+                    },
+                )
+            return EngineJob(
+                desc=job.desc,
+                start_cycle=job.start_cycle,
+                finish_cycle=cycle,
+                event_id=job.event_id,
+                pmu=PMUCounter(),
+            )
+
+        next_request = job.requests[job.next_write_ordinal]
+        if job.write_transaction_id is None and next_request.response_ready:
+            destination = slice_resolved_view(
+                job.destination,
+                job.offsets[next_request.ordinal],
+                next_request.access.bytes,
+            )
+            self._submit_gather_transaction(
+                job,
+                next_request,
+                TransferOp.GATHER_DEST_WRITE,
+                cycle,
+                phase="write",
+                dst=destination,
+            )
+            job.write_transaction_id = next_request.transaction_id
+            return None
+
+        if (
+            not next_request.response_ready
+            and any(
+                request.response_ready
+                for request in job.requests[job.next_write_ordinal + 1 :]
+            )
+        ):
+            self.pmu.add_event("gather_reorder_wait_cycles")
+        return None
+
+    def tick(
+        self,
+        cycle: int,
+        start_queued: bool = True,
+    ) -> list[EngineJob]:
+        """Advance transfer lanes and all active Gather state machines."""
+        self._current_cycle = cycle
         completed: list[EngineJob] = []
-        active = 0
+        active_lanes = 0
         for lane in self._lanes:
             job = lane.running
             if job is None:
                 continue
-            active += 1
+            active_lanes += 1
             done = False
             if job.transaction is not None and self.transfer_manager is not None:
-                status = self.transfer_manager.status(
-                    job.transaction.transaction_id)
-                if status == TransferStatus.DONE:
-                    done = True
-            elif job.start_cycle is not None:
-                # no transaction (BOA-class fallback path): finish next cycle
-                if cycle > job.start_cycle:
-                    done = True
-            if done:
-                self.pmu.add_event("complete")
-                start = (job.transaction.start_cycle
-                         if job.transaction is not None
-                         and job.transaction.start_cycle >= 0
-                         else (job.start_cycle or cycle))
-                finish = (job.transaction.completed_cycle
-                          if job.transaction is not None
-                          and job.transaction.completed_cycle >= 0
-                          else cycle)
-                ej = EngineJob(
-                    desc=job.desc, start_cycle=start, finish_cycle=finish,
-                    event_id=job.event_id, pmu=PMUCounter())
-                completed.append(ej)
-                if (job.transaction is not None
-                        and self.transfer_manager is not None):
-                    self.transfer_manager.acknowledge(
-                        job.transaction.transaction_id)
-                lane.running = None
-                if start_queued:
-                    self._start_lane(lane, cycle)
-                if self.tracer is not None:
-                    self.tracer.complete(
-                        f"Tile{self.tile_id}", lane.name,
-                        f"MFE:{job.desc.op}", start, finish,
-                        args={"event_id": job.event_id,
-                              "bytes": job.desc.params.get("bytes", 0),
-                              "desc": job.desc.name,
-                              "tile_id": self.tile_id})
-        if active:
+                done = (
+                    self.transfer_manager.status(job.transaction.transaction_id)
+                    is TransferStatus.DONE
+                )
+            elif job.start_cycle is not None and cycle > job.start_cycle:
+                done = True
+            if not done:
+                continue
+            self.pmu.add_event("complete")
+            start = (
+                job.transaction.start_cycle
+                if job.transaction is not None and job.transaction.start_cycle >= 0
+                else (job.start_cycle or cycle)
+            )
+            finish = (
+                job.transaction.completed_cycle
+                if job.transaction is not None and job.transaction.completed_cycle >= 0
+                else cycle
+            )
+            completed.append(
+                EngineJob(
+                    desc=job.desc,
+                    start_cycle=start,
+                    finish_cycle=finish,
+                    event_id=job.event_id,
+                    pmu=PMUCounter(),
+                )
+            )
+            if job.transaction is not None and self.transfer_manager is not None:
+                self.transfer_manager.acknowledge(job.transaction.transaction_id)
+            lane.running = None
+            if start_queued:
+                self._start_lane(lane, cycle)
+            if self.tracer is not None:
+                self.tracer.complete(
+                    f"Tile{self.tile_id}",
+                    lane.name,
+                    f"MFE:{job.desc.op}",
+                    start,
+                    finish,
+                    args={
+                        "event_id": job.event_id,
+                        "bytes": job.desc.params.get("bytes", 0),
+                        "desc": job.desc.name,
+                        "tile_id": self.tile_id,
+                    },
+                )
+
+        gather_active = len(self._gather_jobs)
+        finished_gathers: list[str] = []
+        for event_id, gather_job in list(self._gather_jobs.items()):
+            for request in gather_job.requests:
+                self._tick_gather_request(gather_job, request, cycle)
+            completion = self._tick_gather_materialization(gather_job, cycle)
+            if completion is not None:
+                completed.append(completion)
+                finished_gathers.append(event_id)
+            # PR 5: gather FSM transitions are the only writers of
+            # cache/MSHR state — push stats after each job's tick
+            # (change-only sampling keeps this constant-cost).
+            self._emit_memory_trace(cycle)
+        for event_id in finished_gathers:
+            self._gather_jobs.pop(event_id, None)
+
+        blocked_gathers = sum(
+            1
+            for gather_job in self._gather_jobs.values()
+            if any(
+                request.state in ("WAIT_L1_MSHR", "WAIT_L2_MSHR")
+                for request in gather_job.requests
+            )
+        )
+        if active_lanes or gather_active:
             self.pmu.add_cycle("mfe_active", 1)
-            self.pmu.add(StallReason.NONE, 1)
+            if blocked_gathers:
+                self.pmu.add(StallReason.WAIT_MSHR, blocked_gathers)
+            else:
+                self.pmu.add(StallReason.NONE, 1)
         else:
             self.pmu.add_cycle("mfe_idle", 1)
-        self.pmu.add_cycle("mfe_channel_active", active)
+        self.pmu.add_cycle("mfe_channel_active", active_lanes)
+        self.pmu.add_cycle("mfe_gather_active", gather_active)
         self.pmu.add_cycle("total", 1)
         return completed
 
@@ -404,6 +913,9 @@ class MFEEngine(Engine):
         for lane in self._lanes:
             lane.running = None
             lane.queue.clear()
+        self._gather_jobs.clear()
+        self.l1_cache.reset()
+        self.l1_mshr.reset()
         self.pmu.reset()
 
     def _validate_stream_buffer(self, desc: ExecEngineDesc) -> None:
@@ -418,14 +930,15 @@ class MFEEngine(Engine):
         prefetch_depth = int(desc.params["prefetch_depth"])
         if num_pages <= 0:
             raise ValueError(
-                "MFE page_stream num_pages must be > 0 for buffer validation")
+                "MFE page_stream num_pages must be > 0 for buffer validation"
+            )
         page_bytes = (total_bytes + num_pages - 1) // num_pages
         required_bytes = prefetch_depth * page_bytes
         if required_bytes > self.cfg.mfe_stream_buffer_bytes:
             raise ValueError(
                 f"MFE page_stream prefetch requires {required_bytes} bytes, "
-                f"exceeds mfe_stream_buffer_bytes="
-                f"{self.cfg.mfe_stream_buffer_bytes}")
+                f"exceeds mfe_stream_buffer_bytes={self.cfg.mfe_stream_buffer_bytes}"
+            )
 
 class USEEngine(Engine):
     """Unified State Engine — scan/recurrence on a small control core.

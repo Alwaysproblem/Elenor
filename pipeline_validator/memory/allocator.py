@@ -17,6 +17,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+  from ..trace import MemoryTrace
 
 
 class MemoryInvariantError(Exception):
@@ -197,7 +201,9 @@ class BankedFreeExtentAllocator:
   """
 
   def __init__(self, memory_space: str, capacity_bytes: int, banks: int,
-               bytes_per_bank: int | None = None):
+               bytes_per_bank: int | None = None, *,
+               trace: MemoryTrace | None = None,
+               trace_tile_id: int | None = None):
     if capacity_bytes <= 0:
       raise ValueError("invalid allocation capacity")
     if banks < 1:
@@ -220,6 +226,8 @@ class BankedFreeExtentAllocator:
     self._counter: int = 0
     self._peak_allocated: int = 0
     self._allocated_bytes: int = 0
+    self._trace = trace
+    self._trace_tile_id = trace_tile_id
 
   @property
   def pool_version(self) -> int:
@@ -227,6 +235,7 @@ class BankedFreeExtentAllocator:
     return self._pool_version
 
   # -- planning ---------------------------------------------------------
+
 
   def plan_bundle(
     self, requests: list[AllocationRequest],
@@ -338,7 +347,12 @@ class BankedFreeExtentAllocator:
     for req in plan.requests:
       segments = plan.placements[req.buffer_id]
       self._counter += 1
-      alloc_id = f"{self.memory_space}:{self._generation}:{self._counter}"
+      # tile-scoped pools must not mint colliding ids across tiles
+      # (allocation flows are keyed by this string)
+      scope = (f"t{self._trace_tile_id}:" if self._trace_tile_id is not None
+               else "")
+      alloc_id = (
+        f"{self.memory_space}:{scope}{self._generation}:{self._counter}")
       handle = AllocationHandle(
         allocation_id=alloc_id,
         memory_space=self.memory_space,
@@ -356,8 +370,22 @@ class BankedFreeExtentAllocator:
       if self._allocated_bytes > self._peak_allocated:
         self._peak_allocated = self._allocated_bytes
       handles.append(handle)
+      if self._trace is not None:
+        self._trace.alloc_committed(self.memory_space, self._trace_tile_id,
+                                    handle, cycle)
     self._pool_version += 1
+    self._emit_trace(cycle)
     return tuple(results)
+
+  def _emit_trace(self, cycle: int) -> None:
+    """Push capacity + per-bank counters after a pool mutation."""
+    if self._trace is None:
+      return
+    snapshot = self.snapshot()
+    self._trace.capacity(self.memory_space, self._trace_tile_id, snapshot,
+                         cycle)
+    self._trace.banks(self.memory_space, self._trace_tile_id,
+                      snapshot["per_bank_occupancy"], cycle)
 
   @staticmethod
   def _consume(
@@ -421,7 +449,7 @@ class BankedFreeExtentAllocator:
       raise MemoryInvariantError("unknown allocation pin")
     rec.pins.discard(consumer_id)
     if rec.state == AllocationState.RELEASE_PENDING and not rec.pins:
-      self._do_release(rec, cycle)
+      self._do_release(rec, cycle, reason="unpin_final")
       return True
     return False
 
@@ -439,11 +467,13 @@ class BankedFreeExtentAllocator:
     if rec.pins:
       rec.state = AllocationState.RELEASE_PENDING
       rec.release_cycle = cycle
+      self._emit_trace(cycle)
       return False
     self._do_release(rec, cycle)
     return True
 
-  def _do_release(self, rec: _AllocationRecord, cycle: int) -> None:
+  def _do_release(self, rec: _AllocationRecord, cycle: int,
+                  reason: str = "release") -> None:
     for seg in rec.handle.bank_segments:
       local_start = seg.address - seg.bank_id * self.bytes_per_bank
       self._free[seg.bank_id].append((local_start, seg.size_bytes))
@@ -455,6 +485,10 @@ class BankedFreeExtentAllocator:
     rec.state = AllocationState.RELEASED
     rec.release_cycle = cycle
     self._pool_version += 1
+    if self._trace is not None:
+      self._trace.alloc_released(self.memory_space, self._trace_tile_id,
+                                 rec.handle, cycle, reason)
+    self._emit_trace(cycle)
 
   def _merge_bank(self, bank_id: int) -> None:
     extents = self._free[bank_id]
@@ -536,6 +570,7 @@ class BankedFreeExtentAllocator:
       per_bank.append({
         "bank_id": bank_id,
         "free_bytes": bank_free,
+        "allocated_bytes": self.bytes_per_bank - bank_free,
         "largest_free_extent": bank_largest,
       })
     return {

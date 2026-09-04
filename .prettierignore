@@ -1,0 +1,3 @@
+# Generated simulator traces/reports are large artifacts, not source documents.
+/*.json
+/examples/artifacts/

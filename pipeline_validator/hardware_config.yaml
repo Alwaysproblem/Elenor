@@ -14,6 +14,9 @@ system:
     core_mhz: 1000.0
 
 memory:
+  cache:
+    line_bytes: 64 # synthetic reference profile 40-74
+
   hbm:
     capacity_bytes: 17179869184 # 16 GB，由后续规格冻结
     bandwidth_gbs: 819.2 # 8 HBM stacks * 102.4 GB/s
@@ -27,12 +30,20 @@ memory:
     banks: 16
     access_latency_cycles: 4 # 由 SRAM profile 冻结
     bank_bandwidth_gbs: 12.8 # per-bank，由 SRAM profile 冻结
+    cache:
+      capacity_bytes: 4194304 # 50% of 8 MiB L2，由 SRAM profile 冻结
+      lookup_latency_cycles: 4 # synthetic reference profile 40-74
+      mshr_entries: 64 # synthetic reference profile 40-74
 
   tile_l1:
     capacity_bytes: 1048576 # 1 MB Balanced-small (12.3)
     banks: 16 # 12.4 banking
     bandwidth_gbs: 512.0 # per-tile SRAM read peak，frozen later
     access_latency_cycles: 1 # 由 SRAM profile 冻结
+    cache:
+      capacity_bytes: 524288 # 50% of 1 MiB L1，由 SRAM profile 冻结
+      lookup_latency_cycles: 1 # synthetic reference profile 40-74
+      mshr_entries: 16 # synthetic reference profile 40-74
 
   tile_program_sram:
     capacity_bytes: 65536 # hot tile kernel，由 SRAM profile 冻结

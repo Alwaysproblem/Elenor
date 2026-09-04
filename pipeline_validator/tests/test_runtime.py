@@ -43,8 +43,10 @@ from pipeline_validator.dialects.elenor import (
   TileAllocOp,
   TileAwaitOp,
   TileEvuOp,
+  TileGatherOp,
   TileLoadOp,
   TileProgramDefOp,
+  TileProfiledAccessOp,
   TileReturnOp,
   TileSignalOp,
   TileSubviewOp,
@@ -99,6 +101,112 @@ MODEL_BINDINGS = {
   "Y1": GlobalBinding("Y1", 0x200000, L2_WAIT_BYTES, "rw"),
 }
 
+GATHER_BINDINGS = {
+  "table": GlobalBinding("table", 0x400000, 4096, "r"),
+}
+
+
+def make_gather_module(
+  accesses: list[tuple[str, str, str | None, str | None]],
+  *,
+  include_evu_context: bool = False,
+  l1_mshr_hint: int = 16,
+) -> ModuleOp:
+  program = TileProgramDefOp(
+    "gather_tile",
+    [],
+    arg_types=[NestTask(), NestGlobalView.of([4096], "i8")],
+    arg_names=["task", "table"],
+  )
+  _task, table = program.body.block.args
+  indices = TileAllocOp([16], "i32")
+  destination = TileAllocOp([len(accesses) * 64], "i8")
+  profile = [
+    TileProfiledAccessOp(
+      request_id,
+      outcome,
+      64,
+      line_token=line_token,
+      merge_group=merge_group,
+    )
+    for request_id, outcome, line_token, merge_group in accesses
+  ]
+  gather = TileGatherOp(
+    table,
+    indices.result,
+    destination.result,
+    len(accesses) * 64,
+    16384,
+    65536,
+    l1_mshr_hint,
+    profile,
+    "gather_done",
+  )
+  program.body.block.add_ops(
+    [
+      indices,
+      destination,
+      gather,
+      TileAwaitOp([gather.result]),
+      TileReturnOp(),
+    ]
+  )
+
+  context = NestContextOp(
+    "gather_context",
+    [],
+    placement=1,
+    arg_types=[NestGlobalMemref.of([4096], "i8")],
+    arg_names=["table"],
+  )
+  table_arg = context.body.block.args[0]
+  table_view = NestSubviewOp(
+    table_arg,
+    [0],
+    [4096],
+    [1],
+    NestGlobalView.of([4096], "i8"),
+  )
+  tasks = NestTaskRangeOp(0, 1)
+  dispatch = NestDispatchOp(
+    "gather_tile",
+    tasks.result,
+    [table_view.result],
+    [],
+    [],
+    "grid_done",
+    "",
+    "",
+    signal_policy={},
+  )
+  programs = [program]
+  dispatches = [dispatch]
+  if include_evu_context:
+    evu_program = make_short_evu_program("gather_parallel_evu")
+    evu_dispatch = NestDispatchOp(
+      "gather_parallel_evu",
+      tasks.result,
+      [],
+      [],
+      [],
+      "evu_grid_done",
+      "",
+      "",
+      signal_policy={},
+    )
+    programs.append(evu_program)
+    dispatches.append(evu_dispatch)
+  context.body.block.add_ops(
+    [
+      table_view,
+      tasks,
+      *dispatches,
+      NestAwaitOp([item.grid_done for item in dispatches]),
+      NestReturnOp(),
+    ]
+  )
+  return ModuleOp([*programs, context])
+
 
 def make_waiting_mfe_program(name: str = "ctx_wait_mfe") -> TileProgramDefOp:
   prog = TileProgramDefOp(
@@ -135,31 +243,23 @@ def make_same_tile_roles_task(role_count: int, pins: list[int | None] | None = N
     outs = [buffer.result] if i == 0 else []
     if i == 0:
       dispatches.append(
-        NestDispatchOp(
-          name,
-          tasks.result,
-          ins,
-          outs,
-          f"ev_role{i}",
-          f"ev_inrel{i}",
-          "",
-          signal_policy={"input_released": "all_tasks"},
-          context_id=None if pins is None else pins[i],
-        )
+        NestDispatchOp(name, tasks.result, [], ins,
+        outs,
+        f"ev_role{i}",
+        f"ev_inrel{i}",
+        "",
+        signal_policy={"input_released": "all_tasks"},
+        context_id=None if pins is None else pins[i],)
       )
     else:
       dispatches.append(
-        NestDispatchOp(
-          name,
-          tasks.result,
-          ins,
-          outs,
-          f"ev_role{i}",
-          "",
-          "",
-          signal_policy={},
-          context_id=None if pins is None else pins[i],
-        )
+        NestDispatchOp(name, tasks.result, [], ins,
+        outs,
+        f"ev_role{i}",
+        "",
+        "",
+        signal_policy={},
+        context_id=None if pins is None else pins[i],)
       )
   context = NestContextOp(
     "same_tile_roles",
@@ -183,16 +283,12 @@ def make_two_context_model(pins: tuple[int | None, ...] = (None, None)) -> Modul
   for i, pin in enumerate(pins):
     buffer = NestAllocOp(f"l2_buf_c{i}", "in", L2_WAIT_DIMS, "bf16")
     tasks = NestTaskRangeOp(0, 1)
-    disp = NestDispatchOp(
-      "model_wait_mfe",
-      tasks.result,
-      [buffer.result],
-      [buffer.result],
-      f"ev_grid_c{i}",
-      f"ev_inrel_c{i}",
-      "",
-      signal_policy={"input_released": "all_tasks"},
-    )
+    disp = NestDispatchOp("model_wait_mfe", tasks.result, [], [buffer.result],
+    [buffer.result],
+    f"ev_grid_c{i}",
+    f"ev_inrel_c{i}",
+    "",
+    signal_policy={"input_released": "all_tasks"},)
     ctxs.append(
       NestContextOp(
         f"ctx{i}",
@@ -222,10 +318,247 @@ def make_two_context_model(pins: tuple[int | None, ...] = (None, None)) -> Modul
   return ModuleOp([prog, *ctxs, program])
 
 
+
+# ---------------------------------------------------------------------------
+# Deterministic profiled Gather runtime
+# ---------------------------------------------------------------------------
+
+
+class TestGatherRuntime:
+  def test_all_l1_profile_completes_without_hbm_refill(self):
+    module = make_gather_module(
+      [
+        ("r0", "L1_HIT", "line0", None),
+        ("r1", "L1_HIT", "line1", None),
+      ]
+    )
+    simulator = Simulator(
+      HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10),
+      SimConfig(fidelity="full_memory", max_cycles=10000),
+      enable_tracer=True,
+    )
+    result = simulator.run(module, input_bindings=GATHER_BINDINGS)
+    assert result.completed, result.reason
+    assert result.pmu.events["gather_requests"] == 2
+    assert result.pmu.events["gather_l1_hits"] == 2
+    assert result.pmu.events["gather_hbm_misses"] == 0
+    assert {
+      "gather_requests",
+      "gather_l1_hits",
+      "gather_l2_hits",
+      "gather_hbm_misses",
+      "gather_mshr_merges",
+      "gather_mshr_stalls",
+      "gather_reorder_wait_cycles",
+      "gather_bytes",
+    } <= result.pmu.events.keys()
+    assert result.pmu.events["gather_l2_hits"] == 0
+    assert result.pmu.events["gather_mshr_merges"] == 0
+    assert result.pmu.events["gather_mshr_stalls"] == 0
+    assert result.pmu.events["gather_reorder_wait_cycles"] == 0
+    assert simulator.group.l2_cache.snapshot()["refills"] == 0
+    events = simulator.tracer._events if simulator.tracer is not None else []
+    writes = [event for event in events if event["name"] == "gather_destination_write"]
+    from pipeline_validator.report import build_report
+    from pipeline_validator.workloads import Workload
+
+    report = build_report(
+      Workload("gather", module, expected={}, description="profiled gather"),
+      result,
+    )
+    checks = {check["check"]: check for check in report.checks}
+    assert checks["gather_request_conservation"]["pass"]
+    assert checks["gather_zero_leak"]["pass"]
+    assert report.gather_fidelity == "deterministic_profiled_not_address_or_value_accurate"
+    done = [event for event in events if event["name"] == "gather_done"]
+    assert [event["args"]["ordinal"] for event in writes] == [0, 1]
+    assert len(done) == 1
+    assert done[0]["ts"] >= writes[-1]["ts"]
+  def test_l2_hit_uses_cache_noc_and_local_fill_without_hbm(self):
+    module = make_gather_module(
+      [("r0", "L2_HIT", "line0", None)]
+    )
+    simulator = Simulator(
+      HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10),
+      SimConfig(fidelity="full_memory", max_cycles=10000),
+    )
+    result = simulator.run(module, input_bindings=GATHER_BINDINGS)
+    assert result.completed, result.reason
+    issued = simulator.group.transfer_manager.snapshot()["issued_by_op"]
+    assert issued["gather_l2_hit"] == 1
+    assert issued.get("gather_hbm_refill", 0) == 0
+    assert simulator.group.tiles[0].l1_cache.snapshot()["refills"] == 1
+    assert simulator.group.l2_cache.snapshot()["hits"] == 1
+
+  def test_two_merged_hbm_misses_issue_one_leader_refill(self):
+    module = make_gather_module(
+      [
+        ("r0", "HBM_MISS", "line42", "miss42"),
+        ("r1", "HBM_MISS", "line42", "miss42"),
+      ]
+    )
+    simulator = Simulator(
+      HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10),
+      SimConfig(fidelity="full_memory", max_cycles=10000),
+      enable_tracer=True,
+    )
+    result = simulator.run(module, input_bindings=GATHER_BINDINGS)
+    assert result.completed, result.reason
+    assert result.pmu.events["gather_requests"] == 2
+    assert result.pmu.events["gather_hbm_misses"] == 2
+    assert result.pmu.events["gather_mshr_merges"] == 1
+    issued = simulator.group.transfer_manager.snapshot()["issued_by_op"]
+    assert issued["gather_hbm_refill"] == 1
+    assert issued["gather_l2_refill"] == 1
+    assert simulator.group.l2_cache.snapshot()["resident_lines"] == 1
+    assert simulator.group.tiles[0].l1_cache.snapshot()["resident_lines"] == 1
+    events = simulator.tracer._events if simulator.tracer is not None else []
+    writes = [event for event in events if event["name"] == "gather_destination_write"]
+    assert [event["args"]["ordinal"] for event in writes] == [0, 1]
+
+  def test_out_of_order_responses_materialize_in_profile_order(self):
+    module = make_gather_module(
+      [
+        ("slow", "HBM_MISS", "slow_line", None),
+        ("fast", "L1_HIT", "fast_line", None),
+      ]
+    )
+    simulator = Simulator(
+      HardwareConfig().with_overrides(hbm_fixed_latency_cycles=20),
+      SimConfig(fidelity="full_memory", max_cycles=10000),
+      enable_tracer=True,
+    )
+    result = simulator.run(module, input_bindings=GATHER_BINDINGS)
+    assert result.completed, result.reason
+    events = simulator.tracer._events if simulator.tracer is not None else []
+    responses = [event for event in events if event["name"] == "gather_response"]
+    writes = [event for event in events if event["name"] == "gather_destination_write"]
+    done = [event for event in events if event["name"] == "gather_done"]
+    assert [event["args"]["ordinal"] for event in responses] == [1, 0]
+    assert [event["args"]["ordinal"] for event in writes] == [0, 1]
+    assert result.pmu.events["gather_reorder_wait_cycles"] > 0
+    assert len(done) == 1
+    assert done[0]["ts"] >= writes[-1]["ts"]
+    assert done[0]["args"] == {
+      "request_id": "fast",
+      "ordinal": 1,
+      "outcome": "L1_HIT",
+      "event_id": writes[-1]["args"]["event_id"],
+    }
+
+  def test_l1_mshr_full_stalls_one_gather_while_other_context_progresses(self):
+    module = make_gather_module(
+      [
+        ("r0", "HBM_MISS", "line0", None),
+        ("r1", "HBM_MISS", "line1", None),
+      ],
+      include_evu_context=True,
+      l1_mshr_hint=1,
+    )
+    simulator = Simulator(
+      HardwareConfig().with_overrides(
+        hbm_fixed_latency_cycles=30,
+        l1_mshr_entries=1,
+      ),
+      SimConfig(
+        fidelity="full_memory",
+        context_count=2,
+        device_context_count=2,
+        max_cycles=10000,
+      ),
+      enable_tracer=True,
+    )
+    result = simulator.run(module, input_bindings=GATHER_BINDINGS)
+    from pipeline_validator.pmu import StallReason
+
+    assert result.pmu.stall_cycles[StallReason.WAIT_MSHR] > 0
+    assert result.completed, result.reason
+    assert result.pmu.events["gather_mshr_stalls"] == 1
+    assert result.pmu.events["uce_context_switch"] > 0
+    assert simulator.group.tiles[0].l1_mshr.snapshot()["active"] == 0
+    assert simulator.group.l2_mshr.snapshot()["active"] == 0
+    events = simulator.tracer._events if simulator.tracer is not None else []
+    evu = [event for event in events if event["name"] == "EVU:relu"]
+    gather_done = [event for event in events if event["name"] == "gather_done"]
+    assert len(evu) == 1
+    assert len(gather_done) == 1
+    assert evu[0]["ts"] < gather_done[0]["ts"]
+
+
+
+
+  def test_fault_reset_clears_gather_transactions_mshrs_and_allocations(self):
+    module = make_gather_module(
+      [("r0", "HBM_MISS", "line0", None)]
+    )
+    config = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=1000)
+    group = TileGroup(
+      config,
+      fidelity="full_memory",
+      context_count=1,
+    )
+    group.load_task(
+      lower_workload_ir(module),
+      input_bindings=GATHER_BINDINGS,
+    )
+    fault_cycle = None
+    for cycle in range(200):
+      group.step(cycle)
+      if group.tiles[0].mfe._gather_jobs:
+        fault_cycle = cycle
+        break
+    assert fault_cycle is not None
+    group.trigger_fault(
+      FaultCode.ADDRESS_FAULT,
+      tile_id=0,
+      cycle=fault_cycle,
+      desc_id="injected gather fault",
+    )
+    for cycle in range(fault_cycle + 1, fault_cycle + 500):
+      group.step(cycle)
+      if group.reset_domain.is_done:
+        break
+    assert group.reset_domain.is_done
+    snapshot = group.snapshot()
+    memory = snapshot["memory"]
+    assert memory["mshr"]["l2"]["active"] == 0
+    assert memory["mshr"]["l2"]["callbacks"] == 0
+    assert memory["cache"]["l2"]["resident_lines"] == 0
+    assert all(
+      item["resident_lines"] == 0
+      for item in memory["cache"]["l1"].values()
+    )
+    assert all(item["active"] == 0 for item in memory["mshr"]["l1"].values())
+    assert all(tile["gather_active_jobs"] == 0 for tile in snapshot["tiles"])
+    assert memory["transfers"]["inflight"] == 0
+    assert memory["l2"]["live_allocations"] == 0
+    assert all(
+      item["allocator"]["live_allocations"] == 0
+      for item in memory["l1"].values()
+    )
+    assert all(
+      stage["busy_resources"] == 0 and stage["outstanding"] == 0
+      for stage in memory["transfers"]["stages"].values()
+    )
+
+  def test_gather_source_binding_bounds_fail_before_runtime(self):
+    module = make_gather_module(
+      [("r0", "L1_HIT", "line0", None)]
+    )
+    simulator = Simulator(
+      HardwareConfig(),
+      SimConfig(fidelity="full_memory"),
+    )
+    with pytest.raises(ValueError, match="smaller than required 4096 bytes"):
+      simulator.run(
+        module,
+        input_bindings={
+          "table": GlobalBinding("table", 0x400000, 4095, "r"),
+        },
+      )
 # ---------------------------------------------------------------------------
 # Cold / warm launch (residency)
 # ---------------------------------------------------------------------------
-
 
 class TestRuntimeColdWarm:
   def test_cold_launch_includes_program_load(self):
@@ -356,11 +689,11 @@ class TestRuntimeColdWarm:
 
 class TestDMAChannelScheduling:
   def test_two_channels_dma_stores_distribute(self):
-    """Four DMA stores complete as transactions on the GroupDMA track.
+    """Four DMA stores complete on non-overlapping logical output lanes.
 
     PR 2 replaces the round-robin channel selector with the
-    TransferManager's lowest-free-channel allocation; the observable
-    contract is that all four stores complete and are traced.
+    TransferManager's lowest-free-channel allocation; every store must
+    complete and retain its end-to-end summary timing.
     """
     hw = HardwareConfig(num_dma_channels=2)
     sim = Simulator(hw, SimConfig(fidelity="runtime", max_cycles=200_000), enable_tracer=True)
@@ -368,7 +701,11 @@ class TestDMAChannelScheduling:
     assert result.completed, result.reason
     assert result.tracer is not None
     events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
-    store_events = [event for event in events if event.get("name", "").startswith("dma.store:")]
+    store_events = [
+      event for event in events
+      if event.get("args", {}).get("summary_kind") == "group_transfer"
+      and event["args"].get("op") == "global_store"
+    ]
     assert len(store_events) == 4
     for event in store_events:
       args = event["args"]
@@ -620,7 +957,9 @@ class TestFaultReset:
     from pipeline_validator.ir_lowering import lower_workload_ir
 
     hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=1000)
-    s = Simulator(hw, SimConfig(fidelity="full_memory", max_cycles=100000))
+    s = Simulator(
+      hw, SimConfig(fidelity="full_memory", max_cycles=100000),
+      enable_tracer=True)
     wl = PowWorkload()
     task = lower_workload_ir(wl.module)
     s._assign_program_ids(task)
@@ -630,6 +969,8 @@ class TestFaultReset:
     s.group.step(0)
     s.group.step(1)
     assert s.group.transfer_manager.inflight_count > 0
+    assert s.group._group_transfer_trace_slots
+    assert any(s.group._group_transfer_trace_busy_slots.values())
     assert s.group.transfer_manager._hbm_read._outstanding > 0
     assert s.group.l2_sram.snapshot()["live_allocations"] > 0
     s.group.trigger_fault(FaultCode.ADDRESS_FAULT, cycle=2)
@@ -647,6 +988,8 @@ class TestFaultReset:
     assert s.group.reset_domain.is_done
     assert s.group.sequencer.action_index == frozen_action_index
     assert s.group.transfer_manager.inflight_count == 0
+    assert s.group._group_transfer_trace_slots == {}
+    assert not any(s.group._group_transfer_trace_busy_slots.values())
     assert s.group.transfer_manager._hbm_read._outstanding == 0
     assert s.group.transfer_manager._hbm_write._outstanding == 0
     # NoC credit / DMA / bank resources all returned; no flit pending
@@ -826,9 +1169,8 @@ class TestLocalViewResolution:
     assert not isinstance(l2_plan, AdmissionFailure)
     l2_handle = l2.commit(l2_plan, cycle=0)[0]
     memory = _TileContextMemory(
-      owner=l1_owner,
       task_identity=TaskIdentity(grid=GridInstanceId("ctx", 0, 1, 0), task_id=0),
-      l2_formal_handles=(l2_handle,),
+      l2_formal_handles={1: l2_handle},
       l1_handles={"l1:0": l1_handle},
       l2_resolver=l2,
     )
@@ -856,7 +1198,6 @@ class TestLocalViewResolution:
     assert not isinstance(plan, AdmissionFailure)
     handle = tile.l1_allocator.commit(plan, cycle=0)[0]
     memory = _TileContextMemory(
-      owner=owner,
       task_identity=TaskIdentity(grid=GridInstanceId("ctx", 0, 1, 0), task_id=0),
       l1_handles={"l1:0": handle},
     )
@@ -879,7 +1220,6 @@ class TestLocalViewResolution:
     assert not isinstance(plan, AdmissionFailure)
     handle = tile.l1_allocator.commit(plan, cycle=0)[0]
     memory = _TileContextMemory(
-      owner=owner,
       task_identity=TaskIdentity(grid=GridInstanceId("ctx", 0, 1, 0), task_id=0),
       l1_handles={"l1:0": handle},
     )
@@ -954,6 +1294,47 @@ class TestSlotFrame:
     )
     f2 = SlotFrame(l1_bytes=512)
     assert f2.prepare([handle, handle2], [spec, spec2]) is False
+
+  def test_frame_accepts_disjoint_fragmented_allocation_segments(self):
+    from pipeline_validator.execution_ir import ExecL1Buffer
+    from pipeline_validator.memory import (
+      AdmissionFailure,
+      AllocationRequest,
+      BankedFreeExtentAllocator,
+      SlotFrame,
+      TaskBufferOwner,
+    )
+
+    allocator = BankedFreeExtentAllocator("l1", 256, 2)
+    owner_a = TaskBufferOwner("ctx", 0, "ev", 0, 0, 0, "a")
+    owner_b = TaskBufferOwner("ctx", 0, "ev", 0, 0, 0, "b")
+    initial = allocator.plan_bundle(
+      [
+        AllocationRequest("l1", "a", owner_a, 32, 1),
+        AllocationRequest("l1", "b", owner_b, 32, 1),
+      ]
+    )
+    assert not isinstance(initial, AdmissionFailure)
+    handle_a, handle_b = allocator.commit(initial, cycle=0)
+    allocator.request_release(handle_a, owner_a, cycle=1)
+
+    owner_fragmented = TaskBufferOwner("ctx", 0, "ev", 0, 0, 0, "fragmented")
+    fragmented = allocator.plan_bundle(
+      [AllocationRequest("l1", "fragmented", owner_fragmented, 96, 1)]
+    )
+    assert not isinstance(fragmented, AdmissionFailure)
+    fragmented_handle = allocator.commit(fragmented, cycle=2)[0]
+    assert len(fragmented_handle.bank_segments) == 2
+
+    frame = SlotFrame(l1_bytes=256)
+    fragmented_spec = ExecL1Buffer(
+      "fragmented", (96,), "i8", 1, 1, 96
+    )
+    blocker_spec = ExecL1Buffer("b", (32,), "i8", 1, 1, 32)
+    assert frame.prepare(
+      [fragmented_handle, handle_b],
+      [fragmented_spec, blocker_spec],
+    )
 
   def test_frame_generation_gate(self):
     from pipeline_validator.memory import SlotFrame
@@ -1079,28 +1460,20 @@ class TestFidelityModes:
     prog = make_waiting_mfe_program()
     tasks = NestTaskRangeOp(0, 1)
     buffer = NestAllocOp("l2_buf", "in", L2_WAIT_DIMS, "bf16")
-    disp0 = NestDispatchOp(
-      "ctx_wait_mfe",
-      tasks.result,
-      [buffer.result],
-      [buffer.result],
-      "ev_a",
-      "ev_inrel_a",
-      "",
-      signal_policy={"input_released": "all_tasks"},
-      context_id=0,
-    )
-    disp1 = NestDispatchOp(
-      "ctx_wait_mfe",
-      tasks.result,
-      [buffer.result],
-      [buffer.result],
-      "ev_b",
-      "ev_inrel_b",
-      "",
-      signal_policy={"input_released": "all_tasks"},
-      context_id=1,
-    )
+    disp0 = NestDispatchOp("ctx_wait_mfe", tasks.result, [], [buffer.result],
+    [buffer.result],
+    "ev_a",
+    "ev_inrel_a",
+    "",
+    signal_policy={"input_released": "all_tasks"},
+    context_id=0,)
+    disp1 = NestDispatchOp("ctx_wait_mfe", tasks.result, [], [buffer.result],
+    [buffer.result],
+    "ev_b",
+    "ev_inrel_b",
+    "",
+    signal_policy={"input_released": "all_tasks"},
+    context_id=1,)
     module = ModuleOp(
       [
         prog,
@@ -1204,16 +1577,12 @@ class TestModelMode:
     prog = make_waiting_mfe_program()
     tasks = NestTaskRangeOp(0, 1)
     buffer = NestAllocOp("l2_buf", "in", L2_WAIT_DIMS, "bf16")
-    disp = NestDispatchOp(
-      "ctx_wait_mfe",
-      tasks.result,
-      [buffer.result],
-      [buffer.result],
-      "ev_a",
-      "ev_inrel_a",
-      "",
-      signal_policy={"input_released": "all_tasks"},
-    )
+    disp = NestDispatchOp("ctx_wait_mfe", tasks.result, [], [buffer.result],
+    [buffer.result],
+    "ev_a",
+    "ev_inrel_a",
+    "",
+    signal_policy={"input_released": "all_tasks"},)
     module = ModuleOp(
       [
         prog,
@@ -1244,16 +1613,12 @@ class TestModelMode:
     prog = make_waiting_mfe_program("model_wait_mfe")
     buffer = NestAllocOp("l2_buf_c0", "in", L2_WAIT_DIMS, "bf16")
     tasks = NestTaskRangeOp(0, 1)
-    disp = NestDispatchOp(
-      "model_wait_mfe",
-      tasks.result,
-      [buffer.result],
-      [buffer.result],
-      "ev_grid_c0",
-      "ev_inrel_c0",
-      "",
-      signal_policy={"input_released": "all_tasks"},
-    )
+    disp = NestDispatchOp("model_wait_mfe", tasks.result, [], [buffer.result],
+    [buffer.result],
+    "ev_grid_c0",
+    "ev_inrel_c0",
+    "",
+    signal_policy={"input_released": "all_tasks"},)
     ctx = NestContextOp(
       "ctx0",
       [
@@ -1533,17 +1898,13 @@ class TestModelMode:
     )
     pref = NestPrefetchOp(src.result, buf.result, "ev_in")
     tasks = NestTaskRangeOp(0, 4)
-    disp = NestDispatchOp(
-      "pow_4k_tile",
-      tasks.result,
-      [buf.result],
-      [buf.result],
-      "ev_grid",
-      "ev_inrel",
-      "ev_outready",
-      signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
-      depends_on=[pref.result],
-    )
+    disp = NestDispatchOp("pow_4k_tile", tasks.result, [], [buf.result],
+    [buf.result],
+    "ev_grid",
+    "ev_inrel",
+    "ev_outready",
+    signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
+    depends_on=[pref.result],)
     store = NestDMAStoreOp(buf.result, src.result, "ev_out", depends_on=[disp.output_ready])
     release = NestReleaseOp(buf.result, depends_on=[store.result])
     ctx.body.block.add_ops(
@@ -1724,7 +2085,10 @@ class TestSignalGatedRelease:
       SimConfig(fidelity="full_memory", device_context_count=2, max_cycles=200000),
       enable_tracer=True,
     )
-    result = sim.run(parse_workload_ir(open("examples/example.mlir").read()), input_bindings=MODEL_BINDINGS)
+    result = sim.run(
+      parse_workload_ir(open("examples/workloads/pow_dual_context.mlir").read()),
+      input_bindings=MODEL_BINDINGS,
+    )
     assert result.completed, result.reason
     events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
     signals = [e for e in events if e.get("name") == "tile_signal"]
@@ -2019,7 +2383,7 @@ def _admission_wait_sim() -> tuple[Simulator, ModuleOp]:
     SimConfig(fidelity="full_memory", device_context_count=2,
               max_cycles=500000),
     enable_tracer=True)
-  module = load_workload_ir("examples/example_l2_admission_wait.mlir")
+  module = load_workload_ir("examples/scenarios/l2_admission_wait.mlir")
   return sim, module
 
 
@@ -2096,8 +2460,10 @@ class TestL2AdmissionWait:
     b_dispatch = next(
       to_cycle(e["ts"]) for e in events
       if e.get("name") == "tile_role_dispatch" and e["args"]["ctx_id"] == 1)
-    store_done = next(e["args"]["completion_cycle"] for e in events
-                      if e.get("name", "").startswith("dma.store:"))
+    store_done = next(
+      e["args"]["completion_cycle"] for e in events
+      if e.get("args", {}).get("summary_kind") == "group_transfer"
+      and e["args"].get("op") == "global_store")
     assert b_dispatch < store_done
     assert b_dispatch < a_done["cycle"]
 
@@ -2442,7 +2808,7 @@ class TestAdmissionFaultAndQueue:
     B's prefetch source) with different actuals.  B's submit must not
     overwrite A's mapping: A's final store still lands in A's IOVA
     range and B's prefetch in B's."""
-    text = Path("examples/example_l2_admission_wait.mlir").read_text()
+    text = Path("examples/scenarios/l2_admission_wait.mlir").read_text()
     # rename A's output formal and B's input formal to the shared name Y
     start_a = text.index("nest.context @ctx_a")
     start_b = text.index("nest.context @ctx_b")
@@ -2475,10 +2841,16 @@ class TestAdmissionFaultAndQueue:
     a_out = ADMISSION_WAIT_BINDINGS["A_OUT"]
     b_in = ADMISSION_WAIT_BINDINGS["B_IN"]
     a_in = ADMISSION_WAIT_BINDINGS["A_IN"]
-    store_addrs = [e["args"]["destination_address"] for e in events
-                   if e.get("name", "").startswith("dma.store:")]
-    pref_srcs = [e["args"]["source_address"] for e in events
-                 if e.get("name", "").startswith("dma.prefetch:")]
+    store_addrs = [
+      e["args"]["destination_address"] for e in events
+      if e.get("args", {}).get("summary_kind") == "group_transfer"
+      and e["args"].get("op") == "global_store"
+    ]
+    pref_srcs = [
+      e["args"]["source_address"] for e in events
+      if e.get("args", {}).get("summary_kind") == "group_transfer"
+      and e["args"].get("op") == "prefetch"
+    ]
     assert store_addrs, "no store transactions traced"
     assert all(a_out.base_iova <= a < a_out.base_iova + a_out.size_bytes
                for a in store_addrs), store_addrs

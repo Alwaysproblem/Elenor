@@ -17,7 +17,7 @@ builtin.module {
     %src = nest.subview %Y offsets = [0, 0, 0] sizes = [4, 128, 128] strides = [1, 1, 1] : !nest.global_view<4x128x128xbf16>
     %ev_dma_pow_in0 = nest.dma.prefetch.async %src into %l2_buf_pow0 : !nest.event<"ev_dma_pow_in0">
     %0 = nest.task.range from = 0 to = 4 : !nest.task_range
-    %ev_role_pow0, %ev_inrel_pow0, %ev_outready_pow0 = nest.dispatch.tasks.async @pow_4k_tile context = 0 tasks(%0) ins(%l2_buf_pow0) outs(%l2_buf_pow0) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%ev_dma_pow_in0) : (!nest.event<"ev_role_pow0">, !nest.event<"ev_inrel_pow0">, !nest.event<"ev_outready_pow0">)
+    %ev_role_pow0, %ev_inrel_pow0, %ev_outready_pow0 = nest.dispatch.tasks.async @pow_4k_tile context = 0 tasks(%0) globals() ins(%l2_buf_pow0) outs(%l2_buf_pow0) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%ev_dma_pow_in0) : (!nest.event<"ev_role_pow0">, !nest.event<"ev_inrel_pow0">, !nest.event<"ev_outready_pow0">)
     %ev_dma_pow_out0 = nest.dma.store.async %l2_buf_pow0 into %src depends_on(%ev_outready_pow0) : !nest.event<"ev_dma_pow_out0">
     nest.release %l2_buf_pow0 depends_on(%ev_dma_pow_out0)
     nest.await %ev_role_pow0, %ev_dma_pow_out0

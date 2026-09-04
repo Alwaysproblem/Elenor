@@ -12,6 +12,7 @@ from xdsl.dialects.builtin import ModuleOp
 from .config import HardwareConfig, SimConfig
 from .dialects.elenor import NestContextOp, NexusProgramOp
 from .execution_ir import (
+  ExecGatherDesc,
   ExecGlobalInput,
   ExecGroupActionOp,
   ExecTileGroupTask,
@@ -36,6 +37,7 @@ class SimResult:
   trace: list = field(default_factory=list)
   credit_invariant_ok: bool = True
   tracer: Tracer | None = None
+  memory_trace: bool = False
   slot_count: int = 1
   input_bindings: dict[str, GlobalBinding] = field(default_factory=dict)
 
@@ -108,6 +110,37 @@ def _validate_binding_permissions(
             " store destination"
           )
 
+    for role_binding in task.role_bindings.values():
+      for descriptor in role_binding.tile_program.descriptors.values():
+        gather = descriptor.params.get("gather")
+        if not isinstance(gather, ExecGatherDesc):
+          continue
+        if not gather.source.base.startswith("formal:"):
+          raise ValueError("gather source must reference a global formal")
+        try:
+          formal_index = int(gather.source.base.removeprefix("formal:"))
+        except ValueError as exc:
+          raise ValueError("gather source formal index is invalid") from exc
+        if (
+          formal_index >= len(role_binding.tile_program.formals)
+          or role_binding.tile_program.formals[formal_index].space != "global"
+        ):
+          raise ValueError("gather source formal index does not name a global formal")
+        global_index = formal_index - 1
+        if global_index < 0 or global_index >= len(role_binding.global_actuals):
+          raise ValueError("gather source global actual index is out of range")
+        global_actual = role_binding.global_actuals[global_index]
+        if not global_actual.base.startswith("global:"):
+          raise ValueError("gather global actual must reference a context formal")
+        formal_name = global_actual.base.removeprefix("global:")
+        gather_input_name = name_map.get(formal_name)
+        if gather_input_name is None or gather_input_name not in bindings:
+          raise ValueError(f"gather source mapping for global '{formal_name}' is missing")
+        if "r" not in bindings[gather_input_name].permissions:
+          raise ValueError(
+            f"input binding '{gather_input_name}' is not readable but is used as gather source"
+          )
+
 
 class Simulator:
   def __init__(self, hw: HardwareConfig, sim: SimConfig, enable_tracer: bool = False):
@@ -119,7 +152,8 @@ class Simulator:
     # its own UCE context for true concurrency on the shared tiles.
     ctx_count = max(sim.context_count, sim.device_context_count)
     self.group = TileGroup(hw, self.tracer, fidelity=sim.fidelity,
-                           context_count=ctx_count)
+                           context_count=ctx_count,
+                           memory_trace=sim.memory_trace)
     self.groups = [self.group]  # legacy compat
     self.cycle = 0
     self._trace: list = []
@@ -209,6 +243,7 @@ class Simulator:
       trace=self._trace,
       credit_invariant_ok=self.group.credit_invariants_hold(),
       tracer=self.tracer,
+      memory_trace=self.sim.memory_trace,
       input_bindings=dict(bindings),
     )
 
@@ -372,8 +407,8 @@ class Simulator:
       pmu=pmu,
       group_snapshot=self.group.snapshot(),
       trace=self._trace,
-      credit_invariant_ok=self.group.credit_invariants_hold(),
       tracer=self.tracer,
+      memory_trace=self.sim.memory_trace,
       slot_count=count,
       input_bindings=dict(bindings),
     )

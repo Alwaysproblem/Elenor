@@ -20,11 +20,11 @@ context body dispatches tile programs by symbol reference
 
 ### Prefix hierarchy
 
-| Prefix    | Level        | Examples                                                                             |
-| --------- | ------------ | ------------------------------------------------------------------------------------ |
-| `tile.*`  | Tile program | `tile.program`, `tile.load.async`, `tile.pow.async`, `tile.await`, `tile.signal`     |
-| `nest.*`  | Tile group   | `nest.context`, `nest.dispatch.tasks.async`, `nest.dma.prefetch.async`, `nest.await` |
-| `nexus.*` | Host / CPU   | `nexus.program`, `nexus.submit_context.async`, `nexus.await`, `nexus.return`         |
+| Prefix    | Level        | Examples                                                                                   |
+| --------- | ------------ | ------------------------------------------------------------------------------------------ |
+| `tile.*`  | Tile program | `tile.program`, `tile.load.async`, `tile.gather.global.async`, `tile.await`, `tile.signal` |
+| `nest.*`  | Tile group   | `nest.context`, `nest.dispatch.tasks.async`, `nest.dma.prefetch.async`, `nest.await`       |
+| `nexus.*` | Host / CPU   | `nexus.program`, `nexus.submit_context.async`, `nexus.await`, `nexus.return`               |
 
 ### Key IR design points (per `reference.mlir`)
 
@@ -38,12 +38,13 @@ i → tile i), so `placement = 0xF` with `task.range 0..4` dispatches
 4 tasks across 4 tiles.
 
 **Dispatch** — `nest.dispatch.tasks.async @prog` consumes a logical
-task range, ins/outs L2 buffers, and an optional `depends_on` event. It
-returns THREE aggregated events: `grid_done` (all tasks returned),
-`input_released` (all tasks completed their L2 read phase), and
-`output_ready` (all tasks completed their L2 write phase). Its always
-printed `signal_policy { ... }` block (possibly `signal_policy {}`)
-declares each emitted phase with `#nest.aggregate<all_tasks>`.
+task range, mandatory `globals(...)`, ins/outs L2 buffers, and an
+optional `depends_on` event. `globals()` is always printed even when
+empty. It returns THREE aggregated events: `grid_done` (all tasks
+returned), `input_released` (all tasks completed their L2 read phase),
+and `output_ready` (all tasks completed their L2 write phase). Its
+always-printed `signal_policy { ... }` block declares each emitted phase
+with `#nest.aggregate<all_tasks>`.
 
 **Tile phase signals** — `tile.signal input_released(%task)` /
 `tile.signal output_ready(%task)` drive per-grid phase aggregation; the
@@ -87,18 +88,18 @@ custom-assembly IR from disk.
 
 ## Scope
 
-| Aspect               | Modelled                                                  | Source spec                                     |
-| -------------------- | --------------------------------------------------------- | ----------------------------------------------- |
-| Tile Group           | 1 group, 4 tiles                                          | `design/elenor_tile_group/`                     |
-| Tile Group Sequencer | Group Task actions, role dispatch, DMA prefetch, barriers | `design/elenor_tile_group_sequencer/`, arch §16 |
-| Compute Tile         | UCE + BOA/EVU/MFE/USE + L1 SRAM bandwidth                 | `design/elenor_compute_tile/`                   |
-| Tile UCE             | Tile Program ISA: launch/wait/signal                      | arch §16.4, §17.6                               |
-| Stream Queue         | credit invariant, backpressure, EOS, reset/drain, PMU     | `design/elenor_stream_queue/`                   |
-| BOA                  | 4×OPA (16×16) MAC throughput, bandwidth ceiling           | `design/elenor_boa/`                            |
-| EVU                  | 32-lane vector FMA throughput                             | `design/elenor_evu/`                            |
-| MFE                  | bandwidth-bound stream shaping                            | `design/elenor_mfe/`                            |
-| USE                  | slower-clock state engine                                 | `design/elenor_use/`                            |
-| PMU                  | unique stall attribution (one primary owner per cycle)    | arch §21.6                                      |
+| Aspect               | Modelled                                                             | Source spec                                     |
+| -------------------- | -------------------------------------------------------------------- | ----------------------------------------------- |
+| Tile Group           | 1 group, 4 tiles                                                     | `design/elenor_tile_group/`                     |
+| Tile Group Sequencer | Group Task actions, role dispatch, DMA prefetch, barriers            | `design/elenor_tile_group_sequencer/`, arch §16 |
+| Compute Tile         | UCE + BOA/EVU/MFE/USE + L1 SRAM bandwidth                            | `design/elenor_compute_tile/`                   |
+| Tile UCE             | Tile Program ISA: launch/wait/signal                                 | arch §16.4, §17.6                               |
+| Stream Queue         | credit invariant, backpressure, EOS, reset/drain, PMU                | `design/elenor_stream_queue/`                   |
+| BOA                  | 4×OPA (16×16) MAC throughput, bandwidth ceiling                      | `design/elenor_boa/`                            |
+| EVU                  | 32-lane vector FMA throughput                                        | `design/elenor_evu/`                            |
+| MFE                  | load/store plus deterministic profiled Gather through Cache/MSHR/HBM | `design/elenor_mfe/`                            |
+| USE                  | slower-clock state engine                                            | `design/elenor_use/`                            |
+| PMU                  | unique stall attribution (one primary owner per cycle)               | arch §21.6                                      |
 
 ## Fidelity modes
 
@@ -111,6 +112,13 @@ custom-assembly IR from disk.
 | `runtime`     | real L1/L2 allocation + HBM binding | one collapsed bandwidth+launch leg    |
 | `full_memory` | real L1/L2 allocation + HBM binding | full per-leg route (HBM/NoC/DMA/bank) |
 
+Gather never collapses to a synthetic single latency. In all fidelity
+modes it keeps the same profiled
+`L1 lookup → L2 lookup/MSHR → optional HBM/NoC refill → L1 fill →
+ordered destination write` state machine; `timing_only` simply leaves
+physical views null. Cache quota is metadata-only and does not consume
+live L1/L2 scratchpad extents.
+
 All three modes enforce the global-binding contract (missing / overlapping /
 out-of-capacity / wrong-permission bindings fail at load time). In
 `runtime`/`full_memory`, every allocation is an immutable
@@ -118,11 +126,13 @@ out-of-capacity / wrong-permission bindings fail at load time). In
 alignment, owner, generation and use-after-release errors raise
 `MemoryInvariantError` and never produce a success event.
 
-`full_memory` advances each transfer leg-by-leg: prefetch walks
+`full_memory` advances regular transfers leg-by-leg: prefetch walks
 `HBM_READ → GLOBAL_DMA → NOC_RESPONSE → L2_WRITE`, tile load walks
-`L2_READ → LOCAL_DMA → L1_WRITE`, with per-bank segment issuance
-(same-bank serializes, different banks overlap). `TileGroup.snapshot()`
-exposes `memory.fidelity/hbm/l2/l1/transfers/noc` for verification.
+`L2_READ → LOCAL_DMA → L1_WRITE`, with per-bank segment issuance.
+Gather uses dedicated lookup/fill stages and reuses real HBM outstanding,
+NoC credit, local DMA, and destination L1-bank resources. Snapshot
+verification is available under
+`memory.cache/mshr/transfers` plus `memory.hbm/l2/l1/noc`.
 
 Hardware defaults follow the **Balanced-small** profile (arch §12.3):
 64 tiles / 1 MB L1 per tile / 8 MB Group SRAM. The validator runs a
@@ -162,48 +172,110 @@ python -m pipeline_validator -w pow --input-binding Y=0x100000:524288:rw --json
 python -m pipeline_validator -w pow --input-binding Y=0x100000:524288:rw \
   --context-mode 2 --trace-html ctx2.html
 
-# run a model-mode IR (nexus.program) with two device execution slots
-# (model IR declares global inputs; bind each by name: NAME=BASE:SIZE:PERM)
-python -m pipeline_validator --ir-file examples/example.mlir --device-context-mode 2 \
-  --input-binding Y0=0x100000:131072:rw --input-binding Y1=0x200000:131072:rw
+# organized examples include their required bindings and overrides
+bash examples/run.sh list
+bash examples/run.sh pow-dual-context
+bash examples/run.sh gather --json
+
+# edit/copy a custom IR and provide its bindings explicitly
+bash examples/run.sh file path/to/workload.mlir \
+  --input-binding Y=0x100000:131072:rw
+
+# full example catalog and modification workflow: examples/README.md
 
 ### Profiling / Trace Visualization
 
 The validator can emit **Perfetto / Chrome `chrome://tracing`-compatible**
-trace files for visual Gantt-chart inspection of every engine job, stream
-queue occupancy, and task/tile lifecycle event.
+trace files for visual Gantt-chart + counter inspection. By default,
+`--trace-json` / `--trace-html` only enable the lightweight control-flow
+trace (engine jobs, task/tile lifecycle, stream-queue counters). Pass
+`--memory-trace` to add the PR 5 memory-detail lanes/counters/flows and
+to populate `WorkloadReport.memory`.
 
 ```bash
-# write a Perfetto-loadable trace.json (load at perfetto.dev or chrome://tracing)
+# write a Perfetto-loadable control-flow trace.json
 python -m pipeline_validator -w pow --input-binding Y=0x100000:524288:rw \
   --trace-json trace.json
 
-# write a standalone trace.html (open in any browser, no server needed)
+# add PR 5 memory-detail lanes/counters/flows + report.memory
 python -m pipeline_validator -w pow --input-binding Y=0x100000:524288:rw \
-  --trace-html trace.html
-````
+  --memory-trace --trace-json trace-memory.json --trace-html trace-memory.html
+```
 
-**Trace contents:**
+**Lane hierarchy** (PR 5): control-flow lanes are always present once
+tracing is enabled. The memory-detail lanes/counters/flows below require
+`--memory-trace`. Directional group-transfer summaries are always present;
+their clickable `flow_id` handoff to per-leg slices only appears with
+`--memory-trace`. Concurrent summaries take the first free visual slot in
+their direction; `#{n}` identifies a display slot, not a hardware channel.
+Within each `Tile{n}` process, the dataflow region has a fixed visual order:
+`MFE_LD{i}` → `BOA` / `EVU` / `MFE` / `USE` → `MFE_ST{j}`.
 
-- **Slices** (Gantt bars): every BOA/EVU/MFE/USE engine job with op name,
-  ops/bytes, event_id, tile_id. Each tile gets its own track
-  (Tile0/Tile1/Tile2/Tile3) with sub-tracks per engine (BOA/EVU/MFE/USE).
-  TileGroup runtime windows: `TileGroup/Task` (task begin→end),
-  `TileGroup/TileRole:{role_id}` (one track lane per dispatched role,
-  showing that role's dispatch→complete window), `TileGroup/Global DMA`
-  (HBM↔L2 prefetch/store), `TileGroup/Collective` (reduce/broadcast).
-  Tile L2↔L1 traffic is MFE load/store on each tile track.
-- **Instant markers**: `tile_done`, `tile_signal`, `tile_role_dispatch`,
-  `tile_role_complete`, `group_task_done`, `dma_complete`, `collective_complete`.
-  `tile_role_dispatch` / `tile_role_complete` land on the per-role lane
-  `TileRole:{role_id}` so concurrent roles are visually separated.
-- **Multi-context trace details**: with `--context-mode 2`, tile tracks expose
-  `UCE CTX0` / `UCE CTX1` lanes, `ctx_switch` instants, and
-  `active_context_count` / `ready_context_count` counters.
-- **Multi-device-slot trace details**: with `--device-context-mode N`,
-  all slots share the same Tile0-3 lanes (shared physical tiles), and a
-  `Device/Slot:{i}` lane shows `context_submit` → `context_done` windows
-  for device-level scheduling.
+| Process | Thread lane | Contents |
+|---|---|---|
+| Device | `Slot:{i}` | `context_submit` → `context_done` windows |
+| TileGroup | `Task` | group task begin→end |
+| TileGroup | `TileRole:{role_id}` | role dispatch→complete window |
+| TileGroup | `Scheduler:L2` | admission wait/retry/first-action instants, `phase_aggregate`, `transfer_cancelled` |
+| TileGroup | `HBM → L2 Input #{n}` | Prefetch summaries; bars are named `context / buffer` |
+| TileGroup | `L2 → HBM Output #{n}` | Storeback summaries; bars are named `context / buffer` |
+| TileGroup | `Memory:HBM` | `hbm_bind`/`hbm_unbind` instants, `hbm_allocated_bytes`, `hbm_free_bytes`, `hbm_outstanding`, `hbm_credits` |
+| TileGroup | `Memory:L2 Read` | `l2_read`, `l2_cache_lookup` leg slices |
+| TileGroup | `Memory:L2 Write` | `l2_write`, `l2_cache_fill` leg slices |
+| TileGroup | `Memory:L2 State` | L2 capacity/cache/MSHR counters, `{l2,hbm}_alloc`/`{l2,hbm}_release` instants |
+| TileGroup | `L2 Bank:{n}` | `l2_bank_allocated_bytes` |
+| TileGroup | `Global DMA Ch:{n}` | per-channel leg slices + `busy` counter |
+| TileGroup | `HBM Ch:{n}` | per-channel leg slices + `busy` counter |
+| TileGroup | `NoC:VC{n}` | `noc_occupancy`, `noc_credit_available`, NoC leg slices |
+| TileGroup | `StreamQ:{id}` | `occupancy`, `credit_available` |
+| Tile{n} | `UCE CTX{i}` | UCE state slices (`ACCEPT`/`READY`/`WAIT_*`/`DONE`) |
+| Tile{n} | `UCE` | `active_context_count`, `ready_context_count` |
+| Tile{n} | `BOA`/`EVU`/`MFE`/`USE` | engine job slices |
+| Tile{n} | `MFE_LD{i}` / `MFE_ST{j}` | MFE lane slices |
+| Tile{n} | `Local DMA Load`/`Store` | tile-local DMA leg slices |
+| Tile{n} | `Memory:L1 Read` | `l1_read`, `l1_cache_lookup` leg slices |
+| Tile{n} | `Memory:L1 Write` | `l1_write`, `l1_cache_fill` leg slices |
+| Tile{n} | `Memory:L1 State` | L1 capacity/cache counters, `l1_alloc`/`l1_release` instants |
+| Tile{n} | `L1 Bank:{n}` | `l1_bank_allocated_bytes` |
+| Tile{n} | `MSHR` | `l1_mshr_*` counters |
+| Tile{n} | `Lifecycle` | `frame_prepare`/`frame_bind`/`frame_release` instants |
+
+**Counter directory** (all change-only — a sample is emitted only when the
+value changes, not every cycle):
+
+- HBM: `hbm_allocated_bytes`, `hbm_free_bytes`, `hbm_outstanding`, `hbm_credits`.
+- L2: `l2_allocated_bytes`, `l2_free_bytes`, `l2_largest_free_extent`,
+  `l2_live_allocations`, `l2_pending_release`, `l2_bank_allocated_bytes`,
+  `l2_cache_resident_bytes`, `l2_cache_resident_lines`, `l2_mshr_*`.
+- L1 (per tile): the `l1_*` mirror of the L2 set above.
+- NoC: `noc_occupancy`, `noc_credit_available` per VC.
+- Channels: `busy` (0/1) per Global DMA / HBM channel.
+- Stream queues: `occupancy`, `credit_available` per queue.
+- UCE: `active_context_count`, `ready_context_count` per tile.
+
+**Flows**: every memory transaction is a Chrome flow. Each transfer leg
+emits an `X` slice named after its `TransferLegKind` (e.g. `hbm_read`,
+`noc_response`, `l2_read`, `local_dma`); the first completed leg opens
+the flow (`s`), intermediate legs step it (`t`), and the last leg closes
+it (`f`). Each directional `context / buffer` summary carries the same
+`flow_id`, so clicking it in the HTML viewer highlights all legs of that
+transaction across lanes and draws connecting arrows.
+
+**Sampling fidelity**: leg slices are emitted when a leg *completes*
+(using its real accept/complete cycles), so cancelled legs never leave a
+fabricated prediction. Counters are change-only. Collapsed-leg fidelities
+(`timing_only`, `runtime`) produce one leg per transaction, so a flow
+degrades to a single `s`+`f` pair. `Tracer.assert_well_formed()` (called
+by the test suite) enforces: metadata coverage, no consecutive duplicate
+counter samples, closed B/E pairs, one `s`/one `f` per flow, and the
+required identity args on every leg slice.
+
+**Report reconciliation**: with `--memory-trace`, `WorkloadReport.memory`
+exposes `l2_peak_allocated_bytes`, `l1_peak_allocated_bytes` (per tile),
+`hbm_outstanding_peak`, and `hbm_used_bytes` read from the group snapshot
+(never reconstructed from the trace); tests compare these against the
+trace counter maxima. Without `--memory-trace`, the report's `memory`
+field is an empty dict.
 
 ## Tests
 
@@ -220,6 +292,14 @@ python -m pytest pipeline_validator/tests/ -v
 Each workload declares an **expected PMU fingerprint** (e.g. EVU-active,
 low stream stall). The report checks the measured fingerprint against
 these expectations and prints `PASS` / `FAIL`.
+
+Profiled Gather reports `gather_requests`, `gather_l1_hits`,
+`gather_l2_hits`, `gather_hbm_misses`, `gather_mshr_merges`,
+`gather_mshr_stalls`, `gather_reorder_wait_cycles`, and `gather_bytes`.
+Reports automatically check request conservation and zero MSHR/transfer/
+allocation leakage. `gather_fidelity` is explicitly
+`deterministic_profiled_not_address_or_value_accurate`; these counters are
+not measured cache hit rates from real indices.
 
 ## Files
 
@@ -246,3 +326,4 @@ pipeline_validator/
 ├── tests/               # pytest suite
 └── environment.yml      # conda env spec
 ```
+````

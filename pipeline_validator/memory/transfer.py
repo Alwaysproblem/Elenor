@@ -52,6 +52,49 @@ class ResolvedMemoryView:
     return self.address + self.size_bytes
 
 
+def slice_resolved_view(
+  view: ResolvedMemoryView | None,
+  offset_bytes: int,
+  size_bytes: int,
+) -> ResolvedMemoryView | None:
+  """Return one strict logical-byte slice over ordered physical segments."""
+  if view is None:
+    return None
+  if offset_bytes < 0 or size_bytes <= 0:
+    raise MemoryInvariantError("memory view out of bounds")
+  slice_end = offset_bytes + size_bytes
+  if slice_end > view.size_bytes:
+    raise MemoryInvariantError("memory view out of bounds")
+
+  segments: list[BankSegment] = []
+  logical_cursor = 0
+  for segment in view.segments:
+    segment_logical_end = logical_cursor + segment.size_bytes
+    overlap_start = max(offset_bytes, logical_cursor)
+    overlap_end = min(slice_end, segment_logical_end)
+    if overlap_start < overlap_end:
+      physical_offset = overlap_start - logical_cursor
+      segments.append(
+        BankSegment(
+          segment.bank_id,
+          segment.address + physical_offset,
+          overlap_end - overlap_start,
+        )
+      )
+    logical_cursor = segment_logical_end
+
+  if sum(segment.size_bytes for segment in segments) != size_bytes:
+    raise MemoryInvariantError("memory view out of bounds")
+  return ResolvedMemoryView(
+    handle=view.handle,
+    offset_bytes=view.offset_bytes + offset_bytes,
+    size_bytes=size_bytes,
+    address=segments[0].address,
+    segments=tuple(segments),
+    permissions=view.permissions,
+  )
+
+
 # ---------------------------------------------------------------------------
 # Transfer ops, legs, stages
 # ---------------------------------------------------------------------------
@@ -62,6 +105,12 @@ class TransferOp(Enum):
   GLOBAL_STORE = "global_store"
   TILE_LOAD = "tile_load"
   TILE_STORE = "tile_store"
+  GATHER_L1_HIT = "gather_l1_hit"
+  GATHER_L2_HIT = "gather_l2_hit"
+  GATHER_MISS_LOOKUP = "gather_miss_lookup"
+  GATHER_HBM_REFILL = "gather_hbm_refill"
+  GATHER_L2_REFILL = "gather_l2_refill"
+  GATHER_DEST_WRITE = "gather_dest_write"
 
 
 class TransferLegKind(Enum):
@@ -75,6 +124,10 @@ class TransferLegKind(Enum):
   LOCAL_DMA = "local_dma"
   L1_READ = "l1_read"
   L1_WRITE = "l1_write"
+  L1_CACHE_LOOKUP = "l1_cache_lookup"
+  L2_CACHE_LOOKUP = "l2_cache_lookup"
+  L1_CACHE_FILL = "l1_cache_fill"
+  L2_CACHE_FILL = "l2_cache_fill"
 
 
 class StageWaitReason(Enum):
@@ -84,6 +137,8 @@ class StageWaitReason(Enum):
   NOC_CREDIT = "noc_credit"
   L2_BANK = "l2_bank"
   L1_BANK = "l1_bank"
+  L1_CACHE = "l1_cache"
+  L2_CACHE = "l2_cache"
 
 
 class TransferStatus(Enum):
@@ -117,6 +172,8 @@ class StageResult:
   accepted_cycle: int
   completion_cycle: int
   channels: int = 1
+  # bank ids (bank-based stages) or the single channel index chosen
+  resources: tuple[int, ...] = ()
 
 
 @dataclass
@@ -241,7 +298,8 @@ class TransferStage:
         self._outstanding_txns.add(transaction_id)
       return StageResult(accepted_cycle=cycle,
                          completion_cycle=max_completion,
-                         channels=len(bank_ids))
+                         channels=len(bank_ids),
+                         resources=tuple(bank_ids))
     # Channel/outstanding stage: pick first free resource
     free_idx = None
     for i in range(self.resource_count):
@@ -262,7 +320,7 @@ class TransferStage:
     if self.max_outstanding is not None:
       self._outstanding_txns.add(transaction_id)
     return StageResult(accepted_cycle=cycle, completion_cycle=completion,
-                       channels=1)
+                       channels=1, resources=(free_idx,))
 
   def release_outstanding(self, transaction_id: str) -> None:
     """Return one outstanding credit and free the transaction's resources.
@@ -327,11 +385,11 @@ class TransferManager:
   transaction ids to sequencers.  Consumers must ``acknowledge()`` after
   handling final completion.
   """
-
-  def __init__(self, cfg, full_memory: bool = False, noc=None):
+  def __init__(self, cfg, full_memory: bool = False, noc=None, trace=None):
     self.cfg = cfg
     self.full_memory = full_memory
     self.noc = noc  # NoCRouter (full_memory); None when fabric unmodeled
+    self.trace = trace  # MemoryTrace sink; None disables event emission
     clock_hz = cfg.clock_mhz * 1e6
     self._transactions: dict[str, MemoryTransaction] = {}
     self._completed: set[str] = set()
@@ -346,6 +404,9 @@ class TransferManager:
     self.pmu_faulted_count: int = 0
     self.pmu_noc_credit_wait_cycles: int = 0
     self.pmu_hbm_outstanding_peak: int = 0
+    # all-time max (never reset per cycle) for snapshot reconciliation
+    self.pmu_hbm_outstanding_peak_max: int = 0
+    self._issued_by_op: dict[str, int] = {}
     # One global outstanding CAM/credit pool shared by HBM reads+writes.
     self._hbm_outstanding_txns: set[str] = set()
     self._hbm_read = TransferStage(
@@ -380,6 +441,24 @@ class TransferManager:
     self._local_dma: dict[tuple[int, str], TransferStage] = {}
     self._l1_read: dict[int, TransferStage] = {}
     self._l1_write: dict[int, TransferStage] = {}
+    self._l2_cache_lookup = TransferStage(
+      "l2_cache_lookup",
+      StageWaitReason.L2_CACHE,
+      cfg.l2_cache_lookup_latency_cycles,
+      l2_bw,
+      1,
+      1,
+    )
+    self._l2_cache_fill = TransferStage(
+      "l2_cache_fill",
+      StageWaitReason.L2_CACHE,
+      cfg.l2_cache_lookup_latency_cycles,
+      l2_bw,
+      1,
+      1,
+    )
+    self._l1_cache_lookup: dict[int, TransferStage] = {}
+    self._l1_cache_fill: dict[int, TransferStage] = {}
 
   def _local_dma_stage(self, tile_id: int, direction: str) -> TransferStage:
     key = (tile_id, direction)
@@ -405,6 +484,20 @@ class TransferManager:
         self.cfg.tile_l1_banks, 1)
     return cache[tile_id]
 
+  def _l1_cache_stage(self, tile_id: int, is_fill: bool) -> TransferStage:
+    stages = self._l1_cache_fill if is_fill else self._l1_cache_lookup
+    if tile_id not in stages:
+      clock_hz = self.cfg.clock_mhz * 1e6
+      stages[tile_id] = TransferStage(
+        f"l1_cache_{'fill' if is_fill else 'lookup'}_t{tile_id}",
+        StageWaitReason.L1_CACHE,
+        self.cfg.l1_cache_lookup_latency_cycles,
+        self.cfg.tile_l1_bandwidth_gbs * 1e9 / clock_hz,
+        1,
+        1,
+      )
+    return stages[tile_id]
+
   def submit(self, transaction: MemoryTransaction, cycle: int,
              pmu=None) -> None:
     """Submit a transaction.  Builds the route based on op + fidelity."""
@@ -412,18 +505,28 @@ class TransferManager:
       raise MemoryInvariantError("duplicate transaction id")
     self._transactions[transaction.transaction_id] = transaction
     self.pmu_issued_count += 1
-    # build legs based on op + fidelity
-    if transaction.src is None and transaction.dst is None:
-      # timing_only: collapsed single leg by op class
+    op_name = transaction.op.value
+    self._issued_by_op[op_name] = self._issued_by_op.get(op_name, 0) + 1
+    # Gather always retains its explicit lookup/refill/write route in every
+    # fidelity mode.  Opaque profile tokens never collapse into a fake DMA.
+    gather_ops = (
+      TransferOp.GATHER_L1_HIT,
+      TransferOp.GATHER_L2_HIT,
+      TransferOp.GATHER_MISS_LOOKUP,
+      TransferOp.GATHER_HBM_REFILL,
+      TransferOp.GATHER_L2_REFILL,
+      TransferOp.GATHER_DEST_WRITE,
+    )
+    if transaction.op in gather_ops:
+      transaction.legs = self._build_route(transaction)
+    elif transaction.src is None and transaction.dst is None:
       transaction.legs = self._collapsed_leg(transaction)
     elif transaction.src is not None and transaction.dst is not None:
       if self.full_memory:
         transaction.legs = self._build_route(transaction)
       else:
-        # runtime: real handle/address, collapsed single leg
         transaction.legs = self._collapsed_leg(transaction)
     else:
-      # mixed src/dst is invalid
       transaction.status = TransferStatus.FAULTED
       self._faulted.add(transaction.transaction_id)
       self.pmu_faulted_count += 1
@@ -438,6 +541,15 @@ class TransferManager:
     Group ops fold onto the Global DMA stage; tile-local ops fold onto
     the tile's local DMA stage (mfe_launch_cycles + mfe bandwidth).
     """
+    if txn.op in (
+      TransferOp.GATHER_L1_HIT,
+      TransferOp.GATHER_L2_HIT,
+      TransferOp.GATHER_MISS_LOOKUP,
+      TransferOp.GATHER_HBM_REFILL,
+      TransferOp.GATHER_L2_REFILL,
+      TransferOp.GATHER_DEST_WRITE,
+    ):
+      raise MemoryInvariantError("gather route must not be collapsed")
     if txn.op in (TransferOp.TILE_LOAD, TransferOp.TILE_STORE):
       tid = txn.tile_id or 0
       direction = "load" if txn.op == TransferOp.TILE_LOAD else "store"
@@ -451,6 +563,130 @@ class TransferManager:
 
   def _build_route(self, txn: MemoryTransaction) -> tuple[TransferLeg, ...]:
     op = txn.op
+    tid = txn.tile_id or 0
+    if op == TransferOp.GATHER_L1_HIT:
+      return (
+        TransferLeg(
+          TransferLegKind.L1_CACHE_LOOKUP,
+          "l1_cache",
+          "l1_cache",
+          txn.bytes_total,
+          f"l1_cache_lookup:{tid}:{txn.transaction_id}",
+        ),
+      )
+    if op == TransferOp.GATHER_L2_HIT:
+      return (
+        TransferLeg(
+          TransferLegKind.L1_CACHE_LOOKUP,
+          "l1_cache",
+          "l1_cache",
+          txn.bytes_total,
+          f"l1_cache_lookup:{tid}:{txn.transaction_id}",
+        ),
+        TransferLeg(
+          TransferLegKind.L2_CACHE_LOOKUP,
+          "l2_cache",
+          "l2_cache",
+          txn.bytes_total,
+          f"l2_cache_lookup:{txn.transaction_id}",
+        ),
+        TransferLeg(
+          TransferLegKind.NOC_RESPONSE,
+          "noc",
+          "tile",
+          txn.bytes_total,
+          f"noc_rsp:{txn.transaction_id}",
+        ),
+        TransferLeg(
+          TransferLegKind.LOCAL_DMA,
+          "tile",
+          "l1_cache",
+          txn.bytes_total,
+          f"local_dma:{tid}:load:{txn.transaction_id}",
+        ),
+        TransferLeg(
+          TransferLegKind.L1_CACHE_FILL,
+          "l1_cache",
+          "l1_cache",
+          txn.bytes_total,
+          f"l1_cache_fill:{tid}:{txn.transaction_id}",
+        ),
+      )
+    if op == TransferOp.GATHER_MISS_LOOKUP:
+      return (
+        TransferLeg(
+          TransferLegKind.L1_CACHE_LOOKUP,
+          "l1_cache",
+          "l1_cache",
+          txn.bytes_total,
+          f"l1_cache_lookup:{tid}:{txn.transaction_id}",
+        ),
+        TransferLeg(
+          TransferLegKind.L2_CACHE_LOOKUP,
+          "l2_cache",
+          "l2_cache",
+          txn.bytes_total,
+          f"l2_cache_lookup:{txn.transaction_id}",
+        ),
+      )
+    if op == TransferOp.GATHER_HBM_REFILL:
+      return (
+        TransferLeg(
+          TransferLegKind.HBM_READ,
+          "hbm",
+          "noc",
+          txn.bytes_total,
+          f"hbm_read:{txn.transaction_id}",
+        ),
+        TransferLeg(
+          TransferLegKind.NOC_RESPONSE,
+          "noc",
+          "l2_cache",
+          txn.bytes_total,
+          f"noc_rsp:{txn.transaction_id}",
+        ),
+        TransferLeg(
+          TransferLegKind.L2_CACHE_FILL,
+          "l2_cache",
+          "l2_cache",
+          txn.bytes_total,
+          f"l2_cache_fill:{txn.transaction_id}",
+        ),
+      )
+    if op == TransferOp.GATHER_L2_REFILL:
+      return (
+        TransferLeg(
+          TransferLegKind.NOC_RESPONSE,
+          "l2_cache",
+          "tile",
+          txn.bytes_total,
+          f"noc_rsp:{txn.transaction_id}",
+        ),
+        TransferLeg(
+          TransferLegKind.LOCAL_DMA,
+          "tile",
+          "l1_cache",
+          txn.bytes_total,
+          f"local_dma:{tid}:load:{txn.transaction_id}",
+        ),
+        TransferLeg(
+          TransferLegKind.L1_CACHE_FILL,
+          "l1_cache",
+          "l1_cache",
+          txn.bytes_total,
+          f"l1_cache_fill:{tid}:{txn.transaction_id}",
+        ),
+      )
+    if op == TransferOp.GATHER_DEST_WRITE:
+      return (
+        TransferLeg(
+          TransferLegKind.L1_WRITE,
+          "l1",
+          "l1",
+          txn.bytes_total,
+          f"l1_write:{tid}:{txn.transaction_id}",
+        ),
+      )
     if op == TransferOp.PREFETCH:
       return (
         TransferLeg(TransferLegKind.HBM_READ, "hbm", "noc",
@@ -512,12 +748,20 @@ class TransferManager:
       return self._l2_write
     if kind == TransferLegKind.LOCAL_DMA:
       tid = txn.tile_id or 0
-      direction = "load" if txn.op == TransferOp.TILE_LOAD else "store"
+      direction = "store" if txn.op == TransferOp.TILE_STORE else "load"
       return self._local_dma_stage(tid, direction)
     if kind == TransferLegKind.L1_READ:
       return self._l1_stage(txn.tile_id or 0, is_write=False)
     if kind == TransferLegKind.L1_WRITE:
       return self._l1_stage(txn.tile_id or 0, is_write=True)
+    if kind == TransferLegKind.L1_CACHE_LOOKUP:
+      return self._l1_cache_stage(txn.tile_id or 0, is_fill=False)
+    if kind == TransferLegKind.L2_CACHE_LOOKUP:
+      return self._l2_cache_lookup
+    if kind == TransferLegKind.L1_CACHE_FILL:
+      return self._l1_cache_stage(txn.tile_id or 0, is_fill=True)
+    if kind == TransferLegKind.L2_CACHE_FILL:
+      return self._l2_cache_fill
     raise ValueError(f"unknown leg kind {kind}")
 
   @staticmethod
@@ -554,12 +798,19 @@ class TransferManager:
   def _all_stages(self) -> list[TransferStage]:
     """Every stage this manager owns, including per-tile local stages."""
     stages: list[TransferStage] = [
-      self._hbm_read, self._hbm_write, self._global_dma,
-      self._l2_read, self._l2_write,
+      self._hbm_read,
+      self._hbm_write,
+      self._global_dma,
+      self._l2_read,
+      self._l2_write,
+      self._l2_cache_lookup,
+      self._l2_cache_fill,
     ]
     stages.extend(self._local_dma.values())
     stages.extend(self._l1_read.values())
     stages.extend(self._l1_write.values())
+    stages.extend(self._l1_cache_lookup.values())
+    stages.extend(self._l1_cache_fill.values())
     return stages
 
   def note_traversed(self, flits: list[Flit], cycle: int) -> None:
@@ -596,17 +847,36 @@ class TransferManager:
         if isinstance(result, StageWait):
           txn.wait_reason = result.reason
           stage.wait_cycles += 1
+          if self.trace is not None:
+            self.trace.transfer_wait(txn.transaction_id, result.reason.value)
           continue
         txn.wait_reason = StageWaitReason.NONE
         txn.leg_start_cycle = result.accepted_cycle
         txn.leg_completion_cycle = result.completion_cycle
         if txn.start_cycle < 0:
           txn.start_cycle = result.accepted_cycle
+        if stage.name in ("hbm_read", "hbm_write"):
+          # capture the transient: a txn may issue and complete in the
+          # same cycle, so the end-of-step peak check would miss it
+          peak = len(self._hbm_outstanding_txns)
+          if peak > self.pmu_hbm_outstanding_peak:
+            self.pmu_hbm_outstanding_peak = peak
+          if peak > self.pmu_hbm_outstanding_peak_max:
+            self.pmu_hbm_outstanding_peak_max = peak
+        if self.trace is not None:
+          self.trace.transfer_leg_issued(txn, leg, stage.name, result,
+                                         result.resources, cycle)
+          if stage.name in ("hbm_read", "hbm_write"):
+            self._trace_hbm_outstanding(cycle)
       # check if current leg completed
       if cycle >= txn.leg_completion_cycle and txn.leg_completion_cycle > 0:
         # advance to next leg; return this leg's resources and any
         # outstanding credit held by this transaction in the stage
         stage.release_outstanding(txn.transaction_id)
+        if self.trace is not None:
+          self.trace.transfer_leg_completed(txn, cycle)
+          if stage.name in ("hbm_read", "hbm_write"):
+            self._trace_hbm_outstanding(cycle)
         self._advance_leg(txn, cycle, completed)
     # track HBM outstanding peak after this cycle's issue activity
     peak = len(self._hbm_outstanding_txns)
@@ -644,16 +914,26 @@ class TransferManager:
                              tag=txn.noc_tag), cycle)
       txn.wait_reason = StageWaitReason.NOC_CREDIT
       self.pmu_noc_credit_wait_cycles += 1
+      if self.trace is not None:
+        # router-backed leg: completion cycle unknown at issue (-1); the
+        # completion hook substitutes the actual cycle.
+        self.trace.transfer_leg_issued(
+          txn, leg, f"noc_vc{vc}", StageResult(cycle, -1), (), cycle)
       return
     traversed = self._noc_traversed.get(txn.noc_tag)
     if traversed is None:
       # still pending: queueing, arbitration or credit exhaustion
       txn.wait_reason = StageWaitReason.NOC_CREDIT
       self.pmu_noc_credit_wait_cycles += 1
+      if self.trace is not None:
+        self.trace.transfer_wait(txn.transaction_id,
+                                 StageWaitReason.NOC_CREDIT.value)
       return
     if cycle >= traversed + self.cfg.noc_router_latency_cycles:
       self.noc.return_credit(txn.noc_vc, 1)
       self._noc_traversed.pop(txn.noc_tag, None)
+      if self.trace is not None:
+        self.trace.transfer_leg_completed(txn, cycle)
       self._advance_leg(txn, cycle, completed)
     else:
       txn.wait_reason = StageWaitReason.NOC_CREDIT
@@ -727,6 +1007,9 @@ class TransferManager:
       self._cancelled.add(txn.transaction_id)
       self.pmu_cancelled_count += 1
       self._cancel_txn_resources(txn)
+      if self.trace is not None:
+        self.trace.transfer_cancelled(txn, cycle)
+        self._trace_hbm_outstanding(cycle)
       self._transactions.pop(txn.transaction_id, None)
 
   def cancel_all(self, cycle: int) -> None:
@@ -744,10 +1027,21 @@ class TransferManager:
       self._cancelled.add(txn.transaction_id)
       self.pmu_cancelled_count += 1
       self._cancel_txn_resources(txn)
+      if self.trace is not None:
+        self.trace.transfer_cancelled(txn, cycle)
     self._transactions.clear()
     for stage in self._all_stages():
       stage.reset()
     self._noc_traversed.clear()
+    if self.trace is not None:
+      self._trace_hbm_outstanding(cycle)
+
+  def _trace_hbm_outstanding(self, cycle: int) -> None:
+    """Push the shared HBM CAM pool occupancy + credits to the sink."""
+    if self.trace is None:
+      return
+    self.trace.hbm_outstanding(len(self._hbm_outstanding_txns),
+                               self.cfg.hbm_outstanding_limit, cycle)
 
   def reset(self) -> None:
     self._transactions.clear()
@@ -763,6 +1057,8 @@ class TransferManager:
     self.pmu_faulted_count = 0
     self.pmu_noc_credit_wait_cycles = 0
     self.pmu_hbm_outstanding_peak = 0
+    self.pmu_hbm_outstanding_peak_max = 0
+    self._issued_by_op.clear()
 
   @property
   def inflight_count(self) -> int:
@@ -785,13 +1081,26 @@ class TransferManager:
       "cancelled_total": self.pmu_cancelled_count,
       "faulted_total": self.pmu_faulted_count,
       "noc_credit_wait_cycles": self.pmu_noc_credit_wait_cycles,
-      "hbm_outstanding_peak": self.pmu_hbm_outstanding_peak,
+      "hbm_outstanding_peak": self.pmu_hbm_outstanding_peak_max,
+      "issued_by_op": dict(self._issued_by_op),
       "stages": {
         "hbm_read": self._hbm_read.snapshot(),
         "hbm_write": self._hbm_write.snapshot(),
         "global_dma": self._global_dma.snapshot(),
         "l2_read": self._l2_read.snapshot(),
         "l2_write": self._l2_write.snapshot(),
+        "l2_cache_lookup": self._l2_cache_lookup.snapshot(),
+        "l2_cache_fill": self._l2_cache_fill.snapshot(),
+        **{
+          stage.name: stage.snapshot()
+          for stage in (
+            *self._local_dma.values(),
+            *self._l1_read.values(),
+            *self._l1_write.values(),
+            *self._l1_cache_lookup.values(),
+            *self._l1_cache_fill.values(),
+          )
+        },
       },
       "transactions": [
         {

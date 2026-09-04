@@ -25,6 +25,7 @@ class StallReason(IntEnum):
     WAIT_HBM_OUTSTANDING = 8
     UCE_PROGRAM_DESC = 9
     UNKNOWN = 10
+    WAIT_MSHR = 11
 
     @property
     def label(self) -> str:
@@ -43,6 +44,7 @@ _STALL_LABELS = {
     StallReason.WAIT_HBM_OUTSTANDING: "hbm_outstanding_wait",
     StallReason.UCE_PROGRAM_DESC: "uce_program_or_descriptor_stall",
     StallReason.UNKNOWN: "unknown_or_unclassified",
+    StallReason.WAIT_MSHR: "mshr_full",
 }
 
 

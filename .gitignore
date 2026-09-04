@@ -8,3 +8,7 @@ serving/
 bazel-*
 *.whl
 node_modules
+
+# Generated pipeline-validator traces/reports.
+/*.json
+/examples/artifacts/

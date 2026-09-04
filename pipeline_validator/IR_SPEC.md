@@ -54,17 +54,20 @@ that `nest.context` and `nest.dispatch.tasks.async` may carry an optional
   must be >= 0 and < `device_context_count` (upper bound checked at
   model/task load).
 
-### 1.2 `tile.program @name (%task : !nest.task, %l2_buf : !nest.l2_buffer<...>) { ... }`
+### 1.2 `tile.program @name (%task : !nest.task, %global : !nest.global_view<...>, %l2 : !nest.l2_buffer<...>) { ... }`
 
 Defines one tile program. The body contains tile-level async engine ops,
 `tile.await`, `tile.signal`, and `tile.return`. The program is referenced
 by `nest.dispatch.tasks.async` via its symbol name.
 
-The entry block declares the program's data formals: the **first** formal
-must be `!nest.task` (the logical task handle), followed by zero or more
-`!nest.l2_buffer<...>` formals. Each L2 formal is bound positionally to a
-dispatch actual (`ins`/`outs`); the body subviews it (`tile.subview`) and
-moves data with explicit `src`/`dst` (`tile.load.async`/`tile.store.async`).
+The entry block declares the program's data formals in one fixed order:
+the **first** formal is `!nest.task`; zero or more
+`!nest.global_view<...>` formals follow; zero or more
+`!nest.l2_buffer<...>` formals come last. Global/L2 formals may not
+interleave. Dispatch `globals(...)` bind the global prefix positionally;
+`ins(...)` and `outs(...)` each bind all L2 formals positionally.
+`tile.subview` remains L2-only. `tile.gather.global.async` is the only
+tile-side consumer of a global-view formal in PR 4.
 
 ### 1.3 `nexus.program @name (%a : !nest.global_memref<...>) { ... }`
 
@@ -121,7 +124,8 @@ event id used by the simulator and the trace. Produced by:
 
 Tile-level async event. Same semantics as `!nest.event` but scoped to a
 single tile. Produced by: `tile.load.async`, `tile.store.async`,
-`tile.pow.async`, `tile.evu.async`, `tile.boa.async`.
+`tile.gather.global.async`, `tile.pow.async`, `tile.evu.async`,
+`tile.boa.async`.
 
 ### 2.3 `!nest.l2_buffer<DxDx...xdtype>`
 
@@ -235,7 +239,7 @@ L2 → HBM final store from the `!nest.l2_buffer` into the
 
 ```mlir
 %grid, %inrel, %out = nest.dispatch.tasks.async @pow_4k_tile context = 1
-    tasks(%t) ins(%buf) outs(%buf)
+    tasks(%t) globals() ins(%buf) outs(%buf)
     signal_policy {
       input_released = #nest.aggregate<all_tasks>,
       output_ready = #nest.aggregate<all_tasks>
@@ -245,11 +249,11 @@ L2 → HBM final store from the `!nest.l2_buffer` into the
 ```
 
 Function-call dispatch (reference.mlir §194-239). The tile program is
-referenced by symbol. `ins`/`outs` are the L2 buffer actuals bound
-positionally to the tile program's L2 formals (after the leading
-`!nest.task` formal); each must be a whole `!nest.l2_buffer` whose
-shape/dtype exactly match the corresponding formal. Placement comes from
-the enclosing `nest.context`, not from this op.
+referenced by symbol. Mandatory `globals(...)` binds global-view formals;
+it is printed even when empty. `ins(...)` and `outs(...)` independently
+bind every L2 formal. Counts and shape/dtype must match each corresponding
+formal exactly. Placement comes from the enclosing `nest.context`, not
+from this op.
 
 `signal_policy { ... }` is always printed, possibly as
 `signal_policy {}`. Each entry declares how one program phase aggregates
@@ -410,7 +414,38 @@ BOA dense compute op. `accumulate` is optional (default false; when
 present, the matmul result accumulates into the existing L1 buffer
 rather than overwriting).
 
-### 4.8 `tile.await`
+### 4.8 `tile.gather.global.async` / `tile.profiled.access`
+
+```mlir
+%done = tile.gather.global.async %table
+    indices(%indices_l1) into %gather_dst
+    result_bytes = 256 cache_min_bytes = 16384
+    cache_target_bytes = 65536 l1_mshr_hint = 16 {
+  tile.profiled.access id = "r0" outcome = "L1_HIT"
+      bytes = 64 line = "line0"
+  tile.profiled.access id = "r1" outcome = "HBM_MISS"
+      bytes = 64 line = "line42" merge = "line42"
+} : !tile.event<"gather_done">
+```
+
+Deterministic profiled Gather. Operands are exactly one global-view
+formal source, one L1 indices allocation, and a different L1 destination
+allocation. The profile region is single-block, has no terminator, and
+contains only `tile.profiled.access`; it has no control flow, event, or
+side-effect op. Access properties print in fixed
+`id/outcome/bytes/line/merge` order. Outcomes are `L1_HIT`, `L2_HIT`, or
+`HBM_MISS`; `line` and `merge` are opaque profile identities, never
+addresses or bank selectors.
+
+All requests issue lookup legs concurrently. Responses may complete out
+of order, but destination L1 writes follow profile ordinal order.
+`gather_done` fires exactly once after the final destination write.
+`HBM_MISS` uses per-tile L1 MSHR plus shared TileGroup L2 MSHR; one
+non-empty merge group has one leader and waiter completions. The result
+exists only in the explicit L1 destination; Gather creates no L2 output
+and no StreamQueue token.
+
+### 4.9 `tile.await`
 
 ```mlir
 tile.await %ev1, %ev2
@@ -420,7 +455,7 @@ Waits for one or more tile events. Suspends only the current Hardware
 Context (reference.mlir §375-376). Lowered to `WAIT` (1 operand) or
 `WAITALL` (2+ operands).
 
-### 4.9 `tile.signal`
+### 4.10 `tile.signal`
 
 ```mlir
 tile.signal input_released(%task)
@@ -440,7 +475,7 @@ phase, the event fires exactly once only after every expected logical task
 in that `GridInstanceId` has signalled; duplicate task/phase signals are
 ignored. The physical placement mask does not aggregate phase signals.
 
-### 4.10 `tile.return`
+### 4.11 `tile.return`
 
 ```mlir
 tile.return
@@ -471,12 +506,12 @@ Tile program completion. Contributes to `grid_done` (reference.mlir
 - **submit ↔ context signature**: `nexus.submit_context.async @ctx` must
   pass exactly as many actuals as `@ctx` declares formals, and each
   actual's dims+dtype must equal the corresponding formal's.
-- **`tile.program` formals**: at least one formal; the first must be
-  `!nest.task`; the rest must be `!nest.l2_buffer`.
-- **dispatch ↔ tile.program binding**: `ins` and `outs` each bind,
-  positionally and independently, to the program's L2 formals (count and
-  dims+dtype must match); dispatch actuals must be whole `!nest.l2_buffer`
-  values.
+- **`tile.program` formals**: at least one formal; the first is
+  `!nest.task`, followed by a contiguous global-view prefix and then a
+  contiguous L2-buffer suffix. Global formals may not follow L2 formals.
+- **dispatch ↔ tile.program binding**: mandatory `globals` bind all
+  global formals; `ins` and `outs` each bind all L2 formals. Every list
+  must match formal count and dims+dtype exactly.
 - **View bounds (`nest.subview` / `tile.subview`)**: every dim requires
   `offset >= 0`, `size >= 1`, `offset + size <= parent_dim`; view byte
   count must not overflow int64. `tile.subview` bounds against a task
@@ -488,6 +523,17 @@ Tile program completion. Contributes to `grid_done` (reference.mlir
 - **Root-object constraint (no view chains)**: `nest.subview` `src` must
   be a context global formal; `tile.subview` `src` must be a
   `tile.program` L2 formal.
+- **Gather**: source is a current-program global formal; indices and
+  destination are different current-program `tile.alloc` results; profile
+  is non-empty and contains only `tile.profiled.access`; `result_bytes`
+  is positive, fits destination, and equals the sum of request bytes;
+  `cache_min_bytes > 0`, `cache_target_bytes >= cache_min_bytes`, and
+  `l1_mshr_hint > 0`; request ids are non-empty/unique; request bytes are
+  positive and fit the source; outcomes are exactly
+  `L1_HIT|L2_HIT|HBM_MISS`. A non-empty merge group is HBM-miss-only,
+  requires a non-empty line token, and every member has identical line
+  token and byte size. Invalid profiles fail verification; there is no
+  inferred hit-rate fallback.
 - **Input bindings** (simulator load time, not IR verify): every program
   input needs a same-name binding; unknown bindings, undersized bindings,
   overlapping IOVA ranges, and ranges past HBM capacity are rejected with
@@ -525,6 +571,9 @@ Tile program completion. Contributes to `grid_done` (reference.mlir
 - `tile.signal` phase must be `input_released` or `output_ready`, and
   its sole operand must be block argument 0 (the program's `!nest.task`
   formal).
+- `tile.gather.global.async` obeys the complete Gather rule set in §5.2;
+  its `gather_done` event participates in the same unique-tag and
+  defined-before-await rules as other tile async events.
 
 ### 5.5 `nexus.program` body
 
@@ -543,7 +592,10 @@ The lowering (`ir_lowering.py`) is a direct 1:1 walk of the IR body,
 producing `ExecTileGroupTask` DTOs consumed by the cycle-accurate
 simulator. The event type tag is used directly as the runtime event id,
 so the trace (engine jobs, event ids, PMU counters) corresponds exactly
-to the IR ops.
+to the IR ops. Memory-subsystem trace lanes, change-only counters and
+per-transaction flows are documented in `README.md` §Profiling / Trace
+Visualization; the trace well-formedness contract is enforced by
+`Tracer.assert_well_formed()` (see `pipeline_validator/tests/test_trace.py`).
 
 ### 6.1 Context body → ExecGroupAction list
 
@@ -562,10 +614,11 @@ to the IR ops.
 | `nest.return`               | `SIGNAL_EVENT` args=(completion_event)                                        |
 
 `ExecTransfer` carries explicit `src`/`dst` `ExecMemoryView`s and the
-byte count; the sequencer reads `transfer.dst.base`/`transfer.bytes` for
-prefetch and `transfer.src.base`/`transfer.bytes` for store. `global_inputs`,
-`l2_buffers`, `task_domain`, and per-binding `actuals` are recorded on the
-`ExecTileGroupTask`/`ExecTileRoleBinding` DTOs.
+byte count. `global_inputs`, `l2_buffers`, `task_domain`, L2 `actuals`,
+and per-binding `global_actuals` are recorded on
+`ExecTileGroupTask`/`ExecTileRoleBinding`. Tile global formals lower to
+`ExecMemoryView(space="global", base="formal:<index>", ...)`; runtime
+never carries an xDSL SSA value.
 
 `ExecDispatchRequest` preserves the role id, source-order dispatch ordinal,
 per-phase `ExecSignalPolicy`, and phase event ids; its action `dst` remains
@@ -576,21 +629,29 @@ does not recover identity or release dependencies by parsing event strings.
 
 ### 6.2 Tile program body → ExecTileInst list
 
-| IR op              | ExecTileInst                                        |
-| ------------------ | --------------------------------------------------- |
-| `tile.alloc`       | (no action; records `ExecL1Buffer`)                 |
-| `tile.subview`     | (no action; records `ExecMemoryView`)               |
-| `tile.load.async`  | `LAUNCH_MFE` (MFE "load", transfer on the desc)     |
-| `tile.store.async` | `LAUNCH_MFE` (MFE "store", transfer on the desc)    |
-| `tile.pow.async`   | `LAUNCH_EVU` (EVU "pow")                            |
-| `tile.evu.async`   | `LAUNCH_EVU` (EVU op_name)                          |
-| `tile.boa.async`   | `LAUNCH_BOA` (BOA op_name)                          |
-| `tile.await`       | `WAIT` (1 operand) or `WAITALL` (2+)                |
-| `tile.signal`      | `SIGNAL_PHASE` args=(phase_name, task_formal_index) |
-| `tile.return`      | `RET`                                               |
+| IR op                      | ExecTileInst                                        |
+| -------------------------- | --------------------------------------------------- |
+| `tile.alloc`               | (no action; records `ExecL1Buffer`)                 |
+| `tile.subview`             | (no action; records `ExecMemoryView`)               |
+| `tile.load.async`          | `LAUNCH_MFE` (MFE "load", transfer on the desc)     |
+| `tile.store.async`         | `LAUNCH_MFE` (MFE "store", transfer on the desc)    |
+| `tile.gather.global.async` | `LAUNCH_GATHER` with `ExecGatherDesc` on MFE        |
+| `tile.pow.async`           | `LAUNCH_EVU` (EVU "pow")                            |
+| `tile.evu.async`           | `LAUNCH_EVU` (EVU op_name)                          |
+| `tile.boa.async`           | `LAUNCH_BOA` (BOA op_name)                          |
+| `tile.await`               | `WAIT` (1 operand) or `WAITALL` (2+)                |
+| `tile.signal`              | `SIGNAL_PHASE` args=(phase_name, task_formal_index) |
+| `tile.return`              | `RET`                                               |
 
 MFE load/store descriptors carry an `ExecTransfer` (src/dst views +
 bytes); the tile reads `desc.transfer.bytes` for the latency model.
+
+Gather lowering preserves every `ExecProfiledAccess` and its enum outcome
+inside immutable `ExecGatherDesc`. Runtime follows
+`L1 lookup → L2 lookup/MSHR → optional HBM/NoC refill → L1 cache fill →
+ordered L1 destination write`. Opaque line tokens are never converted to
+physical addresses. This is deterministic profiled timing, not
+address-accurate or value-accurate Gather.
 
 ### 6.3 Role binding
 

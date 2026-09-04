@@ -30,6 +30,7 @@ _HW_YAML_PATH_TO_FIELD = {
     "system.profile": "profile",
     "system.topology.tiles_per_group": "num_tiles",
     "system.clock.core_mhz": "clock_mhz",
+    "memory.cache.line_bytes": "cache_line_bytes",
     "memory.hbm.capacity_bytes": "hbm_capacity_bytes",
     "memory.hbm.bandwidth_gbs": "hbm_bandwidth_gbs",
     "memory.hbm.outstanding_limit": "hbm_outstanding_limit",
@@ -40,10 +41,16 @@ _HW_YAML_PATH_TO_FIELD = {
     "memory.group_sram.banks": "group_sram_banks",
     "memory.group_sram.access_latency_cycles": "l2_access_latency_cycles",
     "memory.group_sram.bank_bandwidth_gbs": "l2_bank_bandwidth_gbs",
+    "memory.group_sram.cache.capacity_bytes": "l2_cache_capacity_bytes",
+    "memory.group_sram.cache.lookup_latency_cycles": "l2_cache_lookup_latency_cycles",
+    "memory.group_sram.cache.mshr_entries": "l2_mshr_entries",
     "memory.tile_l1.capacity_bytes": "tile_l1_bytes",
     "memory.tile_l1.banks": "tile_l1_banks",
     "memory.tile_l1.access_latency_cycles": "l1_access_latency_cycles",
     "memory.tile_l1.bandwidth_gbs": "tile_l1_bandwidth_gbs",
+    "memory.tile_l1.cache.capacity_bytes": "l1_cache_capacity_bytes",
+    "memory.tile_l1.cache.lookup_latency_cycles": "l1_cache_lookup_latency_cycles",
+    "memory.tile_l1.cache.mshr_entries": "l1_mshr_entries",
     "memory.tile_program_sram.capacity_bytes": "tile_program_sram_bytes",
     "engines.boa.opa.count": "boa_num_opa",
     "engines.boa.opa.rows": "boa_opa_rows",
@@ -294,6 +301,13 @@ class HardwareConfig:
     hbm_channels: int = _HW_DEFAULTS["hbm_channels"]  # 8 HBM stacks, 由后续规格冻结
     hbm_fixed_latency_cycles: int = _HW_DEFAULTS["hbm_fixed_latency_cycles"]  # 由后续规格冻结
     hbm_burst_bytes: int = _HW_DEFAULTS["hbm_burst_bytes"]  # 2^N, 由后续规格冻结
+    cache_line_bytes: int = _HW_DEFAULTS["cache_line_bytes"]
+    l2_cache_capacity_bytes: int = _HW_DEFAULTS["l2_cache_capacity_bytes"]
+    l2_cache_lookup_latency_cycles: int = _HW_DEFAULTS["l2_cache_lookup_latency_cycles"]
+    l2_mshr_entries: int = _HW_DEFAULTS["l2_mshr_entries"]
+    l1_cache_capacity_bytes: int = _HW_DEFAULTS["l1_cache_capacity_bytes"]
+    l1_cache_lookup_latency_cycles: int = _HW_DEFAULTS["l1_cache_lookup_latency_cycles"]
+    l1_mshr_entries: int = _HW_DEFAULTS["l1_mshr_entries"]
     l2_access_latency_cycles: int = _HW_DEFAULTS["l2_access_latency_cycles"]  # 由 SRAM profile 冻结
     l1_access_latency_cycles: int = _HW_DEFAULTS["l1_access_latency_cycles"]  # 由 SRAM profile 冻结
     l2_bank_bandwidth_gbs: float = _HW_DEFAULTS["l2_bank_bandwidth_gbs"]  # per-bank
@@ -334,6 +348,26 @@ class HardwareConfig:
             raise ValueError("l2_access_latency_cycles must be >= 1")
         if self.l1_access_latency_cycles < 1:
             raise ValueError("l1_access_latency_cycles must be >= 1")
+        if self.cache_line_bytes <= 0 or (
+            self.cache_line_bytes & (self.cache_line_bytes - 1)
+        ) != 0:
+            raise ValueError("cache_line_bytes must be a positive power of 2")
+        for field_name, capacity in (
+            ("l2_cache_capacity_bytes", self.l2_cache_capacity_bytes),
+            ("l1_cache_capacity_bytes", self.l1_cache_capacity_bytes),
+        ):
+            if capacity < self.cache_line_bytes or capacity % self.cache_line_bytes:
+                raise ValueError(
+                    f"{field_name} must be line-aligned and at least one cache line"
+                )
+        if self.l2_cache_lookup_latency_cycles <= 0:
+            raise ValueError("l2_cache_lookup_latency_cycles must be > 0")
+        if self.l1_cache_lookup_latency_cycles <= 0:
+            raise ValueError("l1_cache_lookup_latency_cycles must be > 0")
+        if self.l2_mshr_entries <= 0:
+            raise ValueError("l2_mshr_entries must be > 0")
+        if self.l1_mshr_entries <= 0:
+            raise ValueError("l1_mshr_entries must be > 0")
 
     def cycle_ns(self) -> float:
         """Length of one simulator cycle in nanoseconds."""
@@ -408,6 +442,7 @@ class SimConfig:
 
     max_cycles: int = 2_000_000
     trace: bool = False
+    memory_trace: bool = False  # PR 5: emit memory lanes/counters/flows + report peaks
     trace_tile: int | None = None
     trace_json: str | None = None  # write Perfetto/Chrome trace.json
     trace_html: str | None = None  # write standalone trace.html

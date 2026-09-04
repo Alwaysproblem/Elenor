@@ -17,9 +17,11 @@ from .allocator import (
   MemoryOwner,
   TaskBufferOwner,
 )
+from .cache import CacheStats, DeterministicLRUCache
 from .hbm_region import HBMRegion
 from .l1_slot_frame import FrameState, Slot, SlotFrame, SlotLifetime, SlotRole
 from .l2_sram import L2SRAM
+from .mshr import MshrAllocation, MshrStats, MshrTable, MshrWait
 from .noc import NoCRouter, VirtualChannel
 from .payload import Payload, PayloadTracker
 from .transfer import (
@@ -35,6 +37,7 @@ from .transfer import (
   TransferOp,
   TransferStage,
   TransferStatus,
+  slice_resolved_view,
 )
 
 __all__ = [
@@ -47,13 +50,19 @@ __all__ = [
   "AllocationState",
   "BankSegment",
   "BankedFreeExtentAllocator",
+  "CacheStats",
   "ContextBufferOwner",
+  "DeterministicLRUCache",
   "ExternalOwner",
   "FrameState",
   "HBMRegion",
   "MemoryInvariantError",
   "MemoryOwner",
   "MemoryTransaction",
+  "MshrAllocation",
+  "MshrStats",
+  "MshrTable",
+  "MshrWait",
   "NoCRouter",
   "Payload",
   "PayloadTracker",
@@ -74,4 +83,5 @@ __all__ = [
   "TransferStage",
   "TransferStatus",
   "VirtualChannel",
+  "slice_resolved_view",
 ]

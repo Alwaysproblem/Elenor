@@ -117,6 +117,11 @@ def main(argv=None) -> int:
   parser.add_argument("--max-cycles", type=int, default=None, help="cycle cap (default 2_000_000)")
   parser.add_argument("--trace", action="store_true", help="enable per-cycle trace dump")
   parser.add_argument(
+      "--memory-trace",
+      action="store_true",
+      help="emit memory lanes/counters/flows in the trace and memory peaks in the report (PR 5)",
+  )
+  parser.add_argument(
     "--trace-json",
     default=None,
     metavar="PATH",
@@ -166,6 +171,8 @@ def main(argv=None) -> int:
     sim_overrides["device_context_count"] = args.device_context_mode
   if args.trace:
     sim_overrides["trace"] = True
+  if args.memory_trace:
+    sim_overrides["memory_trace"] = True
   try:
     sim_cfg = SimConfig().with_overrides(**sim_overrides)
   except ValueError as exc:
