@@ -134,8 +134,13 @@ class SlotFrame:
         generation=handle.generation,
         owner=handle.owner,
       )
-    # overlap check on the prepared slots
-    ranges = [(s.base, s.base + s.size) for s in new_slots if s.size > 0]
+    # Overlap is physical-segment based.  ``base + logical size`` is not a
+    # physical range when one allocation spans fragmented bank extents.
+    ranges = [
+      (segment.address, segment.address + segment.size_bytes)
+      for handle in handles
+      for segment in handle.bank_segments
+    ]
     ranges.sort()
     for i in range(1, len(ranges)):
       if ranges[i][0] < ranges[i - 1][1]:

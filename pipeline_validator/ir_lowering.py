@@ -41,6 +41,7 @@ from .dialects.elenor import (
   TileBoaOp,
   TileEvent,
   TileEvuOp,
+  TileGatherOp,
   TileL1Buffer,
   TileLoadOp,
   TilePowOp,
@@ -54,6 +55,8 @@ from .execution_ir import (
   ExecDeviceOp,
   ExecDispatchRequest,
   ExecEngineDesc,
+  ExecGatherDesc,
+  ExecGatherOutcome,
   ExecGlobalInput,
   ExecGroupAction,
   ExecGroupActionOp,
@@ -61,6 +64,7 @@ from .execution_ir import (
   ExecL2Buffer,
   ExecMemoryView,
   ExecModel,
+  ExecProfiledAccess,
   ExecReleaseRequest,
   ExecSignalPolicy,
   ExecTaskDomain,
@@ -269,6 +273,10 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
       task_domain = task_domains.get(body_op.tasks)
       if task_domain is None:
         raise VerifyException("dispatch task range has no lowered task domain")
+      global_actuals = tuple(
+        _memory_view(objects, actual, body_op.name)
+        for actual in body_op.global_views
+      )
       actuals = tuple(
         _l2_buffer(objects, actual, body_op.name).slot
         for actual in (*body_op.ins, *body_op.outs)
@@ -281,6 +289,7 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
         context_id=ctx_id,
         task_domain=task_domain,
         actuals=actuals,
+        global_actuals=global_actuals,
       )
       grid_tag = _event_tag(body_op.grid_done.type)
       inrel_tag = _event_tag(body_op.input_released.type)
@@ -367,6 +376,7 @@ def _register_role(
   context_id: int | None = None,
   task_domain: ExecTaskDomain | None = None,
   actuals: tuple[str, ...] = (),
+  global_actuals: tuple[ExecMemoryView, ...] = (),
 ) -> int:
   """Register one logical tile-program binding and return its role id."""
   for rid, binding in bindings.items():
@@ -376,6 +386,7 @@ def _register_role(
       and binding.context_id == context_id
       and binding.task_domain == task_domain
       and binding.actuals == actuals
+      and binding.global_actuals == global_actuals
     ):
       return rid
   role_id = len(bindings)
@@ -389,6 +400,7 @@ def _register_role(
     context_id=context_id,
     task_domain=task_domain,
     actuals=actuals,
+    global_actuals=global_actuals,
   )
   return role_id
 
@@ -409,9 +421,15 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
       formals.append(ExecTileFormal(space="task", dims=(), dtype=""))
       continue
     dims, dtype = _dims_dtype(arg.type)
-    formals.append(ExecTileFormal(space="l2", dims=dims, dtype=dtype))
+    if isinstance(arg.type, NestGlobalView):
+      space = "global"
+    elif isinstance(arg.type, NestBuffer):
+      space = "l2"
+    else:
+      raise VerifyException(f"unsupported tile formal type '{type(arg.type).__name__}'")
+    formals.append(ExecTileFormal(space=space, dims=dims, dtype=dtype))
     objects[arg] = ExecMemoryView(
-      space="l2",
+      space=space,
       base=f"formal:{i}",
       backing_dims=dims,
       dims=dims,
@@ -507,6 +525,42 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
       insts.append(
         ExecTileInst(
           ExecTileOp.LAUNCH_MFE,
+          dst=_event_tag(body_op.result.type),
+          args=(desc_name,),
+        )
+      )
+    elif isinstance(body_op, TileGatherOp):
+      desc_name = f"d{desc_counter}"
+      desc_counter += 1
+      accesses = tuple(
+        ExecProfiledAccess(
+          request_id=access.request_id.data,
+          outcome=ExecGatherOutcome(access.outcome.data),
+          bytes=int(access.bytes.value.data),
+          line_token=None if access.line_token is None else access.line_token.data,
+          merge_group=None if access.merge_group is None else access.merge_group.data,
+        )
+        for access in body_op.profile.block.ops
+      )
+      gather = ExecGatherDesc(
+        source=_memory_view(objects, body_op.source, body_op.name),
+        indices=_memory_view(objects, body_op.indices, body_op.name),
+        destination=_memory_view(objects, body_op.destination, body_op.name),
+        result_bytes=int(body_op.result_bytes.value.data),
+        cache_min_bytes=int(body_op.cache_min_bytes.value.data),
+        cache_target_bytes=int(body_op.cache_target_bytes.value.data),
+        l1_mshr_hint=int(body_op.l1_mshr_hint.value.data),
+        accesses=accesses,
+      )
+      descriptors[desc_name] = ExecEngineDesc(
+        name=desc_name,
+        kind="MFE",
+        op="gather",
+        params={"gather": gather},
+      )
+      insts.append(
+        ExecTileInst(
+          ExecTileOp.LAUNCH_GATHER,
           dst=_event_tag(body_op.result.type),
           args=(desc_name,),
         )

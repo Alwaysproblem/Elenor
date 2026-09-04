@@ -137,20 +137,16 @@ def make_pow_task(num_group_chunks: int = 4) -> ModuleOp:
   # Dispatch per chunk (depends_on prefetch).
   dispatches = []
   for group in range(num_group_chunks):
-    dispatch = NestDispatchOp(
-      "pow_4k_tile",
-      tasks.result,
-      [bufs[group].result],
-      [bufs[group].result],
-      f"ev_role_pow{group}",
-      f"ev_inrel_pow{group}",
-      f"ev_outready_pow{group}",
-      signal_policy={
-        "input_released": "all_tasks",
-        "output_ready": "all_tasks",
-      },
-      depends_on=[prefetches[group].result],
-    )
+    dispatch = NestDispatchOp("pow_4k_tile", tasks.result, [], [bufs[group].result],
+    [bufs[group].result],
+    f"ev_role_pow{group}",
+    f"ev_inrel_pow{group}",
+    f"ev_outready_pow{group}",
+    signal_policy={
+      "input_released": "all_tasks",
+      "output_ready": "all_tasks",
+    },
+    depends_on=[prefetches[group].result],)
     dispatches.append(dispatch)
     body.append(dispatch)
 

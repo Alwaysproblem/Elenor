@@ -372,6 +372,13 @@ def _parse_str_kw(parser: Parser, keyword: str) -> str:
   parser.parse_punctuation("=")
   return parser.parse_str_literal()
 
+
+def _parse_opt_str_kw(parser: Parser, keyword: str) -> str | None:
+  if parser.parse_optional_keyword(keyword) is None:
+    return None
+  parser.parse_punctuation("=")
+  return parser.parse_str_literal()
+
 def _print_body_region(printer: Printer, region: Region) -> None:
   printer.print_string(" ")
   printer.print_region(region, print_entry_block_args=False, print_empty_block=False)
@@ -521,8 +528,9 @@ NestActionLike: TypeAlias = (  # noqa: UP040
   " | NestAwaitOp | NestBarrierOp | NestReturnOp"
 )
 TileActionLike: TypeAlias = (  # noqa: UP040
-  "TileSubviewOp | TileAllocOp | TileLoadOp | TileStoreOp | TilePowOp"
-  " | TileEvuOp | TileBoaOp | TileAwaitOp | TileSignalOp | TileReturnOp"
+  "TileSubviewOp | TileAllocOp | TileLoadOp | TileStoreOp | TileGatherOp"
+  " | TilePowOp | TileEvuOp | TileBoaOp | TileAwaitOp | TileSignalOp"
+  " | TileReturnOp"
 )
 NexusActionLike: TypeAlias = (  # noqa: UP040
   "NexusSubmitContextOp | NexusAwaitOp | NexusReturnOp"
@@ -611,10 +619,11 @@ class NestContextOp(IRDLOperation):
 
 @irdl_op_definition
 class TileProgramDefOp(IRDLOperation):
-  """``tile.program @name(%task : !nest.task, %l2 : !nest.l2_buffer<...>) { ... }``.
+  """``tile.program @name(%task : !nest.task, %global : !nest.global_view<...>, ...)``.
 
-  One tile program definition.  The first formal must be ``!nest.task``;
-  remaining formals are ``!nest.l2_buffer`` L2 inputs/outputs.
+  The first formal must be ``!nest.task``.  It is followed by zero or
+  more ``!nest.global_view`` formals, then zero or more
+  ``!nest.l2_buffer`` formals; global and L2 formals may not interleave.
   """
 
   name = "tile.program"
@@ -892,12 +901,13 @@ class NestDMAStoreOp(_NestAsyncOp):
 class NestDispatchOp(IRDLOperation):
   """``%grid, %inrel, %out = nest.dispatch.tasks.async @prog``
 
-  ``tasks(%t) ins(%b...) outs(%b...) signal_policy { ... } depends_on(%e)``
+  ``tasks(%t) globals(%g...) ins(%b...) outs(%b...) signal_policy { ... }``
 
   Function-call dispatch per reference.mlir section 4: the tile program is
   referenced by symbol; the placement comes from the enclosing
-  ``nest.context``.  ``ins`` + ``outs`` bind positionally to the tile
-  program's L2 formals (formal 0 is ``!nest.task``, formals 1..N are L2).
+  ``nest.context``.  ``globals`` bind positionally to the tile program's
+  global-view formals.  ``ins`` and ``outs`` each bind positionally to all
+  L2 formals.  Formal 0 is always ``!nest.task``.
   Returns three aggregated events:
 
     - grid_done      - all logical tasks returned;
@@ -924,6 +934,7 @@ class NestDispatchOp(IRDLOperation):
   input_released_policy = opt_prop_def(NestAggregate)
   output_ready_policy = opt_prop_def(NestAggregate)
   tasks = operand_def(TaskRange)
+  global_views = var_operand_def(NestGlobalView)
   ins = var_operand_def(NestBuffer)
   outs = var_operand_def(NestBuffer)
   depends_on = var_operand_def(NestEvent)
@@ -936,6 +947,7 @@ class NestDispatchOp(IRDLOperation):
     self,
     program: str,
     tasks,
+    global_views,
     ins,
     outs,
     grid_tag: str,
@@ -967,7 +979,7 @@ class NestDispatchOp(IRDLOperation):
           None if "output_ready" not in signal_policy
           else NestAggregate.of(signal_policy["output_ready"])),
       }),
-      operands=[[tasks], list(ins), list(outs), list(depends_on)],
+      operands=[[tasks], list(global_views), list(ins), list(outs), list(depends_on)],
     )
     self.grid_done.name_hint = grid_tag
     if inrel_tag:
@@ -992,6 +1004,7 @@ class NestDispatchOp(IRDLOperation):
     printer.print_string(" tasks(")
     printer.print_operand(self.tasks)
     printer.print_string(")")
+    _print_operand_group(printer, "globals", self.global_views)
     _print_operand_group(printer, "ins", self.ins)
     _print_operand_group(printer, "outs", self.outs)
     _print_signal_policy(printer, self)
@@ -1008,6 +1021,7 @@ class NestDispatchOp(IRDLOperation):
     program = _parse_symbol(parser)
     context_id = _parse_opt_int_kw(parser, "context")
     tasks = _parse_operand_group(parser, "tasks")
+    global_ops = _parse_operand_group(parser, "globals")
     ins_ops = _parse_operand_group(parser, "ins")
     outs_ops = _parse_operand_group(parser, "outs")
     signal_policy = _parse_signal_policy(parser)
@@ -1023,9 +1037,19 @@ class NestDispatchOp(IRDLOperation):
     if len(types) != 3 or not all(isinstance(t, NestEvent) for t in types):
       parser.raise_error("dispatch expects three !nest.event results")
     tags = [t.tag.data for t in types]  # type: ignore[attr-defined]
-    return cls(program, tasks[0], ins_ops, outs_ops, tags[0], tags[1], tags[2],
-               signal_policy=signal_policy,
-               depends_on=depends_on, context_id=context_id)
+    return cls(
+      program,
+      tasks[0],
+      global_ops,
+      ins_ops,
+      outs_ops,
+      tags[0],
+      tags[1],
+      tags[2],
+      signal_policy=signal_policy,
+      depends_on=depends_on,
+      context_id=context_id,
+    )
 
 
 @irdl_op_definition
@@ -1477,6 +1501,145 @@ class TileStoreOp(_TileAsyncOp):
 
 
 @irdl_op_definition
+class TileProfiledAccessOp(IRDLOperation):
+  """One deterministic profiled request inside ``tile.gather.global.async``."""
+
+  name = "tile.profiled.access"
+
+  request_id = prop_def(StringAttr)
+  outcome = prop_def(StringAttr)
+  bytes = prop_def(IntegerAttr)
+  line_token = opt_prop_def(StringAttr)
+  merge_group = opt_prop_def(StringAttr)
+
+  def __init__(
+    self,
+    request_id: str,
+    outcome: str,
+    num_bytes: int,
+    line_token: str | None = None,
+    merge_group: str | None = None,
+  ):
+    super().__init__(
+      properties=_props(
+        {
+          "request_id": StringAttr(request_id),
+          "outcome": StringAttr(outcome),
+          "bytes": _index_attr(num_bytes),
+          "line_token": None if line_token is None else StringAttr(line_token),
+          "merge_group": None if merge_group is None else StringAttr(merge_group),
+        }
+      )
+    )
+
+  def print(self, printer: Printer) -> None:
+    _print_str_kw(printer, "id", self.request_id.data)
+    _print_str_kw(printer, "outcome", self.outcome.data)
+    _print_int_kw(printer, "bytes", self.bytes.value.data)
+    if self.line_token is not None:
+      _print_str_kw(printer, "line", self.line_token.data)
+    if self.merge_group is not None:
+      _print_str_kw(printer, "merge", self.merge_group.data)
+
+  @classmethod
+  def parse(cls, parser: Parser) -> Self:
+    request_id = _parse_str_kw(parser, "id")
+    outcome = _parse_str_kw(parser, "outcome")
+    num_bytes = _parse_int_kw(parser, "bytes")
+    line_token = _parse_opt_str_kw(parser, "line")
+    merge_group = _parse_opt_str_kw(parser, "merge")
+    return cls(request_id, outcome, num_bytes, line_token=line_token, merge_group=merge_group)
+
+
+@irdl_op_definition
+class TileGatherOp(_TileAsyncOp):
+  """Deterministic profiled global gather into one tile-local L1 buffer."""
+
+  name = "tile.gather.global.async"
+
+  source = operand_def(NestGlobalView)
+  indices = operand_def(TileL1Buffer)
+  destination = operand_def(TileL1Buffer)
+  result_bytes = prop_def(IntegerAttr)
+  cache_min_bytes = prop_def(IntegerAttr)
+  cache_target_bytes = prop_def(IntegerAttr)
+  l1_mshr_hint = prop_def(IntegerAttr)
+  profile = region_def("single_block")
+
+  traits = traits_def(NoTerminator())
+
+  def __init__(
+    self,
+    source,
+    indices,
+    destination,
+    result_bytes: int,
+    cache_min_bytes: int,
+    cache_target_bytes: int,
+    l1_mshr_hint: int,
+    accesses: Sequence[TileProfiledAccessOp],
+    tag: str,
+    _region: Region | None = None,
+  ):
+    profile = _single_block_region(accesses) if _region is None else _region
+    self._finish(
+      tag,
+      operands=[source, indices, destination],
+      properties=_props(
+        {
+          "result_bytes": _index_attr(result_bytes),
+          "cache_min_bytes": _index_attr(cache_min_bytes),
+          "cache_target_bytes": _index_attr(cache_target_bytes),
+          "l1_mshr_hint": _index_attr(l1_mshr_hint),
+        }
+      ),
+      regions=[profile],
+    )
+
+  def print(self, printer: Printer) -> None:
+    printer.print_string(" ")
+    printer.print_operand(self.source)
+    printer.print_string(" indices(")
+    printer.print_operand(self.indices)
+    printer.print_string(") into ")
+    printer.print_operand(self.destination)
+    _print_int_kw(printer, "result_bytes", self.result_bytes.value.data)
+    _print_int_kw(printer, "cache_min_bytes", self.cache_min_bytes.value.data)
+    _print_int_kw(printer, "cache_target_bytes", self.cache_target_bytes.value.data)
+    _print_int_kw(printer, "l1_mshr_hint", self.l1_mshr_hint.value.data)
+    _print_body_region(printer, self.profile)
+    _print_event_type(printer, self.result.type)
+
+  @classmethod
+  def parse(cls, parser: Parser) -> Self:
+    source = parser.parse_operand()
+    indices = _parse_operand_group(parser, "indices")
+    parser.parse_keyword("into")
+    destination = parser.parse_operand()
+    result_bytes = _parse_int_kw(parser, "result_bytes")
+    cache_min_bytes = _parse_int_kw(parser, "cache_min_bytes")
+    cache_target_bytes = _parse_int_kw(parser, "cache_target_bytes")
+    l1_mshr_hint = _parse_int_kw(parser, "l1_mshr_hint")
+    profile = _parse_body_region(parser)
+    event_type = _parse_event_type(parser, TileEvent)
+    if len(indices) != 1:
+      parser.raise_error("gather indices(...) expects exactly one L1 buffer")
+    tag = event_type.tag.data  # type: ignore[attr-defined]
+    return cls(
+      source,
+      indices[0],
+      destination,
+      result_bytes,
+      cache_min_bytes,
+      cache_target_bytes,
+      l1_mshr_hint,
+      (),
+      tag,
+      _region=profile,
+    )
+
+
+@irdl_op_definition
 class TilePowOp(_TileAsyncOp):
   """``%e = tile.pow.async bytes = N exponent = E ops = K : !tile.event<t>``"""
 
@@ -1716,6 +1879,8 @@ operations: list[type[Operation]] = [
   TileAllocOp,
   TileLoadOp,
   TileStoreOp,
+  TileProfiledAccessOp,
+  TileGatherOp,
   TilePowOp,
   TileEvuOp,
   TileBoaOp,
@@ -1782,9 +1947,11 @@ __all__ = [
   "TileBoaOp",
   "TileEvent",
   "TileEvuOp",
+  "TileGatherOp",
   "TileL1Buffer",
   "TileLoadOp",
   "TilePowOp",
+  "TileProfiledAccessOp",
   "TileProgramDefOp",
   "TileReturnOp",
   "TileSignalOp",

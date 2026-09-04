@@ -30,9 +30,11 @@ from .dialects.elenor import (
   TileBoaOp,
   TileEvent,
   TileEvuOp,
+  TileGatherOp,
   TileL1Buffer,
   TileLoadOp,
   TilePowOp,
+  TileProfiledAccessOp,
   TileProgramDefOp,
   TileReturnOp,
   TileSignalOp,
@@ -41,7 +43,18 @@ from .dialects.elenor import (
 )
 from .engines import BOAEngine, EngineState, EVUEngine, MFEEngine, USEEngine
 from .execution_ir import GlobalBinding
-from .memory import L2SRAM, NoCRouter, PayloadTracker, SlotFrame
+from .memory import (
+  L2SRAM,
+  CacheStats,
+  DeterministicLRUCache,
+  MshrAllocation,
+  MshrStats,
+  MshrTable,
+  MshrWait,
+  NoCRouter,
+  PayloadTracker,
+  SlotFrame,
+)
 from .package import ElenorPackage
 from .pmu import PMUCounter, StallReason
 from .report import WorkloadReport  # noqa: F401
@@ -84,7 +97,9 @@ from .workloads import (
 __all__ = [
   "L2SRAM",
   "BOAEngine",
+  "CacheStats",
   "ComputeTile",
+  "DeterministicLRUCache",
   "DeviceRuntime",
   "EOSPolicy",
   "EVUEngine",
@@ -102,6 +117,10 @@ __all__ = [
   "HostRuntime",
   "KernelDriver",
   "MFEEngine",
+  "MshrAllocation",
+  "MshrStats",
+  "MshrTable",
+  "MshrWait",
   "NestAggregate",
   "NestAllocOp",
   "NestAwaitOp",
@@ -139,11 +158,13 @@ __all__ = [
   "TileBoaOp",
   "TileEvent",
   "TileEvuOp",
+  "TileGatherOp",
   "TileGroup",
   "TileGroupSequencer",
   "TileL1Buffer",
   "TileLoadOp",
   "TilePowOp",
+  "TileProfiledAccessOp",
   "TileProgramDefOp",
   "TileReturnOp",
   "TileSignalOp",

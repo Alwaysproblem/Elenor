@@ -39,8 +39,10 @@ from .memory import (
   AllocationRequest,
   BankSegment,
   ContextBufferOwner,
+  DeterministicLRUCache,
   MemoryInvariantError,
   MemoryTransaction,
+  MshrTable,
   NoCRouter,
   PayloadTracker,
   ResolvedMemoryView,
@@ -63,7 +65,7 @@ from .runtime.reset_domain import ResetState
 from .stream_queue import EOSPolicy, QueueKind, StreamQueue
 from .tile import ComputeTile
 from .tile_group_sequencer import TileGroupSequencer
-from .trace import Tracer
+from .trace import MemoryTrace, Tracer
 
 
 @dataclass
@@ -177,7 +179,7 @@ class TileGroup:
 
   def __init__(self, cfg: HardwareConfig, tracer: Tracer | None = None,
                fidelity: str = "full_memory", context_count: int = 1,
-               trace_prefix: str = ""):
+               memory_trace: bool = False):
     self.cfg = cfg
     self.tracer = tracer
     self.fidelity = fidelity
@@ -185,6 +187,10 @@ class TileGroup:
     mem = fidelity == "full_memory"
     self.runtime_enabled = rt
     self.memory_enabled = mem
+    # PR 5: memory lanes/counters/flows + report peaks are opt-in so a
+    # plain --trace-json run still emits the pre-PR5 control-flow trace.
+    self.memory_trace = (MemoryTrace(tracer)
+                         if tracer is not None and memory_trace else None)
     # PR 2: transfer manager must exist before tiles are created (injected
     # into ComputeTile/MFEEngine as a shared instance).
     from .memory.hbm_region import HBMRegion
@@ -194,13 +200,27 @@ class TileGroup:
     if mem:
       self.noc = NoCRouter(
         vc_depth=cfg.noc_vc_depth,
-        router_latency_cycles=cfg.noc_router_latency_cycles)
+        router_latency_cycles=cfg.noc_router_latency_cycles,
+        trace=self.memory_trace)
     self.transfer_manager = TransferManager(
-      cfg, full_memory=mem, noc=self.noc if mem else None)
+      cfg, full_memory=mem, noc=self.noc if mem else None,
+      trace=self.memory_trace)
+    self.l2_cache = DeterministicLRUCache(
+      cfg.l2_cache_capacity_bytes, cfg.cache_line_bytes)
+    self.l2_mshr = MshrTable(cfg.l2_mshr_entries)
     self.tiles: list[ComputeTile] = [
-      ComputeTile(i, cfg, self.tracer, runtime_enabled=rt,  # type: ignore[arg-type]
-                  memory_enabled=mem, context_count=context_count,
-                  transfer_manager=self.transfer_manager)
+      ComputeTile(
+        i,
+        cfg,
+        self.tracer,
+        runtime_enabled=rt,  # type: ignore[arg-type]
+        memory_enabled=mem,
+        context_count=context_count,
+        transfer_manager=self.transfer_manager,
+        l2_cache=self.l2_cache,
+        l2_mshr=self.l2_mshr,
+        memory_trace=self.memory_trace,
+      )
       for i in range(cfg.num_tiles)
     ]
     self.sequencer = TileGroupSequencer(self)
@@ -228,7 +248,8 @@ class TileGroup:
       base_iova=0,
       size_bytes=cfg.hbm_capacity_bytes,
       bandwidth_gbs=cfg.hbm_bandwidth_gbs,
-      outstanding_limit=cfg.hbm_outstanding_limit)
+      outstanding_limit=cfg.hbm_outstanding_limit,
+      trace=self.memory_trace)
     # PR 2 admission state: launch generation, global/L2 handles, pins
     self._context_launch_generation: int = 0
     self._global_handles: dict[str, AllocationHandle] = {}  # binding name -> handle
@@ -246,6 +267,12 @@ class TileGroup:
     self._role_l1_handles: dict[str, dict[int, list]] = {}
     # transaction id -> sequencer
     self._txn_sequencer: dict[str, TileGroupSequencer] = {}
+    # group transaction id -> (logical direction, visual concurrency slot)
+    self._group_transfer_trace_slots: dict[str, tuple[str, int]] = {}
+    self._group_transfer_trace_busy_slots: dict[str, set[int]] = {
+      "input": set(),
+      "output": set(),
+    }
     if self.runtime_enabled:
       self.event_table = EventTable()
       self.fault_ring = FaultRing()
@@ -255,7 +282,8 @@ class TileGroup:
       self.l2_sram = L2SRAM(
         capacity_bytes=cfg.group_sram_bytes,
         banks=cfg.group_sram_banks,
-        bank_bandwidth_gbs=cfg.l2_bank_bandwidth_gbs)
+        bank_bandwidth_gbs=cfg.l2_bank_bandwidth_gbs,
+        trace=self.memory_trace)
     if self.memory_enabled:
       self.payload = PayloadTracker()
 
@@ -284,6 +312,51 @@ class TileGroup:
         t.bind_stream(desc.queue_id, q)
     return q
 
+  @staticmethod
+  def _group_transfer_trace_direction(op: TransferOp) -> str:
+    if op is TransferOp.PREFETCH:
+      return "input"
+    if op is TransferOp.GLOBAL_STORE:
+      return "output"
+    raise ValueError(f"unsupported group transfer op {op.value}")
+
+  def _reserve_group_transfer_trace_slot(
+    self,
+    transaction_id: str,
+    op: TransferOp,
+  ) -> None:
+    if transaction_id in self._group_transfer_trace_slots:
+      raise ValueError(f"duplicate group transfer trace slot {transaction_id}")
+    direction = self._group_transfer_trace_direction(op)
+    busy = self._group_transfer_trace_busy_slots[direction]
+    slot = 0
+    while slot in busy:
+      slot += 1
+    busy.add(slot)
+    self._group_transfer_trace_slots[transaction_id] = (direction, slot)
+
+  def _release_group_transfer_trace_slot(
+    self,
+    transaction_id: str,
+  ) -> tuple[str, int] | None:
+    binding = self._group_transfer_trace_slots.pop(transaction_id, None)
+    if binding is None:
+      return None
+    direction, slot = binding
+    self._group_transfer_trace_busy_slots[direction].discard(slot)
+    return binding
+
+  def _clear_group_transfer_trace_slots(self) -> None:
+    self._group_transfer_trace_slots.clear()
+    for busy in self._group_transfer_trace_busy_slots.values():
+      busy.clear()
+
+  @staticmethod
+  def _group_transfer_trace_lane(direction: str, slot: int) -> tuple[str, str]:
+    category = ("HBM → L2 Input" if direction == "input"
+                else "L2 → HBM Output")
+    return f"{category} #{slot}", category
+
   def submit_group_transfer(
     self,
     op: str,
@@ -305,6 +378,12 @@ class TileGroup:
     # sequencer; pending B must never overwrite active A's mapping.
     formals = sequencer.formal_bindings if sequencer is not None else {}
     txn_id = f"{gen}:{event_id}"
+    context_name = (
+      sequencer.context_name
+      if sequencer is not None and sequencer.context_name
+      else "ctx"
+    )
+    buffer_id = desc_id.split(":", 1)[-1]
     bytes_total = transfer.bytes if transfer.bytes > 0 else 1024 * 1024
     if self.memory_enabled or self.runtime_enabled:
       # resolve src/dst views against admission handles
@@ -320,9 +399,7 @@ class TileGroup:
         transaction_id=txn_id,
         op=(TransferOp.PREFETCH if op == "dma.prefetch"
             else TransferOp.GLOBAL_STORE),
-        issuer=ContextBufferOwner(
-          sequencer.task.name if sequencer is not None and sequencer.task is not None else "ctx",
-          gen, desc_id),
+        issuer=ContextBufferOwner(context_name, gen, buffer_id),
         src=src_view,
         dst=dst_view,
         bytes_total=bytes_total,
@@ -334,12 +411,14 @@ class TileGroup:
         transaction_id=txn_id,
         op=(TransferOp.PREFETCH if op == "dma.prefetch"
             else TransferOp.GLOBAL_STORE),
-        issuer=ContextBufferOwner("ctx", gen, desc_id),
+        issuer=ContextBufferOwner(context_name, gen, buffer_id),
         src=None, dst=None,
         bytes_total=bytes_total,
         completion_event=event_id,
       )
     self.transfer_manager.submit(txn, cycle, self.pmu)
+    if self.tracer is not None:
+      self._reserve_group_transfer_trace_slot(txn.transaction_id, txn.op)
     if sequencer is not None:
       self._txn_sequencer[txn_id] = sequencer
       sequencer.note_job_started()
@@ -366,11 +445,14 @@ class TileGroup:
       if handle is None:
         return None
       offset = self._view_offset_bytes(view, logical_task_id=0)
-      seg = BankSegment(bank_id=0, address=handle.base_address + offset,
-                        size_bytes=view.bytes)
+      segments = self.hbm.resolve(handle, offset, view.bytes)
       return ResolvedMemoryView(
-        handle=handle, offset_bytes=offset, size_bytes=view.bytes,
-        address=handle.base_address + offset, segments=(seg,))
+        handle=handle,
+        offset_bytes=offset,
+        size_bytes=view.bytes,
+        address=segments[0].address,
+        segments=segments,
+      )
     if space == "l2":
       # L2 view: resolve against sequencer L2 handles
       slot = view.base
@@ -548,7 +630,7 @@ class TileGroup:
       self.pmu.named_cycles["l2_admission_queue_peak"] = len(
         self._pending_context_admissions)
     if self.tracer is not None:
-      self.tracer.instant("TileGroup", "Admission",
+      self.tracer.instant("TileGroup", "Scheduler:L2",
                           "context_admission_wait", ticket.enqueue_cycle, {
                             "context": ticket.context_name,
                             "slot": ticket.device_slot,
@@ -580,7 +662,7 @@ class TileGroup:
     if self.tracer is not None:
       l2_live = (self.l2_sram.snapshot()["live_allocations"]
                  if (self.memory_enabled or self.runtime_enabled) else 0)
-      self.tracer.instant("TileGroup", "Admission", "context_admitted",
+      self.tracer.instant("TileGroup", "Scheduler:L2", "context_admitted",
                           cycle, {
                             "context": seq.context_name,
                             "slot": seq.device_slot,
@@ -621,7 +703,7 @@ class TileGroup:
       ticket.sequencer.admission_retry_count = ticket.retry_count
       self.pmu.add_event("l2_admission_retry")
       if self.tracer is not None:
-        self.tracer.instant("TileGroup", "Admission",
+        self.tracer.instant("TileGroup", "Scheduler:L2",
                             "context_admission_retry", cycle, {
                               "context": ticket.context_name,
                               "slot": ticket.device_slot,
@@ -669,7 +751,7 @@ class TileGroup:
       self.pmu.add_cycle(
         "l2_admission_wait_cycles", terminal - ticket.enqueue_cycle)
       if self.tracer is not None:
-        self.tracer.instant("TileGroup", "Admission",
+        self.tracer.instant("TileGroup", "Scheduler:L2",
                             "context_admission_cancelled", terminal, {
                               "context": ticket.context_name,
                               "slot": ticket.device_slot,
@@ -788,6 +870,10 @@ class TileGroup:
     """
     # PR 3.5: waiting tickets own no allocation — cancel without release
     self._cancel_pending_admissions(cycle)
+    self.transfer_manager.cancel_all(cycle)
+    self._clear_group_transfer_trace_slots()
+    self.l2_mshr.reset()
+    self.l2_cache.reset()
     if not (self.memory_enabled or self.runtime_enabled):
       return
     # marked a handle RELEASE_PENDING, the final reset-time unpin
@@ -896,9 +982,17 @@ class TileGroup:
       # Undo bound contexts first; no UCE step occurred during dispatch.
       for adm in reversed(admissions):
         if adm.bound:
-          adm.tile.rollback_program(adm.context_id)
+          adm.tile.rollback_program(adm.context_id, cycle)
         else:
-          adm.tile.l1_frames[adm.context_id].release()
+          frame = adm.tile.l1_frames[adm.context_id]
+          frame.release()
+          if self.memory_trace is not None and self.tracer is not None:
+            self.tracer.instant(
+              f"Tile{adm.tile.tile_id}", "Lifecycle", "frame_release",
+              cycle, {"ctx_id": adm.context_id,
+                      "generation": frame.generation,
+                      "tile_id": adm.tile.tile_id,
+                      "reason": "dispatch_rollback"})
       # Remove grid L2 consumer pins created during phase 2.
       self._unwind_grid_l2_pins(cycle, [grid])
       self._grid_signals.pop(grid, None)
@@ -985,6 +1079,16 @@ class TileGroup:
             list(adm.l1_handles), list(prog.l1_buffers)):
           raise MemoryInvariantError(
             f"L1 frame prepare failed on tile {adm.tile.tile_id}")
+        if self.memory_trace is not None and self.tracer is not None:
+          self.tracer.instant(
+              f"Tile{adm.tile.tile_id}", "Lifecycle", "frame_prepare",
+              cycle, {
+                "ctx_id": adm.context_id,
+                "generation":
+                  adm.tile.l1_frames[adm.context_id].generation,
+                "tile_id": adm.tile.tile_id,
+                "slots": len(prog.l1_buffers),
+              })
       # Pin each unique L2 allocation once per logical task only after all
       # L1 commits/prepares succeeded.
       for adm in admissions:
@@ -997,20 +1101,58 @@ class TileGroup:
       for adm in admissions:
         task_identity = TaskIdentity(
           grid=grid, task_id=adm.logical_task_id)
-        l2_handles: tuple = ()
+        l2_handle_map: dict[int, AllocationHandle] = {}
+        global_view_map: dict[int, ResolvedMemoryView] = {}
         if self.memory_enabled or self.runtime_enabled:
-          l2_handles = tuple(
-            self._l2_handles.get((gen, slot))
-            for slot in binding.actuals[:len(prog.formals) - 1])
+          l2_formals = [
+            (formal_index, formal)
+            for formal_index, formal in enumerate(prog.formals)
+            if formal.space == "l2"
+          ]
+          if len(binding.actuals) < len(l2_formals):
+            raise MemoryInvariantError("missing L2 actual for tile formal")
+          for (formal_index, _formal), slot in zip(
+            l2_formals, binding.actuals[:len(l2_formals)]
+          ):
+            handle = self._l2_handles.get((gen, slot))
+            if handle is None:
+              raise MemoryInvariantError("missing or stale L2 actual for tile formal")
+            l2_handle_map[formal_index] = handle
+
+          global_formals = [
+            (formal_index, formal)
+            for formal_index, formal in enumerate(prog.formals)
+            if formal.space == "global"
+          ]
+          if len(binding.global_actuals) != len(global_formals):
+            raise MemoryInvariantError("missing global actual for tile formal")
+          for (formal_index, _formal), actual in zip(
+            global_formals, binding.global_actuals
+          ):
+            resolved = self._resolve_view(
+              actual,
+              "global",
+              gen,
+              seq.formal_bindings,
+            )
+            if resolved is None:
+              raise MemoryInvariantError("missing or stale global actual for tile formal")
+            global_view_map[formal_index] = resolved
         l1_map = {
           buf.name: handle
           for buf, handle in zip(prog.l1_buffers, adm.l1_handles)
         }
         memory = _TileContextMemory(
-          owner=ev, task_identity=task_identity,
-          l2_formal_handles=l2_handles, l1_handles=l1_map,
-          l2_resolver=self.l2_sram
-          if (self.memory_enabled or self.runtime_enabled) else None)
+          task_identity=task_identity,
+          l2_formal_handles=l2_handle_map,
+          global_formal_views=global_view_map,
+          l1_handles=l1_map,
+          l2_resolver=(
+            self.l2_sram
+            if (self.memory_enabled or self.runtime_enabled)
+            else None
+          ),
+        )
         ctx_id = adm.tile.load_program(
           prog, role_id=role_id, role_event_id=ev,
           prepare_cycles=adm.prepare_cycles,
@@ -1085,17 +1227,35 @@ class TileGroup:
        expected task has signalled, then unpins input-role pins.
     """
     grid = signal.task.grid
+    tr = self.tracer
+
+    def _signal_args() -> dict:
+      return {
+        "context_name": grid.context_name,
+        "device_slot": grid.device_slot,
+        "launch_generation": grid.launch_generation,
+        "dispatch_ordinal": grid.dispatch_ordinal,
+        "task_id": signal.task.task_id,
+        "phase": signal.phase,
+      }
+
     launch_key = (
       grid.context_name, grid.device_slot, grid.launch_generation)
     seq = self._live_launches.get(launch_key)
     if seq is None:
       self.pmu.add_event("tile_signal_stale")
+      if tr is not None:
+        tr.instant("TileGroup", "Scheduler:L2", "tile_signal_stale",
+                   cycle, _signal_args())
       return
     state = self._grid_signals.get(grid)
     if (state is None
         or signal.task.task_id not in state.expected_task_ids
         or not state.phase_declared(signal.phase)):
       self.pmu.add_event("tile_signal_invalid")
+      if tr is not None:
+        tr.instant("TileGroup", "Scheduler:L2", "tile_signal_invalid",
+                   cycle, _signal_args())
       seq.faulted = True
       seq.fault_reason = (
         f"invalid tile signal: grid {grid} task {signal.task.task_id}"
@@ -1111,6 +1271,9 @@ class TileGroup:
     seen = state.seen.setdefault(signal.phase, set())
     if signal.task.task_id in seen:
       self.pmu.add_event("tile_signal_duplicate")
+      if tr is not None:
+        tr.instant("TileGroup", "Scheduler:L2", "tile_signal_duplicate",
+                   cycle, _signal_args())
       return
     seen.add(signal.task.task_id)
     if seen != state.expected_task_ids:
@@ -1118,6 +1281,13 @@ class TileGroup:
     state.completed_phases.add(signal.phase)
     phase_seq = state.sequencer or self.sequencer
     phase_ev = state.phase_event_ids[signal.phase]
+    if tr is not None:
+      tr.instant("TileGroup", "Scheduler:L2", "phase_aggregate", cycle, {
+        **_signal_args(),
+        "expected": len(state.expected_task_ids),
+        "seen": len(seen),
+        "event_id": phase_ev,
+      })
     phase_seq.notify_event(phase_ev)
     if signal.phase == "input_released":
       self._unpin_grid_inputs(grid, cycle)
@@ -1155,6 +1325,7 @@ class TileGroup:
       # PR 2: skip tile-local transactions — MFE tick handles them
       if txn.tile_id is not None:
         continue
+      trace_slot = self._release_group_transfer_trace_slot(txn.transaction_id)
       seq = self._txn_sequencer.pop(txn.transaction_id, None) or self.sequencer
       seq.notify_event(txn.completion_event)
       seq.note_job_done()
@@ -1173,22 +1344,43 @@ class TileGroup:
                    else "row_major", producer_kind="DMA"))
         self.payload.copy(src_addr, txn.dst.address, txn.bytes_total)
       if tr is not None:
-        op_name = ("dma.store" if txn.op == TransferOp.GLOBAL_STORE
-                   else "dma.prefetch")
+        if trace_slot is None:
+          raise RuntimeError(
+            f"group transfer {txn.transaction_id} lacks a visual slot"
+          )
+        direction, visual_slot = trace_slot
+        thread, category = self._group_transfer_trace_lane(
+          direction, visual_slot)
+        owner_args = MemoryTrace._owner_args(txn.issuer)
+        context_name = str(owner_args.get("context_name", "ctx"))
+        buffer_id = str(owner_args.get("buffer_id", txn.completion_event))
+        duration_cycles = max(txn.completed_cycle - txn.start_cycle, 1)
+        effective_bandwidth_gbs = round(
+          txn.bytes_total / (duration_cycles * self.cfg.cycle_ns()), 3)
         tr.complete(
-          "TileGroup", "GroupDMA",
-          f"{op_name}:{txn.transaction_id}",
+          "TileGroup", thread, f"{context_name} / {buffer_id}",
           txn.start_cycle, txn.completed_cycle,
           args={
+            "summary_kind": "group_transfer",
+            "direction": category,
+            "visual_slot": visual_slot,
             "transaction_id": txn.transaction_id,
+            "op": txn.op.value,
+            **owner_args,
             "event_id": txn.completion_event,
             "bytes": txn.bytes_total,
+            "duration_cycles": duration_cycles,
+            "effective_bandwidth_gbs": effective_bandwidth_gbs,
             "start_cycle": txn.start_cycle,
             "completion_cycle": txn.completed_cycle,
             "source_address": txn.src.address if txn.src is not None else None,
             "destination_address":
               txn.dst.address if txn.dst is not None else None,
-          })
+            **({"flow_id": tr.flow_id(txn.transaction_id)}
+               if self.memory_trace is not None else {}),
+          },
+          category=category,
+        )
       self.transfer_manager.acknowledge(txn.transaction_id)
 
     # 1b. tick Collective jobs
@@ -1217,16 +1409,15 @@ class TileGroup:
                      cycle, {"event_id": cjob.event_id})
       else:
         remaining_coll.append(cjob)
-    self._collective_jobs = remaining_coll
-
     # 2. tick stream queues (PMU occupancy counters + trace counters)
     for q in self.queues.values():
       q.tick(cycle)
       if tr is not None:
-        tr.counter(f"StreamQ{q.queue_id}", "occupancy", cycle, q.occupancy,
-                   "tokens")
-        tr.counter(f"StreamQ{q.queue_id}", "credit_available", cycle,
-                   q._credit_available, "credits")
+        tr.counter_if_changed("TileGroup", "occupancy", cycle, q.occupancy,
+                              "tokens", thread=f"StreamQ:{q.queue_id}")
+        tr.counter_if_changed("TileGroup", "credit_available", cycle,
+                              q._credit_available, "credits",
+                              thread=f"StreamQ:{q.queue_id}")
 
     # (NoC router steps in section 1, before the transfer manager)
     freeze_new_work = self._reset_freezes_new_work()
@@ -1268,7 +1459,14 @@ class TileGroup:
         # PR 3: L2 grid pins outlive the terminal - only the matching
         # aggregate phase or a gated release may unpin them.
         if self.memory_enabled or self.runtime_enabled:
-          t.l1_frames[term.ctx_id].release()
+          frame = t.l1_frames[term.ctx_id]
+          frame.release()
+          if self.memory_trace is not None and tr is not None:
+            tr.instant(f"Tile{t.tile_id}", "Lifecycle", "frame_release",
+                       cycle, {"ctx_id": term.ctx_id,
+                               "generation": frame.generation,
+                               "tile_id": t.tile_id,
+                               "reason": "tile_terminal"})
           tile_l1 = self._role_l1_handles.get(term.role_event_id, {})
           for handle in tile_l1.pop(t.tile_id, []):
             try:
@@ -1477,10 +1675,22 @@ class TileGroup:
                        tm._global_dma.wait_cycles)
     self.pmu.add_cycle("l2_bank_wait",
                        tm._l2_read.wait_cycles + tm._l2_write.wait_cycles)
+    self.pmu.add_cycle(
+      "l2_cache_wait",
+      tm._l2_cache_lookup.wait_cycles + tm._l2_cache_fill.wait_cycles,
+    )
     l1_wait = sum(
       s.wait_cycles for s in list(tm._l1_read.values())
       + list(tm._l1_write.values()))
     self.pmu.add_cycle("l1_bank_wait", l1_wait)
+    l1_cache_wait = sum(
+      stage.wait_cycles
+      for stage in (
+        *tm._l1_cache_lookup.values(),
+        *tm._l1_cache_fill.values(),
+      )
+    )
+    self.pmu.add_cycle("l1_cache_wait", l1_cache_wait)
     self.pmu.add_cycle("hbm_outstanding_wait",
                        tm._hbm_read.wait_cycles + tm._hbm_write.wait_cycles)
     self.pmu.add_cycle("hbm_outstanding_peak", tm.pmu_hbm_outstanding_peak)
@@ -1526,7 +1736,10 @@ class TileGroup:
     self._l2_handles.clear()
     self._role_l1_handles.clear()
     self._txn_sequencer.clear()
+    self._clear_group_transfer_trace_slots()
     self.transfer_manager.reset()
+    self.l2_mshr.reset()
+    self.l2_cache.reset()
     self._l2_capacity_change_cycle = None
     self._last_retried_pool_version = -1
     self._last_retried_capacity_change_cycle = -1
@@ -1825,7 +2038,10 @@ class TileGroup:
     self._l2_handles.clear()
     self._role_l1_handles.clear()
     self._txn_sequencer.clear()
+    self._clear_group_transfer_trace_slots()
     self.transfer_manager.reset()
+    self.l2_mshr.reset()
+    self.l2_cache.reset()
     self.hbm.reset()
     self._l2_capacity_change_cycle = None
     self._last_retried_pool_version = -1
@@ -1858,12 +2074,29 @@ class TileGroup:
         "hbm": self.hbm.snapshot() if self.runtime_enabled else None,
         "l2": self.l2_sram.snapshot() if self.runtime_enabled else None,
         "l1": {
-          t.tile_id: {
-            "allocator": t.l1_allocator.snapshot()
-            if self.runtime_enabled else None,
-            "frames": [f.snapshot() for f in t.l1_frames],
+          tile.tile_id: {
+            "allocator": (
+              tile.l1_allocator.snapshot()
+              if self.runtime_enabled
+              else None
+            ),
+            "frames": [frame.snapshot() for frame in tile.l1_frames],
           }
-          for t in self.tiles
+          for tile in self.tiles
+        },
+        "cache": {
+          "l2": self.l2_cache.snapshot(),
+          "l1": {
+            tile.tile_id: tile.l1_cache.snapshot()
+            for tile in self.tiles
+          },
+        },
+        "mshr": {
+          "l2": self.l2_mshr.snapshot(),
+          "l1": {
+            tile.tile_id: tile.l1_mshr.snapshot()
+            for tile in self.tiles
+          },
         },
         "transfers": self.transfer_manager.snapshot(),
         "noc": self.noc.snapshot() if self.memory_enabled else None,

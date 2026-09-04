@@ -18,9 +18,13 @@ from pipeline_validator.memory import (
   AllocationRequest,
   BankedFreeExtentAllocator,
   ContextBufferOwner,
+  DeterministicLRUCache,
   ExternalOwner,
   HBMRegion,
   MemoryInvariantError,
+  MshrAllocation,
+  MshrTable,
+  MshrWait,
   TaskBufferOwner,
 )
 
@@ -909,3 +913,350 @@ class TestAdmissionClassification:
     assert all(isinstance(o, AdmissionFailure) for o in outcomes)
     after = self._state(alloc)
     assert after == before
+
+
+# ---------------------------------------------------------------------------
+# Deterministic Gather cache and MSHR metadata
+# ---------------------------------------------------------------------------
+
+
+class TestDeterministicLRUCache:
+  def test_two_line_lru_touch_preserves_recent_line(self):
+    cache = DeterministicLRUCache(capacity_bytes=128, line_bytes=64)
+    cache.refill("A")
+    cache.refill("B")
+    cache.record_hit("A")
+    cache.refill("C")
+    snapshot = cache.snapshot()
+    assert snapshot["resident_tokens"] == ("A", "C")
+    assert snapshot["evictions"] == 1
+    assert snapshot["hits"] == 1
+
+  def test_anonymous_token_never_fabricates_residency(self):
+    cache = DeterministicLRUCache(capacity_bytes=128, line_bytes=64)
+    cache.record_hit(None)
+    cache.record_miss()
+    cache.refill(None)
+    snapshot = cache.snapshot()
+    assert snapshot["hits"] == 1
+    assert snapshot["misses"] == 1
+    assert snapshot["refills"] == 1
+    assert snapshot["resident_lines"] == 0
+    assert snapshot["resident_tokens"] == ()
+
+  def test_reset_clears_metadata_and_statistics(self):
+    cache = DeterministicLRUCache(capacity_bytes=64, line_bytes=64)
+    cache.record_miss()
+    cache.refill("A")
+    cache.reset()
+    assert cache.snapshot() == {
+      "hits": 0,
+      "misses": 0,
+      "refills": 0,
+      "evictions": 0,
+      "resident_lines": 0,
+      "resident_bytes": 0,
+      "capacity_bytes": 64,
+      "resident_tokens": (),
+    }
+
+  def test_cache_metadata_does_not_consume_spm_allocator_capacity(self):
+    l1 = BankedFreeExtentAllocator("l1", 1024, 2)
+    l2 = BankedFreeExtentAllocator("l2", 2048, 2)
+    before_l1 = l1.snapshot()
+    before_l2 = l2.snapshot()
+    cache = DeterministicLRUCache(capacity_bytes=128, line_bytes=64)
+    cache.refill("A")
+    cache.refill("B")
+    cache.record_hit("A")
+    assert l1.snapshot() == before_l1
+    assert l2.snapshot() == before_l2
+
+
+class TestMshrTable:
+  def test_non_null_group_has_one_leader_and_waiters(self):
+    table = MshrTable(capacity=2)
+    leader = table.allocate("line42")
+    waiter = table.allocate("line42")
+    assert isinstance(leader, MshrAllocation)
+    assert isinstance(waiter, MshrAllocation)
+    assert leader.leader
+    assert not waiter.leader
+    assert leader.token == waiter.token
+    assert table.snapshot()["active"] == 1
+    assert table.snapshot()["merged"] == 1
+
+  def test_anonymous_misses_never_merge(self):
+    table = MshrTable(capacity=2)
+    first = table.allocate()
+    second = table.allocate()
+    assert isinstance(first, MshrAllocation)
+    assert isinstance(second, MshrAllocation)
+    assert first.leader and second.leader
+    assert first.token != second.token
+    assert table.snapshot()["active"] == 2
+    assert table.snapshot()["merged"] == 0
+
+  def test_capacity_wait_is_structured_and_version_gated(self):
+    table = MshrTable(capacity=1)
+    leader = table.allocate("A")
+    assert isinstance(leader, MshrAllocation)
+    wait = table.allocate("B")
+    assert wait == MshrWait(reason="mshr_full", version=0)
+    assert table.snapshot()["active"] == 1
+    assert table.version == wait.version
+    table.complete(leader.token)
+    assert table.version != wait.version
+    retry = table.allocate("B")
+    assert isinstance(retry, MshrAllocation)
+    assert retry.leader
+
+  def test_complete_returns_callbacks_exactly_once(self):
+    table = MshrTable(capacity=1)
+    allocation = table.allocate("A")
+    assert isinstance(allocation, MshrAllocation)
+    callbacks: list[str] = []
+    table.wait(allocation.token, lambda: callbacks.append("ready"))
+    ready = table.complete(allocation.token)
+    assert len(ready) == 1
+    ready[0]()
+    assert callbacks == ["ready"]
+    with pytest.raises(MemoryInvariantError, match="unknown or completed MSHR token"):
+      table.complete(allocation.token)
+
+  def test_reset_clears_entries_callbacks_and_statistics(self):
+    table = MshrTable(capacity=1)
+    allocation = table.allocate("A")
+    assert isinstance(allocation, MshrAllocation)
+    table.wait(allocation.token, lambda: None)
+    assert isinstance(table.allocate("B"), MshrWait)
+    table.reset()
+    assert table.snapshot() == {
+      "active": 0,
+      "merged": 0,
+      "stalls": 0,
+      "callbacks": 0,
+      "capacity": 1,
+      "version": 0,
+    }
+
+
+class TestGatherTransferRoutes:
+  @staticmethod
+  def _transaction(transaction_id, op, *, src=None, dst=None, owner=None):
+    from pipeline_validator.memory.transfer import MemoryTransaction
+
+    return MemoryTransaction(
+      transaction_id=transaction_id,
+      op=op,
+      issuer=_task_owner() if owner is None else owner,
+      src=src,
+      dst=dst,
+      bytes_total=64,
+      completion_event=transaction_id,
+      tile_id=0,
+    )
+
+  @staticmethod
+  def _view(space: str, owner=None):
+    from pipeline_validator.memory.allocator import AllocationHandle, BankSegment
+    from pipeline_validator.memory.transfer import ResolvedMemoryView
+
+    actual_owner = _task_owner() if owner is None else owner
+    segments = (
+      BankSegment(0, 0, 64),
+      BankSegment(1, 64, 64),
+    )
+    handle = AllocationHandle(
+      allocation_id=f"{space}:0:1",
+      memory_space=space,
+      owner=actual_owner,
+      base_address=0,
+      size_bytes=128,
+      alignment=1,
+      bank_segments=segments,
+      generation=0,
+      allocate_cycle=0,
+    )
+    return ResolvedMemoryView(
+      handle=handle,
+      offset_bytes=0,
+      size_bytes=128,
+      address=0,
+      segments=segments,
+      permissions="r",
+    )
+
+  @pytest.mark.parametrize("full_memory", [False, True])
+  def test_six_gather_routes_have_exact_leg_sequences(self, full_memory):
+    from pipeline_validator.config import HardwareConfig
+    from pipeline_validator.memory.transfer import (
+      TransferLegKind,
+      TransferManager,
+      TransferOp,
+    )
+
+    expected = {
+      TransferOp.GATHER_L1_HIT: (TransferLegKind.L1_CACHE_LOOKUP,),
+      TransferOp.GATHER_L2_HIT: (
+        TransferLegKind.L1_CACHE_LOOKUP,
+        TransferLegKind.L2_CACHE_LOOKUP,
+        TransferLegKind.NOC_RESPONSE,
+        TransferLegKind.LOCAL_DMA,
+        TransferLegKind.L1_CACHE_FILL,
+      ),
+      TransferOp.GATHER_MISS_LOOKUP: (
+        TransferLegKind.L1_CACHE_LOOKUP,
+        TransferLegKind.L2_CACHE_LOOKUP,
+      ),
+      TransferOp.GATHER_HBM_REFILL: (
+        TransferLegKind.HBM_READ,
+        TransferLegKind.NOC_RESPONSE,
+        TransferLegKind.L2_CACHE_FILL,
+      ),
+      TransferOp.GATHER_L2_REFILL: (
+        TransferLegKind.NOC_RESPONSE,
+        TransferLegKind.LOCAL_DMA,
+        TransferLegKind.L1_CACHE_FILL,
+      ),
+      TransferOp.GATHER_DEST_WRITE: (TransferLegKind.L1_WRITE,),
+    }
+    manager = TransferManager(HardwareConfig(), full_memory=full_memory)
+    for index, (op, expected_legs) in enumerate(expected.items()):
+      transaction = self._transaction(f"route:{index}", op)
+      manager.submit(transaction, cycle=0)
+      assert tuple(leg.kind for leg in transaction.legs) == expected_legs
+      assert TransferLegKind.GLOBAL_DMA not in expected_legs
+      assert TransferLegKind.L2_WRITE not in expected_legs
+
+  def test_gather_route_cannot_collapse(self):
+    from pipeline_validator.config import HardwareConfig
+    from pipeline_validator.memory.transfer import TransferManager, TransferOp
+
+    manager = TransferManager(HardwareConfig(), full_memory=False)
+    transaction = self._transaction("no-collapse", TransferOp.GATHER_L1_HIT)
+    with pytest.raises(MemoryInvariantError, match="gather route must not be collapsed"):
+      manager._collapsed_leg(transaction)
+
+  def test_slice_resolved_view_clips_segments_and_checks_bounds(self):
+    from pipeline_validator.memory.transfer import slice_resolved_view
+
+    view = self._view("l1")
+    sliced = slice_resolved_view(view, 32, 64)
+    assert sliced is not None
+    assert sliced.address == 32
+    assert sliced.offset_bytes == 32
+    assert [(segment.bank_id, segment.address, segment.size_bytes) for segment in sliced.segments] == [
+      (0, 32, 32),
+      (1, 64, 32),
+    ]
+    assert slice_resolved_view(None, 0, 64) is None
+    with pytest.raises(MemoryInvariantError, match="memory view out of bounds"):
+      slice_resolved_view(view, 96, 64)
+
+  def test_slice_resolved_view_uses_logical_cursor_for_fragmented_allocation(self):
+    from pipeline_validator.memory.transfer import ResolvedMemoryView, slice_resolved_view
+
+    allocator = BankedFreeExtentAllocator("l1", 256, 2)
+    owner_a = _task_owner(buf="a")
+    owner_b = _task_owner(buf="b")
+    initial = allocator.plan_bundle(
+      [
+        _req(owner_a, 32, buf_id="a", space="l1"),
+        _req(owner_b, 32, buf_id="b", space="l1"),
+      ]
+    )
+    assert not isinstance(initial, AdmissionFailure)
+    handle_a, _handle_b = allocator.commit(initial, cycle=0)
+    allocator.request_release(handle_a, owner_a, cycle=1)
+
+    destination_owner = _task_owner(buf="destination")
+    fragmented = allocator.plan_bundle(
+      [_req(destination_owner, 96, buf_id="destination", space="l1")]
+    )
+    assert not isinstance(fragmented, AdmissionFailure)
+    handle = allocator.commit(fragmented, cycle=2)[0]
+    assert [
+      (segment.bank_id, segment.address, segment.size_bytes)
+      for segment in handle.bank_segments
+    ] == [(0, 0, 32), (0, 64, 64)]
+    view = ResolvedMemoryView(
+      handle=handle,
+      offset_bytes=0,
+      size_bytes=96,
+      address=handle.bank_segments[0].address,
+      segments=handle.bank_segments,
+    )
+    sliced = slice_resolved_view(view, 16, 64)
+    assert sliced is not None
+    assert sliced.address == 16
+    assert [
+      (segment.bank_id, segment.address, segment.size_bytes)
+      for segment in sliced.segments
+    ] == [(0, 16, 16), (0, 64, 48)]
+
+  def test_cancel_returns_gather_cache_hbm_noc_and_l1_resources(self):
+    from pipeline_validator.config import HardwareConfig
+    from pipeline_validator.memory.noc import NoCRouter, VCId
+    from pipeline_validator.memory.transfer import TransferManager, TransferOp
+
+    config = HardwareConfig().with_overrides(
+      hbm_fixed_latency_cycles=1000,
+      hbm_outstanding_limit=1,
+    )
+    noc = NoCRouter(
+      vc_depth=config.noc_vc_depth,
+      router_latency_cycles=config.noc_router_latency_cycles,
+    )
+    manager = TransferManager(config, full_memory=True, noc=noc)
+    owner = _task_owner()
+
+    lookup = self._transaction("lookup", TransferOp.GATHER_L1_HIT, owner=owner)
+    manager.submit(lookup, cycle=0)
+    manager.step(cycle=0)
+    assert manager._l1_cache_lookup[0]._holders[0] == "lookup"
+    manager.cancel_owner(owner, cycle=0)
+    assert manager._l1_cache_lookup[0]._holders[0] is None
+
+    hbm = self._transaction(
+      "hbm",
+      TransferOp.GATHER_HBM_REFILL,
+      src=self._view("hbm", owner),
+      owner=owner,
+    )
+    manager.submit(hbm, cycle=1)
+    manager.step(cycle=1)
+    assert manager._hbm_read._outstanding == 1
+    manager.cancel_owner(owner, cycle=1)
+    assert manager._hbm_read._outstanding == 0
+
+    refill = self._transaction("refill", TransferOp.GATHER_L2_REFILL, owner=owner)
+    manager.submit(refill, cycle=2)
+    manager.step(cycle=2)
+    traversed = noc.step(cycle=3)
+    manager.note_traversed(traversed, cycle=3)
+    manager.step(cycle=3)
+    vc1 = noc.vcs[VCId.VC1_DMA_READ_RSP.value]
+    assert vc1.credit_available == config.noc_vc_depth - 1
+    manager.cancel_owner(owner, cycle=3)
+    assert vc1.credit_available == config.noc_vc_depth
+
+    destination = self._transaction(
+      "destination",
+      TransferOp.GATHER_DEST_WRITE,
+      dst=self._view("l1", owner),
+      owner=owner,
+    )
+    manager.submit(destination, cycle=4)
+    manager.step(cycle=4)
+    assert manager._l1_write[0]._holders[0] == "destination"
+    manager.cancel_owner(owner, cycle=4)
+
+    snapshot = manager.snapshot()
+    assert manager.inflight_count == 0
+    assert manager._hbm_read._outstanding == 0
+    assert vc1.credit_available == config.noc_vc_depth
+    assert all(
+      stage["busy_resources"] == 0 and stage["outstanding"] == 0
+      for stage in snapshot["stages"].values()
+    )

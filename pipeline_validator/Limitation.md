@@ -48,9 +48,16 @@
   独立 PR）；唤醒源只有 release final-free，没有跨层
   `nexus.await_phase` 或 nest event export；
 - logical task 到 physical tile 的 scheduler 仍固定为当前 1:1 映射；
-- 未实现 PR 4 gather；
-- 未实现 PR 5 memory trace lane/counter（现有 `tile_signal` instant 是
-  control-flow trace，不是 memory trace lane/counter）。
+- Gather 仅实现 deterministic profiled V1：不解释真实 index tensor，
+  没有 tagged `AddressProvider`，不报告 address-accurate/value-accurate
+  cache hit rate；没有 Scatter/ScatterReduce/FIFO delivery；
+- PR 5 memory trace lane/counter 已实现：每个 transfer leg 在接受时记录、
+  完成时发射 `X` slice（反映真实 accept/complete，cancel 路径不留虚假预测）；
+  counter 为变化采样（非逐 cycle，change-only 去重）；flow 用 Chrome `s`/`t`/`f`
+  串联同一 transaction 的多腿跨车道。保真边界：collapsed-leg 路线（`timing_only`
+  /`runtime`）每条 txn 只有一条腿，flow 退化为 `s`+`f` 两个事件；Gather 仍为
+  deterministic profiled（不 address-accurate/value-accurate）。车道顺序由
+  `process_sort_index`/`thread_sort_index` 元数据固定（见 README §Profiling）。
 
 ## V2 fidelity 边界（PR 2）
 
@@ -60,6 +67,10 @@
 - `full_memory`：在 `runtime` 之上增加逐腿 route（HBM channel/outstanding、
   NoC VC credit、Global DMA channel、L2/L1 per-bank segment、Local DMA）。
 - 三种模式都必须通过全局 binding/permission/静态 view 验证。
+- Gather 是三种 fidelity 的例外：lookup/MSHR/refill/ordered-write
+  状态机不折叠；`timing_only` 只是不物化 src/dst 地址。`line_token` /
+  `merge_group` 始终是 opaque profile identity，禁止 hash 成伪 bank、
+  cache set 或物理地址。
 
 ## V1 输入参数与逻辑地址 IR 限制（PR 1 冻结）
 

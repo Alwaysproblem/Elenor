@@ -45,9 +45,11 @@ from pipeline_validator.dialects.elenor import (
   TileBoaOp,
   TileEvent,
   TileEvuOp,
+  TileGatherOp,
   TileL1Buffer,
   TileLoadOp,
   TilePowOp,
+  TileProfiledAccessOp,
   TileProgramDefOp,
   TileReturnOp,
   TileSignalOp,
@@ -55,8 +57,15 @@ from pipeline_validator.dialects.elenor import (
   TileSubviewOp,
 )
 from pipeline_validator.engines import EngineState, MFEEngine
-from pipeline_validator.execution_ir import ExecEngineDesc, ExecGroupActionOp, GlobalBinding
-from pipeline_validator.ir_lowering import lower_workload_ir
+from pipeline_validator.execution_ir import (
+  ExecEngineDesc,
+  ExecGatherDesc,
+  ExecGatherOutcome,
+  ExecGroupActionOp,
+  ExecTileOp,
+  GlobalBinding,
+)
+from pipeline_validator.ir_lowering import lower_model_ir, lower_workload_ir
 from pipeline_validator.report import build_report, report_to_text
 from pipeline_validator.simulator import Simulator
 from pipeline_validator.stream_queue import EOSPolicy, StreamQueue, StreamToken
@@ -114,7 +123,7 @@ MODEL_CHAIN_IR = """builtin.module {
     %0 = nest.task.range from = 0 to = 4 : !nest.task_range
     %ev_role, %ev_inrel, %ev_outready = nest.dispatch.tasks.async
         @pow_4k_tile context = 0
-        tasks(%0) ins(%l2_buf) outs(%l2_buf)
+        tasks(%0) globals() ins(%l2_buf) outs(%l2_buf)
         signal_policy { input_released = #nest.aggregate<all_tasks>,
                         output_ready = #nest.aggregate<all_tasks> }
         depends_on(%ev_in)
@@ -150,7 +159,7 @@ DISPATCH_TYPE_MISMATCH_IR = """builtin.module {
         dtype = "bf16" : !nest.l2_buffer<2x128x128xbf16>
     %0 = nest.task.range from = 0 to = 1 : !nest.task_range
     %g, %i, %o = nest.dispatch.tasks.async @p
-        tasks(%0) ins(%bad) outs(%bad) signal_policy {}
+        tasks(%0) globals() ins(%bad) outs(%bad) signal_policy {}
         : (!nest.event<"g">, !nest.event<"i">, !nest.event<"o">)
     nest.await %g
     nest.return
@@ -183,13 +192,59 @@ TILE_PROGRAM_NO_TASK_IR = """builtin.module {
         dtype = "bf16" : !nest.l2_buffer<4x128x128xbf16>
     %0 = nest.task.range from = 0 to = 1 : !nest.task_range
     %g, %i, %o = nest.dispatch.tasks.async @p
-        tasks(%0) ins(%buf) outs() signal_policy {}
+        tasks(%0) globals() ins(%buf) outs() signal_policy {}
         : (!nest.event<"g">, !nest.event<"i">, !nest.event<"o">)
     nest.await %g
     nest.return
   }
 }
 """
+
+
+GATHER_PROFILE = """    tile.profiled.access id = "r0" outcome = "L1_HIT"
+        bytes = 64 line = "line0"
+    tile.profiled.access id = "r1" outcome = "L2_HIT"
+        bytes = 64 line = "line1"
+    tile.profiled.access id = "r2" outcome = "HBM_MISS"
+        bytes = 64 line = "line42" merge = "miss42"
+    tile.profiled.access id = "r3" outcome = "HBM_MISS"
+        bytes = 64 line = "line42" merge = "miss42"
+"""
+
+GATHER_IR = (
+  """builtin.module {
+  tile.program @gather_tile(
+      %task : !nest.task,
+      %table : !nest.global_view<4096xi8>) {
+    %indices = tile.alloc shape = [16] dtype = "i32"
+        : !tile.l1_buffer<16xi32>
+    %destination = tile.alloc shape = [256] dtype = "i8"
+        : !tile.l1_buffer<256xi8>
+    %done = tile.gather.global.async %table
+        indices(%indices) into %destination
+        result_bytes = 256 cache_min_bytes = 16384
+        cache_target_bytes = 65536 l1_mshr_hint = 16 {
+"""
+  + GATHER_PROFILE
+  + """    } : !tile.event<"gather_done">
+    tile.await %done
+    tile.return
+  }
+
+  nest.context @gather_context(
+      %table : !nest.global_memref<4096xi8>) placement = 1 {
+    %table_view = nest.subview %table offsets = [0] sizes = [4096]
+        strides = [1] : !nest.global_view<4096xi8>
+    %tasks = nest.task.range from = 0 to = 1 : !nest.task_range
+    %grid, %inrel, %outready = nest.dispatch.tasks.async @gather_tile
+        tasks(%tasks) globals(%table_view) ins() outs() signal_policy {}
+        : (!nest.event<"grid_done">, !nest.event<"">, !nest.event<"">)
+    nest.await %grid
+    nest.return
+  }
+}
+"""
+)
 
 
 class TestXDSLIR:
@@ -238,6 +293,262 @@ class TestXDSLIR:
     ):
       assert fragment in text1
 
+  def test_gather_round_trip_is_byte_stable(self):
+    module = parse_workload_ir(GATHER_IR, source_name="<gather>")
+    text = print_workload_ir(module)
+    reparsed = parse_workload_ir(text, source_name="<gather-rt>")
+    assert print_workload_ir(reparsed) == text
+    assert "tasks(%tasks) globals(%table_view) ins() outs()" in text
+    assert "tile.gather.global.async" in text
+    assert text.index('id = "r0"') < text.index('id = "r3"')
+
+  def test_gather_lowering_produces_plain_execution_dtos(self):
+    task = lower_workload_ir(parse_workload_ir(GATHER_IR))
+    binding = next(iter(task.role_bindings.values()))
+    assert [formal.space for formal in binding.tile_program.formals] == ["task", "global"]
+    assert len(binding.global_actuals) == 1
+    assert binding.global_actuals[0].base == "global:table"
+    launch = next(
+      inst
+      for inst in binding.tile_program.insts
+      if inst.op == ExecTileOp.LAUNCH_GATHER
+    )
+    descriptor = binding.tile_program.descriptors[launch.args[0]]
+    gather = descriptor.params["gather"]
+    assert descriptor.kind == "MFE"
+    assert descriptor.op == "gather"
+    assert isinstance(gather, ExecGatherDesc)
+    assert gather.source.base == "formal:1"
+    assert gather.indices.base == "l1:0"
+    assert gather.destination.base == "l1:1"
+    assert gather.result_bytes == 256
+    assert tuple(access.outcome for access in gather.accesses) == (
+      ExecGatherOutcome.L1_HIT,
+      ExecGatherOutcome.L2_HIT,
+      ExecGatherOutcome.HBM_MISS,
+      ExecGatherOutcome.HBM_MISS,
+    )
+
+  @pytest.mark.parametrize(
+    "path",
+    [
+      "examples/workloads/gather_profiled.mlir",
+      "examples/workloads/gather_matmul.mlir",
+      "examples/workloads/matmul_gather_add.mlir",
+      "examples/workloads/gather_matmul_4tiles_2contexts.mlir",
+      "examples/workloads/matmul_gather_add_4tiles_2contexts.mlir",
+    ],
+  )
+  def test_gather_examples_lower_complete_output_store_path(self, path):
+    model = lower_model_ir(parse_workload_ir(Path(path).read_text()))
+    assert any("output" in input_.name.lower() for input_ in model.inputs)
+    for task in model.tasks.values():
+      assert any(buffer.role == "out" for buffer in task.l2_buffers)
+      assert any(action.op == ExecGroupActionOp.DMA_STORE for action in task.actions)
+      for binding in task.role_bindings.values():
+        store_descriptors = {
+          name
+          for name, descriptor in binding.tile_program.descriptors.items()
+          if descriptor.op == "store"
+        }
+        assert store_descriptors
+        assert any(
+          inst.op == ExecTileOp.LAUNCH_MFE
+          and inst.args
+          and inst.args[0] in store_descriptors
+          for inst in binding.tile_program.insts
+        )
+
+  def test_gather_source_requires_readable_binding(self):
+    module = parse_workload_ir(GATHER_IR)
+    with pytest.raises(
+      ValueError,
+      match="input binding 'table' is not readable but is used as gather source",
+    ):
+      Simulator(FAST_HW, SimConfig()).run(
+        module,
+        {"table": GlobalBinding("table", 0x100000, 4096, "w")},
+      )
+
+  def test_dispatch_prints_empty_globals_group(self):
+    text = print_workload_ir(PowWorkload().module)
+    assert " globals() ins(" in text
+    assert print_workload_ir(parse_workload_ir(text)) == text
+
+  def test_dispatch_rejects_missing_globals_group(self):
+    self._assert_parse_failure(GATHER_IR.replace(" globals(%table_view)", "", 1))
+
+  @pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+      (
+        "globals(%table_view)",
+        "globals()",
+        "passes 0 global actuals but tile.program declares 1 global formals",
+      ),
+      (
+        "%table : !nest.global_view<4096xi8>",
+        "%table : !nest.global_view<2048xi8>",
+        "global actual 0 type does not match",
+      ),
+      (
+        "%table : !nest.global_view<4096xi8>",
+        (
+          "%l2 : !nest.l2_buffer<1xi8>,"
+          " %table : !nest.global_view<4096xi8>"
+        ),
+        "global formal 2 may not follow an l2 formal",
+      ),
+    ],
+  )
+  def test_global_formal_dispatch_contract_rejects_mismatch(self, old, new, message):
+    with pytest.raises(VerifyException, match=message):
+      parse_workload_ir(GATHER_IR.replace(old, new, 1), source_name="<global-contract>")
+
+  @pytest.mark.parametrize(
+    ("text", "message"),
+    [
+      (
+        GATHER_IR.replace(GATHER_PROFILE, ""),
+        "gather profile must contain at least one",
+      ),
+      (
+        GATHER_IR.replace('id = "r1"', 'id = "r0"', 1),
+        "duplicate gather request_id",
+      ),
+      (
+        GATHER_IR.replace('id = "r0"', 'id = ""', 1),
+        "gather request_id must be non-empty",
+      ),
+      (
+        GATHER_IR.replace('outcome = "L2_HIT"', 'outcome = "UNKNOWN"', 1),
+        "unknown gather outcome",
+      ),
+      (
+        GATHER_IR.replace("result_bytes = 256", "result_bytes = 0", 1),
+        "gather result_bytes must be > 0",
+      ),
+      (
+        GATHER_IR.replace("result_bytes = 256", "result_bytes = 257", 1),
+        "gather result_bytes exceeds destination extent",
+      ),
+      (
+        GATHER_IR.replace("cache_min_bytes = 16384", "cache_min_bytes = 0", 1),
+        "gather cache_min_bytes must be > 0",
+      ),
+      (
+        GATHER_IR.replace("cache_target_bytes = 65536", "cache_target_bytes = 8192", 1),
+        "gather cache_target_bytes must be >= cache_min_bytes",
+      ),
+      (
+        GATHER_IR.replace("l1_mshr_hint = 16", "l1_mshr_hint = 0", 1),
+        "gather l1_mshr_hint must be > 0",
+      ),
+      (
+        GATHER_IR.replace("bytes = 64 line = \"line0\"", "bytes = 0 line = \"line0\"", 1),
+        "bytes must be > 0",
+      ),
+      (
+        GATHER_IR.replace("bytes = 64 line = \"line0\"", "bytes = 4097 line = \"line0\"", 1),
+        "exceeds source extent",
+      ),
+      (
+        GATHER_IR.replace("result_bytes = 256", "result_bytes = 255", 1),
+        "profile bytes .* must equal result_bytes",
+      ),
+      (
+        GATHER_IR.replace("into %destination", "into %indices", 1),
+        "indices and destination must be different",
+      ),
+      (
+        GATHER_IR.replace(
+          'outcome = "L1_HIT"\n        bytes = 64 line = "line0"',
+          'outcome = "L1_HIT"\n        bytes = 64 line = "line0" merge = "bad"',
+          1,
+        ),
+        "merge_group is only valid for HBM_MISS",
+      ),
+      (
+        GATHER_IR.replace('line = "line42" merge = "miss42"', 'merge = "miss42"', 1),
+        "merge_group requires a non-empty line_token",
+      ),
+      (
+        GATHER_IR.replace(
+          'bytes = 64 line = "line42" merge = "miss42"',
+          'bytes = 32 line = "line99" merge = "miss42"',
+          1,
+        ),
+        "must use one line_token and byte size",
+      ),
+      (
+        GATHER_IR.replace(
+          'tile.profiled.access id = "r0" outcome = "L1_HIT"\n'
+          '        bytes = 64 line = "line0"',
+          "tile.return",
+          1,
+        ),
+        "profile may contain only tile.profiled.access",
+      ),
+    ],
+  )
+  def test_gather_static_contract_rejects_invalid_ir(self, text, message):
+    with pytest.raises(VerifyException, match=message):
+      parse_workload_ir(text, source_name="<invalid-gather>")
+
+  def test_profiled_access_is_rejected_at_tile_program_top_level(self):
+    text = GATHER_IR.replace(
+      '    } : !tile.event<"gather_done">\n    tile.await %done',
+      (
+        '    } : !tile.event<"gather_done">\n'
+        '    tile.profiled.access id = "top" outcome = "L1_HIT" bytes = 64\n'
+        "    tile.await %done"
+      ),
+      1,
+    )
+    with pytest.raises(
+      VerifyException,
+      match="unexpected tile program body op 'tile.profiled.access'",
+    ):
+      parse_workload_ir(text, source_name="<top-level-profile>")
+
+  def test_gather_builders_are_public_operations(self):
+    program = TileProgramDefOp(
+      "public_gather",
+      [],
+      arg_types=[NestTask(), NestGlobalView.of([64], "i8")],
+      arg_names=["task", "source"],
+    )
+    _task, source = program.body.block.args
+    indices = TileAllocOp([1], "i32")
+    destination = TileAllocOp([64], "i8")
+    access = TileProfiledAccessOp("r0", "L1_HIT", 64, line_token="line0")
+    gather = TileGatherOp(
+      source,
+      indices.result,
+      destination.result,
+      64,
+      64,
+      64,
+      1,
+      [access],
+      "done",
+    )
+    program.body.block.add_ops(
+      [indices, destination, gather, TileAwaitOp([gather.result]), TileReturnOp()]
+    )
+    verify_workload_ir(
+      ModuleOp(
+        [
+          program,
+          NestContextOp(
+            "unused_context",
+            [NestReturnOp()],
+            placement=1,
+          ),
+        ]
+      )
+    )
+
   def test_function_call_op_builders_verify(self):
     """Every function-call operation can participate in a verified module."""
     l2_dims = [1, 4, 32]
@@ -280,17 +591,13 @@ class TestXDSLIR:
     src = NestSubviewOp(y_arg, [0, 0, 0], l2_dims, [1, 1, 1], NestGlobalView.of(l2_dims, "bf16"))
     tasks = NestTaskRangeOp(from_task=0, to_task=1)
     prefetch = NestPrefetchOp(src.result, buffer.result, "prefetch")
-    dispatch = NestDispatchOp(
-      "all_ops",
-      tasks.result,
-      [buffer.result],
-      [buffer.result],
-      "grid_done",
-      "input_released",
-      "output_ready",
-      signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
-      depends_on=[prefetch.result],
-    )
+    dispatch = NestDispatchOp("all_ops", tasks.result, [], [buffer.result],
+    [buffer.result],
+    "grid_done",
+    "input_released",
+    "output_ready",
+    signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
+    depends_on=[prefetch.result],)
     collective = NestCollectiveOp("reduce", bytes_total=256, participant_mask=1, tag="collective")
     dma_store = NestDMAStoreOp(
       src=buffer.result, dst=src.result, tag="store_done", depends_on=[dispatch.output_ready]
@@ -330,9 +637,7 @@ class TestXDSLIR:
     """Minimal legacy module: identity program + one dispatch context."""
     prog = make_identity_tile_program()
     tasks = NestTaskRangeOp(0, 1)
-    dispatch = NestDispatchOp(
-      prog.sym_name.data, tasks.result, [], [], "grid_done", "", "", signal_policy={}
-    )
+    dispatch = NestDispatchOp(prog.sym_name.data, tasks.result, [], [], [], "grid_done", "", "", signal_policy={})
     ctx = NestContextOp(
       ctx_name,
       [tasks, dispatch, NestAwaitOp([dispatch.grid_done]), NestReturnOp()],
@@ -343,9 +648,7 @@ class TestXDSLIR:
 
   def test_verifier_rejects_unknown_program_symbol(self):
     tasks = NestTaskRangeOp(0, 1)
-    dispatch = NestDispatchOp(
-      "missing_program", tasks.result, [], [], "grid_done", "", "", signal_policy={}
-    )
+    dispatch = NestDispatchOp("missing_program", tasks.result, [], [], [], "grid_done", "", "", signal_policy={})
     module = ModuleOp([NestContextOp("unknown_program", [tasks, dispatch, NestReturnOp()], placement=1)])
     self._assert_verify_failure(module, "dispatch references unknown tile program '@missing_program'")
 
@@ -386,9 +689,7 @@ class TestXDSLIR:
     """``context = N`` prints, parses, and round-trips; absent when not pinned."""
     prog = make_identity_tile_program()
     tasks = NestTaskRangeOp(from_task=0, to_task=1)
-    dispatch = NestDispatchOp(
-      prog.sym_name.data, tasks.result, [], [], "grid_done", "", "", signal_policy={}, context_id=1
-    )
+    dispatch = NestDispatchOp(prog.sym_name.data, tasks.result, [], [], [], "grid_done", "", "", signal_policy={}, context_id=1)
     module = ModuleOp(
       [
         prog,
@@ -417,9 +718,7 @@ class TestXDSLIR:
   def test_verifier_rejects_negative_dispatch_context(self):
     prog = make_identity_tile_program()
     tasks = NestTaskRangeOp(from_task=0, to_task=1)
-    dispatch = NestDispatchOp(
-      prog.sym_name.data, tasks.result, [], [], "grid_done", "", "", signal_policy={}, context_id=-1
-    )
+    dispatch = NestDispatchOp(prog.sym_name.data, tasks.result, [], [], [], "grid_done", "", "", signal_policy={}, context_id=-1)
     module = ModuleOp([prog, NestContextOp("neg_ctx", [tasks, dispatch, NestReturnOp()], placement=1)])
     self._assert_verify_failure(module, "dispatch context must be >= 0")
 
@@ -447,9 +746,7 @@ class TestXDSLIR:
     ctxs = []
     for i in range(2):
       tasks = NestTaskRangeOp(0, 1)
-      disp = NestDispatchOp(
-        prog.sym_name.data, tasks.result, [], [], f"ev_grid_c{i}", "", "", signal_policy={}
-      )
+      disp = NestDispatchOp(prog.sym_name.data, tasks.result, [], [], [], f"ev_grid_c{i}", "", "", signal_policy={})
       ctxs.append(
         NestContextOp(
           f"ctx{i}",
@@ -520,12 +817,14 @@ class TestXDSLIR:
 
   def test_dispatch_actual_arity_mismatch_fails(self):
     text = MODEL_CHAIN_IR.replace(
-      "tasks(%0) ins(%l2_buf) outs(%l2_buf)", "tasks(%0) ins(%l2_buf, %l2_buf) outs(%l2_buf)", 1
+      "tasks(%0) globals() ins(%l2_buf) outs(%l2_buf)",
+      "tasks(%0) globals() ins(%l2_buf, %l2_buf) outs(%l2_buf)",
+      1,
     )
     with pytest.raises(
       VerifyException,
       match=(
-        r"dispatch '@pow_4k_tile' passes 3 actuals"
+        r"dispatch '@pow_4k_tile' passes 3 l2 actuals"
         r" but tile.program declares 1 l2 formals"
       ),
     ):
@@ -535,8 +834,8 @@ class TestXDSLIR:
     with pytest.raises(
       VerifyException,
       match=(
-        r"dispatch actual 0 type does not match"
-        r" tile.program '@p' formal 0"
+        r"dispatch input actual 0 type does not match"
+        r" tile.program '@p' l2 formal 0"
       ),
     ):
       parse_workload_ir(DISPATCH_TYPE_MISMATCH_IR, source_name="<dispatch-type>")
@@ -724,17 +1023,13 @@ class TestLoweringDTOFields:
     )
     pref = NestPrefetchOp(src.result, buf.result, "ev_in")
     tasks = NestTaskRangeOp(0, 1)
-    disp = NestDispatchOp(
-      "sv_prog",
-      tasks.result,
-      [buf.result],
-      [buf.result],
-      "ev_grid",
-      "ev_inrel",
-      "",
-      signal_policy={"input_released": "all_tasks"},
-      depends_on=[pref.result],
-    )
+    disp = NestDispatchOp("sv_prog", tasks.result, [], [buf.result],
+    [buf.result],
+    "ev_grid",
+    "ev_inrel",
+    "",
+    signal_policy={"input_released": "all_tasks"},
+    depends_on=[pref.result],)
     ctx.body.block.add_ops(
       [
         buf,
@@ -849,6 +1144,61 @@ class TestExternalIRCLI:
     assert print_only.stdout == input_path.read_text(encoding="utf-8")
     assert not trace_json.exists()
 
+  def test_memory_trace_flag_gates_trace_and_report(self, tmp_path: Path):
+    input_path = tmp_path / "pow.mlir"
+    input_path.write_text(print_workload_ir(PowWorkload().module), encoding="utf-8")
+    off_trace = tmp_path / "off_trace.json"
+    off_report = tmp_path / "off_report.json"
+    on_trace = tmp_path / "on_trace.json"
+    on_report = tmp_path / "on_report.json"
+    base_args = (
+      "--ir-file",
+      str(input_path),
+      "--input-binding",
+      "Y=0x100000:524288:rw",
+      "--hw-override",
+      "hbm_fixed_latency_cycles=10",
+      "--trace-json",
+      str(off_trace),
+      "--json",
+      "--report",
+      str(off_report),
+    )
+    off = self._run_cli(*base_args)
+    assert off.returncode == 0, off.stderr
+    off_events = json.loads(off_trace.read_text(encoding="utf-8"))["traceEvents"]
+    off_names = {e.get("name") for e in off_events}
+    mem_names = {
+      "l2_allocated_bytes", "hbm_outstanding", "hbm_bind",
+      "l1_alloc", "l2_alloc", "noc_occupancy",
+    }
+    assert not (off_names & mem_names), sorted(off_names & mem_names)
+    assert not [e for e in off_events if e.get("ph") in ("s", "t", "f")]
+    off_report_data = json.loads(off_report.read_text(encoding="utf-8"))
+    assert off_report_data[0]["memory"] == {}
+
+    on = self._run_cli(
+      "--ir-file",
+      str(input_path),
+      "--input-binding",
+      "Y=0x100000:524288:rw",
+      "--hw-override",
+      "hbm_fixed_latency_cycles=10",
+      "--memory-trace",
+      "--trace-json",
+      str(on_trace),
+      "--json",
+      "--report",
+      str(on_report),
+    )
+    assert on.returncode == 0, on.stderr
+    on_events = json.loads(on_trace.read_text(encoding="utf-8"))["traceEvents"]
+    on_names = {e.get("name") for e in on_events}
+    assert on_names & mem_names
+    assert any(e.get("ph") in ("s", "t", "f") for e in on_events)
+    on_report_data = json.loads(on_report.read_text(encoding="utf-8"))
+    assert on_report_data[0]["memory"]["l2_peak_allocated_bytes"] > 0
+
   def test_ir_file_conflicts_and_load_errors(self, tmp_path: Path):
     input_path = tmp_path / "pow.mlir"
     input_path.write_text(print_workload_ir(PowWorkload().module), encoding="utf-8")
@@ -914,7 +1264,7 @@ class TestExternalIRCLI:
   def test_example_mlir_runs_on_two_device_contexts(self):
     res = self._run_cli(
       "--ir-file",
-      "examples/example.mlir",
+      "examples/workloads/pow_dual_context.mlir",
       "--device-context-mode",
       "2",
       "--input-binding",
@@ -931,7 +1281,12 @@ class TestExternalIRCLI:
 
   def test_missing_input_binding_exits_2(self):
     res = self._run_cli(
-      "--ir-file", "examples/example.mlir", "--device-context-mode", "2", "--max-cycles", "200000"
+      "--ir-file",
+      "examples/workloads/pow_dual_context.mlir",
+      "--device-context-mode",
+      "2",
+      "--max-cycles",
+      "200000",
     )
     assert res.returncode == 2
     assert "missing input binding for global 'Y0'" in res.stderr
@@ -1096,7 +1451,7 @@ class TestHardwareConfigYaml:
     return path
 
   def test_defaults_frozen(self):
-    # 55 个字段逐一列出, 值等于迁移前 config.py 的字面量。
+    # 67 fields enumerate the grouped-YAML baseline exactly.
     expected = {
       "profile": "balanced-small",
       "num_tiles": 4,
@@ -1143,6 +1498,13 @@ class TestHardwareConfigYaml:
       "hbm_channels": 8,
       "hbm_fixed_latency_cycles": 200,
       "hbm_burst_bytes": 64,
+      "cache_line_bytes": 64,
+      "l2_cache_capacity_bytes": 4194304,
+      "l2_cache_lookup_latency_cycles": 4,
+      "l2_mshr_entries": 64,
+      "l1_cache_capacity_bytes": 524288,
+      "l1_cache_lookup_latency_cycles": 1,
+      "l1_mshr_entries": 16,
       "l2_access_latency_cycles": 4,
       "l1_access_latency_cycles": 1,
       "l2_bank_bandwidth_gbs": 12.8,
@@ -1164,9 +1526,32 @@ class TestHardwareConfigYaml:
   def test_schema_maps_every_field_once(self):
     mapped = list(_HW_YAML_PATH_TO_FIELD.values())
     field_names = {field.name for field in fields(HardwareConfig)}
-    assert len(_HW_YAML_PATH_TO_FIELD) == 60
+    assert len(_HW_YAML_PATH_TO_FIELD) == 67
     assert len(mapped) == len(set(mapped))
     assert set(mapped) == field_names
+
+  def test_hardware_config_has_67_strict_mappings(self):
+    assert len(_HW_YAML_PATH_TO_FIELD) == 67
+    assert set(_HW_YAML_PATH_TO_FIELD.values()) == {
+      field.name for field in fields(HardwareConfig)
+    }
+
+  @pytest.mark.parametrize(
+    ("override", "message"),
+    [
+      ({"cache_line_bytes": 0}, "positive power of 2"),
+      ({"cache_line_bytes": 48}, "positive power of 2"),
+      ({"l2_cache_capacity_bytes": 32}, "line-aligned"),
+      ({"l1_cache_capacity_bytes": 65}, "line-aligned"),
+      ({"l2_cache_lookup_latency_cycles": 0}, "must be > 0"),
+      ({"l1_cache_lookup_latency_cycles": 0}, "must be > 0"),
+      ({"l2_mshr_entries": 0}, "must be > 0"),
+      ({"l1_mshr_entries": 0}, "must be > 0"),
+    ],
+  )
+  def test_cache_config_rejects_invalid_values(self, override, message):
+    with pytest.raises(ValueError, match=message):
+      HardwareConfig(**override)
 
   def test_bundled_yaml_roundtrip(self):
     default_path = Path(__file__).resolve().parents[1] / "hardware_config.yaml"
@@ -1447,17 +1832,13 @@ class TestPR3SignalPolicy:
     src = NestSubviewOp(y_arg, [0, 0, 0], [1, 4, 32], [1, 1, 1], NestGlobalView.of([1, 4, 32], "bf16"))
     pref = NestPrefetchOp(src.result, buf.result, "ev_in")
     tasks = NestTaskRangeOp(0, 1)
-    disp = NestDispatchOp(
-      "sig_prog",
-      tasks.result,
-      [buf.result],
-      [buf.result],
-      "ev_grid",
-      inrel_tag,
-      outready_tag,
-      signal_policy=policy,
-      depends_on=[pref.result],
-    )
+    disp = NestDispatchOp("sig_prog", tasks.result, [], [buf.result],
+    [buf.result],
+    "ev_grid",
+    inrel_tag,
+    outready_tag,
+    signal_policy=policy,
+    depends_on=[pref.result],)
     ops = [buf, src, pref, tasks, disp]
     if role == "in":
       if inrel_tag:
@@ -1494,7 +1875,7 @@ class TestPR3SignalPolicy:
         # no-L2 identity dispatch: no alloc, no release, empty policy
         prog = make_identity_tile_program()
         tasks = NestTaskRangeOp(0, 1)
-        disp = NestDispatchOp(prog.sym_name.data, tasks.result, [], [], "ev_grid", "", "", signal_policy={})
+        disp = NestDispatchOp(prog.sym_name.data, tasks.result, [], [], [], "ev_grid", "", "", signal_policy={})
         ctx = NestContextOp(
           "sig_ctx", [tasks, disp, NestAwaitOp([disp.grid_done]), NestReturnOp()], placement=1
         )
@@ -1532,16 +1913,12 @@ class TestPR3SignalPolicy:
               "c",
               [
                 NestTaskRangeOp(0, 1),
-                NestDispatchOp(
-                  "bad_sig",
-                  NestTaskRangeOp(0, 1).result,
-                  [],
-                  [],
-                  "g",
-                  "i",
-                  "",
-                  signal_policy={"input_released": "all_tasks"},
-                ),
+                NestDispatchOp("bad_sig", NestTaskRangeOp(0, 1).result, [], [],
+                [],
+                "g",
+                "i",
+                "",
+                signal_policy={"input_released": "all_tasks"},),
                 NestReturnOp(),
               ],
               placement=1,
@@ -1592,17 +1969,13 @@ class TestPR3SignalPolicy:
     src = NestSubviewOp(y, [0, 0, 0], [1, 4, 32], [1, 1, 1], NestGlobalView.of([1, 4, 32], "bf16"))
     pref = NestPrefetchOp(src.result, buf.result, "ev_in")
     tasks = NestTaskRangeOp(0, 1)
-    disp = NestDispatchOp(
-      "sig_prog",
-      tasks.result,
-      [buf.result],
-      [buf.result],
-      "ev_grid",
-      "ev_inrel",
-      "ev_outready",
-      signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
-      depends_on=[pref.result],
-    )
+    disp = NestDispatchOp("sig_prog", tasks.result, [], [buf.result],
+    [buf.result],
+    "ev_grid",
+    "ev_inrel",
+    "ev_outready",
+    signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
+    depends_on=[pref.result],)
     store = NestDMAStoreOp(buf.result, src.result, "ev_out", depends_on=[disp.output_ready])
     # release depends on grid_done instead of store
     bad_release = NestReleaseOp(buf.result, depends_on=[disp.grid_done])
@@ -1655,17 +2028,13 @@ class TestPR3SignalPolicy:
     src = NestSubviewOp(y, [0, 0, 0], [1, 4, 32], [1, 1, 1], NestGlobalView.of([1, 4, 32], "bf16"))
     pref = NestPrefetchOp(src.result, buf.result, "ev_in")
     tasks = NestTaskRangeOp(0, 1)
-    disp = NestDispatchOp(
-      "sig_prog",
-      tasks.result,
-      [buf.result],
-      [buf.result],
-      "ev_grid",
-      "ev_inrel",
-      "ev_outready",
-      signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
-      depends_on=[pref.result],
-    )
+    disp = NestDispatchOp("sig_prog", tasks.result, [], [buf.result],
+    [buf.result],
+    "ev_grid",
+    "ev_inrel",
+    "ev_outready",
+    signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
+    depends_on=[pref.result],)
     store = NestDMAStoreOp(buf.result, src.result, "ev_out", depends_on=[disp.output_ready])
     # release appears AFTER nest.return
     ctx.body.block.add_ops(

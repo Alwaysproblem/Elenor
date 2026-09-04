@@ -175,7 +175,7 @@ class TileGroupSequencer:
     if (self.action_index > 0 and not self._first_action_emitted
         and self.group.tracer is not None):
       self._first_action_emitted = True
-      self.group.tracer.instant("TileGroup", "Admission",
+      self.group.tracer.instant("TileGroup", "Scheduler:L2",
                                 "context_first_action", cycle, {
                                   "context": self.context_name,
                                   "slot": self.device_slot,

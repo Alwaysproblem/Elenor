@@ -24,12 +24,14 @@ from .engines import (
 )
 from .execution_ir import (
   ExecEngineDesc,
+  ExecGatherDesc,
   ExecTileInst,
   ExecTileOp,
   ExecTileProgram,
   PhaseSignal,
   TaskIdentity,
 )
+from .memory import AllocationHandle, ResolvedMemoryView
 from .memory.l1_slot_frame import SlotFrame
 from .memory.l2_sram import L2SRAM
 from .pmu import PMUCounter, StallReason
@@ -96,17 +98,17 @@ class _UCEContext:
 
 @dataclass
 class _TileContextMemory:
-  """Per-context resolved L2/L1 handles + task identity (§5.2, PR 3).
+  """Per-context resolved global/L2/L1 memory state.
 
-  ``l2_formal_handles`` is positional: index i = tile-program formal
-  i+1 (formal 0 is the task handle).  ``l1_handles`` maps L1 buffer
-  name → handle.  timing-only contexts fill both with None/empty.
+  Global and L2 dictionaries are keyed by the original tile-program
+  formal index, including task/global formals before the L2 prefix.
+  ``l1_handles`` maps lowered L1 names to allocation handles.
   """
 
-  owner: object  # MemoryOwner
   task_identity: TaskIdentity
-  l2_formal_handles: tuple = ()
-  l1_handles: dict = field(default_factory=dict)
+  l2_formal_handles: dict[int, AllocationHandle] = field(default_factory=dict)
+  global_formal_views: dict[int, ResolvedMemoryView] = field(default_factory=dict)
+  l1_handles: dict[str, AllocationHandle] = field(default_factory=dict)
   l2_resolver: L2SRAM | None = None
 
 
@@ -117,6 +119,7 @@ class _ResolvedEngineLaunch:
 
   desc: ExecEngineDesc
   transaction: object | None = None
+  launch_params: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -168,6 +171,7 @@ class TileUCE:
       "EVU": deque(),
       "MFE_LOAD": deque(),
       "MFE_STORE": deque(),
+      "MFE_GATHER": deque(),
       "USE": deque(),
     }
     self._engine_queue_depths: dict[str, int] = {
@@ -176,6 +180,7 @@ class TileUCE:
       "USE": 1,
       "MFE_LOAD": cfg.mfe_load_queue_depth,
       "MFE_STORE": cfg.mfe_store_queue_depth,
+      "MFE_GATHER": cfg.mfe_load_queue_depth,
     }
 
   def can_accept_context(self, context_id: int | None = None) -> bool:
@@ -471,6 +476,12 @@ class TileUCE:
       self.pmu.add_event("l1_frame_fault")
       self._fault_context(ctx, "l1_frame_fault", cycle)
       return
+    if tile.memory_trace is not None and self.tracer is not None:
+      self.tracer.instant(
+        f"Tile{self.tile_id}", "Lifecycle", "frame_bind", cycle,
+        {"ctx_id": ctx.ctx_id,
+         "generation": tile.l1_frames[ctx.ctx_id].generation,
+         "tile_id": self.tile_id})
     self._set_context_state(ctx, _UCEContextState.READY, cycle)
 
   def _retry_wait_stream(self, ctx: _UCEContext, cycle: int,
@@ -659,6 +670,8 @@ class TileUCE:
       self._enqueue_engine_launch(ctx, "USE", ins, cycle)
     elif op == ExecTileOp.LAUNCH_MFE:
       self._enqueue_engine_launch(ctx, self._queue_key_for_launch(ctx, ins), ins, cycle)
+    elif op == ExecTileOp.LAUNCH_GATHER:
+      self._enqueue_engine_launch(ctx, "MFE_GATHER", ins, cycle)
     elif op == ExecTileOp.STREAM_POP:
       if not self._retry_wait_stream(ctx, cycle, tile):
         self.pmu.add(StallReason.STREAM_CREDIT, 1)
@@ -740,7 +753,7 @@ class TileUCE:
     self._local_event_owner[event_ref.runtime_id] = event_ref
     desc_ref = ins.args[0] if ins.args else ""
     launch_params: dict = {}
-    engine_kind = "MFE" if queue_key in ("MFE_LOAD", "MFE_STORE") else queue_key
+    engine_kind = "MFE" if queue_key in ("MFE_LOAD", "MFE_GATHER", "MFE_STORE") else queue_key
     fifo.append(
       _EngineQueueEntry(ctx.ctx_id,
                         event_ref,
@@ -752,6 +765,8 @@ class TileUCE:
     return True
 
   def _queue_key_for_launch(self, ctx: _UCEContext, ins: ExecTileInst) -> str:
+    if ins.op == ExecTileOp.LAUNCH_GATHER:
+      return "MFE_GATHER"
     desc_ref = ins.args[0] if ins.args else ""
     desc = ctx.program.descriptors.get(desc_ref) if ctx.program is not None else None
     if desc is not None and desc.op in ("store", "dma_store"):
@@ -760,7 +775,7 @@ class TileUCE:
 
   def _drain_engine_queues(self, cycle: int, tile: ComputeTile) -> None:
     from .memory.allocator import MemoryInvariantError
-    for queue_key in ("BOA", "EVU", "MFE_LOAD", "MFE_STORE", "USE"):
+    for queue_key in ("BOA", "EVU", "MFE_LOAD", "MFE_GATHER", "MFE_STORE", "USE"):
       fifo = self._engine_queues[queue_key]
       if not fifo:
         continue
@@ -773,10 +788,22 @@ class TileUCE:
       engine = self._engine_for_queue(tile, queue_key)
       try:
         resolved = self._build_engine_launch(ctx, entry, tile)
-        is_mfe = queue_key in ("MFE_LOAD", "MFE_STORE")
-        job = engine.launch(
-          resolved.desc, cycle, entry.event_ref.runtime_id,
-          transaction=resolved.transaction if is_mfe else None)
+        job: object | None
+        if queue_key == "MFE_GATHER":
+          job = tile.mfe.launch_gather(
+            resolved.desc,
+            cycle,
+            entry.event_ref.runtime_id,
+            **resolved.launch_params,
+          )
+        else:
+          is_mfe = queue_key in ("MFE_LOAD", "MFE_STORE")
+          job = engine.launch(
+            resolved.desc,
+            cycle,
+            entry.event_ref.runtime_id,
+            transaction=resolved.transaction if is_mfe else None,
+          )
       except (ValueError, MemoryInvariantError) as exc:
         fifo.popleft()
         self._drop_event_ref(entry.event_ref)
@@ -792,7 +819,7 @@ class TileUCE:
       return tile.boa
     if queue_key == "EVU":
       return tile.evu
-    if queue_key in ("MFE_LOAD", "MFE_STORE"):
+    if queue_key in ("MFE_LOAD", "MFE_GATHER", "MFE_STORE"):
       return tile.mfe
     return tile.use
 
@@ -812,10 +839,57 @@ class TileUCE:
     base = ctx.program.descriptors[entry.desc_ref]
     desc = ExecEngineDesc(base.name, base.kind, base.op, dict(base.params))
     transaction = None
+    launch_params: dict = {}
     if base.transfer is not None:
       desc.params["bytes"] = base.transfer.bytes
       transaction = self._build_tile_transaction(
         ctx, base.transfer, entry, tile)
+    elif base.op == "gather":
+      gather = base.params.get("gather")
+      if not isinstance(gather, ExecGatherDesc):
+        raise ValueError("gather descriptor is missing")
+      if gather.cache_target_bytes > self.cfg.l1_cache_capacity_bytes:
+        raise ValueError("gather cache_target_bytes exceeds L1 cache capacity")
+      if gather.l1_mshr_hint > self.cfg.l1_mshr_entries:
+        raise ValueError("gather l1_mshr_hint exceeds L1 MSHR capacity")
+      source = None
+      indices = None
+      destination = None
+      if tile.runtime_enabled:
+        if ctx.memory is None:
+          raise ValueError("gather context memory is missing")
+        source = self._resolve_tile_view(gather.source, ctx.memory, tile)
+        indices = self._resolve_tile_view(gather.indices, ctx.memory, tile)
+        destination = self._resolve_tile_view(gather.destination, ctx.memory, tile)
+      from .memory.allocator import TaskBufferOwner
+      task = ctx.task_identity
+      grid = task.grid if task is not None else None
+      owner = (
+        destination.handle.owner
+        if destination is not None
+        else TaskBufferOwner(
+          grid.context_name if grid is not None else "ctx",
+          grid.launch_generation if grid is not None else 0,
+          ctx.role_event_id or "ev",
+          task.task_id if task is not None else 0,
+          self.tile_id,
+          ctx.ctx_id,
+          gather.destination.base,
+        )
+      )
+      launch_params = {
+        "source": source,
+        "indices": indices,
+        "destination": destination,
+        "issuer": owner,
+        "namespace": (
+          grid.launch_generation if grid is not None else 0,
+          grid.dispatch_ordinal if grid is not None else 0,
+          task.task_id if task is not None else 0,
+          ctx.ctx_id,
+          entry.event_ref.local_name,
+        ),
+      }
     desc.params = {
       **desc.params,
       "tile_id": self.tile_id,
@@ -823,7 +897,11 @@ class TileUCE:
       "program": ctx.program.name,
       "local_event_id": entry.event_ref.local_name,
     }
-    return _ResolvedEngineLaunch(desc=desc, transaction=transaction)
+    return _ResolvedEngineLaunch(
+      desc=desc,
+      transaction=transaction,
+      launch_params=launch_params,
+    )
 
   def _build_tile_transaction(self, ctx: _UCEContext, transfer,
                                entry: _EngineQueueEntry,
@@ -842,8 +920,9 @@ class TileUCE:
               f"t{logical_task}:{entry.event_ref.local_name}")
     src = None
     dst = None
-    if ctx.memory is not None:
-      # resolve views from context memory (runtime/full_memory)
+    if tile.runtime_enabled:
+      if ctx.memory is None:
+        raise ValueError("tile context memory is missing")
       src = self._resolve_tile_view(transfer.src, ctx.memory, tile)
       dst = self._resolve_tile_view(transfer.dst, ctx.memory, tile)
     from .memory.allocator import TaskBufferOwner
@@ -857,47 +936,54 @@ class TileUCE:
 
   @staticmethod
   def _resolve_tile_view(view, memory, tile):
-    """Resolve a tile-local view through its owning allocator.
-
-    The allocator validates handle liveness/generation and clips the
-    requested byte range into real bank segments.  Bounds or
-    use-after-release failures propagate as ``MemoryInvariantError`` to
-    the UCE fault path.
-    """
+    """Resolve one lowered formal/L1 view through its live allocator."""
+    from .memory.allocator import MemoryInvariantError
     from .memory.transfer import ResolvedMemoryView
+
+    if view.space == "global":
+      if not view.base.startswith("formal:"):
+        raise MemoryInvariantError("global view has invalid formal base")
+      formal_index = int(view.base.removeprefix("formal:"))
+      resolved = memory.global_formal_views.get(formal_index)
+      if not isinstance(resolved, ResolvedMemoryView):
+        raise MemoryInvariantError("missing global actual for tile formal")
+      if view.bytes > resolved.size_bytes:
+        raise MemoryInvariantError("memory view out of bounds")
+      return resolved
+
     handle = None
     resolver = None
     if view.space == "l2":
       if not view.base.startswith("formal:"):
-        return None
-      idx = int(view.base.removeprefix("formal:")) - 1
-      if idx < 0 or idx >= len(memory.l2_formal_handles):
-        return None
-      handle = memory.l2_formal_handles[idx]
+        raise MemoryInvariantError("l2 view has invalid formal base")
+      formal_index = int(view.base.removeprefix("formal:"))
+      handle = memory.l2_formal_handles.get(formal_index)
       resolver = memory.l2_resolver
     elif view.space == "l1":
       handle = memory.l1_handles.get(view.base)
       resolver = tile.l1_allocator
     else:
-      return None
+      raise MemoryInvariantError(f"unsupported tile memory space '{view.space}'")
     if handle is None or resolver is None:
-      return None
-    # Compute byte offset after applying logical-task addressing.
+      raise MemoryInvariantError("missing or stale tile memory handle")
     offsets = list(view.offsets)
     if view.task_dim is not None and view.task_dim < len(offsets):
       offsets[view.task_dim] += memory.task_identity.task_id
     element_offset = 0
     for i, off in enumerate(offsets):
       stride = 1
-      for d in view.backing_dims[i + 1:]:
-        stride *= d
+      for dimension in view.backing_dims[i + 1:]:
+        stride *= dimension
       element_offset += off * stride
     offset_bytes = element_offset * view.element_bytes
-    segments = resolver.resolve_segments(
-      handle, offset_bytes, view.bytes)
+    segments = resolver.resolve_segments(handle, offset_bytes, view.bytes)
     return ResolvedMemoryView(
-      handle=handle, offset_bytes=offset_bytes, size_bytes=view.bytes,
-      address=segments[0].address, segments=segments)
+      handle=handle,
+      offset_bytes=offset_bytes,
+      size_bytes=view.bytes,
+      address=segments[0].address,
+      segments=segments,
+    )
 
   def _complete_context(self, ctx: _UCEContext, cycle: int) -> None:
     if ctx.state in (_UCEContextState.DONE, _UCEContextState.FAULT):
@@ -912,6 +998,7 @@ class TileUCE:
         status="done",
       ))
     self._set_context_state(ctx, _UCEContextState.DONE, cycle)
+    self._close_context_trace(ctx, cycle)
 
   def _fault_context(self, ctx: _UCEContext, reason: str, cycle: int) -> None:
     if ctx.state == _UCEContextState.FAULT:
@@ -930,6 +1017,7 @@ class TileUCE:
         reason=reason,
       ))
     self._set_context_state(ctx, _UCEContextState.FAULT, cycle)
+    self._close_context_trace(ctx, cycle)
 
   def _drop_event_ref(self, ref: _UCEEventRef) -> None:
     self._local_event_owner.pop(ref.runtime_id, None)
@@ -1002,6 +1090,12 @@ class TileUCE:
     if self.tracer is None:
       return
     for ctx in self.contexts:
+      # terminal/empty contexts are not traced as state slices; the
+      # slice is closed at completion (DONE/FAULT) and never opened for
+      # idle EMPTY contexts, so _ensure_context_traces must not re-open.
+      if ctx.state in (_UCEContextState.EMPTY, _UCEContextState.DONE,
+                        _UCEContextState.FAULT):
+        continue
       state_name = self._state_label(ctx)
       if ctx.trace_slice_name != state_name:
         self._trace_context_state(ctx, state_name, cycle)
@@ -1025,10 +1119,12 @@ class TileUCE:
   def _sample_context_counters(self, cycle: int) -> None:
     if self.tracer is None:
       return
-    self.tracer.counter(f"Tile{self.tile_id}", "active_context_count", cycle,
-                        self.active_context_count(), "contexts")
-    self.tracer.counter(f"Tile{self.tile_id}", "ready_context_count", cycle,
-                        self.ready_context_count(), "contexts")
+    self.tracer.counter_if_changed(
+      f"Tile{self.tile_id}", "active_context_count", cycle,
+      self.active_context_count(), "contexts", thread="UCE")
+    self.tracer.counter_if_changed(
+      f"Tile{self.tile_id}", "ready_context_count", cycle,
+      self.ready_context_count(), "contexts", thread="UCE")
 
 
 class ComputeTile:
@@ -1047,10 +1143,14 @@ class ComputeTile:
                runtime_enabled: bool = False,
                memory_enabled: bool = False,
                context_count: int = 1,
-               transfer_manager=None):
+               transfer_manager=None,
+               l2_cache=None,
+               l2_mshr=None,
+               memory_trace=None):
     self.tile_id = tile_id
     self.cfg = cfg
     self.tracer = tracer
+    self.memory_trace = memory_trace
     self.runtime_enabled = runtime_enabled
     self.memory_enabled = memory_enabled
     self.uce = TileUCE(tile_id,
@@ -1060,8 +1160,21 @@ class ComputeTile:
                        runtime_enabled=runtime_enabled)
     self.boa = BOAEngine(cfg, tile_id, tracer)
     self.evu = EVUEngine(cfg, tile_id, tracer)
-    self.mfe = MFEEngine(cfg, tile_id, tracer,
-                         transfer_manager=transfer_manager)
+    from .memory import DeterministicLRUCache, MshrTable
+    self.l1_cache = DeterministicLRUCache(
+      cfg.l1_cache_capacity_bytes, cfg.cache_line_bytes)
+    self.l1_mshr = MshrTable(cfg.l1_mshr_entries)
+    self.mfe = MFEEngine(
+      cfg,
+      tile_id,
+      tracer,
+      transfer_manager=transfer_manager,
+      l1_cache=self.l1_cache,
+      l1_mshr=self.l1_mshr,
+      l2_cache=l2_cache,
+      l2_mshr=l2_mshr,
+      memory_trace=memory_trace,
+    )
     self.use = USEEngine(cfg, tile_id, tracer)
     self.streams: dict[int, StreamQueue] = {}
     self.pmu = PMUCounter()
@@ -1069,7 +1182,8 @@ class ComputeTile:
     from .memory.allocator import BankedFreeExtentAllocator
     self.l1_allocator = BankedFreeExtentAllocator(
       memory_space="l1", capacity_bytes=cfg.tile_l1_bytes,
-      banks=cfg.tile_l1_banks)
+      banks=cfg.tile_l1_banks,
+      trace=memory_trace, trace_tile_id=tile_id)
     self.l1_frames: list[SlotFrame] = [
       SlotFrame(l1_bytes=cfg.tile_l1_bytes) for _ in range(context_count)
     ]
@@ -1101,10 +1215,15 @@ class ComputeTile:
   def available_context_id(self, preferred: int | None = None) -> int | None:
     return self.uce.available_context_id(preferred)
 
-  def rollback_program(self, context_id: int) -> None:
+  def rollback_program(self, context_id: int, cycle: int = 0) -> None:
     self.uce.rollback_context(context_id)
-    self.l1_frames[context_id].release()
-
+    frame = self.l1_frames[context_id]
+    frame.release()
+    if self.memory_trace is not None and self.tracer is not None:
+      self.tracer.instant(
+        f"Tile{self.tile_id}", "Lifecycle", "frame_release", cycle,
+        {"ctx_id": context_id, "generation": frame.generation,
+         "tile_id": self.tile_id, "reason": "rollback"})
   def drain_context_terminals(self) -> list[_UCETerminalEvent]:
     return self.uce.drain_terminal_events()
   def step(self, cycle: int,
@@ -1153,6 +1272,7 @@ class ComputeTile:
       "evu_state": self.evu.state.name,
       "mfe_state": self.mfe.state.name,
       "use_state": self.use.state.name,
+      "gather_active_jobs": len(self.mfe._gather_jobs),
       "uce": self.uce.snapshot(),
       "l1_frames": [f.snapshot() for f in self.l1_frames],
     }

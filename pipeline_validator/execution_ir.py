@@ -25,6 +25,7 @@ class ExecTileOp(Enum):
   LAUNCH_EVU = "launch.evu"
   LAUNCH_MFE = "launch.mfe"
   LAUNCH_USE = "launch.use"
+  LAUNCH_GATHER = "launch.gather"
   WAIT = "wait"
   WAITALL = "waitall"
   FENCE = "fence"
@@ -40,6 +41,12 @@ class ExecTileOp(Enum):
   PROF_END = "prof.end"
   TRAP = "trap"
   SIGNAL_PHASE = "signal.phase"
+
+
+class ExecGatherOutcome(Enum):
+  L1_HIT = "L1_HIT"
+  L2_HIT = "L2_HIT"
+  HBM_MISS = "HBM_MISS"
 
 
 class ExecGroupActionOp(Enum):
@@ -116,6 +123,27 @@ class ExecMemoryView:
   bytes: int
   task_dim: int | None = None
 
+
+@dataclass(frozen=True)
+class ExecProfiledAccess:
+  request_id: str
+  outcome: ExecGatherOutcome
+  bytes: int
+  line_token: str | None
+  merge_group: str | None
+
+
+@dataclass(frozen=True)
+class ExecGatherDesc:
+  source: ExecMemoryView
+  indices: ExecMemoryView
+  destination: ExecMemoryView
+  result_bytes: int
+  cache_min_bytes: int
+  cache_target_bytes: int
+  l1_mshr_hint: int
+  accesses: tuple[ExecProfiledAccess, ...]
+
 @dataclass(frozen=True)
 class ExecTransfer:
   """One DMA or MFE transfer with explicit src/dst views."""
@@ -153,7 +181,7 @@ class ExecL1Buffer:
 class ExecTileFormal:
   """Tile program formal parameter descriptor."""
 
-  space: str  # "task" | "l2"
+  space: str  # "task" | "global" | "l2"
   dims: tuple[int, ...]  # task is ()
   dtype: str  # task is ""
 
@@ -298,6 +326,7 @@ class ExecTileRoleBinding:
   context_id: int | None = None
   task_domain: ExecTaskDomain | None = None
   actuals: tuple[str, ...] = ()
+  global_actuals: tuple[ExecMemoryView, ...] = ()
 
 @dataclass
 class ExecTileGroupTask:

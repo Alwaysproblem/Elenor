@@ -292,25 +292,50 @@ def _verify_context(context: NestContextOp, programs: dict[str, TileProgramDefOp
       if prog_sym not in programs:
         raise VerifyException(f"dispatch references unknown tile program '@{prog_sym}'")
       prog_def = programs[prog_sym]
-      # Rule 5: dispatch↔tile.program binding
-      l2_formals = list(prog_def.body.block.args[1:])
+      # Rule 5: dispatch↔tile.program binding.  Program data formals are
+      # zero or more globals followed by zero or more L2 buffers.
+      data_formals = list(enumerate(prog_def.body.block.args[1:], start=1))
+      global_formals = [
+        (formal_pos, formal)
+        for formal_pos, formal in data_formals
+        if isinstance(formal.type, NestGlobalView)
+      ]
+      l2_formals = [
+        (formal_pos, formal)
+        for formal_pos, formal in data_formals
+        if isinstance(formal.type, NestBuffer)
+      ]
+      globals_list = list(op.global_views)
       ins_list = list(op.ins)
       outs_list = list(op.outs)
+      if len(globals_list) != len(global_formals):
+        raise VerifyException(
+          f"dispatch '@{prog_sym}' passes {len(globals_list)} global actuals"
+          f" but tile.program declares {len(global_formals)} global formals"
+        )
+      for i, (actual, (_, formal)) in enumerate(zip(globals_list, global_formals)):
+        if (
+          not isinstance(actual.type, NestGlobalView)
+          or _shape_key(actual.type) != _shape_key(formal.type)
+        ):
+          raise VerifyException(
+            f"dispatch global actual {i} type does not match tile.program '@{prog_sym}' global formal {i}"
+          )
       total = len(ins_list) + len(outs_list)
       if len(ins_list) != len(l2_formals) or len(outs_list) != len(l2_formals):
         raise VerifyException(
-          f"dispatch '@{prog_sym}' passes {total} actuals"
+          f"dispatch '@{prog_sym}' passes {total} l2 actuals"
           f" but tile.program declares {len(l2_formals)} l2 formals"
         )
-      for i, (actual, formal) in enumerate(zip(ins_list, l2_formals)):
+      for i, (actual, (_, formal)) in enumerate(zip(ins_list, l2_formals)):
         if not isinstance(actual.type, NestBuffer) or _shape_key(actual.type) != _shape_key(formal.type):
           raise VerifyException(
-            f"dispatch actual {i} type does not match tile.program '@{prog_sym}' formal {i}"
+            f"dispatch input actual {i} type does not match tile.program '@{prog_sym}' l2 formal {i}"
           )
-      for i, (actual, formal) in enumerate(zip(outs_list, l2_formals)):
+      for i, (actual, (_, formal)) in enumerate(zip(outs_list, l2_formals)):
         if not isinstance(actual.type, NestBuffer) or _shape_key(actual.type) != _shape_key(formal.type):
           raise VerifyException(
-            f"dispatch actual {i} type does not match tile.program '@{prog_sym}' formal {i}"
+            f"dispatch output actual {i} type does not match tile.program '@{prog_sym}' l2 formal {i}"
           )
       # Validate 1:1 logical-task-to-tile mapping
       task_op = cast(NestTaskRangeOp, op.tasks.owner)
@@ -322,9 +347,9 @@ def _verify_context(context: NestContextOp, programs: dict[str, TileProgramDefOp
         )
       # Rule 7: tile.subview bounds at dispatch checkpoint
       to_task = int(task_op.to_task.value.data)
-      for i, formal in enumerate(l2_formals):
+      for i, (formal_pos, formal) in enumerate(l2_formals):
         parent = _int_list(_shape_type(formal.type).dims)
-        for sv in _program_subviews_of_formal(prog_def, i + 1):
+        for sv in _program_subviews_of_formal(prog_def, formal_pos):
           offsets = _int_list(sv.offsets)
           sizes = _int_list(sv.sizes)
           td = None if sv.task_dim is None else int(sv.task_dim.value.data)
@@ -522,8 +547,11 @@ def _verify_program(prog: TileProgramDefOp) -> None:
     TileAwaitOp,
     TileBoaOp,
     TileEvuOp,
+    TileGatherOp,
     TileLoadOp,
     TilePowOp,
+    TileProfiledAccessOp,
+    TileReturnOp,
     TileSignalOp,
     TileStoreOp,
   )
@@ -532,9 +560,21 @@ def _verify_program(prog: TileProgramDefOp) -> None:
   args = list(block.args)
   if not args or not isinstance(args[0].type, NestTask):
     raise VerifyException(f"tile.program '@{prog.sym_name.data}' first formal must be !nest.task")
+  seen_l2_formal = False
   for i, arg in enumerate(args[1:], start=1):
-    if not isinstance(arg.type, NestBuffer):
-      raise VerifyException(f"tile.program '@{prog.sym_name.data}' formal {i} must be !nest.l2_buffer")
+    if isinstance(arg.type, NestGlobalView):
+      if seen_l2_formal:
+        raise VerifyException(
+          f"tile.program '@{prog.sym_name.data}' global formal {i} may not follow an l2 formal"
+        )
+      continue
+    if isinstance(arg.type, NestBuffer):
+      seen_l2_formal = True
+      continue
+    raise VerifyException(
+      f"tile.program '@{prog.sym_name.data}' formal {i}"
+      " must be !nest.global_view or !nest.l2_buffer"
+    )
 
   body = _body_ops(prog)
   seen_events: set[str] = set()
@@ -542,9 +582,10 @@ def _verify_program(prog: TileProgramDefOp) -> None:
 
   for op in body:
     if isinstance(op, TileSubviewOp):
-      # Rule 10: src must be a tile.program L2 formal (not task)
+      # tile.subview remains L2-only; gather is the only tile-side global
+      # consumer in this PR.
       idx = _formal_index(op.src, block)
-      if idx is None or idx == 0:
+      if idx is None or idx == 0 or not isinstance(args[idx].type, NestBuffer):
         raise VerifyException("tile.subview source must be a tile.program l2 formal")
       # task operand and task_dim must be used together
       if bool(op.task) != (op.task_dim is not None):
@@ -572,7 +613,7 @@ def _verify_program(prog: TileProgramDefOp) -> None:
         raise VerifyException("tile.subview result type must match sizes and source dtype")
       continue
 
-    if isinstance(op, (TileLoadOp, TileStoreOp, TilePowOp, TileEvuOp, TileBoaOp)):
+    if isinstance(op, (TileLoadOp, TileStoreOp, TileGatherOp, TilePowOp, TileEvuOp, TileBoaOp)):
       if not isinstance(op.result.type, TileEvent):
         raise VerifyException(f"expected tile.event result type in '{op.name}'")
       tag = op.result.type.tag.data
@@ -591,6 +632,85 @@ def _verify_program(prog: TileProgramDefOp) -> None:
         dst_bytes = _shape_bytes(op.dst.type)
         if src_bytes != dst_bytes:
           raise VerifyException(f"transfer '{op.name}' src bytes ({src_bytes}) != dst bytes ({dst_bytes})")
+      elif isinstance(op, TileGatherOp):
+        source_index = _formal_index(op.source, block)
+        if source_index is None or not isinstance(args[source_index].type, NestGlobalView):
+          raise VerifyException("gather source must be a global formal of the current tile.program")
+        indices_owner = op.indices.owner
+        destination_owner = op.destination.owner
+        if (
+          not isinstance(indices_owner, TileAllocOp)
+          or indices_owner not in body
+          or not isinstance(destination_owner, TileAllocOp)
+          or destination_owner not in body
+        ):
+          raise VerifyException(
+            "gather indices and destination must be tile.alloc results in the current tile.program"
+          )
+        if op.indices is op.destination:
+          raise VerifyException("gather indices and destination must be different tile.alloc results")
+
+        accesses = list(op.profile.block.ops)
+        if not accesses:
+          raise VerifyException("gather profile must contain at least one tile.profiled.access")
+        if any(not isinstance(access, TileProfiledAccessOp) for access in accesses):
+          raise VerifyException("gather profile may contain only tile.profiled.access operations")
+        profiled_accesses = [
+          cast(TileProfiledAccessOp, access)
+          for access in accesses
+        ]
+
+        result_bytes = int(op.result_bytes.value.data)
+        cache_min_bytes = int(op.cache_min_bytes.value.data)
+        cache_target_bytes = int(op.cache_target_bytes.value.data)
+        l1_mshr_hint = int(op.l1_mshr_hint.value.data)
+        if result_bytes <= 0:
+          raise VerifyException("gather result_bytes must be > 0")
+        if result_bytes > _shape_bytes(op.destination.type):
+          raise VerifyException("gather result_bytes exceeds destination extent")
+        if cache_min_bytes <= 0:
+          raise VerifyException("gather cache_min_bytes must be > 0")
+        if cache_target_bytes < cache_min_bytes:
+          raise VerifyException("gather cache_target_bytes must be >= cache_min_bytes")
+        if l1_mshr_hint <= 0:
+          raise VerifyException("gather l1_mshr_hint must be > 0")
+
+        request_ids: set[str] = set()
+        merge_contracts: dict[str, tuple[str, int]] = {}
+        profiled_bytes = 0
+        for access in profiled_accesses:
+          request_id = access.request_id.data
+          outcome = access.outcome.data
+          access_bytes = int(access.bytes.value.data)
+          line_token = None if access.line_token is None else access.line_token.data
+          merge_group = None if access.merge_group is None else access.merge_group.data
+          if not request_id.strip():
+            raise VerifyException("gather request_id must be non-empty")
+          if request_id in request_ids:
+            raise VerifyException(f"duplicate gather request_id '{request_id}'")
+          request_ids.add(request_id)
+          if access_bytes <= 0:
+            raise VerifyException(f"gather request '{request_id}' bytes must be > 0")
+          if access_bytes > _shape_bytes(op.source.type):
+            raise VerifyException(f"gather request '{request_id}' exceeds source extent")
+          if outcome not in ("L1_HIT", "L2_HIT", "HBM_MISS"):
+            raise VerifyException(f"unknown gather outcome '{outcome}'")
+          if merge_group:
+            if outcome != "HBM_MISS":
+              raise VerifyException("gather merge_group is only valid for HBM_MISS")
+            if not line_token:
+              raise VerifyException("gather merge_group requires a non-empty line_token")
+            contract = (line_token, access_bytes)
+            previous = merge_contracts.setdefault(merge_group, contract)
+            if previous != contract:
+              raise VerifyException(
+                f"gather merge_group '{merge_group}' must use one line_token and byte size"
+              )
+          profiled_bytes += access_bytes
+        if profiled_bytes != result_bytes:
+          raise VerifyException(
+            f"gather profile bytes ({profiled_bytes}) must equal result_bytes ({result_bytes})"
+          )
       continue
 
     if isinstance(op, TileAwaitOp):
@@ -611,6 +731,11 @@ def _verify_program(prog: TileProgramDefOp) -> None:
 
     if isinstance(op, TileAllocOp):
       continue
+
+    if isinstance(op, TileReturnOp):
+      continue
+
+    raise VerifyException(f"unexpected tile program body op '{op.name}'")
 
 
 def _body_ops(op) -> list:

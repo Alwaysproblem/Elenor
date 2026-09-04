@@ -12,6 +12,7 @@ region registry.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .allocator import (
   AllocationHandle,
@@ -21,6 +22,9 @@ from .allocator import (
   MemoryOwner,
 )
 
+if TYPE_CHECKING:
+  from ..trace import MemoryTrace
+
 
 @dataclass
 class HBMRegion:
@@ -29,6 +33,7 @@ class HBMRegion:
   size_bytes: int = 16 * 1024 * 1024 * 1024  # 16 GB default
   bandwidth_gbs: float = 819.2
   outstanding_limit: int = 32
+  trace: MemoryTrace | None = None
 
   def __post_init__(self) -> None:
     self._bindings: dict[str, AllocationHandle] = {}
@@ -70,6 +75,9 @@ class HBMRegion:
       allocate_cycle=cycle,
     )
     self._bindings[name] = handle
+    if self.trace is not None:
+      self.trace.hbm_bind(binding, handle, cycle)
+      self.trace.hbm(self.snapshot(), cycle)
     return handle
 
   def get_handle(self, name: str) -> AllocationHandle | None:
@@ -111,8 +119,11 @@ class HBMRegion:
     if owner is not None and live.owner != owner:
       raise MemoryInvariantError("wrong-owner release")
 
-  def unbind_external(self, name: str) -> None:
+  def unbind_external(self, name: str, cycle: int = 0) -> None:
     self._bindings.pop(name, None)
+    if self.trace is not None:
+      self.trace.hbm_unbind(name, cycle)
+      self.trace.hbm(self.snapshot(), cycle)
 
   def used_bytes(self) -> int:
     return sum(h.size_bytes for h in self._bindings.values())

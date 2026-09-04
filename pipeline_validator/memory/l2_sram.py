@@ -10,6 +10,7 @@ segments.  Capacity faults surface as ``AdmissionFailure`` from
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .allocator import (
   AdmissionFailure,
@@ -21,6 +22,8 @@ from .allocator import (
   MemoryOwner,
 )
 
+if TYPE_CHECKING:
+  from ..trace import MemoryTrace
 
 @dataclass
 class L2SRAM:
@@ -28,12 +31,14 @@ class L2SRAM:
   capacity_bytes: int = 8 * 1024 * 1024
   banks: int = 16
   bank_bandwidth_gbs: float = 12.8
+  trace: MemoryTrace | None = None
 
   def __post_init__(self) -> None:
     self._allocator = BankedFreeExtentAllocator(
       memory_space="l2",
       capacity_bytes=self.capacity_bytes,
       banks=self.banks,
+      trace=self.trace,
     )
 
   @property
