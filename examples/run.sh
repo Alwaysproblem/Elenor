@@ -26,6 +26,9 @@ Runnable workloads:
   matmul-gather-add              workloads/matmul_gather_add.mlir
   gather-matmul-4tiles-2contexts
                                  workloads/gather_matmul_4tiles_2contexts.mlir
+  matmul-2048x512-boa256          workloads/matmul_2048x512x64_boa256x256x32.mlir
+                                 (2048x512x64 matmul, BOA 256x256x32, K tile 内
+                                 展开, 4 context x placement=15 x 4 task)
   matmul-gather-add-4tiles-2contexts
                                  workloads/matmul_gather_add_4tiles_2contexts.mlir
   pow-dual-context               workloads/pow_dual_context.mlir
@@ -104,6 +107,20 @@ case "$name" in
       --input-binding rhs1=0x170000:65536:r \
       --input-binding indices1=0x190000:256:r \
       --input-binding output1=0xD00000:131072:w \
+      --sim-override fidelity=full_memory \
+      --max-cycles 500000 \
+      "$@"
+    ;;
+  matmul-2048x512-boa256)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/matmul_2048x512x64_boa256x256x32.mlir" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --context-mode 4 \
+      --device-context-mode 4 \
+      --input-binding A=0x100000:262144:r \
+      --input-binding B=0x150000:65536:r \
+      --input-binding C=0x200000:2097152:w \
       --sim-override fidelity=full_memory \
       --max-cycles 500000 \
       "$@"
