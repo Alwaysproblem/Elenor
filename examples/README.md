@@ -36,16 +36,17 @@ input bindings、context 数量、memory fidelity 和必要的硬件 override。
 
 ## 可运行 workload
 
-| 名称                                 | 编辑文件                                            | 主要路径                                                    |
-| ------------------------------------ | --------------------------------------------------- | ----------------------------------------------------------- |
-| `gather`                             | `workloads/gather_profiled.mlir`                    | deterministic profiled Gather                               |
-| `gather-matmul`                      | `workloads/gather_matmul.mlir`                      | Gather → BOA Matmul                                         |
-| `matmul-gather-add`                  | `workloads/matmul_gather_add.mlir`                  | BOA Matmul → Gather → EVU Add                               |
-| `gather-matmul-4tiles-2contexts`     | `workloads/gather_matmul_4tiles_2contexts.mlir`     | `placement=15`，4 tiles × 2 contexts，Gather → Matmul       |
-| `matmul-gather-add-4tiles-2contexts` | `workloads/matmul_gather_add_4tiles_2contexts.mlir` | `placement=15`，4 tiles × 2 contexts，Matmul → Gather → Add |
-| `pow-dual-context`                   | `workloads/pow_dual_context.mlir`                   | 两个同 shape context 并发                                   |
-| `pow-dual-context-mixed-shapes`      | `workloads/pow_dual_context_mixed_shapes.mlir`      | 两个不同 shape context 并发                                 |
-| `pow-sequential-contexts`            | `workloads/pow_sequential_contexts.mlir`            | 两个 context 串行提交                                       |
+| 名称                                 | 编辑文件                                            | 主要路径                                                     |
+| ------------------------------------ | --------------------------------------------------- | ------------------------------------------------------------ |
+| `gather`                             | `workloads/gather_profiled.mlir`                    | deterministic profiled Gather                                |
+| `gather-matmul`                      | `workloads/gather_matmul.mlir`                      | Gather → BOA Matmul                                          |
+| `matmul-gather-add`                  | `workloads/matmul_gather_add.mlir`                  | BOA Matmul → Gather → EVU Add                                |
+| `gather-matmul-4tiles-2contexts`     | `workloads/gather_matmul_4tiles_2contexts.mlir`     | `placement=15`，4 tiles × 2 contexts，Gather → Matmul        |
+| `matmul-gather-add-4tiles-2contexts` | `workloads/matmul_gather_add_4tiles_2contexts.mlir` | `placement=15`，4 tiles × 2 contexts，Matmul → Gather → Add  |
+| `pow-dual-context`                   | `workloads/pow_dual_context.mlir`                   | 两个同 shape context 并发                                    |
+| `pow-dual-context-mixed-shapes`      | `workloads/pow_dual_context_mixed_shapes.mlir`      | 两个不同 shape context 并发                                  |
+| `pow-sequential-contexts`            | `workloads/pow_sequential_contexts.mlir`            | 两个 context 串行提交                                        |
+| `matmul-2048x512-boa256`             | `workloads/matmul_2048x512x64_boa256x256x32.mlir`   | 2048x512x64 matmul，BOA 256x256x32，K tile 内展开，4 context |
 
 多 context trace：
 
@@ -61,6 +62,26 @@ bash examples/run.sh matmul-gather-add-4tiles-2contexts \
 
 两份模型都在 `nexus.program` 中连续 submit 两个 context，没有中间 await；每个 context
 使用 `placement = 15` 和 `task.range 0..4`，分别固定到 UCE context 0/1。
+
+`matmul-2048x512-boa256` 展示 2048x512x64 bf16 matmul 按 BOA shape 256x256x32 的切分方式
+（placement 全 15 ⇒ 每 dispatch 4 task ⇒ 4 context x 4 task = 16 个输出块）：
+
+- **K tiling 在一个 tile 内完成**：K=64 展开为 2 个静态 `tile.boa.async`（k=32），
+  第二个带 `accumulate`，无任何循环；两个 K-step 的输入 load 一次性发射，
+  MFE 与 BOA 流水重叠。BOA 描述符严格保持 256x256x32。
+- **M/N tiling 在不同 context 下完成**：context 网格 2x2（`@mm_m0n0`..`@mm_m1n1`，
+  m_sup/n_sup 超块），每个 context 的 `task.range 0..4` 沿 M 把超块切成 4x256 行。
+- **全部 `placement = 15`**：每个 context 的 4-task grid 铺满全组 4 tiles；
+  device slot pin（`nest.context context = 0..3`）与 UCE context pin
+  （dispatch `context = 0..3`）一一对应，每 tile 用 4 个 UCE context 分别承载
+  4 个 slot 的 task（`--context-mode 4`，超出 V1.x 每 tile 2 context 上限，
+  作为 what-if 探索）。
+- **block-packed 全局布局**：`A[2,4,2,256,32]`/`B[2,2,32,256]`/`C[2,2,4,256,256]`
+  把 tiling 维全放前导维，所有 subview/DMA 都是连续 row-major 区间。
+
+```bash
+bash examples/run.sh matmul-2048x512-boa256 --trace-json /tmp/matmul-boa256.json --json
+```
 
 所有 Gather runnable example 都包含完整输出路径：
 
