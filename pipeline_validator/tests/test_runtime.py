@@ -16,6 +16,7 @@ These tests exercise the runtime / full_memory fidelity modes:
 from __future__ import annotations
 
 import json
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,7 @@ from pipeline_validator.dialects.elenor import (
   NexusSubmitContextOp,
   TileAllocOp,
   TileAwaitOp,
+  TileBoaOp,
   TileEvuOp,
   TileGatherOp,
   TileLoadOp,
@@ -73,7 +75,7 @@ from pipeline_validator.memory import L2SRAM, NoCRouter, PayloadTracker
 from pipeline_validator.runtime import EventStatus, EventTable, FaultCode, FaultRing
 from pipeline_validator.runtime.fault_ring import FaultDomain, FaultRecord
 from pipeline_validator.runtime.reset_domain import ResetDomain, ResetRequest, ResetState
-from pipeline_validator.simulator import Simulator
+from pipeline_validator.simulator import SimResult, Simulator
 from pipeline_validator.tile import TileUCE
 from pipeline_validator.tile_group import L2AdmissionStatus, TileGroup
 from pipeline_validator.workload_builders import make_pow_tile_program
@@ -104,6 +106,21 @@ MODEL_BINDINGS = {
 GATHER_BINDINGS = {
   "table": GlobalBinding("table", 0x400000, 4096, "r"),
 }
+
+
+def assert_uce_instructions_issue_once(result: SimResult) -> list[dict]:
+  assert result.tracer is not None
+  events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
+  issues = [event for event in events if event.get("name") == "uce_issue"]
+  issue_counts = Counter(
+    (event["args"]["ctx_id"], event["args"]["pc"]) for event in issues
+  )
+  assert issue_counts
+  assert set(issue_counts.values()) == {1}
+  assert any(
+    event.get("name", "").startswith("WAIT_ENGINE_QUEUE:") for event in events
+  )
+  return issues
 
 
 def make_gather_module(
@@ -229,6 +246,80 @@ def make_short_evu_program(name: str = "ctx_short_evu") -> TileProgramDefOp:
   evu = TileEvuOp(op_name="relu", evu_ops=16, tag="e_evu")
   prog.body.block.add_ops([evu, TileAwaitOp([evu.result]), TileReturnOp()])
   return prog
+
+
+def make_boa_program(name: str) -> TileProgramDefOp:
+  prog = TileProgramDefOp(name, [], arg_types=[NestTask()], arg_names=["task"])
+  boa = TileBoaOp(
+    op_name="matmul",
+    m=256,
+    n=256,
+    k=256,
+    boa_ops=33554432,
+    tag="e_boa",
+  )
+  prog.body.block.add_ops([boa, TileAwaitOp([boa.result]), TileReturnOp()])
+  return prog
+
+
+def make_held_mfe_launch_module() -> ModuleOp:
+  dims = [1, 64, 64]
+  prog = TileProgramDefOp(
+    "held_mfe_launch",
+    [],
+    arg_types=[NestTask(), NestBuffer.of(dims, "bf16")],
+    arg_names=["task", "l2_buf"],
+  )
+  task_arg, l2_arg = prog.body.block.args
+  loads = []
+  for i in range(6):
+    view = TileSubviewOp(
+      l2_arg,
+      None,
+      None,
+      [0, 0, 0],
+      dims,
+      [1, 1, 1],
+      NestL2View.of(dims, "bf16"),
+    )
+    l1 = TileAllocOp(dims[1:], "bf16")
+    load = TileLoadOp(view.result, l1.result, f"e_load{i}")
+    prog.body.block.add_ops([view, l1, load])
+    loads.append(load)
+  prog.body.block.add_ops(
+    [
+      TileAwaitOp([load.result for load in loads]),
+      TileSignalOp("input_released", task_arg),
+      TileReturnOp(),
+    ]
+  )
+
+  tasks = NestTaskRangeOp(0, 1)
+  buffer = NestAllocOp("held_l2_buf", "in", dims, "bf16")
+  dispatch = NestDispatchOp(
+    "held_mfe_launch",
+    tasks.result,
+    [],
+    [buffer.result],
+    [buffer.result],
+    "held_mfe_done",
+    "held_mfe_input_released",
+    "",
+    signal_policy={"input_released": "all_tasks"},
+  )
+  context = NestContextOp(
+    "held_mfe_context",
+    [
+      buffer,
+      tasks,
+      dispatch,
+      NestReleaseOp(buffer.result, depends_on=[dispatch.input_released]),
+      NestAwaitOp([dispatch.grid_done]),
+      NestReturnOp(),
+    ],
+    placement=1,
+  )
+  return ModuleOp([prog, context])
 
 
 def make_same_tile_roles_task(role_count: int, pins: list[int | None] | None = None) -> ModuleOp:
@@ -1386,6 +1477,69 @@ class TestFidelityModes:
     events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
     peak = max(e["args"]["active_context_count"] for e in events if e.get("name") == "active_context_count")
     assert peak == 3
+
+  def test_held_engine_launch_issues_once_and_parks(self):
+    context_count = 8
+    programs = [
+      make_boa_program(f"ctx_held_boa{i}") for i in range(context_count)
+    ]
+    tasks = NestTaskRangeOp(0, 1)
+    dispatches = [
+      NestDispatchOp(
+        program.sym_name.data,
+        tasks.result,
+        [],
+        [],
+        [],
+        f"ev_held_boa{i}",
+        "",
+        "",
+        signal_policy={},
+        context_id=i,
+      )
+      for i, program in enumerate(programs)
+    ]
+    context = NestContextOp(
+      "held_boa_context",
+      [
+        tasks,
+        *dispatches,
+        NestAwaitOp([dispatch.grid_done for dispatch in dispatches]),
+        NestReturnOp(),
+      ],
+      placement=1,
+    )
+    result = Simulator(
+      HardwareConfig(),
+      SimConfig(
+        fidelity="runtime",
+        context_count=context_count,
+        max_cycles=200000,
+      ),
+      enable_tracer=True,
+    ).run(ModuleOp([*programs, context]))
+
+    assert result.completed, result.reason
+    queue_stalls = result.pmu.named_cycles.get("engine_queue_full", 0)
+    assert 0 < queue_stalls <= result.cycles
+    issues = assert_uce_instructions_issue_once(result)
+    assert sum(
+      event["args"]["op"] == ExecTileOp.LAUNCH_BOA.value for event in issues
+    ) == context_count
+
+  def test_held_mfe_launch_issues_once(self):
+    result = Simulator(
+      HardwareConfig(),
+      SimConfig(fidelity="runtime", max_cycles=200000),
+      enable_tracer=True,
+    ).run(make_held_mfe_launch_module())
+
+    assert result.completed, result.reason
+    assert result.pmu.named_cycles.get("engine_queue_full", 0) > 0
+    issues = assert_uce_instructions_issue_once(result)
+    assert sum(
+      event["args"]["op"] == ExecTileOp.LAUNCH_MFE.value for event in issues
+    ) == 6
 
   def test_context_count_bounds(self):
     with pytest.raises(ValueError, match="context_count must be between 1 and 8"):

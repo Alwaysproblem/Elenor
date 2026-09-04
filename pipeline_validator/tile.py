@@ -46,6 +46,7 @@ class _UCEContextState(Enum):
   READY = "ready"
   WAIT_EVENT = "wait_event"
   WAIT_STREAM = "wait_stream"
+  WAIT_ENGINE_QUEUE = "wait_engine_queue"
   DONE = "done"
   FAULT = "fault"
 
@@ -138,6 +139,7 @@ _ACTIVE_CONTEXT_STATES = {
   _UCEContextState.READY,
   _UCEContextState.WAIT_EVENT,
   _UCEContextState.WAIT_STREAM,
+  _UCEContextState.WAIT_ENGINE_QUEUE,
 }
 
 
@@ -277,6 +279,9 @@ class TileUCE:
     if self.faulted:
       self._sample_context_counters(cycle)
       return
+    if self._retry_held_launch_issue(cycle, require_queue_space=True):
+      self._sample_context_counters(cycle)
+      return
 
     selected = self._select_context(cycle)
     if selected is not None:
@@ -285,6 +290,9 @@ class TileUCE:
       return
 
     if self._retry_wait_stream_issue(cycle, tile):
+      self._sample_context_counters(cycle)
+      return
+    if self._retry_held_launch_issue(cycle, require_queue_space=False):
       self._sample_context_counters(cycle)
       return
 
@@ -548,6 +556,18 @@ class TileUCE:
         return idx
     return None
 
+  def _find_held_launch(self, start_ctx: int,
+                        require_queue_space: bool) -> int | None:
+    for offset in range(1, self.context_count + 1):
+      idx = (start_ctx + offset) % self.context_count
+      ctx = self.contexts[idx]
+      if ctx.state != _UCEContextState.WAIT_ENGINE_QUEUE:
+        continue
+      if require_queue_space and not self._held_launch_queue_has_space(ctx):
+        continue
+      return idx
+    return None
+
   def _trace_issue(self, ctx: _UCEContext, ins: ExecTileInst, cycle: int) -> None:
     if self.tracer is None:
       return
@@ -561,6 +581,22 @@ class TileUCE:
       issue_args["event_id"] = ins.dst
     self.tracer.instant(f"Tile{self.tile_id}", f"UCE CTX{ctx.ctx_id}",
                         "uce_issue", cycle, issue_args)
+
+  def _retry_held_launch_issue(self, cycle: int,
+                               require_queue_space: bool) -> bool:
+    candidate_id = self._find_held_launch(
+      self._current_ctx, require_queue_space)
+    if candidate_id is None:
+      return False
+    ctx = self.contexts[candidate_id]
+    if not self._retry_held_launch(ctx, cycle):
+      return True
+    if candidate_id != self._current_ctx:
+      self._switch_context(self._current_ctx, candidate_id, cycle,
+                           reason="held_launch_retry")
+      self._current_ctx = candidate_id
+    self._set_context_state(ctx, _UCEContextState.READY, cycle)
+    return True
 
   def _retry_wait_stream_issue(self, cycle: int, tile: ComputeTile) -> bool:
     current = self.contexts[self._current_ctx]
@@ -578,8 +614,6 @@ class TileUCE:
     ctx = self.contexts[candidate_id]
     if ctx.program is None or ctx.pc >= len(ctx.program.insts):
       return False
-    ins = ctx.program.insts[ctx.pc]
-    self._trace_issue(ctx, ins, cycle)
     if self._retry_wait_stream(ctx, cycle, tile):
       self._set_context_state(ctx, _UCEContextState.READY, cycle)
       return True
@@ -662,16 +696,14 @@ class TileUCE:
           )
       self.pmu.add_event("tile_signal")
       ctx.pc += 1
-    elif op == ExecTileOp.LAUNCH_BOA:
-      self._enqueue_engine_launch(ctx, "BOA", ins, cycle)
-    elif op == ExecTileOp.LAUNCH_EVU:
-      self._enqueue_engine_launch(ctx, "EVU", ins, cycle)
-    elif op == ExecTileOp.LAUNCH_USE:
-      self._enqueue_engine_launch(ctx, "USE", ins, cycle)
-    elif op == ExecTileOp.LAUNCH_MFE:
-      self._enqueue_engine_launch(ctx, self._queue_key_for_launch(ctx, ins), ins, cycle)
-    elif op == ExecTileOp.LAUNCH_GATHER:
-      self._enqueue_engine_launch(ctx, "MFE_GATHER", ins, cycle)
+    elif op in (
+      ExecTileOp.LAUNCH_BOA,
+      ExecTileOp.LAUNCH_EVU,
+      ExecTileOp.LAUNCH_USE,
+      ExecTileOp.LAUNCH_MFE,
+      ExecTileOp.LAUNCH_GATHER,
+    ):
+      self._issue_engine_launch(ctx, self._launch_queue_key(ctx, ins), ins, cycle)
     elif op == ExecTileOp.STREAM_POP:
       if not self._retry_wait_stream(ctx, cycle, tile):
         self.pmu.add(StallReason.STREAM_CREDIT, 1)
@@ -738,6 +770,36 @@ class TileUCE:
       ctx.wait_all = False
       return
     self._set_context_state(ctx, _UCEContextState.WAIT_EVENT, cycle)
+
+  def _launch_queue_key(self, ctx: _UCEContext, ins: ExecTileInst) -> str:
+    if ins.op == ExecTileOp.LAUNCH_BOA:
+      return "BOA"
+    if ins.op == ExecTileOp.LAUNCH_EVU:
+      return "EVU"
+    if ins.op == ExecTileOp.LAUNCH_USE:
+      return "USE"
+    if ins.op == ExecTileOp.LAUNCH_GATHER:
+      return "MFE_GATHER"
+    return self._queue_key_for_launch(ctx, ins)
+
+  def _issue_engine_launch(self, ctx: _UCEContext, queue_key: str,
+                           ins: ExecTileInst, cycle: int) -> None:
+    if not self._enqueue_engine_launch(ctx, queue_key, ins, cycle):
+      self._set_context_state(ctx, _UCEContextState.WAIT_ENGINE_QUEUE, cycle)
+
+  def _held_launch_queue_has_space(self, ctx: _UCEContext) -> bool:
+    if ctx.program is None or ctx.pc >= len(ctx.program.insts):
+      return True
+    ins = ctx.program.insts[ctx.pc]
+    queue_key = self._launch_queue_key(ctx, ins)
+    return len(self._engine_queues[queue_key]) < self._engine_queue_depths[queue_key]
+
+  def _retry_held_launch(self, ctx: _UCEContext, cycle: int) -> bool:
+    if ctx.program is None or ctx.pc >= len(ctx.program.insts):
+      return True
+    ins = ctx.program.insts[ctx.pc]
+    return self._enqueue_engine_launch(
+      ctx, self._launch_queue_key(ctx, ins), ins, cycle)
 
   def _enqueue_engine_launch(self, ctx: _UCEContext, queue_key: str,
                              ins: ExecTileInst, cycle: int) -> bool:
@@ -1075,6 +1137,7 @@ class TileUCE:
       _UCEContextState.READY: "READY",
       _UCEContextState.WAIT_EVENT: "WAIT_EVENT",
       _UCEContextState.WAIT_STREAM: "WAIT_STREAM",
+      _UCEContextState.WAIT_ENGINE_QUEUE: "WAIT_ENGINE_QUEUE",
       _UCEContextState.DONE: "DONE",
       _UCEContextState.FAULT: "FAULT",
     }[ctx.state]
