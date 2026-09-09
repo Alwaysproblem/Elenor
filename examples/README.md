@@ -36,17 +36,21 @@ input bindings、context 数量、memory fidelity 和必要的硬件 override。
 
 ## 可运行 workload
 
-| 名称                                 | 编辑文件                                            | 主要路径                                                     |
-| ------------------------------------ | --------------------------------------------------- | ------------------------------------------------------------ |
-| `gather`                             | `workloads/gather_profiled.mlir`                    | deterministic profiled Gather                                |
-| `gather-matmul`                      | `workloads/gather_matmul.mlir`                      | Gather → BOA Matmul                                          |
-| `matmul-gather-add`                  | `workloads/matmul_gather_add.mlir`                  | BOA Matmul → Gather → EVU Add                                |
-| `gather-matmul-4tiles-2contexts`     | `workloads/gather_matmul_4tiles_2contexts.mlir`     | `placement=15`，4 tiles × 2 contexts，Gather → Matmul        |
-| `matmul-gather-add-4tiles-2contexts` | `workloads/matmul_gather_add_4tiles_2contexts.mlir` | `placement=15`，4 tiles × 2 contexts，Matmul → Gather → Add  |
-| `pow-dual-context`                   | `workloads/pow_dual_context.mlir`                   | 两个同 shape context 并发                                    |
-| `pow-dual-context-mixed-shapes`      | `workloads/pow_dual_context_mixed_shapes.mlir`      | 两个不同 shape context 并发                                  |
-| `pow-sequential-contexts`            | `workloads/pow_sequential_contexts.mlir`            | 两个 context 串行提交                                        |
-| `matmul-2048x512-boa256`             | `workloads/matmul_2048x512x64_boa256x256x32.mlir`   | 2048x512x64 matmul，BOA 256x256x32，K tile 内展开，4 context |
+| 名称                                 | 编辑文件                                            | 主要路径                                                                      |
+| ------------------------------------ | --------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `gather`                             | `workloads/gather_profiled.mlir`                    | deterministic profiled Gather                                                 |
+| `gather-matmul`                      | `workloads/gather_matmul.mlir`                      | Gather → BOA Matmul                                                           |
+| `matmul-gather-add`                  | `workloads/matmul_gather_add.mlir`                  | BOA Matmul → Gather → EVU Add                                                 |
+| `gather-matmul-4tiles-2contexts`     | `workloads/gather_matmul_4tiles_2contexts.mlir`     | `placement=15`，4 tiles × 2 contexts，Gather → Matmul                         |
+| `matmul-gather-add-4tiles-2contexts` | `workloads/matmul_gather_add_4tiles_2contexts.mlir` | `placement=15`，4 tiles × 2 contexts，Matmul → Gather → Add                   |
+| `pow-dual-context`                   | `workloads/pow_dual_context.mlir`                   | 两个同 shape context 并发                                                     |
+| `pow-dual-context-mixed-shapes`      | `workloads/pow_dual_context_mixed_shapes.mlir`      | 两个不同 shape context 并发                                                   |
+| `matmul-pow-parallel`                | `workloads/matmul_pow_parallel.mlir`                | 2 matmul + 2 pow context 全并发，BOA/EVU 并行                                 |
+| `matmul-pow-free-slot`               | `workloads/matmul_pow_free_slot.mlir`               | matmul 先占满 slot，pow 等首个空槽提前调度                                    |
+| `matmul-pow-data-dep`                | `workloads/matmul_pow_data_dep.mlir`                | pow 消费 matmul 输出 C，只等生产者、不过早也不过度串行                        |
+| `matmul17-pow-tail-overlap`          | `workloads/matmul17_pow_tail_overlap.mlir`          | 17 个 tile context（4 x placement15 + 1 x placement1），pow 与尾 context 重叠 |
+| `pow-sequential-contexts`            | `workloads/pow_sequential_contexts.mlir`            | 两个 context 串行提交                                                         |
+| `matmul-2048x512-boa256`             | `workloads/matmul_2048x512x64_boa256x256x32.mlir`   | 2048x512x64 matmul，BOA 256x256x32，K tile 内展开，4 context                  |
 
 多 context trace：
 
@@ -82,6 +86,37 @@ bash examples/run.sh matmul-gather-add-4tiles-2contexts \
 ```bash
 bash examples/run.sh matmul-2048x512-boa256 --trace-json /tmp/matmul-boa256.json --json
 ```
+
+## matmul + pow 调度验证组
+
+四个示例基于 `matmul_2048x512x64_boa256x256x32.mlir` 改造，验证 BOA matmul 与
+EVU pow 在不同依赖/资源约束下的调度行为。每个示例都建议带 `--trace-json`
+运行，在 Perfetto 里看 `Device / Slot:N`、`BOA`、`EVU`、`MFE_LD0/ST0` 轨道：
+
+```bash
+bash examples/run.sh matmul-pow-parallel       --trace-json /tmp/ex1.json
+bash examples/run.sh matmul-pow-free-slot      --trace-json /tmp/ex2.json
+bash examples/run.sh matmul-pow-data-dep       --trace-json /tmp/ex3.json
+bash examples/run.sh matmul17-pow-tail-overlap --trace-json /tmp/ex4.json
+```
+
+| 示例                        | 结构                                                                                                                                                                                                                                | 验证点（实测）                                                                                                                                                                                         |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `matmul-pow-parallel`       | M=1024 半边 matmul（2 context）+ 独立 Y 上的 pow（2 context），全部 placement=15、4 slot 从 t=0 并发 submit                                                                                                                         | EVU:pow 与 BOA:matmul 时间窗重叠（实测 overlap ≈ 3.7 µs，16 BOA + 16 EVU 事件）                                                                                                                        |
+| `matmul-pow-free-slot`      | 完整 4-context matmul 先占满 4 个 device slot，2 个 pow context（不 pin slot）紧随 submit；pow 输入是独立 Y，无 data 依赖                                                                                                           | pow 的 submit 阻塞（`device_submit_wait`），在**第一个** matmul context 完成释放 slot 时立即被接管（实测 106 µs，早于最后一个 matmul 的 163 µs），并与仍在运行的 matmul context 并发                   |
+| `matmul-pow-data-dep`       | 同 4-context matmul，但 pow 的输入是 matmul 写回 HBM 的 C（`:rw` binding）；`@pow_np_c0` 只 await 生产 C[m0] 半边的两个 context，`@pow_np_c1` 只等 m1 行                                                                            | pow 绝不早于生产者启动（实测 c0 在 117 µs = m0 行完成时刻），但不等无关工作（c0 与仍在跑的 m1 行 matmul 重叠）——依赖感知、不过度串行                                                                   |
+| `matmul17-pow-tail-overlap` | M=5120 → 20 块：4 x placement=15 context（16 个 tile context，块 0..15）+ 1 x placement=1 尾 context（第 17 个 tile context，单 task 串行算剩余 4 块）；2 个 pow context 消费前 16 块（`--context-mode 5 --device-context-mode 5`） | 5 个 matmul context 从 t=0 分开并发调度；尾 context 的 BOA 只落 Tile0；pow 不等尾 context，在尾 context 仍在跑（0..221 µs）时用其余空闲 tile context 提前运行（pow EVU 188..271 µs，实测重叠 18.4 µs） |
+
+设计说明：
+
+- ex2/ex3 是同一拓扑的对照组：pow 输入从独立 Y 换成 matmul 输出 C 后，启动
+  约束从"slot 空闲"变成"生产者完成"。
+- ex4 的 17 个 tile context 不是 16 的倍数：4 个满 placement context（4 task 各）
+  - 1 个 placement=1 context（1 task，task 内串行展开剩余块）。尾 context 只占
+    tile 0 的 1 个 UCE context，其余 15 个 tile context 空闲时被 placement=15 的
+    pow 立即复用。
+- pow 的 tile program 每 task 处理 2 个 chunk（load → pow → store × 2），
+  L1 buffer 顺序复用；`input_released` 在最后一次输入 load 之后发出。
 
 所有 Gather runnable example 都包含完整输出路径：
 

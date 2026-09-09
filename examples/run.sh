@@ -31,9 +31,24 @@ Runnable workloads:
                                  展开, 4 context x placement=15 x 4 task)
   matmul-gather-add-4tiles-2contexts
                                  workloads/matmul_gather_add_4tiles_2contexts.mlir
-  pow-dual-context               workloads/pow_dual_context.mlir
-  pow-dual-context-mixed-shapes  workloads/pow_dual_context_mixed_shapes.mlir
-  pow-sequential-contexts        workloads/pow_sequential_contexts.mlir
+  matmul-pow-parallel          workloads/matmul_pow_parallel.mlir
+                                 (1024x512x64 matmul x2 context + pow(Y) x2
+                                 context, 全部 placement=15 并发 submit,
+                                 验证 BOA matmul 与 EVU pow 并行)
+  matmul-pow-free-slot          workloads/matmul_pow_free_slot.mlir
+                                 (4 个 matmul context 占满 slot 后 submit
+                                 pow; 验证首个 matmul 提前结束即释放 slot
+                                 给 pow 提前调度)
+  matmul-pow-data-dep           workloads/matmul_pow_data_dep.mlir
+                                 (pow 消费 matmul 输出 C; 验证 data 依赖下
+                                 pow 只等它的生产者、不提前也不全串行)
+  matmul17-pow-tail-overlap     workloads/matmul17_pow_tail_overlap.mlir
+                                 (M=4352 → 17 个 tile context = 4 x
+                                 placement15 + 1 x placement1 尾块；验证
+                                 尾块独占 tile0 时 pow 提前占用其余资源)
+   pow-dual-context               workloads/pow_dual_context.mlir
+   pow-dual-context-mixed-shapes  workloads/pow_dual_context_mixed_shapes.mlir
+   pow-sequential-contexts        workloads/pow_sequential_contexts.mlir
 
 Protocol scenarios:
   l2-admission-wait              scenarios/l2_admission_wait.mlir
@@ -121,6 +136,66 @@ case "$name" in
       --input-binding A=0x100000:262144:r \
       --input-binding B=0x150000:65536:r \
       --input-binding C=0x200000:2097152:w \
+      --sim-override fidelity=full_memory \
+      --max-cycles 500000 \
+      "$@"
+    ;;
+  matmul-pow-parallel)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/matmul_pow_parallel.mlir" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --context-mode 4 \
+      --device-context-mode 4 \
+      --input-binding A=0x100000:131072:r \
+      --input-binding B=0x120000:65536:r \
+      --input-binding C=0x200000:1048576:w \
+      --input-binding Y0=0x400000:262144:rw \
+      --input-binding Y1=0x440000:262144:rw \
+      --sim-override fidelity=full_memory \
+      --max-cycles 500000 \
+      "$@"
+    ;;
+  matmul-pow-free-slot)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/matmul_pow_free_slot.mlir" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --context-mode 4 \
+      --device-context-mode 4 \
+      --input-binding A=0x100000:262144:r \
+      --input-binding B=0x150000:65536:r \
+      --input-binding C=0x200000:2097152:w \
+      --input-binding Y0=0x400000:262144:rw \
+      --input-binding Y1=0x440000:262144:rw \
+      --sim-override fidelity=full_memory \
+      --max-cycles 500000 \
+      "$@"
+    ;;
+  matmul-pow-data-dep)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/matmul_pow_data_dep.mlir" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --context-mode 4 \
+      --device-context-mode 4 \
+      --input-binding A=0x100000:262144:r \
+      --input-binding B=0x150000:65536:r \
+      --input-binding C=0x200000:2097152:rw \
+      --sim-override fidelity=full_memory \
+      --max-cycles 500000 \
+      "$@"
+    ;;
+  matmul17-pow-tail-overlap)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/matmul17_pow_tail_overlap.mlir" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --context-mode 5 \
+      --device-context-mode 5 \
+      --input-binding A=0x100000:655360:r \
+      --input-binding B=0x1A0000:32768:r \
+      --input-binding C=0x200000:2621440:rw \
       --sim-override fidelity=full_memory \
       --max-cycles 500000 \
       "$@"
