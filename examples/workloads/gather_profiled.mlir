@@ -62,7 +62,7 @@ builtin.module {
     %grid_done, %input_released, %output_ready =
         nest.dispatch.tasks.async @gather_tile
         tasks(%tasks) globals(%table_view)
-        ins(%indices_l2, %output_l2) outs(%indices_l2, %output_l2)
+        bindings(%indices_l2, %output_l2) ins(%indices_l2) outs(%output_l2)
         signal_policy {
           input_released = #nest.aggregate<all_tasks>,
           output_ready = #nest.aggregate<all_tasks>
@@ -70,7 +70,7 @@ builtin.module {
         depends_on(%indices_prefetched)
         : (!nest.event<"grid_done">, !nest.event<"input_released">,
            !nest.event<"output_ready">)
-    nest.release %indices_l2 depends_on(%input_released)
+    nest.release %indices_l2 depends_on(%input_released, %indices_prefetched)
     %hbm_store_done = nest.dma.store.async %output_l2 into %output_global
         depends_on(%output_ready) : !nest.event<"hbm_store_done">
     nest.release %output_l2 depends_on(%hbm_store_done)

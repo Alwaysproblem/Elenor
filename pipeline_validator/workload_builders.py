@@ -137,16 +137,22 @@ def make_pow_task(num_group_chunks: int = 4) -> ModuleOp:
   # Dispatch per chunk (depends_on prefetch).
   dispatches = []
   for group in range(num_group_chunks):
-    dispatch = NestDispatchOp("pow_4k_tile", tasks.result, [], [bufs[group].result],
-    [bufs[group].result],
-    f"ev_role_pow{group}",
-    f"ev_inrel_pow{group}",
-    f"ev_outready_pow{group}",
-    signal_policy={
-      "input_released": "all_tasks",
-      "output_ready": "all_tasks",
-    },
-    depends_on=[prefetches[group].result],)
+    dispatch = NestDispatchOp(
+      "pow_4k_tile",
+      tasks.result,
+      [],
+      [bufs[group].result],
+      [bufs[group].result],
+      f"ev_role_pow{group}",
+      f"ev_inrel_pow{group}",
+      f"ev_outready_pow{group}",
+      bindings=[bufs[group].result],
+      signal_policy={
+        "input_released": "all_tasks",
+        "output_ready": "all_tasks",
+      },
+      depends_on=[prefetches[group].result],
+    )
     dispatches.append(dispatch)
     body.append(dispatch)
 
@@ -162,9 +168,16 @@ def make_pow_task(num_group_chunks: int = 4) -> ModuleOp:
     stores.append(store)
     body.append(store)
 
-  # Await grid_done + store for each chunk, then release the buffer.
+  # Await grid_done + store, then release with complete reader/transfer dependencies.
   for group in range(num_group_chunks):
     body.append(NestAwaitOp([dispatches[group].grid_done, stores[group].result]))
-    body.append(NestReleaseOp(bufs[group].result, depends_on=[stores[group].result]))
+    body.append(NestReleaseOp(
+      bufs[group].result,
+      depends_on=[
+        dispatches[group].input_released,
+        prefetches[group].result,
+        stores[group].result,
+      ],
+    ))
   ctx.body.block.add_ops(body)
   return ModuleOp([prog, ctx])

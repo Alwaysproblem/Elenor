@@ -161,12 +161,18 @@ bash examples/run.sh file /tmp/my_gather.mlir \
 修改时优先关注：
 
 1. `nexus.program` 与 `nest.context` global formal 的 shape/dtype 必须一致。
-2. `nest.dispatch.tasks.async` 的 `globals`、`ins`、`outs` 必须与 Tile Program formal 对齐。
+2. Dispatch 的 `globals` 与 `bindings` 分别按位置对齐 global/L2 formals；
+   必填 `ins`/`outs` 只声明真实读/写 actual 集合，允许 bindings alias 和 unused formal。
 3. 每个 async event tag 在所属 body 内必须唯一。
 4. Gather profile 的 request bytes 总和必须等于 `result_bytes`。
-5. `tile.await` 决定 engine 的执行顺序。
+5. `tile.await` 决定 engine 顺序；input_released/output_ready 前必须 await
+   对应全部 L2 load/store，发出该 phase 后不得再进行同方向访问。
 6. 输出路径需要同时声明 `tile.store.async`、`output_ready`、L2 `role="out"` 和
    `nest.dma.store.async`。
+7. 每次 HBM Store 等此前真实 writer.output_ready，最后一次覆盖全部写者，不等纯读者计算尾部。
+8. 每个 Buffer 恰好 release 一次，依赖精确列齐全部 reader.input_released、
+   prefetch completion、Store completion；所有 role 一致，不得省略并行搬运。
+   纯读 pin 按真实访问解除，不按 alloc.role；readwrite 必须独立满足读写两阶段。
 
 当前 `tile.boa.async` 和 `tile.evu.async` 是 timing descriptor，没有显式 L1
 operand/result。组合示例沿用 Pow 的隐式 L1 原地约定：`%matmul_dst` 作为最终工作

@@ -83,8 +83,8 @@ builtin.module {
     %h_X = nest.subview %arena offsets = [262144] sizes = [16384] strides = [1] : !nest.global_view<16384xbf16>
     %pref_input_X = nest.dma.prefetch.async %h_input_X into %b_input_X : !nest.event<"pref_input_X">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_X, %read_X, %ready_X = nest.dispatch.tasks.async @prog_X context = 0 tasks(%tasks) globals() ins(%b_input_X, %b_X) outs(%b_input_X, %b_X) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input_X) : (!nest.event<"grid_X">, !nest.event<"read_X">, !nest.event<"ready_X">)
-    nest.release %b_input_X depends_on(%read_X)
+    %grid_X, %read_X, %ready_X = nest.dispatch.tasks.async @prog_X context = 0 tasks(%tasks) globals() bindings(%b_input_X, %b_X) ins(%b_input_X) outs(%b_X) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input_X) : (!nest.event<"grid_X">, !nest.event<"read_X">, !nest.event<"ready_X">)
+    nest.release %b_input_X depends_on(%read_X, %pref_input_X)
     %store_X_0 = nest.dma.store.async %b_X into %h_X depends_on(%ready_X) : !nest.event<"store_X_0">
     nest.release %b_X depends_on(%store_X_0)
     nest.await %grid_X, %store_X_0
@@ -102,12 +102,12 @@ builtin.module {
     %pref_X = nest.dma.prefetch.async %h_X into %b_X : !nest.event<"pref_X">
     %pref_W_F0 = nest.dma.prefetch.async %h_W_F0 into %b_W_F0 : !nest.event<"pref_W_F0">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_F0, %read_F0, %ready_F0 = nest.dispatch.tasks.async @prog_F0 context = 1 tasks(%tasks) globals() ins(%b_X, %b_W_F0, %b_F0) outs(%b_X, %b_W_F0, %b_F0) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_X, %pref_W_F0) : (!nest.event<"grid_F0">, !nest.event<"read_F0">, !nest.event<"ready_F0">)
-    %grid_F1, %read_F1, %ready_F1 = nest.dispatch.tasks.async @prog_F1 context = 1 tasks(%tasks) globals() ins(%b_F0, %b_F1) outs(%b_F0, %b_F1) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%ready_F0) : (!nest.event<"grid_F1">, !nest.event<"read_F1">, !nest.event<"ready_F1">)
-    nest.release %b_X depends_on(%read_F0)
-    nest.release %b_W_F0 depends_on(%read_F0)
-    %store_F0_0 = nest.dma.store.async %b_F0 into %h_F0 depends_on(%ready_F0, %ready_F1) : !nest.event<"store_F0_0">
-    nest.release %b_F0 depends_on(%store_F0_0)
+    %grid_F0, %read_F0, %ready_F0 = nest.dispatch.tasks.async @prog_F0 context = 1 tasks(%tasks) globals() bindings(%b_X, %b_W_F0, %b_F0) ins(%b_X, %b_W_F0) outs(%b_F0) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_X, %pref_W_F0) : (!nest.event<"grid_F0">, !nest.event<"read_F0">, !nest.event<"ready_F0">)
+    %grid_F1, %read_F1, %ready_F1 = nest.dispatch.tasks.async @prog_F1 context = 1 tasks(%tasks) globals() bindings(%b_F0, %b_F1) ins(%b_F0) outs(%b_F1) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%ready_F0) : (!nest.event<"grid_F1">, !nest.event<"read_F1">, !nest.event<"ready_F1">)
+    nest.release %b_X depends_on(%read_F0, %pref_X)
+    nest.release %b_W_F0 depends_on(%read_F0, %pref_W_F0)
+    %store_F0_0 = nest.dma.store.async %b_F0 into %h_F0 depends_on(%ready_F0) : !nest.event<"store_F0_0">
+    nest.release %b_F0 depends_on(%read_F1, %store_F0_0)
     %store_F1_0 = nest.dma.store.async %b_F1 into %h_F1 depends_on(%ready_F1) : !nest.event<"store_F1_0">
     nest.release %b_F1 depends_on(%store_F1_0)
     nest.await %grid_F0, %grid_F1, %store_F0_0, %store_F1_0
@@ -120,8 +120,8 @@ builtin.module {
     %h_Copy = nest.subview %arena offsets = [655360] sizes = [16384] strides = [1] : !nest.global_view<16384xbf16>
     %pref_X = nest.dma.prefetch.async %h_X into %b_X : !nest.event<"pref_X">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_Copy, %read_Copy, %ready_Copy = nest.dispatch.tasks.async @prog_Copy context = 2 tasks(%tasks) globals() ins(%b_X, %b_Copy) outs(%b_X, %b_Copy) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_X) : (!nest.event<"grid_Copy">, !nest.event<"read_Copy">, !nest.event<"ready_Copy">)
-    nest.release %b_X depends_on(%read_Copy)
+    %grid_Copy, %read_Copy, %ready_Copy = nest.dispatch.tasks.async @prog_Copy context = 2 tasks(%tasks) globals() bindings(%b_X, %b_Copy) ins(%b_X) outs(%b_Copy) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_X) : (!nest.event<"grid_Copy">, !nest.event<"read_Copy">, !nest.event<"ready_Copy">)
+    nest.release %b_X depends_on(%read_Copy, %pref_X)
     %store_Copy_0 = nest.dma.store.async %b_Copy into %h_Copy depends_on(%ready_Copy) : !nest.event<"store_Copy_0">
     nest.release %b_Copy depends_on(%store_Copy_0)
     nest.await %grid_Copy, %store_Copy_0
@@ -137,9 +137,9 @@ builtin.module {
     %pref_Copy = nest.dma.prefetch.async %h_Copy into %b_Copy : !nest.event<"pref_Copy">
     %pref_F1 = nest.dma.prefetch.async %h_F1 into %b_F1 : !nest.event<"pref_F1">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_Add, %read_Add, %ready_Add = nest.dispatch.tasks.async @prog_Add context = 3 tasks(%tasks) globals() ins(%b_Copy, %b_F1, %b_Add) outs(%b_Copy, %b_F1, %b_Add) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_Copy, %pref_F1) : (!nest.event<"grid_Add">, !nest.event<"read_Add">, !nest.event<"ready_Add">)
-    nest.release %b_Copy depends_on(%read_Add)
-    nest.release %b_F1 depends_on(%read_Add)
+    %grid_Add, %read_Add, %ready_Add = nest.dispatch.tasks.async @prog_Add context = 3 tasks(%tasks) globals() bindings(%b_Copy, %b_F1, %b_Add) ins(%b_Copy, %b_F1) outs(%b_Add) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_Copy, %pref_F1) : (!nest.event<"grid_Add">, !nest.event<"read_Add">, !nest.event<"ready_Add">)
+    nest.release %b_Copy depends_on(%read_Add, %pref_Copy)
+    nest.release %b_F1 depends_on(%read_Add, %pref_F1)
     %store_Add_0 = nest.dma.store.async %b_Add into %h_Add depends_on(%ready_Add) : !nest.event<"store_Add_0">
     nest.release %b_Add depends_on(%store_Add_0)
     nest.await %grid_Add, %store_Add_0

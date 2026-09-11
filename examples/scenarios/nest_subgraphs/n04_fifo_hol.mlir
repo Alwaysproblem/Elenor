@@ -251,8 +251,8 @@ builtin.module {
     %h_output = nest.subview %arena offsets = [393216] sizes = [65536] strides = [1] : !nest.global_view<65536xbf16>
     %pref_input = nest.dma.prefetch.async %h_input into %b_input : !nest.event<"pref_Holder_input">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_Holder, %read_Holder, %ready_Holder = nest.dispatch.tasks.async @prog_Holder tasks(%tasks) globals() ins(%b_input, %b_output) outs(%b_input, %b_output) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input) : (!nest.event<"grid_Holder">, !nest.event<"read_Holder">, !nest.event<"ready_Holder">)
-    nest.release %b_input depends_on(%read_Holder)
+    %grid_Holder, %read_Holder, %ready_Holder = nest.dispatch.tasks.async @prog_Holder tasks(%tasks) globals() bindings(%b_input, %b_output) ins(%b_input) outs(%b_output) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input) : (!nest.event<"grid_Holder">, !nest.event<"read_Holder">, !nest.event<"ready_Holder">)
+    nest.release %b_input depends_on(%read_Holder, %pref_input)
     %store_Holder = nest.dma.store.async %b_output into %h_output depends_on(%ready_Holder) : !nest.event<"store_Holder">
     nest.release %b_output depends_on(%store_Holder)
     nest.await %grid_Holder, %store_Holder
@@ -265,8 +265,8 @@ builtin.module {
     %h_output = nest.subview %arena offsets = [524288] sizes = [32768] strides = [1] : !nest.global_view<32768xbf16>
     %pref_input = nest.dma.prefetch.async %h_input into %b_input : !nest.event<"pref_Head_input">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_Head, %read_Head, %ready_Head = nest.dispatch.tasks.async @prog_Head tasks(%tasks) globals() ins(%b_input, %b_output) outs(%b_input, %b_output) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input) : (!nest.event<"grid_Head">, !nest.event<"read_Head">, !nest.event<"ready_Head">)
-    nest.release %b_input depends_on(%read_Head)
+    %grid_Head, %read_Head, %ready_Head = nest.dispatch.tasks.async @prog_Head tasks(%tasks) globals() bindings(%b_input, %b_output) ins(%b_input) outs(%b_output) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input) : (!nest.event<"grid_Head">, !nest.event<"read_Head">, !nest.event<"ready_Head">)
+    nest.release %b_input depends_on(%read_Head, %pref_input)
     %store_Head = nest.dma.store.async %b_output into %h_output depends_on(%ready_Head) : !nest.event<"store_Head">
     nest.release %b_output depends_on(%store_Head)
     nest.await %grid_Head, %store_Head
@@ -279,8 +279,8 @@ builtin.module {
     %h_output = nest.subview %arena offsets = [655360] sizes = [16384] strides = [1] : !nest.global_view<16384xbf16>
     %pref_input = nest.dma.prefetch.async %h_input into %b_input : !nest.event<"pref_Tail_input">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_Tail, %read_Tail, %ready_Tail = nest.dispatch.tasks.async @prog_Tail tasks(%tasks) globals() ins(%b_input, %b_output) outs(%b_input, %b_output) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input) : (!nest.event<"grid_Tail">, !nest.event<"read_Tail">, !nest.event<"ready_Tail">)
-    nest.release %b_input depends_on(%read_Tail)
+    %grid_Tail, %read_Tail, %ready_Tail = nest.dispatch.tasks.async @prog_Tail tasks(%tasks) globals() bindings(%b_input, %b_output) ins(%b_input) outs(%b_output) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input) : (!nest.event<"grid_Tail">, !nest.event<"read_Tail">, !nest.event<"ready_Tail">)
+    nest.release %b_input depends_on(%read_Tail, %pref_input)
     %store_Tail = nest.dma.store.async %b_output into %h_output depends_on(%ready_Tail) : !nest.event<"store_Tail">
     nest.release %b_output depends_on(%store_Tail)
     nest.await %grid_Tail, %store_Tail

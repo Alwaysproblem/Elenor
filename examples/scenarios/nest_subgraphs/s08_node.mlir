@@ -1,5 +1,5 @@
 // 可复现 NEST 子图；时间模型，不证明 tensor 数值。
-// case: {"id": "s08", "name": "s08_node", "nodes": ["A", "B", "D", "C"], "edges": {"C": ["A", "B"], "D": ["B"]}, "context_partition": [["A"], ["B"], ["D"], ["C"]], "resource_config": {"uce": 4, "device": 4, "placement": 15, "fidelity": "full_memory"}, "expected": {"Correctness": "检查真实数据边与生命周期", "数值": "未建模；隐式 L1 output timing，合成 compute-cost 扫描", "Liveness": "完成（short 为永久容量 fault）", "Scheduling Quality": "barrier 为反例；其余以实测 service 判定，不保证最优"}, "forbidden_dependencies": "仅真前驱；跨 Context context_done 为当前 IR 保守降级", "tensors": {"input_A": {"index": 0, "offset_elements": 0, "bytes": 32768}, "W_A": {"index": 1, "offset_elements": 131072, "bytes": 32768}, "input_B": {"index": 2, "offset_elements": 262144, "bytes": 32768}, "A": {"index": 3, "offset_elements": 393216, "bytes": 32768}, "B": {"index": 4, "offset_elements": 524288, "bytes": 32768}, "D": {"index": 5, "offset_elements": 655360, "bytes": 32768}, "C": {"index": 6, "offset_elements": 786432, "bytes": 32768}}, "node_programs": {"A": {"program": "prog_A", "pin": "device-slot", "engine": "boa", "repeat": 100, "loads": 1}, "B": {"program": "prog_B", "pin": "device-slot", "engine": "evu", "repeat": 5, "loads": 1}, "D": {"program": "prog_D", "pin": "device-slot", "engine": "evu", "repeat": 90, "loads": 1}, "C": {"program": "prog_C", "pin": "device-slot", "engine": "evu", "repeat": 5, "loads": 1}}, "ready": "组内 output_ready；组外 HBM 最后 Store/context_done。out/inout hold 到全部双绑定 reader output_ready，非精确 last-read 回收。"}
+// case: {"id": "s08", "name": "s08_node", "nodes": ["A", "B", "D", "C"], "edges": {"C": ["A", "B"], "D": ["B"]}, "context_partition": [["A"], ["B"], ["D"], ["C"]], "resource_config": {"uce": 4, "device": 4, "placement": 15, "fidelity": "full_memory"}, "expected": {"Correctness": "检查真实数据边与生命周期", "数值": "未建模；隐式 L1 output timing，合成 compute-cost 扫描", "Liveness": "完成（short 为永久容量 fault）", "Scheduling Quality": "barrier 为反例；其余以实测 service 判定，不保证最优"}, "forbidden_dependencies": "仅真前驱；跨 Context context_done 为当前 IR 保守降级", "tensors": {"input_A": {"index": 0, "offset_elements": 0, "bytes": 32768}, "W_A": {"index": 1, "offset_elements": 131072, "bytes": 32768}, "input_B": {"index": 2, "offset_elements": 262144, "bytes": 32768}, "A": {"index": 3, "offset_elements": 393216, "bytes": 32768}, "B": {"index": 4, "offset_elements": 524288, "bytes": 32768}, "D": {"index": 5, "offset_elements": 655360, "bytes": 32768}, "C": {"index": 6, "offset_elements": 786432, "bytes": 32768}}, "node_programs": {"A": {"program": "prog_A", "pin": "device-slot", "engine": "boa", "repeat": 100, "loads": 1}, "B": {"program": "prog_B", "pin": "device-slot", "engine": "evu", "repeat": 5, "loads": 1}, "D": {"program": "prog_D", "pin": "device-slot", "engine": "evu", "repeat": 90, "loads": 1}, "C": {"program": "prog_C", "pin": "device-slot", "engine": "evu", "repeat": 5, "loads": 1}}, "ready": "组内真实 writer output_ready 可启动 HBM Store；release 等真实 reader input_released、相关 prefetch 与全部 Store，组外仍以 HBM 最后 Store/context_done 可见。"}
 builtin.module {
   tile.program @prog_A (%task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %i1: !nest.l2_buffer<4x64x64xbf16>, %out: !nest.l2_buffer<4x64x64xbf16>) {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64] strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
@@ -466,9 +466,9 @@ builtin.module {
     %pref_input_A = nest.dma.prefetch.async %h_input_A into %b_input_A : !nest.event<"pref_input_A">
     %pref_W_A = nest.dma.prefetch.async %h_W_A into %b_W_A : !nest.event<"pref_W_A">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_A, %read_A, %ready_A = nest.dispatch.tasks.async @prog_A tasks(%tasks) globals() ins(%b_input_A, %b_W_A, %b_A) outs(%b_input_A, %b_W_A, %b_A) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input_A, %pref_W_A) : (!nest.event<"grid_A">, !nest.event<"read_A">, !nest.event<"ready_A">)
-    nest.release %b_input_A depends_on(%read_A)
-    nest.release %b_W_A depends_on(%read_A)
+    %grid_A, %read_A, %ready_A = nest.dispatch.tasks.async @prog_A tasks(%tasks) globals() bindings(%b_input_A, %b_W_A, %b_A) ins(%b_input_A, %b_W_A) outs(%b_A) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input_A, %pref_W_A) : (!nest.event<"grid_A">, !nest.event<"read_A">, !nest.event<"ready_A">)
+    nest.release %b_input_A depends_on(%read_A, %pref_input_A)
+    nest.release %b_W_A depends_on(%read_A, %pref_W_A)
     %store_A_0 = nest.dma.store.async %b_A into %h_A depends_on(%ready_A) : !nest.event<"store_A_0">
     nest.release %b_A depends_on(%store_A_0)
     nest.await %grid_A, %store_A_0
@@ -481,8 +481,8 @@ builtin.module {
     %h_B = nest.subview %arena offsets = [524288] sizes = [16384] strides = [1] : !nest.global_view<16384xbf16>
     %pref_input_B = nest.dma.prefetch.async %h_input_B into %b_input_B : !nest.event<"pref_input_B">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_B, %read_B, %ready_B = nest.dispatch.tasks.async @prog_B tasks(%tasks) globals() ins(%b_input_B, %b_B) outs(%b_input_B, %b_B) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input_B) : (!nest.event<"grid_B">, !nest.event<"read_B">, !nest.event<"ready_B">)
-    nest.release %b_input_B depends_on(%read_B)
+    %grid_B, %read_B, %ready_B = nest.dispatch.tasks.async @prog_B tasks(%tasks) globals() bindings(%b_input_B, %b_B) ins(%b_input_B) outs(%b_B) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input_B) : (!nest.event<"grid_B">, !nest.event<"read_B">, !nest.event<"ready_B">)
+    nest.release %b_input_B depends_on(%read_B, %pref_input_B)
     %store_B_0 = nest.dma.store.async %b_B into %h_B depends_on(%ready_B) : !nest.event<"store_B_0">
     nest.release %b_B depends_on(%store_B_0)
     nest.await %grid_B, %store_B_0
@@ -495,8 +495,8 @@ builtin.module {
     %h_D = nest.subview %arena offsets = [655360] sizes = [16384] strides = [1] : !nest.global_view<16384xbf16>
     %pref_B = nest.dma.prefetch.async %h_B into %b_B : !nest.event<"pref_B">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_D, %read_D, %ready_D = nest.dispatch.tasks.async @prog_D tasks(%tasks) globals() ins(%b_B, %b_D) outs(%b_B, %b_D) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_B) : (!nest.event<"grid_D">, !nest.event<"read_D">, !nest.event<"ready_D">)
-    nest.release %b_B depends_on(%read_D)
+    %grid_D, %read_D, %ready_D = nest.dispatch.tasks.async @prog_D tasks(%tasks) globals() bindings(%b_B, %b_D) ins(%b_B) outs(%b_D) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_B) : (!nest.event<"grid_D">, !nest.event<"read_D">, !nest.event<"ready_D">)
+    nest.release %b_B depends_on(%read_D, %pref_B)
     %store_D_0 = nest.dma.store.async %b_D into %h_D depends_on(%ready_D) : !nest.event<"store_D_0">
     nest.release %b_D depends_on(%store_D_0)
     nest.await %grid_D, %store_D_0
@@ -512,9 +512,9 @@ builtin.module {
     %pref_A = nest.dma.prefetch.async %h_A into %b_A : !nest.event<"pref_A">
     %pref_B = nest.dma.prefetch.async %h_B into %b_B : !nest.event<"pref_B">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_C, %read_C, %ready_C = nest.dispatch.tasks.async @prog_C tasks(%tasks) globals() ins(%b_A, %b_B, %b_C) outs(%b_A, %b_B, %b_C) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_A, %pref_B) : (!nest.event<"grid_C">, !nest.event<"read_C">, !nest.event<"ready_C">)
-    nest.release %b_A depends_on(%read_C)
-    nest.release %b_B depends_on(%read_C)
+    %grid_C, %read_C, %ready_C = nest.dispatch.tasks.async @prog_C tasks(%tasks) globals() bindings(%b_A, %b_B, %b_C) ins(%b_A, %b_B) outs(%b_C) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_A, %pref_B) : (!nest.event<"grid_C">, !nest.event<"read_C">, !nest.event<"ready_C">)
+    nest.release %b_A depends_on(%read_C, %pref_A)
+    nest.release %b_B depends_on(%read_C, %pref_B)
     %store_C_0 = nest.dma.store.async %b_C into %h_C depends_on(%ready_C) : !nest.event<"store_C_0">
     nest.release %b_C depends_on(%store_C_0)
     nest.await %grid_C, %store_C_0

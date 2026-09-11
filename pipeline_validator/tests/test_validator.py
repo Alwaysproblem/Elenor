@@ -123,7 +123,7 @@ MODEL_CHAIN_IR = """builtin.module {
     %0 = nest.task.range from = 0 to = 4 : !nest.task_range
     %ev_role, %ev_inrel, %ev_outready = nest.dispatch.tasks.async
         @pow_4k_tile context = 0
-        tasks(%0) globals() ins(%l2_buf) outs(%l2_buf)
+        tasks(%0) globals() bindings(%l2_buf) ins(%l2_buf) outs(%l2_buf)
         signal_policy { input_released = #nest.aggregate<all_tasks>,
                         output_ready = #nest.aggregate<all_tasks> }
         depends_on(%ev_in)
@@ -131,7 +131,7 @@ MODEL_CHAIN_IR = """builtin.module {
            !nest.event<"ev_outready_pow0">)
     %ev_out = nest.dma.store.async %l2_buf into %src
         depends_on(%ev_outready) : !nest.event<"ev_dma_pow_out0">
-    nest.release %l2_buf depends_on(%ev_out)
+    nest.release %l2_buf depends_on(%ev_inrel, %ev_in, %ev_out)
     nest.await %ev_role, %ev_out
     nest.return
   }
@@ -150,22 +150,6 @@ MODEL_CHAIN_IR = """builtin.module {
 }
 """
 
-DISPATCH_TYPE_MISMATCH_IR = """builtin.module {
-  tile.program @p(%task : !nest.task, %l2 : !nest.l2_buffer<4x128x128xbf16>) {
-    tile.return
-  }
-  nest.context @c placement = 1 {
-    %bad = nest.alloc slot = "bad" role = "in" shape = [2, 128, 128]
-        dtype = "bf16" : !nest.l2_buffer<2x128x128xbf16>
-    %0 = nest.task.range from = 0 to = 1 : !nest.task_range
-    %g, %i, %o = nest.dispatch.tasks.async @p
-        tasks(%0) globals() ins(%bad) outs(%bad) signal_policy {}
-        : (!nest.event<"g">, !nest.event<"i">, !nest.event<"o">)
-    nest.await %g
-    nest.return
-  }
-}
-"""
 
 TRANSFER_BYTE_MISMATCH_IR = """builtin.module {
   tile.program @p(%task : !nest.task) {
@@ -192,7 +176,7 @@ TILE_PROGRAM_NO_TASK_IR = """builtin.module {
         dtype = "bf16" : !nest.l2_buffer<4x128x128xbf16>
     %0 = nest.task.range from = 0 to = 1 : !nest.task_range
     %g, %i, %o = nest.dispatch.tasks.async @p
-        tasks(%0) globals() ins(%buf) outs() signal_policy {}
+        tasks(%0) globals() bindings(%buf) ins() outs() signal_policy {}
         : (!nest.event<"g">, !nest.event<"i">, !nest.event<"o">)
     nest.await %g
     nest.return
@@ -237,7 +221,7 @@ GATHER_IR = (
         strides = [1] : !nest.global_view<4096xi8>
     %tasks = nest.task.range from = 0 to = 1 : !nest.task_range
     %grid, %inrel, %outready = nest.dispatch.tasks.async @gather_tile
-        tasks(%tasks) globals(%table_view) ins() outs() signal_policy {}
+        tasks(%tasks) globals(%table_view) bindings() ins() outs() signal_policy {}
         : (!nest.event<"grid_done">, !nest.event<"">, !nest.event<"">)
     nest.await %grid
     nest.return
@@ -298,7 +282,6 @@ class TestXDSLIR:
     text = print_workload_ir(module)
     reparsed = parse_workload_ir(text, source_name="<gather-rt>")
     assert print_workload_ir(reparsed) == text
-    assert "tasks(%tasks) globals(%table_view) ins() outs()" in text
     assert "tile.gather.global.async" in text
     assert text.index('id = "r0"') < text.index('id = "r3"')
 
@@ -370,13 +353,10 @@ class TestXDSLIR:
         {"table": GlobalBinding("table", 0x100000, 4096, "w")},
       )
 
-  def test_dispatch_prints_empty_globals_group(self):
-    text = print_workload_ir(PowWorkload().module)
-    assert " globals() ins(" in text
-    assert print_workload_ir(parse_workload_ir(text)) == text
 
-  def test_dispatch_rejects_missing_globals_group(self):
-    self._assert_parse_failure(GATHER_IR.replace(" globals(%table_view)", "", 1))
+  @pytest.mark.parametrize("group", ["globals(%table_view)", "bindings()", "ins()", "outs()"])
+  def test_dispatch_rejects_missing_required_group(self, group):
+    self._assert_parse_failure(GATHER_IR.replace(f" {group}", "", 1))
 
   @pytest.mark.parametrize(
     ("old", "new", "message"),
@@ -591,18 +571,27 @@ class TestXDSLIR:
     src = NestSubviewOp(y_arg, [0, 0, 0], l2_dims, [1, 1, 1], NestGlobalView.of(l2_dims, "bf16"))
     tasks = NestTaskRangeOp(from_task=0, to_task=1)
     prefetch = NestPrefetchOp(src.result, buffer.result, "prefetch")
-    dispatch = NestDispatchOp("all_ops", tasks.result, [], [buffer.result],
-    [buffer.result],
-    "grid_done",
-    "input_released",
-    "output_ready",
-    signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
-    depends_on=[prefetch.result],)
+    dispatch = NestDispatchOp(
+      "all_ops",
+      tasks.result,
+      [],
+      [buffer.result],
+      [buffer.result],
+      "grid_done",
+      "input_released",
+      "output_ready",
+      bindings=[buffer.result],
+      signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
+      depends_on=[prefetch.result],
+    )
     collective = NestCollectiveOp("reduce", bytes_total=256, participant_mask=1, tag="collective")
     dma_store = NestDMAStoreOp(
       src=buffer.result, dst=src.result, tag="store_done", depends_on=[dispatch.output_ready]
     )
-    release = NestReleaseOp(buffer.result, depends_on=[dma_store.result])
+    release = NestReleaseOp(
+      buffer.result,
+      depends_on=[dispatch.input_released, prefetch.result, dma_store.result],
+    )
     ctx.body.block.add_ops(
       [
         buffer,
@@ -634,10 +623,21 @@ class TestXDSLIR:
     assert ALL_WORKLOADS == [PowWorkload]
 
   def _make_identity_context(self, ctx_name="c", placement=1, context_id=None):
-    """Minimal legacy module: identity program + one dispatch context."""
+    """Minimal identity program with one dispatch context."""
     prog = make_identity_tile_program()
     tasks = NestTaskRangeOp(0, 1)
-    dispatch = NestDispatchOp(prog.sym_name.data, tasks.result, [], [], [], "grid_done", "", "", signal_policy={})
+    dispatch = NestDispatchOp(
+      prog.sym_name.data,
+      tasks.result,
+      [],
+      [],
+      [],
+      "grid_done",
+      "",
+      "",
+      bindings=[],
+      signal_policy={},
+    )
     ctx = NestContextOp(
       ctx_name,
       [tasks, dispatch, NestAwaitOp([dispatch.grid_done]), NestReturnOp()],
@@ -648,7 +648,18 @@ class TestXDSLIR:
 
   def test_verifier_rejects_unknown_program_symbol(self):
     tasks = NestTaskRangeOp(0, 1)
-    dispatch = NestDispatchOp("missing_program", tasks.result, [], [], [], "grid_done", "", "", signal_policy={})
+    dispatch = NestDispatchOp(
+      "missing_program",
+      tasks.result,
+      [],
+      [],
+      [],
+      "grid_done",
+      "",
+      "",
+      bindings=[],
+      signal_policy={},
+    )
     module = ModuleOp([NestContextOp("unknown_program", [tasks, dispatch, NestReturnOp()], placement=1)])
     self._assert_verify_failure(module, "dispatch references unknown tile program '@missing_program'")
 
@@ -689,7 +700,19 @@ class TestXDSLIR:
     """``context = N`` prints, parses, and round-trips; absent when not pinned."""
     prog = make_identity_tile_program()
     tasks = NestTaskRangeOp(from_task=0, to_task=1)
-    dispatch = NestDispatchOp(prog.sym_name.data, tasks.result, [], [], [], "grid_done", "", "", signal_policy={}, context_id=1)
+    dispatch = NestDispatchOp(
+      prog.sym_name.data,
+      tasks.result,
+      [],
+      [],
+      [],
+      "grid_done",
+      "",
+      "",
+      bindings=[],
+      signal_policy={},
+      context_id=1,
+    )
     module = ModuleOp(
       [
         prog,
@@ -718,7 +741,19 @@ class TestXDSLIR:
   def test_verifier_rejects_negative_dispatch_context(self):
     prog = make_identity_tile_program()
     tasks = NestTaskRangeOp(from_task=0, to_task=1)
-    dispatch = NestDispatchOp(prog.sym_name.data, tasks.result, [], [], [], "grid_done", "", "", signal_policy={}, context_id=-1)
+    dispatch = NestDispatchOp(
+      prog.sym_name.data,
+      tasks.result,
+      [],
+      [],
+      [],
+      "grid_done",
+      "",
+      "",
+      bindings=[],
+      signal_policy={},
+      context_id=-1,
+    )
     module = ModuleOp([prog, NestContextOp("neg_ctx", [tasks, dispatch, NestReturnOp()], placement=1)])
     self._assert_verify_failure(module, "dispatch context must be >= 0")
 
@@ -746,7 +781,18 @@ class TestXDSLIR:
     ctxs = []
     for i in range(2):
       tasks = NestTaskRangeOp(0, 1)
-      disp = NestDispatchOp(prog.sym_name.data, tasks.result, [], [], [], f"ev_grid_c{i}", "", "", signal_policy={})
+      disp = NestDispatchOp(
+        prog.sym_name.data,
+        tasks.result,
+        [],
+        [],
+        [],
+        f"ev_grid_c{i}",
+        "",
+        "",
+        bindings=[],
+        signal_policy={},
+      )
       ctxs.append(
         NestContextOp(
           f"ctx{i}",
@@ -815,30 +861,6 @@ class TestXDSLIR:
     ):
       parse_workload_ir(text, source_name="<type>")
 
-  def test_dispatch_actual_arity_mismatch_fails(self):
-    text = MODEL_CHAIN_IR.replace(
-      "tasks(%0) globals() ins(%l2_buf) outs(%l2_buf)",
-      "tasks(%0) globals() ins(%l2_buf, %l2_buf) outs(%l2_buf)",
-      1,
-    )
-    with pytest.raises(
-      VerifyException,
-      match=(
-        r"dispatch '@pow_4k_tile' passes 3 l2 actuals"
-        r" but tile.program declares 1 l2 formals"
-      ),
-    ):
-      parse_workload_ir(text, source_name="<dispatch-arity>")
-
-  def test_dispatch_actual_type_mismatch_fails(self):
-    with pytest.raises(
-      VerifyException,
-      match=(
-        r"dispatch input actual 0 type does not match"
-        r" tile.program '@p' l2 formal 0"
-      ),
-    ):
-      parse_workload_ir(DISPATCH_TYPE_MISMATCH_IR, source_name="<dispatch-type>")
 
   def test_nest_subview_out_of_bounds_fails(self):
     text = MODEL_CHAIN_IR.replace(
@@ -1023,13 +1045,19 @@ class TestLoweringDTOFields:
     )
     pref = NestPrefetchOp(src.result, buf.result, "ev_in")
     tasks = NestTaskRangeOp(0, 1)
-    disp = NestDispatchOp("sv_prog", tasks.result, [], [buf.result],
-    [buf.result],
-    "ev_grid",
-    "ev_inrel",
-    "",
-    signal_policy={"input_released": "all_tasks"},
-    depends_on=[pref.result],)
+    disp = NestDispatchOp(
+      "sv_prog",
+      tasks.result,
+      [],
+      [buf.result],
+      [],
+      "ev_grid",
+      "ev_inrel",
+      "",
+      bindings=[buf.result],
+      signal_policy={"input_released": "all_tasks"},
+      depends_on=[pref.result],
+    )
     ctx.body.block.add_ops(
       [
         buf,
@@ -1037,7 +1065,7 @@ class TestLoweringDTOFields:
         pref,
         tasks,
         disp,
-        NestReleaseOp(buf.result, depends_on=[disp.input_released]),
+        NestReleaseOp(buf.result, depends_on=[disp.input_released, pref.result]),
         NestAwaitOp([disp.grid_done]),
         NestReturnOp(),
       ]
@@ -1799,10 +1827,10 @@ class TestHardwareConfigCLI:
 
 
 class TestPR3SignalPolicy:
-  """PR 3: signal_policy, task-bound signals, and role-aware release."""
+  """Signal policies follow the Tile Program's real L2 accesses."""
 
   @staticmethod
-  def _make_signal_prog(phases: tuple[str, ...] = ("input_released", "output_ready")) -> TileProgramDefOp:
+  def _make_signal_prog(phases: tuple[str, ...]) -> TileProgramDefOp:
     prog = TileProgramDefOp(
       "sig_prog",
       [],
@@ -1811,12 +1839,23 @@ class TestPR3SignalPolicy:
     )
     task_arg, l2_arg = prog.body.block.args
     view = TileSubviewOp(
-      l2_arg, task_arg, 0, [0, 0, 0], [1, 4, 32], [1, 1, 1], NestL2View.of([1, 4, 32], "bf16")
+      l2_arg,
+      task_arg,
+      0,
+      [0, 0, 0],
+      [1, 4, 32],
+      [1, 1, 1],
+      NestL2View.of([1, 4, 32], "bf16"),
     )
     l1 = TileAllocOp([4, 32], "bf16")
-    load = TileLoadOp(view.result, l1.result, "e_load")
-    ops = [view, l1, load, TileAwaitOp([load.result])]
+    ops = [view, l1]
     for phase in phases:
+      if phase == "input_released":
+        load = TileLoadOp(view.result, l1.result, "e_load")
+        ops.extend([load, TileAwaitOp([load.result])])
+      else:
+        store = TileStoreOp(l1.result, view.result, "e_store")
+        ops.extend([store, TileAwaitOp([store.result])])
       ops.append(TileSignalOp(phase, task_arg))
     ops.append(TileReturnOp())
     prog.body.block.add_ops(ops)
@@ -1824,68 +1863,117 @@ class TestPR3SignalPolicy:
 
   @staticmethod
   def _make_context(prog, role, inrel_tag, outready_tag, policy):
+    reads = any(isinstance(op, TileLoadOp) for op in prog.body.block.ops)
+    writes = any(isinstance(op, TileStoreOp) for op in prog.body.block.ops)
     ctx = NestContextOp(
-      "sig_ctx", [], arg_types=[NestGlobalMemref.of([1, 4, 32], "bf16")], arg_names=["Y"], placement=1
+      "sig_ctx",
+      [],
+      arg_types=[NestGlobalMemref.of([1, 4, 32], "bf16")],
+      arg_names=["Y"],
+      placement=1,
     )
     y_arg = ctx.body.block.args[0]
     buf = NestAllocOp("l2_buf", role, [1, 4, 32], "bf16", alignment=256)
-    src = NestSubviewOp(y_arg, [0, 0, 0], [1, 4, 32], [1, 1, 1], NestGlobalView.of([1, 4, 32], "bf16"))
-    pref = NestPrefetchOp(src.result, buf.result, "ev_in")
+    src = NestSubviewOp(
+      y_arg,
+      [0, 0, 0],
+      [1, 4, 32],
+      [1, 1, 1],
+      NestGlobalView.of([1, 4, 32], "bf16"),
+    )
+    ops = [buf, src]
+    pref = NestPrefetchOp(src.result, buf.result, "ev_in") if reads else None
+    if pref is not None:
+      ops.append(pref)
     tasks = NestTaskRangeOp(0, 1)
-    disp = NestDispatchOp("sig_prog", tasks.result, [], [buf.result],
-    [buf.result],
-    "ev_grid",
-    inrel_tag,
-    outready_tag,
-    signal_policy=policy,
-    depends_on=[pref.result],)
-    ops = [buf, src, pref, tasks, disp]
-    if role == "in":
-      if inrel_tag:
-        release = NestReleaseOp(buf.result, depends_on=[disp.input_released])
-      else:
-        release = NestReleaseOp(buf.result, depends_on=[disp.grid_done])
-    else:
+    disp = NestDispatchOp(
+      "sig_prog",
+      tasks.result,
+      [],
+      [buf.result] if reads else [],
+      [buf.result] if writes else [],
+      "ev_grid",
+      inrel_tag,
+      outready_tag,
+      bindings=[buf.result],
+      signal_policy=policy,
+      depends_on=[pref.result] if pref is not None else [],
+    )
+    ops.extend([tasks, disp])
+    store = None
+    if writes:
       store = NestDMAStoreOp(
-        buf.result, src.result, "ev_out", depends_on=([disp.output_ready] if outready_tag else [])
+        buf.result,
+        src.result,
+        "ev_out",
+        depends_on=[disp.output_ready],
       )
       ops.append(store)
-      release = NestReleaseOp(buf.result, depends_on=[store.result])
-    ops.extend([release, NestAwaitOp([disp.grid_done]), NestReturnOp()])
+    release_deps = []
+    if reads:
+      release_deps.append(disp.input_released)
+    if pref is not None:
+      release_deps.append(pref.result)
+    if store is not None:
+      release_deps.append(store.result)
+    ops.extend(
+      [
+        NestReleaseOp(buf.result, depends_on=release_deps),
+        NestAwaitOp(
+          [disp.grid_done] + ([store.result] if store is not None else [])
+        ),
+        NestReturnOp(),
+      ]
+    )
     ctx.body.block.add_ops(ops)
-    return ctx, disp
+    return ctx
 
   def test_signal_policy_round_trip(self):
-    """0/1/2 phase policy custom assembly byte-stable round-trip."""
-    for phases, policy, inrel, outready in [
-      ((), {}, "", ""),
-      (("input_released",), {"input_released": "all_tasks"}, "ev_i", ""),
-      (
-        ("input_released", "output_ready"),
-        {"input_released": "all_tasks", "output_ready": "all_tasks"},
-        "ev_i",
-        "ev_o",
-      ),
-    ]:
-      prog = self._make_signal_prog(phases)
-      ctx, disp = self._make_context(
-        prog, "in" if phases == ("input_released",) else "inout", inrel, outready, policy
-      )
-      if not inrel and not outready:
-        # no-L2 identity dispatch: no alloc, no release, empty policy
+    """Empty, read-only, write-only, and read-write policies round-trip."""
+    cases = [
+      ((), None),
+      (("input_released",), "in"),
+      (("output_ready",), "out"),
+      (("input_released", "output_ready"), "inout"),
+    ]
+    for phases, role in cases:
+      if not phases:
         prog = make_identity_tile_program()
         tasks = NestTaskRangeOp(0, 1)
-        disp = NestDispatchOp(prog.sym_name.data, tasks.result, [], [], [], "ev_grid", "", "", signal_policy={})
+        disp = NestDispatchOp(
+          prog.sym_name.data,
+          tasks.result,
+          [],
+          [],
+          [],
+          "ev_grid",
+          "",
+          "",
+          bindings=[],
+          signal_policy={},
+        )
         ctx = NestContextOp(
-          "sig_ctx", [tasks, disp, NestAwaitOp([disp.grid_done]), NestReturnOp()], placement=1
+          "sig_ctx",
+          [tasks, disp, NestAwaitOp([disp.grid_done]), NestReturnOp()],
+          placement=1,
+        )
+      else:
+        prog = self._make_signal_prog(phases)
+        policy = {phase: "all_tasks" for phase in phases}
+        ctx = self._make_context(
+          prog,
+          role,
+          "ev_i" if "input_released" in phases else "",
+          "ev_o" if "output_ready" in phases else "",
+          policy,
         )
       module = ModuleOp([prog, ctx])
+      verify_workload_ir(module)
       text = print_workload_ir(module)
       reparsed = parse_workload_ir(text, source_name="<rt>")
       assert print_workload_ir(reparsed) == text
 
   def test_legacy_signal_syntax_rejected(self):
-    """Old operand-less tile.signal is a parse error."""
     text = """builtin.module {
   tile.program @p (%task : !nest.task, %l2 : !nest.l2_buffer<1x4x32xbf16>) {
     tile.signal input_released
@@ -1897,184 +1985,475 @@ class TestPR3SignalPolicy:
       parse_workload_ir(text, source_name="<legacy>")
 
   def test_signal_requires_program_task_formal(self):
-    """tile.signal operand must be block arg 0."""
     prog = TileProgramDefOp(
-      "bad_sig", [], arg_types=[NestTask(), NestBuffer.of([1, 4, 32], "bf16")], arg_names=["task", "l2_buf"]
+      "bad_sig",
+      [],
+      arg_types=[NestTask(), NestBuffer.of([1, 4, 32], "bf16")],
+      arg_names=["task", "l2_buf"],
     )
     _task_arg, l2_arg = prog.body.block.args
-    # Second formal is NOT a task; using it as signal operand must fail.
-    prog.body.block.add_ops([TileSignalOp("input_released", l2_arg), TileReturnOp()])
-    with pytest.raises(VerifyException, match=r"nest.task"):
-      verify_workload_ir(
-        ModuleOp(
-          [
-            prog,
-            NestContextOp(
-              "c",
-              [
-                NestTaskRangeOp(0, 1),
-                NestDispatchOp("bad_sig", NestTaskRangeOp(0, 1).result, [], [],
-                [],
-                "g",
-                "i",
-                "",
-                signal_policy={"input_released": "all_tasks"},),
-                NestReturnOp(),
-              ],
-              placement=1,
-            ),
-          ]
+    prog.body.block.add_ops(
+      [TileSignalOp("input_released", l2_arg), TileReturnOp()]
+    )
+    with pytest.raises(VerifyException):
+      verify_workload_ir(ModuleOp([prog]))
+
+  def test_signal_policy_matches_program_phases(self):
+    prog = self._make_signal_prog(("input_released",))
+    ctx = self._make_context(
+      prog,
+      "in",
+      "ev_i",
+      "ev_o",
+      {
+        "input_released": "all_tasks",
+        "output_ready": "all_tasks",
+      },
+    )
+    with pytest.raises(VerifyException):
+      verify_workload_ir(ModuleOp([prog, ctx]))
+
+  @pytest.mark.parametrize(
+    ("role", "phases"),
+    [
+      ("in", ("input_released",)),
+      ("out", ("output_ready",)),
+      ("inout", ("input_released", "output_ready")),
+    ],
+  )
+  def test_access_based_release_chains_verify(self, role, phases):
+    prog = self._make_signal_prog(phases)
+    ctx = self._make_context(
+      prog,
+      role,
+      "ev_i" if "input_released" in phases else "",
+      "ev_o" if "output_ready" in phases else "",
+      {phase: "all_tasks" for phase in phases},
+    )
+    verify_workload_ir(ModuleOp([prog, ctx]))
+
+
+class TestL2AccessContract:
+  BINDING_IR = """builtin.module {
+  tile.program @access(
+      %task : !nest.task,
+      %read_src : !nest.l2_buffer<1x4x32xbf16>,
+      %write_dst : !nest.l2_buffer<1x4x32xbf16>,
+      %unused : !nest.l2_buffer<1x4x32xbf16>) {
+    %read_view = tile.subview %read_src task = %task task_dim = 0
+        offsets = [0, 0, 0] sizes = [1, 4, 32] strides = [1, 1, 1]
+        : !nest.l2_view<1x4x32xbf16>
+    %write_view = tile.subview %write_dst task = %task task_dim = 0
+        offsets = [0, 0, 0] sizes = [1, 4, 32] strides = [1, 1, 1]
+        : !nest.l2_view<1x4x32xbf16>
+    %work = tile.alloc shape = [4, 32] dtype = "bf16"
+        : !tile.l1_buffer<4x32xbf16>
+    %load = tile.load.async %read_view into %work : !tile.event<"load">
+    tile.await %load
+    tile.signal input_released(%task)
+    %write = tile.store.async %work into %write_view : !tile.event<"write">
+    tile.await %write
+    tile.signal output_ready(%task)
+    tile.return
+  }
+
+  nest.context @access_ctx(
+      %dst : !nest.global_memref<1x4x32xbf16>) placement = 1 {
+    %X = nest.alloc slot = "X" role = "in" shape = [1, 4, 32]
+        dtype = "bf16" : !nest.l2_buffer<1x4x32xbf16>
+    %Y = nest.alloc slot = "Y" role = "out" shape = [1, 4, 32]
+        dtype = "bf16" : !nest.l2_buffer<1x4x32xbf16>
+    %Z = nest.alloc slot = "Z" role = "in" shape = [1, 2, 32]
+        dtype = "bf16" : !nest.l2_buffer<1x2x32xbf16>
+    %dst_view = nest.subview %dst offsets = [0, 0, 0] sizes = [1, 4, 32]
+        strides = [1, 1, 1] : !nest.global_view<1x4x32xbf16>
+    %tasks = nest.task.range from = 0 to = 1 : !nest.task_range
+    %grid, %read, %ready = nest.dispatch.tasks.async @access
+        tasks(%tasks) globals() bindings(%X, %Y, %X) ins(%X) outs(%Y)
+        signal_policy { input_released = #nest.aggregate<all_tasks>,
+                        output_ready = #nest.aggregate<all_tasks> }
+        : (!nest.event<"grid">, !nest.event<"read">, !nest.event<"ready">)
+    %stored = nest.dma.store.async %Y into %dst_view depends_on(%ready)
+        : !nest.event<"stored">
+    nest.release %X depends_on(%read)
+    nest.release %Y depends_on(%stored)
+    nest.release %Z
+    nest.await %grid, %stored
+    nest.return
+  }
+}
+"""
+
+  PHASE_IR = """builtin.module {
+  tile.program @phase(
+      %task : !nest.task,
+      %buffer : !nest.l2_buffer<1x4x32xbf16>) {
+    %view = tile.subview %buffer task = %task task_dim = 0
+        offsets = [0, 0, 0] sizes = [1, 4, 32] strides = [1, 1, 1]
+        : !nest.l2_view<1x4x32xbf16>
+    %work = tile.alloc shape = [4, 32] dtype = "bf16"
+        : !tile.l1_buffer<4x32xbf16>
+    %load = tile.load.async %view into %work : !tile.event<"load">
+    tile.await %load
+    tile.signal input_released(%task)
+    %store = tile.store.async %work into %view : !tile.event<"store">
+    tile.await %store
+    tile.signal output_ready(%task)
+    tile.return
+  }
+
+  nest.context @phase_ctx(
+      %dst : !nest.global_memref<1x4x32xbf16>) placement = 1 {
+    %buffer = nest.alloc slot = "buffer" role = "inout" shape = [1, 4, 32]
+        dtype = "bf16" : !nest.l2_buffer<1x4x32xbf16>
+    %dst_view = nest.subview %dst offsets = [0, 0, 0] sizes = [1, 4, 32]
+        strides = [1, 1, 1] : !nest.global_view<1x4x32xbf16>
+    %tasks = nest.task.range from = 0 to = 1 : !nest.task_range
+    %grid, %read, %ready = nest.dispatch.tasks.async @phase
+        tasks(%tasks) globals() bindings(%buffer) ins(%buffer) outs(%buffer)
+        signal_policy { input_released = #nest.aggregate<all_tasks>,
+                        output_ready = #nest.aggregate<all_tasks> }
+        : (!nest.event<"grid">, !nest.event<"read">, !nest.event<"ready">)
+    %stored = nest.dma.store.async %buffer into %dst_view depends_on(%ready)
+        : !nest.event<"stored">
+    nest.release %buffer depends_on(%read, %stored)
+    nest.await %grid, %stored
+    nest.return
+  }
+}
+"""
+
+  RELEASE_IR = """builtin.module {
+  tile.program @writer(
+      %task : !nest.task,
+      %buffer : !nest.l2_buffer<1x4x32xbf16>) {
+    %view = tile.subview %buffer task = %task task_dim = 0
+        offsets = [0, 0, 0] sizes = [1, 4, 32] strides = [1, 1, 1]
+        : !nest.l2_view<1x4x32xbf16>
+    %work = tile.alloc shape = [4, 32] dtype = "bf16"
+        : !tile.l1_buffer<4x32xbf16>
+    %write = tile.store.async %work into %view : !tile.event<"write">
+    tile.await %write
+    tile.signal output_ready(%task)
+    tile.return
+  }
+
+  tile.program @reader(
+      %task : !nest.task,
+      %buffer : !nest.l2_buffer<1x4x32xbf16>) {
+    %view = tile.subview %buffer task = %task task_dim = 0
+        offsets = [0, 0, 0] sizes = [1, 4, 32] strides = [1, 1, 1]
+        : !nest.l2_view<1x4x32xbf16>
+    %work = tile.alloc shape = [4, 32] dtype = "bf16"
+        : !tile.l1_buffer<4x32xbf16>
+    %read = tile.load.async %view into %work : !tile.event<"read">
+    tile.await %read
+    tile.signal input_released(%task)
+    tile.return
+  }
+
+  nest.context @release_ctx(
+      %arena : !nest.global_memref<1x4x32xbf16>) placement = 1 {
+    %shared = nest.alloc slot = "shared" role = "inout" shape = [1, 4, 32]
+        dtype = "bf16" : !nest.l2_buffer<1x4x32xbf16>
+    %view = nest.subview %arena offsets = [0, 0, 0] sizes = [1, 4, 32]
+        strides = [1, 1, 1] : !nest.global_view<1x4x32xbf16>
+    %pref = nest.dma.prefetch.async %view into %shared : !nest.event<"pref">
+    %tasks = nest.task.range from = 0 to = 1 : !nest.task_range
+    %writer_grid, %writer_read, %writer_ready = nest.dispatch.tasks.async @writer
+        tasks(%tasks) globals() bindings(%shared) ins() outs(%shared)
+        signal_policy { output_ready = #nest.aggregate<all_tasks> }
+        depends_on(%pref)
+        : (!nest.event<"writer_grid">, !nest.event<"">,
+           !nest.event<"writer_ready">)
+    %early_store = nest.dma.store.async %shared into %view
+        depends_on(%writer_ready) : !nest.event<"early_store">
+    %reader_a_grid, %reader_a_read, %reader_a_ready = nest.dispatch.tasks.async @reader
+        tasks(%tasks) globals() bindings(%shared) ins(%shared) outs()
+        signal_policy { input_released = #nest.aggregate<all_tasks> }
+        depends_on(%writer_ready)
+        : (!nest.event<"reader_a_grid">, !nest.event<"reader_a_read">,
+           !nest.event<"">)
+    %reader_b_grid, %reader_b_read, %reader_b_ready = nest.dispatch.tasks.async @reader
+        tasks(%tasks) globals() bindings(%shared) ins(%shared) outs()
+        signal_policy { input_released = #nest.aggregate<all_tasks> }
+        depends_on(%writer_ready)
+        : (!nest.event<"reader_b_grid">, !nest.event<"reader_b_read">,
+           !nest.event<"">)
+    %late_store = nest.dma.store.async %shared into %view
+        depends_on(%writer_ready) : !nest.event<"late_store">
+    nest.release %shared depends_on(%reader_a_read, %reader_b_read, %pref,
+                                    %early_store, %late_store)
+    nest.await %writer_grid, %reader_a_grid, %reader_b_grid,
+               %early_store, %late_store
+    nest.return
+  }
+}
+"""
+
+  INPUT_WITH_STORE_IR = """builtin.module {
+  tile.program @reader(
+      %task : !nest.task,
+      %buffer : !nest.l2_buffer<1x4x32xbf16>) {
+    %view = tile.subview %buffer task = %task task_dim = 0
+        offsets = [0, 0, 0] sizes = [1, 4, 32] strides = [1, 1, 1]
+        : !nest.l2_view<1x4x32xbf16>
+    %work = tile.alloc shape = [4, 32] dtype = "bf16"
+        : !tile.l1_buffer<4x32xbf16>
+    %read = tile.load.async %view into %work : !tile.event<"read">
+    tile.await %read
+    tile.signal input_released(%task)
+    tile.return
+  }
+  nest.context @input_ctx(
+      %arena : !nest.global_memref<1x4x32xbf16>) placement = 1 {
+    %buffer = nest.alloc slot = "buffer" role = "in" shape = [1, 4, 32]
+        dtype = "bf16" : !nest.l2_buffer<1x4x32xbf16>
+    %view = nest.subview %arena offsets = [0, 0, 0] sizes = [1, 4, 32]
+        strides = [1, 1, 1] : !nest.global_view<1x4x32xbf16>
+    %tasks = nest.task.range from = 0 to = 1 : !nest.task_range
+    %grid, %read, %ready = nest.dispatch.tasks.async @reader
+        tasks(%tasks) globals() bindings(%buffer) ins(%buffer) outs()
+        signal_policy { input_released = #nest.aggregate<all_tasks> }
+        : (!nest.event<"grid">, !nest.event<"read">, !nest.event<"">)
+    %stored = nest.dma.store.async %buffer into %view
+        : !nest.event<"stored">
+    nest.release %buffer depends_on(%read, %stored)
+    nest.await %grid, %stored
+    nest.return
+  }
+}
+"""
+
+  OUTPUT_IR = """builtin.module {
+  tile.program @writer(
+      %task : !nest.task,
+      %buffer : !nest.l2_buffer<1x4x32xbf16>) {
+    %view = tile.subview %buffer task = %task task_dim = 0
+        offsets = [0, 0, 0] sizes = [1, 4, 32] strides = [1, 1, 1]
+        : !nest.l2_view<1x4x32xbf16>
+    %work = tile.alloc shape = [4, 32] dtype = "bf16"
+        : !tile.l1_buffer<4x32xbf16>
+    %write = tile.store.async %work into %view : !tile.event<"write">
+    tile.await %write
+    tile.signal output_ready(%task)
+    tile.return
+  }
+  nest.context @output_ctx(
+      %arena : !nest.global_memref<1x4x32xbf16>) placement = 1 {
+    %buffer = nest.alloc slot = "buffer" role = "out" shape = [1, 4, 32]
+        dtype = "bf16" : !nest.l2_buffer<1x4x32xbf16>
+    %view = nest.subview %arena offsets = [0, 0, 0] sizes = [1, 4, 32]
+        strides = [1, 1, 1] : !nest.global_view<1x4x32xbf16>
+    %tasks = nest.task.range from = 0 to = 1 : !nest.task_range
+    %grid, %read, %ready = nest.dispatch.tasks.async @writer
+        tasks(%tasks) globals() bindings(%buffer) ins() outs(%buffer)
+        signal_policy { output_ready = #nest.aggregate<all_tasks> }
+        : (!nest.event<"grid">, !nest.event<"">, !nest.event<"ready">)
+    %stored = nest.dma.store.async %buffer into %view depends_on(%ready)
+        : !nest.event<"stored">
+    nest.release %buffer depends_on(%stored)
+    nest.await %grid, %stored
+    nest.return
+  }
+}
+"""
+
+  @staticmethod
+  def _assert_rejected(text: str) -> None:
+    with pytest.raises(VerifyException):
+      parse_workload_ir(text, source_name="<l2-access-negative>")
+
+  def test_bindings_and_effects_are_independent(self):
+    module = parse_workload_ir(self.BINDING_IR, source_name="<bindings>")
+    text = print_workload_ir(module)
+    assert print_workload_ir(
+      parse_workload_ir(text, source_name="<bindings-round-trip>")
+    ) == text
+
+    mutations = [
+      (
+        "bindings(%X, %Y, %X)",
+        "bindings(%X, %Y)",
+      ),
+      (
+        "bindings(%X, %Y, %X)",
+        "bindings(%X, %Y, %Z)",
+      ),
+      ("ins(%X)", "ins()"),
+      ("outs(%Y)", "outs(%Y, %X)"),
+      ("ins(%X)", "ins(%X, %X)"),
+      ("ins(%X)", "ins(%Z)"),
+    ]
+    for old, new in mutations:
+      self._assert_rejected(self.BINDING_IR.replace(old, new, 1))
+
+  def test_phase_signals_seal_completed_l2_accesses(self):
+    parse_workload_ir(self.PHASE_IR, source_name="<phase>")
+
+    mutations = [
+      (
+        "    tile.await %load\n",
+        "",
+      ),
+      (
+        "    tile.signal input_released(%task)\n",
+        (
+          "    tile.signal input_released(%task)\n"
+          "    %late_load = tile.load.async %view into %work"
+          ' : !tile.event<"late_load">\n'
+          "    tile.await %late_load\n"
+        ),
+      ),
+      (
+        "    tile.await %store\n",
+        "",
+      ),
+      (
+        "    tile.signal output_ready(%task)\n",
+        (
+          "    tile.signal output_ready(%task)\n"
+          "    %late_store = tile.store.async %work into %view"
+          ' : !tile.event<"late_store">\n'
+          "    tile.await %late_store\n"
+        ),
+      ),
+      (
+        "    tile.signal input_released(%task)\n",
+        (
+          "    tile.signal input_released(%task)\n"
+          "    tile.signal input_released(%task)\n"
+        ),
+      ),
+    ]
+    for old, new in mutations:
+      self._assert_rejected(self.PHASE_IR.replace(old, new, 1))
+
+    early_return = self.PHASE_IR.replace(
+      "    tile.signal input_released(%task)\n",
+      "    tile.signal input_released(%task)\n    tile.return\n",
+      1,
+    )
+    self._assert_rejected(early_return)
+
+    ordered = """    %load = tile.load.async %view into %work : !tile.event<"load">
+    tile.await %load
+    tile.signal input_released(%task)
+    %store = tile.store.async %work into %view : !tile.event<"store">
+    tile.await %store
+    tile.signal output_ready(%task)
+"""
+    reversed_phases = """    %store = tile.store.async %work into %view : !tile.event<"store">
+    tile.await %store
+    tile.signal output_ready(%task)
+    %load = tile.load.async %view into %work : !tile.event<"load">
+    tile.await %load
+    tile.signal input_released(%task)
+"""
+    parse_workload_ir(
+      self.PHASE_IR.replace(ordered, reversed_phases, 1),
+      source_name="<reversed-phases>",
+    )
+
+  def test_release_requires_readers_and_all_transfers(self):
+    parse_workload_ir(self.RELEASE_IR, source_name="<release>")
+    self._assert_rejected(
+      self.RELEASE_IR.replace(
+        (
+          "    %early_store = nest.dma.store.async %shared into %view\n"
+          "        depends_on(%writer_ready) : !nest.event<\"early_store\">"
+        ),
+        (
+          "    %early_store = nest.dma.store.async %shared into %view\n"
+          "        : !nest.event<\"early_store\">"
+        ),
+        1,
+      )
+    )
+
+
+    release_line = (
+      "    nest.release %shared depends_on(%reader_a_read, %reader_b_read, %pref,\n"
+      "                                    %early_store, %late_store)"
+    )
+    invalid_releases = [
+      (
+        "    nest.release %shared depends_on(%reader_b_read, %pref,\n"
+        "                                    %early_store, %late_store)"
+      ),
+      (
+        "    nest.release %shared depends_on(%reader_a_read, %reader_b_read, %pref,\n"
+        "                                    %late_store)"
+      ),
+      (
+        "    nest.release %shared depends_on(%reader_a_read, %reader_b_read,\n"
+        "                                    %early_store, %late_store)"
+      ),
+      (
+        "    nest.release %shared depends_on(%reader_a_read, %reader_b_grid, %pref,\n"
+        "                                    %early_store, %late_store)"
+      ),
+      (
+        "    nest.release %shared depends_on(%reader_a_read, %reader_b_read,"
+        " %pref, %pref,\n"
+        "                                    %early_store, %late_store)"
+      ),
+    ]
+    for replacement in invalid_releases:
+      self._assert_rejected(
+        self.RELEASE_IR.replace(release_line, replacement, 1)
+      )
+
+    release_after_return = self.RELEASE_IR.replace(
+      (
+        f"{release_line}\n"
+        "    nest.await %writer_grid, %reader_a_grid, %reader_b_grid,\n"
+        "               %early_store, %late_store\n"
+        "    nest.return"
+      ),
+      (
+        "    nest.await %writer_grid, %reader_a_grid, %reader_b_grid,\n"
+        "               %early_store, %late_store\n"
+        f"    nest.return\n{release_line}"
+      ),
+      1,
+    )
+    self._assert_rejected(release_after_return)
+
+    self._assert_rejected(
+      self.RELEASE_IR.replace('role = "inout"', 'role = "in"', 1)
+    )
+
+    parse_workload_ir(
+      self.INPUT_WITH_STORE_IR,
+      source_name="<input-with-store>",
+    )
+    for role in ("out", "inout"):
+      self._assert_rejected(
+        self.INPUT_WITH_STORE_IR.replace(
+          'role = "in"',
+          f'role = "{role}"',
+          1,
         )
       )
 
-  def test_signal_policy_matches_program_phases(self):
-    """Missing declared phase, extra phase, and unsupported mode all reject."""
-    prog = self._make_signal_prog(("input_released",))
-    # extra undeclared phase in policy
-    ctx, _ = self._make_context(
-      prog, "inout", "ev_i", "ev_o", {"input_released": "all_tasks", "output_ready": "all_tasks"}
-    )
-    with pytest.raises(VerifyException, match="signal_policy phases"):
-      verify_workload_ir(ModuleOp([prog, ctx]))
-
-  def test_release_dependency_matches_buffer_role(self):
-    """Legal in/out/inout release chains pass verification."""
-    for role, phases, policy_kwargs, _dep_kind in [
-      ("in", ("input_released",), {"input_released": "all_tasks"}, "input"),
-      (
-        "inout",
-        ("input_released", "output_ready"),
-        {"input_released": "all_tasks", "output_ready": "all_tasks"},
-        "output",
-      ),
-    ]:
-      prog = self._make_signal_prog(phases)
-      ctx, _disp = self._make_context(
-        prog,
-        role,
-        "ev_i" if "input_released" in phases else "",
-        "ev_o" if "output_ready" in phases else "",
-        policy_kwargs,
+    for role in ("out", "inout"):
+      valid_output = self.OUTPUT_IR.replace(
+        'role = "out"',
+        f'role = "{role}"',
+        1,
       )
-      verify_workload_ir(ModuleOp([prog, ctx]))
-
-  def test_release_rejects_wrong_phase_or_grid(self):
-    """grid_done dependency, missing release, wrong dependency all reject."""
-    prog = self._make_signal_prog(("input_released", "output_ready"))
-    ctx = NestContextOp(
-      "bad", [], placement=1, arg_types=[NestGlobalMemref.of([1, 4, 32], "bf16")], arg_names=["Y"]
-    )
-    y = ctx.body.block.args[0]
-    buf = NestAllocOp("l2_buf", "inout", [1, 4, 32], "bf16", alignment=256)
-    src = NestSubviewOp(y, [0, 0, 0], [1, 4, 32], [1, 1, 1], NestGlobalView.of([1, 4, 32], "bf16"))
-    pref = NestPrefetchOp(src.result, buf.result, "ev_in")
-    tasks = NestTaskRangeOp(0, 1)
-    disp = NestDispatchOp("sig_prog", tasks.result, [], [buf.result],
-    [buf.result],
-    "ev_grid",
-    "ev_inrel",
-    "ev_outready",
-    signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
-    depends_on=[pref.result],)
-    store = NestDMAStoreOp(buf.result, src.result, "ev_out", depends_on=[disp.output_ready])
-    # release depends on grid_done instead of store
-    bad_release = NestReleaseOp(buf.result, depends_on=[disp.grid_done])
-    ctx.body.block.add_ops(
-      [
-        buf,
-        src,
-        pref,
-        tasks,
-        disp,
-        store,
-        bad_release,
-        NestAwaitOp([disp.grid_done, store.result]),
-        NestReturnOp(),
-      ]
-    )
-    with pytest.raises(VerifyException, match="must depend only on"):
-      verify_workload_ir(ModuleOp([prog, ctx]))
-
-  def test_lowering_preserves_dispatch_and_release_dtos(self):
-    """Lowered ExecDispatchRequest/ExecReleaseRequest carry exact
-    ordinals, policies, consumer ordinals, and dependency events."""
-    from pipeline_validator.execution_ir import ExecDispatchRequest, ExecReleaseRequest
-
-    task = lower_workload_ir(PowWorkload().module)
-    dispatch_actions = [a for a in task.actions if a.op == ExecGroupActionOp.DISPATCH_ROLE]
-    release_actions = [a for a in task.actions if a.op == ExecGroupActionOp.RELEASE_L2]
-    assert len(dispatch_actions) == 4
-    assert len(release_actions) == 4
-    for i, a in enumerate(dispatch_actions):
-      req = a.args[0]
-      assert isinstance(req, ExecDispatchRequest)
-      assert req.dispatch_ordinal == i
-      assert req.signal_policy.input_released == "all_tasks"
-      assert req.signal_policy.output_ready == "all_tasks"
-    for a in release_actions:
-      req = a.args[0]
-      assert isinstance(req, ExecReleaseRequest)
-      assert req.buffer_role == "inout"
-      assert len(req.consumer_dispatch_ordinals) == 1
-
-  def test_release_after_return_rejected(self):
-    """A nest.release after nest.return is rejected (plan §1)."""
-    prog = self._make_signal_prog(("input_released", "output_ready"))
-    ctx = NestContextOp(
-      "post_return", [], placement=1, arg_types=[NestGlobalMemref.of([1, 4, 32], "bf16")], arg_names=["Y"]
-    )
-    y = ctx.body.block.args[0]
-    buf = NestAllocOp("l2_buf", "inout", [1, 4, 32], "bf16", alignment=256)
-    src = NestSubviewOp(y, [0, 0, 0], [1, 4, 32], [1, 1, 1], NestGlobalView.of([1, 4, 32], "bf16"))
-    pref = NestPrefetchOp(src.result, buf.result, "ev_in")
-    tasks = NestTaskRangeOp(0, 1)
-    disp = NestDispatchOp("sig_prog", tasks.result, [], [buf.result],
-    [buf.result],
-    "ev_grid",
-    "ev_inrel",
-    "ev_outready",
-    signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
-    depends_on=[pref.result],)
-    store = NestDMAStoreOp(buf.result, src.result, "ev_out", depends_on=[disp.output_ready])
-    # release appears AFTER nest.return
-    ctx.body.block.add_ops(
-      [
-        buf,
-        src,
-        pref,
-        tasks,
-        disp,
-        store,
-        NestAwaitOp([disp.grid_done, store.result]),
-        NestReturnOp(),
-        NestReleaseOp(buf.result, depends_on=[store.result]),
-      ]
-    )
-    with pytest.raises(VerifyException, match="before nest.return"):
-      verify_workload_ir(ModuleOp([prog, ctx]))
-
-  def test_release_rejects_out_inout_without_outs_producer(self):
-    """out/inout buffer with no dispatch in outs lacks a matching
-    producer; release must be rejected (plan §1)."""
-    prog = self._make_signal_prog(("input_released", "output_ready"))
-    ctx = NestContextOp(
-      "no_producer", [], placement=1, arg_types=[NestGlobalMemref.of([1, 4, 32], "bf16")], arg_names=["Y"]
-    )
-    y = ctx.body.block.args[0]
-    buf = NestAllocOp("l2_buf", "inout", [1, 4, 32], "bf16", alignment=256)
-    src = NestSubviewOp(y, [0, 0, 0], [1, 4, 32], [1, 1, 1], NestGlobalView.of([1, 4, 32], "bf16"))
-    pref = NestPrefetchOp(src.result, buf.result, "ev_in")
-    store = NestDMAStoreOp(buf.result, src.result, "ev_out")
-    ctx.body.block.add_ops(
-      [
-        buf,
-        src,
-        pref,
-        store,
-        NestReleaseOp(buf.result, depends_on=[store.result]),
-        NestAwaitOp([store.result]),
-        NestReturnOp(),
-      ]
-    )
-    with pytest.raises(VerifyException, match="lacks a matching"):
-      verify_workload_ir(ModuleOp([prog, ctx]))
+      parse_workload_ir(valid_output, source_name=f"<{role}-writer>")
+      self._assert_rejected(
+        valid_output.replace(
+          (
+            "    %stored = nest.dma.store.async %buffer into %view"
+            " depends_on(%ready)\n"
+            '        : !nest.event<"stored">\n'
+            "    nest.release %buffer depends_on(%stored)\n"
+            "    nest.await %grid, %stored"
+          ),
+          "    nest.release %buffer\n    nest.await %grid",
+          1,
+        )
+      )

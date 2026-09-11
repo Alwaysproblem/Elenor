@@ -107,8 +107,9 @@ builtin.module {
     %grid_done, %input_released, %output_ready =
         nest.dispatch.tasks.async @gather_matmul_4tile context = 0
         tasks(%tasks) globals(%table_global)
-        ins(%lhs_buffer, %rhs_buffer, %indices_buffer, %output_buffer)
-        outs(%lhs_buffer, %rhs_buffer, %indices_buffer, %output_buffer)
+        bindings(%lhs_buffer, %rhs_buffer, %indices_buffer, %output_buffer)
+        ins(%lhs_buffer, %rhs_buffer, %indices_buffer)
+        outs(%output_buffer)
         signal_policy {
           input_released = #nest.aggregate<all_tasks>,
           output_ready = #nest.aggregate<all_tasks>
@@ -116,9 +117,9 @@ builtin.module {
         depends_on(%lhs_prefetched, %rhs_prefetched, %indices_prefetched)
         : (!nest.event<"grid_done">, !nest.event<"input_released">,
            !nest.event<"output_ready">)
-    nest.release %lhs_buffer depends_on(%input_released)
-    nest.release %rhs_buffer depends_on(%input_released)
-    nest.release %indices_buffer depends_on(%input_released)
+    nest.release %lhs_buffer depends_on(%input_released, %lhs_prefetched)
+    nest.release %rhs_buffer depends_on(%input_released, %rhs_prefetched)
+    nest.release %indices_buffer depends_on(%input_released, %indices_prefetched)
     %hbm_store_done = nest.dma.store.async %output_buffer into %output_global
         depends_on(%output_ready) : !nest.event<"hbm_store_done">
     nest.release %output_buffer depends_on(%hbm_store_done)
@@ -170,8 +171,9 @@ builtin.module {
     %grid_done, %input_released, %output_ready =
         nest.dispatch.tasks.async @gather_matmul_4tile context = 1
         tasks(%tasks) globals(%table_global)
-        ins(%lhs_buffer, %rhs_buffer, %indices_buffer, %output_buffer)
-        outs(%lhs_buffer, %rhs_buffer, %indices_buffer, %output_buffer)
+        bindings(%lhs_buffer, %rhs_buffer, %indices_buffer, %output_buffer)
+        ins(%lhs_buffer, %rhs_buffer, %indices_buffer)
+        outs(%output_buffer)
         signal_policy {
           input_released = #nest.aggregate<all_tasks>,
           output_ready = #nest.aggregate<all_tasks>
@@ -179,9 +181,9 @@ builtin.module {
         depends_on(%lhs_prefetched, %rhs_prefetched, %indices_prefetched)
         : (!nest.event<"grid_done">, !nest.event<"input_released">,
            !nest.event<"output_ready">)
-    nest.release %lhs_buffer depends_on(%input_released)
-    nest.release %rhs_buffer depends_on(%input_released)
-    nest.release %indices_buffer depends_on(%input_released)
+    nest.release %lhs_buffer depends_on(%input_released, %lhs_prefetched)
+    nest.release %rhs_buffer depends_on(%input_released, %rhs_prefetched)
+    nest.release %indices_buffer depends_on(%input_released, %indices_prefetched)
     %hbm_store_done = nest.dma.store.async %output_buffer into %output_global
         depends_on(%output_ready) : !nest.event<"hbm_store_done">
     nest.release %output_buffer depends_on(%hbm_store_done)

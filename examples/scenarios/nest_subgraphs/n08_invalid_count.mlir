@@ -23,8 +23,8 @@ builtin.module {
     %h_output = nest.subview %arena offsets = [131072] sizes = [12288] strides = [1] : !nest.global_view<12288xbf16>
     %pref_input = nest.dma.prefetch.async %h_input into %b_input : !nest.event<"pref_Input">
     %tasks = nest.task.range from = 0 to = 3 : !nest.task_range
-    %grid_InvalidCount, %read_InvalidCount, %ready_InvalidCount = nest.dispatch.tasks.async @prog_InvalidCount tasks(%tasks) globals() ins(%b_input, %b_output) outs(%b_input, %b_output) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input) : (!nest.event<"grid_InvalidCount">, !nest.event<"read_InvalidCount">, !nest.event<"ready_InvalidCount">)
-    nest.release %b_input depends_on(%read_InvalidCount)
+    %grid_InvalidCount, %read_InvalidCount, %ready_InvalidCount = nest.dispatch.tasks.async @prog_InvalidCount tasks(%tasks) globals() bindings(%b_input, %b_output) ins(%b_input) outs(%b_output) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input) : (!nest.event<"grid_InvalidCount">, !nest.event<"read_InvalidCount">, !nest.event<"ready_InvalidCount">)
+    nest.release %b_input depends_on(%read_InvalidCount, %pref_input)
     %store_Output = nest.dma.store.async %b_output into %h_output depends_on(%ready_InvalidCount) : !nest.event<"store_Output">
     nest.release %b_output depends_on(%store_Output)
     nest.await %grid_InvalidCount, %store_Output

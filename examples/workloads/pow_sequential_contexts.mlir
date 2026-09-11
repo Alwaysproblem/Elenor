@@ -17,9 +17,15 @@ builtin.module {
     %2 = nest.subview %Y offsets = [0, 0, 0] sizes = [4, 128, 128] strides = [1, 1, 1] : !nest.global_view<4x128x128xbf16>
     %ev_in = nest.dma.prefetch.async %2 into %l2_buf_1 : !nest.event<"ev_in">
     %3 = nest.task.range from = 0 to = 4 : !nest.task_range
-    %ev_grid, %ev_inrel, %ev_outready = nest.dispatch.tasks.async @pow_tile tasks(%3) globals() ins(%l2_buf_1) outs(%l2_buf_1) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%ev_in) : (!nest.event<"ev_grid">, !nest.event<"ev_inrel">, !nest.event<"ev_outready">)
+    %ev_grid, %ev_inrel, %ev_outready =
+      nest.dispatch.tasks.async @pow_tile tasks(%3) globals() bindings(%l2_buf_1)
+      ins(%l2_buf_1) outs(%l2_buf_1)
+      signal_policy {
+        input_released = #nest.aggregate<all_tasks>,
+        output_ready = #nest.aggregate<all_tasks>
+      } depends_on(%ev_in) : (!nest.event<"ev_grid">, !nest.event<"ev_inrel">, !nest.event<"ev_outready">)
     %ev_out = nest.dma.store.async %l2_buf_1 into %2 depends_on(%ev_outready) : !nest.event<"ev_out">
-    nest.release %l2_buf_1 depends_on(%ev_out)
+    nest.release %l2_buf_1 depends_on(%ev_inrel, %ev_in, %ev_out)
     nest.await %ev_grid, %ev_out
     nest.return
   }
@@ -28,9 +34,15 @@ builtin.module {
     %4 = nest.subview %Y_1 offsets = [0, 0, 0] sizes = [4, 128, 128] strides = [1, 1, 1] : !nest.global_view<4x128x128xbf16>
     %ev_in_1 = nest.dma.prefetch.async %4 into %l2_buf_2 : !nest.event<"ev_in">
     %5 = nest.task.range from = 0 to = 4 : !nest.task_range
-    %ev_grid_1, %ev_inrel_1, %ev_outready_1 = nest.dispatch.tasks.async @pow_tile tasks(%5) globals() ins(%l2_buf_2) outs(%l2_buf_2) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%ev_in_1) : (!nest.event<"ev_grid_1">, !nest.event<"ev_inrel_1">, !nest.event<"ev_outready_1">)
+    %ev_grid_1, %ev_inrel_1, %ev_outready_1 =
+      nest.dispatch.tasks.async @pow_tile tasks(%5) globals() bindings(%l2_buf_2)
+      ins(%l2_buf_2) outs(%l2_buf_2)
+      signal_policy {
+        input_released = #nest.aggregate<all_tasks>,
+        output_ready = #nest.aggregate<all_tasks>
+      } depends_on(%ev_in_1) : (!nest.event<"ev_grid_1">, !nest.event<"ev_inrel_1">, !nest.event<"ev_outready_1">)
     %ev_out_1 = nest.dma.store.async %l2_buf_2 into %4 depends_on(%ev_outready_1) : !nest.event<"ev_out_1">
-    nest.release %l2_buf_2 depends_on(%ev_out_1)
+    nest.release %l2_buf_2 depends_on(%ev_inrel_1, %ev_in_1, %ev_out_1)
     nest.await %ev_grid_1, %ev_out_1
     nest.return
   }

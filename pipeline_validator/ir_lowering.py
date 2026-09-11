@@ -279,8 +279,17 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
       )
       actuals = tuple(
         _l2_buffer(objects, actual, body_op.name).slot
-        for actual in (*body_op.ins, *body_op.outs)
+        for actual in body_op.bindings
       )
+      read_slots = {
+        _l2_buffer(objects, actual, body_op.name).slot for actual in body_op.ins
+      }
+      write_slots = {
+        _l2_buffer(objects, actual, body_op.name).slot for actual in body_op.outs
+      }
+      unique_actuals = dict.fromkeys(actuals)
+      read_actuals = tuple(slot for slot in unique_actuals if slot in read_slots)
+      write_actuals = tuple(slot for slot in unique_actuals if slot in write_slots)
       role_id = _register_role(
         role_bindings,
         programs,
@@ -290,6 +299,8 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
         task_domain=task_domain,
         actuals=actuals,
         global_actuals=global_actuals,
+        read_actuals=read_actuals,
+        write_actuals=write_actuals,
       )
       grid_tag = _event_tag(body_op.grid_done.type)
       inrel_tag = _event_tag(body_op.input_released.type)
@@ -322,17 +333,14 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
           )
         )
       buffer = _l2_buffer(objects, body_op.buffer, body_op.name)
-      if buffer.role == "in":
-        consumers = ins_consumers.get(body_op.buffer, [])
-      else:
-        consumers = outs_producers.get(body_op.buffer, [])
       actions.append(
         ExecGroupAction(
           ExecGroupActionOp.RELEASE_L2,
           args=(ExecReleaseRequest(
             buffer_slot=buffer.slot,
             buffer_role=buffer.role,
-            consumer_dispatch_ordinals=tuple(sorted(set(consumers))),
+            reader_dispatch_ordinals=tuple(sorted(set(ins_consumers.get(body_op.buffer, ())))),
+            writer_dispatch_ordinals=tuple(sorted(set(outs_producers.get(body_op.buffer, ())))),
             dependency_events=tuple(
               _event_tag(dep.type) for dep in body_op.depends_on),
           ),),
@@ -377,6 +385,9 @@ def _register_role(
   task_domain: ExecTaskDomain | None = None,
   actuals: tuple[str, ...] = (),
   global_actuals: tuple[ExecMemoryView, ...] = (),
+  *,
+  read_actuals: tuple[str, ...],
+  write_actuals: tuple[str, ...],
 ) -> int:
   """Register one logical tile-program binding and return its role id."""
   for rid, binding in bindings.items():
@@ -387,6 +398,8 @@ def _register_role(
       and binding.task_domain == task_domain
       and binding.actuals == actuals
       and binding.global_actuals == global_actuals
+      and binding.read_actuals == read_actuals
+      and binding.write_actuals == write_actuals
     ):
       return rid
   role_id = len(bindings)
@@ -401,6 +414,8 @@ def _register_role(
     task_domain=task_domain,
     actuals=actuals,
     global_actuals=global_actuals,
+    read_actuals=read_actuals,
+    write_actuals=write_actuals,
   )
   return role_id
 
