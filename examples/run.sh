@@ -55,6 +55,14 @@ Protocol scenarios:
   sequential-release-counterexample
                                  scenarios/sequential_release_counterexample.mlir
 EOF
+  printf '\nNEST subgraphs (timing/lifetime, not tensor numerics):\n'
+  local model stem
+  for model in "$ROOT_DIR"/examples/scenarios/nest_subgraphs/*.mlir; do
+    [[ -f "$model" ]] || continue
+    stem="${model##*/}"
+    stem="${stem%.mlir}"
+    printf '  nest-%-36s scenarios/nest_subgraphs/%s.mlir\n' "${stem//_/-}" "$stem"
+  done
 }
 
 name="${1:-list}"
@@ -277,6 +285,55 @@ case "$name" in
       --hw-override hbm_fixed_latency_cycles=10 \
       --max-cycles 200000 \
       "$@"
+    ;;
+  nest-*)
+    stem="${name#nest-}"
+    if [[ ! "$stem" =~ ^[a-z0-9_-]+$ ]]; then
+      echo "error: unknown example '$name'" >&2
+      exit 2
+    fi
+    stem="${stem//-/_}"
+    model_path="$ROOT_DIR/examples/scenarios/nest_subgraphs/$stem.mlir"
+    if [[ ! -f "$model_path" ]]; then
+      echo "error: unknown example '$name'" >&2
+      exit 2
+    fi
+    nest_args=(
+      --ir-file "$model_path"
+      --sim-override fidelity=full_memory
+      --hw-override num_dma_channels=2
+      --hw-override hbm_fixed_latency_cycles=10
+      --context-mode 4
+      --device-context-mode 4
+      --max-cycles 2000000
+    )
+    case "$stem" in
+      *_single|*_single_*) nest_args+=(--device-context-mode 1) ;;
+    esac
+    case "$stem" in
+      t01_single_one_uce)
+        nest_args+=(--context-mode 1 --device-context-mode 1) ;;
+      n03_wait_capacity|n09_impossible)
+        nest_args+=(--hw-override group_sram_bytes=65536) ;;
+      n04_fifo_hol|s09_single_exact)
+        nest_args+=(--hw-override group_sram_bytes=196608) ;;
+      s09_single_short)
+        nest_args+=(--hw-override group_sram_bytes=196352) ;;
+      s07_node_c100|s12_node_v100_evu)
+        nest_args+=(--max-cycles 8000000) ;;
+    esac
+    case "$stem" in
+      t04_*)
+        nest_args+=(
+          --input-binding R0=0x1000000:8388608:rw
+          --input-binding R1=0x2000000:8388608:rw
+          --input-binding R2=0x3000000:8388608:rw
+          --input-binding R3=0x4000000:8388608:rw
+          --input-binding W=0x5000000:32768:r
+        ) ;;
+      *) nest_args+=(--input-binding arena=0x1000000:8388608:rw) ;;
+    esac
+    set -- "${nest_args[@]}" "$@"
     ;;
   file)
     if [[ $# -lt 1 ]]; then
