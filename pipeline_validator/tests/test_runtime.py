@@ -29,9 +29,11 @@ from pipeline_validator.dialects.elenor import (
   NestBuffer,
   NestContextOp,
   NestDispatchOp,
+  NestDMAStoreOp,
   NestGlobalMemref,
   NestGlobalView,
   NestL2View,
+  NestPrefetchOp,
   NestReleaseOp,
   NestReturnOp,
   NestSubviewOp,
@@ -51,6 +53,7 @@ from pipeline_validator.dialects.elenor import (
   TileProfiledAccessOp,
   TileReturnOp,
   TileSignalOp,
+  TileStoreOp,
   TileSubviewOp,
 )
 from pipeline_validator.execution_ir import (
@@ -194,6 +197,7 @@ def make_gather_module(
     "grid_done",
     "",
     "",
+    bindings=[],
     signal_policy={},
   )
   programs = [program]
@@ -209,6 +213,7 @@ def make_gather_module(
       "evu_grid_done",
       "",
       "",
+      bindings=[],
       signal_policy={},
     )
     programs.append(evu_program)
@@ -301,10 +306,11 @@ def make_held_mfe_launch_module() -> ModuleOp:
     tasks.result,
     [],
     [buffer.result],
-    [buffer.result],
+    [],
     "held_mfe_done",
     "held_mfe_input_released",
     "",
+    bindings=[buffer.result],
     signal_policy={"input_released": "all_tasks"},
   )
   context = NestContextOp(
@@ -330,28 +336,23 @@ def make_same_tile_roles_task(role_count: int, pins: list[int | None] | None = N
   buffer = NestAllocOp("l2_buf", "in", L2_WAIT_DIMS, "bf16")
   dispatches = []
   for i, name in enumerate(names):
+    bindings = [buffer.result] if i == 0 else []
     ins = [buffer.result] if i == 0 else []
-    outs = [buffer.result] if i == 0 else []
-    if i == 0:
-      dispatches.append(
-        NestDispatchOp(name, tasks.result, [], ins,
-        outs,
+    dispatches.append(
+      NestDispatchOp(
+        name,
+        tasks.result,
+        [],
+        ins,
+        [],
         f"ev_role{i}",
-        f"ev_inrel{i}",
+        f"ev_inrel{i}" if i == 0 else "",
         "",
-        signal_policy={"input_released": "all_tasks"},
-        context_id=None if pins is None else pins[i],)
+        bindings=bindings,
+        signal_policy={"input_released": "all_tasks"} if i == 0 else {},
+        context_id=None if pins is None else pins[i],
       )
-    else:
-      dispatches.append(
-        NestDispatchOp(name, tasks.result, [], ins,
-        outs,
-        f"ev_role{i}",
-        "",
-        "",
-        signal_policy={},
-        context_id=None if pins is None else pins[i],)
-      )
+    )
   context = NestContextOp(
     "same_tile_roles",
     [
@@ -374,12 +375,18 @@ def make_two_context_model(pins: tuple[int | None, ...] = (None, None)) -> Modul
   for i, pin in enumerate(pins):
     buffer = NestAllocOp(f"l2_buf_c{i}", "in", L2_WAIT_DIMS, "bf16")
     tasks = NestTaskRangeOp(0, 1)
-    disp = NestDispatchOp("model_wait_mfe", tasks.result, [], [buffer.result],
-    [buffer.result],
-    f"ev_grid_c{i}",
-    f"ev_inrel_c{i}",
-    "",
-    signal_policy={"input_released": "all_tasks"},)
+    disp = NestDispatchOp(
+      "model_wait_mfe",
+      tasks.result,
+      [],
+      [buffer.result],
+      [],
+      f"ev_grid_c{i}",
+      f"ev_inrel_c{i}",
+      "",
+      bindings=[buffer.result],
+      signal_policy={"input_released": "all_tasks"},
+    )
     ctxs.append(
       NestContextOp(
         f"ctx{i}",
@@ -828,9 +835,8 @@ class TestFullMemorySnapshot:
 
 
 class TestL2DispatchPins:
-  def test_inout_actual_pins_once_per_task_and_defers_release(self):
-    """Dispatch deduplicates in/out actuals by allocation id; RELEASE_L2
-    stays pending until the grid's output_ready pins are unpinned."""
+  def test_readwrite_actual_pins_once_per_task(self):
+    """One readwrite actual has one pin per task with merged access flags."""
     task = lower_workload_ir(PowWorkload().module)
     hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
     group = TileGroup(hw, fidelity="runtime")
@@ -851,14 +857,16 @@ class TestL2DispatchPins:
     handle = group._l2_handles[key]
     grid = seq.grid_id(0)
     pins = group._grid_l2_pins[grid]
-    # Four logical tasks (one per tile), despite the same inout appearing
-    # in both ins and outs: no duplicate pin per task.
+    # The same actual is read and written, but each task receives one pin.
     for task_id in range(4):
-      assert slot in pins[task_id]
-    # Check actual consumer IDs in the allocator.
+      assert set(pins[task_id]) == {slot}
+      assert pins[task_id][slot].reads
+      assert pins[task_id][slot].writes
     record = group.l2_sram._allocator._live[handle.allocation_id]
-    expected_pins = {f"pow_task:s0:g{seq.context_launch_generation}:d0:t{tid}:{slot}" for tid in range(4)}
-    assert record.pins == expected_pins
+    assert len(record.pins) == 4
+    assert record.pins == {
+      pins[task_id][slot].consumer_id for task_id in range(4)
+    }
     group.reset()
 
 
@@ -1494,6 +1502,7 @@ class TestFidelityModes:
         f"ev_held_boa{i}",
         "",
         "",
+        bindings=[],
         signal_policy={},
         context_id=i,
       )
@@ -1614,20 +1623,32 @@ class TestFidelityModes:
     prog = make_waiting_mfe_program()
     tasks = NestTaskRangeOp(0, 1)
     buffer = NestAllocOp("l2_buf", "in", L2_WAIT_DIMS, "bf16")
-    disp0 = NestDispatchOp("ctx_wait_mfe", tasks.result, [], [buffer.result],
-    [buffer.result],
-    "ev_a",
-    "ev_inrel_a",
-    "",
-    signal_policy={"input_released": "all_tasks"},
-    context_id=0,)
-    disp1 = NestDispatchOp("ctx_wait_mfe", tasks.result, [], [buffer.result],
-    [buffer.result],
-    "ev_b",
-    "ev_inrel_b",
-    "",
-    signal_policy={"input_released": "all_tasks"},
-    context_id=1,)
+    disp0 = NestDispatchOp(
+      "ctx_wait_mfe",
+      tasks.result,
+      [],
+      [buffer.result],
+      [],
+      "ev_a",
+      "ev_inrel_a",
+      "",
+      bindings=[buffer.result],
+      signal_policy={"input_released": "all_tasks"},
+      context_id=0,
+    )
+    disp1 = NestDispatchOp(
+      "ctx_wait_mfe",
+      tasks.result,
+      [],
+      [buffer.result],
+      [],
+      "ev_b",
+      "ev_inrel_b",
+      "",
+      bindings=[buffer.result],
+      signal_policy={"input_released": "all_tasks"},
+      context_id=1,
+    )
     module = ModuleOp(
       [
         prog,
@@ -1731,12 +1752,18 @@ class TestModelMode:
     prog = make_waiting_mfe_program()
     tasks = NestTaskRangeOp(0, 1)
     buffer = NestAllocOp("l2_buf", "in", L2_WAIT_DIMS, "bf16")
-    disp = NestDispatchOp("ctx_wait_mfe", tasks.result, [], [buffer.result],
-    [buffer.result],
-    "ev_a",
-    "ev_inrel_a",
-    "",
-    signal_policy={"input_released": "all_tasks"},)
+    disp = NestDispatchOp(
+      "ctx_wait_mfe",
+      tasks.result,
+      [],
+      [buffer.result],
+      [],
+      "ev_a",
+      "ev_inrel_a",
+      "",
+      bindings=[buffer.result],
+      signal_policy={"input_released": "all_tasks"},
+    )
     module = ModuleOp(
       [
         prog,
@@ -1767,12 +1794,18 @@ class TestModelMode:
     prog = make_waiting_mfe_program("model_wait_mfe")
     buffer = NestAllocOp("l2_buf_c0", "in", L2_WAIT_DIMS, "bf16")
     tasks = NestTaskRangeOp(0, 1)
-    disp = NestDispatchOp("model_wait_mfe", tasks.result, [], [buffer.result],
-    [buffer.result],
-    "ev_grid_c0",
-    "ev_inrel_c0",
-    "",
-    signal_policy={"input_released": "all_tasks"},)
+    disp = NestDispatchOp(
+      "model_wait_mfe",
+      tasks.result,
+      [],
+      [buffer.result],
+      [],
+      "ev_grid_c0",
+      "ev_inrel_c0",
+      "",
+      bindings=[buffer.result],
+      signal_policy={"input_released": "all_tasks"},
+    )
     ctx = NestContextOp(
       "ctx0",
       [
@@ -2052,15 +2085,24 @@ class TestModelMode:
     )
     pref = NestPrefetchOp(src.result, buf.result, "ev_in")
     tasks = NestTaskRangeOp(0, 4)
-    disp = NestDispatchOp("pow_4k_tile", tasks.result, [], [buf.result],
-    [buf.result],
-    "ev_grid",
-    "ev_inrel",
-    "ev_outready",
-    signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
-    depends_on=[pref.result],)
+    disp = NestDispatchOp(
+      "pow_4k_tile",
+      tasks.result,
+      [],
+      [buf.result],
+      [buf.result],
+      "ev_grid",
+      "ev_inrel",
+      "ev_outready",
+      bindings=[buf.result],
+      signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
+      depends_on=[pref.result],
+    )
     store = NestDMAStoreOp(buf.result, src.result, "ev_out", depends_on=[disp.output_ready])
-    release = NestReleaseOp(buf.result, depends_on=[store.result])
+    release = NestReleaseOp(
+      buf.result,
+      depends_on=[disp.input_released, pref.result, store.result],
+    )
     ctx.body.block.add_ops(
       [
         buf,
@@ -2164,7 +2206,7 @@ class TestGridSignalAggregation:
 
 
 class TestSignalGatedRelease:
-  """PR 3: role-aware release gating and pin lifecycle."""
+  """Access-aware release gating and pin lifecycle."""
 
   def test_exact_capacity_blocks_until_release(self):
     """Exact-capacity L2 (one pow chunk = 131072 bytes): first batch
@@ -2185,48 +2227,83 @@ class TestSignalGatedRelease:
     group.reset()
 
   def test_exact_capacity_retries_after_3_4_barrier_and_release(self):
-    """Exact-capacity L2: after 3/4 signals, a retry is WAIT_CAPACITY
-    (pins hold L2). After 4th signal + legal release, it is ADMITTED."""
-    from pipeline_validator.execution_ir import PhaseSignal, TaskIdentity
+    """Only real, completed tile phases drive the controlled 3/4 barrier."""
     from pipeline_validator.tile_group import L2AdmissionStatus, TileGroup
 
-    chunk = 4 * 128 * 128 * 2  # one pow allocation = 131072 bytes
-    hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10, group_sram_bytes=chunk)
+    chunk = 4 * 128 * 128 * 2
+    hw = HardwareConfig().with_overrides(
+      hbm_fixed_latency_cycles=10,
+      group_sram_bytes=chunk,
+    )
     group = TileGroup(hw, fidelity="full_memory")
     task = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
     group.load_task(task, input_bindings=POW_BINDINGS)
     seq = group.sequencer
-    # Step until the dispatch registers a grid signal state.
-    for c in range(5000):
-      group.step(c)
+    for cycle in range(5000):
+      group.step(cycle)
       if group._grid_signals:
         break
     assert group._grid_signals, "dispatch did not register grid signal state"
     grid = next(iter(group._grid_signals))
-    # Fire only 3 of 4 input_released signals — phase not complete,
-    # pins still hold L2.
-    for tid in range(3):
-      group._on_phase_signal(PhaseSignal(TaskIdentity(grid, tid), "input_released"), c + 1)
+    captured: list[tuple[PhaseSignal, int]] = []
+
+    def defer_target(signal, emitted_cycle):
+      if signal.task.grid == grid:
+        captured.append((signal, emitted_cycle))
+      else:
+        group._on_phase_signal(signal, emitted_cycle)
+
+    for tile in group.tiles:
+      tile.uce._phase_signal_callback = defer_target
+    for actual_cycle in range(cycle + 1, cycle + 200000):
+      group.step(actual_cycle)
+      if len(captured) == 8:
+        break
+    assert len(captured) == 8
+    assert not seq.faulted
+    for tile in group.tiles:
+      tile.uce._phase_signal_callback = group._on_phase_signal
+    input_signals = sorted(
+      (signal for signal, _ in captured if signal.phase == "input_released"),
+      key=lambda signal: signal.task.task_id,
+    )
+    output_signals = sorted(
+      (signal for signal, _ in captured if signal.phase == "output_ready"),
+      key=lambda signal: signal.task.task_id,
+    )
+    assert len(input_signals) == len(output_signals) == 4
+
+    delivery_cycle = actual_cycle + 1
+    for signal in input_signals[:3]:
+      group._on_phase_signal(signal, delivery_cycle)
+      delivery_cycle += 1
     task2 = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
-    # Second admission must wait: L2 is pinned by the first batch.
     gen2 = group._context_launch_generation + 1
     outcome = group.try_admit_l2_buffers(
-      task2, context_name="ctx2", launch_generation=gen2, cycle=c + 2)
+      task2,
+      context_name="ctx2",
+      launch_generation=gen2,
+      cycle=delivery_cycle,
+    )
     assert outcome.status is L2AdmissionStatus.WAIT_CAPACITY
-    # Complete the 4th signal + all output_ready, then step until
-    # the RELEASE_L2 action unpins and releases the handle.
-    group._on_phase_signal(PhaseSignal(TaskIdentity(grid, 3), "input_released"), c + 3)
-    for tid in range(4):
-      group._on_phase_signal(PhaseSignal(TaskIdentity(grid, tid), "output_ready"), c + 4)
-    for c2 in range(c + 5, c + 20000):
-      group.step(c2)
+
+    delivery_cycle += 1
+    group._on_phase_signal(input_signals[3], delivery_cycle)
+    for signal in output_signals:
+      delivery_cycle += 1
+      group._on_phase_signal(signal, delivery_cycle)
+    for release_cycle in range(delivery_cycle + 1, delivery_cycle + 20000):
+      group.step(release_cycle)
       if seq.done:
         break
-    assert seq.done, "sequencer did not complete after release"
+    assert seq.done, "sequencer did not complete after real phase delivery"
     assert group.l2_sram.snapshot()["live_allocations"] == 0
-    # Retry: L2 is now free; second admission must succeed.
     outcome = group.try_admit_l2_buffers(
-      task2, context_name="ctx2", launch_generation=gen2, cycle=c2)
+      task2,
+      context_name="ctx2",
+      launch_generation=gen2,
+      cycle=release_cycle,
+    )
     assert outcome.status is L2AdmissionStatus.ADMITTED
     assert group.l2_sram.snapshot()["live_allocations"] == 1
     group.reset()
@@ -2280,32 +2357,1409 @@ class TestSignalGatedRelease:
       assert ev.get(key, 0) == 0, (key, ev)
 
 
+class TestL2AccessRelease:
+  """Access-based L2 pinning and release regressions on real transfers."""
+
+  _ARENA_DIMS = [4194304]
+  _BUFFER_DIMS = [4, 64, 64]
+  _TASK_VIEW_DIMS = [1, 64, 64]
+  _TENSOR_ELEMENTS = 131072
+  _TENSOR_BYTES = 32768
+  _TASK_BYTES = 8192
+  _BINDINGS = {
+    "arena": GlobalBinding("arena", 0x1000000, 8388608, "rw"),
+  }
+
+  @classmethod
+  def _task_view(cls, buffer, task):
+    return TileSubviewOp(
+      buffer,
+      task,
+      0,
+      [0, 0, 0],
+      cls._TASK_VIEW_DIMS,
+      [1, 1, 1],
+      NestL2View.of(cls._TASK_VIEW_DIMS, "bf16"),
+    )
+
+  @classmethod
+  def _global_view(cls, arena, tensor_index: int, elements: int = 16384):
+    return NestSubviewOp(
+      arena,
+      [tensor_index * cls._TENSOR_ELEMENTS],
+      [elements],
+      [1],
+      NestGlobalView.of([elements], "bf16"),
+    )
+
+  @classmethod
+  def _make_access_programs(cls):
+    program_a = TileProgramDefOp(
+      "access_A",
+      [],
+      arg_types=[
+        NestTask(),
+        NestBuffer.of(cls._BUFFER_DIMS, "bf16"),
+        NestBuffer.of(cls._BUFFER_DIMS, "bf16"),
+      ],
+      arg_names=["task", "source_X", "shared_A"],
+    )
+    task_a, source_a, shared_a = program_a.body.block.args
+    source_view_a = cls._task_view(source_a, task_a)
+    shared_view_a = cls._task_view(shared_a, task_a)
+    work_a = TileAllocOp([64, 64], "bf16", alignment=256)
+    load_a = TileLoadOp(source_view_a.result, work_a.result, "a_load")
+    compute_a = TileEvuOp("relu", 16448, "a_evu")
+    store_a = TileStoreOp(work_a.result, shared_view_a.result, "a_store")
+    program_a.body.block.add_ops(
+      [
+        source_view_a,
+        shared_view_a,
+        work_a,
+        load_a,
+        TileAwaitOp([load_a.result]),
+        TileSignalOp("input_released", task_a),
+        compute_a,
+        TileAwaitOp([compute_a.result]),
+        store_a,
+        TileAwaitOp([store_a.result]),
+        TileSignalOp("output_ready", task_a),
+        TileReturnOp(),
+      ]
+    )
+
+    program_b = TileProgramDefOp(
+      "access_B",
+      [],
+      arg_types=[
+        NestTask(),
+        NestBuffer.of(cls._BUFFER_DIMS, "bf16"),
+        NestBuffer.of(cls._BUFFER_DIMS, "bf16"),
+      ],
+      arg_names=["task", "shared_A", "B_out"],
+    )
+    task_b, shared_b, output_b = program_b.body.block.args
+    shared_view_b = cls._task_view(shared_b, task_b)
+    output_view_b = cls._task_view(output_b, task_b)
+    work_b = TileAllocOp([64, 64], "bf16", alignment=256)
+    load_b = TileLoadOp(shared_view_b.result, work_b.result, "b_load")
+    compute_b = TileEvuOp("relu", 16448, "b_evu")
+    store_b = TileStoreOp(work_b.result, output_view_b.result, "b_store")
+    program_b.body.block.add_ops(
+      [
+        shared_view_b,
+        output_view_b,
+        work_b,
+        load_b,
+        TileAwaitOp([load_b.result]),
+        TileSignalOp("input_released", task_b),
+        compute_b,
+        TileAwaitOp([compute_b.result]),
+        store_b,
+        TileAwaitOp([store_b.result]),
+        TileSignalOp("output_ready", task_b),
+        TileReturnOp(),
+      ]
+    )
+
+    program_d = TileProgramDefOp(
+      "access_D",
+      [],
+      arg_types=[
+        NestTask(),
+        NestBuffer.of(cls._BUFFER_DIMS, "bf16"),
+        NestBuffer.of(cls._BUFFER_DIMS, "bf16"),
+        NestBuffer.of(cls._BUFFER_DIMS, "bf16"),
+      ],
+      arg_names=["task", "gate", "shared_A", "D_out"],
+    )
+    task_d, gate_d, shared_d, output_d = program_d.body.block.args
+    gate_view_d = cls._task_view(gate_d, task_d)
+    shared_view_d = cls._task_view(shared_d, task_d)
+    output_view_d = cls._task_view(output_d, task_d)
+    gate_lhs = TileAllocOp([64, 64], "bf16", alignment=256)
+    gate_rhs = TileAllocOp([64, 64], "bf16", alignment=256)
+    accumulator = TileAllocOp([64, 64], "bf16", alignment=256)
+    shared_work = TileAllocOp([64, 64], "bf16", alignment=256)
+    gate_load_lhs = TileLoadOp(
+      gate_view_d.result,
+      gate_lhs.result,
+      "d_gate_load_lhs",
+    )
+    gate_load_rhs = TileLoadOp(
+      gate_view_d.result,
+      gate_rhs.result,
+      "d_gate_load_rhs",
+    )
+    d_ops = [
+      gate_view_d,
+      shared_view_d,
+      output_view_d,
+      gate_lhs,
+      gate_rhs,
+      accumulator,
+      shared_work,
+      gate_load_lhs,
+      gate_load_rhs,
+      TileAwaitOp([gate_load_lhs.result, gate_load_rhs.result]),
+    ]
+    for index in range(100):
+      boa = TileBoaOp(
+        "matmul",
+        64,
+        64,
+        64,
+        524288,
+        f"d_boa_{index}",
+        accumulate=index > 0,
+      )
+      d_ops.extend([boa, TileAwaitOp([boa.result])])
+    shared_load_d = TileLoadOp(
+      shared_view_d.result,
+      shared_work.result,
+      "d_shared_load",
+    )
+    d_ops.extend(
+      [
+        shared_load_d,
+        TileAwaitOp([shared_load_d.result]),
+        TileSignalOp("input_released", task_d),
+      ]
+    )
+    for index in range(100):
+      evu = TileEvuOp("relu", 16448, f"d_evu_{index}")
+      d_ops.extend([evu, TileAwaitOp([evu.result])])
+    store_d = TileStoreOp(
+      shared_work.result,
+      output_view_d.result,
+      "d_store",
+    )
+    d_ops.extend(
+      [
+        store_d,
+        TileAwaitOp([store_d.result]),
+        TileSignalOp("output_ready", task_d),
+        TileReturnOp(),
+      ]
+    )
+    program_d.body.block.add_ops(d_ops)
+    return program_a, program_b, program_d
+
+  @classmethod
+  def _make_early_store_model(cls) -> ModuleOp:
+    program_a, program_b, program_d = cls._make_access_programs()
+    context = NestContextOp(
+      "ctx_access",
+      [],
+      placement=15,
+      arg_types=[NestGlobalMemref.of(cls._ARENA_DIMS, "bf16")],
+      arg_names=["arena"],
+    )
+    arena = context.body.block.args[0]
+    source_x = NestAllocOp(
+      "source_X",
+      "in",
+      cls._BUFFER_DIMS,
+      "bf16",
+      alignment=256,
+    )
+    shared_a = NestAllocOp(
+      "shared_A",
+      "inout",
+      cls._BUFFER_DIMS,
+      "bf16",
+      alignment=256,
+    )
+    gate = NestAllocOp(
+      "gate",
+      "in",
+      cls._BUFFER_DIMS,
+      "bf16",
+      alignment=256,
+    )
+    output_b = NestAllocOp(
+      "B_out",
+      "out",
+      cls._BUFFER_DIMS,
+      "bf16",
+      alignment=256,
+    )
+    output_d = NestAllocOp(
+      "D_out",
+      "out",
+      cls._BUFFER_DIMS,
+      "bf16",
+      alignment=256,
+    )
+    source_view = cls._global_view(arena, 0)
+    shared_view = cls._global_view(arena, 1)
+    gate_view = cls._global_view(arena, 2)
+    output_b_view = cls._global_view(arena, 3)
+    output_d_view = cls._global_view(arena, 4)
+    prefetch_source = NestPrefetchOp(
+      source_view.result,
+      source_x.result,
+      "pref_source_X",
+    )
+    prefetch_gate = NestPrefetchOp(
+      gate_view.result,
+      gate.result,
+      "pref_gate",
+    )
+    tasks = NestTaskRangeOp(0, 4)
+    dispatch_a = NestDispatchOp(
+      "access_A",
+      tasks.result,
+      [],
+      [source_x.result],
+      [shared_a.result],
+      "grid_A",
+      "read_A",
+      "ready_A",
+      bindings=[source_x.result, shared_a.result],
+      signal_policy={
+        "input_released": "all_tasks",
+        "output_ready": "all_tasks",
+      },
+      depends_on=[prefetch_source.result],
+      context_id=0,
+    )
+    dispatch_b = NestDispatchOp(
+      "access_B",
+      tasks.result,
+      [],
+      [shared_a.result],
+      [output_b.result],
+      "grid_B",
+      "read_B",
+      "ready_B",
+      bindings=[shared_a.result, output_b.result],
+      signal_policy={
+        "input_released": "all_tasks",
+        "output_ready": "all_tasks",
+      },
+      depends_on=[dispatch_a.output_ready],
+      context_id=1,
+    )
+    dispatch_d = NestDispatchOp(
+      "access_D",
+      tasks.result,
+      [],
+      [gate.result, shared_a.result],
+      [output_d.result],
+      "grid_D",
+      "read_D",
+      "ready_D",
+      bindings=[gate.result, shared_a.result, output_d.result],
+      signal_policy={
+        "input_released": "all_tasks",
+        "output_ready": "all_tasks",
+      },
+      depends_on=[dispatch_a.output_ready, prefetch_gate.result],
+      context_id=2,
+    )
+    store_shared = NestDMAStoreOp(
+      shared_a.result,
+      shared_view.result,
+      "store_shared_A",
+      depends_on=[dispatch_a.output_ready],
+    )
+    store_b = NestDMAStoreOp(
+      output_b.result,
+      output_b_view.result,
+      "store_B",
+      depends_on=[dispatch_b.output_ready],
+    )
+    store_d = NestDMAStoreOp(
+      output_d.result,
+      output_d_view.result,
+      "store_D",
+      depends_on=[dispatch_d.output_ready],
+    )
+    context.body.block.add_ops(
+      [
+        source_x,
+        shared_a,
+        gate,
+        output_b,
+        output_d,
+        source_view,
+        shared_view,
+        gate_view,
+        output_b_view,
+        output_d_view,
+        prefetch_source,
+        prefetch_gate,
+        tasks,
+        dispatch_a,
+        dispatch_b,
+        dispatch_d,
+        store_shared,
+        NestReleaseOp(
+          source_x.result,
+          depends_on=[dispatch_a.input_released, prefetch_source.result],
+        ),
+        store_b,
+        NestReleaseOp(output_b.result, depends_on=[store_b.result]),
+        NestReleaseOp(
+          shared_a.result,
+          depends_on=[
+            dispatch_b.input_released,
+            dispatch_d.input_released,
+            store_shared.result,
+          ],
+        ),
+        NestReleaseOp(
+          gate.result,
+          depends_on=[dispatch_d.input_released, prefetch_gate.result],
+        ),
+        store_d,
+        NestReleaseOp(output_d.result, depends_on=[store_d.result]),
+        NestAwaitOp(
+          [
+            dispatch_a.grid_done,
+            dispatch_b.grid_done,
+            dispatch_d.grid_done,
+            store_shared.result,
+            store_b.result,
+            store_d.result,
+          ]
+        ),
+        NestReturnOp(),
+      ]
+    )
+    root = NexusProgramOp(
+      "run_access",
+      [],
+      arg_types=[NestGlobalMemref.of(cls._ARENA_DIMS, "bf16")],
+      arg_names=["arena"],
+    )
+    root_arena = root.body.block.args[0]
+    submit = NexusSubmitContextOp(
+      "ctx_access",
+      "done_access",
+      actuals=[root_arena],
+    )
+    root.body.block.add_ops(
+      [submit, NexusAwaitOp([submit.result]), NexusReturnOp()]
+    )
+    return ModuleOp([program_a, program_b, program_d, context, root])
+
+  @staticmethod
+  def _trace_events(tracer) -> list[dict]:
+    return json.loads(tracer.to_chrome_json())["traceEvents"]
+
+  @staticmethod
+  def _cycle_of(sim: Simulator, event: dict) -> int:
+    return round(event["ts"] * 1000.0 / sim.hw.cycle_ns())
+
+  @classmethod
+  def _tile_transactions(
+    cls,
+    events: list[dict],
+    role_event_suffix: str,
+    op: str,
+  ) -> dict[str, dict]:
+    transactions: dict[str, dict] = {}
+    for event in events:
+      args = event.get("args", {})
+      if (
+        event.get("ph") != "X"
+        or args.get("op") != op
+        or not str(args.get("role_event_id", "")).endswith(role_event_suffix)
+        or "accepted_cycle" not in args
+      ):
+        continue
+      transaction_id = args["transaction_id"]
+      record = transactions.setdefault(
+        transaction_id,
+        {
+          "start": args["accepted_cycle"],
+          "done": args["completion_cycle"],
+          "source_address": args.get("source_address"),
+          "destination_address": args.get("destination_address"),
+          "bytes": args["bytes"],
+          "task_id": args["task_id"],
+        },
+      )
+      record["start"] = min(record["start"], args["accepted_cycle"])
+      record["done"] = max(record["done"], args["completion_cycle"])
+    return transactions
+
+  @staticmethod
+  def _pin_fingerprint(group: TileGroup, handle) -> set[tuple]:
+    return {
+      (
+        grid,
+        task_id,
+        slot,
+        pin.consumer_id,
+        pin.reads,
+        pin.writes,
+      )
+      for grid, task_pins in group._grid_l2_pins.items()
+      for task_id, slot_pins in task_pins.items()
+      for slot, pin in slot_pins.items()
+      if pin.handle == handle
+    }
+
+  @staticmethod
+  def _assert_runtime_zero_leak(group: TileGroup) -> None:
+    memory = group.snapshot()["memory"]
+    assert memory["l2"]["live_allocations"] == 0
+    assert memory["l2"]["pending_release"] == 0
+    assert memory["transfers"]["inflight"] == 0
+    assert not group._grid_l2_pins
+    for tile_id, l1 in memory["l1"].items():
+      assert l1["allocator"]["live_allocations"] == 0, tile_id
+
+  @pytest.mark.parametrize("fidelity", ["runtime", "full_memory"])
+  def test_early_store_preserves_delayed_reader(self, fidelity):
+    hw = HardwareConfig().with_overrides(
+      num_dma_channels=2,
+      hbm_fixed_latency_cycles=10,
+    )
+    sim = Simulator(
+      hw,
+      SimConfig(
+        fidelity=fidelity,
+        context_count=4,
+        device_context_count=1,
+        memory_trace=True,
+        max_cycles=2000000,
+      ),
+      enable_tracer=True,
+    )
+    result = sim.run(
+      self._make_early_store_model(),
+      input_bindings=self._BINDINGS,
+    )
+    assert result.completed, result.reason
+    assert result.tracer is not None
+    events = self._trace_events(result.tracer)
+    shared_alloc = next(
+      event
+      for event in events
+      if event.get("name") == "l2_alloc"
+      and event["args"].get("buffer_id") == "shared_A"
+    )
+    shared_id = shared_alloc["args"]["allocation_id"]
+    shared_base = shared_alloc["args"]["base_address"]
+    shared_release = next(
+      event
+      for event in events
+      if event.get("name") == "l2_release"
+      and event["args"].get("allocation_id") == shared_id
+    )
+    release_cycle = self._cycle_of(sim, shared_release)
+    shared_store = next(
+      event["args"]
+      for event in events
+      if event.get("args", {}).get("summary_kind") == "group_transfer"
+      and event["args"].get("op") == "global_store"
+      and event["args"].get("buffer_id") == "shared_A"
+    )
+    reads_b = self._tile_transactions(events, "grid_B", "tile_load")
+    reads_d = {
+      transaction_id: transaction
+      for transaction_id, transaction in self._tile_transactions(
+        events,
+        "grid_D",
+        "tile_load",
+      ).items()
+      if shared_base
+      <= transaction["source_address"]
+      < shared_base + self._TENSOR_BYTES
+    }
+    assert len(reads_b) == len(reads_d) == 4
+    for transaction in reads_d.values():
+      assert transaction["source_address"] == (
+        shared_base + transaction["task_id"] * self._TASK_BYTES
+      )
+      assert transaction["bytes"] == self._TASK_BYTES
+    assert shared_store["source_address"] == shared_base
+    assert shared_store["bytes"] == self._TENSOR_BYTES
+    first_d_read = min(item["start"] for item in reads_d.values())
+    last_b_read = max(item["done"] for item in reads_b.values())
+    last_d_read = max(item["done"] for item in reads_d.values())
+    assert shared_store["completion_cycle"] < first_d_read
+    d_evu_events = [
+      event
+      for event in events
+      if event.get("name") == "EVU:relu"
+      and event.get("args", {}).get("program") == "access_D"
+      and event["args"].get("local_event_id") == "d_evu_99"
+    ]
+    assert len(d_evu_events) == 4
+    d_compute_end = max(
+      self._cycle_of(
+        sim,
+        {
+          "ts": event["ts"] + event["dur"],
+        },
+      )
+      for event in d_evu_events
+    )
+    assert max(
+      last_b_read,
+      last_d_read,
+      shared_store["completion_cycle"],
+    ) <= release_cycle < d_compute_end
+    assert shared_store["transaction_id"]
+    assert set(reads_b).isdisjoint(reads_d)
+    context_done = next(
+      event["args"]
+      for event in events
+      if event.get("name") == "context_done"
+      and event["args"].get("context") == "ctx_access"
+    )
+    assert context_done["cycle"] >= release_cycle
+    self._assert_runtime_zero_leak(sim.group)
+    assert result.credit_invariant_ok
+    if fidelity == "full_memory":
+      for vc in result.group_snapshot["memory"]["noc"].values():
+        assert vc["credit"] == hw.noc_vc_depth
+    result.tracer.assert_well_formed()
+
+  def test_release_preflight_rejects_late_reader(self):
+    from dataclasses import replace
+
+    from pipeline_validator.memory.allocator import MemoryInvariantError
+
+    sim = Simulator(
+      HardwareConfig().with_overrides(
+        num_dma_channels=2,
+        hbm_fixed_latency_cycles=10,
+      ),
+      SimConfig(
+        fidelity="full_memory",
+        context_count=4,
+        device_context_count=1,
+        memory_trace=True,
+        max_cycles=2000000,
+      ),
+      enable_tracer=True,
+    )
+    model = lower_model_ir(self._make_early_store_model())
+    for task in model.tasks.values():
+      sim._assign_program_ids(task)
+    group = sim.group
+    seq = group.load_context_task(
+      model.tasks["ctx_access"],
+      slot_index=0,
+      context_name="ctx_access",
+      input_bindings=self._BINDINGS,
+      formal_bindings={"arena": "arena"},
+      cycle=0,
+    )
+    release_request = next(
+      action.args[0]
+      for action in seq.task.actions
+      if action.op == ExecGroupActionOp.RELEASE_L2
+      and action.args[0].buffer_slot == "shared_A"
+    )
+    late_reader = max(release_request.reader_dispatch_ordinals)
+    late_event = next(
+      event
+      for event in release_request.dependency_events
+      if event.endswith("read_D")
+    )
+    bad_request = replace(
+      release_request,
+      reader_dispatch_ordinals=tuple(
+        ordinal
+        for ordinal in release_request.reader_dispatch_ordinals
+        if ordinal != late_reader
+      ),
+      dependency_events=tuple(
+        event
+        for event in release_request.dependency_events
+        if event != late_event
+      ),
+    )
+    for cycle in range(1000000):
+      group.step(cycle)
+      if (
+        set(bad_request.dependency_events) <= seq._events_done
+        and late_event not in seq._events_done
+      ):
+        break
+    assert late_event not in seq._events_done
+    handle = group._l2_handles[
+      (seq.context_launch_generation, "shared_A")
+    ]
+    pins_before = self._pin_fingerprint(group, handle)
+    assert pins_before
+    assert any(item[-2] and not item[-1] for item in pins_before)
+    assert any(item[-1] for item in pins_before)
+    allocator_pins_before = set(
+      group.l2_sram._allocator._live[handle.allocation_id].pins
+    )
+    snapshot_before = group.l2_sram.snapshot()
+    with pytest.raises(MemoryInvariantError):
+      group.release_l2(bad_request, sequencer=seq, cycle=cycle + 1)
+    assert not group.l2_sram.is_released(handle)
+    assert self._pin_fingerprint(group, handle) == pins_before
+    assert (
+      group.l2_sram._allocator._live[handle.allocation_id].pins
+      == allocator_pins_before
+    )
+    assert (
+      group.l2_sram.snapshot()["pending_release"]
+      == snapshot_before["pending_release"]
+      == 0
+    )
+    group.reset()
+    self._assert_runtime_zero_leak(group)
+    assert group.credit_invariants_hold()
+
+  @classmethod
+  def _make_alias_module(cls, reverse_phases: bool) -> ModuleOp:
+    dims = [1, 64, 64]
+    task_view_dims = [1, 64, 64]
+    program = TileProgramDefOp(
+      "alias_reverse" if reverse_phases else "alias_forward",
+      [],
+      arg_types=[
+        NestTask(),
+        NestBuffer.of(dims, "bf16"),
+        NestBuffer.of(dims, "bf16"),
+      ],
+      arg_names=["task", "read_formal", "write_formal"],
+    )
+    task, read_formal, write_formal = program.body.block.args
+    read_view = TileSubviewOp(
+      read_formal,
+      task,
+      0,
+      [0, 0, 0],
+      task_view_dims,
+      [1, 1, 1],
+      NestL2View.of(task_view_dims, "bf16"),
+    )
+    write_view = TileSubviewOp(
+      write_formal,
+      task,
+      0,
+      [0, 0, 0],
+      task_view_dims,
+      [1, 1, 1],
+      NestL2View.of(task_view_dims, "bf16"),
+    )
+    work = TileAllocOp([64, 64], "bf16", alignment=256)
+    scratch = TileAllocOp([64, 64], "bf16", alignment=256)
+    initial_load = TileLoadOp(read_view.result, work.result, "alias_load_0")
+    ops = [
+      read_view,
+      write_view,
+      work,
+      scratch,
+      initial_load,
+      TileAwaitOp([initial_load.result]),
+    ]
+    if not reverse_phases:
+      ops.append(TileSignalOp("input_released", task))
+    if reverse_phases:
+      tile_store = TileStoreOp(
+        work.result,
+        write_view.result,
+        "alias_tile_store",
+      )
+      ops.extend(
+        [
+          tile_store,
+          TileAwaitOp([tile_store.result]),
+          TileSignalOp("output_ready", task),
+        ]
+      )
+    for index in range(100):
+      evu = TileEvuOp("relu", 16448, f"alias_evu_{index}")
+      ops.extend([evu, TileAwaitOp([evu.result])])
+    if reverse_phases:
+      late_load = TileLoadOp(
+        read_view.result,
+        scratch.result,
+        "alias_load_1",
+      )
+      ops.extend(
+        [
+          late_load,
+          TileAwaitOp([late_load.result]),
+          TileSignalOp("input_released", task),
+        ]
+      )
+    else:
+      tile_store = TileStoreOp(
+        work.result,
+        write_view.result,
+        "alias_tile_store",
+      )
+      ops.extend(
+        [
+          tile_store,
+          TileAwaitOp([tile_store.result]),
+          TileSignalOp("output_ready", task),
+        ]
+      )
+    ops.append(TileReturnOp())
+    program.body.block.add_ops(ops)
+
+    context = NestContextOp(
+      "ctx_alias",
+      [],
+      placement=1,
+      arg_types=[NestGlobalMemref.of(cls._ARENA_DIMS, "bf16")],
+      arg_names=["arena"],
+    )
+    arena = context.body.block.args[0]
+    buffer = NestAllocOp(
+      "alias",
+      "inout",
+      dims,
+      "bf16",
+      alignment=256,
+    )
+    global_view = cls._global_view(arena, 0, elements=4096)
+    prefetch = NestPrefetchOp(
+      global_view.result,
+      buffer.result,
+      "alias_prefetch",
+    )
+    tasks = NestTaskRangeOp(0, 1)
+    dispatch = NestDispatchOp(
+      program.sym_name.data,
+      tasks.result,
+      [],
+      [buffer.result],
+      [buffer.result],
+      "alias_grid",
+      "alias_read",
+      "alias_ready",
+      bindings=[buffer.result, buffer.result],
+      signal_policy={
+        "input_released": "all_tasks",
+        "output_ready": "all_tasks",
+      },
+      depends_on=[prefetch.result],
+      context_id=0,
+    )
+    store = NestDMAStoreOp(
+      buffer.result,
+      global_view.result,
+      "alias_global_store",
+      depends_on=[dispatch.output_ready],
+    )
+    context.body.block.add_ops(
+      [
+        buffer,
+        global_view,
+        prefetch,
+        tasks,
+        dispatch,
+        store,
+        NestReleaseOp(
+          buffer.result,
+          depends_on=[
+            dispatch.input_released,
+            prefetch.result,
+            store.result,
+          ],
+        ),
+        NestAwaitOp([dispatch.grid_done, store.result]),
+        NestReturnOp(),
+      ]
+    )
+    return ModuleOp([program, context])
+
+  @pytest.mark.parametrize("fidelity", ["runtime", "full_memory"])
+  @pytest.mark.parametrize("reverse_phases", [False, True])
+  def test_readwrite_alias_lifetime(self, fidelity, reverse_phases):
+    hw = HardwareConfig().with_overrides(
+      num_dma_channels=2,
+      hbm_fixed_latency_cycles=10,
+    )
+    sim = Simulator(
+      hw,
+      SimConfig(
+        fidelity=fidelity,
+        context_count=4,
+        device_context_count=1,
+        memory_trace=True,
+        max_cycles=2000000,
+      ),
+      enable_tracer=True,
+    )
+    task = lower_workload_ir(self._make_alias_module(reverse_phases))
+    sim._assign_program_ids(task)
+    group = sim.group
+    group.load_task(task, input_bindings=self._BINDINGS)
+    seq = group.sequencer
+    for dispatch_cycle in range(10000):
+      group.step(dispatch_cycle)
+      if group._grid_l2_pins:
+        break
+    assert group._grid_l2_pins
+    grid = next(iter(group._grid_l2_pins))
+    pin = group._grid_l2_pins[grid][0]["alias"]
+    assert pin.reads and pin.writes
+    handle = group._l2_handles[
+      (seq.context_launch_generation, "alias")
+    ]
+    record = group.l2_sram._allocator._live[handle.allocation_id]
+    assert record.pins == {pin.consumer_id}
+    for cycle in range(dispatch_cycle + 1, 2000000):
+      group.step(cycle)
+      if seq.done:
+        break
+    assert seq.done and not seq.faulted, seq.fault_reason
+    assert sim.tracer is not None
+    events = self._trace_events(sim.tracer)
+    loads = self._tile_transactions(events, "alias_grid", "tile_load")
+    assert len(loads) == (2 if reverse_phases else 1)
+    release = next(
+      event
+      for event in events
+      if event.get("name") == "l2_release"
+      and event["args"].get("allocation_id") == handle.allocation_id
+    )
+    release_cycle = self._cycle_of(sim, release)
+    store = next(
+      event["args"]
+      for event in events
+      if event.get("args", {}).get("summary_kind") == "group_transfer"
+      and event["args"].get("buffer_id") == "alias"
+      and event["args"].get("op") == "global_store"
+    )
+    assert release_cycle >= max(
+      store["completion_cycle"],
+      max(item["done"] for item in loads.values()),
+    )
+    if reverse_phases:
+      ordered_loads = sorted(loads.values(), key=lambda item: item["start"])
+      assert store["completion_cycle"] < ordered_loads[1]["start"]
+    self._assert_runtime_zero_leak(group)
+    assert group.credit_invariants_hold()
+    sim.tracer.assert_well_formed()
+
+  @classmethod
+  def _make_inflight_store_module(cls) -> ModuleOp:
+    dims = [1, 64, 64]
+    program = TileProgramDefOp(
+      "inflight_copy",
+      [],
+      arg_types=[
+        NestTask(),
+        NestBuffer.of(dims, "bf16"),
+        NestBuffer.of(dims, "bf16"),
+      ],
+      arg_names=["task", "source", "output"],
+    )
+    task, source, output = program.body.block.args
+    source_view = TileSubviewOp(
+      source,
+      task,
+      0,
+      [0, 0, 0],
+      dims,
+      [1, 1, 1],
+      NestL2View.of(dims, "bf16"),
+    )
+    output_view = TileSubviewOp(
+      output,
+      task,
+      0,
+      [0, 0, 0],
+      dims,
+      [1, 1, 1],
+      NestL2View.of(dims, "bf16"),
+    )
+    work = TileAllocOp([64, 64], "bf16", alignment=256)
+    load = TileLoadOp(source_view.result, work.result, "copy_load")
+    tile_store = TileStoreOp(work.result, output_view.result, "copy_store")
+    program.body.block.add_ops(
+      [
+        source_view,
+        output_view,
+        work,
+        load,
+        TileAwaitOp([load.result]),
+        TileSignalOp("input_released", task),
+        tile_store,
+        TileAwaitOp([tile_store.result]),
+        TileSignalOp("output_ready", task),
+        TileReturnOp(),
+      ]
+    )
+    context = NestContextOp(
+      "ctx_inflight_store",
+      [],
+      placement=1,
+      arg_types=[NestGlobalMemref.of(cls._ARENA_DIMS, "bf16")],
+      arg_names=["arena"],
+    )
+    arena = context.body.block.args[0]
+    source_buffer = NestAllocOp(
+      "store_source",
+      "in",
+      dims,
+      "bf16",
+      alignment=256,
+    )
+    output_buffer = NestAllocOp(
+      "store_output",
+      "out",
+      dims,
+      "bf16",
+      alignment=256,
+    )
+    source_global = cls._global_view(arena, 0, elements=4096)
+    output_global_1 = cls._global_view(arena, 1, elements=4096)
+    output_global_2 = cls._global_view(arena, 2, elements=4096)
+    prefetch = NestPrefetchOp(
+      source_global.result,
+      source_buffer.result,
+      "store_prefetch",
+    )
+    tasks = NestTaskRangeOp(0, 1)
+    dispatch = NestDispatchOp(
+      "inflight_copy",
+      tasks.result,
+      [],
+      [source_buffer.result],
+      [output_buffer.result],
+      "copy_grid",
+      "copy_read",
+      "copy_ready",
+      bindings=[source_buffer.result, output_buffer.result],
+      signal_policy={
+        "input_released": "all_tasks",
+        "output_ready": "all_tasks",
+      },
+      depends_on=[prefetch.result],
+      context_id=0,
+    )
+    store_1 = NestDMAStoreOp(
+      output_buffer.result,
+      output_global_1.result,
+      "output_store_1",
+      depends_on=[dispatch.output_ready],
+    )
+    store_2 = NestDMAStoreOp(
+      output_buffer.result,
+      output_global_2.result,
+      "output_store_2",
+      depends_on=[dispatch.output_ready],
+    )
+    context.body.block.add_ops(
+      [
+        source_buffer,
+        output_buffer,
+        source_global,
+        output_global_1,
+        output_global_2,
+        prefetch,
+        tasks,
+        dispatch,
+        store_1,
+        store_2,
+        NestReleaseOp(
+          source_buffer.result,
+          depends_on=[dispatch.input_released, prefetch.result],
+        ),
+        NestReleaseOp(
+          output_buffer.result,
+          depends_on=[store_1.result, store_2.result],
+        ),
+        NestAwaitOp(
+          [dispatch.grid_done, store_1.result, store_2.result]
+        ),
+        NestReturnOp(),
+      ]
+    )
+    return ModuleOp([program, context])
+
+  @classmethod
+  def _make_inflight_prefetch_module(cls) -> ModuleOp:
+    dims = [1, 64, 64]
+    program = TileProgramDefOp(
+      "inflight_reader",
+      [],
+      arg_types=[NestTask(), NestBuffer.of(dims, "bf16")],
+      arg_names=["task", "input"],
+    )
+    task, input_buffer = program.body.block.args
+    input_view = TileSubviewOp(
+      input_buffer,
+      task,
+      0,
+      [0, 0, 0],
+      dims,
+      [1, 1, 1],
+      NestL2View.of(dims, "bf16"),
+    )
+    work = TileAllocOp([64, 64], "bf16", alignment=256)
+    load = TileLoadOp(input_view.result, work.result, "reader_load")
+    program.body.block.add_ops(
+      [
+        input_view,
+        work,
+        load,
+        TileAwaitOp([load.result]),
+        TileSignalOp("input_released", task),
+        TileReturnOp(),
+      ]
+    )
+    context = NestContextOp(
+      "ctx_inflight_prefetch",
+      [],
+      placement=1,
+      arg_types=[NestGlobalMemref.of(cls._ARENA_DIMS, "bf16")],
+      arg_names=["arena"],
+    )
+    arena = context.body.block.args[0]
+    buffer = NestAllocOp(
+      "prefetch_input",
+      "in",
+      dims,
+      "bf16",
+      alignment=256,
+    )
+    global_1 = cls._global_view(arena, 0, elements=4096)
+    global_2 = cls._global_view(arena, 1, elements=4096)
+    prefetch_1 = NestPrefetchOp(
+      global_1.result,
+      buffer.result,
+      "input_prefetch_1",
+    )
+    tasks = NestTaskRangeOp(0, 1)
+    dispatch = NestDispatchOp(
+      "inflight_reader",
+      tasks.result,
+      [],
+      [buffer.result],
+      [],
+      "reader_grid",
+      "reader_done",
+      "",
+      bindings=[buffer.result],
+      signal_policy={"input_released": "all_tasks"},
+      depends_on=[prefetch_1.result],
+      context_id=0,
+    )
+    prefetch_2 = NestPrefetchOp(
+      global_2.result,
+      buffer.result,
+      "input_prefetch_2",
+    )
+    context.body.block.add_ops(
+      [
+        buffer,
+        global_1,
+        global_2,
+        prefetch_1,
+        tasks,
+        dispatch,
+        NestAwaitOp([dispatch.input_released]),
+        prefetch_2,
+        NestReleaseOp(
+          buffer.result,
+          depends_on=[
+            dispatch.input_released,
+            prefetch_1.result,
+            prefetch_2.result,
+          ],
+        ),
+        NestAwaitOp([dispatch.grid_done, prefetch_2.result]),
+        NestReturnOp(),
+      ]
+    )
+    return ModuleOp([program, context])
+
+  def test_release_rejects_inflight_store(self):
+    from dataclasses import replace
+
+    from pipeline_validator.memory.allocator import MemoryInvariantError
+    from pipeline_validator.memory.transfer import TransferStatus
+
+    hw = HardwareConfig().with_overrides(
+      num_dma_channels=2,
+      hbm_fixed_latency_cycles=10,
+    )
+    sim = Simulator(
+      hw,
+      SimConfig(
+        fidelity="full_memory",
+        context_count=4,
+        device_context_count=1,
+        memory_trace=True,
+        max_cycles=200000,
+      ),
+      enable_tracer=True,
+    )
+    task = lower_workload_ir(self._make_inflight_store_module())
+    sim._assign_program_ids(task)
+    group = sim.group
+    group.load_task(task, input_bindings=self._BINDINGS)
+    seq = group.sequencer
+    request = next(
+      action.args[0]
+      for action in seq.task.actions
+      if action.op == ExecGroupActionOp.RELEASE_L2
+      and action.args[0].buffer_slot == "store_output"
+    )
+    assert len(request.dependency_events) == 2
+    first_store, second_store = request.dependency_events
+    bad_request = replace(
+      request,
+      dependency_events=(first_store,),
+    )
+    handle = group._l2_handles[
+      (seq.context_launch_generation, "store_output")
+    ]
+    second_transaction = None
+    for cycle in range(200000):
+      group.step(cycle)
+      second_transaction = next(
+        (
+          transaction
+          for transaction in group.transfer_manager._transactions.values()
+          if transaction.completion_event == second_store
+        ),
+        None,
+      )
+      if (
+        first_store in seq._events_done
+        and second_store not in seq._events_done
+        and second_transaction is not None
+        and group.transfer_manager.has_inflight_access(handle)
+      ):
+        break
+    assert first_store in seq._events_done
+    assert second_store not in seq._events_done
+    assert second_transaction is not None
+    assert second_transaction.status is TransferStatus.RUNNING
+    pins_before = self._pin_fingerprint(group, handle)
+    allocator_pins_before = set(
+      group.l2_sram._allocator._live[handle.allocation_id].pins
+    )
+    pending_before = group.l2_sram.snapshot()["pending_release"]
+    with pytest.raises(MemoryInvariantError):
+      group.release_l2(bad_request, sequencer=seq, cycle=cycle + 1)
+    assert not group.l2_sram.is_released(handle)
+    assert self._pin_fingerprint(group, handle) == pins_before
+    assert (
+      group.l2_sram._allocator._live[handle.allocation_id].pins
+      == allocator_pins_before
+    )
+    assert group.l2_sram.snapshot()["pending_release"] == pending_before
+    for finish_cycle in range(cycle + 2, cycle + 200000):
+      group.step(finish_cycle)
+      if seq.done:
+        break
+    assert seq.done and not seq.faulted, seq.fault_reason
+    self._assert_runtime_zero_leak(group)
+    assert group.credit_invariants_hold()
+    assert sim.tracer is not None
+    sim.tracer.assert_well_formed()
+    group.reset()
+    self._assert_runtime_zero_leak(group)
+
+  def test_release_rejects_inflight_prefetch(self):
+    from dataclasses import replace
+
+    from pipeline_validator.memory.allocator import MemoryInvariantError
+    from pipeline_validator.memory.transfer import TransferStatus
+
+    hw = HardwareConfig().with_overrides(
+      num_dma_channels=2,
+      hbm_fixed_latency_cycles=10,
+    )
+    sim = Simulator(
+      hw,
+      SimConfig(
+        fidelity="full_memory",
+        context_count=4,
+        device_context_count=1,
+        memory_trace=True,
+        max_cycles=200000,
+      ),
+      enable_tracer=True,
+    )
+    task = lower_workload_ir(self._make_inflight_prefetch_module())
+    sim._assign_program_ids(task)
+    group = sim.group
+    group.load_task(task, input_bindings=self._BINDINGS)
+    seq = group.sequencer
+    request = next(
+      action.args[0]
+      for action in seq.task.actions
+      if action.op == ExecGroupActionOp.RELEASE_L2
+      and action.args[0].buffer_slot == "prefetch_input"
+    )
+    second_prefetch = next(
+      event
+      for event in request.dependency_events
+      if event.endswith("input_prefetch_2")
+    )
+    bad_request = replace(
+      request,
+      dependency_events=tuple(
+        event
+        for event in request.dependency_events
+        if event != second_prefetch
+      ),
+    )
+    handle = group._l2_handles[
+      (seq.context_launch_generation, "prefetch_input")
+    ]
+    transaction = None
+    for cycle in range(200000):
+      group.step(cycle)
+      transaction = next(
+        (
+          candidate
+          for candidate in group.transfer_manager._transactions.values()
+          if candidate.completion_event == second_prefetch
+        ),
+        None,
+      )
+      if (
+        set(bad_request.dependency_events) <= seq._events_done
+        and second_prefetch not in seq._events_done
+        and transaction is not None
+        and group.transfer_manager.has_inflight_access(handle)
+      ):
+        break
+    assert transaction is not None
+    assert transaction.status is TransferStatus.RUNNING
+    pins_before = self._pin_fingerprint(group, handle)
+    allocator_pins_before = set(
+      group.l2_sram._allocator._live[handle.allocation_id].pins
+    )
+    pending_before = group.l2_sram.snapshot()["pending_release"]
+    with pytest.raises(MemoryInvariantError):
+      group.release_l2(bad_request, sequencer=seq, cycle=cycle + 1)
+    assert not group.l2_sram.is_released(handle)
+    assert self._pin_fingerprint(group, handle) == pins_before
+    assert (
+      group.l2_sram._allocator._live[handle.allocation_id].pins
+      == allocator_pins_before
+    )
+    assert group.l2_sram.snapshot()["pending_release"] == pending_before
+    group.release_context_memory(cycle + 1)
+    assert transaction.status is TransferStatus.CANCELLED
+    assert not group.transfer_manager.has_inflight_access(handle)
+    group.reset()
+    self._assert_runtime_zero_leak(group)
+    assert group.credit_invariants_hold()
+    assert sim.tracer is not None
+    sim.tracer.assert_well_formed()
+
+  def test_inflight_query_uses_status_and_handle_generation(self):
+    from dataclasses import replace
+
+    from pipeline_validator.memory import (
+      AdmissionFailure,
+      AllocationRequest,
+      ContextBufferOwner,
+      TaskBufferOwner,
+    )
+    from pipeline_validator.memory.transfer import (
+      MemoryTransaction,
+      ResolvedMemoryView,
+      TransferManager,
+      TransferOp,
+      TransferStatus,
+    )
+
+    owner = ContextBufferOwner("status_ctx", 0, "status_buffer")
+    l2 = L2SRAM(capacity_bytes=8192, banks=1)
+    plan = l2.plan_bundle(
+      [AllocationRequest("l2", "status_buffer", owner, 4096, 256)]
+    )
+    assert not isinstance(plan, AdmissionFailure)
+    original = l2.commit(plan, cycle=0)[0]
+    source = ResolvedMemoryView(
+      handle=original,
+      offset_bytes=0,
+      size_bytes=4096,
+      address=original.base_address,
+      segments=original.bank_segments,
+    )
+    destination_handle = replace(
+      original,
+      allocation_id="l1:status-access",
+      memory_space="l1",
+    )
+    destination = ResolvedMemoryView(
+      handle=destination_handle,
+      offset_bytes=0,
+      size_bytes=4096,
+      address=destination_handle.base_address,
+      segments=destination_handle.bank_segments,
+    )
+    transaction = MemoryTransaction(
+      transaction_id="status-access",
+      op=TransferOp.TILE_LOAD,
+      issuer=TaskBufferOwner(
+        "status_ctx",
+        0,
+        "status-grid",
+        0,
+        0,
+        0,
+        "status-l1",
+      ),
+      src=source,
+      dst=destination,
+      bytes_total=4096,
+      completion_event="status-done",
+      tile_id=0,
+    )
+    manager = TransferManager(HardwareConfig(), full_memory=False)
+    manager._transactions[transaction.transaction_id] = transaction
+    for status in (
+      TransferStatus.PENDING,
+      TransferStatus.RUNNING,
+      TransferStatus.FAULTED,
+    ):
+      transaction.status = status
+      assert manager.has_inflight_access(original)
+    for status in (TransferStatus.DONE, TransferStatus.CANCELLED):
+      transaction.status = status
+      assert not manager.has_inflight_access(original)
+    same_id_new_generation = replace(
+      original,
+      generation=original.generation + 1,
+    )
+    transaction.src = destination
+    transaction.dst = source
+    transaction.status = TransferStatus.RUNNING
+    assert manager.has_inflight_access(original)
+    assert not manager.has_inflight_access(same_id_new_generation)
+
+    assert l2.request_release(original, owner, cycle=1)
+    l2.reset()
+    next_owner = ContextBufferOwner("status_ctx", 1, "status_buffer")
+    next_plan = l2.plan_bundle(
+      [AllocationRequest("l2", "status_buffer", next_owner, 4096, 256)]
+    )
+    assert not isinstance(next_plan, AdmissionFailure)
+    replacement = l2.commit(next_plan, cycle=2)[0]
+    assert replacement.base_address == original.base_address
+    assert replacement.generation != original.generation
+    transaction.status = TransferStatus.RUNNING
+    assert manager.has_inflight_access(original)
+    assert not manager.has_inflight_access(replacement)
+    assert l2.request_release(replacement, next_owner, cycle=3)
+    manager.cancel_all(cycle=3)
+    assert l2.snapshot()["live_allocations"] == 0
+
+
 class TestReleaseFaultPath:
   """PR 3 §5: wrong-owner / double RELEASE_L2 through the sequencer
   produces ADDRESS_FAULT + fault ring + ResetDomain zero-leak."""
 
-  @staticmethod
-  def _step_until_action(group, seq, target_op):
-    """Step until the sequencer's next action is ``target_op``."""
-    from pipeline_validator.execution_ir import ExecGroupActionOp
-
-    for c in range(50000):
-      group.step(c)
-      if seq.done or seq.faulted:
-        return c
-      if seq.action_index < len(seq.task.actions):
-        if seq.task.actions[seq.action_index].op == target_op:
-          return c
-    raise AssertionError(f"sequencer never reached {target_op}")
-
-  @staticmethod
-  def _fire_all_signals(group, grid):
-    from pipeline_validator.execution_ir import PhaseSignal, TaskIdentity
-
-    for tid in range(4):
-      group._on_phase_signal(PhaseSignal(TaskIdentity(grid, tid), "input_released"), 0)
-    for tid in range(4):
-      group._on_phase_signal(PhaseSignal(TaskIdentity(grid, tid), "output_ready"), 0)
 
   @staticmethod
   def _assert_zero_leak(group):
@@ -2317,61 +3771,53 @@ class TestReleaseFaultPath:
       assert tile.l1_allocator.snapshot()["live_allocations"] == 0
 
   def test_unknown_buffer_release_faults_and_resets(self):
-    """RELEASE_L2 for a non-existent buffer slot: sequencer catches
-    MemoryInvariantError, writes ADDRESS_FAULT, starts reset/drain;
-    after cleanup all state returns to zero-leak."""
+    """An unknown RELEASE_L2 slot faults and reset restores zero leaks."""
     from pipeline_validator.execution_ir import ExecGroupActionOp, ExecReleaseRequest
-    from pipeline_validator.memory.allocator import MemoryInvariantError
-    from pipeline_validator.tile_group import TileGroup
 
     hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
     group = TileGroup(hw, fidelity="runtime")
     task = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
     group.load_task(task, input_bindings=POW_BINDINGS)
     seq = group.sequencer
-    # Step until dispatch registers, then fire all signals.
-    for c in range(5000):
-      group.step(c)
-      if group._grid_signals:
-        break
-    grid = next(iter(group._grid_signals))
-    self._fire_all_signals(group, grid)
-    # Find the RELEASE_L2 action and step until it is ready to issue
-    # (deps satisfied, _pending cleared, action_index pointing at it).
-    rel_idx = next(i for i, a in enumerate(seq.task.actions) if a.op == ExecGroupActionOp.RELEASE_L2)
-    for c2 in range(c + 1, c + 5000):
-      group.step(c2)
-      if seq.faulted or seq.done:
-        break
+    rel_idx = next(
+      i for i, action in enumerate(seq.task.actions)
+      if action.op == ExecGroupActionOp.RELEASE_L2
+    )
+    for cycle in range(50000):
+      group.step(cycle)
       if (
-        seq.action_index == rel_idx
+        not seq.faulted
+        and not seq.done
+        and seq.action_index == rel_idx
         and seq._pending is None
-        and all(ev in seq._events_done for ev in seq.task.actions[rel_idx].args[0].dependency_events)
+        and all(
+          event in seq._events_done
+          for event in seq.task.actions[rel_idx].args[0].dependency_events
+        )
       ):
         break
     assert not seq.faulted, f"premature fault: {seq.fault_reason}"
-    # Mutate the release request to reference a non-existent slot.
     original_req = seq.task.actions[rel_idx].args[0]
     bad_req = ExecReleaseRequest(
       buffer_slot="nonexistent",
       buffer_role=original_req.buffer_role,
-      consumer_dispatch_ordinals=original_req.consumer_dispatch_ordinals,
+      reader_dispatch_ordinals=original_req.reader_dispatch_ordinals,
+      writer_dispatch_ordinals=original_req.writer_dispatch_ordinals,
       dependency_events=original_req.dependency_events,
     )
     seq.task.actions[rel_idx] = type(seq.task.actions[rel_idx])(
-      ExecGroupActionOp.RELEASE_L2, args=(bad_req,)
+      ExecGroupActionOp.RELEASE_L2,
+      args=(bad_req,),
     )
-    # Step one more cycle — RELEASE_L2 issues, catches, faults.
-    group.step(c2 + 1)
+    group.step(cycle + 1)
     assert seq.faulted
     assert "release invariant fault" in seq.fault_reason
     assert group.pmu.events.get("release_invariant_fault", 0) >= 1
     if group.runtime_enabled:
       assert group.fault_ring.snapshot()["count"] > 0
       assert group.fault_ring.snapshot()["latest_code"] == FaultCode.ADDRESS_FAULT.name
-    # Step until reset cleanup completes.
-    for c3 in range(c2 + 2, c2 + 5000):
-      group.step(c3)
+    for reset_cycle in range(cycle + 2, cycle + 5000):
+      group.step(reset_cycle)
       if group.reset_domain.is_done:
         break
     assert group.reset_domain.is_done
@@ -2382,9 +3828,7 @@ class TestReleaseFaultPath:
     """A second RELEASE_L2 for an already-released buffer hits the
     allocator's double-release check; sequencer catches, faults, and
     reset restores zero-leak."""
-    from dataclasses import replace
     from pipeline_validator.execution_ir import ExecGroupAction, ExecGroupActionOp
-    from pipeline_validator.tile_group import TileGroup
 
     hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
     group = TileGroup(hw, fidelity="runtime")
@@ -2397,24 +3841,16 @@ class TestReleaseFaultPath:
     )
     group.load_task(task, input_bindings=POW_BINDINGS)
     seq = group.sequencer
-    # Step until dispatch, fire signals, step until fault.
-    for c in range(5000):
-      group.step(c)
-      if group._grid_signals:
-        break
-    grid = next(iter(group._grid_signals))
-    self._fire_all_signals(group, grid)
-    # Step until the second RELEASE_L2 faults.
-    for c2 in range(c + 1, c + 5000):
-      group.step(c2)
+    for cycle in range(50000):
+      group.step(cycle)
       if seq.faulted:
         break
     assert seq.faulted
     assert "release invariant fault" in seq.fault_reason
     assert group.pmu.events.get("release_invariant_fault", 0) >= 1
     # Step until reset cleanup completes.
-    for c3 in range(c2 + 1, c2 + 5000):
-      group.step(c3)
+    for reset_cycle in range(cycle + 1, cycle + 5000):
+      group.step(reset_cycle)
       if group.reset_domain.is_done:
         break
     assert group.reset_domain.is_done
@@ -2433,35 +3869,35 @@ class TestReleaseFaultPath:
     task = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
     group.load_task(task, input_bindings=POW_BINDINGS)
     seq = group.sequencer
-    for c in range(5000):
-      group.step(c)
-      if group._grid_signals:
-        break
-    grid = next(iter(group._grid_signals))
-    self._fire_all_signals(group, grid)
-    rel_idx = next(i for i, a in enumerate(seq.task.actions) if a.op == ExecGroupActionOp.RELEASE_L2)
-    for c2 in range(c + 1, c + 5000):
-      group.step(c2)
-      if seq.faulted or seq.done:
-        break
+    rel_idx = next(
+      i for i, action in enumerate(seq.task.actions)
+      if action.op == ExecGroupActionOp.RELEASE_L2
+    )
+    for cycle in range(50000):
+      group.step(cycle)
       if (
-        seq.action_index == rel_idx
+        not seq.faulted
+        and not seq.done
+        and seq.action_index == rel_idx
         and seq._pending is None
-        and all(ev in seq._events_done for ev in seq.task.actions[rel_idx].args[0].dependency_events)
+        and all(
+          event in seq._events_done
+          for event in seq.task.actions[rel_idx].args[0].dependency_events
+        )
       ):
         break
     assert not seq.faulted, f"premature fault: {seq.fault_reason}"
     # Corrupt the sequencer's context_name so the owner check fails.
     seq.context_name = "wrong_owner_ctx"
-    group.step(c2 + 1)
+    group.step(cycle + 1)
     assert seq.faulted
     assert "release invariant fault" in seq.fault_reason
     assert group.pmu.events.get("release_invariant_fault", 0) >= 1
     if group.runtime_enabled:
       assert group.fault_ring.snapshot()["count"] > 0
       assert group.fault_ring.snapshot()["latest_code"] == FaultCode.ADDRESS_FAULT.name
-    for c3 in range(c2 + 2, c2 + 5000):
-      group.step(c3)
+    for reset_cycle in range(cycle + 2, cycle + 5000):
+      group.step(reset_cycle)
       if group.reset_domain.is_done:
         break
     assert group.reset_domain.is_done
@@ -2480,36 +3916,36 @@ class TestReleaseFaultPath:
     task = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
     group.load_task(task, input_bindings=POW_BINDINGS)
     seq = group.sequencer
-    for c in range(5000):
-      group.step(c)
-      if group._grid_signals:
-        break
-    grid = next(iter(group._grid_signals))
-    self._fire_all_signals(group, grid)
-    rel_idx = next(i for i, a in enumerate(seq.task.actions) if a.op == ExecGroupActionOp.RELEASE_L2)
-    for c2 in range(c + 1, c + 5000):
-      group.step(c2)
-      if seq.faulted or seq.done:
-        break
+    rel_idx = next(
+      i for i, action in enumerate(seq.task.actions)
+      if action.op == ExecGroupActionOp.RELEASE_L2
+    )
+    for cycle in range(50000):
+      group.step(cycle)
       if (
-        seq.action_index == rel_idx
+        not seq.faulted
+        and not seq.done
+        and seq.action_index == rel_idx
         and seq._pending is None
-        and all(ev in seq._events_done for ev in seq.task.actions[rel_idx].args[0].dependency_events)
+        and all(
+          event in seq._events_done
+          for event in seq.task.actions[rel_idx].args[0].dependency_events
+        )
       ):
         break
     assert not seq.faulted, f"premature fault: {seq.fault_reason}"
     # Corrupt the sequencer's launch generation so the handle
     # lookup misses the stored (gen, slot) key.
     seq.context_launch_generation = seq.context_launch_generation + 999
-    group.step(c2 + 1)
+    group.step(cycle + 1)
     assert seq.faulted
     assert "release invariant fault" in seq.fault_reason
     assert group.pmu.events.get("release_invariant_fault", 0) >= 1
     if group.runtime_enabled:
       assert group.fault_ring.snapshot()["count"] > 0
       assert group.fault_ring.snapshot()["latest_code"] == FaultCode.ADDRESS_FAULT.name
-    for c3 in range(c2 + 2, c2 + 5000):
-      group.step(c3)
+    for reset_cycle in range(cycle + 2, cycle + 5000):
+      group.step(reset_cycle)
       if group.reset_domain.is_done:
         break
     assert group.reset_domain.is_done
@@ -2622,91 +4058,113 @@ class TestL2AdmissionWait:
     assert b_dispatch < a_done["cycle"]
 
   def test_wait_gating_at_signal_and_release_boundaries(self):
-    """3/4 input signals keep B WAIT; the 4/4 aggregate alone does not
-    wake B; only the release final-free admits B in the same cycle and
-    B's first action issues exactly one cycle later."""
+    """Deferred real input phases preserve the 3/4 and final-free gates."""
     sim, module = _admission_wait_sim()
     name_maps = _admission_model_names(sim, module)
     group = sim.group
     model = lower_model_ir(module)
     seq_a = group.load_context_task(
       model.tasks["ctx_a"],
-      slot_index=0, context_name="ctx_a",
+      slot_index=0,
+      context_name="ctx_a",
       input_bindings=ADMISSION_WAIT_BINDINGS,
-      formal_bindings=name_maps["ctx_a"], cycle=0)
+      formal_bindings=name_maps["ctx_a"],
+      cycle=0,
+    )
     seq_b = group.load_context_task(
       model.tasks["ctx_b"],
-      slot_index=1, context_name="ctx_b",
+      slot_index=1,
+      context_name="ctx_b",
       input_bindings=ADMISSION_WAIT_BINDINGS,
-      formal_bindings=name_maps["ctx_b"], cycle=0)
-    # A active with both buffers; B waiting with zero resources
+      formal_bindings=name_maps["ctx_b"],
+      cycle=0,
+    )
     assert seq_a.admission_status is ContextAdmissionStatus.ACTIVE
     assert seq_b.admission_status is ContextAdmissionStatus.WAIT_CAPACITY
     assert not seq_b.faulted and not seq_b.done
     assert group.l2_sram.snapshot()["live_allocations"] == 2
     assert group.l2_sram.snapshot()["free_bytes"] == 0
     assert seq_b not in group._active_sequencers
-    assert (seq_b.context_name, 1, seq_b.context_launch_generation) \
-      not in group._live_launches
+    assert (
+      seq_b.context_name,
+      1,
+      seq_b.context_launch_generation,
+    ) not in group._live_launches
     assert group._role_l1_handles == {}
-    assert all(not t.uce.has_active_contexts() for t in group.tiles)
+    assert all(not tile.uce.has_active_contexts() for tile in group.tiles)
     assert len(group.queues) == 0
     gen_b = seq_b.context_launch_generation
-    assert not [k for k in group._l2_handles if k[0] == gen_b]
-    # step until A's grid registers
+    assert not [key for key in group._l2_handles if key[0] == gen_b]
+
     grid_a = None
-    for c in range(5000):
-      group.step(c)
-      grid_a = next((g for g in group._grid_signals
-                     if g.context_name == "ctx_a"), None)
+    for cycle in range(5000):
+      group.step(cycle)
+      grid_a = next(
+        (grid for grid in group._grid_signals if grid.context_name == "ctx_a"),
+        None,
+      )
       if grid_a is not None:
         break
     assert grid_a is not None
-    # Step until all four tiles finished their L2 loads: the manual
-    # signal injection below must not race an in-flight load (releasing
-    # a_input while a tile still reads it is a real use-after-release).
-    for c1 in range(c + 1, c + 5000):
-      group.step(c1)
-      if all("e_load" in t.uce.contexts[0].events_done for t in group.tiles):
+    captured: list[tuple[PhaseSignal, int]] = []
+
+    def defer_target_input(signal, emitted_cycle):
+      if signal.task.grid == grid_a and signal.phase == "input_released":
+        captured.append((signal, emitted_cycle))
+      else:
+        group._on_phase_signal(signal, emitted_cycle)
+
+    for tile in group.tiles:
+      tile.uce._phase_signal_callback = defer_target_input
+    for actual_cycle in range(cycle + 1, cycle + 200000):
+      group.step(actual_cycle)
+      if len(captured) == 4:
         break
-    assert all("e_load" in t.uce.contexts[0].events_done for t in group.tiles)
-    # 3/4 signals: aggregate incomplete, no capacity change, B still waits
-    for tid in range(3):
-      group._on_phase_signal(
-        PhaseSignal(TaskIdentity(grid_a, tid), "input_released"), c1)
-    group.step(c1)
+    assert len(captured) == 4
+    assert not seq_a.faulted
+    for tile in group.tiles:
+      tile.uce._phase_signal_callback = group._on_phase_signal
+    inputs = sorted(
+      (signal for signal, _ in captured),
+      key=lambda signal: signal.task.task_id,
+    )
+
+    delivery_cycle = actual_cycle + 1
+    for signal in inputs[:3]:
+      group._on_phase_signal(signal, delivery_cycle)
+      delivery_cycle += 1
+    group.step(delivery_cycle)
     assert seq_b.admission_status is ContextAdmissionStatus.WAIT_CAPACITY
     assert group._pending_context_admissions[0].sequencer is seq_b
-    # 4th signal completes the aggregate; B must still wait until the
-    # release action final-frees (a signal alone never wakes).
-    group._on_phase_signal(
-      PhaseSignal(TaskIdentity(grid_a, 3), "input_released"), c1 + 1)
+
+    delivery_cycle += 1
+    group._on_phase_signal(inputs[3], delivery_cycle)
+    assert seq_b.admission_status is ContextAdmissionStatus.WAIT_CAPACITY
     admit_cycle = None
-    for c2 in range(c1 + 1, c1 + 1000):
-      group.step(c2)
+    for release_cycle in range(delivery_cycle + 1, delivery_cycle + 1000):
+      group.step(release_cycle)
       if seq_b.admission_status is ContextAdmissionStatus.ACTIVE:
-        admit_cycle = c2
+        admit_cycle = release_cycle
         break
     assert admit_cycle is not None
     assert group._l2_capacity_change_cycle == admit_cycle
-    # A's output handle still live/pinned at B admission
-    out_handle = group._l2_handles[(seq_a.context_launch_generation, "a_output")]
+    out_handle = group._l2_handles[
+      (seq_a.context_launch_generation, "a_output")
+    ]
     assert not group.l2_sram.is_released(out_handle)
     assert group._grid_l2_pins
-    # B first action issues exactly one cycle later
     assert seq_b.action_index == 0
     group.step(admit_cycle + 1)
     assert seq_b.action_index == 1
-    # drive to completion: both contexts drain with zero leak
-    for c3 in range(admit_cycle + 2, admit_cycle + 500000):
-      group.step(c3)
+    for finish_cycle in range(admit_cycle + 2, admit_cycle + 500000):
+      group.step(finish_cycle)
       if seq_a.done and seq_b.done:
         break
     assert seq_a.done and seq_b.done, (seq_a.fault_reason, seq_b.fault_reason)
     assert not group._pending_context_admissions
     assert group.l2_sram.snapshot()["live_allocations"] == 0
-    for t in group.tiles:
-      assert t.l1_allocator.snapshot()["live_allocations"] == 0
+    for tile in group.tiles:
+      assert tile.l1_allocator.snapshot()["live_allocations"] == 0
     assert not group._grid_l2_pins
     assert group.transfer_manager.inflight_count == 0
     group.reset()
@@ -2782,8 +4240,7 @@ class TestAdmissionFaultAndQueue:
     group.reset()
 
   def test_fragmentation_waiter_wakes_after_release_merges_extent(self):
-    """A release_l2 final-free merges an aligned extent and wakes the
-    queued fragmentation waiter through the real admission queue."""
+    """A final-free merges an extent and wakes the fragmentation waiter."""
     from pipeline_validator.execution_ir import ExecL2Buffer, ExecReleaseRequest
 
     hw = HardwareConfig().with_overrides(
@@ -2814,7 +4271,8 @@ class TestAdmissionFaultAndQueue:
       ExecReleaseRequest(
         buffer_slot="a",
         buffer_role="in",
-        consumer_dispatch_ordinals=(),
+        reader_dispatch_ordinals=(),
+        writer_dispatch_ordinals=(),
         dependency_events=(),
       ),
       sequencer=seq_a,
@@ -2859,7 +4317,8 @@ class TestAdmissionFaultAndQueue:
       ExecReleaseRequest(
         buffer_slot="a",
         buffer_role="in",
-        consumer_dispatch_ordinals=(),
+        reader_dispatch_ordinals=(),
+        writer_dispatch_ordinals=(),
         dependency_events=(),
       ),
       sequencer=seq_a,

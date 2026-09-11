@@ -957,6 +957,35 @@ class TransferManager:
       self.pmu_completed_count += 1
       completed.append(txn)
 
+  def has_inflight_access(self, handle: AllocationHandle) -> bool:
+    """Return whether an unfinished transaction references ``handle``.
+
+    Allocation identity includes memory space, allocation id and
+    generation; a recycled physical address is not the same allocation.
+    This query is used only on the release path and deliberately scans
+    the live transaction table instead of maintaining a per-cycle index.
+    """
+    for transaction in self._transactions.values():
+      if transaction.status not in (
+          TransferStatus.PENDING,
+          TransferStatus.RUNNING,
+          TransferStatus.FAULTED,
+      ):
+        continue
+      src = transaction.src
+      if (src is not None
+          and src.handle.memory_space == handle.memory_space
+          and src.handle.allocation_id == handle.allocation_id
+          and src.handle.generation == handle.generation):
+        return True
+      dst = transaction.dst
+      if (dst is not None
+          and dst.handle.memory_space == handle.memory_space
+          and dst.handle.allocation_id == handle.allocation_id
+          and dst.handle.generation == handle.generation):
+        return True
+    return False
+
   def status(self, transaction_id: str) -> TransferStatus:
     txn = self._transactions.get(transaction_id)
     if txn is None:

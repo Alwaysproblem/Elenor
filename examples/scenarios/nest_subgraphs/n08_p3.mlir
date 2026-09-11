@@ -23,8 +23,8 @@ builtin.module {
     %h_output = nest.subview %arena offsets = [131072] sizes = [12288] strides = [1] : !nest.global_view<12288xbf16>
     %pref_input = nest.dma.prefetch.async %h_input into %b_input : !nest.event<"pref_input">
     %tasks = nest.task.range from = 0 to = 3 : !nest.task_range
-    %grid_Grid3, %read_Grid3, %ready_Grid3 = nest.dispatch.tasks.async @prog_Count3 tasks(%tasks) globals() ins(%b_input, %b_output) outs(%b_input, %b_output) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input) : (!nest.event<"grid_Grid3">, !nest.event<"read_Grid3">, !nest.event<"ready_Grid3">)
-    nest.release %b_input depends_on(%read_Grid3)
+    %grid_Grid3, %read_Grid3, %ready_Grid3 = nest.dispatch.tasks.async @prog_Count3 tasks(%tasks) globals() bindings(%b_input, %b_output) ins(%b_input) outs(%b_output) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input) : (!nest.event<"grid_Grid3">, !nest.event<"read_Grid3">, !nest.event<"ready_Grid3">)
+    nest.release %b_input depends_on(%read_Grid3, %pref_input)
     %store_Output = nest.dma.store.async %b_output into %h_output depends_on(%ready_Grid3) : !nest.event<"store_Output">
     nest.release %b_output depends_on(%store_Output)
     nest.await %grid_Grid3, %store_Output

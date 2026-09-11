@@ -250,11 +250,12 @@ class ExecDispatchRequest:
 
 @dataclass(frozen=True)
 class ExecReleaseRequest:
-  """Structured RELEASE_L2 request with verified consumer ordinals."""
+  """Structured RELEASE_L2 request with verified reader/writer ordinals."""
 
   buffer_slot: str
   buffer_role: str
-  consumer_dispatch_ordinals: tuple[int, ...]
+  reader_dispatch_ordinals: tuple[int, ...]
+  writer_dispatch_ordinals: tuple[int, ...]
   dependency_events: tuple[str, ...]
 
 
@@ -327,6 +328,8 @@ class ExecTileRoleBinding:
   task_domain: ExecTaskDomain | None = None
   actuals: tuple[str, ...] = ()
   global_actuals: tuple[ExecMemoryView, ...] = ()
+  read_actuals: tuple[str, ...] = ()
+  write_actuals: tuple[str, ...] = ()
 
 @dataclass
 class ExecTileGroupTask:

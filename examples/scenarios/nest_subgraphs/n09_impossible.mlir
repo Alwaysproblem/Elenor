@@ -24,8 +24,8 @@ builtin.module {
     %h_output = nest.subview %arena offsets = [131072] sizes = [32768] strides = [1] : !nest.global_view<32768xbf16>
     %pref_input = nest.dma.prefetch.async %h_input into %b_input : !nest.event<"pref_input">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_Impossible, %read_Impossible, %ready_Impossible = nest.dispatch.tasks.async @prog_Impossible context = 0 tasks(%tasks) globals() ins(%b_input, %b_output) outs(%b_input, %b_output) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input) : (!nest.event<"grid_Impossible">, !nest.event<"read_Impossible">, !nest.event<"ready_Impossible">)
-    nest.release %b_input depends_on(%read_Impossible)
+    %grid_Impossible, %read_Impossible, %ready_Impossible = nest.dispatch.tasks.async @prog_Impossible context = 0 tasks(%tasks) globals() bindings(%b_input, %b_output) ins(%b_input) outs(%b_output) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input) : (!nest.event<"grid_Impossible">, !nest.event<"read_Impossible">, !nest.event<"ready_Impossible">)
+    nest.release %b_input depends_on(%read_Impossible, %pref_input)
     %store_Output = nest.dma.store.async %b_output into %h_output depends_on(%ready_Impossible) : !nest.event<"store_Output">
     nest.release %b_output depends_on(%store_Output)
     nest.await %grid_Impossible, %store_Output

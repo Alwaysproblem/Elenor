@@ -24,8 +24,8 @@ builtin.module {
     %h_output = nest.subview %arena offsets = [131072] sizes = [65536] strides = [1] : !nest.global_view<65536xbf16>
     %pref_input = nest.dma.prefetch.async %h_input into %b_input : !nest.event<"pref_input">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_Compute, %read_Compute, %ready_Compute = nest.dispatch.tasks.async @prog_Compute context = 0 tasks(%tasks) globals() ins(%b_input, %b_output) outs(%b_input, %b_output) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input) : (!nest.event<"grid_Compute">, !nest.event<"read_Compute">, !nest.event<"ready_Compute">)
-    nest.release %b_input depends_on(%read_Compute)
+    %grid_Compute, %read_Compute, %ready_Compute = nest.dispatch.tasks.async @prog_Compute context = 0 tasks(%tasks) globals() bindings(%b_input, %b_output) ins(%b_input) outs(%b_output) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_input) : (!nest.event<"grid_Compute">, !nest.event<"read_Compute">, !nest.event<"ready_Compute">)
+    nest.release %b_input depends_on(%read_Compute, %pref_input)
     %store_Output_0 = nest.dma.store.async %b_output into %h_output depends_on(%ready_Compute) : !nest.event<"store_Output_0">
     nest.await %store_Output_0
     %store_Output_1 = nest.dma.store.async %b_output into %h_output depends_on(%ready_Compute) : !nest.event<"store_Output_1">
@@ -45,7 +45,7 @@ builtin.module {
     %store_Output_8 = nest.dma.store.async %b_output into %h_output depends_on(%ready_Compute) : !nest.event<"store_Output_8">
     nest.await %store_Output_8
     %store_Output_9 = nest.dma.store.async %b_output into %h_output depends_on(%ready_Compute) : !nest.event<"store_Output_9">
-    nest.release %b_output depends_on(%store_Output_9)
+    nest.release %b_output depends_on(%store_Output_0, %store_Output_1, %store_Output_2, %store_Output_3, %store_Output_4, %store_Output_5, %store_Output_6, %store_Output_7, %store_Output_8, %store_Output_9)
     nest.await %grid_Compute, %store_Output_9
     nest.return
   }

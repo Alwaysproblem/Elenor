@@ -147,7 +147,7 @@ builtin.module {
     %grid_done, %input_released, %output_ready =
         nest.dispatch.tasks.async @mm_ktiled_256x256x64 context = 0
         tasks(%tasks) globals()
-        ins(%a_l2, %b_l2, %c_l2) outs(%a_l2, %b_l2, %c_l2)
+        bindings(%a_l2, %b_l2, %c_l2) ins(%a_l2, %b_l2) outs(%c_l2)
         signal_policy {
           input_released = #nest.aggregate<all_tasks>,
           output_ready = #nest.aggregate<all_tasks>
@@ -155,8 +155,8 @@ builtin.module {
         depends_on(%a_prefetched, %b_prefetched)
         : (!nest.event<"mpf_m0n0_grid_done">, !nest.event<"mpf_m0n0_inrel">,
            !nest.event<"mpf_m0n0_out_ready">)
-    nest.release %a_l2 depends_on(%input_released)
-    nest.release %b_l2 depends_on(%input_released)
+    nest.release %a_l2 depends_on(%input_released, %a_prefetched)
+    nest.release %b_l2 depends_on(%input_released, %b_prefetched)
     %c_store_done = nest.dma.store.async %c_l2 into %c_blk
         depends_on(%output_ready) : !nest.event<"mpf_m0n0_c_store_done">
     nest.release %c_l2 depends_on(%c_store_done)
@@ -195,7 +195,7 @@ builtin.module {
     %grid_done, %input_released, %output_ready =
         nest.dispatch.tasks.async @mm_ktiled_256x256x64 context = 1
         tasks(%tasks) globals()
-        ins(%a_l2, %b_l2, %c_l2) outs(%a_l2, %b_l2, %c_l2)
+        bindings(%a_l2, %b_l2, %c_l2) ins(%a_l2, %b_l2) outs(%c_l2)
         signal_policy {
           input_released = #nest.aggregate<all_tasks>,
           output_ready = #nest.aggregate<all_tasks>
@@ -203,8 +203,8 @@ builtin.module {
         depends_on(%a_prefetched, %b_prefetched)
         : (!nest.event<"mpf_m0n1_grid_done">, !nest.event<"mpf_m0n1_inrel">,
            !nest.event<"mpf_m0n1_out_ready">)
-    nest.release %a_l2 depends_on(%input_released)
-    nest.release %b_l2 depends_on(%input_released)
+    nest.release %a_l2 depends_on(%input_released, %a_prefetched)
+    nest.release %b_l2 depends_on(%input_released, %b_prefetched)
     %c_store_done = nest.dma.store.async %c_l2 into %c_blk
         depends_on(%output_ready) : !nest.event<"mpf_m0n1_c_store_done">
     nest.release %c_l2 depends_on(%c_store_done)
@@ -243,7 +243,7 @@ builtin.module {
     %grid_done, %input_released, %output_ready =
         nest.dispatch.tasks.async @mm_ktiled_256x256x64 context = 2
         tasks(%tasks) globals()
-        ins(%a_l2, %b_l2, %c_l2) outs(%a_l2, %b_l2, %c_l2)
+        bindings(%a_l2, %b_l2, %c_l2) ins(%a_l2, %b_l2) outs(%c_l2)
         signal_policy {
           input_released = #nest.aggregate<all_tasks>,
           output_ready = #nest.aggregate<all_tasks>
@@ -251,8 +251,8 @@ builtin.module {
         depends_on(%a_prefetched, %b_prefetched)
         : (!nest.event<"mpf_m1n0_grid_done">, !nest.event<"mpf_m1n0_inrel">,
            !nest.event<"mpf_m1n0_out_ready">)
-    nest.release %a_l2 depends_on(%input_released)
-    nest.release %b_l2 depends_on(%input_released)
+    nest.release %a_l2 depends_on(%input_released, %a_prefetched)
+    nest.release %b_l2 depends_on(%input_released, %b_prefetched)
     %c_store_done = nest.dma.store.async %c_l2 into %c_blk
         depends_on(%output_ready) : !nest.event<"mpf_m1n0_c_store_done">
     nest.release %c_l2 depends_on(%c_store_done)
@@ -291,7 +291,7 @@ builtin.module {
     %grid_done, %input_released, %output_ready =
         nest.dispatch.tasks.async @mm_ktiled_256x256x64 context = 3
         tasks(%tasks) globals()
-        ins(%a_l2, %b_l2, %c_l2) outs(%a_l2, %b_l2, %c_l2)
+        bindings(%a_l2, %b_l2, %c_l2) ins(%a_l2, %b_l2) outs(%c_l2)
         signal_policy {
           input_released = #nest.aggregate<all_tasks>,
           output_ready = #nest.aggregate<all_tasks>
@@ -299,8 +299,8 @@ builtin.module {
         depends_on(%a_prefetched, %b_prefetched)
         : (!nest.event<"mpf_m1n1_grid_done">, !nest.event<"mpf_m1n1_inrel">,
            !nest.event<"mpf_m1n1_out_ready">)
-    nest.release %a_l2 depends_on(%input_released)
-    nest.release %b_l2 depends_on(%input_released)
+    nest.release %a_l2 depends_on(%input_released, %a_prefetched)
+    nest.release %b_l2 depends_on(%input_released, %b_prefetched)
     %c_store_done = nest.dma.store.async %c_l2 into %c_blk
         depends_on(%output_ready) : !nest.event<"mpf_m1n1_c_store_done">
     nest.release %c_l2 depends_on(%c_store_done)
@@ -324,7 +324,7 @@ builtin.module {
     %grid_done, %input_released, %output_ready =
         nest.dispatch.tasks.async @pow_y_pair_128
         tasks(%tasks) globals()
-        ins(%y_l2) outs(%y_l2)
+        bindings(%y_l2) ins(%y_l2) outs(%y_l2)
         signal_policy {
           input_released = #nest.aggregate<all_tasks>,
           output_ready = #nest.aggregate<all_tasks>
@@ -334,7 +334,7 @@ builtin.module {
            !nest.event<"mpf_pow_y0_out_ready">)
     %y_store_done = nest.dma.store.async %y_l2 into %y_blk
         depends_on(%output_ready) : !nest.event<"mpf_pow_y0_store_done">
-    nest.release %y_l2 depends_on(%y_store_done)
+    nest.release %y_l2 depends_on(%input_released, %y_prefetched, %y_store_done)
     nest.await %grid_done, %y_store_done
     nest.return
   }
@@ -354,7 +354,7 @@ builtin.module {
     %grid_done, %input_released, %output_ready =
         nest.dispatch.tasks.async @pow_y_pair_128
         tasks(%tasks) globals()
-        ins(%y_l2) outs(%y_l2)
+        bindings(%y_l2) ins(%y_l2) outs(%y_l2)
         signal_policy {
           input_released = #nest.aggregate<all_tasks>,
           output_ready = #nest.aggregate<all_tasks>
@@ -364,7 +364,7 @@ builtin.module {
            !nest.event<"mpf_pow_y1_out_ready">)
     %y_store_done = nest.dma.store.async %y_l2 into %y_blk
         depends_on(%output_ready) : !nest.event<"mpf_pow_y1_store_done">
-    nest.release %y_l2 depends_on(%y_store_done)
+    nest.release %y_l2 depends_on(%input_released, %y_prefetched, %y_store_done)
     nest.await %grid_done, %y_store_done
     nest.return
   }

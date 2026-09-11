@@ -8,9 +8,9 @@ reference.  Async engine/DMA ops produce SSA event values typed
 
 Key design points mirrored from reference.mlir:
 
-  - placement (tile mask) lives on ``nest.context``, not on dispatch;
-  - dispatch consumes a logical task range plus ins/outs L2 buffers and a
-    ``depends_on`` event, and returns THREE aggregated events:
+  - dispatch consumes a logical task range, positional L2 ``bindings``, true
+    ``ins``/``outs`` access sets, and a ``depends_on`` event, and returns
+    THREE aggregated events:
     ``grid_done`` / ``input_released`` / ``output_ready``;
   - tile programs mark their L2-read / L2-write phases with
     ``tile.signal``, which drives the dispatch phase events;
@@ -866,7 +866,8 @@ class NestPrefetchOp(_NestAsyncOp):
 class NestDMAStoreOp(_NestAsyncOp):
   """``%e = nest.dma.store.async %src into %dst depends_on(%o) : !nest.event<t>``
 
-  L2 -> HBM final store, gated on the dispatch ``output_ready`` event.
+  L2 -> HBM store.  Verification requires it to wait for every preceding
+  dispatch that truly writes the source allocation.
   """
 
   name = "nest.dma.store.async"
@@ -901,13 +902,15 @@ class NestDMAStoreOp(_NestAsyncOp):
 class NestDispatchOp(IRDLOperation):
   """``%grid, %inrel, %out = nest.dispatch.tasks.async @prog``
 
-  ``tasks(%t) globals(%g...) ins(%b...) outs(%b...) signal_policy { ... }``
+  ``tasks(%t) globals(%g...) bindings(%b...) ins(%b...) outs(%b...)``
+  ``signal_policy { ... }``
 
   Function-call dispatch per reference.mlir section 4: the tile program is
   referenced by symbol; the placement comes from the enclosing
   ``nest.context``.  ``globals`` bind positionally to the tile program's
-  global-view formals.  ``ins`` and ``outs`` each bind positionally to all
-  L2 formals.  Formal 0 is always ``!nest.task``.
+  global-view formals.  ``bindings`` is the sole positional binding for all
+  L2 formals; ``ins`` and ``outs`` declare the actual buffers truly read and
+  written by the program.
   Returns three aggregated events:
 
     - grid_done      - all logical tasks returned;
@@ -935,6 +938,7 @@ class NestDispatchOp(IRDLOperation):
   output_ready_policy = opt_prop_def(NestAggregate)
   tasks = operand_def(TaskRange)
   global_views = var_operand_def(NestGlobalView)
+  bindings = var_operand_def(NestBuffer)
   ins = var_operand_def(NestBuffer)
   outs = var_operand_def(NestBuffer)
   depends_on = var_operand_def(NestEvent)
@@ -954,6 +958,7 @@ class NestDispatchOp(IRDLOperation):
     inrel_tag: str,
     outready_tag: str,
     *,
+    bindings: Sequence,
     signal_policy: Mapping[str, str],
     depends_on: Sequence = (),
     context_id: int | None = None,
@@ -979,7 +984,14 @@ class NestDispatchOp(IRDLOperation):
           None if "output_ready" not in signal_policy
           else NestAggregate.of(signal_policy["output_ready"])),
       }),
-      operands=[[tasks], list(global_views), list(ins), list(outs), list(depends_on)],
+      operands=[
+        [tasks],
+        list(global_views),
+        list(bindings),
+        list(ins),
+        list(outs),
+        list(depends_on),
+      ],
     )
     self.grid_done.name_hint = grid_tag
     if inrel_tag:
@@ -1005,6 +1017,7 @@ class NestDispatchOp(IRDLOperation):
     printer.print_operand(self.tasks)
     printer.print_string(")")
     _print_operand_group(printer, "globals", self.global_views)
+    _print_operand_group(printer, "bindings", self.bindings)
     _print_operand_group(printer, "ins", self.ins)
     _print_operand_group(printer, "outs", self.outs)
     _print_signal_policy(printer, self)
@@ -1022,6 +1035,7 @@ class NestDispatchOp(IRDLOperation):
     context_id = _parse_opt_int_kw(parser, "context")
     tasks = _parse_operand_group(parser, "tasks")
     global_ops = _parse_operand_group(parser, "globals")
+    bindings_ops = _parse_operand_group(parser, "bindings")
     ins_ops = _parse_operand_group(parser, "ins")
     outs_ops = _parse_operand_group(parser, "outs")
     signal_policy = _parse_signal_policy(parser)
@@ -1046,6 +1060,7 @@ class NestDispatchOp(IRDLOperation):
       tags[0],
       tags[1],
       tags[2],
+      bindings=bindings_ops,
       signal_policy=signal_policy,
       depends_on=depends_on,
       context_id=context_id,

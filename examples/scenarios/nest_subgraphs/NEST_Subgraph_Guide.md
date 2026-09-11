@@ -1,6 +1,6 @@
 # NEST 子图库：运行结论、结构与测试目的
 
-> 范围：`examples/scenarios/nest_subgraphs/` 下全部 **112 份独立 MLIR**。本说明对应 2026-09-10 导出的 `full_memory` / `runtime` trace 快照；编写时已核对两种模式的 source SHA-256 与当前 112 份输入一致。周期数是此次模拟结果，不是硬件承诺或性能上限。
+> 范围：`examples/scenarios/nest_subgraphs/` 下全部 **112 份独立 MLIR**。本文原有周期表、§8 诊断和 `full_memory` / `runtime` 链接均为 **2026-09-10 修正前合同基线**，不是迁移后源码的实测结果。迁移前 SHA-256 已与原 summary 全量核对；原文/hash 保存在 [migration_inventory.json](../../artifacts/nest_subgraphs/l2_access_contract/migration_inventory.json)。当前源码已切换 bindings + 真实 ins/outs；新结果见 §8.4 的独立证据目录。周期数不是硬件承诺或性能上限。
 
 ## 1. 运行结论与证据边界
 
@@ -26,7 +26,7 @@
 
 **这不等于数值正确性或全图最优调度认证。** 下文“主要目的”描述案例要检验的行为，不是把每一项都自动标为 PASS。外部 MLIR 的通用 CLI 检查不能替代逐条 tensor use-def、阶段事件和调度质量检查。
 
-**调度诊断补充（详见 §8）**：当前主要不足是静态发射顺序不能主动绕开无关等待、跨 Context 完成事件偏粗、中间 Buffer 的读写绑定与回收过于保守，以及内存布局/性能指标限制了优化判断。它们分属编译器映射、IR 合同、资源策略和模拟器模型，不能统称为调度器错误。新增分析覆盖已有两模式的全部 220 份 trace；提出的实现改进尚未执行。
+**修正前调度诊断（详见 §8）**：静态发射顺序不能主动绕开无关等待、跨 Context 完成事件偏粗、中间 Buffer 的旧双绑定与回收过于保守，以及内存布局/性能指标限制了优化判断。它们不能统称为调度器错误。旧分析覆盖两模式全部 220 份基线 trace；本次只修正访问与释放合同，不改变调度、成本或 Context partition。
 
 ### 1.2 可从当前 trace 直接观察的代表结论
 
@@ -46,7 +46,7 @@
 | `t04_stage`          | R1 在50153完成；R3 在50154接纳到 slot1，generation 1→3；R0 到79453才完成                                     | 默认长尾版本确实复用 R1 的槽位，且 R0 仍在飞；未注入旧通知。                                               |
 | `t04_stage_uniform`  | R0 在57595完成，R1 在62723完成；R3 在62724接纳到 slot0、generation3                                          | first-free 复用的是先释放的 R0 槽，而不是固定要求 R1 的 slot1。                                            |
 
-初始 repeat100 的 S07/S12 诊断未观察到要求的重叠，当前两份具名文件按批准的加长分支改为 repeat1000；其 `diagnostic_fallback` 元数据已注明。本文的正式周期表只使用当前 112 份输入对应的两模式导出，不把初测旧 trace 混入比较。
+初始 repeat100 的 S07/S12 诊断未观察到要求的重叠，两份具名文件此前已按批准分支改为 repeat1000；`diagnostic_fallback` 元数据注明。原周期表使用修正前112份输入对应的导出，不与本次新合同结果混算。
 
 ### 1.3 证据与导航
 
@@ -75,7 +75,7 @@
 - **node**：S 图通常每节点一个 Context，跨 Context 边经 HBM；T01 按完整 chunk 切分，T03 按 step，T04 按请求内 A/B/C 节点。
 - **stage**：按分支或阶段合并。下文 `{A,B}/{C,D}` 表示两个 Context，不表示阶段事件可以跨 Context 导出。
 - 当前 IR 的跨 Context 可见事件粒度是 `context_done`：消费者 submit 前等待所需 producer Context，包含其必要 HBM 写回。这是当前 IR 的保守实现，不是架构上“所有边都必须等 context_done”的结论。
-- 所有 dispatch 的 `ins`、`outs` 都绑定完整 actual 列表；中间 out/inout Buffer 的最终 Store 也要等待相关 reader dispatch 的 output_ready，存在保守持有，不能冒称精确 last-read 回收。
+- 当前 dispatch 用 `bindings` 保留唯一 positional actual 列表，`ins`/`outs` 精确声明真实读/写集合。Store 只等真实写者；所有 role 的 release 等全部 reader.input_released、prefetch 与 Store completion。旧双绑定造成的保守等待仅保留为 §8.4 修正前基线。
 - Device slot 和 Tile-local UCE context 是两层资源。默认 4×4 指 **device-context-mode × context-mode**；single 是 1×4，只有 `t01_single_one_uce` 是 1×1。共享 pin0 不会把物理配置自动变成 Nx1。
 
 ### 2.3 数据、成本与两种 fidelity
@@ -136,7 +136,7 @@ A 为 BOA；B/C/D 分别进行 pow timing 工作并真实读取 A。
 
 **目的**：检查完成事件能唤醒所有消费者，共享输出在最后读取前不能释放或覆盖。
 
-**注意**：普通 intermediate out/inout Buffer 会保守持有至读者 output_ready/最终 Store；input-only 的精确早释放目标另见 N02。
+**基线注意**：下表旧合同 intermediate out/inout 曾保守持有至读者 output_ready/最终 Store；当前输入已切换真实访问合同，新测量与旧值分开见 §8.4。
 
 | 子图（源码，省略 .mlir）                  | 大概信息 / 切分与参数                          | 主要目的                                                                        | full_memory cycles | runtime cycles | 两模式结果（exit） | Trace / 日志                                                                                                                                        |
 | ----------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------- | -----------------: | -------------: | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -604,9 +604,9 @@ single 较快，但其峰值 L2 更高；node 慢的一部分是搬运量翻倍�
 
 **验收**：在 S08/S10/T02 上逐条核对所有 fan-in 的真实地址与最早可见时刻；新映射的等待减少不能以增加未说明的 DMA、扩大 SRAM 或放松 release 为代价。未运行新 ABI，故不报告它的预计加速比。
 
-### 8.4 不足三：中间输出的读写绑定与回收过于保守
+### 8.4 修正前基线：中间输出的读写绑定与回收过于保守
 
-`s03_single_d100` 中，B/C/D 都读取 A，但完整双绑定使它们也进入 A 的 `outs_producers`。A 的最终 Store 必须等这些 dispatch 的 output_ready，再由 Store 完成门控 release。
+修正前 `s03_single_d100` 的 B/C/D 都读取 A，但完整双绑定使它们也进入 A 的 `outs_producers`。旧合同要求 A 最终 Store 等这些 dispatch 的 output_ready，再由 Store 完成门控 release。以下数值仅属于旧输入 hash。
 
 | 模式        | A 最后一次 tile.load 完成 / D.input_released | D.output_ready | A 最终 Store 首腿接受 → 完成 | A release | release−最后 tile.load |
 | ----------- | -------------------------------------------: | -------------: | ---------------------------- | --------: | ---------------------: |
@@ -617,15 +617,65 @@ single 较快，但其峰值 L2 更高；node 慢的一部分是搬运量翻倍�
 
 对照 N02：共享 input-only X 在 full_memory 的最后 load 完成 45854 后，于 45863 释放，而 D 的 EVU 到 71955 才结束。说明当前系统已经有按 input_released 释放的机制；不足主要是中间 out/inout 的访问集合表达与法定回收路径，而不是“所有 Buffer 都不会早释放”。
 
-**合同根因**：[release verifier](../../../pipeline_validator/workload_ir.py#L447-L525) 按 `ins/outs` 列表收集消费者/生产者；当前双绑定让纯读者的 output_ready 也成为 A 最终 Store 的前提。与此同时，[顺序式 sequencer](../../../pipeline_validator/tile_group_sequencer.py#L138-L174) 会让放在后面的 release action 等待前面无关的 action。
+**旧合同根因**：release verifier 按旧 `ins/outs` full-list 收集消费者/生产者，纯读者的 output_ready 因而成为 A 最终 Store 前提。顺序式 sequencer 还会让后面的 release action 等待前面无关的 action；本次不改变该 PC 调度语义。
 
-**改进建议**：
+**修正范围与保留边界**：
 
 - 先将已经合法的 input-only release 放到其全部读者事件已定义、且不阻挡独立发射的较早位置，减少单纯的 PC 延迟。
-- 在合同层分离**实际读者、实际写者、绑定列表**，避免“绑定到程序”自动等价于“生产这个 Buffer”。必须同步修改 verifier、lowering、pin/consumer ordinal 与回收规则，不能只从某个 `outs` 列表删除参数。
-- 让必要 Store 由真实写者的完成事件门控，final-free 则至少等待 `max(最后真实读取完成, 必要 Store 完成)`，并保留写后读、读后写、取消与错误路径的保护。
+- 当前合同分离实际读者、实际写者和 positional `bindings`；verifier、lowering、pin 与两类 dispatch ordinals 一并切换。
+- 必要 Store 由真实 writer.output_ready 门控；release 精确等全部 reader.input_released、全部 prefetch completion 和全部 Store completion。运行时在任何 writer unpin 前验证两阶段和未结束 transfer，readwrite 的两个 phase 不依赖固定先后。
 
 **验收**：S03 D100 的 A 不再因 D 后续纯计算而被额外持有；但最后 Store 未结束时仍不可释放。30113/26756 包含现有法定等待和 Store 时间，不能直接宣称是可回收的全部时间或可节省的 makespan。不得把产出 Buffer 改成 input-only 来绕过合同。
+
+#### 新合同实测：2026-09-11
+
+独立输出：[full_memory summary](../../artifacts/nest_subgraphs/l2_access_contract/full_memory/summary.json) /
+[runtime summary](../../artifacts/nest_subgraphs/l2_access_contract/runtime/summary.json) /
+[生命周期与调度对照](../../artifacts/nest_subgraphs/l2_access_contract/lifecycle_comparison.json)。
+两模式各112例，均为 **108 completed、2 verify exit2、2 capacity fault exit1**；
+各110份真实 trace 全部通过 `Tracer.assert_well_formed()`。原结果目录未覆盖。
+另13个 workload 和2个 protocol 入口全部完成，见 [extras summary](../../artifacts/nest_subgraphs/l2_access_contract/extras/summary.json)。
+
+当前 source SHA-256：
+
+- `s03_single`：`5d3996ae26989ab915459a2dda878f45c3e70cae9244dbfbe262a331562cbf9d`。
+- `s03_single_d100`：`f37b36fc792b48223a19b6e30b8f731ef57b904ae38a41d6bded522f983d2e1c`。
+- 其余输入、实际命令、退出码、配置参数与运行时间见新 summary；[roundtrip](../../artifacts/nest_subgraphs/l2_access_contract/roundtrip.json) 记录126份合法非空输入的结构等价 roundtrip、两份指定 N08 拒绝及保留的空文件。
+
+| 输入       | 模式        | A Store 首腿接受 → 完成 | A 最后实际 load 完成 | A release | D 后续 EVU 结束 | 相比旧基线 release 提前 |
+| ---------- | ----------- | ----------------------: | -------------------: | --------: | --------------: | ----------------------: |
+| S03 single | full_memory |           14896 → 17964 |                22906 |     22910 |           23168 |                    1706 |
+| S03 D100   | full_memory |           14896 → 17964 |                22906 |     22910 |           49007 |                   27545 |
+| S03 single | runtime     |               580 → 746 |                  685 |       747 |            1395 |                     855 |
+| S03 D100   | runtime     |               580 → 746 |                  685 |       747 |           27234 |                   26694 |
+
+以上单位为 cycle。A 是 `allocation_id=l2:1:3, generation=1`；
+Store 是 `transaction_id=0:s0l0_store_A_0`、`event_id=s0l0_store_A_0`；
+B/C/D 的真实读取按 `role_event_id=s0l0_grid_B/C/D` 与逐 task transaction 关联，
+D 的阶段事件仍为 `s0l0_read_D / s0l0_ready_D`。JSON 保留完整 allocation、
+phase、transaction、逐腿地址和端点记录，不以 UCE issue 或 context slot 占用替代真实 service。
+
+结论：A Store 不再等待纯读者 B/C/D 的 output_ready；A release 同时晚于全部
+真实读取和必要 Store，却早于 D100 的后续计算完成。full_memory 的读取端点也因
+真实内存竞争改变，不能把 release 提前量直接当成整个 workload 的加速量。
+
+保留合同的实测检查：
+
+- **N02**：X 最后读取／release／D EVU 结束分别为 F `45854 / 45867 / 71955`，
+  R `26507 / 26520 / 52608`；input-only 仍可早释放。
+- **N03**：holder final-free 与 waiter admit 同 cycle（F `2140`，R `312`），
+  first_action 在下一 cycle（F `2141`，R `313`）；等待期间不启动该 launch 的搬运。
+- **N04**：Head/Tail 的排队、接纳顺序仍均为 `ctx_head → ctx_tail`。
+- **T01**：四 chunks 的12个 HBM 传输、32个 Tile load、16个 Tile Store 均核对
+  tensor 地址与 bytes；输入覆写不早于上次 input_released，输出覆写不早于上次
+  HBM Store completion。两套六个 allocations 保持不变。
+- **T04**：single 的 R3 prefetch 仍晚于 R1 的 C1 grid 完成；node 的 A3 submit
+  仍晚于 C1 context_done；stage/uniform 的 R3 submit 仍晚于 R1 context_done。
+  重用 context/program 名称不混淆 device slot 与 launch generation。
+
+证据口径：runtime 的单腿 `local_dma` trace 沿用 stage 的 nominal space 标签，
+因此 Tile Store 方向由 `op=tile_store` 确认，并核对实际 destination_address/bytes，
+不将该腿的 nominal `destination_space` 当成真实传输方向。此次未改动 trace schema。
 
 ### 8.5 不足四：Admission 公平性会放弃部分并发机会，但正确性基线成立
 

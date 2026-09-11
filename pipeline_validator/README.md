@@ -38,9 +38,11 @@ i → tile i), so `placement = 0xF` with `task.range 0..4` dispatches
 4 tasks across 4 tiles.
 
 **Dispatch** — `nest.dispatch.tasks.async @prog` consumes a logical
-task range, mandatory `globals(...)`, ins/outs L2 buffers, and an
-optional `depends_on` event. `globals()` is always printed even when
-empty. It returns THREE aggregated events: `grid_done` (all tasks
+task range, mandatory `globals(...)`, `bindings(...)`, `ins(...)`, and
+`outs(...)`, plus optional `depends_on` events. All operand groups print
+even when empty. `bindings` alone binds all L2 formals positionally;
+`ins`/`outs` are exact, unique actual read/write sets. Aliases merge effects;
+unused formals stay bound without pins. It returns THREE events: `grid_done` (all tasks
 returned), `input_released` (all tasks completed their L2 read phase),
 and `output_ready` (all tasks completed their L2 write phase). Its
 always-printed `signal_policy { ... }` block declares each emitted phase
@@ -53,19 +55,29 @@ is keyed by `(context launch generation, grid instance, phase, logical
 task)`, and a phase result fires exactly once only after every expected
 logical task in that grid has signalled. Physical tile masks and UCE
 hardware-context ids are not aggregation identities.
+Programs await all actual L2 loads before sealing `input_released`, with
+no later loads; stores and `output_ready` obey the symmetric rule.
+Each real access direction requires its phase exactly once. Either phase
+order is legal; readwrite release must independently satisfy both.
 
 **Buffers** — `nest.alloc` produces SSA values typed
 `!nest.l2_buffer<slot>`; the slot name is the runtime L2 buffer id.
 At context admission, every `l2_buffers` entry is planned and committed
 as one atomic bundle on the L2 `BankedFreeExtentAllocator` (owner,
-generation, alignment, bank segments). `input_released` aggregation
-unpins only role=`"in"` consumer pins. `output_ready` makes output
-visible in L2 but does not unpin role=`"out"`/`"inout"` consumers; their
-`nest.release` is gated by the final store after all required
-`output_ready` events. Release additionally validates its explicit event,
-owner, generation, live handle, and pin state before reclaiming the
-buffer. The event type tag doubles as the runtime event id shared by the
-simulator and the trace.
+generation, alignment, bank segments). Pins record actual reads/writes,
+not allocation roles. `input_released` unpins pure readers of any role;
+write/readwrite pins stay until explicit release. Every HBM Store waits
+on its previously defined real writers' `output_ready`; the final Store
+covers all writers, not pure readers. For every role, release dependencies
+are exactly all reader `input_released`, all prefetch completions, and all
+HBM Store completions. Input-role writes are forbidden; out/inout requires
+a real writer and Store. An asynchronously unused input may release with
+empty dependencies; no buffer use may follow release.
+Release preflights owner, role, generations, live handle, every event and
+phase, pins, and unfinished allocation-identity-matched transfers before
+unpinning any writer. Only successful final-free wakes capacity waiters.
+The event type tag doubles as the runtime event id shared by simulator
+and trace.
 
 **L2 admission wait (PR 3.5)** — a submit is accepted onto a device slot
 even when its atomic L2 bundle transiently cannot fit: the context

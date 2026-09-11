@@ -65,7 +65,8 @@ the **first** formal is `!nest.task`; zero or more
 `!nest.global_view<...>` formals follow; zero or more
 `!nest.l2_buffer<...>` formals come last. Global/L2 formals may not
 interleave. Dispatch `globals(...)` bind the global prefix positionally;
-`ins(...)` and `outs(...)` each bind all L2 formals positionally.
+`bindings(...)` alone binds all L2 formals positionally. `ins(...)` and
+`outs(...)` declare actual L2 read/write sets, not parameter positions.
 `tile.subview` remains L2-only. `tile.gather.global.async` is the only
 tile-side consumer of a global-view formal in PR 4.
 
@@ -231,15 +232,19 @@ derived from the view/buffer shapes. Produces one event.
 %ev = nest.dma.store.async %l2_buf into %src depends_on(%out) : !nest.event<"ev_store">
 ```
 
-L2 → HBM final store from the `!nest.l2_buffer` into the
-`!nest.global_view`, gated on the dispatch `output_ready` event via
-`depends_on`. Produces one event.
+L2 → HBM store from the `!nest.l2_buffer` into the `!nest.global_view`.
+Every Store explicitly depends on all previously defined dispatches that
+actually write this buffer, through their `output_ready` results. The last
+Store must cover every writer in the context. Pure readers do not add
+`output_ready` prerequisites; unrelated explicit control dependencies remain
+legal. Produces one completion event; parallel Stores are not implicitly
+ordered by source position.
 
 ### 3.6 `nest.dispatch.tasks.async`
 
 ```mlir
 %grid, %inrel, %out = nest.dispatch.tasks.async @pow_4k_tile context = 1
-    tasks(%t) globals() ins(%buf) outs(%buf)
+    tasks(%t) globals() bindings(%buf) ins(%buf) outs(%buf)
     signal_policy {
       input_released = #nest.aggregate<all_tasks>,
       output_ready = #nest.aggregate<all_tasks>
@@ -248,12 +253,26 @@ L2 → HBM final store from the `!nest.l2_buffer` into the
     : (!nest.event<"grid">, !nest.event<"inrel">, !nest.event<"out">)
 ```
 
-Function-call dispatch (reference.mlir §194-239). The tile program is
-referenced by symbol. Mandatory `globals(...)` binds global-view formals;
-it is printed even when empty. `ins(...)` and `outs(...)` independently
-bind every L2 formal. Counts and shape/dtype must match each corresponding
-formal exactly. Placement comes from the enclosing `nest.context`, not
-from this op.
+The tile program is referenced by symbol. All four groups `globals(...)`,
+`bindings(...)`, `ins(...)`, and `outs(...)` are mandatory, including when
+empty. Old dispatch syntax without `bindings` is rejected, not inferred.
+`globals` binds global-view formals; `bindings` is the sole positional
+binding for all L2 formals. Each count and shape/dtype must match exactly.
+Each L2 actual must be a `nest.alloc` result in this context body.
+Placement comes from the enclosing `nest.context`, not this op.
+
+`ins` and `outs` must each be duplicate-free subsets of `bindings`, exactly
+equal to the program's actual read/write effects mapped to actual buffers.
+Reads come from `tile.load.async` sources and writes from `tile.store.async`
+destinations, through current-program `tile.subview` operations. Global
+Gather accesses do not contribute L2 effects. Extra or missing declarations
+are rejected; effect order is irrelevant.
+
+Aliases in `bindings` are legal: effects merge by actual SSA identity, with
+one pin per task and actual buffer. An unused L2 formal remains bound but
+contributes no effect, pin, or required phase. Lowering canonicalizes effect
+tuples in first-occurrence binding order; it never infers positions from
+read/write direction.
 
 `signal_policy { ... }` is always printed, possibly as
 `signal_policy {}`. Each entry declares how one program phase aggregates
@@ -294,22 +313,30 @@ Collective engine op (reduce/broadcast/multicast). Produces one event.
 ### 3.8 `nest.release`
 
 ```mlir
-nest.release %buf depends_on(%store_ev)
+nest.release %buf depends_on(%reader_inrel, %prefetch_ev, %store_ev)
 ```
 
-Reclaims the context-owned L2 buffer. `depends_on` is required, and
-release legality is determined by the buffer role from `nest.alloc`:
+Reclaims the context-owned L2 buffer. For **every** allocation role, the
+dependency SSA set must be exactly `R(buffer) ∪ P(buffer) ∪ S(buffer)`:
 
-- role=`"in"` must depend on exactly the `input_released` results of
-  every dispatch that consumes the buffer through `ins`.
-- role=`"out"` and role=`"inout"` must depend only on the final
-  `nest.dma.store.async` result for that buffer. That final store must
-  itself `depends_on` every producing dispatch's `output_ready` result.
+- `R`: `input_released` of every distinct dispatch that actually reads it.
+- `P`: every prefetch completion into this allocation.
+- `S`: every HBM Store completion from this allocation, not just the last.
 
-Every `nest.alloc` must have exactly one legal `nest.release` in the
-same context before `nest.return`. At runtime, release additionally
-checks the explicit events plus the allocation's owner, generation, live
-state, and consumer pins; it is not a best-effort free.
+No duplicate dependencies, `grid_done` substitutions, or reader
+`output_ready` substitutions are allowed. Canonical order is readers by
+dispatch ordinal, prefetches in source order, then Stores in source order.
+An input buffer with no asynchronous use may have an empty dependency set.
+Role `"in"` forbids Tile writes; `"out"`/`"inout"` require a real Tile
+writer and at least one HBM Store.
+
+Every allocation has exactly one release before `nest.return`; no binding,
+prefetch, Store, or other buffer use may appear after that release.
+Runtime preflights all events, owner, role, live handle, allocation/launch
+generation, reader/writer phases, remaining pins, and in-flight transfers
+before mutating any pin. Failed preflight cannot partially sweep writers.
+Readwrite pins require both phases independently. Only successful allocator
+final-free changes capacity and wakes admission.
 
 ### 3.9 `nest.await`
 
@@ -470,6 +497,14 @@ task:
 - `input_released` — this task will not read its L2 input subview again.
 - `output_ready` — this task's output is now visible in L2.
 
+Each phase occurs at most once in the straight-line program. A real L2
+reader/writer must emit its corresponding phase. Before input release,
+every preceding L2 load completion must have been awaited by SSA identity,
+and no L2 load may follow it; output readiness seals stores symmetrically.
+Waiting on compute or another event cannot substitute for transfer completion.
+The phases may occur in either order. Explicit empty phases are allowed;
+their policy/tag declarations still match the emitted phase set exactly.
+
 The dispatch's `signal_policy` selects the declared phases. For each
 phase, the event fires exactly once only after every expected logical task
 in that `GridInstanceId` has signalled; duplicate task/phase signals are
@@ -481,8 +516,10 @@ ignored. The physical placement mask does not aggregate phase signals.
 tile.return
 ```
 
-Tile program completion. Contributes to `grid_done` (reference.mlir
-§417-418).
+Tile program completion. Contributes to `grid_done`. Public Tile Programs
+are single-block, straight-line bodies with exactly one terminal return;
+memory accesses or signals after an early return are rejected. This does not
+restrict the private execution IR's branch/stream instructions.
 
 ## 5. Verification Rules
 
@@ -509,9 +546,11 @@ Tile program completion. Contributes to `grid_done` (reference.mlir
 - **`tile.program` formals**: at least one formal; the first is
   `!nest.task`, followed by a contiguous global-view prefix and then a
   contiguous L2-buffer suffix. Global formals may not follow L2 formals.
-- **dispatch ↔ tile.program binding**: mandatory `globals` bind all
-  global formals; `ins` and `outs` each bind all L2 formals. Every list
-  must match formal count and dims+dtype exactly.
+- **dispatch ↔ tile.program binding**: mandatory `globals` binds all global
+  formals; mandatory `bindings` binds all L2 formals with exact arity and
+  dims+dtype, using only current-context allocations. `ins`/`outs` are exact,
+  unique mapped read/write sets (§3.6), independent of formal positions.
+  Aliases merge effects; unused formals stay bound without effects.
 - **View bounds (`nest.subview` / `tile.subview`)**: every dim requires
   `offset >= 0`, `size >= 1`, `offset + size <= parent_dim`; view byte
   count must not overflow int64. `tile.subview` bounds against a task
@@ -555,12 +594,12 @@ Tile program completion. Contributes to `grid_done` (reference.mlir
     tag, and an undeclared phase requires an empty tag.
   - `context = N` (if present) must be >= 0; the upper bound is the
     simulator's `context_count` (checked at task load, not at IR verify).
-- `nest.dma.store.async` / `nest.release` `depends_on` operands must be
-  events defined earlier. Every `nest.alloc` has exactly one release
-  before `nest.return`: an `"in"` release's dependency SSA set is exactly
-  all matching consumer `input_released` events; an `"out"`/`"inout"`
-  release depends only on the final store, which waits on all matching
-  producer `output_ready` events.
+- `nest.dma.store.async` / `nest.release` dependencies must be earlier SSA
+  events. Each Store waits on all earlier real writers; the final Store
+  covers all writers. Every allocation has exactly one release before
+  return, with exactly the full `R ∪ P ∪ S` set (§3.8), including all parallel
+  Stores and prefetches. No buffer use may follow release. Input-role Tile
+  writes and output/inout allocations without real writers/Stores are rejected.
 - `nest.await` operands must be events defined earlier.
 
 ### 5.4 Tile program body
@@ -571,6 +610,13 @@ Tile program completion. Contributes to `grid_done` (reference.mlir
 - `tile.signal` phase must be `input_released` or `output_ready`, and
   its sole operand must be block argument 0 (the program's `!nest.task`
   formal).
+- Load sources and Store destinations must be current-program subviews of
+  direct L2 formals. Actual access indices are collected once per program.
+- Each real access direction requires exactly one corresponding signal;
+  every phase occurs at most once. Signals seal already-awaited transfers by
+  SSA identity, forbidding later accesses in that direction (§4.10).
+- Exactly one terminal `tile.return` is required; no unreachable accesses
+  or signals may be used to satisfy the contract.
 - `tile.gather.global.async` obeys the complete Gather rule set in §5.2;
   its `gather_done` event participates in the same unique-tag and
   defined-before-await rules as other tile async events.
@@ -623,7 +669,7 @@ never carries an xDSL SSA value.
 `ExecDispatchRequest` preserves the role id, source-order dispatch ordinal,
 per-phase `ExecSignalPolicy`, and phase event ids; its action `dst` remains
 the `grid_done` event. `ExecReleaseRequest` preserves the verified buffer
-slot/role, matching consumer dispatch ordinals, and explicit dependency
+slot/role, separate reader and writer dispatch ordinals, and complete `R/P/S`
 event ids. These structured DTOs are consumed directly by the runtime; it
 does not recover identity or release dependencies by parsing event strings.
 
@@ -656,11 +702,21 @@ address-accurate or value-accurate Gather.
 ### 6.3 Role binding
 
 Each unique `(program, placement_mask, context identity, task domain,
-actuals)` binding gets an auto-assigned `role_id` (starting from 0).
+actuals, global_actuals, read_actuals, write_actuals)` binding gets an
+auto-assigned `role_id` (starting from 0).
 Device slot is deliberately not part of this static role-binding identity.
 Each source dispatch still receives its own source-order `dispatch_ordinal`
 inside `ExecDispatchRequest`, which becomes part of `GridInstanceId` at
 runtime.
+
+`actuals` contains exactly one entry per L2 formal, sourced only from
+`bindings`. `read_actuals` and `write_actuals` are unique slot tuples in
+first-occurrence binding order. Runtime binds exact arity without truncation.
+Each task pins each accessed actual once; unused bindings are not pinned.
+Aggregate `input_released` unpins pure readers regardless of allocation role.
+Write/readwrite pins remain until explicit release passes full preflight,
+including both phases for readwrite and absence of PENDING/RUNNING/FAULTED
+transfers with the same `(memory_space, allocation_id, generation)`.
 
 ### 6.4 Model lowering (`nexus.*` → `ExecDeviceOp`)
 
@@ -718,16 +774,23 @@ the aggregation key.
   placeable but not under the current live free map) enters the
   strict-FIFO admission wait queue instead. A failed plan never
   mutates the free map, pool version, counters or peak.
-- `nest.release` - `RELEASE_L2` first requires every explicit dependency
-  event to be complete, then validates the buffer role, owner, generation,
-  live handle, and required pin state before calling `request_release`.
-  `input_released` aggregation unpins only role=`"in"` consumers.
-  `output_ready` only makes L2 output visible; role=`"out"`/`"inout"`
-  pins remain until their final-store-gated release. An unsatisfied or
-  inconsistent release is an invariant fault, never a silent success.
-  Only an allocator **final-free** (request_release returning with no
-  remaining pins) marks a capacity change: signal aggregates and unpins
-  alone never wake the admission queue.
+- Dispatch pins are access-based: one pin per task and distinct accessed
+  actual, with read/write flags merged across aliases; unused formals do not
+  pin. `input_released` unpins pure readers of any allocation role. Normal
+  unpin failure faults/reset the owning sequencer; cancel/rollback cleanup
+  remains idempotent. Write/readwrite pins remain for explicit release.
+- `nest.release` - `RELEASE_L2` preflights every explicit `R/P/S` dependency,
+  allocation owner/role/live handle and both generations. Reader/writer
+  ordinals must be unique, known grids of this launch with their respective
+  aggregate phases complete. Any remaining pure-read pin rejects release;
+  readwrite pins independently require input release even if a request
+  omitted the reader ordinal. No PENDING/RUNNING/FAULTED transfer may still
+  access the allocation identity; DONE/CANCELLED do not block it.
+  Only after all checks pass may writer pins be removed and
+  `request_release` final-free the allocation. Rejection cannot partially
+  unpin or enter RELEASE_PENDING. Inconsistent release faults/reset, never
+  silently succeeds. Only successful **final-free** marks capacity change;
+  phase aggregates and unpins alone never wake admission.
 - `L2SRAM` capacity fault: a permanent/invalid `AdmissionFailure`
   faults the sequencer with `L2 capacity fault during context
 admission` and no completion event is produced; a transient miss

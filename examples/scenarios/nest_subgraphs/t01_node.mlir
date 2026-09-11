@@ -155,10 +155,10 @@ builtin.module {
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
     %pref_A0 = nest.dma.prefetch.async %h_A0 into %b_A0 : !nest.event<"pref_A0">
     %pref_B0 = nest.dma.prefetch.async %h_B0 into %b_B0 : !nest.event<"pref_B0">
-    %grid_Compute0, %read_Compute0, %ready_Compute0 = nest.dispatch.tasks.async @prog_Compute0 context = 0 tasks(%tasks) globals() ins(%b_A0, %b_B0, %b_O0) outs(%b_A0, %b_B0, %b_O0) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_A0, %pref_B0) : (!nest.event<"grid_Compute0">, !nest.event<"read_Compute0">, !nest.event<"ready_Compute0">)
+    %grid_Compute0, %read_Compute0, %ready_Compute0 = nest.dispatch.tasks.async @prog_Compute0 context = 0 tasks(%tasks) globals() bindings(%b_A0, %b_B0, %b_O0) ins(%b_A0, %b_B0) outs(%b_O0) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_A0, %pref_B0) : (!nest.event<"grid_Compute0">, !nest.event<"read_Compute0">, !nest.event<"ready_Compute0">)
     %store_chunk0 = nest.dma.store.async %b_O0 into %h_O0 depends_on(%ready_Compute0) : !nest.event<"store_chunk0">
-    nest.release %b_A0 depends_on(%read_Compute0)
-    nest.release %b_B0 depends_on(%read_Compute0)
+    nest.release %b_A0 depends_on(%read_Compute0, %pref_A0)
+    nest.release %b_B0 depends_on(%read_Compute0, %pref_B0)
     nest.release %b_O0 depends_on(%store_chunk0)
     nest.await %grid_Compute0, %store_chunk0
     nest.return
@@ -173,10 +173,10 @@ builtin.module {
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
     %pref_A1 = nest.dma.prefetch.async %h_A1 into %b_A1 : !nest.event<"pref_A1">
     %pref_B1 = nest.dma.prefetch.async %h_B1 into %b_B1 : !nest.event<"pref_B1">
-    %grid_Compute1, %read_Compute1, %ready_Compute1 = nest.dispatch.tasks.async @prog_Compute1 context = 1 tasks(%tasks) globals() ins(%b_A1, %b_B1, %b_O1) outs(%b_A1, %b_B1, %b_O1) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_A1, %pref_B1) : (!nest.event<"grid_Compute1">, !nest.event<"read_Compute1">, !nest.event<"ready_Compute1">)
+    %grid_Compute1, %read_Compute1, %ready_Compute1 = nest.dispatch.tasks.async @prog_Compute1 context = 1 tasks(%tasks) globals() bindings(%b_A1, %b_B1, %b_O1) ins(%b_A1, %b_B1) outs(%b_O1) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_A1, %pref_B1) : (!nest.event<"grid_Compute1">, !nest.event<"read_Compute1">, !nest.event<"ready_Compute1">)
     %store_chunk1 = nest.dma.store.async %b_O1 into %h_O1 depends_on(%ready_Compute1) : !nest.event<"store_chunk1">
-    nest.release %b_A1 depends_on(%read_Compute1)
-    nest.release %b_B1 depends_on(%read_Compute1)
+    nest.release %b_A1 depends_on(%read_Compute1, %pref_A1)
+    nest.release %b_B1 depends_on(%read_Compute1, %pref_B1)
     nest.release %b_O1 depends_on(%store_chunk1)
     nest.await %grid_Compute1, %store_chunk1
     nest.return
@@ -191,10 +191,10 @@ builtin.module {
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
     %pref_A2 = nest.dma.prefetch.async %h_A2 into %b_A2 : !nest.event<"pref_A2">
     %pref_B2 = nest.dma.prefetch.async %h_B2 into %b_B2 : !nest.event<"pref_B2">
-    %grid_Compute2, %read_Compute2, %ready_Compute2 = nest.dispatch.tasks.async @prog_Compute2 context = 0 tasks(%tasks) globals() ins(%b_A2, %b_B2, %b_O2) outs(%b_A2, %b_B2, %b_O2) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_A2, %pref_B2) : (!nest.event<"grid_Compute2">, !nest.event<"read_Compute2">, !nest.event<"ready_Compute2">)
+    %grid_Compute2, %read_Compute2, %ready_Compute2 = nest.dispatch.tasks.async @prog_Compute2 context = 0 tasks(%tasks) globals() bindings(%b_A2, %b_B2, %b_O2) ins(%b_A2, %b_B2) outs(%b_O2) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_A2, %pref_B2) : (!nest.event<"grid_Compute2">, !nest.event<"read_Compute2">, !nest.event<"ready_Compute2">)
     %store_chunk2 = nest.dma.store.async %b_O2 into %h_O2 depends_on(%ready_Compute2) : !nest.event<"store_chunk2">
-    nest.release %b_A2 depends_on(%read_Compute2)
-    nest.release %b_B2 depends_on(%read_Compute2)
+    nest.release %b_A2 depends_on(%read_Compute2, %pref_A2)
+    nest.release %b_B2 depends_on(%read_Compute2, %pref_B2)
     nest.release %b_O2 depends_on(%store_chunk2)
     nest.await %grid_Compute2, %store_chunk2
     nest.return
@@ -209,10 +209,10 @@ builtin.module {
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
     %pref_A3 = nest.dma.prefetch.async %h_A3 into %b_A3 : !nest.event<"pref_A3">
     %pref_B3 = nest.dma.prefetch.async %h_B3 into %b_B3 : !nest.event<"pref_B3">
-    %grid_Compute3, %read_Compute3, %ready_Compute3 = nest.dispatch.tasks.async @prog_Compute3 context = 1 tasks(%tasks) globals() ins(%b_A3, %b_B3, %b_O3) outs(%b_A3, %b_B3, %b_O3) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_A3, %pref_B3) : (!nest.event<"grid_Compute3">, !nest.event<"read_Compute3">, !nest.event<"ready_Compute3">)
+    %grid_Compute3, %read_Compute3, %ready_Compute3 = nest.dispatch.tasks.async @prog_Compute3 context = 1 tasks(%tasks) globals() bindings(%b_A3, %b_B3, %b_O3) ins(%b_A3, %b_B3) outs(%b_O3) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_A3, %pref_B3) : (!nest.event<"grid_Compute3">, !nest.event<"read_Compute3">, !nest.event<"ready_Compute3">)
     %store_chunk3 = nest.dma.store.async %b_O3 into %h_O3 depends_on(%ready_Compute3) : !nest.event<"store_chunk3">
-    nest.release %b_A3 depends_on(%read_Compute3)
-    nest.release %b_B3 depends_on(%read_Compute3)
+    nest.release %b_A3 depends_on(%read_Compute3, %pref_A3)
+    nest.release %b_B3 depends_on(%read_Compute3, %pref_B3)
     nest.release %b_O3 depends_on(%store_chunk3)
     nest.await %grid_Compute3, %store_chunk3
     nest.return

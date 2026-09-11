@@ -112,13 +112,14 @@ class _TileAdmission:
 
 @dataclass
 class _GridL2Pin:
-  """One logical task's pin on one L2 allocation (PR 3)."""
+  """One logical task's access pin on one L2 allocation."""
 
   task: TaskIdentity
   buffer_slot: str
-  buffer_role: str
   handle: AllocationHandle
   consumer_id: str
+  reads: bool
+  writes: bool
 
 
 @dataclass
@@ -541,13 +542,13 @@ class TileGroup:
 
   def release_l2(self, request: ExecReleaseRequest,
                  sequencer: TileGroupSequencer, cycle: int) -> bool:
-    """Gated release of one context-owned L2 buffer (PR 3).
+    """Release one context-owned L2 buffer after a read-only preflight.
 
-    The issuing sequencer has already confirmed every dependency event
-    fired.  Raises ``MemoryInvariantError`` on any ownership, role,
-    generation or pin violation; never silently succeeds.  The handle
-    stays in ``_l2_handles`` until context cleanup so a duplicate
-    release reaches the allocator's double-release check.
+    Direct callers receive the same safety checks as sequenced actions:
+    dependencies and declared reader/writer phases must be complete,
+    every remaining access pin must be safe to sweep, and no transfer
+    may still reference the allocation.  No pin or allocator state is
+    changed until the complete preflight succeeds.
     """
     gen = sequencer.context_launch_generation
     slot = request.buffer_slot
@@ -564,49 +565,100 @@ class TileGroup:
         f"release role mismatch on slot '{slot}':"
         f" alloc '{declared_role}' != request '{request.buffer_role}'")
     self.l2_sram.assert_live(handle, expected_owner)
-    launch_pins = [
-      (grid, pins) for grid, pins in self._grid_l2_pins.items()
-      if (grid.context_name == sequencer.context_name
-          and grid.launch_generation == gen)
-    ]
-    if request.buffer_role == "in":
-      # input pins must already be gone via the input_released aggregates
-      remaining = [
-        (grid, task_id) for grid, pins in launch_pins
-        for task_id, slot_pins in pins.items()
-        if slot in slot_pins]
-      if remaining:
+
+    for event in request.dependency_events:
+      if event not in sequencer._events_done:
         raise MemoryInvariantError(
-          f"release of input slot '{slot}' before its input_released"
-          " aggregates unpinned every consumer")
-    else:
-      # out/inout: final store dependency fired; drop every matching
-      # consumer pin of this buffer.
-      for grid, pins in launch_pins:
-        for _task_id, slot_pins in pins.items():
-          pin = slot_pins.get(slot)
-          if pin is None or (pin.task.grid.dispatch_ordinal
-                             not in request.consumer_dispatch_ordinals):
+          f"release of slot '{slot}' has incomplete dependency '{event}'")
+
+    reader_ordinals = request.reader_dispatch_ordinals
+    writer_ordinals = request.writer_dispatch_ordinals
+    if len(reader_ordinals) != len(set(reader_ordinals)):
+      raise MemoryInvariantError(
+        f"release of slot '{slot}' has duplicate reader ordinals")
+    if len(writer_ordinals) != len(set(writer_ordinals)):
+      raise MemoryInvariantError(
+        f"release of slot '{slot}' has duplicate writer ordinals")
+
+    for ordinal in reader_ordinals:
+      state = self._grid_signals.get(sequencer.grid_id(ordinal))
+      if state is None or state.sequencer is not sequencer:
+        raise MemoryInvariantError(
+          f"release of slot '{slot}' references unknown or future"
+          f" reader dispatch ordinal {ordinal}")
+      if "input_released" not in state.completed_phases:
+        raise MemoryInvariantError(
+          f"release of slot '{slot}' precedes input_released for"
+          f" reader dispatch ordinal {ordinal}")
+
+    writer_states: dict[int, _GridSignalState] = {}
+    for ordinal in writer_ordinals:
+      state = self._grid_signals.get(sequencer.grid_id(ordinal))
+      if state is None or state.sequencer is not sequencer:
+        raise MemoryInvariantError(
+          f"release of slot '{slot}' references unknown or future"
+          f" writer dispatch ordinal {ordinal}")
+      if "output_ready" not in state.completed_phases:
+        raise MemoryInvariantError(
+          f"release of slot '{slot}' precedes output_ready for"
+          f" writer dispatch ordinal {ordinal}")
+      writer_states[ordinal] = state
+
+    writer_pins: list[
+      tuple[GridInstanceId, int, dict[str, _GridL2Pin], _GridL2Pin]
+    ] = []
+    for grid, task_pins in self._grid_l2_pins.items():
+      for task_id, slot_pins in task_pins.items():
+        for pin_slot, pin in slot_pins.items():
+          if pin.handle != handle:
             continue
-          self.l2_sram.unpin(pin.handle, pin.consumer_id, cycle)
-          slot_pins.pop(slot, None)
-        if pins and all(not sp for sp in pins.values()):
-          self._grid_l2_pins.pop(grid, None)
-      remaining = [
-        (grid, task_id) for grid, pins in self._grid_l2_pins.items()
-        if (grid.context_name == sequencer.context_name
-            and grid.launch_generation == gen)
-        for task_id, slot_pins in pins.items()
-        if slot in slot_pins]
-      if remaining:
-        raise MemoryInvariantError(
-          f"release of slot '{slot}' with undeclared pinned consumers")
+          if (grid.context_name != sequencer.context_name
+              or grid.device_slot != sequencer.device_slot
+              or grid.launch_generation != gen
+              or pin.task.grid != grid
+              or pin.task.task_id != task_id
+              or pin_slot != slot
+              or pin.buffer_slot != slot):
+            raise MemoryInvariantError(
+              f"release of slot '{slot}' found inconsistent access pin")
+          ordinal = grid.dispatch_ordinal
+          if pin.reads and not pin.writes:
+            raise MemoryInvariantError(
+              f"release of slot '{slot}' precedes input_released for"
+              f" reader dispatch ordinal {ordinal}")
+          if not pin.writes:
+            raise MemoryInvariantError(
+              f"release of slot '{slot}' found an accessless pin")
+          state = writer_states.get(ordinal)
+          if state is None:
+            raise MemoryInvariantError(
+              f"release of slot '{slot}' has undeclared pinned writer"
+              f" dispatch ordinal {ordinal}")
+          if pin.reads and "input_released" not in state.completed_phases:
+            raise MemoryInvariantError(
+              f"release of readwrite slot '{slot}' precedes"
+              f" input_released for dispatch ordinal {ordinal}")
+          writer_pins.append((grid, task_id, slot_pins, pin))
+
+    if self.transfer_manager.has_inflight_access(handle):
+      raise MemoryInvariantError(
+        f"release of slot '{slot}' has an in-flight transfer")
+
+    for grid, task_id, slot_pins, pin in writer_pins:
+      self.l2_sram.unpin(pin.handle, pin.consumer_id, cycle)
+      slot_pins.pop(slot)
+      task_pins = self._grid_l2_pins[grid]
+      if not slot_pins:
+        task_pins.pop(task_id)
+      if not task_pins:
+        self._grid_l2_pins.pop(grid)
+
     freed = self.l2_sram.request_release(handle, expected_owner, cycle)
     if not freed:
       raise MemoryInvariantError(
         f"release of slot '{slot}' left pinned consumers")
-    # PR 3.5: only an allocator final-free makes new capacity available;
-    # signal aggregates and unpins alone never wake the admission queue.
+    # Only an allocator final-free makes new capacity available; signal
+    # aggregates and unpins alone never wake the admission queue.
     self._l2_capacity_change_cycle = cycle
     return True
 
@@ -780,22 +832,25 @@ class TileGroup:
   def _pin_grid_l2(self, grid: GridInstanceId,
                    binding: ExecTileRoleBinding,
                    task: TaskIdentity, cycle: int) -> None:
-    """Pin each unique L2 allocation once for one logical task of a grid.
-
-    ``actuals`` contains both ins and outs; slot dedup prevents an
-    inout buffer from receiving a duplicate pin.
-    """
+    """Pin each accessed L2 allocation once for one logical task."""
     if not (self.memory_enabled or self.runtime_enabled):
       return
-    roles = self._l2_roles.get(grid.launch_generation, {})
-    slot_pins = self._grid_l2_pins.setdefault(
-      grid, {}).setdefault(task.task_id, {})
+    reads = set(binding.read_actuals)
+    writes = set(binding.write_actuals)
+    access_slots = [
+      slot for slot in dict.fromkeys(binding.actuals)
+      if slot in reads or slot in writes
+    ]
+    if not access_slots:
+      return
+
     pinned: list[tuple[str, AllocationHandle, str]] = []
     try:
-      for slot in dict.fromkeys(binding.actuals):
+      for slot in access_slots:
         handle = self._l2_handles.get((grid.launch_generation, slot))
         if handle is None:
-          continue
+          raise MemoryInvariantError(
+            f"missing or stale accessed L2 actual '{slot}'")
         consumer_id = (
           f"{grid.context_name}:s{grid.device_slot}"
           f":g{grid.launch_generation}:d{grid.dispatch_ordinal}"
@@ -806,31 +861,35 @@ class TileGroup:
       for _slot, handle, consumer_id in pinned:
         self.l2_sram.unpin(handle, consumer_id, cycle)
       raise
-    for slot, handle, consumer_id in pinned:
-      slot_pins[slot] = _GridL2Pin(
-        task=task, buffer_slot=slot,
-        buffer_role=roles.get(slot, "inout"),
-        handle=handle, consumer_id=consumer_id)
 
-  def _unpin_grid_inputs(self, grid: GridInstanceId, cycle: int) -> None:
-    """Unpin every role='in' allocation of one grid (input_released)."""
+    task_pins = self._grid_l2_pins.setdefault(grid, {}).setdefault(
+      task.task_id, {})
+    for slot, handle, consumer_id in pinned:
+      task_pins[slot] = _GridL2Pin(
+        task=task,
+        buffer_slot=slot,
+        handle=handle,
+        consumer_id=consumer_id,
+        reads=slot in reads,
+        writes=slot in writes,
+      )
+
+  def _unpin_grid_readers(self, grid: GridInstanceId, cycle: int) -> None:
+    """Unpin pure readers after the grid's input_released aggregate."""
     pins = self._grid_l2_pins.get(grid)
     if not pins:
       return
     for task_id in list(pins):
       for slot in list(pins[task_id]):
         pin = pins[task_id][slot]
-        if pin.buffer_role != "in":
+        if not pin.reads or pin.writes:
           continue
-        try:
-          self.l2_sram.unpin(pin.handle, pin.consumer_id, cycle)
-        except MemoryInvariantError:
-          pass
+        self.l2_sram.unpin(pin.handle, pin.consumer_id, cycle)
         pins[task_id].pop(slot)
       if not pins[task_id]:
         pins.pop(task_id)
     if not pins:
-      self._grid_l2_pins.pop(grid, None)
+      self._grid_l2_pins.pop(grid)
 
   def _unwind_grid_l2_pins(self, cycle: int,
                            grids: list[GridInstanceId] | None = None) -> None:
@@ -1009,6 +1068,36 @@ class TileGroup:
       self._role_done_tiles.pop(ev, None)
       self._role_trace.pop(ev, None)
 
+    l2_formals = [
+      (formal_index, formal)
+      for formal_index, formal in enumerate(prog.formals)
+      if formal.space == "l2"
+    ]
+    if len(binding.actuals) != len(l2_formals):
+      return fail(
+        "L2 actual count must exactly match tile program L2 formals")
+    if len(binding.read_actuals) != len(set(binding.read_actuals)):
+      return fail("duplicate read actual in tile role binding")
+    if len(binding.write_actuals) != len(set(binding.write_actuals)):
+      return fail("duplicate write actual in tile role binding")
+    actual_slots = set(binding.actuals)
+    if any(slot not in actual_slots for slot in binding.read_actuals):
+      return fail("read actual is not present in tile role binding actuals")
+    if any(slot not in actual_slots for slot in binding.write_actuals):
+      return fail("write actual is not present in tile role binding actuals")
+    if (binding.read_actuals
+        and not request.signal_policy.input_released):
+      return fail("L2 read actuals require an input_released policy")
+    if (binding.write_actuals
+        and not request.signal_policy.output_ready):
+      return fail("L2 write actuals require an output_ready policy")
+    roles = self._l2_roles.get(gen, {})
+    if not roles and seq.task is not None:
+      roles = {buffer.slot: buffer.role for buffer in seq.task.l2_buffers}
+    for slot in binding.write_actuals:
+      if roles.get(slot) == "in":
+        return fail(f"role=in L2 actual '{slot}' cannot be written")
+
 
     # Phase 1: select exact contexts and plan all L1 bundles.  No commit,
     # frame prepare, pin or context bind is allowed in this phase.
@@ -1104,15 +1193,8 @@ class TileGroup:
         l2_handle_map: dict[int, AllocationHandle] = {}
         global_view_map: dict[int, ResolvedMemoryView] = {}
         if self.memory_enabled or self.runtime_enabled:
-          l2_formals = [
-            (formal_index, formal)
-            for formal_index, formal in enumerate(prog.formals)
-            if formal.space == "l2"
-          ]
-          if len(binding.actuals) < len(l2_formals):
-            raise MemoryInvariantError("missing L2 actual for tile formal")
           for (formal_index, _formal), slot in zip(
-            l2_formals, binding.actuals[:len(l2_formals)]
+            l2_formals, binding.actuals
           ):
             handle = self._l2_handles.get((gen, slot))
             if handle is None:
@@ -1278,9 +1360,25 @@ class TileGroup:
     seen.add(signal.task.task_id)
     if seen != state.expected_task_ids:
       return
-    state.completed_phases.add(signal.phase)
     phase_seq = state.sequencer or self.sequencer
     phase_ev = state.phase_event_ids[signal.phase]
+    if signal.phase == "input_released":
+      try:
+        self._unpin_grid_readers(grid, cycle)
+      except MemoryInvariantError as exc:
+        self.pmu.add_event("release_invariant_fault")
+        phase_seq.faulted = True
+        phase_seq.fault_reason = (
+          f"input release unpin invariant fault: {exc}")
+        phase_seq.done = True
+        if (self.runtime_enabled
+            and not (self.reset_domain.is_active
+                     or self.reset_domain.is_done)):
+          self.trigger_fault(
+            FaultCode.ADDRESS_FAULT, tile_id=-1, cycle=cycle,
+            desc_id=phase_seq.fault_reason)
+        return
+    state.completed_phases.add(signal.phase)
     if tr is not None:
       tr.instant("TileGroup", "Scheduler:L2", "phase_aggregate", cycle, {
         **_signal_args(),
@@ -1289,8 +1387,6 @@ class TileGroup:
         "event_id": phase_ev,
       })
     phase_seq.notify_event(phase_ev)
-    if signal.phase == "input_released":
-      self._unpin_grid_inputs(grid, cycle)
 
   @staticmethod
   def _program_bytes(prog) -> int:

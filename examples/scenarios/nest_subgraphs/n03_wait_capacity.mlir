@@ -235,8 +235,8 @@ builtin.module {
     %h_holder_output = nest.subview %arena offsets = [262144] sizes = [16384] strides = [1] : !nest.global_view<16384xbf16>
     %pref_holder_input = nest.dma.prefetch.async %h_holder_input into %b_holder_input : !nest.event<"pref_holder_input">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_Holder, %read_Holder, %ready_Holder = nest.dispatch.tasks.async @prog_Holder tasks(%tasks) globals() ins(%b_holder_input, %b_holder_output) outs(%b_holder_input, %b_holder_output) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_holder_input) : (!nest.event<"grid_Holder">, !nest.event<"read_Holder">, !nest.event<"ready_Holder">)
-    nest.release %b_holder_input depends_on(%read_Holder)
+    %grid_Holder, %read_Holder, %ready_Holder = nest.dispatch.tasks.async @prog_Holder tasks(%tasks) globals() bindings(%b_holder_input, %b_holder_output) ins(%b_holder_input) outs(%b_holder_output) signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> } depends_on(%pref_holder_input) : (!nest.event<"grid_Holder">, !nest.event<"read_Holder">, !nest.event<"ready_Holder">)
+    nest.release %b_holder_input depends_on(%read_Holder, %pref_holder_input)
     %store_Holder = nest.dma.store.async %b_holder_output into %h_holder_output depends_on(%ready_Holder) : !nest.event<"store_Holder">
     nest.release %b_holder_output depends_on(%store_Holder)
     nest.await %grid_Holder, %store_Holder
@@ -247,8 +247,8 @@ builtin.module {
     %h_waiter_input = nest.subview %arena offsets = [131072] sizes = [16384] strides = [1] : !nest.global_view<16384xbf16>
     %pref_waiter_input = nest.dma.prefetch.async %h_waiter_input into %b_waiter_input : !nest.event<"pref_waiter_input">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_Waiter, %read_Waiter, %unused_ready = nest.dispatch.tasks.async @prog_Waiter tasks(%tasks) globals() ins(%b_waiter_input) outs(%b_waiter_input) signal_policy { input_released = #nest.aggregate<all_tasks> } depends_on(%pref_waiter_input) : (!nest.event<"grid_Waiter">, !nest.event<"read_Waiter">, !nest.event<"">)
-    nest.release %b_waiter_input depends_on(%read_Waiter)
+    %grid_Waiter, %read_Waiter, %unused_ready = nest.dispatch.tasks.async @prog_Waiter tasks(%tasks) globals() bindings(%b_waiter_input) ins(%b_waiter_input) outs() signal_policy { input_released = #nest.aggregate<all_tasks> } depends_on(%pref_waiter_input) : (!nest.event<"grid_Waiter">, !nest.event<"read_Waiter">, !nest.event<"">)
+    nest.release %b_waiter_input depends_on(%read_Waiter, %pref_waiter_input)
     nest.await %grid_Waiter
     nest.return
   }
