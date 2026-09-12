@@ -179,7 +179,8 @@ builtin.module {
     %grid_done, %input_released, %output_ready =
         nest.dispatch.tasks.async @matmul_gather_add_4tile context = 1
         tasks(%tasks) globals(%table_global)
-        bindings(%lhs_buffer, %rhs_buffer, %indices_buffer, %output_buffer) ins(%lhs_buffer, %rhs_buffer, %indices_buffer)
+        bindings(%lhs_buffer, %rhs_buffer, %indices_buffer, %output_buffer)
+          ins(%lhs_buffer, %rhs_buffer, %indices_buffer)
         outs(%output_buffer)
         signal_policy {
           input_released = #nest.aggregate<all_tasks>,
