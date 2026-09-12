@@ -641,6 +641,7 @@ def _verify_program(
     TileAwaitOp,
     TileBoaOp,
     TileEvuOp,
+    TileFreeOp,
     TileGatherOp,
     TileLoadOp,
     TilePowOp,
@@ -686,6 +687,30 @@ def _verify_program(
   read_formals: set[int] = set()
   write_formals: set[int] = set()
   phase_counts = dict.fromkeys(TileSignalOp.PHASES, 0)
+  defined_l1: set = set()
+  live_l1: set = set()
+  freed_l1: set = set()
+  l1_access_events: dict = {}
+  opaque_compute_events: set = set()
+
+  def require_live_l1(buffer, operand_description: str) -> None:
+    owner = buffer.owner
+    if buffer in freed_l1:
+      raise VerifyException(
+        f"tile.free in '@{prog.sym_name.data}' is followed by"
+        f" {operand_description} access to the freed allocation"
+      )
+    if (
+      not isinstance(owner, TileAllocOp)
+      or owner not in body
+      or buffer not in defined_l1
+      or buffer not in live_l1
+    ):
+      raise VerifyException(
+        f"{operand_description} must be an earlier tile.alloc result"
+        " from the current tile.program"
+      )
+
   for op in body:
     if isinstance(op, TileSubviewOp):
       # tile.subview remains L2-only; gather is the only tile-side global
@@ -719,6 +744,38 @@ def _verify_program(
         raise VerifyException("tile.subview result type must match sizes and source dtype")
       continue
 
+    if isinstance(op, TileFreeOp):
+      buffer = op.buffer
+      owner = buffer.owner
+      if (
+        not isinstance(owner, TileAllocOp)
+        or owner not in body
+        or buffer not in defined_l1
+      ):
+        raise VerifyException(
+          f"tile.free in '@{prog.sym_name.data}' requires an earlier"
+          " tile.alloc result from the current tile.program"
+        )
+      if buffer in freed_l1:
+        raise VerifyException(
+          f"tile.free in '@{prog.sym_name.data}' may not free"
+          " the same allocation more than once"
+        )
+      pending_accesses = l1_access_events[buffer] - awaited_events
+      if pending_accesses:
+        raise VerifyException(
+          f"tile.free in '@{prog.sym_name.data}' requires every preceding"
+          " asynchronous access to the allocation to be awaited"
+        )
+      if opaque_compute_events - awaited_events:
+        raise VerifyException(
+          f"tile.free in '@{prog.sym_name.data}' requires every preceding"
+          " opaque compute event to be awaited"
+        )
+      live_l1.remove(buffer)
+      freed_l1.add(buffer)
+      continue
+
     if isinstance(op, (TileLoadOp, TileStoreOp, TileGatherOp, TilePowOp, TileEvuOp, TileBoaOp)):
       if not isinstance(op.result.type, TileEvent):
         raise VerifyException(f"expected tile.event result type in '{op.name}'")
@@ -727,8 +784,12 @@ def _verify_program(
         raise VerifyException(f"duplicate event tag '{tag}' in tile program '@{prog.sym_name.data}'")
       seen_events.add(tag)
       defined_events.add(op.result)
+      if isinstance(op, (TilePowOp, TileEvuOp, TileBoaOp)):
+        opaque_compute_events.add(op.result)
       # Rule 9: transfer byte equality (load/store only)
       if isinstance(op, TileLoadOp):
+        require_live_l1(op.dst, "tile.load destination")
+        l1_access_events[op.dst].add(op.result)
         view = op.src.owner
         if not isinstance(view, TileSubviewOp) or view not in body:
           raise VerifyException(
@@ -751,6 +812,8 @@ def _verify_program(
         if src_bytes != dst_bytes:
           raise VerifyException(f"transfer '{op.name}' src bytes ({src_bytes}) != dst bytes ({dst_bytes})")
       elif isinstance(op, TileStoreOp):
+        require_live_l1(op.src, "tile.store source")
+        l1_access_events[op.src].add(op.result)
         view = op.dst.owner
         if not isinstance(view, TileSubviewOp) or view not in body:
           raise VerifyException(
@@ -776,19 +839,12 @@ def _verify_program(
         source_index = _formal_index(op.source, block)
         if source_index is None or not isinstance(args[source_index].type, NestGlobalView):
           raise VerifyException("gather source must be a global formal of the current tile.program")
-        indices_owner = op.indices.owner
-        destination_owner = op.destination.owner
-        if (
-          not isinstance(indices_owner, TileAllocOp)
-          or indices_owner not in body
-          or not isinstance(destination_owner, TileAllocOp)
-          or destination_owner not in body
-        ):
-          raise VerifyException(
-            "gather indices and destination must be tile.alloc results in the current tile.program"
-          )
+        require_live_l1(op.indices, "gather indices")
+        require_live_l1(op.destination, "gather destination")
         if op.indices is op.destination:
           raise VerifyException("gather indices and destination must be different tile.alloc results")
+        l1_access_events[op.indices].add(op.result)
+        l1_access_events[op.destination].add(op.result)
 
         accesses = list(op.profile.block.ops)
         if not accesses:
@@ -893,6 +949,9 @@ def _verify_program(
       continue
 
     if isinstance(op, TileAllocOp):
+      defined_l1.add(op.result)
+      live_l1.add(op.result)
+      l1_access_events[op.result] = set()
       continue
 
     if isinstance(op, TileReturnOp):

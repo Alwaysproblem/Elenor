@@ -1,6 +1,13 @@
 # NEST 子图库：运行结论、结构与测试目的
 
 > 范围：`examples/scenarios/nest_subgraphs/` 下全部 **112 份独立 MLIR**。本文原有周期表、§8 诊断和 `full_memory` / `runtime` 链接均为 **2026-09-10 修正前合同基线**，不是迁移后源码的实测结果。迁移前 SHA-256 已与原 summary 全量核对；原文/hash 保存在 [migration_inventory.json](../../artifacts/nest_subgraphs/l2_access_contract/migration_inventory.json)。当前源码已切换 bindings + 真实 ins/outs；新结果见 §8.4 的独立证据目录。周期数不是硬件承诺或性能上限。
+>
+> 本次全量 `tile.free` 审查已改变部分输入。本文 §8.4 的2026-09-11测量同样是审查前快照；
+> 当前逐文件决定、原始/新 hash 和安全释放点见 [全量审查](../../artifacts/tile_free/full_mlir_audit-20260912-110535Z/file_decisions.json)。
+> 不用旧 trace 的周期或 source hash 冒充当前输入的结果。
+>
+> [本轮重新生成的 trace、完整配置与执行结果](../../artifacts/tile_free/full_mlir_audit-20260912-110535Z/execution/summary.json)
+> 已覆盖239次调用；两种 fidelity 的112例仍各为108 completed、2 verify 拒绝、2容量 fault。
 
 ## 1. 运行结论与证据边界
 
@@ -636,11 +643,19 @@ single 较快，但其峰值 L2 更高；node 慢的一部分是搬运量翻倍�
 各110份真实 trace 全部通过 `Tracer.assert_well_formed()`。原结果目录未覆盖。
 另13个 workload 和2个 protocol 入口全部完成，见 [extras summary](../../artifacts/nest_subgraphs/l2_access_contract/extras/summary.json)。
 
-当前 source SHA-256：
+访问合同修正时的 source SHA-256（本次全量 free 审查前）：
 
 - `s03_single`：`5d3996ae26989ab915459a2dda878f45c3e70cae9244dbfbe262a331562cbf9d`。
 - `s03_single_d100`：`f37b36fc792b48223a19b6e30b8f731ef57b904ae38a41d6bded522f983d2e1c`。
-- 其余输入、实际命令、退出码、配置参数与运行时间见新 summary；[roundtrip](../../artifacts/nest_subgraphs/l2_access_contract/roundtrip.json) 记录126份合法非空输入的结构等价 roundtrip、两份指定 N08 拒绝及保留的空文件。
+- 其余输入、实际命令、退出码与运行时间见原 summary；它只记录传给 runner 的参数，
+  **未展开全部配置默认值**。[roundtrip](../../artifacts/nest_subgraphs/l2_access_contract/roundtrip.json)
+  对应访问合同切换时的126份合法非空输入、两份指定 N08 拒绝及保留的空文件。
+  新增 `tile.free` 后的独立复跑在执行前重新捕获了
+  [完整配置快照](../../artifacts/nest_subgraphs/l2_access_contract/configured-run-20260911-120503Z/execution/configuration/manifest.json)：
+  包含最终 HardwareConfig、SimConfig、global bindings、context 数、trace 开关、
+  展开后的直接 CLI 命令及配置/source 指纹，不再依赖未来 runner 的默认值。
+  [完整配置复跑结果](../../artifacts/nest_subgraphs/l2_access_contract/configured-run-20260911-120503Z/execution/summary.json)
+  确认239次调用均符合预期、235份 trace 通过检查；执行前后全部源码指纹一致。
 
 | 输入       | 模式        | A Store 首腿接受 → 完成 | A 最后实际 load 完成 | A release | D 后续 EVU 结束 | 相比旧基线 release 提前 |
 | ---------- | ----------- | ----------------------: | -------------------: | --------: | --------------: | ----------------------: |

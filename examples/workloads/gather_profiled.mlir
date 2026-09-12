@@ -32,9 +32,11 @@ builtin.module {
           bytes = 64 line = "line42" merge = "line42"
     } : !tile.event<"gather_done">
     tile.await %gather_done
+    tile.free %indices_l1
     %l2_store_done = tile.store.async %gather_dst into %output_view
         : !tile.event<"l2_store_done">
     tile.await %l2_store_done
+    tile.free %gather_dst
     tile.signal output_ready(%task)
     tile.return
   }

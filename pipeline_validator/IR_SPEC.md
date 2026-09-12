@@ -57,7 +57,7 @@ that `nest.context` and `nest.dispatch.tasks.async` may carry an optional
 ### 1.2 `tile.program @name (%task : !nest.task, %global : !nest.global_view<...>, %l2 : !nest.l2_buffer<...>) { ... }`
 
 Defines one tile program. The body contains tile-level async engine ops,
-`tile.await`, `tile.signal`, and `tile.return`. The program is referenced
+`tile.await`, `tile.free`, `tile.signal`, and `tile.return`. The program is referenced
 by `nest.dispatch.tasks.async` via its symbol name.
 
 The entry block declares the program's data formals in one fixed order:
@@ -156,8 +156,8 @@ the L2 side of `tile.load.async`/`tile.store.async`.
 ### 2.7 `!tile.l1_buffer<DxDx...xdtype>`
 
 Tile-local L1 buffer, shape-typed: e.g.
-`!tile.l1_buffer<128x128xbf16>`. Produced by `tile.alloc`; consumed as the
-L1 side of `tile.load.async`/`tile.store.async`.
+`!tile.l1_buffer<128x128xbf16>`. Produced by `tile.alloc`; consumed by
+`tile.load.async`/`tile.store.async`, Gather indices/destination, and `tile.free`.
 
 ### 2.8 `!nest.task_range`
 
@@ -390,9 +390,51 @@ dtype must match the source.
     : !tile.l1_buffer<128x128xbf16>
 ```
 
-Allocates a tile-local L1 buffer. `shape`/`dtype` must match the result
-type; `alignment` is optional. Consumed by `tile.load.async` /
-`tile.store.async` as the L1 side.
+Declares a tile-local L1 buffer. `shape`/`dtype` must match the result
+type; `alignment` is optional. All declarations are allocated as one bundle
+at dispatch admission, not when the Tile PC reaches their source position.
+`tile.free` may end an allocation's lifetime early; otherwise it remains live
+until automatic terminal/reset cleanup. A later `tile.alloc` declaration in
+the same program is still part of the initial bundle, not a dynamic allocation.
+
+#### 4.2.1 `tile.free`
+
+```mlir
+%loaded = tile.load.async %view into %scratch : !tile.event<"loaded">
+tile.await %loaded
+// All uses of scratch must be complete before this instruction.
+tile.free %scratch
+```
+
+Synchronous one-operand release of a current-program `tile.alloc` result.
+There is no result event, type suffix, implicit wait, or `depends_on` group.
+Free consumes a normal UCE instruction issue and returns the allocation's
+L1 extents immediately in runtime/full_memory. This permits a subsequent
+dispatch to reuse capacity while the releasing program continues.
+
+Before free, every preceding load destination, Store source, or Gather
+indices/destination access to that allocation must have been awaited by SSA
+event identity. Unrelated asynchronous memory operations do not block it.
+BOA/EVU/Pow currently have opaque timing descriptors without L1 operands:
+all preceding such compute events must also have been awaited. The programmer
+remains responsible for their implicit data lifetime; no numerical use-def
+analysis is claimed. Later explicit load/store/Gather use, double free,
+forward/foreign allocation references, and L2/global operands are rejected.
+Freeing an unused local allocation is valid.
+
+Runtime separately preflights owner, tile/UCE/task/launch identity, allocator
+generation, pins, active/shadow frame binding, queued/active engine accesses,
+and unfinished transfers before any mutation. It removes the allocation
+from live context/terminal-cleanup bookkeeping and invalidates only its frame
+slot; other slots and the frame generation are preserved. Failed free faults
+through the existing Tile/group reset path. Timing-only enforces logical
+lifetime without pretending to return physical capacity.
+
+This operation neither frees L2 (`nest.release` owns that lifetime), global
+bindings, nor Gather cache/MSHR resources. It does not change eager admission
+or add an L1 wait queue: software must order a capacity-dependent dispatch
+after the relevant free. Existing programs may omit explicit frees and keep
+automatic program-terminal cleanup.
 
 ### 4.3 `tile.load.async`
 
@@ -620,6 +662,9 @@ restrict the private execution IR's branch/stream instructions.
 - `tile.gather.global.async` obeys the complete Gather rule set in §5.2;
   its `gather_done` event participates in the same unique-tag and
   defined-before-await rules as other tile async events.
+- L1 load/store/Gather operands must be earlier current-program `tile.alloc`
+  results still live at the access. `tile.free` enforces the lifetime and
+  completed-async-use contract in §4.2.1; unfreed buffers retain terminal cleanup.
 
 ### 5.5 `nexus.program` body
 
@@ -678,6 +723,7 @@ does not recover identity or release dependencies by parsing event strings.
 | IR op                      | ExecTileInst                                        |
 | -------------------------- | --------------------------------------------------- |
 | `tile.alloc`               | (no action; records `ExecL1Buffer`)                 |
+| `tile.free`                | `FREE_L1` args=(lowered_l1_buffer_name,)            |
 | `tile.subview`             | (no action; records `ExecMemoryView`)               |
 | `tile.load.async`          | `LAUNCH_MFE` (MFE "load", transfer on the desc)     |
 | `tile.store.async`         | `LAUNCH_MFE` (MFE "store", transfer on the desc)    |

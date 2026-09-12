@@ -4472,3 +4472,277 @@ class TestAdmissionFaultAndQueue:
     assert any(a_in.base_iova <= a < a_in.base_iova + a_in.size_bytes
                for a in pref_srcs), pref_srcs
     group.reset()
+
+
+class TestTileFreeRuntime:
+  BINDINGS = {"input": GlobalBinding("input", 0x100000, 8192, "r")}
+
+  @staticmethod
+  def make_module(explicit_free=True):
+    from pipeline_validator.dialects.elenor import TileFreeOp
+
+    programs = []
+    for name, iterations in (("free_holder", 20), ("free_peer", 40)):
+      program = TileProgramDefOp(
+        name, [], arg_types=[NestTask(), NestBuffer.of([1, 64, 64], "bf16")],
+        arg_names=["task", "input"],
+      )
+      task_arg, buffer_arg = program.body.block.args
+      view = TileSubviewOp(
+        buffer_arg, task_arg, 0, [0, 0, 0], [1, 64, 64], [1, 1, 1],
+        NestL2View.of([1, 64, 64], "bf16"),
+      )
+      scratch = TileAllocOp([64, 64], "bf16", alignment=256)
+      work = TileAllocOp([64, 64], "bf16", alignment=256)
+      load = TileLoadOp(view.result, scratch.result, "scratch_loaded")
+      ops = [view, scratch]
+      if name == "free_holder":
+        ops.append(work)
+      ops.extend([load, TileAwaitOp([load.result])])
+      if name == "free_holder":
+        work_load = TileLoadOp(view.result, work.result, "work_loaded")
+        ops.extend([work_load, TileAwaitOp([work_load.result])])
+        if explicit_free:
+          ops.append(TileFreeOp(scratch.result))
+      ops.append(TileSignalOp("input_released", task_arg))
+      for index in range(iterations):
+        compute = TileEvuOp("relu", 16448, f"compute_{index}")
+        ops.extend([compute, TileAwaitOp([compute.result])])
+      # Peer intentionally keeps its allocation until automatic terminal cleanup.
+      if name == "free_holder" and explicit_free:
+        ops.append(TileFreeOp(work.result))
+      ops.append(TileReturnOp())
+      program.body.block.add_ops(ops)
+      programs.append(program)
+    context = NestContextOp(
+      "free_context", [], placement=1,
+      arg_types=[NestGlobalMemref.of([1, 64, 64], "bf16")], arg_names=["input"],
+    )
+    buf = NestAllocOp("input", "in", [1, 64, 64], "bf16", alignment=256)
+    global_view = NestSubviewOp(
+      context.body.block.args[0], [0, 0, 0], [1, 64, 64], [1, 1, 1],
+      NestGlobalView.of([1, 64, 64], "bf16"),
+    )
+    pref = NestPrefetchOp(global_view.result, buf.result, "prefetched")
+    tasks = NestTaskRangeOp(0, 1)
+    holder = NestDispatchOp(
+      "free_holder", tasks.result, [], [buf.result], [], "holder_grid", "holder_read", "",
+      bindings=[buf.result], signal_policy={"input_released": "all_tasks"},
+      depends_on=[pref.result], context_id=0,
+    )
+    peer = NestDispatchOp(
+      "free_peer", tasks.result, [], [buf.result], [], "peer_grid", "peer_read", "",
+      bindings=[buf.result], signal_policy={"input_released": "all_tasks"},
+      depends_on=[holder.input_released], context_id=1,
+    )
+    context.body.block.add_ops([
+      buf, global_view, pref, tasks, holder, peer,
+      NestReleaseOp(buf.result, depends_on=[holder.input_released, peer.input_released, pref.result]),
+      NestAwaitOp([holder.grid_done, peer.grid_done]), NestReturnOp(),
+    ])
+    return ModuleOp([*programs, context])
+
+  @staticmethod
+  def make_sim(fidelity):
+    return Simulator(
+      HardwareConfig().with_overrides(tile_l1_bytes=16384, hbm_fixed_latency_cycles=10),
+      SimConfig(fidelity=fidelity, context_count=2, memory_trace=True, max_cycles=200000),
+      enable_tracer=True,
+    )
+
+  @staticmethod
+  def assert_empty(group):
+    if group.runtime_enabled:
+      assert group.l2_sram.snapshot()["live_allocations"] == 0
+    assert group.transfer_manager.inflight_count == 0
+    for tile in group.tiles:
+      assert tile.l1_allocator.snapshot()["live_allocations"] == 0
+    assert not group._grid_l2_pins
+    assert not any(group._role_l1_handles.values())
+    assert group.credit_invariants_hold()
+
+  @pytest.mark.parametrize("fidelity", ["runtime", "full_memory"])
+  def test_early_free_reuses_extent_before_holder_returns(self, fidelity):
+    baseline = self.make_sim(fidelity)
+    without_free = baseline.run(self.make_module(False), input_bindings=self.BINDINGS)
+    assert not without_free.completed
+    assert baseline.group.reset_domain.is_done
+    self.assert_empty(baseline.group)
+
+    sim = self.make_sim(fidelity)
+    result = sim.run(self.make_module(), input_bindings=self.BINDINGS)
+    assert result.completed, result.reason
+    assert result.tracer is not None
+    events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
+    allocations = [e for e in events if e["name"] == "l1_alloc" and e["ph"] == "i"]
+    scratch_allocs = sorted(
+      (e for e in allocations if e["args"]["buffer_id"] == "l1:0"),
+      key=lambda e: e["args"]["allocate_cycle"],
+    )
+    assert len(scratch_allocs) == 2
+    original, replacement = scratch_allocs
+    assert original["args"]["allocation_id"] != replacement["args"]["allocation_id"]
+    assert original["args"]["base_address"] == replacement["args"]["base_address"]
+    releases = {
+      e["args"]["allocation_id"]: e for e in events
+      if e["name"] == "l1_release" and e["ph"] == "i"
+    }
+    holder_done = next(
+      e for e in events if e["name"] == "tile_done"
+      and e["args"]["event_id"].endswith("holder_grid")
+    )
+    assert (
+      releases[original["args"]["allocation_id"]]["ts"]
+      < replacement["ts"]
+      < holder_done["ts"]
+      < releases[replacement["args"]["allocation_id"]]["ts"]
+    )
+    original_loads = [
+      e["args"] for e in events if e["ph"] == "X"
+      and e.get("args", {}).get("op") == "tile_load"
+      and e["args"].get("role_event_id", "").endswith("holder_grid")
+      and e["args"]["destination_address"] == original["args"]["base_address"]
+    ]
+    assert original_loads
+    freed_cycle = round(
+      releases[original["args"]["allocation_id"]]["ts"] * 1000 / sim.hw.cycle_ns()
+    )
+    assert max(e["completion_cycle"] for e in original_loads) < freed_cycle
+    assert set(releases) == {e["args"]["allocation_id"] for e in allocations}
+    self.assert_empty(sim.group)
+    assert result.credit_invariant_ok
+    result.tracer.assert_well_formed()
+
+  @pytest.mark.parametrize("fidelity", ["timing_only", "runtime", "full_memory"])
+  @pytest.mark.parametrize("violation", ["pending-load", "double-free", "load-after-free"])
+  def test_raw_execution_rejects_unsafe_free(self, fidelity, violation):
+    sim = self.make_sim(fidelity)
+    task = lower_workload_ir(self.make_module())
+    program = next(b.tile_program for b in task.role_bindings.values() if b.tile_program.name == "free_holder")
+    free_index = next(i for i, ins in enumerate(program.insts) if ins.op == ExecTileOp.FREE_L1)
+    scratch_name = program.insts[free_index].args[0]
+    if violation == "pending-load":
+      wait_index = next(i for i, ins in enumerate(program.insts) if ins.op == ExecTileOp.WAIT)
+      program.insts[wait_index] = ExecTileInst(ExecTileOp.FREE_L1, args=(scratch_name,))
+    elif violation == "double-free":
+      program.insts.insert(len(program.insts) - 1, ExecTileInst(ExecTileOp.FREE_L1, args=(scratch_name,)))
+    else:
+      load = next(ins for ins in program.insts if ins.op == ExecTileOp.LAUNCH_MFE)
+      program.insts.insert(
+        free_index + 1, ExecTileInst(ExecTileOp.LAUNCH_MFE, dst="illegal_reload", args=load.args)
+      )
+    sim._assign_program_ids(task)
+    sim.group.load_task(task, input_bindings=self.BINDINGS)
+    for cycle in range(200000):
+      sim.group.step(cycle)
+      if sim.group.sequencer.faulted:
+        break
+    assert sim.group.sequencer.faulted
+    # A stale free from holder must not release peer's same-address allocation.
+    if violation == "double-free" and fidelity != "timing_only":
+      peer_memory = sim.group.tiles[0].uce.contexts[1].memory
+      assert peer_memory is not None and peer_memory.l1_handles
+      for handle in peer_memory.l1_handles.values():
+        sim.group.tiles[0].l1_allocator.assert_live(handle, handle.owner)
+    sim.group.release_context_memory(cycle + 1)
+    self.assert_empty(sim.group)
+
+  @pytest.mark.parametrize("fidelity", ["timing_only", "runtime", "full_memory"])
+  def test_raw_free_rejects_pending_gather(self, fidelity):
+    path = Path(__file__).resolve().parents[2] / "examples/workloads/gather_profiled.mlir"
+    task = lower_model_ir(load_workload_ir(path)).tasks["gather_context"]
+    program = next(iter(task.role_bindings.values())).tile_program
+    free = next(ins for ins in program.insts if ins.op == ExecTileOp.FREE_L1)
+    wait_index = next(
+      i for i, ins in enumerate(program.insts)
+      if ins.op == ExecTileOp.WAIT and ins.args == ("gather_done",)
+    )
+    program.insts[wait_index] = ExecTileInst(ExecTileOp.FREE_L1, args=free.args)
+    sim = Simulator(
+      HardwareConfig(),
+      SimConfig(fidelity=fidelity, memory_trace=True, max_cycles=100000),
+      enable_tracer=True,
+    )
+    sim._assign_program_ids(task)
+    sim.group.load_task(task, input_bindings={
+      "table": GlobalBinding("table", 0x200000, 8388608, "r"),
+      "indices": GlobalBinding("indices", 0xA00000, 4096, "r"),
+      "output": GlobalBinding("output", 0xB00000, 256, "w"),
+    })
+    for cycle in range(100000):
+      sim.group.step(cycle)
+      if sim.group.sequencer.faulted:
+        break
+    assert sim.group.sequencer.faulted
+    memory = sim.group.tiles[0].uce.contexts[0].memory
+    assert memory is not None
+    if fidelity != "timing_only":
+      assert len(memory.l1_handles) == 2
+      for handle in memory.l1_handles.values():
+        sim.group.tiles[0].l1_allocator.assert_live(handle, handle.owner)
+    sim.group.release_context_memory(cycle + 1)
+    self.assert_empty(sim.group)
+
+  @pytest.mark.parametrize("violation", ["stale-generation", "wrong-owner", "pinned", "inflight"])
+  def test_free_preflight_is_atomic(self, monkeypatch, violation):
+    from dataclasses import replace
+
+    from pipeline_validator.memory.transfer import MemoryTransaction, ResolvedMemoryView, TransferOp
+
+    sim = self.make_sim("full_memory")
+    task = lower_workload_ir(self.make_module())
+    sim._assign_program_ids(task)
+    group = sim.group
+    group.load_task(task, input_bindings=self.BINDINGS)
+    tile = group.tiles[0]
+    original_issue = tile.uce._issue_context
+    captured = []
+
+    def stop_at_free(ctx, cycle, compute_tile):
+      if ctx.program is not None and ctx.program.insts[ctx.pc].op == ExecTileOp.FREE_L1:
+        captured.append(ctx)
+        return
+      original_issue(ctx, cycle, compute_tile)
+
+    monkeypatch.setattr(tile.uce, "_issue_context", stop_at_free)
+    for cycle in range(100000):
+      group.step(cycle)
+      if captured:
+        break
+    assert captured
+    ctx = captured[0]
+    assert ctx.memory is not None
+    name = ctx.program.insts[ctx.pc].args[0]
+    handle = ctx.memory.l1_handles[name]
+    if violation == "stale-generation":
+      ctx.memory.l1_handles[name] = replace(handle, generation=handle.generation + 1)
+    elif violation == "wrong-owner":
+      ctx.memory.l1_handles[name] = replace(
+        handle, owner=replace(handle.owner, hardware_context_id=1)
+      )
+    elif violation == "pinned":
+      tile.l1_allocator.pin(handle, "external-test-reader")
+    else:
+      source = ctx.memory.l2_formal_handles[1]
+      transaction = MemoryTransaction(
+        transaction_id="extra_l1_access", op=TransferOp.TILE_LOAD, issuer=handle.owner,
+        src=ResolvedMemoryView(source, 0, source.size_bytes, source.base_address, source.bank_segments),
+        dst=ResolvedMemoryView(handle, 0, handle.size_bytes, handle.base_address, handle.bank_segments),
+        bytes_total=handle.size_bytes, completion_event="extra_l1_done", tile_id=0,
+      )
+      group.transfer_manager.submit(transaction, cycle)
+      group.transfer_manager.step(cycle + 1)
+      assert group.transfer_manager.has_inflight_access(handle)
+    before = tile.l1_allocator.snapshot()
+    slot_ids = [slot.allocation_id for slot in tile.l1_frames[0].slots]
+    original_issue(ctx, cycle + 2, tile)
+    assert ctx.state.name == "FAULT"
+    tile.l1_allocator.assert_live(handle, handle.owner)
+    assert tile.l1_allocator.snapshot()["allocated_bytes"] == before["allocated_bytes"]
+    assert tile.l1_allocator.snapshot()["pending_release"] == before["pending_release"] == 0
+    assert [slot.allocation_id for slot in tile.l1_frames[0].slots] == slot_ids
+    ctx.memory.l1_handles[name] = handle
+    if violation == "pinned":
+      tile.l1_allocator.unpin(handle, "external-test-reader", cycle + 3)
+    group.release_context_memory(cycle + 3)
+    self.assert_empty(group)

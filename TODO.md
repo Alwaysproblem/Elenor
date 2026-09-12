@@ -18,14 +18,15 @@
 7. 当前 IR 并没有对与 传入参数进行实质性的处理，也就是说，当前的 IR 并没有 输入参数的概念，需要加入输入参数的概念，并且在 IR 中进行处理，具体可以参考 reference.mlir， /home/yongxiy/Desktop/multicontext 和 /home/yongxiy/Desktop/dockerVolumn/Elenor 的对模型的建模。
 8. 当前的trace 已经非常直观了，并且很好的了解当前的运行情况，memory 大小相关的，可以参考当前 queue 的状态来表示，memory latency 相关的也可以加入，但是需要注意，tile 的 memory 需要在tile 那一栏里面，L2 的 cache 需要和 L2 一起
 9. 当前的 trace 中 indices_ready 的状态是 轮训的，这个需要改一下
+10. 当前的 nest.dispatch.tasks.async 的 ins 和 outs 表示的并不正确，需要增加类似于 function args 这种表示，ins 和 outs 只是明确定义的输入输出。
 
 ## R3
 
 1. IR 层面并没有对 nest.context 的资源进行显式的配置与管理，比如像 reference.mlir 中的配置方式，当前的 IR 只是简单的将 nest.context 当作一个普通的 tile 来处理，并没有对其进行资源的显式管理
-2. 当前的 IR 中的 tile program 中的 load 是指 L2 -> L1 的 load，而并不是 L1 -> Register 的 load，当前的 IR 中的 store 是指 L1 -> L2 的 store，而并不是 Register -> L1 的 store，这样的设计是为了简化 IR 的设计，但是在后续的设计中，需要将 load 和 store 分为两类，一类是 L2 <-> L1 的 load/store，另一类是 L1 <-> Register 的 load/store，这样可以更好的模拟实际的硬件行为
-3. 需要在 IR 中加入 bank 模式的概念，因为我们的硬件设计中，一个bank是很多种模式的，需要暴露给编译器来做优化的。
-4. 允许 在 L2 开一个 shared memory 的概念，允许多个 tile 共享一个 memory，这样共享的weight 可以放在 L2 中，减少 memory IO 的占用
-5. 当前的 nexus.program 需要采用 depends 机制来明确各个 tile program 之间的依赖关系，确保使用 ready-action 策略而不是wait这种策略来进行触发。
-6. 需要询问 当前 next.context 的运行是不是 ready action 这种模式。
-7. 需要加入 free 操作，用于释放不再使用的内存资源，确保内存的高效利用。
-8. 当前的 nest.dispatch.tasks.async 的 ins 和 outs 表示的并不正确，需要增加类似于 function args 这种表示，ins 和 outs 只是明确定义的输入输出。
+2. 需要考虑，当内存资源不足的时候（包括，L2 和 L1 的内存），下一个 L1/2 的 context 可能无法执行，需要等待，但是并不能每个cycle都进行重试，需要根据编译器给出的内存信息（包括大小和内存模式是否为cache或者scratchpad）来做比较，每次只有在有 release 的时候才进行重试。当前 L2 级别只是有初级的相关机制，L1 级别几乎没有，需要在后续设计中加入类似的机制。
+3. 当前的 IR 中的 tile program 中的 load 是指 L2 -> L1 的 load，而并不是 L1 -> Register 的 load，当前的 IR 中的 store 是指 L1 -> L2 的 store，而并不是 Register -> L1 的 store，这样的设计是为了简化 IR 的设计，但是在后续的设计中，需要将 load 和 store 分为两类，一类是 L2 <-> L1 的 load/store，另一类是 L1 <-> Register 的 load/store，这样可以更好的模拟实际的硬件行为
+4. 需要在 IR 中加入 bank 模式的概念，因为我们的硬件设计中，一个bank是很多种模式的，需要暴露给编译器来做优化的。
+5. 允许 在 L2 开一个 shared memory 的概念，允许多个 tile 共享一个 memory，这样共享的weight 可以放在 L2 中，减少 memory IO 的占用
+6. 当前的 nexus.program 需要采用 depends 机制来明确各个 tile program 之间的依赖关系，确保使用 ready-action 策略而不是wait这种策略来进行触发。
+7. 需要询问 当前 next.context 的运行是不是 ready action 这种模式。
+8. 需要加入 L1 级别的 free 操作，用于释放不再使用的内存资源，确保内存的高效利用。

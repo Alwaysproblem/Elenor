@@ -79,6 +79,25 @@ unpinning any writer. Only successful final-free wakes capacity waiters.
 The event type tag doubles as the runtime event id shared by simulator
 and trace.
 
+**Tile-local free** — `tile.free %scratch` synchronously returns a
+`tile.alloc` L1 allocation before the Tile Program ends. Await its last
+load/store/Gather access first, and also prior BOA/EVU/Pow events because
+those timing descriptors do not expose L1 operands. Unrelated memory
+operations may remain pending. Double free, foreign buffers, and later
+explicit accesses are rejected; runtime also checks ownership, generations,
+frame slots and queued/in-flight accesses before freeing.
+Only that allocation's frame binding is removed, so later dispatches can
+reuse its extents without waiting for the original program to return.
+Unfreed buffers still receive automatic terminal/reset cleanup.
+`tile.alloc` remains eager at dispatch admission; this is not dynamic
+allocation, a new L1 wait queue, or an alternative to L2 `nest.release`.
+See `IR_SPEC.md` §4.2.1 and the executable `examples/workloads/gather_profiled.mlir`.
+The [two-fidelity reuse smoke](../examples/artifacts/tile_free/run-20260911-final/verification.json)
+uses a 16 KiB Tile L1: a holder frees 8 KiB, a second dispatch reuses the
+same address before the holder returns, and terminal cleanup preserves the
+replacement allocation. Omitting free makes that same admission fail.
+The evidence includes full hardware/simulator/binding snapshots and source hashes.
+
 **L2 admission wait (PR 3.5)** — a submit is accepted onto a device slot
 even when its atomic L2 bundle transiently cannot fit: the context
 enters `ADMISSION_WAIT` (slot reserved, no UCE/L1/L2/stream/DMA

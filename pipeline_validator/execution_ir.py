@@ -41,6 +41,7 @@ class ExecTileOp(Enum):
   PROF_END = "prof.end"
   TRAP = "trap"
   SIGNAL_PHASE = "signal.phase"
+  FREE_L1 = "free.l1"
 
 
 class ExecGatherOutcome(Enum):
