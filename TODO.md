@@ -19,6 +19,7 @@
 8. 当前的trace 已经非常直观了，并且很好的了解当前的运行情况，memory 大小相关的，可以参考当前 queue 的状态来表示，memory latency 相关的也可以加入，但是需要注意，tile 的 memory 需要在tile 那一栏里面，L2 的 cache 需要和 L2 一起
 9. 当前的 trace 中 indices_ready 的状态是 轮训的，这个需要改一下
 10. 当前的 nest.dispatch.tasks.async 的 ins 和 outs 表示的并不正确，需要增加类似于 function args 这种表示，ins 和 outs 只是明确定义的输入输出。
+11. 需要加入 L1 级别的 free 操作，用于释放不再使用的内存资源，确保内存的高效利用。
 
 ## R3
 
@@ -29,4 +30,10 @@
 5. 允许 在 L2 开一个 shared memory 的概念，允许多个 tile 共享一个 memory，这样共享的weight 可以放在 L2 中，减少 memory IO 的占用
 6. 当前的 nexus.program 需要采用 depends 机制来明确各个 tile program 之间的依赖关系，确保使用 ready-action 策略而不是wait这种策略来进行触发。
 7. 需要询问 当前 next.context 的运行是不是 ready action 这种模式。
-8. 需要加入 L1 级别的 free 操作，用于释放不再使用的内存资源，确保内存的高效利用。
+
+## 未来需要考虑的问题暂时先不考虑
+
+- Transpose 和这个 Layout 变换，这边当前的思考方式是有专门的器件去做。但是呢，我后来想了一下，是不是也可以将 Transpose 这个类似这种 Layout 的东西作为一个单独的器件儿镶嵌在 BOA 或者是 EVU 这个里面来。
+- 对于编译器的需求。比如说需要考虑一下拓扑排序，需要分析 liveness 的 memory 和 non-liveness 的 memory，以及 peak memory 相关的事宜，为后续的 memory addition 去做准备。tiling，以及 context 的切分，还有 L1 当前是context 总和爆内存是 fail 模式需要在编译器知道哪里超内存了，相关的吧，就是编译器这边的需要做的事情，到后面需要整理出来。
+- 比如说类似于像 BOA 这种，怎么去做 register file 的 load，这一块可能得需要考虑一下硬件级别的 pipeline。比如说如果加入 transpose 的话，那就意味着 transpose input 和 BOA，之后再去接一个 transpose output。所以说这一块得需要衡量一下整体的 BOA 的大小以及功耗。理论上来说 multi-context 去把 BOA 或这种计算单元的利用率打满，所以说 BOA 内部的设计的话，还是需要一些指令级别的pipeline。
+- 
