@@ -41,6 +41,7 @@ from .dialects.elenor import (
   TileBoaOp,
   TileEvent,
   TileEvuOp,
+  TileFreeOp,
   TileGatherOp,
   TileL1Buffer,
   TileLoadOp,
@@ -486,6 +487,9 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
         element_bytes=element_bytes,
         bytes=_view_bytes(dims, dtype),
       )
+    elif isinstance(body_op, TileFreeOp):
+      buffer = _memory_view(objects, body_op.buffer, body_op.name)
+      insts.append(ExecTileInst(ExecTileOp.FREE_L1, args=(buffer.base,)))
     elif isinstance(body_op, TileSubviewOp):
       src = _memory_view(objects, body_op.src, body_op.name)
       dims = tuple(_int_list(body_op.sizes))

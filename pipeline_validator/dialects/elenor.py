@@ -528,9 +528,9 @@ NestActionLike: TypeAlias = (  # noqa: UP040
   " | NestAwaitOp | NestBarrierOp | NestReturnOp"
 )
 TileActionLike: TypeAlias = (  # noqa: UP040
-  "TileSubviewOp | TileAllocOp | TileLoadOp | TileStoreOp | TileGatherOp"
-  " | TilePowOp | TileEvuOp | TileBoaOp | TileAwaitOp | TileSignalOp"
-  " | TileReturnOp"
+  "TileSubviewOp | TileAllocOp | TileFreeOp | TileLoadOp | TileStoreOp"
+  " | TileGatherOp | TilePowOp | TileEvuOp | TileBoaOp | TileAwaitOp"
+  " | TileSignalOp | TileReturnOp"
 )
 NexusActionLike: TypeAlias = (  # noqa: UP040
   "NexusSubmitContextOp | NexusAwaitOp | NexusReturnOp"
@@ -1458,6 +1458,26 @@ class TileAllocOp(IRDLOperation):
 
 
 @irdl_op_definition
+class TileFreeOp(IRDLOperation):
+  """``tile.free %buffer`` - synchronously release one tile-local L1 buffer."""
+
+  name = "tile.free"
+
+  buffer = operand_def(TileL1Buffer)
+
+  def __init__(self, buffer):
+    super().__init__(operands=[buffer])
+
+  def print(self, printer: Printer) -> None:
+    printer.print_string(" ")
+    printer.print_operand(self.buffer)
+
+  @classmethod
+  def parse(cls, parser: Parser) -> Self:
+    return cls(parser.parse_operand())
+
+
+@irdl_op_definition
 class TileLoadOp(_TileAsyncOp):
   """``%e = tile.load.async %src into %dst : !tile.event<t>`` - MFE L2->L1 load."""
 
@@ -1892,6 +1912,7 @@ operations: list[type[Operation]] = [
   TileProgramDefOp,
   TileSubviewOp,
   TileAllocOp,
+  TileFreeOp,
   TileLoadOp,
   TileStoreOp,
   TileProfiledAccessOp,
@@ -1962,6 +1983,7 @@ __all__ = [
   "TileBoaOp",
   "TileEvent",
   "TileEvuOp",
+  "TileFreeOp",
   "TileGatherOp",
   "TileL1Buffer",
   "TileLoadOp",

@@ -173,11 +173,64 @@ bash examples/run.sh file /tmp/my_gather.mlir \
 8. 每个 Buffer 恰好 release 一次，依赖精确列齐全部 reader.input_released、
    prefetch completion、Store completion；所有 role 一致，不得省略并行搬运。
    纯读 pin 按真实访问解除，不按 alloc.role；readwrite 必须独立满足读写两阶段。
+9. Tile L1 scratch 可在最后一次实际使用完成后 `tile.free %buffer`，无需等整个程序
+   返回。必须 await 使用该 buffer 的 load/store/Gather，以及此前未完成的
+   BOA/EVU/Pow；不能 free 后再访问，也不能用它释放 Context L2/global memory。
+   `gather_profiled.mlir` 在 Gather 完成后释放 indices，在 Tile Store 完成后释放结果。
+   未显式 free 的 L1 仍由 terminal/reset 回收；`tile.alloc` 仍在 dispatch 时统一分配，
+   因而同一程序后面的 alloc 不会因前面的 free 自动变成动态分配。
+
+`tile.free` 的 [真实复用证据](artifacts/tile_free/run-20260911-final/verification.json)
+使用16 KiB L1、每个 buffer 8 KiB：full_memory 在2.244 µs释放，
+2.247 µs由另一 dispatch 复用同一地址，原程序11.870 µs才返回；
+replacement allocation 保持到17.871 µs才回收。runtime 同样通过。
+不加 free 的同配置对照因 L1 admission 容量不足失败；未改变 eager allocation 模型。
 
 当前 `tile.boa.async` 和 `tile.evu.async` 是 timing descriptor，没有显式 L1
 operand/result。组合示例沿用 Pow 的隐式 L1 原地约定：`%matmul_dst` 作为最终工作
 buffer，并在最后一个 engine event 完成后显式 Store。该路径是 output lifecycle /
 timing accurate，不是 tensor value accurate。
+
+## 全量 MLIR 的 free 审查
+
+本轮逐份审查了仓库中的 **132 份 `.mlir`**，包括 `.vscode` 历史样例和
+`reference.mlir`，不是只检查 `run.sh` 的入口。128 份当前方言输入共有
+581 个 Tile Program、1,116 个 L1 allocation 声明；历史 reference 另有1个。
+
+| 文件结论                 | 数量 | 处理                                                   |
+| ------------------------ | ---: | ------------------------------------------------------ |
+| 存在有意义的提前释放窗口 |  108 | 共补534个 `tile.free`                                  |
+| 最后使用后只剩收尾       |   15 | 保留 terminal 自动回收                                 |
+| 已有显式 free 足够       |    1 | 保留 Gather 示例的2个 free                             |
+| 没有 L1 allocation       |    4 | 不伪造 free                                            |
+| 历史方言文件             |    4 | 逐份人工检查后保留；当前 parser 不支持，不声称运行通过 |
+
+放置规则不是“最后一次 load 后就 free”：当前 BOA/EVU/Pow 不声明 L1 operands，
+因此自动审查将程序中的所有此类计算视为潜在使用者，等全部相关事件已由现有
+`tile.await` 等待后才考虑释放。`matmul_gather_add` 的 `gather_dst` 保留到
+后续 `add_done`；多 chunk matmul 的共享输入、权重保留到最后一个 chunk。
+仅当此后仍有实质搬运或异步等待时添加 free；只剩 signal/return 则避免额外 UCE
+指令。已有 free 不移动；L2 `nest.release`、所有 await/依赖、shape/bytes、
+计算 repeat、placement 和 Context 切分均不改。
+
+- [逐文件结论](artifacts/tile_free/full_mlir_audit-20260912-110535Z/file_decisions.json)
+- [逐 allocation 的使用、await 与释放决定](artifacts/tile_free/full_mlir_audit-20260912-110535Z/allocation_audit.json)
+- [历史文件审查及 parser 限制](artifacts/tile_free/full_mlir_audit-20260912-110535Z/historical_audit.json)
+- [迁移 hash 与 roundtrip](artifacts/tile_free/full_mlir_audit-20260912-110535Z/roundtrip.json)
+- [本轮完整配置、命令与运行结果](artifacts/tile_free/full_mlir_audit-20260912-110535Z/execution/summary.json)
+- [L1 allocation/release 核对](artifacts/tile_free/full_mlir_audit-20260912-110535Z/execution/l1_lifecycle.json)
+
+128 份当前输入均经过 parse → print → parse 的结构等价检查，其中两份指定 N08
+在前后两次 verify 中均保持原有范围错误，其余126份通过。除新增 free 外的源码
+字节保持不变；历史 trace/hash 只对应各自当时的输入，不作为本次修改后的证据。
+
+实跑239次：两种 fidelity 各108 completed、2个预期 verifier 拒绝、2个预期容量
+fault，另15个 workload/protocol 入口全部完成；235份 trace 结构检查通过。
+L1 allocations 按 `(allocation_id, generation)` 与 release 精确配对，完成的运行
+最终占用为零。当前 trace 不提供完整的方向性 transfer allocation identity，
+因此不按地址区间猜测所有访存归属，也不宣称仅凭 trace 已证明每次 transfer 的
+last-use；异步 free 安全性同时由本轮 SSA 审查和实际 runtime preflight 检查。
+完整测试套件331项通过，输入与模拟器源码的执行前后指纹一致。
 
 ## Fixtures 与 artifacts
 

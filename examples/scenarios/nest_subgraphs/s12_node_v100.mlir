@@ -26,6 +26,8 @@ builtin.module {
     tile.signal input_released(%task)
     %compute_0 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 : !tile.event<"compute_0">
     tile.await %compute_0
+    tile.free %l0
+    tile.free %l1
     %stored = tile.store.async %acc into %vo : !tile.event<"stored">
     tile.await %stored
     tile.signal output_ready(%task)
@@ -44,6 +46,8 @@ builtin.module {
     tile.signal input_released(%task)
     %compute_0 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 : !tile.event<"compute_0">
     tile.await %compute_0
+    tile.free %l0
+    tile.free %l1
     %stored = tile.store.async %acc into %vo : !tile.event<"stored">
     tile.await %stored
     tile.signal output_ready(%task)
@@ -260,6 +264,8 @@ builtin.module {
     tile.await %compute_98
     %compute_99 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate : !tile.event<"compute_99">
     tile.await %compute_99
+    tile.free %l0
+    tile.free %l1
     %stored = tile.store.async %acc into %vo : !tile.event<"stored">
     tile.await %stored
     tile.signal output_ready(%task)
@@ -278,6 +284,8 @@ builtin.module {
     tile.signal input_released(%task)
     %compute_0 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 : !tile.event<"compute_0">
     tile.await %compute_0
+    tile.free %l0
+    tile.free %l1
     %stored = tile.store.async %acc into %vo : !tile.event<"stored">
     tile.await %stored
     tile.signal output_ready(%task)
@@ -310,6 +318,8 @@ builtin.module {
     tile.signal input_released(%task)
     %compute_0 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 : !tile.event<"compute_0">
     tile.await %compute_0
+    tile.free %l0
+    tile.free %l1
     %stored = tile.store.async %acc into %vo : !tile.event<"stored">
     tile.await %stored
     tile.signal output_ready(%task)

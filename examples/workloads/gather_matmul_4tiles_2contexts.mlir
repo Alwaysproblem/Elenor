@@ -56,6 +56,10 @@ builtin.module {
         m = 128 n = 128 k = 64 ops = 2097152
         : !tile.event<"matmul_done">
     tile.await %matmul_done
+    tile.free %lhs_l1
+    tile.free %rhs_l1
+    tile.free %indices_l1
+    tile.free %gather_dst
     %l2_store_done = tile.store.async %matmul_dst into %output_view
         : !tile.event<"l2_store_done">
     tile.await %l2_store_done

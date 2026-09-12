@@ -55,6 +55,7 @@ builtin.module {
     tile.signal input_released(%task)
     %compute_0 = tile.evu.async "add" ops = 16448 : !tile.event<"compute_0">
     tile.await %compute_0
+    tile.free %l1
     %stored = tile.store.async %l0 into %vo : !tile.event<"stored">
     tile.await %stored
     tile.signal output_ready(%task)
@@ -298,6 +299,7 @@ builtin.module {
     tile.signal input_released(%task)
     %compute_0 = tile.evu.async "add" ops = 16448 : !tile.event<"compute_0">
     tile.await %compute_0
+    tile.free %l1
     %stored = tile.store.async %l0 into %vo : !tile.event<"stored">
     tile.await %stored
     tile.signal output_ready(%task)
@@ -315,6 +317,7 @@ builtin.module {
     tile.signal input_released(%task)
     %compute_0 = tile.evu.async "add" ops = 16448 : !tile.event<"compute_0">
     tile.await %compute_0
+    tile.free %l1
     %stored = tile.store.async %l0 into %vo : !tile.event<"stored">
     tile.await %stored
     tile.signal output_ready(%task)
@@ -332,6 +335,7 @@ builtin.module {
     tile.signal input_released(%task)
     %compute_0 = tile.evu.async "add" ops = 16448 : !tile.event<"compute_0">
     tile.await %compute_0
+    tile.free %l1
     %stored = tile.store.async %l0 into %vo : !tile.event<"stored">
     tile.await %stored
     tile.signal output_ready(%task)

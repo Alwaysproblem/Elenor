@@ -79,6 +79,10 @@ builtin.module {
         m = 256 n = 256 k = 32 ops = 4194304 accumulate
         : !tile.event<"boa_k1_done">
     tile.await %boa_k1_done
+    tile.free %a_k0_l1
+    tile.free %a_k1_l1
+    tile.free %b_k0_l1
+    tile.free %b_k1_l1
     %c_stored = tile.store.async %acc into %c_tile
         : !tile.event<"c_stored">
     tile.await %c_stored

@@ -31,7 +31,13 @@ from .execution_ir import (
   PhaseSignal,
   TaskIdentity,
 )
-from .memory import AllocationHandle, ResolvedMemoryView
+from .memory import (
+  AllocationHandle,
+  AllocationState,
+  MemoryInvariantError,
+  ResolvedMemoryView,
+  TaskBufferOwner,
+)
 from .memory.l1_slot_frame import SlotFrame
 from .memory.l2_sram import L2SRAM
 from .pmu import PMUCounter, StallReason
@@ -95,6 +101,7 @@ class _UCEContext:
   prepare_total: int = 0
   memory: _TileContextMemory | None = None  # PR 2: per-context memory state
   task_identity: TaskIdentity | None = None  # PR 3: dispatch grid + logical task
+  l1_live_names: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -103,9 +110,10 @@ class _TileContextMemory:
 
   Global and L2 dictionaries are keyed by the original tile-program
   formal index, including task/global formals before the L2 prefix.
-  ``l1_handles`` maps lowered L1 names to allocation handles.
-  """
+  ``l1_handles`` is the live name-to-handle map shared with TileGroup
+  terminal/reset bookkeeping; explicit free removes the binding once.
 
+  """
   task_identity: TaskIdentity
   l2_formal_handles: dict[int, AllocationHandle] = field(default_factory=dict)
   global_formal_views: dict[int, ResolvedMemoryView] = field(default_factory=dict)
@@ -224,6 +232,7 @@ class TileUCE:
                                   if self.runtime_enabled else 0)
       ctx.memory = memory
       ctx.task_identity = task_identity
+      ctx.l1_live_names = {buffer.name for buffer in program.l1_buffers}
       if self.runtime_enabled:
         ctx.state = _UCEContextState.ACCEPT
       else:
@@ -696,6 +705,13 @@ class TileUCE:
           )
       self.pmu.add_event("tile_signal")
       ctx.pc += 1
+    elif op == ExecTileOp.FREE_L1:
+      try:
+        self._free_l1(ctx, ins, cycle, tile)
+      except MemoryInvariantError as exc:
+        self._fault_context(ctx, f"tile.free: {exc}", cycle)
+      else:
+        ctx.pc += 1
     elif op in (
       ExecTileOp.LAUNCH_BOA,
       ExecTileOp.LAUNCH_EVU,
@@ -703,7 +719,13 @@ class TileUCE:
       ExecTileOp.LAUNCH_MFE,
       ExecTileOp.LAUNCH_GATHER,
     ):
-      self._issue_engine_launch(ctx, self._launch_queue_key(ctx, ins), ins, cycle)
+      try:
+        self._assert_launch_l1_live(ctx, ins)
+      except MemoryInvariantError as exc:
+        self._fault_context(ctx, f"tile.free: {exc}", cycle)
+      else:
+        self._issue_engine_launch(
+          ctx, self._launch_queue_key(ctx, ins), ins, cycle)
     elif op == ExecTileOp.STREAM_POP:
       if not self._retry_wait_stream(ctx, cycle, tile):
         self.pmu.add(StallReason.STREAM_CREDIT, 1)
@@ -753,6 +775,180 @@ class TileUCE:
       self._complete_context(ctx, cycle)
     else:
       ctx.pc += 1
+
+  @staticmethod
+  def _descriptor_l1_bases(
+    program: ExecTileProgram,
+    desc_ref: str,
+  ) -> tuple[frozenset[str], bool]:
+    """Return explicit L1 bases and whether a descriptor is opaque."""
+    desc = program.descriptors.get(desc_ref)
+    if desc is None:
+      raise MemoryInvariantError("instruction references an unknown descriptor")
+    bases: set[str] = set()
+    if desc.transfer is not None:
+      if desc.transfer.src.space == "l1":
+        bases.add(desc.transfer.src.base)
+      if desc.transfer.dst.space == "l1":
+        bases.add(desc.transfer.dst.base)
+      return frozenset(bases), False
+    gather = desc.params.get("gather")
+    if isinstance(gather, ExecGatherDesc):
+      for view in (gather.source, gather.indices, gather.destination):
+        if view.space == "l1":
+          bases.add(view.base)
+      return frozenset(bases), False
+    if desc.op == "gather":
+      raise MemoryInvariantError("gather descriptor is missing")
+    return frozenset(), True
+
+  def _assert_launch_l1_live(
+    self,
+    ctx: _UCEContext,
+    ins: ExecTileInst,
+  ) -> None:
+    """Reject raw execution paths that access an explicitly freed L1."""
+    if ctx.program is None or not ins.args or not isinstance(ins.args[0], str):
+      raise MemoryInvariantError("launch has an invalid descriptor reference")
+    if len(ctx.l1_live_names) == len(ctx.program.l1_buffers):
+      return
+    bases, _opaque = self._descriptor_l1_bases(ctx.program, ins.args[0])
+    for base in bases:
+      if base not in ctx.l1_live_names:
+        raise MemoryInvariantError(
+          f"use-after-free of L1 buffer '{base}'")
+      if self.runtime_enabled and (
+        ctx.memory is None or base not in ctx.memory.l1_handles
+      ):
+        raise MemoryInvariantError(
+          f"missing physical L1 binding for '{base}'")
+
+  def _assert_free_dependencies_complete(
+    self,
+    ctx: _UCEContext,
+    buffer_name: str,
+  ) -> None:
+    """Check prior queued/active accesses without adding hot-path state."""
+    assert ctx.program is not None
+    launch_ops = {
+      ExecTileOp.LAUNCH_BOA,
+      ExecTileOp.LAUNCH_EVU,
+      ExecTileOp.LAUNCH_USE,
+      ExecTileOp.LAUNCH_MFE,
+      ExecTileOp.LAUNCH_GATHER,
+    }
+    relevant_events: set[str] = set()
+    for prior in ctx.program.insts[:ctx.pc]:
+      if prior.op not in launch_ops:
+        continue
+      if prior.dst is None:
+        continue
+      event_ref = ctx.event_records.get(prior.dst)
+      if event_ref is None:
+        # Private Exec control flow may skip a textual predecessor.
+        continue
+      if not prior.args or not isinstance(prior.args[0], str):
+        raise MemoryInvariantError("prior launch has an invalid descriptor reference")
+      bases, opaque = self._descriptor_l1_bases(ctx.program, prior.args[0])
+      if not opaque and buffer_name not in bases:
+        continue
+      if prior.dst in relevant_events:
+        raise MemoryInvariantError(
+          f"ambiguous duplicate completion event '{prior.dst}'")
+      relevant_events.add(prior.dst)
+      if (
+        event_ref.scope != _UCEEventScope.LOCAL
+        or event_ref.owner_ctx != ctx.ctx_id
+        or event_ref.runtime_id != self._runtime_event_id(ctx, prior.dst)
+      ):
+        raise MemoryInvariantError(
+          f"prior access event '{prior.dst}' is not owned by this context")
+      if prior.dst not in ctx.events_done:
+        raise MemoryInvariantError(
+          f"L1 buffer '{buffer_name}' has pending event '{prior.dst}'")
+
+  def _free_l1(
+    self,
+    ctx: _UCEContext,
+    ins: ExecTileInst,
+    cycle: int,
+    tile: ComputeTile,
+  ) -> None:
+    """Preflight, final-free, then invalidate one L1 program binding."""
+    if (
+      len(ins.args) != 1
+      or not isinstance(ins.args[0], str)
+      or ctx.program is None
+    ):
+      raise MemoryInvariantError("requires one L1 buffer name")
+    buffer_name = ins.args[0]
+    slot_ids = [
+      slot_id
+      for slot_id, buffer in enumerate(ctx.program.l1_buffers)
+      if buffer.name == buffer_name
+    ]
+    if len(slot_ids) != 1:
+      raise MemoryInvariantError(
+        f"L1 buffer '{buffer_name}' is not a unique program allocation")
+    if buffer_name not in ctx.l1_live_names:
+      raise MemoryInvariantError(
+        f"double free of L1 buffer '{buffer_name}'")
+
+    self._assert_free_dependencies_complete(ctx, buffer_name)
+    if not self.runtime_enabled:
+      ctx.l1_live_names.remove(buffer_name)
+      self.pmu.add_event("l1_free")
+      return
+
+    if ctx.memory is None or ctx.task_identity is None:
+      raise MemoryInvariantError("physical L1 context identity is missing")
+    if ctx.memory.task_identity != ctx.task_identity:
+      raise MemoryInvariantError("physical L1 TaskIdentity does not match context")
+    if ctx.role_event_id is None:
+      raise MemoryInvariantError("physical L1 role event is missing")
+    handle = ctx.memory.l1_handles.get(buffer_name)
+    if handle is None or handle.memory_space != "l1":
+      raise MemoryInvariantError(
+        f"missing physical L1 binding for '{buffer_name}'")
+
+    task = ctx.task_identity
+    expected_owner = TaskBufferOwner(
+      task.grid.context_name,
+      task.grid.launch_generation,
+      ctx.role_event_id,
+      task.task_id,
+      self.tile_id,
+      ctx.ctx_id,
+      buffer_name,
+    )
+    tile.l1_allocator.assert_live(handle, expected_owner)
+    record = tile.l1_allocator._live.get(handle.allocation_id)
+    if record is None or record.handle != handle:
+      raise MemoryInvariantError("stale allocation generation")
+    if record.state != AllocationState.LIVE:
+      raise MemoryInvariantError(
+        f"double free of L1 buffer '{buffer_name}'")
+    if record.pins:
+      raise MemoryInvariantError(
+        f"L1 buffer '{buffer_name}' still has allocator pins")
+
+    slot_id = slot_ids[0]
+    frame = tile.l1_frames[ctx.ctx_id]
+    frame.assert_slot_binding(slot_id, handle)
+    transfer_manager = tile.mfe.transfer_manager
+    if transfer_manager is None:
+      raise MemoryInvariantError("physical L1 transfer manager is missing")
+    if transfer_manager.has_inflight_access(handle):
+      raise MemoryInvariantError(
+        f"L1 buffer '{buffer_name}' has an in-flight transfer")
+
+    if not tile.l1_allocator.request_release(handle, expected_owner, cycle):
+      raise MemoryInvariantError(
+        f"L1 buffer '{buffer_name}' did not final-free")
+    frame.release_slot(slot_id, handle)
+    del ctx.memory.l1_handles[buffer_name]
+    ctx.l1_live_names.remove(buffer_name)
+    self.pmu.add_event("l1_free")
 
   def _issue_wait(self, ctx: _UCEContext, cycle: int,
                   event_names: tuple[str, ...], wait_all: bool) -> None:
@@ -1127,6 +1323,7 @@ class TileUCE:
     ctx.prepare_total = 0
     ctx.memory = None
     ctx.task_identity = None
+    ctx.l1_live_names.clear()
 
   def _state_label(self, ctx: _UCEContext) -> str:
     if ctx.state == _UCEContextState.EMPTY:

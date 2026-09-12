@@ -211,6 +211,7 @@ builtin.module {
     tile.await %compute_98
     %compute_99 = tile.evu.async "expand" ops = 16448 : !tile.event<"compute_99">
     tile.await %compute_99
+    tile.free %l0
     %stored = tile.store.async %lout into %vo : !tile.event<"stored">
     tile.await %stored
     tile.signal output_ready(%task)

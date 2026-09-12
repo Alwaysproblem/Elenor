@@ -106,7 +106,7 @@ class _TileAdmission:
   context_id: int
   l1_plan: AllocationPlan | None
   prepare_cycles: int = 0
-  l1_handles: tuple[AllocationHandle, ...] = ()
+  l1_handles: dict[str, AllocationHandle] = field(default_factory=dict)
   bound: bool = False
 
 
@@ -264,8 +264,10 @@ class TileGroup:
     self._last_retried_pool_version: int = -1
     self._last_retried_capacity_change_cycle: int = -1
     self._last_step_cycle: int = 0
-    # PR 2: role_event_id -> {tile_id: [L1 AllocationHandle]}
-    self._role_l1_handles: dict[str, dict[int, list]] = {}
+    # role_event_id -> tile_id -> shared live L1 name/handle map.  Each
+    # inner map is the same object held by that tile's UCE context.
+    self._role_l1_handles: dict[
+      str, dict[int, dict[str, AllocationHandle]]] = {}
     # transaction id -> sequencer
     self._txn_sequencer: dict[str, TileGroupSequencer] = {}
     # group transaction id -> (logical direction, visual concurrency slot)
@@ -950,11 +952,12 @@ class TileGroup:
     for tile_l1 in self._role_l1_handles.values():
       for tile_id, handles in tile_l1.items():
         alloc = self.tiles[tile_id].l1_allocator
-        for handle in handles:
+        for handle in tuple(handles.values()):
           try:
             alloc.request_release(handle, handle.owner, cycle)
           except MemoryInvariantError:
             pass
+        handles.clear()
     self._role_l1_handles.clear()
     # Cancelled transfer resources are already returned by reset cleanup;
     # now clear UCE contexts/queued engine work and invalidate L1 handles.
@@ -1057,7 +1060,7 @@ class TileGroup:
       self._grid_signals.pop(grid, None)
       # Return every committed L1 allocation.
       for adm in admissions:
-        for handle in adm.l1_handles:
+        for handle in adm.l1_handles.values():
           try:
             adm.tile.l1_allocator.request_release(
               handle, handle.owner, cycle)
@@ -1120,7 +1123,7 @@ class TileGroup:
             memory_space="l1",
             buffer_id=buf.name,
             owner=TaskBufferOwner(
-              seq.task.name if seq.task is not None else "ctx",
+              grid.context_name,
               gen, ev, logical_task_id, tile.tile_id, context_id, buf.name),
             size_bytes=buf.bytes,
             alignment=max(buf.alignment, 1),
@@ -1162,10 +1165,16 @@ class TileGroup:
       for adm in admissions:
         if adm.l1_plan is None:
           continue
-        adm.l1_handles = adm.tile.l1_allocator.commit(
-          adm.l1_plan, cycle)
+        committed = adm.tile.l1_allocator.commit(adm.l1_plan, cycle)
+        adm.l1_handles = {
+          buffer.name: handle
+          for buffer, handle in zip(prog.l1_buffers, committed)
+        }
+        ordered_handles = [
+          adm.l1_handles[buffer.name] for buffer in prog.l1_buffers
+        ]
         if not adm.tile.l1_frames[adm.context_id].prepare(
-            list(adm.l1_handles), list(prog.l1_buffers)):
+            ordered_handles, list(prog.l1_buffers)):
           raise MemoryInvariantError(
             f"L1 frame prepare failed on tile {adm.tile.tile_id}")
         if self.memory_trace is not None and self.tracer is not None:
@@ -1220,15 +1229,11 @@ class TileGroup:
             if resolved is None:
               raise MemoryInvariantError("missing or stale global actual for tile formal")
             global_view_map[formal_index] = resolved
-        l1_map = {
-          buf.name: handle
-          for buf, handle in zip(prog.l1_buffers, adm.l1_handles)
-        }
         memory = _TileContextMemory(
           task_identity=task_identity,
           l2_formal_handles=l2_handle_map,
           global_formal_views=global_view_map,
-          l1_handles=l1_map,
+          l1_handles=adm.l1_handles,
           l2_resolver=(
             self.l2_sram
             if (self.memory_enabled or self.runtime_enabled)
@@ -1260,7 +1265,7 @@ class TileGroup:
       sequencer=seq,
     )
     self._role_l1_handles[ev] = {
-      adm.tile.tile_id: list(adm.l1_handles) for adm in admissions
+      adm.tile.tile_id: adm.l1_handles for adm in admissions
       if adm.l1_handles
     }
     self._role_trace[ev] = _RoleTrace(
@@ -1554,6 +1559,8 @@ class TileGroup:
         # PR 2: release L1 frame + allocations on tile terminal (§5.7).
         # PR 3: L2 grid pins outlive the terminal - only the matching
         # aggregate phase or a gated release may unpin them.
+        tile_l1 = self._role_l1_handles.get(term.role_event_id, {})
+        live_l1 = tile_l1.pop(t.tile_id, {})
         if self.memory_enabled or self.runtime_enabled:
           frame = t.l1_frames[term.ctx_id]
           frame.release()
@@ -1563,12 +1570,14 @@ class TileGroup:
                                "generation": frame.generation,
                                "tile_id": t.tile_id,
                                "reason": "tile_terminal"})
-          tile_l1 = self._role_l1_handles.get(term.role_event_id, {})
-          for handle in tile_l1.pop(t.tile_id, []):
+          for handle in tuple(live_l1.values()):
             try:
               t.l1_allocator.request_release(handle, handle.owner, cycle)
             except MemoryInvariantError:
               pass  # already released or stale - terminal must not fault
+        live_l1.clear()
+        if not tile_l1:
+          self._role_l1_handles.pop(term.role_event_id, None)
         done_set = self._role_done_tiles.setdefault(term.role_event_id, set())
         if t.tile_id in done_set:
           continue

@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
+from .allocator import MemoryInvariantError
+
 if TYPE_CHECKING:
   from ..execution_ir import ExecL1Buffer
   from .allocator import AllocationHandle, MemoryOwner
@@ -181,6 +183,49 @@ class SlotFrame:
     self.shadow = None
     self._shadow_slots = None
     self.state = FrameState.IDLE
+
+  def assert_slot_binding(
+    self,
+    slot_id: int,
+    handle: AllocationHandle,  # type: ignore[name-defined]
+  ) -> None:
+    """Read-only validation for releasing one live slot binding."""
+    if self.state != FrameState.FRAME_ACTIVE:
+      raise MemoryInvariantError("L1 slot frame is not active")
+    if self.shadow is None or self._shadow_slots is None:
+      raise MemoryInvariantError("L1 slot frame copies are missing")
+    copies = (
+      ("active", self.slots),
+      ("shadow", self.shadow.slots),
+      ("prepared", self._shadow_slots),
+    )
+    for copy_name, slots in copies:
+      if slot_id < 0 or slot_id >= len(slots):
+        raise MemoryInvariantError("L1 slot id is out of range")
+      slot = slots[slot_id]
+      if (
+        slot.allocation_id != handle.allocation_id
+        or slot.generation != handle.generation
+        or slot.owner != handle.owner
+        or slot.base != handle.base_address
+        or slot.size != handle.size_bytes
+      ):
+        raise MemoryInvariantError(
+          f"L1 {copy_name} slot binding does not match allocation")
+
+  def release_slot(
+    self,
+    slot_id: int,
+    handle: AllocationHandle,  # type: ignore[name-defined]
+  ) -> None:
+    """Atomically invalidate one slot without ending or bumping the frame."""
+    self.assert_slot_binding(slot_id, handle)
+    self.slots[slot_id] = Slot(slot_id)
+    assert self.shadow is not None
+    self.shadow.slots[slot_id] = Slot(slot_id)
+    assert self._shadow_slots is not None
+    self._shadow_slots[slot_id] = Slot(slot_id)
+
 
   def check_generation(self, expected_gen: int) -> bool:
     """Warm-launch generation gate (design 5.2).  Mismatch -> fault."""

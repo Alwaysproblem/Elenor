@@ -2457,3 +2457,100 @@ class TestL2AccessContract:
           1,
         )
       )
+
+
+class TestTileFree:
+  IR = """builtin.module {
+  tile.program @free_work(%task: !nest.task, %buf: !nest.l2_buffer<1x64xbf16>) {
+    %view = tile.subview %buf offsets = [0, 0] sizes = [1, 64] strides = [1, 1]
+        : !nest.l2_view<1x64xbf16>
+    %a = tile.alloc shape = [64] dtype = "bf16" : !tile.l1_buffer<64xbf16>
+    %b = tile.alloc shape = [64] dtype = "bf16" : !tile.l1_buffer<64xbf16>
+    %ra = tile.load.async %view into %a : !tile.event<"ra">
+    tile.await %ra
+    %rb = tile.load.async %view into %b : !tile.event<"rb">
+    tile.free %a
+    tile.await %rb
+    tile.signal input_released(%task)
+    %write = tile.store.async %b into %view : !tile.event<"write">
+    tile.await %write
+    tile.free %b
+    tile.signal output_ready(%task)
+    tile.return
+  }
+  nest.context @ctx(%input: !nest.global_memref<1x64xbf16>) placement = 1 {
+    %buf = nest.alloc slot = "buf" role = "inout" shape = [1, 64] dtype = "bf16"
+        : !nest.l2_buffer<1x64xbf16>
+    %view = nest.subview %input offsets = [0, 0] sizes = [1, 64] strides = [1, 1]
+        : !nest.global_view<1x64xbf16>
+    %pref = nest.dma.prefetch.async %view into %buf : !nest.event<"pref">
+    %tasks = nest.task.range from = 0 to = 1 : !nest.task_range
+    %grid, %read, %ready = nest.dispatch.tasks.async @free_work
+        tasks(%tasks) globals() bindings(%buf) ins(%buf) outs(%buf)
+        signal_policy { input_released = #nest.aggregate<all_tasks>, output_ready = #nest.aggregate<all_tasks> }
+        depends_on(%pref) : (!nest.event<"grid">, !nest.event<"read">, !nest.event<"ready">)
+    %stored = nest.dma.store.async %buf into %view depends_on(%ready) : !nest.event<"stored">
+    nest.release %buf depends_on(%read, %pref, %stored)
+    nest.await %grid, %stored
+    nest.return
+  }
+}"""
+
+  def test_roundtrip_allows_unrelated_pending_transfer(self):
+    module = parse_workload_ir(self.IR)
+    assert module.is_structurally_equivalent(parse_workload_ir(print_workload_ir(module)))
+    # b's load is intentionally not awaited until after freeing a.
+    result = Simulator(
+      HardwareConfig(), SimConfig(fidelity="full_memory", max_cycles=100000)
+    ).run(module, input_bindings={"input": GlobalBinding("input", 0x100000, 128, "rw")})
+    assert result.completed, result.reason
+    assert result.credit_invariant_ok
+
+  @pytest.mark.parametrize(
+    ("old", "new"),
+    [
+      ("    tile.await %ra\n", ""),
+      ("    tile.await %write\n", ""),
+      ("tile.free %a", "tile.free %a\n    tile.free %a"),
+      (
+        "tile.free %a",
+        'tile.free %a\n    %again = tile.load.async %view into %a : !tile.event<"again">',
+      ),
+      ("tile.store.async %b into %view", "tile.store.async %a into %view"),
+      (
+        "tile.free %a",
+        '%compute = tile.evu.async "relu" ops = 16448 : !tile.event<"compute">\n    tile.free %a',
+      ),
+    ],
+    ids=["pending-load", "pending-store", "double-free", "load-after-free",
+         "store-after-free", "pending-opaque-compute"],
+  )
+  def test_rejects_unsafe_lifetime(self, old, new):
+    with pytest.raises(VerifyException, match="tile.free"):
+      parse_workload_ir(self.IR.replace(old, new, 1))
+
+  def test_free_requires_current_program_local_allocation(self):
+    from pipeline_validator.dialects.elenor import TileFreeOp
+
+    foreign = TileAllocOp([64], "bf16")
+    owner = TileProgramDefOp(
+      "owner", [foreign, TileReturnOp()], arg_types=[NestTask()], arg_names=["task"]
+    )
+    consumer = TileProgramDefOp(
+      "consumer", [TileFreeOp(foreign.result), TileReturnOp()],
+      arg_types=[NestTask()], arg_names=["task"]
+    )
+    with pytest.raises(VerifyException):
+      verify_workload_ir(ModuleOp([owner, consumer, NestContextOp("ctx", [NestReturnOp()], placement=1)]))
+    with pytest.raises(VerifyException):
+      parse_workload_ir(self.IR.replace("tile.free %a", "tile.free %buf", 1))
+
+  @pytest.mark.parametrize("buffer", ["indices_l1", "gather_dst"])
+  def test_gather_buffers_live_until_gather_completion(self, buffer):
+    source = (Path(__file__).resolve().parents[2] / "examples/workloads/gather_profiled.mlir").read_text()
+    with pytest.raises(VerifyException, match="tile.free"):
+      parse_workload_ir(source.replace(
+        "    tile.await %gather_done",
+        f"    tile.free %{buffer}\n    tile.await %gather_done",
+        1,
+      ))

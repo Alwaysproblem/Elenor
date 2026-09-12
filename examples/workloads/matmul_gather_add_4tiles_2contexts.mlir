@@ -60,6 +60,10 @@ builtin.module {
     %add_done = tile.evu.async "add" ops = 256
         : !tile.event<"add_done">
     tile.await %add_done
+    tile.free %lhs_l1
+    tile.free %rhs_l1
+    tile.free %indices_l1
+    tile.free %gather_dst
     %l2_store_done = tile.store.async %matmul_dst into %output_view
         : !tile.event<"l2_store_done">
     tile.await %l2_store_done
