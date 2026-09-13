@@ -82,6 +82,10 @@ class TileGroupSequencer:
 
   def load(self, task: ExecTileGroupTask) -> None:
     self.task = task
+    self._clear_launch_state()
+    self.submission_closed = not task.actions
+
+  def _clear_launch_state(self) -> None:
     self.submission_pc = 0
     self._events_done.clear()
     self._event_errors.clear()
@@ -92,7 +96,7 @@ class TileGroupSequencer:
     self._inflight_actions.clear()
     self._registration_fence = None
     self._outstanding_jobs = 0
-    self.submission_closed = not task.actions
+    self.submission_closed = False
     self.done = False
     self.faulted = False
     self.fault_reason = ""
@@ -344,25 +348,7 @@ class TileGroupSequencer:
     self.submission_closed = True
 
   def reset(self) -> None:
-    self.submission_pc = 0
     self.task = None
-    self._events_done.clear()
-    self._event_errors.clear()
-    self._role_events.clear()
-    self._issued_role_events.clear()
-    self._issued_phase_events.clear()
-    self._queued_actions.clear()
-    self._inflight_actions.clear()
-    self._registration_fence = None
-    self.submission_closed = False
-    self.done = False
-    self.faulted = False
-    self.fault_reason = ""
-    self.owned_queue_ids.clear()
-    self._outstanding_jobs = 0
-    self.admission_status = ContextAdmissionStatus.PREPARED
-    self.admission_wait_start_cycle = None
-    self.admission_retry_count = 0
+    self._clear_launch_state()
     self.formal_bindings.clear()
-    self._first_action_emitted = False
     self.pmu.reset()

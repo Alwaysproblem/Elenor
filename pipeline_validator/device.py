@@ -371,9 +371,7 @@ class CpuDeviceController:
         self._pending_peak = max(self._pending_peak, len(self._pending))
         self._outstanding_peak = max(self._outstanding_peak, self.outstanding_count)
         if not dependency_ids:
-          self._counters["dependencies_ready"] += 1
-          self.pmu.add_event("device_dependencies_ready")
-          self._observe("launch_dependencies_ready", cycle, record)
+          self._mark_dependencies_ready(record, cycle)
         continue
 
       if op.op == "await":
@@ -412,15 +410,18 @@ class CpuDeviceController:
       return False
     return True
 
+  def _mark_dependencies_ready(self, record: _LaunchRecord, cycle: int) -> None:
+    record.dependencies_ready_cycle = cycle
+    record.state = DeviceLaunchState.WAIT_ADMISSION
+    self._counters["dependencies_ready"] += 1
+    self.pmu.add_event("device_dependencies_ready")
+    self._observe("launch_dependencies_ready", cycle, record)
+
   def _resolve_pending_dependencies(self, cycle: int) -> None:
     for pending in tuple(self._pending):
       if not pending.unresolved_dependencies:
         if pending.record.dependencies_ready_cycle is None:
-          pending.record.dependencies_ready_cycle = cycle
-          pending.record.state = DeviceLaunchState.WAIT_ADMISSION
-          self._counters["dependencies_ready"] += 1
-          self.pmu.add_event("device_dependencies_ready")
-          self._observe("launch_dependencies_ready", cycle, pending.record)
+          self._mark_dependencies_ready(pending.record, cycle)
         continue
 
       failed: DeviceCompletion | None = None
@@ -442,11 +443,7 @@ class CpuDeviceController:
         self._record_unadmitted_failure(pending.record, reason, cycle, dependency_failure=True)
         self._enter_fault(reason, cycle)
       elif not pending.unresolved_dependencies:
-        pending.record.dependencies_ready_cycle = cycle
-        pending.record.state = DeviceLaunchState.WAIT_ADMISSION
-        self._counters["dependencies_ready"] += 1
-        self.pmu.add_event("device_dependencies_ready")
-        self._observe("launch_dependencies_ready", cycle, pending.record)
+        self._mark_dependencies_ready(pending.record, cycle)
 
   def _admit_ready_launches(self, cycle: int) -> None:
     attempts = 0
@@ -502,9 +499,7 @@ class CpuDeviceController:
         raise RuntimeError(f"completion metadata was not reserved for request {completion.request_id}")
       self._completions[completion.request_id] = completion
     else:
-      tag = self._event_tags_by_request.get(completion.request_id)
-      if tag is not None and self._event_handles.get(tag) == completion.request_id:
-        self._event_handles.pop(tag, None)
+      self._retire_event_handle(completion.request_id)
     if completion.status is DeviceCompletionStatus.SUCCESS:
       self._counters["completed"] += 1
       self.pmu.add_event("device_launch_complete")
@@ -570,6 +565,11 @@ class CpuDeviceController:
       self._release_reference(request_id)
     pending.unresolved_dependencies.clear()
 
+  def _retire_event_handle(self, request_id: int) -> None:
+    tag = self._event_tags_by_request.get(request_id)
+    if tag is not None and self._event_handles.get(tag) == request_id:
+      self._event_handles.pop(tag, None)
+
   def _release_reference(self, request_id: int) -> None:
     remaining = self._remaining_references.get(request_id)
     if remaining is None or remaining < 1:
@@ -580,9 +580,7 @@ class CpuDeviceController:
       return
     self._completions.pop(request_id, None)
     self._completion_reserved.discard(request_id)
-    tag = self._event_tags_by_request.get(request_id)
-    if tag is not None and self._event_handles.get(tag) == request_id:
-      self._event_handles.pop(tag, None)
+    self._retire_event_handle(request_id)
 
   def _abandon_all_references(self) -> None:
     for request_id in tuple(self._remaining_references):

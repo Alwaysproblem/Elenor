@@ -668,6 +668,19 @@ class MemoryTrace:
       args["task_id"] = owner.logical_task_id
     return args
 
+  @staticmethod
+  def _allocation_args(handle) -> dict:
+    owner = handle.owner
+    return {
+      "allocation_id": handle.allocation_id,
+      "owner_kind": type(owner).__name__,
+      "buffer_id": getattr(owner, "buffer_id", getattr(owner, "binding_name", "")),
+      "generation": handle.generation,
+      "base_address": handle.base_address,
+      "size_bytes": handle.size_bytes,
+      "allocate_cycle": handle.allocate_cycle,
+    }
+
   # -- capacity / bank counters (PR 5 §2.5) ----------------------------
 
   def capacity(self, space: str, tile_id: int | None, snapshot: dict, cycle: int) -> None:
@@ -738,16 +751,7 @@ class MemoryTrace:
 
   def alloc_committed(self, space: str, tile_id: int | None, handle, cycle: int) -> None:
     track, thread = self._space_lane(space, tile_id)
-    owner = handle.owner
-    args = {
-      "allocation_id": handle.allocation_id,
-      "owner_kind": type(owner).__name__,
-      "buffer_id": getattr(owner, "buffer_id", getattr(owner, "binding_name", "")),
-      "generation": handle.generation,
-      "base_address": handle.base_address,
-      "size_bytes": handle.size_bytes,
-      "allocate_cycle": handle.allocate_cycle,
-    }
+    args = self._allocation_args(handle)
     name = f"{space}_alloc"
     self.tracer.instant(track, thread, name, cycle, args)
     self.tracer.flow_start(
@@ -756,17 +760,8 @@ class MemoryTrace:
 
   def alloc_released(self, space: str, tile_id: int | None, handle, cycle: int, reason: str) -> None:
     track, thread = self._space_lane(space, tile_id)
-    owner = handle.owner
-    args = {
-      "allocation_id": handle.allocation_id,
-      "owner_kind": type(owner).__name__,
-      "buffer_id": getattr(owner, "buffer_id", getattr(owner, "binding_name", "")),
-      "generation": handle.generation,
-      "base_address": handle.base_address,
-      "size_bytes": handle.size_bytes,
-      "allocate_cycle": handle.allocate_cycle,
-      "reason": reason,
-    }
+    args = self._allocation_args(handle)
+    args["reason"] = reason
     name = f"{space}_release"
     self.tracer.instant(track, thread, name, cycle, args)
     self.tracer.flow_end(

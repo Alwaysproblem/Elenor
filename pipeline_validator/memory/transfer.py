@@ -322,25 +322,24 @@ class TransferStage:
     return StageResult(accepted_cycle=cycle, completion_cycle=completion,
                        channels=1, resources=(free_idx,))
 
+  def _release_resources(self, transaction_id: str) -> None:
+    self._outstanding_txns.discard(transaction_id)
+    for i, holder in enumerate(self._holders):
+      if holder == transaction_id:
+        self._busy_until[i] = 0
+        self._holders[i] = None
+
   def release_outstanding(self, transaction_id: str) -> None:
     """Return one outstanding credit and free the transaction's resources.
 
     Idempotent: safe to call after a leg completes or after cancel.
     """
-    self._outstanding_txns.discard(transaction_id)
-    for i, holder in enumerate(self._holders):
-      if holder == transaction_id:
-        self._busy_until[i] = 0
-        self._holders[i] = None
+    self._release_resources(transaction_id)
 
   def cancel(self, transaction_id: str) -> None:
     """Free every resource and outstanding credit held by a cancelled
     transaction (idempotent)."""
-    self._outstanding_txns.discard(transaction_id)
-    for i, holder in enumerate(self._holders):
-      if holder == transaction_id:
-        self._busy_until[i] = 0
-        self._holders[i] = None
+    self._release_resources(transaction_id)
 
   def step(self, cycle: int) -> None:
     """Advance one cycle: reconcile resources whose busy window expired.
@@ -1027,17 +1026,20 @@ class TransferManager:
       return
     self._stage_for_leg(leg, txn).cancel(txn.transaction_id)
 
+  def _cancel_transaction(self, txn: MemoryTransaction, cycle: int) -> None:
+    txn.status = TransferStatus.CANCELLED
+    self._cancelled.add(txn.transaction_id)
+    self.pmu_cancelled_count += 1
+    self._cancel_txn_resources(txn)
+    if self.trace is not None:
+      self.trace.transfer_cancelled(txn, cycle)
+
   def cancel_owner(self, owner: MemoryOwner, cycle: int) -> None:
     for txn in list(self._transactions.values()):
-      if txn.issuer != owner or txn.status in (
-          TransferStatus.DONE, TransferStatus.CANCELLED):
+      if txn.issuer != owner or txn.status in (TransferStatus.DONE, TransferStatus.CANCELLED):
         continue
-      txn.status = TransferStatus.CANCELLED
-      self._cancelled.add(txn.transaction_id)
-      self.pmu_cancelled_count += 1
-      self._cancel_txn_resources(txn)
+      self._cancel_transaction(txn, cycle)
       if self.trace is not None:
-        self.trace.transfer_cancelled(txn, cycle)
         self._trace_hbm_outstanding(cycle)
       self._transactions.pop(txn.transaction_id, None)
 
@@ -1052,12 +1054,7 @@ class TransferManager:
     for txn in list(self._transactions.values()):
       if txn.status in (TransferStatus.DONE, TransferStatus.CANCELLED):
         continue
-      txn.status = TransferStatus.CANCELLED
-      self._cancelled.add(txn.transaction_id)
-      self.pmu_cancelled_count += 1
-      self._cancel_txn_resources(txn)
-      if self.trace is not None:
-        self.trace.transfer_cancelled(txn, cycle)
+      self._cancel_transaction(txn, cycle)
     self._transactions.clear()
     for stage in self._all_stages():
       stage.reset()

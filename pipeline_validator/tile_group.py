@@ -20,6 +20,7 @@ from .execution_ir import (
   ContextAdmissionStatus,
   ExecDispatchRequest,
   ExecGroupActionOp,
+  ExecMemoryView,
   ExecReleaseRequest,
   ExecSignalPolicy,
   ExecStreamDesc,
@@ -393,36 +394,23 @@ class TileGroup:
     context_name = sequencer.context_name if sequencer is not None and sequencer.context_name else "ctx"
     buffer_id = desc_id.split(":", 1)[-1]
     bytes_total = transfer.bytes if transfer.bytes > 0 else 1024 * 1024
+    src_view = dst_view = None
     if self.memory_enabled or self.runtime_enabled:
       # resolve src/dst views against admission handles
-      src_view = self._resolve_view(transfer.src, "global", gen, formals)
-      dst_view = self._resolve_view(transfer.dst, "l2", gen, formals)
-      if op == "dma.store":
-        src_view = self._resolve_view(transfer.src, "l2", gen, formals)
-        dst_view = self._resolve_view(transfer.dst, "global", gen, formals)
+      src_view = self._resolve_view(transfer.src, gen, formals)
+      dst_view = self._resolve_view(transfer.dst, gen, formals)
       if src_view is None or dst_view is None:
         # missing handle → fault
         return False
-      txn = MemoryTransaction(
-        transaction_id=txn_id,
-        op=(TransferOp.PREFETCH if op == "dma.prefetch" else TransferOp.GLOBAL_STORE),
-        issuer=ContextBufferOwner(context_name, gen, buffer_id),
-        src=src_view,
-        dst=dst_view,
-        bytes_total=bytes_total,
-        completion_event=event_id,
-      )
-    else:
-      # timing_only: collapsed
-      txn = MemoryTransaction(
-        transaction_id=txn_id,
-        op=(TransferOp.PREFETCH if op == "dma.prefetch" else TransferOp.GLOBAL_STORE),
-        issuer=ContextBufferOwner(context_name, gen, buffer_id),
-        src=None,
-        dst=None,
-        bytes_total=bytes_total,
-        completion_event=event_id,
-      )
+    txn = MemoryTransaction(
+      transaction_id=txn_id,
+      op=(TransferOp.PREFETCH if op == "dma.prefetch" else TransferOp.GLOBAL_STORE),
+      issuer=ContextBufferOwner(context_name, gen, buffer_id),
+      src=src_view,
+      dst=dst_view,
+      bytes_total=bytes_total,
+      completion_event=event_id,
+    )
     self.transfer_manager.submit(txn, cycle, self.pmu)
     if self.tracer is not None:
       self._reserve_group_transfer_trace_slot(txn.transaction_id, txn.op)
@@ -432,7 +420,7 @@ class TileGroup:
     return True
 
   def _resolve_view(
-    self, view, default_space: str, gen: int | None = None, formal_bindings: dict[str, str] | None = None
+    self, view: ExecMemoryView | None, gen: int | None = None, formal_bindings: dict[str, str] | None = None
   ) -> ResolvedMemoryView | None:
     """Resolve an ``ExecMemoryView`` to a ``ResolvedMemoryView`` using
     the admission handles.  ``formal_bindings`` maps context formal
@@ -1238,7 +1226,7 @@ class TileGroup:
           if len(binding.global_actuals) != len(global_formals):
             raise MemoryInvariantError("missing global actual for tile formal")
           for (formal_index, _formal), actual in zip(global_formals, binding.global_actuals):
-            resolved = self._resolve_view(actual, "global", generation, seq.formal_bindings)
+            resolved = self._resolve_view(actual, generation, seq.formal_bindings)
             if resolved is None:
               raise MemoryInvariantError("missing or stale global actual for tile formal")
             global_view_map[formal_index] = resolved
@@ -1477,20 +1465,8 @@ class TileGroup:
 
   # ---- per-cycle step -------------------------------------------------
 
-  def step(self, cycle: int) -> bool:
-    """Advance one cycle.  Returns True if the whole task is done."""
-    self._last_step_cycle = cycle
+  def _step_group_transfers(self, cycle: int) -> None:
     tr = self.tracer
-    # 0. task trace: capture start cycle on first step
-    if tr is not None and self._task_start_cycle is None:
-      self._task_start_cycle = cycle
-
-    # 1. advance the NoC fabric first, then the transfer manager: flits
-    # enqueued last cycle traverse now, and the manager observes the
-    # traversal in the same cycle it polls (PR 2 §4.4/§4.7).
-    if self.memory_enabled:
-      traversed = self.noc.step(cycle)
-      self.transfer_manager.note_traversed(traversed, cycle)
     completed_txns = self.transfer_manager.step(cycle)
     for txn in completed_txns:
       # PR 2: skip tile-local transactions — MFE tick handles them
@@ -1559,7 +1535,8 @@ class TileGroup:
         )
       self.transfer_manager.acknowledge(txn.transaction_id)
 
-    # 1b. tick Collective jobs
+  def _step_collectives(self, cycle: int) -> None:
+    tr = self.tracer
     remaining_coll: list[_CollectiveJob] = []
     for cjob in self._collective_jobs:
       if cycle >= cjob.finish_cycle:
@@ -1585,7 +1562,9 @@ class TileGroup:
       else:
         remaining_coll.append(cjob)
     self._collective_jobs = remaining_coll
-    # 2. tick stream queues (PMU occupancy counters + trace counters)
+
+  def _step_stream_queues(self, cycle: int) -> None:
+    tr = self.tracer
     for q in self.queues.values():
       q.tick(cycle)
       if tr is not None:
@@ -1601,10 +1580,8 @@ class TileGroup:
           thread=f"StreamQ:{q.queue_id}",
         )
 
-    # (NoC router steps in section 1, before the transfer manager)
-    freeze_new_work = self._reset_freezes_new_work()
-
-    # 4. running engines still tick; UCE issue/queued launches freeze
+  def _step_tiles(self, cycle: int, *, freeze_new_work: bool) -> None:
+    tr = self.tracer
     for t in self.tiles:
       t.step(cycle, freeze_new_work=freeze_new_work)
       for term in t.drain_context_terminals():
@@ -1704,6 +1681,30 @@ class TileGroup:
               {"role_id": term.role_id, "event_id": term.role_event_id},
             )
 
+  def step(self, cycle: int) -> bool:
+    """Advance one cycle.  Returns True if the whole task is done."""
+    self._last_step_cycle = cycle
+    tr = self.tracer
+    # 0. task trace: capture start cycle on first step
+    if tr is not None and self._task_start_cycle is None:
+      self._task_start_cycle = cycle
+
+    # 1. advance the NoC fabric first, then the transfer manager: flits
+    # enqueued last cycle traverse now, and the manager observes the
+    # traversal in the same cycle it polls (PR 2 §4.4/§4.7).
+    if self.memory_enabled:
+      traversed = self.noc.step(cycle)
+      self.transfer_manager.note_traversed(traversed, cycle)
+    self._step_group_transfers(cycle)
+    self._step_collectives(cycle)
+    self._step_stream_queues(cycle)
+
+    # (NoC router steps in section 1, before the transfer manager)
+    freeze_new_work = self._reset_freezes_new_work()
+
+    # Running engines still tick; UCE issue/queued launches freeze.
+    self._step_tiles(cycle, freeze_new_work=freeze_new_work)
+
     # 4. completions above are visible before one shared ISSUE and REGISTER.
     scheduler_frozen = freeze_new_work or (self.runtime_enabled and self.reset_domain.is_active)
     if not scheduler_frozen:
@@ -1760,6 +1761,23 @@ class TileGroup:
         tr.instant("TileGroup", "Task", "group_task_done", cycle, {"event": cev})
         self._task_done_traced = True
     return all_done
+
+  def _clear_grid_state(self) -> None:
+    self._grid_signals.clear()
+    self._live_launches.clear()
+    self._grid_l2_pins.clear()
+    self._l2_roles.clear()
+    self._protocol_live_l2.clear()
+
+  def _reset_transfer_state(self) -> None:
+    self._global_handles.clear()
+    self._l2_handles.clear()
+    self._role_l1_handles.clear()
+    self._txn_sequencer.clear()
+    self._clear_group_transfer_trace_slots()
+    self.transfer_manager.reset()
+    self.l2_mshr.reset()
+    self.l2_cache.reset()
 
   def _retire_sequencer(self, s: TileGroupSequencer, cycle: int) -> None:
     """Retire one completed launch (PR 3).
@@ -1926,21 +1944,10 @@ class TileGroup:
     # clearing handle/role registries for the fresh standalone run.
     self._cancel_pending_admissions(release_staged=True)
     # PR 3: clear structured grid registries
-    self._grid_signals.clear()
-    self._live_launches.clear()
-    self._grid_l2_pins.clear()
-    self._l2_roles.clear()
-    self._protocol_live_l2.clear()
+    self._clear_grid_state()
     # PR 2: bump launch generation, clear admission state
     self._context_launch_generation += 1
-    self._global_handles.clear()
-    self._l2_handles.clear()
-    self._role_l1_handles.clear()
-    self._txn_sequencer.clear()
-    self._clear_group_transfer_trace_slots()
-    self.transfer_manager.reset()
-    self.l2_mshr.reset()
-    self.l2_cache.reset()
+    self._reset_transfer_state()
     self._l2_capacity_change_cycle = None
     self._last_retried_pool_version = -1
     self._last_retried_capacity_change_cycle = -1
@@ -2242,25 +2249,14 @@ class TileGroup:
     # clearing the generation-keyed handle/role registries.
     self._cancel_pending_admissions(release_staged=True)
     # PR 3: clear structured grid registries
-    self._grid_signals.clear()
-    self._live_launches.clear()
-    self._grid_l2_pins.clear()
-    self._l2_roles.clear()
-    self._protocol_live_l2.clear()
+    self._clear_grid_state()
     self._task_trace_name = None
     self._task_start_cycle = None
     self._task_done_traced = False
     self._registered_programs.clear()
     # PR 2: clear admission + transfer state
     self._context_launch_generation = 0
-    self._global_handles.clear()
-    self._l2_handles.clear()
-    self._role_l1_handles.clear()
-    self._txn_sequencer.clear()
-    self._clear_group_transfer_trace_slots()
-    self.transfer_manager.reset()
-    self.l2_mshr.reset()
-    self.l2_cache.reset()
+    self._reset_transfer_state()
     self.hbm.reset()
     self._l2_capacity_change_cycle = None
     self._last_retried_pool_version = -1

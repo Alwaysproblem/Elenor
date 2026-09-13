@@ -51,6 +51,7 @@ from .dialects.elenor import (
   TileSignalOp,
   TileStoreOp,
   TileSubviewOp,
+  _int_list,
 )
 from .execution_ir import (
   ExecDeviceOp,
@@ -77,7 +78,7 @@ from .execution_ir import (
   ExecTileRoleBinding,
   ExecTransfer,
 )
-from .workload_ir import _view_bytes, verify_workload_ir
+from .workload_ir import _body_ops, _view_bytes, _view_offset_bytes, verify_workload_ir
 
 
 def lower_workload_ir(module) -> ExecTileGroupTask:
@@ -381,12 +382,7 @@ def _build_action_dependencies(
     for view, global_write in dict.fromkeys(accesses):
       name = view.base.removeprefix("global:")
       name = aliases.get(name, name)
-      offset = 0
-      for index, value in enumerate(view.offsets):
-        stride = 1
-        for dim in view.backing_dims[index + 1 :]:
-          stride *= dim
-        offset += value * stride * view.element_bytes
+      offset = _view_offset_bytes(view.offsets, view.backing_dims, view.element_bytes)
       end = offset + view.bytes
       for prior_name, start, stop, prior_write, event in global_accesses:
         if (
@@ -475,6 +471,73 @@ def _register_role(
 # ---------------------------------------------------------------------------
 
 
+def _lower_engine_descriptor(
+  op: TileLoadOp | TileStoreOp | TileGatherOp | TilePowOp | TileEvuOp | TileBoaOp,
+  name: str,
+  objects: Mapping[SSAValue, ExecMemoryView],
+) -> tuple[ExecEngineDesc, ExecTileOp]:
+  if isinstance(op, (TileLoadOp, TileStoreOp)):
+    src = _memory_view(objects, op.src, op.name)
+    dst = _memory_view(objects, op.dst, op.name)
+    return ExecEngineDesc(
+      name=name,
+      kind="MFE",
+      op="load" if isinstance(op, TileLoadOp) else "store",
+      params={},
+      transfer=ExecTransfer(src=src, dst=dst, bytes=src.bytes),
+    ), ExecTileOp.LAUNCH_MFE
+  if isinstance(op, TileGatherOp):
+    accesses = tuple(
+      ExecProfiledAccess(
+        request_id=access.request_id.data,
+        outcome=ExecGatherOutcome(access.outcome.data),
+        bytes=int(access.bytes.value.data),
+        line_token=None if access.line_token is None else access.line_token.data,
+        merge_group=None if access.merge_group is None else access.merge_group.data,
+      )
+      for access in op.profile.block.ops
+    )
+    gather = ExecGatherDesc(
+      source=_memory_view(objects, op.source, op.name),
+      indices=_memory_view(objects, op.indices, op.name),
+      destination=_memory_view(objects, op.destination, op.name),
+      result_bytes=int(op.result_bytes.value.data),
+      cache_min_bytes=int(op.cache_min_bytes.value.data),
+      cache_target_bytes=int(op.cache_target_bytes.value.data),
+      l1_mshr_hint=int(op.l1_mshr_hint.value.data),
+      accesses=accesses,
+    )
+    return ExecEngineDesc(
+      name=name, kind="MFE", op="gather", params={"gather": gather}
+    ), ExecTileOp.LAUNCH_GATHER
+  if isinstance(op, TilePowOp):
+    return ExecEngineDesc(
+      name=name,
+      kind="EVU",
+      op="pow",
+      params={
+        "bytes": int(op.bytes_total.value.data),
+        "exponent": int(op.exponent.value.data),
+        "ops": int(op.pow_ops.value.data),
+      },
+    ), ExecTileOp.LAUNCH_EVU
+  if isinstance(op, TileEvuOp):
+    return ExecEngineDesc(
+      name=name, kind="EVU", op=op.op_name.data, params={"ops": int(op.evu_ops.value.data)}
+    ), ExecTileOp.LAUNCH_EVU
+  if isinstance(op, TileBoaOp):
+    params = {
+      "m": int(op.m.value.data),
+      "n": int(op.n.value.data),
+      "k": int(op.k.value.data),
+      "ops": int(op.boa_ops.value.data),
+    }
+    if op.accumulate is not None:
+      params["accumulate"] = True
+    return ExecEngineDesc(name=name, kind="BOA", op=op.op_name.data, params=params), ExecTileOp.LAUNCH_BOA
+  raise VerifyException(f"unexpected tile program body op '{op.name}'")
+
+
 def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
   descriptors: dict[str, ExecEngineDesc] = {}
   insts: list[ExecTileInst] = []
@@ -554,107 +617,12 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
         bytes=_view_bytes(dims, dtype),
         task_dim=(None if body_op.task_dim is None else int(body_op.task_dim.value.data)),
       )
-    elif isinstance(body_op, TileLoadOp):
+    elif isinstance(body_op, (TileLoadOp, TileStoreOp, TileGatherOp, TilePowOp, TileEvuOp, TileBoaOp)):
       desc_name = f"d{desc_counter}"
       desc_counter += 1
-      src = _memory_view(objects, body_op.src, body_op.name)
-      dst = _memory_view(objects, body_op.dst, body_op.name)
-      descriptors[desc_name] = ExecEngineDesc(
-        name=desc_name,
-        kind="MFE",
-        op="load",
-        params={},
-        transfer=ExecTransfer(src=src, dst=dst, bytes=src.bytes),
-      )
-      insts.append(
-        ExecTileInst(ExecTileOp.LAUNCH_MFE, dst=_event_tag(body_op.result.type), args=(desc_name,))
-      )
-    elif isinstance(body_op, TileStoreOp):
-      desc_name = f"d{desc_counter}"
-      desc_counter += 1
-      src = _memory_view(objects, body_op.src, body_op.name)
-      dst = _memory_view(objects, body_op.dst, body_op.name)
-      descriptors[desc_name] = ExecEngineDesc(
-        name=desc_name,
-        kind="MFE",
-        op="store",
-        params={},
-        transfer=ExecTransfer(src=src, dst=dst, bytes=src.bytes),
-      )
-      insts.append(
-        ExecTileInst(ExecTileOp.LAUNCH_MFE, dst=_event_tag(body_op.result.type), args=(desc_name,))
-      )
-    elif isinstance(body_op, TileGatherOp):
-      desc_name = f"d{desc_counter}"
-      desc_counter += 1
-      accesses = tuple(
-        ExecProfiledAccess(
-          request_id=access.request_id.data,
-          outcome=ExecGatherOutcome(access.outcome.data),
-          bytes=int(access.bytes.value.data),
-          line_token=None if access.line_token is None else access.line_token.data,
-          merge_group=None if access.merge_group is None else access.merge_group.data,
-        )
-        for access in body_op.profile.block.ops
-      )
-      gather = ExecGatherDesc(
-        source=_memory_view(objects, body_op.source, body_op.name),
-        indices=_memory_view(objects, body_op.indices, body_op.name),
-        destination=_memory_view(objects, body_op.destination, body_op.name),
-        result_bytes=int(body_op.result_bytes.value.data),
-        cache_min_bytes=int(body_op.cache_min_bytes.value.data),
-        cache_target_bytes=int(body_op.cache_target_bytes.value.data),
-        l1_mshr_hint=int(body_op.l1_mshr_hint.value.data),
-        accesses=accesses,
-      )
-      descriptors[desc_name] = ExecEngineDesc(
-        name=desc_name, kind="MFE", op="gather", params={"gather": gather}
-      )
-      insts.append(
-        ExecTileInst(ExecTileOp.LAUNCH_GATHER, dst=_event_tag(body_op.result.type), args=(desc_name,))
-      )
-    elif isinstance(body_op, TilePowOp):
-      desc_name = f"d{desc_counter}"
-      desc_counter += 1
-      descriptors[desc_name] = ExecEngineDesc(
-        name=desc_name,
-        kind="EVU",
-        op="pow",
-        params={
-          "bytes": int(body_op.bytes_total.value.data),
-          "exponent": int(body_op.exponent.value.data),
-          "ops": int(body_op.pow_ops.value.data),
-        },
-      )
-      insts.append(
-        ExecTileInst(ExecTileOp.LAUNCH_EVU, dst=_event_tag(body_op.result.type), args=(desc_name,))
-      )
-    elif isinstance(body_op, TileEvuOp):
-      desc_name = f"d{desc_counter}"
-      desc_counter += 1
-      descriptors[desc_name] = ExecEngineDesc(
-        name=desc_name, kind="EVU", op=body_op.op_name.data, params={"ops": int(body_op.evu_ops.value.data)}
-      )
-      insts.append(
-        ExecTileInst(ExecTileOp.LAUNCH_EVU, dst=_event_tag(body_op.result.type), args=(desc_name,))
-      )
-    elif isinstance(body_op, TileBoaOp):
-      desc_name = f"d{desc_counter}"
-      desc_counter += 1
-      params = {
-        "m": int(body_op.m.value.data),
-        "n": int(body_op.n.value.data),
-        "k": int(body_op.k.value.data),
-        "ops": int(body_op.boa_ops.value.data),
-      }
-      if body_op.accumulate is not None:
-        params["accumulate"] = True
-      descriptors[desc_name] = ExecEngineDesc(
-        name=desc_name, kind="BOA", op=body_op.op_name.data, params=params
-      )
-      insts.append(
-        ExecTileInst(ExecTileOp.LAUNCH_BOA, dst=_event_tag(body_op.result.type), args=(desc_name,))
-      )
+      desc, launch_op = _lower_engine_descriptor(body_op, desc_name, objects)
+      descriptors[desc_name] = desc
+      insts.append(ExecTileInst(launch_op, dst=_event_tag(body_op.result.type), args=(desc_name,)))
     elif isinstance(body_op, TileAwaitOp):
       events = [_event_tag(operand.type) for operand in body_op.events]
       if len(events) == 1:
@@ -688,14 +656,6 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
 # ---------------------------------------------------------------------------
 
 
-def _body_ops(op) -> list:
-  """Return the ops in the single-block body region of a definition op."""
-  region = op.body if hasattr(op, "body") else op.regions[0]
-  if len(region.blocks) != 1:
-    raise VerifyException("expected exactly one block in body region")
-  return list(region.blocks[0].ops)
-
-
 def _event_tag(event_type) -> str:
   """Extract the runtime event id from a ``!nest.event<tag>``,
   ``!tile.event<tag>``, or ``!nexus.event<"tag">`` type."""
@@ -708,10 +668,6 @@ def _dims_dtype(type_attr: Attribute) -> tuple[tuple[int, ...], str]:
   if not isinstance(type_attr, (NestBuffer, NestGlobalMemref, NestGlobalView, NestL2View, TileL1Buffer)):
     raise VerifyException(f"expected shape-typed memory attribute, got {type(type_attr).__name__}")
   return tuple(_int_list(type_attr.dims)), type_attr.dtype.data
-
-
-def _int_list(arr) -> list[int]:
-  return [int(value.value.data) for value in arr.data]
 
 
 def _global_input(arg: SSAValue, index: int) -> ExecGlobalInput:
