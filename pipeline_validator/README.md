@@ -1,13 +1,55 @@
 # ELENOR Runtime Pipeline Validator
 
-A **cycle-accurate functional simulator** of one ELENOR Tile Group
-(1 Tile Group Sequencer + 4 Compute Tiles), built to validate the runtime
-pipeline efficiency described in the `design/` architecture specs.
+A **cycle-stepped CPU + accelerator functional simulator**: an independent
+CPU Device controller connects through a message port to one FPGA-oriented
+Tile Group (shared finite Group scheduler + 4 Compute Tiles).
 
 It models the full `Graph → Group Task → Tile-SPMD Tile Program roles → Engine`
 control flow, the Stream Queue producer-consumer pipeline, and the
 BOA / EVU / MFE / USE engine partition, then reports a PMU fingerprint
 with pass/fail checks against the architecture's predicted bottlenecks.
+
+## CPU / hardware boundary and ready-action scheduling
+
+- `device.py`: CPU `nexus.program` interpreter, dependency-ready pending
+  descriptors, explicit await, and bounded outstanding/completion credits.
+- `runtime/group_port.py`: submission/completion adapter; owns Group context
+  slots and hides sequencers from the CPU.
+- `group_scheduler.py`: shared hardware-model action window, finite rotating
+  scan, one REGISTER plus one ISSUE per cycle, and independent completion.
+- `tile.py`: exact physical Tile contexts, eligible-head round robin, and
+  Tile-owned atomic L1/frame admission.
+
+`--device-context-mode N` limits hardware-admitted CPU requests; WAIT_DEPS
+uses `device.pending_capacity` instead. `--context-mode N` is the exact
+physical Tile context count: no implicit max(), and no Device-slot→Tile-slot
+binding. Optional `nest.context context=N` is an affinity to a Group context
+slot, not a Tile slot or a Group ID. Explicit dispatch `context=N` remains a
+physical Tile pin.
+
+```bash
+bash examples/run.sh ready-action-branch --group-policy s0 --json
+bash examples/run.sh ready-action-branch --group-policy s1 --json
+bash examples/run.sh ready-action-branch --group-policy s2 \
+  --sim-override group.action_capacity=32 \
+  --sim-override group.context_action_quota=16 \
+  --sim-override group.scan_width=8 --json
+bash examples/run.sh device-dependency-submit --json
+```
+
+S0 selects each context's earliest unissued action; S1/S2 select eligible
+visible actions through the same finite backend. S2 has no hidden wider issue:
+its resource sizes are explicit. Ordinary dependencies stay on descriptors;
+explicit await and context-local barrier remain frontend fences. Dependencies
+are checked by SSA identity and actual buffer/global-range hazards; cross-context
+overlapping global accesses with a writer require explicit submit dependencies
+or a preceding CPU await. Group bank/adapter pressure is not CPU scheduling.
+
+Group/CPU configurations and timing are reported separately. `same_program`
+epoch is optional (`--sim-override group.epoch_policy=same_program`), gates
+only dispatch, and does not freeze independent prefetch/store. No RTL, Fmax,
+power, tensor numerics, task stealing, or reusable reservation layouts are
+claimed by this executable model.
 
 ## IR Dialect
 
@@ -75,7 +117,8 @@ a real writer and Store. An asynchronously unused input may release with
 empty dependencies; no buffer use may follow release.
 Release preflights owner, role, generations, live handle, every event and
 phase, pins, and unfinished allocation-identity-matched transfers before
-unpinning any writer. Only successful final-free wakes capacity waiters.
+unpinning any writer. Successful final-free wakes L2 capacity waiters;
+finite event-budget waiters also wake when event reservations retire.
 The event type tag doubles as the runtime event id shared by simulator
 and trace.
 
@@ -98,18 +141,19 @@ same address before the holder returns, and terminal cleanup preserves the
 replacement allocation. Omitting free makes that same admission fail.
 The evidence includes full hardware/simulator/binding snapshots and source hashes.
 
-**L2 admission wait (PR 3.5)** — a submit is accepted onto a device slot
-even when its atomic L2 bundle transiently cannot fit: the context
-enters `ADMISSION_WAIT` (slot reserved, no UCE/L1/L2/stream/DMA
-resource held, no fault). Only a `nest.release` allocator final-free
-wakes the strict-FIFO wait queue; the head is admitted in the same
-cycle and issues its first group action the next cycle, so a later
-context can overlap an earlier context's compute/store. Invalid or
-empty-pool-impossible bundles fault immediately and never queue. The
-submit result event still means full context completion.
+**Admission wait** — after the CPU port accepts a request, a Group context
+slot may be retained while its atomic L2 bundle or event budget cannot fit.
+WAIT_DEPS requests never reach that port. No UCE/L1/L2/stream/DMA work is
+partially held on a failed L2 plan. Admission remains FIFO; L2 final-free
+and independent event-budget reclamation are explicit wake sources.
+Newly registered actions cannot issue in the same cycle; exact first-issue
+latency additionally depends on window/scan/adapter pressure.
+Permanent capacity errors fault instead of waiting indefinitely. The CPU
+completion still covers grids, final store, and safe resource cleanup.
 
-**`depends_on(%e)`** expresses data dependencies directly on async ops
-(dispatch, store, release), lowered to wait actions by the lowering.
+**`depends_on(%e)`** stays on prefetch/dispatch/store/release descriptors,
+not synthetic blocking WAIT actions. `nexus.submit_context.async` accepts
+Nexus dependencies independently of the Group's internal events.
 
 ### Print / parse
 

@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 from .cli import main
-from .config import HardwareConfig, SimConfig, WorkloadConfig
+from .config import DeviceConfig, GroupSchedulerConfig, HardwareConfig, SimConfig, WorkloadConfig
+from .device import (
+  CpuDeviceController,
+  DeviceCompletion,
+  DeviceCompletionStatus,
+  DeviceLaunchRequest,
+  DevicePort,
+)
 from .dialects import Elenor
 from .dialects.elenor import (
   NestAggregate,
@@ -60,7 +67,6 @@ from .package import ElenorPackage
 from .pmu import PMUCounter, StallReason
 from .report import WorkloadReport  # noqa: F401
 from .runtime import (
-  DeviceRuntime,
   EventStatus,
   EventTable,
   FaultCode,
@@ -78,11 +84,7 @@ from .tile import ComputeTile, TileUCE
 from .tile_group import TileGroup
 from .tile_group_sequencer import TileGroupSequencer
 from .trace import Tracer, trace_to_html
-from .workload_builders import (
-  make_identity_tile_program,
-  make_pow_task,
-  make_pow_tile_program,
-)
+from .workload_builders import make_identity_tile_program, make_pow_task, make_pow_tile_program
 from .workload_ir import (
   load_workload_ir,
   make_elenor_context,
@@ -90,18 +92,20 @@ from .workload_ir import (
   print_workload_ir,
   verify_workload_ir,
 )
-from .workloads import (
-  PowWorkload,
-  Workload,
-)
+from .workloads import PowWorkload, Workload
 
 __all__ = [
   "L2SRAM",
   "BOAEngine",
   "CacheStats",
   "ComputeTile",
+  "CpuDeviceController",
   "DeterministicLRUCache",
-  "DeviceRuntime",
+  "DeviceCompletion",
+  "DeviceCompletionStatus",
+  "DeviceConfig",
+  "DeviceLaunchRequest",
+  "DevicePort",
   "EOSPolicy",
   "EVUEngine",
   "Elenor",
@@ -114,6 +118,7 @@ __all__ = [
   "FaultRing",
   "FirmwareRuntime",
   "GlobalBinding",
+  "GroupSchedulerConfig",
   "HardwareConfig",
   "HostRuntime",
   "KernelDriver",

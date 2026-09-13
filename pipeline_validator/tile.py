@@ -13,26 +13,23 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from .config import MAX_CONTEXT_COUNT, HardwareConfig
-from .engines import (
-  BOAEngine,
-  Engine,
-  EngineJob,
-  EngineState,
-  EVUEngine,
-  MFEEngine,
-  USEEngine,
-)
+from .engines import BOAEngine, Engine, EngineJob, EngineState, EVUEngine, MFEEngine, USEEngine
 from .execution_ir import (
   ExecEngineDesc,
   ExecGatherDesc,
   ExecTileInst,
   ExecTileOp,
   ExecTileProgram,
+  GridInstanceId,
   PhaseSignal,
   TaskIdentity,
 )
 from .memory import (
+  AdmissionFailure,
+  AdmissionFailureKind,
   AllocationHandle,
+  AllocationPlan,
+  AllocationRequest,
   AllocationState,
   MemoryInvariantError,
   ResolvedMemoryView,
@@ -54,6 +51,14 @@ class _UCEContextState(Enum):
   WAIT_STREAM = "wait_stream"
   WAIT_ENGINE_QUEUE = "wait_engine_queue"
   DONE = "done"
+  FAULT = "fault"
+
+
+class _UCEHeadStatus(Enum):
+  ELIGIBLE = "eligible"
+  WAIT_EVENT = "wait_event"
+  WAIT_ENGINE_QUEUE = "wait_engine_queue"
+  WAIT_STREAM = "wait_stream"
   FAULT = "fault"
 
 
@@ -114,12 +119,25 @@ class _TileContextMemory:
   terminal/reset bookkeeping; explicit free removes the binding once.
 
   """
+
   task_identity: TaskIdentity
   l2_formal_handles: dict[int, AllocationHandle] = field(default_factory=dict)
   global_formal_views: dict[int, ResolvedMemoryView] = field(default_factory=dict)
   l1_handles: dict[str, AllocationHandle] = field(default_factory=dict)
   l2_resolver: L2SRAM | None = None
 
+
+@dataclass
+class TileAdmission:
+  """One Tile's side-effect-free context and L1 admission plan."""
+
+  tile: ComputeTile
+  logical_task_id: int
+  context_id: int
+  l1_plan: AllocationPlan | None
+  prepare_cycles: int = 0
+  l1_handles: dict[str, AllocationHandle] = field(default_factory=dict)
+  bound: bool = False
 
 
 @dataclass
@@ -141,6 +159,12 @@ class _EngineQueueEntry:
   launch_params: dict = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class _UCEHeadProbe:
+  status: _UCEHeadStatus
+  reason: str = ""
+
+
 _ACTIVE_CONTEXT_STATES = {
   _UCEContextState.ACCEPT,
   _UCEContextState.FRAME_BIND,
@@ -154,12 +178,14 @@ _ACTIVE_CONTEXT_STATES = {
 class TileUCE:
   """Tile Unified Control Engine with 1..MAX_CONTEXT_COUNT execution contexts."""
 
-  def __init__(self,
-               tile_id: int,
-               cfg: HardwareConfig,
-               tracer: Tracer | None = None,
-               context_count: int = 1,
-               runtime_enabled: bool = False):
+  def __init__(
+    self,
+    tile_id: int,
+    cfg: HardwareConfig,
+    tracer: Tracer | None = None,
+    context_count: int = 1,
+    runtime_enabled: bool = False,
+  ):
     if context_count < 1 or context_count > MAX_CONTEXT_COUNT:
       raise ValueError("context_count must be between 1 and 8")
     self.tile_id = tile_id
@@ -170,6 +196,7 @@ class TileUCE:
     self.context_count = context_count
     self.contexts = [_UCEContext(ctx_id=i) for i in range(context_count)]
     self._current_ctx: int = 0
+    self._rr_next_ctx: int = 0
     self._terminal_events: list[_UCETerminalEvent] = []
     self._local_event_owner: dict[str, _UCEEventRef] = {}
     self._external_events_done: set[str] = set()
@@ -200,18 +227,19 @@ class TileUCE:
 
   def available_context_id(self, preferred: int | None = None) -> int | None:
     """Return the exact context id a later atomic bind may consume."""
-    candidates = self.contexts if preferred is None else (
-      self.contexts[preferred],)
-    return next(
-      (ctx.ctx_id for ctx in candidates if self._context_available(ctx)),
-      None)
+    candidates = self.contexts if preferred is None else (self.contexts[preferred],)
+    return next((ctx.ctx_id for ctx in candidates if self._context_available(ctx)), None)
 
-  def bind_context(self, program: ExecTileProgram, role_id: int | None,
-                   role_event_id: str | None,
-                   prepare_cycles: int = 0,
-                   context_id: int | None = None,
-                   memory: _TileContextMemory | None = None,
-                   task_identity: TaskIdentity | None = None) -> int | None:
+  def bind_context(
+    self,
+    program: ExecTileProgram,
+    role_id: int | None,
+    role_event_id: str | None,
+    prepare_cycles: int = 0,
+    context_id: int | None = None,
+    memory: _TileContextMemory | None = None,
+    task_identity: TaskIdentity | None = None,
+  ) -> int | None:
     candidates = self.contexts if context_id is None else (self.contexts[context_id],)
     for ctx in candidates:
       if not self._context_available(ctx):
@@ -228,8 +256,7 @@ class TileUCE:
       ctx.event_records.clear()
       ctx.prepare_total = 1 + prepare_cycles if self.runtime_enabled else 0
       ctx.prepare_remaining = ctx.prepare_total
-      ctx.frame_bind_remaining = (self.cfg.frame_bind_cycles
-                                  if self.runtime_enabled else 0)
+      ctx.frame_bind_remaining = self.cfg.frame_bind_cycles if self.runtime_enabled else 0
       ctx.memory = memory
       ctx.task_identity = task_identity
       ctx.l1_live_names = {buffer.name for buffer in program.l1_buffers}
@@ -245,12 +272,10 @@ class TileUCE:
     ctx = self.contexts[context_id]
     self._unregister_context_events(ctx)
     for key, fifo in self._engine_queues.items():
-      self._engine_queues[key] = deque(
-        entry for entry in fifo if entry.ctx_id != context_id)
+      self._engine_queues[key] = deque(entry for entry in fifo if entry.ctx_id != context_id)
     self._reset_context(ctx)
 
-  def step(self, cycle: int, tile: ComputeTile,
-           freeze_new_work: bool = False) -> None:
+  def step(self, cycle: int, tile: ComputeTile, freeze_new_work: bool = False) -> None:
     self.pmu.add_cycle("total", 1)
     self._ensure_context_traces(cycle)
     # Running engines may finish while reset drains. Apply those
@@ -269,46 +294,34 @@ class TileUCE:
       self._sample_context_counters(cycle)
       return
 
-    wait_event_blocked = False
-    wait_stream_blocked = False
     for ctx in self.contexts:
       if ctx.state == _UCEContextState.ACCEPT:
         self._advance_accept(ctx, cycle)
       elif ctx.state == _UCEContextState.FRAME_BIND:
         self._advance_frame_bind(ctx, cycle, tile)
-      elif ctx.state == _UCEContextState.WAIT_EVENT:
-        if self._wait_refs_ready(ctx):
-          ctx.wait_refs = ()
-          ctx.wait_all = False
-          self._set_context_state(ctx, _UCEContextState.READY, cycle)
-        else:
-          wait_event_blocked = True
-      elif ctx.state == _UCEContextState.WAIT_STREAM:
-        wait_stream_blocked = True
     if self.faulted:
       self._sample_context_counters(cycle)
       return
-    if self._retry_held_launch_issue(cycle, require_queue_space=True):
+
+    selected, selected_probe, probes = self._select_context(cycle, tile)
+    self._record_blocked_heads(probes, cycle)
+    if selected is not None and selected_probe is not None:
+      if selected_probe.status == _UCEHeadStatus.FAULT:
+        self._fault_context(selected, selected_probe.reason, cycle)
+      else:
+        self._wake_selected_context(selected, cycle)
+        self._issue_context(selected, cycle, tile)
       self._sample_context_counters(cycle)
       return
 
-    selected = self._select_context(cycle)
-    if selected is not None:
-      self._issue_context(selected, cycle, tile)
-      self._sample_context_counters(cycle)
-      return
-
-    if self._retry_wait_stream_issue(cycle, tile):
-      self._sample_context_counters(cycle)
-      return
-    if self._retry_held_launch_issue(cycle, require_queue_space=False):
-      self._sample_context_counters(cycle)
-      return
-
-    if wait_event_blocked:
+    statuses = {probe.status for _ctx, probe in probes}
+    if _UCEHeadStatus.WAIT_EVENT in statuses:
       self.pmu.add(StallReason.WAIT_EVENT, 1)
       self.pmu.add_cycle("wait_event", 1)
-    elif wait_stream_blocked:
+    elif _UCEHeadStatus.WAIT_ENGINE_QUEUE in statuses:
+      self.pmu.add(StallReason.WAIT_OPERAND, 1)
+      self.pmu.add_cycle("engine_queue_full", 1)
+    elif _UCEHeadStatus.WAIT_STREAM in statuses:
       self.pmu.add(StallReason.STREAM_CREDIT, 1)
       self.pmu.add_cycle("wait_stream", 1)
     elif self.has_active_contexts():
@@ -326,6 +339,10 @@ class TileUCE:
       self._external_events_done.add(runtime_id)
       return
     self.pmu.add_event("uce_unknown_event")
+
+  def retire_external_events(self, events: set[str] | tuple[str, ...]) -> None:
+    """Discard completed external events owned by a retired launch."""
+    self._external_events_done.difference_update(events)
 
   def has_active_contexts(self) -> bool:
     return any(ctx.state in _ACTIVE_CONTEXT_STATES for ctx in self.contexts)
@@ -356,6 +373,7 @@ class TileUCE:
     return {
       "context_count": self.context_count,
       "current_ctx": self._current_ctx,
+      "rr_next_ctx": self._rr_next_ctx,
       "active_context_count": self.active_context_count(),
       "ready_context_count": self.ready_context_count(),
       "engine_queues": {
@@ -382,11 +400,7 @@ class TileUCE:
           "role_id": ctx.role_id,
           "role_event_id": ctx.role_event_id,
           "wait_refs": [
-            {
-              "scope": ref.scope.value,
-              "runtime_id": ref.runtime_id,
-              "local_name": ref.local_name,
-            }
+            {"scope": ref.scope.value, "runtime_id": ref.runtime_id, "local_name": ref.local_name}
             for ref in ctx.wait_refs
           ],
           "events_done": sorted(ctx.events_done),
@@ -401,6 +415,7 @@ class TileUCE:
       self._close_context_trace(ctx, 0)
       self._reset_context(ctx)
     self._current_ctx = 0
+    self._rr_next_ctx = 0
     self._terminal_events.clear()
     self._local_event_owner.clear()
     self._external_events_done.clear()
@@ -414,14 +429,14 @@ class TileUCE:
     return f"ctx{ctx.ctx_id}:{local_name}"
 
   def _make_local_event_ref(self, ctx: _UCEContext, local_name: str) -> _UCEEventRef:
-    return _UCEEventRef(_UCEEventScope.LOCAL, ctx.ctx_id, local_name,
-                        self._runtime_event_id(ctx, local_name))
+    return _UCEEventRef(
+      _UCEEventScope.LOCAL, ctx.ctx_id, local_name, self._runtime_event_id(ctx, local_name)
+    )
 
   def _make_external_event_ref(self, local_name: str) -> _UCEEventRef:
     return _UCEEventRef(_UCEEventScope.EXTERNAL, None, local_name, local_name)
 
-  def _make_wait_ref(self, ctx: _UCEContext, local_name: str,
-                     cycle: int) -> _UCEEventRef | None:
+  def _make_wait_ref(self, ctx: _UCEContext, local_name: str, cycle: int) -> _UCEEventRef | None:
     if "ev_dma_" in local_name:
       return self._make_external_event_ref(local_name)
     ref = ctx.event_records.get(local_name)
@@ -435,13 +450,9 @@ class TileUCE:
       return True
     if ctx.state != _UCEContextState.DONE:
       return False
-    if any(ref.local_name not in ctx.events_done
-           for ref in ctx.event_records.values()):
+    if any(ref.local_name not in ctx.events_done for ref in ctx.event_records.values()):
       return False
-    return not any(
-      entry.ctx_id == ctx.ctx_id
-      for queue in self._engine_queues.values()
-      for entry in queue)
+    return not any(entry.ctx_id == ctx.ctx_id for queue in self._engine_queues.values() for entry in queue)
 
   def _event_ref_done(self, ref: _UCEEventRef) -> bool:
     if ref.scope == _UCEEventScope.EXTERNAL:
@@ -467,8 +478,7 @@ class TileUCE:
 
   def _advance_accept(self, ctx: _UCEContext, cycle: int) -> None:
     if ctx.prepare_remaining <= 0:
-      next_state = (_UCEContextState.FRAME_BIND
-                    if ctx.frame_bind_remaining > 0 else _UCEContextState.READY)
+      next_state = _UCEContextState.FRAME_BIND if ctx.frame_bind_remaining > 0 else _UCEContextState.READY
       self._set_context_state(ctx, next_state, cycle)
       return
     if ctx.prepare_remaining == ctx.prepare_total:
@@ -477,12 +487,10 @@ class TileUCE:
       self.pmu.add_cycle("prepared_check", 1)
     ctx.prepare_remaining -= 1
     if ctx.prepare_remaining == 0:
-      next_state = (_UCEContextState.FRAME_BIND
-                    if ctx.frame_bind_remaining > 0 else _UCEContextState.READY)
+      next_state = _UCEContextState.FRAME_BIND if ctx.frame_bind_remaining > 0 else _UCEContextState.READY
       self._set_context_state(ctx, next_state, cycle)
 
-  def _advance_frame_bind(self, ctx: _UCEContext, cycle: int,
-                          tile: ComputeTile) -> None:
+  def _advance_frame_bind(self, ctx: _UCEContext, cycle: int, tile: ComputeTile) -> None:
     self.pmu.add_cycle("frame_bind", 1)
     if ctx.frame_bind_remaining > 1:
       ctx.frame_bind_remaining -= 1
@@ -495,14 +503,19 @@ class TileUCE:
       return
     if tile.memory_trace is not None and self.tracer is not None:
       self.tracer.instant(
-        f"Tile{self.tile_id}", "Lifecycle", "frame_bind", cycle,
-        {"ctx_id": ctx.ctx_id,
-         "generation": tile.l1_frames[ctx.ctx_id].generation,
-         "tile_id": self.tile_id})
+        f"Tile{self.tile_id}",
+        "Lifecycle",
+        "frame_bind",
+        cycle,
+        {
+          "ctx_id": ctx.ctx_id,
+          "generation": tile.l1_frames[ctx.ctx_id].generation,
+          "tile_id": self.tile_id,
+        },
+      )
     self._set_context_state(ctx, _UCEContextState.READY, cycle)
 
-  def _retry_wait_stream(self, ctx: _UCEContext, cycle: int,
-                         tile: ComputeTile) -> bool:
+  def _retry_wait_stream(self, ctx: _UCEContext, cycle: int, tile: ComputeTile) -> bool:
     if ctx.program is None or ctx.pc >= len(ctx.program.insts):
       return False
     ins = ctx.program.insts[ctx.pc]
@@ -538,44 +551,115 @@ class TileUCE:
       return all(self._event_ref_done(ref) for ref in ctx.wait_refs)
     return any(self._event_ref_done(ref) for ref in ctx.wait_refs)
 
-  def _select_context(self, cycle: int) -> _UCEContext | None:
-    current = self.contexts[self._current_ctx]
-    if current.state == _UCEContextState.READY:
-      return current
-    next_ctx = self._find_next_ready(self._current_ctx)
-    if next_ctx is None:
+  def _probe_wait_instruction(self, ctx: _UCEContext, ins: ExecTileInst) -> _UCEHeadProbe:
+    names = (ins.args[0],) if ins.op == ExecTileOp.WAIT else tuple(ins.args)
+    done: list[bool] = []
+    for name in names:
+      if "ev_dma_" in name:
+        done.append(name in self._external_events_done)
+        continue
+      ref = ctx.event_records.get(name)
+      if ref is None:
+        return _UCEHeadProbe(_UCEHeadStatus.FAULT, f"wait references unknown event {name}")
+      done.append(self._event_ref_done(ref))
+    ready = all(done) if ins.op == ExecTileOp.WAITALL else any(done)
+    return _UCEHeadProbe(_UCEHeadStatus.ELIGIBLE if ready else _UCEHeadStatus.WAIT_EVENT)
+
+  def _probe_head(self, ctx: _UCEContext, tile: ComputeTile) -> _UCEHeadProbe | None:
+    if ctx.state not in (
+      _UCEContextState.READY,
+      _UCEContextState.WAIT_EVENT,
+      _UCEContextState.WAIT_STREAM,
+      _UCEContextState.WAIT_ENGINE_QUEUE,
+    ):
       return None
-    if next_ctx != self._current_ctx:
-      self._switch_context(self._current_ctx, next_ctx, cycle,
-                           reason="current_not_ready")
-    self._current_ctx = next_ctx
-    return self.contexts[next_ctx]
+    if ctx.program is None:
+      return _UCEHeadProbe(_UCEHeadStatus.FAULT, "active context has no tile program")
+    if ctx.state == _UCEContextState.WAIT_EVENT and not self._wait_refs_ready(ctx):
+      return _UCEHeadProbe(_UCEHeadStatus.WAIT_EVENT)
+    if ctx.pc >= len(ctx.program.insts):
+      return _UCEHeadProbe(_UCEHeadStatus.ELIGIBLE)
 
-  def _find_next_ready(self, start_ctx: int) -> int | None:
-    for offset in range(1, self.context_count + 1):
-      idx = (start_ctx + offset) % self.context_count
-      if self.contexts[idx].state == _UCEContextState.READY:
-        return idx
-    return None
+    ins = ctx.program.insts[ctx.pc]
+    if ins.op in (ExecTileOp.WAIT, ExecTileOp.WAITALL):
+      return self._probe_wait_instruction(ctx, ins)
+    if ins.op in (
+      ExecTileOp.LAUNCH_BOA,
+      ExecTileOp.LAUNCH_EVU,
+      ExecTileOp.LAUNCH_USE,
+      ExecTileOp.LAUNCH_MFE,
+      ExecTileOp.LAUNCH_GATHER,
+    ):
+      try:
+        self._assert_launch_l1_live(ctx, ins)
+        queue_key = self._launch_queue_key(ctx, ins)
+      except (KeyError, MemoryInvariantError, ValueError) as exc:
+        return _UCEHeadProbe(_UCEHeadStatus.FAULT, str(exc))
+      if ins.dst is None:
+        return _UCEHeadProbe(_UCEHeadStatus.FAULT, "engine launch has no completion event")
+      if ins.dst in ctx.event_records:
+        return _UCEHeadProbe(_UCEHeadStatus.FAULT, f"duplicate completion event '{ins.dst}'")
+      if len(self._engine_queues[queue_key]) >= self._engine_queue_depths[queue_key]:
+        return _UCEHeadProbe(_UCEHeadStatus.WAIT_ENGINE_QUEUE)
+      return _UCEHeadProbe(_UCEHeadStatus.ELIGIBLE)
+    if ins.op in (ExecTileOp.STREAM_POP, ExecTileOp.STREAM_ACQUIRE):
+      qid = ins.args[0]
+      if qid < 0 and ins.op == ExecTileOp.STREAM_ACQUIRE:
+        return _UCEHeadProbe(_UCEHeadStatus.ELIGIBLE)
+      try:
+        queue = tile.get_stream(qid)
+      except KeyError:
+        return _UCEHeadProbe(_UCEHeadStatus.FAULT, f"unknown stream queue {qid}")
+      eligible = (
+        not queue.is_empty if ins.op == ExecTileOp.STREAM_POP else not queue.is_full and not queue._faulted
+      )
+      return _UCEHeadProbe(_UCEHeadStatus.ELIGIBLE if eligible else _UCEHeadStatus.WAIT_STREAM)
+    return _UCEHeadProbe(_UCEHeadStatus.ELIGIBLE)
 
-  def _find_next_wait_stream(self, start_ctx: int) -> int | None:
-    for offset in range(1, self.context_count + 1):
-      idx = (start_ctx + offset) % self.context_count
-      if self.contexts[idx].state == _UCEContextState.WAIT_STREAM:
-        return idx
-    return None
-
-  def _find_held_launch(self, start_ctx: int,
-                        require_queue_space: bool) -> int | None:
-    for offset in range(1, self.context_count + 1):
-      idx = (start_ctx + offset) % self.context_count
+  def _select_context(
+    self, cycle: int, tile: ComputeTile
+  ) -> tuple[_UCEContext | None, _UCEHeadProbe | None, list[tuple[_UCEContext, _UCEHeadProbe]]]:
+    probes: list[tuple[_UCEContext, _UCEHeadProbe]] = []
+    for offset in range(self.context_count):
+      idx = (self._rr_next_ctx + offset) % self.context_count
       ctx = self.contexts[idx]
-      if ctx.state != _UCEContextState.WAIT_ENGINE_QUEUE:
+      probe = self._probe_head(ctx, tile)
+      if probe is None:
         continue
-      if require_queue_space and not self._held_launch_queue_has_space(ctx):
+      probes.append((ctx, probe))
+      if probe.status not in (_UCEHeadStatus.ELIGIBLE, _UCEHeadStatus.FAULT):
         continue
-      return idx
-    return None
+      if idx != self._current_ctx:
+        self._switch_context(self._current_ctx, idx, cycle, reason="eligible_head_rr")
+      self._current_ctx = idx
+      self._rr_next_ctx = (idx + 1) % self.context_count
+      return ctx, probe, probes
+    return None, None, probes
+
+  def _record_blocked_heads(self, probes: list[tuple[_UCEContext, _UCEHeadProbe]], cycle: int) -> None:
+    state_by_status = {
+      _UCEHeadStatus.WAIT_ENGINE_QUEUE: _UCEContextState.WAIT_ENGINE_QUEUE,
+      _UCEHeadStatus.WAIT_STREAM: _UCEContextState.WAIT_STREAM,
+    }
+    for ctx, probe in probes:
+      if ctx.state == _UCEContextState.WAIT_EVENT and self._wait_refs_ready(ctx):
+        ctx.wait_refs = ()
+        ctx.wait_all = False
+        self._set_context_state(ctx, _UCEContextState.READY, cycle)
+      blocked_state = state_by_status.get(probe.status)
+      if ctx.state == _UCEContextState.READY and blocked_state is not None:
+        self._set_context_state(ctx, blocked_state, cycle)
+
+  def _wake_selected_context(self, ctx: _UCEContext, cycle: int) -> None:
+    if ctx.state == _UCEContextState.WAIT_EVENT:
+      ctx.wait_refs = ()
+      ctx.wait_all = False
+    if ctx.state in (
+      _UCEContextState.WAIT_EVENT,
+      _UCEContextState.WAIT_STREAM,
+      _UCEContextState.WAIT_ENGINE_QUEUE,
+    ):
+      self._set_context_state(ctx, _UCEContextState.READY, cycle)
 
   def _trace_issue(self, ctx: _UCEContext, ins: ExecTileInst, cycle: int) -> None:
     if self.tracer is None:
@@ -588,50 +672,9 @@ class TileUCE:
     }
     if ins.dst is not None:
       issue_args["event_id"] = ins.dst
-    self.tracer.instant(f"Tile{self.tile_id}", f"UCE CTX{ctx.ctx_id}",
-                        "uce_issue", cycle, issue_args)
+    self.tracer.instant(f"Tile{self.tile_id}", f"UCE CTX{ctx.ctx_id}", "uce_issue", cycle, issue_args)
 
-  def _retry_held_launch_issue(self, cycle: int,
-                               require_queue_space: bool) -> bool:
-    candidate_id = self._find_held_launch(
-      self._current_ctx, require_queue_space)
-    if candidate_id is None:
-      return False
-    ctx = self.contexts[candidate_id]
-    if not self._retry_held_launch(ctx, cycle):
-      return True
-    if candidate_id != self._current_ctx:
-      self._switch_context(self._current_ctx, candidate_id, cycle,
-                           reason="held_launch_retry")
-      self._current_ctx = candidate_id
-    self._set_context_state(ctx, _UCEContextState.READY, cycle)
-    return True
-
-  def _retry_wait_stream_issue(self, cycle: int, tile: ComputeTile) -> bool:
-    current = self.contexts[self._current_ctx]
-    candidate_id = None
-    if current.state == _UCEContextState.WAIT_STREAM:
-      candidate_id = current.ctx_id
-    else:
-      candidate_id = self._find_next_wait_stream(self._current_ctx)
-      if candidate_id is not None:
-        self._switch_context(self._current_ctx, candidate_id, cycle,
-                             reason="wait_stream_retry")
-        self._current_ctx = candidate_id
-    if candidate_id is None:
-      return False
-    ctx = self.contexts[candidate_id]
-    if ctx.program is None or ctx.pc >= len(ctx.program.insts):
-      return False
-    if self._retry_wait_stream(ctx, cycle, tile):
-      self._set_context_state(ctx, _UCEContextState.READY, cycle)
-      return True
-    self.pmu.add(StallReason.STREAM_CREDIT, 1)
-    self.pmu.add_cycle("wait_stream", 1)
-    return True
-
-  def _switch_context(self, from_ctx: int, to_ctx: int, cycle: int,
-                      reason: str) -> None:
+  def _switch_context(self, from_ctx: int, to_ctx: int, cycle: int, reason: str) -> None:
     self.pmu.add_event("uce_context_switch")
     if self.tracer is not None:
       self.tracer.instant(
@@ -661,8 +704,15 @@ class TileUCE:
     op = ins.op
     if op == ExecTileOp.NOP:
       ctx.pc += 1
-    elif op in (ExecTileOp.MOV, ExecTileOp.ADD, ExecTileOp.CMP, ExecTileOp.LOAD_DESC,
-                ExecTileOp.STORE_DESC, ExecTileOp.PROF_BEGIN, ExecTileOp.PROF_END):
+    elif op in (
+      ExecTileOp.MOV,
+      ExecTileOp.ADD,
+      ExecTileOp.CMP,
+      ExecTileOp.LOAD_DESC,
+      ExecTileOp.STORE_DESC,
+      ExecTileOp.PROF_BEGIN,
+      ExecTileOp.PROF_END,
+    ):
       ctx.pc += 1
     elif op == ExecTileOp.BR:
       ctx.pc = prog.label_index(ins.args[0])
@@ -690,7 +740,9 @@ class TileUCE:
         if self.tracer is not None:
           grid = ctx.task_identity.grid
           self.tracer.instant(
-            f"Tile{self.tile_id}", f"UCE CTX{ctx.ctx_id}", "tile_signal",
+            f"Tile{self.tile_id}",
+            f"UCE CTX{ctx.ctx_id}",
+            "tile_signal",
             cycle,
             {
               "context_name": grid.context_name,
@@ -724,8 +776,7 @@ class TileUCE:
       except MemoryInvariantError as exc:
         self._fault_context(ctx, f"tile.free: {exc}", cycle)
       else:
-        self._issue_engine_launch(
-          ctx, self._launch_queue_key(ctx, ins), ins, cycle)
+        self._issue_engine_launch(ctx, self._launch_queue_key(ctx, ins), ins, cycle)
     elif op == ExecTileOp.STREAM_POP:
       if not self._retry_wait_stream(ctx, cycle, tile):
         self.pmu.add(StallReason.STREAM_CREDIT, 1)
@@ -777,10 +828,7 @@ class TileUCE:
       ctx.pc += 1
 
   @staticmethod
-  def _descriptor_l1_bases(
-    program: ExecTileProgram,
-    desc_ref: str,
-  ) -> tuple[frozenset[str], bool]:
+  def _descriptor_l1_bases(program: ExecTileProgram, desc_ref: str) -> tuple[frozenset[str], bool]:
     """Return explicit L1 bases and whether a descriptor is opaque."""
     desc = program.descriptors.get(desc_ref)
     if desc is None:
@@ -802,11 +850,7 @@ class TileUCE:
       raise MemoryInvariantError("gather descriptor is missing")
     return frozenset(), True
 
-  def _assert_launch_l1_live(
-    self,
-    ctx: _UCEContext,
-    ins: ExecTileInst,
-  ) -> None:
+  def _assert_launch_l1_live(self, ctx: _UCEContext, ins: ExecTileInst) -> None:
     """Reject raw execution paths that access an explicitly freed L1."""
     if ctx.program is None or not ins.args or not isinstance(ins.args[0], str):
       raise MemoryInvariantError("launch has an invalid descriptor reference")
@@ -815,19 +859,11 @@ class TileUCE:
     bases, _opaque = self._descriptor_l1_bases(ctx.program, ins.args[0])
     for base in bases:
       if base not in ctx.l1_live_names:
-        raise MemoryInvariantError(
-          f"use-after-free of L1 buffer '{base}'")
-      if self.runtime_enabled and (
-        ctx.memory is None or base not in ctx.memory.l1_handles
-      ):
-        raise MemoryInvariantError(
-          f"missing physical L1 binding for '{base}'")
+        raise MemoryInvariantError(f"use-after-free of L1 buffer '{base}'")
+      if self.runtime_enabled and (ctx.memory is None or base not in ctx.memory.l1_handles):
+        raise MemoryInvariantError(f"missing physical L1 binding for '{base}'")
 
-  def _assert_free_dependencies_complete(
-    self,
-    ctx: _UCEContext,
-    buffer_name: str,
-  ) -> None:
+  def _assert_free_dependencies_complete(self, ctx: _UCEContext, buffer_name: str) -> None:
     """Check prior queued/active accesses without adding hot-path state."""
     assert ctx.program is not None
     launch_ops = {
@@ -838,7 +874,7 @@ class TileUCE:
       ExecTileOp.LAUNCH_GATHER,
     }
     relevant_events: set[str] = set()
-    for prior in ctx.program.insts[:ctx.pc]:
+    for prior in ctx.program.insts[: ctx.pc]:
       if prior.op not in launch_ops:
         continue
       if prior.dst is None:
@@ -853,46 +889,29 @@ class TileUCE:
       if not opaque and buffer_name not in bases:
         continue
       if prior.dst in relevant_events:
-        raise MemoryInvariantError(
-          f"ambiguous duplicate completion event '{prior.dst}'")
+        raise MemoryInvariantError(f"ambiguous duplicate completion event '{prior.dst}'")
       relevant_events.add(prior.dst)
       if (
         event_ref.scope != _UCEEventScope.LOCAL
         or event_ref.owner_ctx != ctx.ctx_id
         or event_ref.runtime_id != self._runtime_event_id(ctx, prior.dst)
       ):
-        raise MemoryInvariantError(
-          f"prior access event '{prior.dst}' is not owned by this context")
+        raise MemoryInvariantError(f"prior access event '{prior.dst}' is not owned by this context")
       if prior.dst not in ctx.events_done:
-        raise MemoryInvariantError(
-          f"L1 buffer '{buffer_name}' has pending event '{prior.dst}'")
+        raise MemoryInvariantError(f"L1 buffer '{buffer_name}' has pending event '{prior.dst}'")
 
-  def _free_l1(
-    self,
-    ctx: _UCEContext,
-    ins: ExecTileInst,
-    cycle: int,
-    tile: ComputeTile,
-  ) -> None:
+  def _free_l1(self, ctx: _UCEContext, ins: ExecTileInst, cycle: int, tile: ComputeTile) -> None:
     """Preflight, final-free, then invalidate one L1 program binding."""
-    if (
-      len(ins.args) != 1
-      or not isinstance(ins.args[0], str)
-      or ctx.program is None
-    ):
+    if len(ins.args) != 1 or not isinstance(ins.args[0], str) or ctx.program is None:
       raise MemoryInvariantError("requires one L1 buffer name")
     buffer_name = ins.args[0]
     slot_ids = [
-      slot_id
-      for slot_id, buffer in enumerate(ctx.program.l1_buffers)
-      if buffer.name == buffer_name
+      slot_id for slot_id, buffer in enumerate(ctx.program.l1_buffers) if buffer.name == buffer_name
     ]
     if len(slot_ids) != 1:
-      raise MemoryInvariantError(
-        f"L1 buffer '{buffer_name}' is not a unique program allocation")
+      raise MemoryInvariantError(f"L1 buffer '{buffer_name}' is not a unique program allocation")
     if buffer_name not in ctx.l1_live_names:
-      raise MemoryInvariantError(
-        f"double free of L1 buffer '{buffer_name}'")
+      raise MemoryInvariantError(f"double free of L1 buffer '{buffer_name}'")
 
     self._assert_free_dependencies_complete(ctx, buffer_name)
     if not self.runtime_enabled:
@@ -908,8 +927,7 @@ class TileUCE:
       raise MemoryInvariantError("physical L1 role event is missing")
     handle = ctx.memory.l1_handles.get(buffer_name)
     if handle is None or handle.memory_space != "l1":
-      raise MemoryInvariantError(
-        f"missing physical L1 binding for '{buffer_name}'")
+      raise MemoryInvariantError(f"missing physical L1 binding for '{buffer_name}'")
 
     task = ctx.task_identity
     expected_owner = TaskBufferOwner(
@@ -926,11 +944,9 @@ class TileUCE:
     if record is None or record.handle != handle:
       raise MemoryInvariantError("stale allocation generation")
     if record.state != AllocationState.LIVE:
-      raise MemoryInvariantError(
-        f"double free of L1 buffer '{buffer_name}'")
+      raise MemoryInvariantError(f"double free of L1 buffer '{buffer_name}'")
     if record.pins:
-      raise MemoryInvariantError(
-        f"L1 buffer '{buffer_name}' still has allocator pins")
+      raise MemoryInvariantError(f"L1 buffer '{buffer_name}' still has allocator pins")
 
     slot_id = slot_ids[0]
     frame = tile.l1_frames[ctx.ctx_id]
@@ -939,19 +955,16 @@ class TileUCE:
     if transfer_manager is None:
       raise MemoryInvariantError("physical L1 transfer manager is missing")
     if transfer_manager.has_inflight_access(handle):
-      raise MemoryInvariantError(
-        f"L1 buffer '{buffer_name}' has an in-flight transfer")
+      raise MemoryInvariantError(f"L1 buffer '{buffer_name}' has an in-flight transfer")
 
     if not tile.l1_allocator.request_release(handle, expected_owner, cycle):
-      raise MemoryInvariantError(
-        f"L1 buffer '{buffer_name}' did not final-free")
+      raise MemoryInvariantError(f"L1 buffer '{buffer_name}' did not final-free")
     frame.release_slot(slot_id, handle)
     del ctx.memory.l1_handles[buffer_name]
     ctx.l1_live_names.remove(buffer_name)
     self.pmu.add_event("l1_free")
 
-  def _issue_wait(self, ctx: _UCEContext, cycle: int,
-                  event_names: tuple[str, ...], wait_all: bool) -> None:
+  def _issue_wait(self, ctx: _UCEContext, cycle: int, event_names: tuple[str, ...], wait_all: bool) -> None:
     refs: list[_UCEEventRef] = []
     for event_name in event_names:
       ref = self._make_wait_ref(ctx, event_name, cycle)
@@ -978,27 +991,19 @@ class TileUCE:
       return "MFE_GATHER"
     return self._queue_key_for_launch(ctx, ins)
 
-  def _issue_engine_launch(self, ctx: _UCEContext, queue_key: str,
-                           ins: ExecTileInst, cycle: int) -> None:
+  def _issue_engine_launch(self, ctx: _UCEContext, queue_key: str, ins: ExecTileInst, cycle: int) -> None:
+    if self.tracer is not None:
+      self.tracer.instant(
+        f"Tile{self.tile_id}",
+        f"UCE CTX{ctx.ctx_id}",
+        "uce_launch_attempt",
+        cycle,
+        {"ctx_id": ctx.ctx_id, "pc": ctx.pc, "queue": queue_key, "event_id": ins.dst},
+      )
     if not self._enqueue_engine_launch(ctx, queue_key, ins, cycle):
       self._set_context_state(ctx, _UCEContextState.WAIT_ENGINE_QUEUE, cycle)
 
-  def _held_launch_queue_has_space(self, ctx: _UCEContext) -> bool:
-    if ctx.program is None or ctx.pc >= len(ctx.program.insts):
-      return True
-    ins = ctx.program.insts[ctx.pc]
-    queue_key = self._launch_queue_key(ctx, ins)
-    return len(self._engine_queues[queue_key]) < self._engine_queue_depths[queue_key]
-
-  def _retry_held_launch(self, ctx: _UCEContext, cycle: int) -> bool:
-    if ctx.program is None or ctx.pc >= len(ctx.program.insts):
-      return True
-    ins = ctx.program.insts[ctx.pc]
-    return self._enqueue_engine_launch(
-      ctx, self._launch_queue_key(ctx, ins), ins, cycle)
-
-  def _enqueue_engine_launch(self, ctx: _UCEContext, queue_key: str,
-                             ins: ExecTileInst, cycle: int) -> bool:
+  def _enqueue_engine_launch(self, ctx: _UCEContext, queue_key: str, ins: ExecTileInst, cycle: int) -> bool:
     fifo = self._engine_queues[queue_key]
     if len(fifo) >= self._engine_queue_depths[queue_key]:
       self.pmu.add(StallReason.WAIT_OPERAND, 1)
@@ -1013,12 +1018,22 @@ class TileUCE:
     launch_params: dict = {}
     engine_kind = "MFE" if queue_key in ("MFE_LOAD", "MFE_GATHER", "MFE_STORE") else queue_key
     fifo.append(
-      _EngineQueueEntry(ctx.ctx_id,
-                        event_ref,
-                        desc_ref,
-                        ins.op,
-                        engine_kind,
-                        launch_params=launch_params))
+      _EngineQueueEntry(ctx.ctx_id, event_ref, desc_ref, ins.op, engine_kind, launch_params=launch_params)
+    )
+    if self.tracer is not None:
+      self.tracer.instant(
+        f"Tile{self.tile_id}",
+        f"UCE CTX{ctx.ctx_id}",
+        "uce_launch_accepted",
+        cycle,
+        {
+          "ctx_id": ctx.ctx_id,
+          "pc": ctx.pc,
+          "queue": queue_key,
+          "event_id": local_name,
+          "runtime_id": event_ref.runtime_id,
+        },
+      )
     ctx.pc += 1
     return True
 
@@ -1033,6 +1048,7 @@ class TileUCE:
 
   def _drain_engine_queues(self, cycle: int, tile: ComputeTile) -> None:
     from .memory.allocator import MemoryInvariantError
+
     for queue_key in ("BOA", "EVU", "MFE_LOAD", "MFE_GATHER", "MFE_STORE", "USE"):
       fifo = self._engine_queues[queue_key]
       if not fifo:
@@ -1049,10 +1065,7 @@ class TileUCE:
         job: object | None
         if queue_key == "MFE_GATHER":
           job = tile.mfe.launch_gather(
-            resolved.desc,
-            cycle,
-            entry.event_ref.runtime_id,
-            **resolved.launch_params,
+            resolved.desc, cycle, entry.event_ref.runtime_id, **resolved.launch_params
           )
         else:
           is_mfe = queue_key in ("MFE_LOAD", "MFE_STORE")
@@ -1081,10 +1094,9 @@ class TileUCE:
       return tile.mfe
     return tile.use
 
-  def _build_engine_launch(self, ctx: _UCEContext,
-                           entry: _EngineQueueEntry,
-                           tile: ComputeTile,
-                           ) -> _ResolvedEngineLaunch:
+  def _build_engine_launch(
+    self, ctx: _UCEContext, entry: _EngineQueueEntry, tile: ComputeTile
+  ) -> _ResolvedEngineLaunch:
     """Build the ExecEngineDesc + optional MemoryTransaction for this launch.
 
     For MFE load/store (desc.transfer is not None): build a real
@@ -1100,8 +1112,7 @@ class TileUCE:
     launch_params: dict = {}
     if base.transfer is not None:
       desc.params["bytes"] = base.transfer.bytes
-      transaction = self._build_tile_transaction(
-        ctx, base.transfer, entry, tile)
+      transaction = self._build_tile_transaction(ctx, base.transfer, entry, tile)
     elif base.op == "gather":
       gather = base.params.get("gather")
       if not isinstance(gather, ExecGatherDesc):
@@ -1120,6 +1131,7 @@ class TileUCE:
         indices = self._resolve_tile_view(gather.indices, ctx.memory, tile)
         destination = self._resolve_tile_view(gather.destination, ctx.memory, tile)
       from .memory.allocator import TaskBufferOwner
+
       task = ctx.task_identity
       grid = task.grid if task is not None else None
       owner = (
@@ -1155,42 +1167,63 @@ class TileUCE:
       "program": ctx.program.name,
       "local_event_id": entry.event_ref.local_name,
     }
-    return _ResolvedEngineLaunch(
-      desc=desc,
-      transaction=transaction,
-      launch_params=launch_params,
-    )
+    return _ResolvedEngineLaunch(desc=desc, transaction=transaction, launch_params=launch_params)
 
-  def _build_tile_transaction(self, ctx: _UCEContext, transfer,
-                               entry: _EngineQueueEntry,
-                               tile: ComputeTile):
+  def _build_tile_transaction(
+    self, ctx: _UCEContext, transfer, entry: _EngineQueueEntry, tile: ComputeTile
+  ):
     """Build a tile-local MemoryTransaction for an MFE load/store."""
     from .memory.transfer import MemoryTransaction, TransferOp
-    op = (TransferOp.TILE_LOAD if transfer.src.space == "l2"
-          else TransferOp.TILE_STORE)
+
+    op = TransferOp.TILE_LOAD if transfer.src.space == "l2" else TransferOp.TILE_STORE
     role_ev = ctx.role_event_id or "ev"
-    logical_task = 0
-    gen = 0
+    task = ctx.task_identity
     if ctx.memory is not None:
-      logical_task = ctx.memory.task_identity.task_id
-      gen = ctx.memory.task_identity.grid.launch_generation
-    txn_id = (f"{gen}:{role_ev}:"
-              f"t{logical_task}:{entry.event_ref.local_name}")
+      if task is not None and ctx.memory.task_identity != task:
+        raise MemoryInvariantError("tile transaction TaskIdentity does not match context")
+      task = ctx.memory.task_identity
+    logical_task = task.task_id if task is not None else 0
+    gen = task.grid.launch_generation if task is not None else 0
+    txn_id = f"{gen}:{role_ev}:t{logical_task}:{entry.event_ref.local_name}"
     src = None
     dst = None
     if tile.runtime_enabled:
-      if ctx.memory is None:
-        raise ValueError("tile context memory is missing")
+      if ctx.memory is None or task is None:
+        raise ValueError("tile context memory identity is missing")
       src = self._resolve_tile_view(transfer.src, ctx.memory, tile)
       dst = self._resolve_tile_view(transfer.dst, ctx.memory, tile)
-    from .memory.allocator import TaskBufferOwner
-    owner = TaskBufferOwner(
-      "ctx", 0, role_ev, logical_task, self.tile_id, ctx.ctx_id, "task")
+      l1_endpoint = dst if op == TransferOp.TILE_LOAD else src
+      owner = l1_endpoint.handle.owner
+      if (
+        not isinstance(owner, TaskBufferOwner)
+        or owner.context_name != task.grid.context_name
+        or owner.context_launch_generation != task.grid.launch_generation
+        or owner.role_event_id != role_ev
+        or owner.logical_task_id != task.task_id
+        or owner.physical_tile_id != self.tile_id
+        or owner.hardware_context_id != ctx.ctx_id
+      ):
+        raise MemoryInvariantError("tile transaction L1 endpoint has an invalid owner")
+    else:
+      owner = TaskBufferOwner(
+        task.grid.context_name if task is not None else "ctx",
+        gen,
+        role_ev,
+        logical_task,
+        self.tile_id,
+        ctx.ctx_id,
+        "task",
+      )
     return MemoryTransaction(
-      transaction_id=txn_id, op=op, issuer=owner,
-      src=src, dst=dst, bytes_total=transfer.bytes,
+      transaction_id=txn_id,
+      op=op,
+      issuer=owner,
+      src=src,
+      dst=dst,
+      bytes_total=transfer.bytes,
       completion_event=entry.event_ref.runtime_id,
-      tile_id=self.tile_id)
+      tile_id=self.tile_id,
+    )
 
   @staticmethod
   def _resolve_tile_view(view, memory, tile):
@@ -1230,7 +1263,7 @@ class TileUCE:
     element_offset = 0
     for i, off in enumerate(offsets):
       stride = 1
-      for dimension in view.backing_dims[i + 1:]:
+      for dimension in view.backing_dims[i + 1 :]:
         stride *= dimension
       element_offset += off * stride
     offset_bytes = element_offset * view.element_bytes
@@ -1254,7 +1287,8 @@ class TileUCE:
         role_id=ctx.role_id,
         role_event_id=ctx.role_event_id,
         status="done",
-      ))
+      )
+    )
     self._set_context_state(ctx, _UCEContextState.DONE, cycle)
     self._close_context_trace(ctx, cycle)
 
@@ -1273,7 +1307,8 @@ class TileUCE:
         role_event_id=ctx.role_event_id,
         status="fault",
         reason=reason,
-      ))
+      )
+    )
     self._set_context_state(ctx, _UCEContextState.FAULT, cycle)
     self._close_context_trace(ctx, cycle)
 
@@ -1295,8 +1330,7 @@ class TileUCE:
 
   def _unregister_context_events(self, ctx: _UCEContext) -> None:
     runtime_ids = [
-      runtime_id for runtime_id, ref in self._local_event_owner.items()
-      if ref.owner_ctx == ctx.ctx_id
+      runtime_id for runtime_id, ref in self._local_event_owner.items() if ref.owner_ctx == ctx.ctx_id
     ]
     for runtime_id in runtime_ids:
       self._local_event_owner.pop(runtime_id, None)
@@ -1341,8 +1375,7 @@ class TileUCE:
     program = ctx.program.name if ctx.program is not None else "<empty>"
     return f"{prefix}:{program}"
 
-  def _set_context_state(self, ctx: _UCEContext, state: _UCEContextState,
-                         cycle: int) -> None:
+  def _set_context_state(self, ctx: _UCEContext, state: _UCEContextState, cycle: int) -> None:
     ctx.state = state
     self._trace_context_state(ctx, self._state_label(ctx), cycle)
 
@@ -1353,38 +1386,46 @@ class TileUCE:
       # terminal/empty contexts are not traced as state slices; the
       # slice is closed at completion (DONE/FAULT) and never opened for
       # idle EMPTY contexts, so _ensure_context_traces must not re-open.
-      if ctx.state in (_UCEContextState.EMPTY, _UCEContextState.DONE,
-                        _UCEContextState.FAULT):
+      if ctx.state in (_UCEContextState.EMPTY, _UCEContextState.DONE, _UCEContextState.FAULT):
         continue
       state_name = self._state_label(ctx)
       if ctx.trace_slice_name != state_name:
         self._trace_context_state(ctx, state_name, cycle)
 
-  def _trace_context_state(self, ctx: _UCEContext, new_state_name: str,
-                           cycle: int, args: dict | None = None) -> None:
+  def _trace_context_state(
+    self, ctx: _UCEContext, new_state_name: str, cycle: int, args: dict | None = None
+  ) -> None:
     thread = f"UCE CTX{ctx.ctx_id}"
     if self.tracer is not None and ctx.trace_slice_name is not None:
       self.tracer.end(f"Tile{self.tile_id}", thread, ctx.trace_slice_name, cycle)
     ctx.trace_slice_name = new_state_name
     if self.tracer is not None:
-      self.tracer.begin(f"Tile{self.tile_id}", thread, new_state_name, cycle,
-                        args=args)
+      self.tracer.begin(f"Tile{self.tile_id}", thread, new_state_name, cycle, args=args)
 
   def _close_context_trace(self, ctx: _UCEContext, cycle: int) -> None:
     if self.tracer is not None and ctx.trace_slice_name is not None:
-      self.tracer.end(f"Tile{self.tile_id}", f"UCE CTX{ctx.ctx_id}",
-                      ctx.trace_slice_name, cycle)
+      self.tracer.end(f"Tile{self.tile_id}", f"UCE CTX{ctx.ctx_id}", ctx.trace_slice_name, cycle)
     ctx.trace_slice_name = None
 
   def _sample_context_counters(self, cycle: int) -> None:
     if self.tracer is None:
       return
     self.tracer.counter_if_changed(
-      f"Tile{self.tile_id}", "active_context_count", cycle,
-      self.active_context_count(), "contexts", thread="UCE")
+      f"Tile{self.tile_id}",
+      "active_context_count",
+      cycle,
+      self.active_context_count(),
+      "contexts",
+      thread="UCE",
+    )
     self.tracer.counter_if_changed(
-      f"Tile{self.tile_id}", "ready_context_count", cycle,
-      self.ready_context_count(), "contexts", thread="UCE")
+      f"Tile{self.tile_id}",
+      "ready_context_count",
+      cycle,
+      self.ready_context_count(),
+      "contexts",
+      thread="UCE",
+    )
 
 
 class ComputeTile:
@@ -1396,33 +1437,31 @@ class ComputeTile:
   submit local transactions.
   """
 
-  def __init__(self,
-               tile_id: int,
-               cfg: HardwareConfig,
-               tracer: Tracer | None = None,
-               runtime_enabled: bool = False,
-               memory_enabled: bool = False,
-               context_count: int = 1,
-               transfer_manager=None,
-               l2_cache=None,
-               l2_mshr=None,
-               memory_trace=None):
+  def __init__(
+    self,
+    tile_id: int,
+    cfg: HardwareConfig,
+    tracer: Tracer | None = None,
+    runtime_enabled: bool = False,
+    memory_enabled: bool = False,
+    context_count: int = 1,
+    transfer_manager=None,
+    l2_cache=None,
+    l2_mshr=None,
+    memory_trace=None,
+  ):
     self.tile_id = tile_id
     self.cfg = cfg
     self.tracer = tracer
     self.memory_trace = memory_trace
     self.runtime_enabled = runtime_enabled
     self.memory_enabled = memory_enabled
-    self.uce = TileUCE(tile_id,
-                       cfg,
-                       tracer,
-                       context_count=context_count,
-                       runtime_enabled=runtime_enabled)
+    self.uce = TileUCE(tile_id, cfg, tracer, context_count=context_count, runtime_enabled=runtime_enabled)
     self.boa = BOAEngine(cfg, tile_id, tracer)
     self.evu = EVUEngine(cfg, tile_id, tracer)
     from .memory import DeterministicLRUCache, MshrTable
-    self.l1_cache = DeterministicLRUCache(
-      cfg.l1_cache_capacity_bytes, cfg.cache_line_bytes)
+
+    self.l1_cache = DeterministicLRUCache(cfg.l1_cache_capacity_bytes, cfg.cache_line_bytes)
     self.l1_mshr = MshrTable(cfg.l1_mshr_entries)
     self.mfe = MFEEngine(
       cfg,
@@ -1440,60 +1479,213 @@ class ComputeTile:
     self.pmu = PMUCounter()
     # PR 2: per-tile L1 allocator + one frame per UCE context
     from .memory.allocator import BankedFreeExtentAllocator
+
     self.l1_allocator = BankedFreeExtentAllocator(
-      memory_space="l1", capacity_bytes=cfg.tile_l1_bytes,
+      memory_space="l1",
+      capacity_bytes=cfg.tile_l1_bytes,
       banks=cfg.tile_l1_banks,
-      trace=memory_trace, trace_tile_id=tile_id)
+      trace=memory_trace,
+      trace_tile_id=tile_id,
+    )
     self.l1_frames: list[SlotFrame] = [
-      SlotFrame(l1_bytes=cfg.tile_l1_bytes) for _ in range(context_count)
+      SlotFrame(frame_id=context_id, l1_bytes=cfg.tile_l1_bytes) for context_id in range(context_count)
     ]
 
   def bind_stream(self, qid: int, q: StreamQueue) -> None:
     self.streams[qid] = q
+
   def unbind_stream(self, qid: int) -> None:
     self.streams.pop(qid, None)
+
   def get_stream(self, qid: int) -> StreamQueue:
     return self.streams[qid]
 
   def can_accept_context(self, context_id: int | None = None) -> bool:
-    return self.uce.can_accept_context(context_id)
+    return self.available_context_id(context_id) is not None
 
-  def load_program(self, program: ExecTileProgram, role_id: int | None,
-                   role_event_id: str | None,
-                   prepare_cycles: int = 0,
-                   context_id: int | None = None,
-                   memory: _TileContextMemory | None = None,
-                   task_identity: TaskIdentity | None = None) -> int | None:
-    return self.uce.bind_context(program,
-                                 role_id=role_id,
-                                 role_event_id=role_event_id,
-                                 prepare_cycles=prepare_cycles,
-                                 context_id=context_id,
-                                 memory=memory,
-                                 task_identity=task_identity)
+  def plan_admission(
+    self,
+    program: ExecTileProgram,
+    grid: GridInstanceId,
+    role_event_id: str,
+    logical_task_id: int,
+    context_id: int | None = None,
+  ) -> TileAdmission | AdmissionFailure | None:
+    """Choose one exact context and plan its whole L1 bundle, without mutation."""
+    if context_id is not None and not 0 <= context_id < len(self.l1_frames):
+      return AdmissionFailure(
+        AdmissionFailureKind.INVALID_REQUEST, f"hardware context id {context_id} is out of range"
+      )
+    selected = self.available_context_id(context_id)
+    if selected is None:
+      return None
+
+    l1_plan = None
+    if (self.memory_enabled or self.runtime_enabled) and program.l1_buffers:
+      task = TaskIdentity(grid=grid, task_id=logical_task_id)
+      requests = [
+        AllocationRequest(
+          memory_space="l1",
+          buffer_id=buffer.name,
+          owner=TaskBufferOwner(
+            task.grid.context_name,
+            task.grid.launch_generation,
+            role_event_id,
+            task.task_id,
+            self.tile_id,
+            selected,
+            buffer.name,
+          ),
+          size_bytes=buffer.bytes,
+          alignment=max(buffer.alignment, 1),
+        )
+        for buffer in program.l1_buffers
+      ]
+      candidate = self.l1_allocator.plan_bundle(requests)
+      if isinstance(candidate, AdmissionFailure):
+        return candidate
+      l1_plan = candidate
+    return TileAdmission(tile=self, logical_task_id=logical_task_id, context_id=selected, l1_plan=l1_plan)
+
+  def commit_admission(self, admission: TileAdmission, program: ExecTileProgram, cycle: int) -> None:
+    """Commit one Tile-local plan and prepare its exact context frame."""
+    if admission.tile is not self:
+      raise MemoryInvariantError("Tile admission belongs to another tile")
+    if admission.bound or admission.l1_handles:
+      raise MemoryInvariantError("Tile admission was already committed")
+    if self.available_context_id(admission.context_id) != admission.context_id:
+      raise MemoryInvariantError(f"UCE context {admission.context_id} is no longer available")
+    if (self.memory_enabled or self.runtime_enabled) and program.l1_buffers and admission.l1_plan is None:
+      raise MemoryInvariantError("Tile admission is missing its L1 plan")
+
+    handles: tuple[AllocationHandle, ...] = ()
+    frame = self.l1_frames[admission.context_id]
+    materialize_l1 = self.memory_enabled or self.runtime_enabled
+    materialized_specs = tuple(program.l1_buffers) if materialize_l1 else ()
+    try:
+      if admission.l1_plan is not None:
+        expected_names = tuple(buffer.name for buffer in materialized_specs)
+        planned_names = tuple(request.buffer_id for request in admission.l1_plan.requests)
+        if planned_names != expected_names:
+          raise MemoryInvariantError("Tile admission plan does not match the tile program")
+        handles = self.l1_allocator.commit(admission.l1_plan, cycle)
+      if len(handles) != len(materialized_specs):
+        raise MemoryInvariantError("Tile admission committed an incomplete L1 bundle")
+      admission.l1_handles = {buffer.name: handle for buffer, handle in zip(materialized_specs, handles)}
+      if materialize_l1 and not frame.prepare(list(handles), list(materialized_specs)):
+        raise MemoryInvariantError(f"L1 frame prepare failed on tile {self.tile_id}")
+    except (MemoryInvariantError, ValueError):
+      frame.release()
+      for handle in handles:
+        if not self.l1_allocator.is_released(handle):
+          self.l1_allocator.request_release(handle, handle.owner, cycle)
+      admission.l1_handles.clear()
+      raise
+
+    if materialize_l1 and self.memory_trace is not None and self.tracer is not None:
+      self.tracer.instant(
+        f"Tile{self.tile_id}",
+        "Lifecycle",
+        "frame_prepare",
+        cycle,
+        {
+          "ctx_id": admission.context_id,
+          "generation": frame.generation,
+          "tile_id": self.tile_id,
+          "slots": len(materialized_specs),
+        },
+      )
+
+  def abort_admission(self, admission: TileAdmission, cycle: int) -> None:
+    """Undo a committed/prepared/bound Tile admission without partial residue."""
+    if admission.tile is not self:
+      raise MemoryInvariantError("Tile admission belongs to another tile")
+    frame = self.l1_frames[admission.context_id]
+    generation = frame.generation
+    if admission.bound:
+      self.rollback_program(admission.context_id, cycle)
+    else:
+      frame.release()
+      if self.memory_trace is not None and self.tracer is not None:
+        self.tracer.instant(
+          f"Tile{self.tile_id}",
+          "Lifecycle",
+          "frame_release",
+          cycle,
+          {
+            "ctx_id": admission.context_id,
+            "generation": generation,
+            "tile_id": self.tile_id,
+            "reason": "dispatch_rollback",
+          },
+        )
+    for handle in tuple(admission.l1_handles.values()):
+      if not self.l1_allocator.is_released(handle):
+        self.l1_allocator.request_release(handle, handle.owner, cycle)
+    admission.l1_handles.clear()
+    admission.l1_plan = None
+    admission.bound = False
+
+  def load_program(
+    self,
+    program: ExecTileProgram,
+    role_id: int | None,
+    role_event_id: str | None,
+    prepare_cycles: int = 0,
+    context_id: int | None = None,
+    memory: _TileContextMemory | None = None,
+    task_identity: TaskIdentity | None = None,
+  ) -> int | None:
+    return self.uce.bind_context(
+      program,
+      role_id=role_id,
+      role_event_id=role_event_id,
+      prepare_cycles=prepare_cycles,
+      context_id=context_id,
+      memory=memory,
+      task_identity=task_identity,
+    )
 
   def available_context_id(self, preferred: int | None = None) -> int | None:
-    return self.uce.available_context_id(preferred)
+    if preferred is not None and not 0 <= preferred < len(self.l1_frames):
+      return None
+    candidates = range(len(self.l1_frames)) if preferred is None else (preferred,)
+    return next(
+      (
+        context_id
+        for context_id in candidates
+        if self.uce.available_context_id(context_id) == context_id
+        and self.l1_frames[context_id].is_available
+      ),
+      None,
+    )
 
   def rollback_program(self, context_id: int, cycle: int = 0) -> None:
     self.uce.rollback_context(context_id)
     frame = self.l1_frames[context_id]
+    generation = frame.generation
     frame.release()
     if self.memory_trace is not None and self.tracer is not None:
       self.tracer.instant(
-        f"Tile{self.tile_id}", "Lifecycle", "frame_release", cycle,
-        {"ctx_id": context_id, "generation": frame.generation,
-         "tile_id": self.tile_id, "reason": "rollback"})
+        f"Tile{self.tile_id}",
+        "Lifecycle",
+        "frame_release",
+        cycle,
+        {"ctx_id": context_id, "generation": generation, "tile_id": self.tile_id, "reason": "rollback"},
+      )
+
   def drain_context_terminals(self) -> list[_UCETerminalEvent]:
     return self.uce.drain_terminal_events()
-  def step(self, cycle: int,
-           freeze_new_work: bool = False) -> EngineJob | None:
+
+  def retire_external_events(self, events: set[str] | tuple[str, ...]) -> None:
+    self.uce.retire_external_events(events)
+
+  def step(self, cycle: int, freeze_new_work: bool = False) -> EngineJob | None:
     completed = None
     # Running engines always tick so drain can complete.  The UCE receives
     # completions but freezes queued launches/PC issue when requested.
     for eng in (self.boa, self.evu, self.mfe, self.use):
-      jobs = (eng.tick(cycle, start_queued=not freeze_new_work)
-              if eng is self.mfe else eng.tick(cycle))
+      jobs = eng.tick(cycle, start_queued=not freeze_new_work) if eng is self.mfe else eng.tick(cycle)
       for job in jobs:
         completed = job
         self.uce.notify_event(job.event_id)
@@ -1510,9 +1702,9 @@ class ComputeTile:
 
   @property
   def done(self) -> bool:
-    return (not self.uce.has_active_contexts() and all(
-      eng.state in (EngineState.IDLE, EngineState.DONE)
-      for eng in (self.boa, self.evu, self.mfe, self.use)))
+    return not self.uce.has_active_contexts() and all(
+      eng.state in (EngineState.IDLE, EngineState.DONE) for eng in (self.boa, self.evu, self.mfe, self.use)
+    )
 
   def reset(self) -> None:
     self.uce.reset()

@@ -75,6 +75,8 @@ class ContextAdmissionStatus(Enum):
   WAIT_CAPACITY = "wait_capacity"
   ACTIVE = "active"
   CANCELLED = "cancelled"
+
+
 # ---------------------------------------------------------------------------
 # Frozen value objects (logical address IR, PR 1)
 # ---------------------------------------------------------------------------
@@ -145,6 +147,7 @@ class ExecGatherDesc:
   l1_mshr_hint: int
   accesses: tuple[ExecProfiledAccess, ...]
 
+
 @dataclass(frozen=True)
 class ExecTransfer:
   """One DMA or MFE transfer with explicit src/dst views."""
@@ -152,6 +155,7 @@ class ExecTransfer:
   src: ExecMemoryView
   dst: ExecMemoryView
   bytes: int
+
 
 @dataclass(frozen=True)
 class ExecL2Buffer:
@@ -280,6 +284,21 @@ class ExecGroupAction:
   args: tuple = ()
   dst: str | None = None
   comment: str = ""
+  dependencies: tuple[str, ...] = ()
+  reads: tuple[str, ...] = ()
+  writes: tuple[str, ...] = ()
+
+  @property
+  def output_events(self) -> tuple[str, ...]:
+    events = (self.dst,) if self.dst else ()
+    if self.op is ExecGroupActionOp.DISPATCH_ROLE:
+      request = self.args[0]
+      events += tuple(
+        event for event in (request.input_released_event, request.output_ready_event) if event
+      )
+    elif self.op is ExecGroupActionOp.SIGNAL_EVENT:
+      events += (self.args[0],)
+    return events
 
 
 @dataclass
@@ -332,6 +351,7 @@ class ExecTileRoleBinding:
   read_actuals: tuple[str, ...] = ()
   write_actuals: tuple[str, ...] = ()
 
+
 @dataclass
 class ExecTileGroupTask:
   name: str
@@ -351,6 +371,7 @@ class ExecDeviceOp:
   ctx_name: str = ""
   event_tag: str = ""
   actual_inputs: tuple[int, ...] = ()
+  dependencies: tuple[str, ...] = ()
 
 
 @dataclass

@@ -13,8 +13,9 @@ The trace has three kinds of events:
     These show up as horizontal bars on a Gantt timeline.
   * **counter** (ph=C):   stream-queue occupancy and credit, sampled
     per cycle.  These render as line graphs in Perfetto/Chrome.
-  * **instant** (ph=i):   stream push/pop/release/EOS events, dispatch,
-    tile_done, group_task_done — markers on the timeline.
+  * **instant** (ph=i): CPU request lifecycle, distinct Group
+    REGISTER/ISSUE/COMPLETE markers, UCE issue attempts, stream events, and
+    tile/group completion markers.
 
 Cycle → time mapping: one cycle = `hw.cycle_ns()` nanoseconds.  Chrome
 trace uses microseconds, so cycles are converted to µs with 3 decimal
@@ -39,37 +40,59 @@ from .config import HardwareConfig
 _SORT_BAND_WIDTH = 1000
 
 # Process sort: "Tile" is a prefix family (Tile0..Tile999 -> 200000+n).
-_PROCESS_SORT = {"Device": 0, "TileGroup": 100, "Tile": 200}
+_PROCESS_SORT = {"CPU Device": 0, "Device": 1, "TileGroup": 100, "Tile": 200}
 _UNKNOWN_SORT = 900 * _SORT_BAND_WIDTH
 
 # Thread sort: per-process table, longest-prefix match, trailing digits of
 # the thread name become an in-band offset ("L2 Bank:3" -> 60000+3).
 _THREAD_SORT = {
+  "CPU Device": {"Controller": 10, "Pending": 20, "Completion": 30, "Request:": 40},
   "Device": {"Slot:": 10},
   "TileGroup": {
-    "Task": 10, "TileRole:": 20, "Scheduler:L2": 30,
-    "HBM → L2 Input #": 40, "L2 → HBM Output #": 50,
-    "Memory:HBM": 60, "Memory:L2 Read": 70, "Memory:L2 Write": 71,
-    "Memory:L2 State": 72, "L2 Bank:": 80, "Global DMA Ch:": 90,
-    "HBM Ch:": 100, "NoC:VC": 110, "Collective": 120, "StreamQ:": 130,
+    "Task": 10,
+    "TileRole:": 20,
+    "Scheduler:Control": 25,
+    "Scheduler:L2": 30,
+    "HBM → L2 Input #": 40,
+    "L2 → HBM Output #": 50,
+    "Memory:HBM": 60,
+    "Memory:L2 Read": 70,
+    "Memory:L2 Write": 71,
+    "Memory:L2 State": 72,
+    "L2 Bank:": 80,
+    "Global DMA Ch:": 90,
+    "HBM Ch:": 100,
+    "NoC:VC": 110,
+    "Collective": 120,
+    "StreamQ:": 130,
   },
   "Tile": {
-    "UCE CTX": 10, "MFE_LD": 20, "BOA": 30, "EVU": 31, "MFE": 32,
-    "USE": 33, "MFE_ST": 40, "Memory:L1 Read": 50,
-    "Memory:L1 Write": 51, "Memory:L1 State": 52, "L1 Bank:": 60,
-    "Local DMA Load": 70, "Local DMA Store": 71, "MSHR": 80,
-    "UCE": 90, "Lifecycle": 95,
+    "UCE CTX": 10,
+    "MFE_LD": 20,
+    "BOA": 30,
+    "EVU": 31,
+    "MFE": 32,
+    "USE": 33,
+    "MFE_ST": 40,
+    "Memory:L1 Read": 50,
+    "Memory:L1 Write": 51,
+    "Memory:L1 State": 52,
+    "L1 Bank:": 60,
+    "Local DMA Load": 70,
+    "Local DMA Store": 71,
+    "MSHR": 80,
+    "UCE": 90,
+    "Lifecycle": 95,
   },
 }
 
 
 def _prefix_offset(prefix: str, base: int, name: str) -> int:
-  remainder = name[len(prefix):]
+  remainder = name[len(prefix) :]
   offset = int(remainder) if remainder.isdigit() else 0
   if offset >= _SORT_BAND_WIDTH:
     raise ValueError(
-      f"trace lane {name!r} numeric suffix {offset} exceeds reserved range "
-      f"0..{_SORT_BAND_WIDTH - 1}"
+      f"trace lane {name!r} numeric suffix {offset} exceeds reserved range 0..{_SORT_BAND_WIDTH - 1}"
     )
   return base * _SORT_BAND_WIDTH + offset
 
@@ -104,478 +127,454 @@ def _thread_sort(track: str, thread: str) -> int:
   return best
 
 
-
 # TransferLegKind values (memory/transfer.py) — kept as a literal set so
 # trace.py never imports the memory package (components import this module).
-_LEG_KIND_VALUES = frozenset({
-  "hbm_read", "hbm_write", "global_dma", "noc_response", "noc_request",
-  "l2_read", "l2_write", "local_dma", "l1_read", "l1_write",
-  "l1_cache_lookup", "l2_cache_lookup", "l1_cache_fill", "l2_cache_fill",
-})
-_LEG_REQUIRED_ARGS = frozenset({
-  "transaction_id", "flow_id", "bytes", "accepted_cycle", "completion_cycle",
-  "source_space", "destination_space",
-})
+_LEG_KIND_VALUES = frozenset(
+  {
+    "hbm_read",
+    "hbm_write",
+    "global_dma",
+    "noc_response",
+    "noc_request",
+    "l2_read",
+    "l2_write",
+    "local_dma",
+    "l1_read",
+    "l1_write",
+    "l1_cache_lookup",
+    "l2_cache_lookup",
+    "l1_cache_fill",
+    "l2_cache_fill",
+  }
+)
+_LEG_REQUIRED_ARGS = frozenset(
+  {
+    "transaction_id",
+    "flow_id",
+    "bytes",
+    "accepted_cycle",
+    "completion_cycle",
+    "source_space",
+    "destination_space",
+  }
+)
+_GROUP_ACTION_EVENTS = frozenset({"group_action_register", "group_action_issue", "group_action_complete"})
+_GROUP_ACTION_REQUIRED_ARGS = frozenset({"context", "launch_generation", "ordinal", "kind", "cycle"})
+
 
 @dataclass
 class Tracer:
-    """Collects Chrome trace events during a simulation run.
+  """Collects Chrome trace events during a simulation run.
 
-    Call `begin`/`end` for slice events, `counter` for sampled values,
-    `instant` for point-in-time markers.  After the run, `to_chrome_json`
-    produces the Perfetto-loadable JSON.
+  Call `begin`/`end` for slice events, `counter` for sampled values,
+  `instant` for point-in-time markers.  After the run, `to_chrome_json`
+  produces the Perfetto-loadable JSON.
+  """
+
+  hw: HardwareConfig
+  _events: list[dict] = field(default_factory=list)
+  # track open slices: (pid, tid, name) -> (start_us, args)
+  _open: dict[tuple, tuple] = field(default_factory=dict)
+  _pid_counter: int = 0
+  _tid_counter: int = 0
+  _pids: dict[str, int] = field(default_factory=dict)  # track_name -> pid
+  _tids: dict[tuple[int, str], int] = field(default_factory=dict)
+  # flow key -> dense flow id, assigned in first-appearance order
+  _flow_ids: dict[str, int] = field(default_factory=dict)
+  # (track, effective thread, counter name) -> last sampled value
+  _last_counter: dict[tuple[str, str, str], float] = field(default_factory=dict)
+
+  # ---- helpers ---------------------------------------------------------
+
+  def cycle_to_us(self, cycle: int) -> float:
+    """Convert a cycle number to wall-clock microseconds."""
+    ns = cycle * self.hw.cycle_ns()
+    return round(ns / 1000.0, 3)
+
+  def _pid(self, track: str) -> int:
+    if track not in self._pids:
+      self._pid_counter += 1
+      pid = self._pid_counter
+      self._pids[track] = pid
+      self._events.append(
+        {"name": "process_name", "ph": "M", "pid": pid, "tid": 0, "args": {"name": track}}
+      )
+      self._events.append(
+        {
+          "name": "process_sort_index",
+          "ph": "M",
+          "pid": pid,
+          "tid": 0,
+          "args": {"sort_index": _process_sort(track)},
+        }
+      )
+    return self._pids[track]
+
+  def _tid(self, pid: int, thread: str, track: str = "") -> int:
+    key = (pid, thread)
+    if key not in self._tids:
+      self._tid_counter += 1
+      tid = self._tid_counter
+      self._tids[key] = tid
+      self._events.append(
+        {"name": "thread_name", "ph": "M", "pid": pid, "tid": tid, "args": {"name": thread}}
+      )
+      self._events.append(
+        {
+          "name": "thread_sort_index",
+          "ph": "M",
+          "pid": pid,
+          "tid": tid,
+          "args": {"sort_index": _thread_sort(track, thread)},
+        }
+      )
+    return self._tids[key]
+
+  # ---- slice events (Gantt bars) --------------------------------------
+
+  def begin(self, track: str, thread: str, name: str, cycle: int, args: dict | None = None) -> None:
+    """Start a slice.  Pair with `end` using the same (track, thread, name)."""
+    pid = self._pid(track)
+    tid = self._tid(pid, thread, track)
+    key = (pid, tid, name)
+    self._open[key] = (self.cycle_to_us(cycle), args or {})
+    self._events.append(
+      {
+        "name": name,
+        "ph": "B",
+        "pid": pid,
+        "tid": tid,
+        "ts": self.cycle_to_us(cycle),
+        "cat": thread,
+        "args": dict(args) if args else {},
+      }
+    )
+
+  def end(self, track: str, thread: str, name: str, cycle: int) -> None:
+    """End a previously-started slice."""
+    pid = self._pid(track)
+    tid = self._tid(pid, thread, track)
+    key = (pid, tid, name)
+    self._events.append(
+      {"name": name, "ph": "E", "pid": pid, "tid": tid, "ts": self.cycle_to_us(cycle), "cat": thread}
+    )
+    self._open.pop(key, None)
+
+  def complete(
+    self,
+    track: str,
+    thread: str,
+    name: str,
+    start_cycle: int,
+    end_cycle: int,
+    args: dict | None = None,
+    category: str | None = None,
+  ) -> None:
+    """Emit a complete slice (X event) with known start and end."""
+    pid = self._pid(track)
+    tid = self._tid(pid, thread, track)
+    dur = self.cycle_to_us(end_cycle) - self.cycle_to_us(start_cycle)
+    self._events.append(
+      {
+        "name": name,
+        "ph": "X",
+        "pid": pid,
+        "tid": tid,
+        "ts": self.cycle_to_us(start_cycle),
+        "dur": max(dur, 0.001),
+        "cat": category if category is not None else thread,
+        "args": dict(args) if args else {},
+      }
+    )
+
+  # ---- counter events (line graphs) -----------------------------------
+
+  def counter(
+    self, track: str, name: str, cycle: int, value: float, unit: str = "", thread: str | None = None
+  ) -> None:
+    """Sample a counter value at a given cycle.
+
+    ``thread`` selects the lane the counter renders on; when omitted
+    the counter name itself is the thread name (legacy behavior).
     """
+    eff_thread = thread if thread is not None else name
+    pid = self._pid(track)
+    tid = self._tid(pid, eff_thread, track)
+    self._events.append(
+      {
+        "name": name,
+        "ph": "C",
+        "pid": pid,
+        "tid": tid,
+        "ts": self.cycle_to_us(cycle),
+        "args": {name: value, "unit": unit} if unit else {name: value},
+      }
+    )
 
-    hw: HardwareConfig
-    _events: list[dict] = field(default_factory=list)
-    # track open slices: (pid, tid, name) -> (start_us, args)
-    _open: dict[tuple, tuple] = field(default_factory=dict)
-    _pid_counter: int = 0
-    _tid_counter: int = 0
-    _pids: dict[str, int] = field(default_factory=dict)  # track_name -> pid
-    _tids: dict[tuple[int, str], int] = field(default_factory=dict)
-    # flow key -> dense flow id, assigned in first-appearance order
-    _flow_ids: dict[str, int] = field(default_factory=dict)
-    # (track, effective thread, counter name) -> last sampled value
-    _last_counter: dict[tuple[str, str, str], float] = field(default_factory=dict)
+  def counter_if_changed(
+    self, track: str, name: str, cycle: int, value: float, unit: str = "", thread: str | None = None
+  ) -> None:
+    """Sample a counter only when its value changed (PR 5 §2.5).
 
-    # ---- helpers ---------------------------------------------------------
+    The first sample for each (track, thread, name) is always
+    emitted; subsequent samples are dropped while the value is
+    unchanged.  Keeps per-cycle emission sites cheap without
+    flooding the trace with constant samples.
+    """
+    eff_thread = thread if thread is not None else name
+    key = (track, eff_thread, name)
+    if self._last_counter.get(key) == value:
+      return
+    self._last_counter[key] = value
+    self.counter(track, name, cycle, value, unit, thread)
 
-    def cycle_to_us(self, cycle: int) -> float:
-        """Convert a cycle number to wall-clock microseconds."""
-        ns = cycle * self.hw.cycle_ns()
-        return round(ns / 1000.0, 3)
+  # ---- instant events (markers) ---------------------------------------
 
-    def _pid(self, track: str) -> int:
-        if track not in self._pids:
-            self._pid_counter += 1
-            pid = self._pid_counter
-            self._pids[track] = pid
-            self._events.append({
-                "name": "process_name",
-                "ph": "M",
-                "pid": pid,
-                "tid": 0,
-                "args": {
-                    "name": track
-                },
-            })
-            self._events.append({
-                "name": "process_sort_index",
-                "ph": "M",
-                "pid": pid,
-                "tid": 0,
-                "args": {
-                    "sort_index": _process_sort(track)
-                },
-            })
-        return self._pids[track]
+  def instant(self, track: str, thread: str, name: str, cycle: int, args: dict | None = None) -> None:
+    pid = self._pid(track)
+    tid = self._tid(pid, thread, track)
+    self._events.append(
+      {
+        "name": name,
+        "ph": "i",
+        "pid": pid,
+        "tid": tid,
+        "ts": self.cycle_to_us(cycle),
+        "cat": thread,
+        "s": "t",
+        "args": dict(args) if args else {},
+      }
+    )
 
-    def _tid(self, pid: int, thread: str, track: str = "") -> int:
-        key = (pid, thread)
-        if key not in self._tids:
-            self._tid_counter += 1
-            tid = self._tid_counter
-            self._tids[key] = tid
-            self._events.append({
-                "name": "thread_name",
-                "ph": "M",
-                "pid": pid,
-                "tid": tid,
-                "args": {
-                    "name": thread
-                },
-            })
-            self._events.append({
-                "name": "thread_sort_index",
-                "ph": "M",
-                "pid": pid,
-                "tid": tid,
-                "args": {
-                    "sort_index": _thread_sort(track, thread)
-                },
-            })
-        return self._tids[key]
+  # ---- flow events (cross-lane arrows) ---------------------------------
 
-    # ---- slice events (Gantt bars) --------------------------------------
+  def flow_id(self, key: str) -> int:
+    """Dense flow id for a stable key, assigned on first appearance."""
+    fid = self._flow_ids.get(key)
+    if fid is None:
+      fid = len(self._flow_ids) + 1
+      self._flow_ids[key] = fid
+    return fid
 
-    def begin(self,
-              track: str,
-              thread: str,
-              name: str,
-              cycle: int,
-              args: dict | None = None) -> None:
-        """Start a slice.  Pair with `end` using the same (track, thread, name)."""
-        pid = self._pid(track)
-        tid = self._tid(pid, thread, track)
-        key = (pid, tid, name)
-        self._open[key] = (self.cycle_to_us(cycle), args or {})
-        self._events.append({
-            "name": name,
-            "ph": "B",
-            "pid": pid,
-            "tid": tid,
-            "ts": self.cycle_to_us(cycle),
-            "cat": thread,
-            "args": dict(args) if args else {},
-        })
+  def _flow_event(
+    self, ph: str, track: str, thread: str, name: str, cycle: int, key: str, args: dict | None
+  ) -> None:
+    pid = self._pid(track)
+    tid = self._tid(pid, thread, track)
+    self._events.append(
+      {
+        "name": name,
+        "ph": ph,
+        "pid": pid,
+        "tid": tid,
+        "ts": self.cycle_to_us(cycle),
+        "cat": thread,
+        "id": self.flow_id(key),
+        "args": dict(args) if args else {},
+      }
+    )
 
-    def end(self, track: str, thread: str, name: str, cycle: int) -> None:
-        """End a previously-started slice."""
-        pid = self._pid(track)
-        tid = self._tid(pid, thread, track)
-        key = (pid, tid, name)
-        self._events.append({
-            "name": name,
-            "ph": "E",
-            "pid": pid,
-            "tid": tid,
-            "ts": self.cycle_to_us(cycle),
-            "cat": thread,
-        })
-        self._open.pop(key, None)
+  def flow_start(
+    self, track: str, thread: str, name: str, cycle: int, key: str, args: dict | None = None
+  ) -> None:
+    """Open a flow (ph=s) anchored on one lane."""
+    self._flow_event("s", track, thread, name, cycle, key, args)
 
-    def complete(self,
-                 track: str,
-                 thread: str,
-                 name: str,
-                 start_cycle: int,
-                 end_cycle: int,
-                 args: dict | None = None,
-                 category: str | None = None) -> None:
-        """Emit a complete slice (X event) with known start and end."""
-        pid = self._pid(track)
-        tid = self._tid(pid, thread, track)
-        dur = self.cycle_to_us(end_cycle) - self.cycle_to_us(start_cycle)
-        self._events.append({
-            "name": name,
-            "ph": "X",
-            "pid": pid,
-            "tid": tid,
-            "ts": self.cycle_to_us(start_cycle),
-            "dur": max(dur, 0.001),
-            "cat": category if category is not None else thread,
-            "args": dict(args) if args else {},
-        })
+  def flow_step(
+    self, track: str, thread: str, name: str, cycle: int, key: str, args: dict | None = None
+  ) -> None:
+    """Continue a flow (ph=t) on another lane."""
+    self._flow_event("t", track, thread, name, cycle, key, args)
 
-    # ---- counter events (line graphs) -----------------------------------
+  def flow_end(
+    self, track: str, thread: str, name: str, cycle: int, key: str, args: dict | None = None
+  ) -> None:
+    """Close a flow (ph=f) anchored on its final lane."""
+    self._flow_event("f", track, thread, name, cycle, key, args)
 
-    def counter(self,
-                track: str,
-                name: str,
-                cycle: int,
-                value: float,
-                unit: str = "",
-                thread: str | None = None) -> None:
-        """Sample a counter value at a given cycle.
+  # ---- well-formedness (test entry, not a hot path) --------------------
 
-        ``thread`` selects the lane the counter renders on; when omitted
-        the counter name itself is the thread name (legacy behavior).
-        """
-        eff_thread = thread if thread is not None else name
-        pid = self._pid(track)
-        tid = self._tid(pid, eff_thread, track)
-        self._events.append({
-            "name": name,
-            "ph": "C",
-            "pid": pid,
-            "tid": tid,
-            "ts": self.cycle_to_us(cycle),
-            "args": {
-                name: value,
-                "unit": unit
-            } if unit else {
-                name: value
-            },
-        })
+  def assert_well_formed(self) -> None:
+    """Validate the collected trace; raise AssertionError on violation.
 
-    def counter_if_changed(self,
-                           track: str,
-                           name: str,
-                           cycle: int,
-                           value: float,
-                           unit: str = "",
-                           thread: str | None = None) -> None:
-        """Sample a counter only when its value changed (PR 5 §2.5).
-
-        The first sample for each (track, thread, name) is always
-        emitted; subsequent samples are dropped while the value is
-        unchanged.  Keeps per-cycle emission sites cheap without
-        flooding the trace with constant samples.
-        """
-        eff_thread = thread if thread is not None else name
-        key = (track, eff_thread, name)
-        if self._last_counter.get(key) == value:
-            return
-        self._last_counter[key] = value
-        self.counter(track, name, cycle, value, unit, thread)
-
-    # ---- instant events (markers) ---------------------------------------
-
-    def instant(self,
-                track: str,
-                thread: str,
-                name: str,
-                cycle: int,
-                args: dict | None = None) -> None:
-        pid = self._pid(track)
-        tid = self._tid(pid, thread, track)
-        self._events.append({
-            "name": name,
-            "ph": "i",
-            "pid": pid,
-            "tid": tid,
-            "ts": self.cycle_to_us(cycle),
-            "cat": thread,
-            "s": "t",
-            "args": dict(args) if args else {},
-        })
-
-    # ---- flow events (cross-lane arrows) ---------------------------------
-
-    def flow_id(self, key: str) -> int:
-        """Dense flow id for a stable key, assigned on first appearance."""
-        fid = self._flow_ids.get(key)
+    Checks (PR 5 §2.10): metadata coverage for every process/thread,
+    counter args shape and change-only sampling, non-negative X
+    durations, closed B/E pairs, one (s, f) pair per flow id with
+    steps in between, and required identity args on transfer-leg
+    slices.  Collects all violations before raising.
+    """
+    errors: list[str] = []
+    proc_names: dict[Any, bool] = {}
+    proc_sorts: dict[Any, bool] = {}
+    thread_names: dict[Any, bool] = {}
+    thread_sorts: dict[Any, bool] = {}
+    last_counter: dict[Any, object] = {}
+    open_stack: dict[Any, int] = {}
+    flow_start_ts: dict[Any, float] = {}
+    flow_end_ts: dict[Any, float] = {}
+    flow_steps: dict[Any, list[float]] = {}
+    for ev in self._events:
+      ph = ev.get("ph")
+      if ph == "M":
+        mname = ev.get("name")
+        if mname == "process_name":
+          proc_names[ev["pid"]] = True
+        elif mname == "process_sort_index":
+          proc_sorts[ev["pid"]] = True
+        elif mname == "thread_name":
+          thread_names[(ev["pid"], ev["tid"])] = True
+        elif mname == "thread_sort_index":
+          thread_sorts[(ev["pid"], ev["tid"])] = True
+        continue
+      pid = ev.get("pid")
+      tid = ev.get("tid")
+      if ph in ("B", "E", "X", "C", "i", "s", "t", "f"):
+        if not proc_names.get(pid):
+          errors.append(f"pid {pid} lacks process_name")
+          proc_names[pid] = True  # report once
+        if not proc_sorts.get(pid):
+          errors.append(f"pid {pid} lacks process_sort_index")
+          proc_sorts[pid] = True
+        if tid is not None and not thread_names.get((pid, tid)):
+          errors.append(f"pid {pid} tid {tid} lacks thread_name")
+          thread_names[(pid, tid)] = True
+        if tid is not None and not thread_sorts.get((pid, tid)):
+          errors.append(f"pid {pid} tid {tid} lacks thread_sort_index")
+          thread_sorts[(pid, tid)] = True
+      if ph == "C":
+        name = ev.get("name", "")
+        cargs = ev.get("args", {})
+        extra = set(cargs) - {name, "unit"}
+        if extra:
+          errors.append(f"counter '{name}' has extra args {sorted(extra)}")
+        if name not in cargs:
+          errors.append(f"counter '{name}' lacks its own value key")
+          continue
+        ckey = (pid, tid, name)
+        value = cargs[name]
+        if ckey in last_counter and last_counter[ckey] == value:
+          errors.append(f"counter '{name}' has consecutive duplicate value {value}")
+        last_counter[ckey] = value
+      elif ph == "X":
+        if ev.get("dur", 0) < 0:
+          errors.append(f"X '{ev.get('name')}' has negative dur")
+        if ev.get("name") in _LEG_KIND_VALUES:
+          missing = _LEG_REQUIRED_ARGS - set(ev.get("args", {}))
+          if missing:
+            errors.append(f"leg slice '{ev.get('name')}' missing args {sorted(missing)}")
+      elif ph == "i" and ev.get("name") in _GROUP_ACTION_EVENTS:
+        missing = _GROUP_ACTION_REQUIRED_ARGS - set(ev.get("args", {}))
+        if missing:
+          errors.append(f"Group action instant '{ev.get('name')}' missing args {sorted(missing)}")
+      elif ph == "B":
+        bkey = (pid, tid, ev.get("name"))
+        open_stack[bkey] = open_stack.get(bkey, 0) + 1
+      elif ph == "E":
+        ekey = (pid, tid, ev.get("name"))
+        if open_stack.get(ekey, 0) <= 0:
+          errors.append(f"unmatched E for '{ev.get('name')}'")
+        else:
+          open_stack[ekey] -= 1
+      elif ph in ("s", "t", "f"):
+        fid = ev.get("id")
         if fid is None:
-            fid = len(self._flow_ids) + 1
-            self._flow_ids[key] = fid
-        return fid
+          errors.append("flow event without id")
+        elif ph == "s":
+          if fid in flow_start_ts:
+            errors.append(f"flow {fid} has duplicate start")
+          flow_start_ts[fid] = ev.get("ts", 0)
+        elif ph == "f":
+          if fid in flow_end_ts:
+            errors.append(f"flow {fid} has duplicate end")
+          flow_end_ts[fid] = ev.get("ts", 0)
+        else:
+          flow_steps.setdefault(fid, []).append(ev.get("ts", 0))
+    for key, depth in open_stack.items():
+      if depth > 0:
+        errors.append(f"unclosed B slice '{key[2]}'")
+    for fid in sorted(set(flow_start_ts) | set(flow_end_ts) | set(flow_steps)):
+      if fid not in flow_start_ts:
+        errors.append(f"flow {fid} lacks a start event")
+      if fid not in flow_end_ts:
+        errors.append(f"flow {fid} lacks an end event")
+      if fid in flow_start_ts and fid in flow_end_ts:
+        if flow_start_ts[fid] > flow_end_ts[fid]:
+          errors.append(f"flow {fid} starts after it ends")
+        for ts in flow_steps.get(fid, []):
+          if not flow_start_ts[fid] <= ts <= flow_end_ts[fid]:
+            errors.append(f"flow {fid} step outside [s, f] window")
+    if errors:
+      raise AssertionError("trace not well-formed:\n  " + "\n  ".join(errors))
 
-    def _flow_event(self,
-                    ph: str,
-                    track: str,
-                    thread: str,
-                    name: str,
-                    cycle: int,
-                    key: str,
-                    args: dict | None) -> None:
-        pid = self._pid(track)
-        tid = self._tid(pid, thread, track)
-        self._events.append({
-            "name": name,
-            "ph": ph,
-            "pid": pid,
-            "tid": tid,
-            "ts": self.cycle_to_us(cycle),
-            "cat": thread,
-            "id": self.flow_id(key),
-            "args": dict(args) if args else {},
-        })
+  # ---- output ---------------------------------------------------------
 
-    def flow_start(self, track: str, thread: str, name: str, cycle: int,
-                   key: str, args: dict | None = None) -> None:
-        """Open a flow (ph=s) anchored on one lane."""
-        self._flow_event("s", track, thread, name, cycle, key, args)
+  def to_chrome_json(self) -> str:
+    """Produce the Perfetto/Chrome-loadable JSON trace."""
+    # flush any open slices
+    for (pid, tid, name), (_, _) in list(self._open.items()):
+      self._events.append(
+        {"name": name, "ph": "E", "pid": pid, "tid": tid, "ts": self.cycle_to_us(9999999), "cat": "open"}
+      )
+    return json.dumps({"traceEvents": self._events}, indent=None, separators=(",", ":"))
 
-    def flow_step(self, track: str, thread: str, name: str, cycle: int,
-                  key: str, args: dict | None = None) -> None:
-        """Continue a flow (ph=t) on another lane."""
-        self._flow_event("t", track, thread, name, cycle, key, args)
+  def to_chrome_json_pretty(self) -> str:
+    return json.dumps({"traceEvents": self._events}, indent=2)
 
-    def flow_end(self, track: str, thread: str, name: str, cycle: int,
-                 key: str, args: dict | None = None) -> None:
-        """Close a flow (ph=f) anchored on its final lane."""
-        self._flow_event("f", track, thread, name, cycle, key, args)
-
-    # ---- well-formedness (test entry, not a hot path) --------------------
-
-    def assert_well_formed(self) -> None:
-        """Validate the collected trace; raise AssertionError on violation.
-
-        Checks (PR 5 §2.10): metadata coverage for every process/thread,
-        counter args shape and change-only sampling, non-negative X
-        durations, closed B/E pairs, one (s, f) pair per flow id with
-        steps in between, and required identity args on transfer-leg
-        slices.  Collects all violations before raising.
-        """
-        errors: list[str] = []
-        proc_names: dict[Any, bool] = {}
-        proc_sorts: dict[Any, bool] = {}
-        thread_names: dict[Any, bool] = {}
-        thread_sorts: dict[Any, bool] = {}
-        last_counter: dict[Any, object] = {}
-        open_stack: dict[Any, int] = {}
-        flow_start_ts: dict[Any, float] = {}
-        flow_end_ts: dict[Any, float] = {}
-        flow_steps: dict[Any, list[float]] = {}
-        for ev in self._events:
-            ph = ev.get("ph")
-            if ph == "M":
-                mname = ev.get("name")
-                if mname == "process_name":
-                    proc_names[ev["pid"]] = True
-                elif mname == "process_sort_index":
-                    proc_sorts[ev["pid"]] = True
-                elif mname == "thread_name":
-                    thread_names[(ev["pid"], ev["tid"])] = True
-                elif mname == "thread_sort_index":
-                    thread_sorts[(ev["pid"], ev["tid"])] = True
-                continue
-            pid = ev.get("pid")
-            tid = ev.get("tid")
-            if ph in ("B", "E", "X", "C", "i", "s", "t", "f"):
-                if not proc_names.get(pid):
-                    errors.append(f"pid {pid} lacks process_name")
-                    proc_names[pid] = True  # report once
-                if not proc_sorts.get(pid):
-                    errors.append(f"pid {pid} lacks process_sort_index")
-                    proc_sorts[pid] = True
-                if tid is not None and not thread_names.get((pid, tid)):
-                    errors.append(f"pid {pid} tid {tid} lacks thread_name")
-                    thread_names[(pid, tid)] = True
-                if tid is not None and not thread_sorts.get((pid, tid)):
-                    errors.append(f"pid {pid} tid {tid} lacks thread_sort_index")
-                    thread_sorts[(pid, tid)] = True
-            if ph == "C":
-                name = ev.get("name", "")
-                cargs = ev.get("args", {})
-                extra = set(cargs) - {name, "unit"}
-                if extra:
-                    errors.append(f"counter '{name}' has extra args {sorted(extra)}")
-                if name not in cargs:
-                    errors.append(f"counter '{name}' lacks its own value key")
-                    continue
-                ckey = (pid, tid, name)
-                value = cargs[name]
-                if ckey in last_counter and last_counter[ckey] == value:
-                    errors.append(
-                        f"counter '{name}' has consecutive duplicate value {value}")
-                last_counter[ckey] = value
-            elif ph == "X":
-                if ev.get("dur", 0) < 0:
-                    errors.append(f"X '{ev.get('name')}' has negative dur")
-                if ev.get("name") in _LEG_KIND_VALUES:
-                    missing = _LEG_REQUIRED_ARGS - set(ev.get("args", {}))
-                    if missing:
-                        errors.append(
-                            f"leg slice '{ev.get('name')}' missing args {sorted(missing)}")
-            elif ph == "B":
-                bkey = (pid, tid, ev.get("name"))
-                open_stack[bkey] = open_stack.get(bkey, 0) + 1
-            elif ph == "E":
-                ekey = (pid, tid, ev.get("name"))
-                if open_stack.get(ekey, 0) <= 0:
-                    errors.append(f"unmatched E for '{ev.get('name')}'")
-                else:
-                    open_stack[ekey] -= 1
-            elif ph in ("s", "t", "f"):
-                fid = ev.get("id")
-                if fid is None:
-                    errors.append("flow event without id")
-                elif ph == "s":
-                    if fid in flow_start_ts:
-                        errors.append(f"flow {fid} has duplicate start")
-                    flow_start_ts[fid] = ev.get("ts", 0)
-                elif ph == "f":
-                    if fid in flow_end_ts:
-                        errors.append(f"flow {fid} has duplicate end")
-                    flow_end_ts[fid] = ev.get("ts", 0)
-                else:
-                    flow_steps.setdefault(fid, []).append(ev.get("ts", 0))
-        for key, depth in open_stack.items():
-            if depth > 0:
-                errors.append(f"unclosed B slice '{key[2]}'")
-        for fid in sorted(set(flow_start_ts) | set(flow_end_ts)
-                           | set(flow_steps)):
-            if fid not in flow_start_ts:
-                errors.append(f"flow {fid} lacks a start event")
-            if fid not in flow_end_ts:
-                errors.append(f"flow {fid} lacks an end event")
-            if fid in flow_start_ts and fid in flow_end_ts:
-                if flow_start_ts[fid] > flow_end_ts[fid]:
-                    errors.append(f"flow {fid} starts after it ends")
-                for ts in flow_steps.get(fid, []):
-                    if not flow_start_ts[fid] <= ts <= flow_end_ts[fid]:
-                        errors.append(f"flow {fid} step outside [s, f] window")
-        if errors:
-            raise AssertionError("trace not well-formed:\n  " + "\n  ".join(errors))
-
-    # ---- output ---------------------------------------------------------
-
-    def to_chrome_json(self) -> str:
-        """Produce the Perfetto/Chrome-loadable JSON trace."""
-        # flush any open slices
-        for (pid, tid, name), (_, _) in list(self._open.items()):
-            self._events.append({
-                "name":
-                name,
-                "ph":
-                "E",
-                "pid":
-                pid,
-                "tid":
-                tid,
-                "ts":
-                self.cycle_to_us(9999999),
-                "cat":
-                "open",
-            })
-        return json.dumps({"traceEvents": self._events},
-                          indent=None,
-                          separators=(",", ":"))
-
-    def to_chrome_json_pretty(self) -> str:
-        return json.dumps({"traceEvents": self._events}, indent=2)
-
-    @property
-    def event_count(self) -> int:
-        return len(self._events)
-
+  @property
+  def event_count(self) -> int:
+    return len(self._events)
 
 
 class ScopedTracer:
-    """Tracer wrapper prefixing every track (process lane) name.
+  """Tracer wrapper prefixing every track (process lane) name.
 
-    Thread names (and thus ``cat``) are unchanged, so per-thread
-    assertions and HTML colors are unaffected.  Gives each device
-    execution slot its own lane set (``G0:Tile0``, ``G0:TileGroup``...).
-    """
+  Thread names (and thus ``cat``) are unchanged, so per-thread
+  assertions and HTML colors are unaffected.  Gives each device
+  execution slot its own lane set (``G0:Tile0``, ``G0:TileGroup``...).
+  """
 
-    def __init__(self, inner: Tracer, prefix: str):
-        self._inner = inner
-        self._prefix = prefix
+  def __init__(self, inner: Tracer, prefix: str):
+    self._inner = inner
+    self._prefix = prefix
 
-    def cycle_to_us(self, cycle: int) -> float:
-        return self._inner.cycle_to_us(cycle)
+  def cycle_to_us(self, cycle: int) -> float:
+    return self._inner.cycle_to_us(cycle)
 
-    def begin(self, track, thread, name, cycle, args=None):
-        self._inner.begin(self._prefix + track, thread, name, cycle, args)
+  def begin(self, track, thread, name, cycle, args=None):
+    self._inner.begin(self._prefix + track, thread, name, cycle, args)
 
-    def end(self, track, thread, name, cycle):
-        self._inner.end(self._prefix + track, thread, name, cycle)
+  def end(self, track, thread, name, cycle):
+    self._inner.end(self._prefix + track, thread, name, cycle)
 
-    def complete(self, track, thread, name, start_cycle, end_cycle, args=None,
-                 category=None):
-        self._inner.complete(
-            self._prefix + track, thread, name, start_cycle, end_cycle, args,
-            category)
+  def complete(self, track, thread, name, start_cycle, end_cycle, args=None, category=None):
+    self._inner.complete(self._prefix + track, thread, name, start_cycle, end_cycle, args, category)
 
-    def counter(self, track, name, cycle, value, unit="", thread=None):
-        self._inner.counter(self._prefix + track, name, cycle, value, unit, thread)
+  def counter(self, track, name, cycle, value, unit="", thread=None):
+    self._inner.counter(self._prefix + track, name, cycle, value, unit, thread)
 
-    def counter_if_changed(self, track, name, cycle, value, unit="", thread=None):
-        self._inner.counter_if_changed(
-            self._prefix + track, name, cycle, value, unit, thread)
+  def counter_if_changed(self, track, name, cycle, value, unit="", thread=None):
+    self._inner.counter_if_changed(self._prefix + track, name, cycle, value, unit, thread)
 
-    def instant(self, track, thread, name, cycle, args=None):
-        self._inner.instant(self._prefix + track, thread, name, cycle, args)
+  def instant(self, track, thread, name, cycle, args=None):
+    self._inner.instant(self._prefix + track, thread, name, cycle, args)
 
-    def flow_id(self, key):
-        return self._inner.flow_id(key)
+  def flow_id(self, key):
+    return self._inner.flow_id(key)
 
-    def flow_start(self, track, thread, name, cycle, key, args=None):
-        self._inner.flow_start(self._prefix + track, thread, name, cycle, key, args)
+  def flow_start(self, track, thread, name, cycle, key, args=None):
+    self._inner.flow_start(self._prefix + track, thread, name, cycle, key, args)
 
-    def flow_step(self, track, thread, name, cycle, key, args=None):
-        self._inner.flow_step(self._prefix + track, thread, name, cycle, key, args)
+  def flow_step(self, track, thread, name, cycle, key, args=None):
+    self._inner.flow_step(self._prefix + track, thread, name, cycle, key, args)
 
-    def flow_end(self, track, thread, name, cycle, key, args=None):
-        self._inner.flow_end(self._prefix + track, thread, name, cycle, key, args)
+  def flow_end(self, track, thread, name, cycle, key, args=None):
+    self._inner.flow_end(self._prefix + track, thread, name, cycle, key, args)
 
 
 # ---------------------------------------------------------------------------
 # MemoryTrace — semantic sink for memory-subsystem events (PR 5 §2.2)
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class _LegRecord:
@@ -623,8 +622,7 @@ class MemoryTrace:
     return "TileGroup", "Memory:L2 State"
 
   @staticmethod
-  def _channel_thread(stage_name: str,
-                      resources: tuple[int, ...]) -> str | None:
+  def _channel_thread(stage_name: str, resources: tuple[int, ...]) -> str | None:
     if not resources:
       return None
     if stage_name == "global_dma":
@@ -650,8 +648,7 @@ class MemoryTrace:
       return "TileGroup", "Memory:L2 Write"
     if kind == "local_dma":
       load = leg.dst_space in ("l1", "l1_cache")
-      return f"Tile{txn.tile_id}", ("Local DMA Load" if load
-                                    else "Local DMA Store")
+      return f"Tile{txn.tile_id}", ("Local DMA Load" if load else "Local DMA Store")
     if kind in ("l1_read", "l1_cache_lookup"):
       return f"Tile{txn.tile_id}", "Memory:L1 Read"
     if kind in ("l1_write", "l1_cache_fill"):
@@ -673,31 +670,35 @@ class MemoryTrace:
 
   # -- capacity / bank counters (PR 5 §2.5) ----------------------------
 
-  def capacity(self, space: str, tile_id: int | None, snapshot: dict,
-               cycle: int) -> None:
+  def capacity(self, space: str, tile_id: int | None, snapshot: dict, cycle: int) -> None:
     track, thread = self._space_lane(space, tile_id)
     tr = self.tracer
-    for key in ("allocated_bytes", "free_bytes", "largest_free_extent",
-                "live_allocations", "pending_release"):
-      tr.counter_if_changed(track, f"{space}_{key}", cycle, snapshot[key],
-                            thread=thread)
+    for key in (
+      "allocated_bytes",
+      "free_bytes",
+      "largest_free_extent",
+      "live_allocations",
+      "pending_release",
+    ):
+      tr.counter_if_changed(track, f"{space}_{key}", cycle, snapshot[key], thread=thread)
 
-  def banks(self, space: str, tile_id: int | None, per_bank: list[dict],
-            cycle: int) -> None:
+  def banks(self, space: str, tile_id: int | None, per_bank: list[dict], cycle: int) -> None:
     track = self._space_lane(space, tile_id)[0]
     name = f"{space}_bank_allocated_bytes"
     for item in per_bank:
       self.tracer.counter_if_changed(
-        track, name, cycle, item["allocated_bytes"],
-        thread=f"{space.upper()} Bank:{item['bank_id']}")
+        track, name, cycle, item["allocated_bytes"], thread=f"{space.upper()} Bank:{item['bank_id']}"
+      )
 
   def cache(self, space: str, tile_id: int | None, stats, cycle: int) -> None:
     track, thread = self._space_lane(space, tile_id)
     tr = self.tracer
-    tr.counter_if_changed(track, f"{space}_cache_resident_bytes", cycle,
-                          stats.resident_bytes, thread=thread)
-    tr.counter_if_changed(track, f"{space}_cache_resident_lines", cycle,
-                          stats.resident_lines, thread=thread)
+    tr.counter_if_changed(
+      track, f"{space}_cache_resident_bytes", cycle, stats.resident_bytes, thread=thread
+    )
+    tr.counter_if_changed(
+      track, f"{space}_cache_resident_lines", cycle, stats.resident_lines, thread=thread
+    )
 
   def mshr(self, space: str, tile_id: int | None, stats, cycle: int) -> None:
     if space == "l1":
@@ -705,48 +706,43 @@ class MemoryTrace:
     else:
       track, thread = "TileGroup", "Memory:L2 State"
     tr = self.tracer
-    tr.counter_if_changed(track, f"{space}_mshr_active", cycle,
-                          stats.active, thread=thread)
-    tr.counter_if_changed(track, f"{space}_mshr_merged", cycle,
-                          stats.merged, thread=thread)
-    tr.counter_if_changed(track, f"{space}_mshr_stalls", cycle,
-                          stats.stalls, thread=thread)
+    tr.counter_if_changed(track, f"{space}_mshr_active", cycle, stats.active, thread=thread)
+    tr.counter_if_changed(track, f"{space}_mshr_merged", cycle, stats.merged, thread=thread)
+    tr.counter_if_changed(track, f"{space}_mshr_stalls", cycle, stats.stalls, thread=thread)
 
   def hbm(self, snapshot: dict, cycle: int) -> None:
     tr = self.tracer
-    tr.counter_if_changed("TileGroup", "hbm_allocated_bytes", cycle,
-                          snapshot["used_bytes"], thread="Memory:HBM")
-    tr.counter_if_changed("TileGroup", "hbm_free_bytes", cycle,
-                          snapshot["capacity_bytes"] - snapshot["used_bytes"],
-                          thread="Memory:HBM")
+    tr.counter_if_changed(
+      "TileGroup", "hbm_allocated_bytes", cycle, snapshot["used_bytes"], thread="Memory:HBM"
+    )
+    tr.counter_if_changed(
+      "TileGroup",
+      "hbm_free_bytes",
+      cycle,
+      snapshot["capacity_bytes"] - snapshot["used_bytes"],
+      thread="Memory:HBM",
+    )
 
   def hbm_outstanding(self, outstanding: int, limit: int, cycle: int) -> None:
     tr = self.tracer
-    tr.counter_if_changed("TileGroup", "hbm_outstanding", cycle, outstanding,
-                          thread="Memory:HBM")
-    tr.counter_if_changed("TileGroup", "hbm_credits", cycle,
-                          limit - outstanding, thread="Memory:HBM")
+    tr.counter_if_changed("TileGroup", "hbm_outstanding", cycle, outstanding, thread="Memory:HBM")
+    tr.counter_if_changed("TileGroup", "hbm_credits", cycle, limit - outstanding, thread="Memory:HBM")
 
-  def noc_vc(self, vc_id: int, occupancy: int, credit: int,
-             cycle: int) -> None:
+  def noc_vc(self, vc_id: int, occupancy: int, credit: int, cycle: int) -> None:
     thread = f"NoC:VC{vc_id}"
     tr = self.tracer
-    tr.counter_if_changed("TileGroup", "noc_occupancy", cycle, occupancy,
-                          thread=thread)
-    tr.counter_if_changed("TileGroup", "noc_credit_available", cycle, credit,
-                          thread=thread)
+    tr.counter_if_changed("TileGroup", "noc_occupancy", cycle, occupancy, thread=thread)
+    tr.counter_if_changed("TileGroup", "noc_credit_available", cycle, credit, thread=thread)
 
   # -- allocation lifecycle (PR 5 §2.6) --------------------------------
 
-  def alloc_committed(self, space: str, tile_id: int | None, handle,
-                      cycle: int) -> None:
+  def alloc_committed(self, space: str, tile_id: int | None, handle, cycle: int) -> None:
     track, thread = self._space_lane(space, tile_id)
     owner = handle.owner
     args = {
       "allocation_id": handle.allocation_id,
       "owner_kind": type(owner).__name__,
-      "buffer_id": getattr(owner, "buffer_id",
-                           getattr(owner, "binding_name", "")),
+      "buffer_id": getattr(owner, "buffer_id", getattr(owner, "binding_name", "")),
       "generation": handle.generation,
       "base_address": handle.base_address,
       "size_bytes": handle.size_bytes,
@@ -754,18 +750,17 @@ class MemoryTrace:
     }
     name = f"{space}_alloc"
     self.tracer.instant(track, thread, name, cycle, args)
-    self.tracer.flow_start(track, thread, name, cycle, handle.allocation_id,
-                           {"allocation_id": handle.allocation_id})
+    self.tracer.flow_start(
+      track, thread, name, cycle, handle.allocation_id, {"allocation_id": handle.allocation_id}
+    )
 
-  def alloc_released(self, space: str, tile_id: int | None, handle,
-                     cycle: int, reason: str) -> None:
+  def alloc_released(self, space: str, tile_id: int | None, handle, cycle: int, reason: str) -> None:
     track, thread = self._space_lane(space, tile_id)
     owner = handle.owner
     args = {
       "allocation_id": handle.allocation_id,
       "owner_kind": type(owner).__name__,
-      "buffer_id": getattr(owner, "buffer_id",
-                           getattr(owner, "binding_name", "")),
+      "buffer_id": getattr(owner, "buffer_id", getattr(owner, "binding_name", "")),
       "generation": handle.generation,
       "base_address": handle.base_address,
       "size_bytes": handle.size_bytes,
@@ -774,30 +769,37 @@ class MemoryTrace:
     }
     name = f"{space}_release"
     self.tracer.instant(track, thread, name, cycle, args)
-    self.tracer.flow_end(track, thread, name, cycle, handle.allocation_id,
-                         {"allocation_id": handle.allocation_id})
+    self.tracer.flow_end(
+      track, thread, name, cycle, handle.allocation_id, {"allocation_id": handle.allocation_id}
+    )
 
   def hbm_bind(self, binding, handle, cycle: int) -> None:
-    self.tracer.instant("TileGroup", "Memory:HBM", "hbm_bind", cycle, {
-      "binding": binding.name,
-      "base_iova": binding.base_iova,
-      "size_bytes": binding.size_bytes,
-      "permissions": binding.permissions,
-      "allocation_id": handle.allocation_id,
-      "generation": handle.generation,
-    })
+    self.tracer.instant(
+      "TileGroup",
+      "Memory:HBM",
+      "hbm_bind",
+      cycle,
+      {
+        "binding": binding.name,
+        "base_iova": binding.base_iova,
+        "size_bytes": binding.size_bytes,
+        "permissions": binding.permissions,
+        "allocation_id": handle.allocation_id,
+        "generation": handle.generation,
+      },
+    )
 
   def hbm_unbind(self, binding_name: str, cycle: int) -> None:
-    self.tracer.instant("TileGroup", "Memory:HBM", "hbm_unbind", cycle,
-                        {"binding": binding_name})
+    self.tracer.instant("TileGroup", "Memory:HBM", "hbm_unbind", cycle, {"binding": binding_name})
 
   # -- transfer legs (PR 5 §2.3/§2.4) ----------------------------------
 
   def transfer_wait(self, transaction_id: str, reason: str) -> None:
     self._last_wait[transaction_id] = reason
 
-  def transfer_leg_issued(self, txn, leg, stage_name: str, result,
-                          resources: tuple[int, ...], cycle: int) -> None:
+  def transfer_leg_issued(
+    self, txn, leg, stage_name: str, result, resources: tuple[int, ...], cycle: int
+  ) -> None:
     rec = _LegRecord(
       leg_index=txn.current_leg,
       stage_name=stage_name,
@@ -810,8 +812,7 @@ class MemoryTrace:
     rec.channel_thread = self._channel_thread(stage_name, rec.resources)
     self._leg_records.setdefault(txn.transaction_id, []).append(rec)
     if rec.channel_thread is not None:
-      self.tracer.counter_if_changed("TileGroup", "busy", cycle, 1,
-                                     thread=rec.channel_thread)
+      self.tracer.counter_if_changed("TileGroup", "busy", cycle, 1, thread=rec.channel_thread)
 
   def _leg_args(self, txn, leg, rec: _LegRecord, end_cycle: int) -> dict:
     args = {
@@ -848,47 +849,37 @@ class MemoryTrace:
     leg = txn.legs[rec.leg_index]
     end_cycle = rec.completion_cycle if rec.completion_cycle > 0 else cycle
     track, thread = self._leg_lane(txn, leg, rec)
-    self.tracer.complete(track, thread, leg.kind.value, rec.accepted_cycle,
-                         end_cycle, self._leg_args(txn, leg, rec, end_cycle))
+    self.tracer.complete(
+      track, thread, leg.kind.value, rec.accepted_cycle, end_cycle, self._leg_args(txn, leg, rec, end_cycle)
+    )
     flow_args = {"transaction_id": txn.transaction_id}
     key = txn.transaction_id
     if key not in self._emitted_flows:
-      self.tracer.flow_start(track, thread, leg.kind.value,
-                             rec.accepted_cycle, key, flow_args)
+      self.tracer.flow_start(track, thread, leg.kind.value, rec.accepted_cycle, key, flow_args)
       self._emitted_flows.add(key)
     else:
-      self.tracer.flow_step(track, thread, leg.kind.value,
-                            rec.accepted_cycle, key, flow_args)
+      self.tracer.flow_step(track, thread, leg.kind.value, rec.accepted_cycle, key, flow_args)
     self._last_leg_lane[key] = (track, thread)
     if rec.leg_index + 1 >= len(txn.legs):
-      self.tracer.flow_end(track, thread, leg.kind.value,
-                           rec.accepted_cycle, key, flow_args)
+      self.tracer.flow_end(track, thread, leg.kind.value, rec.accepted_cycle, key, flow_args)
       self._closed_flows.add(key)
     if rec.channel_thread is not None:
-      self.tracer.counter_if_changed("TileGroup", "busy", end_cycle, 0,
-                                     thread=rec.channel_thread)
+      self.tracer.counter_if_changed("TileGroup", "busy", end_cycle, 0, thread=rec.channel_thread)
 
   def transfer_cancelled(self, txn, cycle: int) -> None:
     queue = self._leg_records.pop(txn.transaction_id, None)
     if queue and queue[0].channel_thread is not None:
       # the issued-but-never-completed leg leaves its channel lane busy
-      self.tracer.counter_if_changed("TileGroup", "busy", cycle, 0,
-                                     thread=queue[0].channel_thread)
+      self.tracer.counter_if_changed("TileGroup", "busy", cycle, 0, thread=queue[0].channel_thread)
     self._last_wait.pop(txn.transaction_id, None)
-    args = {
-      "transaction_id": txn.transaction_id,
-      "op": txn.op.value,
-      **self._owner_args(txn.issuer),
-    }
-    self.tracer.instant("TileGroup", "Scheduler:L2", "transfer_cancelled",
-                        cycle, args)
+    args = {"transaction_id": txn.transaction_id, "op": txn.op.value, **self._owner_args(txn.issuer)}
+    self.tracer.instant("TileGroup", "Scheduler:L2", "transfer_cancelled", cycle, args)
     key = txn.transaction_id
     if key in self._emitted_flows and key not in self._closed_flows:
-      track, thread = self._last_leg_lane.get(key, ("TileGroup",
-                                                    "Scheduler:L2"))
-      self.tracer.flow_end(track, thread, "transfer_cancelled", cycle, key,
-                           {"transaction_id": key})
+      track, thread = self._last_leg_lane.get(key, ("TileGroup", "Scheduler:L2"))
+      self.tracer.flow_end(track, thread, "transfer_cancelled", cycle, key, {"transaction_id": key})
       self._closed_flows.add(key)
+
 
 # ---------------------------------------------------------------------------
 # Standalone HTML wrapper
@@ -1131,6 +1122,6 @@ const TRACE = __TRACE_JSON__;
 
 
 def trace_to_html(tracer: Tracer) -> str:
-    """Wrap the Chrome trace JSON in a standalone HTML page with a Gantt chart."""
-    json_str = tracer.to_chrome_json()
-    return _HTML_TEMPLATE.replace("__TRACE_JSON__", json_str)
+  """Wrap the Chrome trace JSON in a standalone HTML page with a Gantt chart."""
+  json_str = tracer.to_chrome_json()
+  return _HTML_TEMPLATE.replace("__TRACE_JSON__", json_str)

@@ -39,20 +39,16 @@ that `nest.context` and `nest.dispatch.tasks.async` may carry an optional
   Tile Group participate in dispatches. The tile-local scheduler maps
   logical tasks to physical tiles/contexts at runtime (reference.mlir
   §27-33, §188-189).
-- **Device slot pin**: `nest.context` may carry `context = N` to pin
-  this context to **device execution slot N** when submitted via
-  `nexus.submit_context.async` (mirrors the UCE context pin of
-  `nest.dispatch.tasks.async` one level up). Omitted = first available
-  slot; occupied slot = submission waits (backpressure, PMU
-  `device_submit_wait`). Legal range `0..device_context_count-1`;
-  out-of-range rejected at model/task load. In a legacy single-context
-  module the pin selects the (only) slot and must be 0.
+- **Group context-slot affinity**: optional `nest.context context = N` is
+  carried by the CPU message and honored by the Group port's active-context
+  table. The range is `0..group.active_context_capacity-1`; an unavailable
+  occupied slot backpressures admission. It is neither a Group ID nor a
+  physical Tile context. Standalone single-context launches accept only slot 0.
 - **Validator mapping**: In this validator the mapping is 1:1 (logical
   task i → tile i), so `placement = 0xF` (4 bits set) with `task.range
 0..4` dispatches 4 tasks across 4 tiles.
 - **Verifier**: placement must be non-zero; `context = N` (if present)
-  must be >= 0 and < `device_context_count` (upper bound checked at
-  model/task load).
+  must be >= 0 and below the Group port's active-context capacity.
 
 ### 1.2 `tile.program @name (%task : !nest.task, %global : !nest.global_view<...>, %l2 : !nest.l2_buffer<...>) { ... }`
 
@@ -82,35 +78,33 @@ formal by position; the context body subviews the formal and moves it
 with explicit `src`/`dst` transfer ops. Bytes are derived from
 view/buffer shapes, not from a `bytes` property.
 
-**Device slot scheduling**: The device has `device_context_count`
-execution slots that all share the **same physical TileGroup** (the
-base `num_tiles` tiles are shared, not duplicated). When
-`nexus.submit_context.async @ctx` is reached, the context is assigned to
-a slot: if `@ctx`'s `nest.context` carries `context = N`, it is pinned to
-slot N (must be free); otherwise the first free slot is used. If no slot
-is free, the submission waits (backpressure, PMU `device_submit_wait`).
-Each slot runs its task concurrently on the shared tiles via UCE
-context switching: unpinned dispatch bindings auto-assign UCE context
-`slot_index`, requiring `context_count >= device_context_count`. When
-the context finishes, the slot is released and a `!nexus.event` fires;
-`nexus.await` blocks the device PC until the awaited event has fired.
+**CPU/hardware separation**: `CpuDeviceController` in `device.py` interprets
+the CPU body. It uses only `DevicePort.try_submit` and `poll_completions`;
+`runtime/group_port.py` owns concrete hardware slots/sequencer references.
+`Simulator` only coordinates CPU-before-Group and completion-after-Group
+cycle phases. A completion in cycle N can wake CPU dependencies in N+1.
 
-**L2 admission wait (PR 3.5)**: accepting a submit reserves the device
-slot but does not guarantee immediate L2 capacity. If the context's L2
-bundle (every `nest.alloc` slot as one atomic allocation) transiently
-cannot fit the live free map, the context enters `ADMISSION_WAIT`: the
-slot stays busy but no UCE context, L1 frame, stream queue, L2 handle or
-DMA/engine work is held, and no fault is recorded. A legal
-`nest.release` whose allocator final-free makes capacity available
-wakes the strict-FIFO wait queue in the same cycle; the admitted context
-issues its first group action the next cycle. Invalid bundles
-(size/alignment) and bundles that can never fit an empty L2 fault
-immediately and never queue. The submit result event still means the
-**full context completion**, not admission acceptance; two submits with
-no intermediate `nexus.await` may therefore be ACTIVE and
-ADMISSION_WAIT concurrently. PMU: `l2_admission_wait`,
-`l2_admission_retry`, `l2_admission_wakeup`, `l2_admission_wait_cycles`,
-`l2_admission_queue_peak`, `l2_admission_permanent_fault`.
+```mlir
+%a = nexus.submit_context.async @producer(%input, %middle) : !nexus.event<"a">
+%c = nexus.submit_context.async @consumer(%middle, %out) depends_on(%a) : !nexus.event<"c">
+%b = nexus.submit_context.async @independent(%other) : !nexus.event<"b">
+nexus.await %b, %c
+```
+
+Submit acceptance consumes bounded CPU pending metadata. WAIT_DEPS does not
+consume Group slots, L2 or Tile resources; the CPU scans past dependent
+pending requests to admit independent work. `device_context_count` limits
+hardware-admitted outstanding requests, not WAIT_DEPS metadata.
+`context_count` is independently the exact physical Tile context count;
+there is no automatic max() or slot-index binding.
+
+The Group port retains accepted requests across temporary L2/event-budget
+admission waits. L2 admission atomically plans every declared allocation;
+failure leaves no partial L2/L1/UCE/stream/DMA state. Strict FIFO remains the
+capacity policy. L2 final-free and event reservation retirement independently
+wake their waiters. Permanently impossible budgets fail, not wait forever.
+The return event denotes full context completion and safe cleanup, not
+submission, admission, or PC reaching the final instruction.
 
 ## 2. SSA Types
 
@@ -225,6 +219,9 @@ validator).
 HBM → L2 prefetch from a `!nest.global_view` (`%src`) into a
 `!nest.l2_buffer` (`%l2_buf`). The byte count is `prod(sizes) * dtype_size`
 derived from the view/buffer shapes. Produces one event.
+Optional `depends_on(...)` names earlier Group SSA events and remains on
+the action descriptor. Lowering also preserves overlapping global-range
+and L2 read/write hazards; independent input prefetches remain independent.
 
 ### 3.5 `nest.dma.store.async`
 
@@ -237,8 +234,8 @@ Every Store explicitly depends on all previously defined dispatches that
 actually write this buffer, through their `output_ready` results. The last
 Store must cover every writer in the context. Pure readers do not add
 `output_ready` prerequisites; unrelated explicit control dependencies remain
-legal. Produces one completion event; parallel Stores are not implicitly
-ordered by source position.
+legal. Produces one completion event. Stores to overlapping global ranges
+retain WAW order; independent destination ranges are not implicitly serialized.
 
 ### 3.6 `nest.dispatch.tasks.async`
 
@@ -344,8 +341,9 @@ final-free changes capacity and wakes admission.
 nest.await %grid, %store
 ```
 
-Waits for one or more nest events. Lowered to one `WAIT_EVENT` action
-per operand (or `WAITALL` if multiple).
+An explicit frontend submission fence for the named events. Earlier queued
+actions keep executing while the frontend waits; ordinary descriptor
+dependencies do not create this fence.
 
 ### 3.10 `nest.barrier`
 
@@ -353,7 +351,10 @@ per operand (or `WAITALL` if multiple).
 nest.barrier
 ```
 
-Group barrier. Zero-cycle, all tiles must reach before proceeding.
+A context-local full-prefix completion fence. It waits for every earlier
+registered/inflight action, including local release, before allowing later
+registration. It is not a zero-cycle no-op, cross-context barrier, or an
+oversubscribed Tile task barrier.
 
 ### 3.11 `nest.return`
 
@@ -361,10 +362,10 @@ Group barrier. Zero-cycle, all tiles must reach before proceeding.
 nest.return
 ```
 
-Context completion. Signals the context's `completion_event` (default
-`"context_done"`). This is the CPU-visible context completion:
-`context_done` covers both `grid_done` (all tasks returned) and the
-final store reaching HBM (reference.mlir §284-289).
+Closes context submission and signals `completion_event` only after its
+prerequisites complete. CPU completion additionally requires queued/inflight
+actions, grids and phase events, final HBM store and resource cleanup to drain.
+Reaching the final PC alone never denotes completion.
 
 ## 4. tile.\* Program-Body Ops
 
@@ -622,8 +623,8 @@ restrict the private execution IR's branch/stream instructions.
 
 ### 5.3 Context body
 
-- `context = N` on `nest.context` (if present) must be >= 0 and <
-  `device_context_count` (upper bound checked at model/task load).
+- `context = N` on `nest.context` is a non-negative Group context-slot
+  affinity, bounded by `group.active_context_capacity`, not CPU or Tile count.
 - All event tags (from `!nest.event<tag>` results) must be unique within
   the context body. Empty tags (for unused phase events) are skipped.
 - `nest.dispatch.tasks.async`:
@@ -636,7 +637,7 @@ restrict the private execution IR's branch/stream instructions.
     tag, and an undeclared phase requires an empty tag.
   - `context = N` (if present) must be >= 0; the upper bound is the
     simulator's `context_count` (checked at task load, not at IR verify).
-- `nest.dma.store.async` / `nest.release` dependencies must be earlier SSA
+- `nest.dma.prefetch.async` / `nest.dma.store.async` / `nest.release` dependencies must be earlier SSA
   events. Each Store waits on all earlier real writers; the final Store
   covers all writers. Every allocation has exactly one release before
   return, with exactly the full `R ∪ P ∪ S` set (§3.8), including all parallel
@@ -674,35 +675,37 @@ restrict the private execution IR's branch/stream instructions.
   unique within the program body.
 - `nexus.await` operands must be events defined earlier in the body
   (by a prior `nexus.submit_context.async`).
+- Submit `depends_on` operands must be unique earlier Nexus SSA results,
+  not matching-tag values from another scope. Overlapping global ranges
+  across launches with any writer require a transitive dependency or prior await.
 - The body must end with `nexus.return`.
 - No other ops are allowed in the body.
 
 ## 6. Lowering (IR → Runtime)
 
-The lowering (`ir_lowering.py`) is a direct 1:1 walk of the IR body,
-producing `ExecTileGroupTask` DTOs consumed by the cycle-accurate
-simulator. The event type tag is used directly as the runtime event id,
-so the trace (engine jobs, event ids, PMU counters) corresponds exactly
-to the IR ops. Memory-subsystem trace lanes, change-only counters and
+Lowering builds `ExecTileGroupTask` descriptors with explicit dependencies and
+actual L2 read/write effects, including RAW/WAR/WAW and overlapping global
+transfer/Gather-range hazards. Event tags are instantiated with launch identity;
+hardware does not carry xDSL SSA values. Memory-subsystem trace lanes, counters and
 per-transaction flows are documented in `README.md` §Profiling / Trace
 Visualization; the trace well-formedness contract is enforced by
 `Tracer.assert_well_formed()` (see `pipeline_validator/tests/test_trace.py`).
 
 ### 6.1 Context body → ExecGroupAction list
 
-| IR op                       | ExecGroupAction                                                               |
-| --------------------------- | ----------------------------------------------------------------------------- |
-| `nest.alloc`                | (no action; records `ExecL2Buffer`; L2 bundle admitted at context start)      |
-| `nest.subview`              | (no action; records `ExecMemoryView`)                                         |
-| `nest.task.range`           | (no action; records `ExecTaskDomain`, attached to dispatch role bindings)     |
-| `nest.dma.prefetch.async`   | `DMA_PREFETCH` args=(desc_id, ExecTransfer)                                   |
-| `nest.dma.store.async`      | `WAIT_EVENT` per depends_on; then `DMA_STORE` args=(desc_id, ExecTransfer)    |
-| `nest.dispatch.tasks.async` | `WAIT_EVENT` per depends_on; then `DISPATCH_ROLE` args=(ExecDispatchRequest,) |
-| `nest.collective.async`     | `COLLECTIVE_RUN` args=(name, op, bytes, mask)                                 |
-| `nest.release`              | `WAIT_EVENT` per depends_on; then `RELEASE_L2` args=(ExecReleaseRequest,)     |
-| `nest.await`                | `WAIT_EVENT` per operand                                                      |
-| `nest.barrier`              | `BARRIER_GROUP`                                                               |
-| `nest.return`               | `SIGNAL_EVENT` args=(completion_event)                                        |
+| IR op                       | ExecGroupAction                                                                |
+| --------------------------- | ------------------------------------------------------------------------------ |
+| `nest.alloc`                | (no action; records `ExecL2Buffer`; L2 bundle admitted at context start)       |
+| `nest.subview`              | (no action; records `ExecMemoryView`)                                          |
+| `nest.task.range`           | (no action; records `ExecTaskDomain`, attached to dispatch role bindings)      |
+| `nest.dma.prefetch.async`   | `DMA_PREFETCH` args=(desc_id, ExecTransfer)                                    |
+| `nest.dma.store.async`      | `DMA_STORE` with descriptor dependencies and source read effect                |
+| `nest.dispatch.tasks.async` | `DISPATCH_ROLE` with dependencies, actual reads/writes and three output events |
+| `nest.collective.async`     | `COLLECTIVE_RUN` args=(name, op, bytes, mask)                                  |
+| `nest.release`              | `RELEASE_L2` with dependencies and verified access ordinals                    |
+| `nest.await`                | `WAIT_EVENT` per operand                                                       |
+| `nest.barrier`              | `BARRIER_GROUP`                                                                |
+| `nest.return`               | `SIGNAL_EVENT` args=(completion_event)                                         |
 
 `ExecTransfer` carries explicit `src`/`dst` `ExecMemoryView`s and the
 byte count. `global_inputs`, `l2_buffers`, `task_domain`, L2 `actuals`,
@@ -770,20 +773,17 @@ In model mode, `lower_model_ir` produces an `ExecModel` containing:
 
 - `tasks`: `nest.context` ops lowered to `ExecTileGroupTask` (same as
   §6.1) keyed by context symbol name.
-- `context_pins`: per-context device slot pin (from `nest.context`
-  `context = N`, or `None`).
+- `context_pins`: per-context Group context-slot affinity from `context=N`.
 - `body`: `nexus.submit_context.async` → `ExecDeviceOp("submit", ...)`,
   `nexus.await` → `ExecDeviceOp("await", ...)` per operand,
   `nexus.return` → `ExecDeviceOp("return")`.
 
-The device PC loop (`Simulator._run_model`) walks `body` linearly:
-submit assigns a slot (pin or first-free), await blocks until the event
-fires, return completes. Slots share ONE `TileGroup` instance; each
-submit deep-clones its `ExecTileGroupTask` and namespaces event/stream
-IDs with a monotonic launch ID (`s{slot}l{launch}_`), then registers a
-fresh `TileGroupSequencer` advanced in lockstep each cycle. Completing
-sequencers are pruned; when all slots drain and `return` was reached,
-the model completes.
+`CpuDeviceController` interprets the body with bounded pending descriptors,
+dependency handles and hardware-outstanding credits. GroupPortAdapter owns
+hardware slots and launch namespacing. The Group's shared scheduler registers
+and issues at most one action each per cycle, rather than stepping one
+independently issuing sequencer per context. Submission and completion messages
+are the only CPU/hardware execution boundary.
 
 ## 7. Runtime: Phase Signal Aggregation
 
@@ -798,7 +798,7 @@ already-seen task ids. A signal is processed as follows:
 1. A retired/non-live launch generation is stale and ignored.
 2. A live but unknown grid, task, or phase is invalid and faults the
    owning sequencer.
-3. A duplicate `(grid, phase, task_id)` is ignored.
+3. A duplicate live `(grid, phase, task_id)` faults the owner without recounting.
 4. A first valid signal is recorded; when its seen task ids exactly equal
    the grid's expected logical-task set, `notify_event` fires that phase
    event exactly once.
@@ -840,8 +840,8 @@ the aggregation key.
 - `L2SRAM` capacity fault: a permanent/invalid `AdmissionFailure`
   faults the sequencer with `L2 capacity fault during context
 admission` and no completion event is produced; a transient miss
-  never writes the fault ring. The strict-FIFO wait queue retries only
-  on a release final-free; the head is admitted in that same cycle and
-  issues its first group action the next cycle. Reset/fault cleanup
+  never writes the fault ring. FIFO admission retries on relevant L2 final-free
+  or event-budget reclamation. The admitted context next participates in shared
+  registration; issue occurs no earlier than the following cycle. Reset/fault cleanup
   cancels waiting tickets (they own no allocation) and accumulates
   `l2_admission_wait_cycles = terminal - enqueue` exactly once.

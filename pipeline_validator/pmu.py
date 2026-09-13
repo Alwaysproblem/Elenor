@@ -13,110 +13,123 @@ from enum import IntEnum
 
 
 class StallReason(IntEnum):
-    """elenor_stall_reason_t (Architecture 21.6).  Order = priority."""
-    NONE = 0
-    WAIT_EVENT = 1
-    WAIT_OPERAND = 2
-    STREAM_CREDIT = 3
-    WAIT_L1_BANK = 4
-    WAIT_L2_BANK = 5
-    WAIT_NOC_CREDIT = 6
-    WAIT_DMA_QUEUE = 7
-    WAIT_HBM_OUTSTANDING = 8
-    UCE_PROGRAM_DESC = 9
-    UNKNOWN = 10
-    WAIT_MSHR = 11
+  """elenor_stall_reason_t (Architecture 21.6).  Order = priority."""
 
-    @property
-    def label(self) -> str:
-        return _STALL_LABELS[self]
+  NONE = 0
+  WAIT_EVENT = 1
+  WAIT_OPERAND = 2
+  STREAM_CREDIT = 3
+  WAIT_L1_BANK = 4
+  WAIT_L2_BANK = 5
+  WAIT_NOC_CREDIT = 6
+  WAIT_DMA_QUEUE = 7
+  WAIT_HBM_OUTSTANDING = 8
+  UCE_PROGRAM_DESC = 9
+  UNKNOWN = 10
+  WAIT_MSHR = 11
+
+  @property
+  def label(self) -> str:
+    return _STALL_LABELS[self]
 
 
 _STALL_LABELS = {
-    StallReason.NONE: "engine_active",
-    StallReason.WAIT_EVENT: "engine_wait_event",
-    StallReason.WAIT_OPERAND: "engine_wait_operand",
-    StallReason.STREAM_CREDIT: "stream_credit_empty_or_full",
-    StallReason.WAIT_L1_BANK: "l1_bank_conflict",
-    StallReason.WAIT_L2_BANK: "l2_bank_conflict",
-    StallReason.WAIT_NOC_CREDIT: "noc_credit_backpressure",
-    StallReason.WAIT_DMA_QUEUE: "dma_queue_wait",
-    StallReason.WAIT_HBM_OUTSTANDING: "hbm_outstanding_wait",
-    StallReason.UCE_PROGRAM_DESC: "uce_program_or_descriptor_stall",
-    StallReason.UNKNOWN: "unknown_or_unclassified",
-    StallReason.WAIT_MSHR: "mshr_full",
+  StallReason.NONE: "engine_active",
+  StallReason.WAIT_EVENT: "engine_wait_event",
+  StallReason.WAIT_OPERAND: "engine_wait_operand",
+  StallReason.STREAM_CREDIT: "stream_credit_empty_or_full",
+  StallReason.WAIT_L1_BANK: "l1_bank_conflict",
+  StallReason.WAIT_L2_BANK: "l2_bank_conflict",
+  StallReason.WAIT_NOC_CREDIT: "noc_credit_backpressure",
+  StallReason.WAIT_DMA_QUEUE: "dma_queue_wait",
+  StallReason.WAIT_HBM_OUTSTANDING: "hbm_outstanding_wait",
+  StallReason.UCE_PROGRAM_DESC: "uce_program_or_descriptor_stall",
+  StallReason.UNKNOWN: "unknown_or_unclassified",
+  StallReason.WAIT_MSHR: "mshr_full",
 }
 
 
 @dataclass
 class PMUCounter:
-    """A generic PMU counter set with unique stall attribution.
+  """A generic PMU counter set with unique stall attribution.
 
-    `stall_cycles` records per-primary-owner stall cycles.
-    `named_cycles` records arbitrary cycle counters (occupancy, queue_full, ...)
-    `events` records event counts (push, pop, acquire, release, eos, fault).
+  `stall_cycles` records per-primary-owner stall cycles.
+  `named_cycles` records arbitrary cycle counters (occupancy, queue_full, ...)
+  `events` records event counts (push, pop, acquire, release, eos, fault).
+  """
+
+  stall_cycles: dict = field(default_factory=lambda: defaultdict(int))
+  named_cycles: dict = field(default_factory=lambda: defaultdict(int))
+  events: dict = field(default_factory=lambda: defaultdict(int))
+
+  def add(self, reason: StallReason, n: int = 1) -> None:
+    self.stall_cycles[reason] += n
+
+  def add_cycle(self, name: str, n: int = 1) -> None:
+    self.named_cycles[name] += n
+
+  def add_event(self, name: str, n: int = 1) -> None:
+    self.events[name] += n
+
+  def active_cycles(self) -> int:
+    """Cycles where the engine was *not* stalled (idle-or-busy).
+
+    For engine PMUs this is total - sum(stall).  For a queue PMU the
+    occupancy-weighted total is in named_cycles['occupancy'].
     """
-    stall_cycles: dict = field(default_factory=lambda: defaultdict(int))
-    named_cycles: dict = field(default_factory=lambda: defaultdict(int))
-    events: dict = field(default_factory=lambda: defaultdict(int))
+    total_stall = sum(self.stall_cycles.values())
+    # caller sets total via set_total; we keep a separate field.
+    return max(self.named_cycles.get("total", 0) - total_stall, 0)
 
-    def add(self, reason: StallReason, n: int = 1) -> None:
-        self.stall_cycles[reason] += n
+  def utilization(self, total_cycles: int) -> float:
+    """Fraction of tile-cycles where at least one engine was active.
 
-    def add_cycle(self, name: str, n: int = 1) -> None:
-        self.named_cycles[name] += n
+    Computed as total active cycles (StallReason.NONE, aggregated across
+    all engines and the UCE) divided by total tile-cycles.  Capped at 1.0.
+    """
+    if total_cycles <= 0:
+      return 0.0
+    active = self.stall_cycles.get(StallReason.NONE, 0)
+    return min(active / total_cycles, 1.0)
 
-    def add_event(self, name: str, n: int = 1) -> None:
-        self.events[name] += n
+  def stall_breakdown(self) -> dict:
+    """Map stall_label -> cycles, dropping zeros."""
+    return {reason.label: c for reason, c in self.stall_cycles.items() if c}
 
-    def active_cycles(self) -> int:
-        """Cycles where the engine was *not* stalled (idle-or-busy).
+  def prefixed_snapshot(self, prefix: str) -> dict[str, dict[str, int]]:
+    """Return scalar counters in one namespace without inferring meaning.
 
-        For engine PMUs this is total - sum(stall).  For a queue PMU the
-        occupancy-weighted total is in named_cycles['occupancy'].
-        """
-        total_stall = sum(self.stall_cycles.values())
-        # caller sets total via set_total; we keep a separate field.
-        return max(self.named_cycles.get("total", 0) - total_stall, 0)
+    Components own the semantics of their counters.  Report generation
+    uses this helper to expose, for example, ``group_*`` counters without
+    re-attributing stalls from traces or scheduler state.
+    """
+    return {
+      "named_cycles": {
+        name: value for name, value in sorted(self.named_cycles.items()) if name.startswith(prefix)
+      },
+      "events": {name: value for name, value in sorted(self.events.items()) if name.startswith(prefix)},
+    }
 
-    def utilization(self, total_cycles: int) -> float:
-        """Fraction of tile-cycles where at least one engine was active.
+  def merge(self, other: PMUCounter) -> None:
+    for k, v in other.stall_cycles.items():
+      self.stall_cycles[k] += v
+    for k, v in other.named_cycles.items():
+      self.named_cycles[k] += v
+    for k, v in other.events.items():
+      self.events[k] += v
 
-        Computed as total active cycles (StallReason.NONE, aggregated across
-        all engines and the UCE) divided by total tile-cycles.  Capped at 1.0.
-        """
-        if total_cycles <= 0:
-            return 0.0
-        active = self.stall_cycles.get(StallReason.NONE, 0)
-        return min(active / total_cycles, 1.0)
-
-    def stall_breakdown(self) -> dict:
-        """Map stall_label -> cycles, dropping zeros."""
-        return {
-            reason.label: c
-            for reason, c in self.stall_cycles.items() if c
-        }
-
-    def merge(self, other: PMUCounter) -> None:
-        for k, v in other.stall_cycles.items():
-            self.stall_cycles[k] += v
-        for k, v in other.named_cycles.items():
-            self.named_cycles[k] += v
-        for k, v in other.events.items():
-            self.events[k] += v
-
-    def reset(self) -> None:
-        self.stall_cycles.clear()
-        self.named_cycles.clear()
-        self.events.clear()
+  def reset(self) -> None:
+    self.stall_cycles.clear()
+    self.named_cycles.clear()
+    self.events.clear()
 
 
 def primary_stall_owner(reasons) -> StallReason:
-    """Pick the highest-priority (lowest int) non-NONE stall reason.
+  """Pick the highest-priority (lowest int) non-NONE stall reason.
 
-    Implements the 'each stall cycle has exactly one primary owner' rule.
-    """
-    active = [r for r in reasons if r != StallReason.NONE]
-    if not active:
-        return StallReason.NONE
-    return min(active)
+  Implements the 'each stall cycle has exactly one primary owner' rule.
+  """
+  active = [r for r in reasons if r != StallReason.NONE]
+  if not active:
+    return StallReason.NONE
+  return min(active)

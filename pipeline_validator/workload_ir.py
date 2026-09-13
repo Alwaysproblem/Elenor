@@ -15,7 +15,7 @@ from typing import cast
 
 from xdsl.context import Context
 from xdsl.dialects.builtin import Builtin, ModuleOp
-from xdsl.ir import Attribute
+from xdsl.ir import Attribute, SSAValue
 from xdsl.parser import Parser
 from xdsl.printer import Printer
 from xdsl.utils.exceptions import VerifyException
@@ -33,6 +33,7 @@ from .dialects.elenor import (
   NestTask,
   NestTaskRangeOp,
   NexusAwaitOp,
+  NexusEvent,
   NexusProgramOp,
   NexusReturnOp,
   NexusSubmitContextOp,
@@ -159,10 +160,7 @@ def verify_workload_ir(module: ModuleOp) -> NestContextOp | NexusProgramOp:
       raise VerifyException("expected exactly one nest.context")
     if len(contexts) > 1:
       raise VerifyException("expected exactly one nest.context")
-    program_accesses = {
-      name: _verify_program(prog)
-      for name, prog in programs.items()
-    }
+    program_accesses = {name: _verify_program(prog) for name, prog in programs.items()}
     _verify_context(context, programs, program_accesses)
     return context
 
@@ -172,13 +170,10 @@ def verify_workload_ir(module: ModuleOp) -> NestContextOp | NexusProgramOp:
   if not contexts:
     raise VerifyException("model requires at least one nest.context")
   program = nexus_programs[0]
-  program_accesses = {
-    name: _verify_program(prog)
-    for name, prog in programs.items()
-  }
+  program_accesses = {name: _verify_program(prog) for name, prog in programs.items()}
   for ctx in contexts.values():
     _verify_context(ctx, programs, program_accesses)
-  _verify_nexus_program(program, contexts)
+  _verify_nexus_program(program, contexts, programs)
   return program
 
 
@@ -214,13 +209,9 @@ def _verify_context(
       )
 
   body = _body_ops(context)
-  context_allocs = {
-    op.result
-    for op in body
-    if isinstance(op, NestAllocOp)
-  }
+  context_allocs = {op.result for op in body if isinstance(op, NestAllocOp)}
   seen_events: set[str] = set()
-  defined_events: set[str] = set()
+  defined_events: set[SSAValue] = set()
   seen_buffers: set[str] = set()
 
   for op in body:
@@ -291,11 +282,11 @@ def _verify_context(
       if tag in seen_events:
         raise VerifyException(f"duplicate event tag '{tag}'")
       seen_events.add(tag)
-      defined_events.add(tag)
       for dep in getattr(op, "depends_on", ()):
         dep_tag = dep.type.tag.data
-        if dep_tag not in defined_events:
+        if dep not in defined_events:
           raise VerifyException(f"depends_on references undefined event '{dep_tag}'")
+      defined_events.add(op.result)
       continue
 
     if isinstance(op, NestDispatchOp):
@@ -314,9 +305,7 @@ def _verify_context(
         if isinstance(formal.type, NestGlobalView)
       ]
       l2_formals = [
-        (formal_pos, formal)
-        for formal_pos, formal in data_formals
-        if isinstance(formal.type, NestBuffer)
+        (formal_pos, formal) for formal_pos, formal in data_formals if isinstance(formal.type, NestBuffer)
       ]
       globals_list = list(op.global_views)
       bindings_list = list(op.bindings)
@@ -328,9 +317,8 @@ def _verify_context(
           f" but tile.program declares {len(global_formals)} global formals"
         )
       for i, (actual, (_, formal)) in enumerate(zip(globals_list, global_formals)):
-        if (
-          not isinstance(actual.type, NestGlobalView)
-          or _shape_key(actual.type) != _shape_key(formal.type)
+        if not isinstance(actual.type, NestGlobalView) or _shape_key(actual.type) != _shape_key(
+          formal.type
         ):
           raise VerifyException(
             f"dispatch global actual {i} type does not match tile.program '@{prog_sym}' global formal {i}"
@@ -346,49 +334,31 @@ def _verify_context(
             f"dispatch bindings actual {i} for '@{prog_sym}'"
             " must be a nest.alloc result from the current nest.context"
           )
-        if (
-          not isinstance(actual.type, NestBuffer)
-          or _shape_key(actual.type) != _shape_key(formal.type)
-        ):
+        if not isinstance(actual.type, NestBuffer) or _shape_key(actual.type) != _shape_key(formal.type):
           raise VerifyException(
-            f"dispatch bindings actual {i} type does not match"
-            f" tile.program '@{prog_sym}' l2 formal {i}"
+            f"dispatch bindings actual {i} type does not match tile.program '@{prog_sym}' l2 formal {i}"
           )
 
       binding_set = set(bindings_list)
       for label, actuals in (("ins", ins_list), ("outs", outs_list)):
         if len(set(actuals)) != len(actuals):
-          raise VerifyException(
-            f"dispatch {label} for '@{prog_sym}' contains a duplicate actual"
-          )
+          raise VerifyException(f"dispatch {label} for '@{prog_sym}' contains a duplicate actual")
         if any(actual not in binding_set for actual in actuals):
           raise VerifyException(
-            f"dispatch {label} for '@{prog_sym}' contains an actual"
-            " that is not present in bindings"
+            f"dispatch {label} for '@{prog_sym}' contains an actual that is not present in bindings"
           )
 
       read_formals, write_formals = program_accesses[prog_sym]
-      actual_by_formal = {
-        formal_pos: actual
-        for (formal_pos, _), actual in zip(l2_formals, bindings_list)
-      }
-      expected_ins = {
-        actual_by_formal[formal_pos]
-        for formal_pos in read_formals
-      }
-      expected_outs = {
-        actual_by_formal[formal_pos]
-        for formal_pos in write_formals
-      }
+      actual_by_formal = {formal_pos: actual for (formal_pos, _), actual in zip(l2_formals, bindings_list)}
+      expected_ins = {actual_by_formal[formal_pos] for formal_pos in read_formals}
+      expected_outs = {actual_by_formal[formal_pos] for formal_pos in write_formals}
       if set(ins_list) != expected_ins:
         raise VerifyException(
-          f"dispatch ins for '@{prog_sym}' must exactly declare"
-          " the buffers read by the tile program"
+          f"dispatch ins for '@{prog_sym}' must exactly declare the buffers read by the tile program"
         )
       if set(outs_list) != expected_outs:
         raise VerifyException(
-          f"dispatch outs for '@{prog_sym}' must exactly declare"
-          " the buffers written by the tile program"
+          f"dispatch outs for '@{prog_sym}' must exactly declare the buffers written by the tile program"
         )
       # Validate 1:1 logical-task-to-tile mapping
       task_op = cast(NestTaskRangeOp, op.tasks.owner)
@@ -457,13 +427,13 @@ def _verify_context(
         if tag in seen_events:
           raise VerifyException(f"duplicate event tag '{tag}'")
         seen_events.add(tag)
-        defined_events.add(tag)
       for dep in op.depends_on:
         if not isinstance(dep.type, NestEvent):
           continue
         dep_tag = dep.type.tag.data
-        if dep_tag not in defined_events:
+        if dep not in defined_events:
           raise VerifyException(f"dispatch depends_on references undefined event '{dep_tag}'")
+      defined_events.update(op.results)
       continue
 
     if isinstance(op, NestReleaseOp):
@@ -471,7 +441,7 @@ def _verify_context(
         if not isinstance(dep.type, NestEvent):
           continue
         dep_tag = dep.type.tag.data
-        if dep_tag not in defined_events:
+        if dep not in defined_events:
           raise VerifyException(f"nest.release depends_on references undefined event '{dep_tag}'")
       continue
 
@@ -480,7 +450,7 @@ def _verify_context(
         if not isinstance(operand.type, NestEvent):
           continue
         tag = operand.type.tag.data
-        if tag not in defined_events:
+        if operand not in defined_events:
           raise VerifyException(f"nest.await references undefined event '{tag}'")
       continue
 
@@ -513,10 +483,7 @@ def _verify_release_graph(body: list) -> None:
   stores: dict = {}
   prefetches: dict = {}
   dispatches: list[tuple[int, NestDispatchOp]] = []
-  return_index = next(
-    (idx for idx, op in enumerate(body) if isinstance(op, NestReturnOp)),
-    len(body),
-  )
+  return_index = next((idx for idx, op in enumerate(body) if isinstance(op, NestReturnOp)), len(body))
   for idx, op in enumerate(body):
     if isinstance(op, NestAllocOp):
       allocs[op.result] = op
@@ -540,51 +507,36 @@ def _verify_release_graph(body: list) -> None:
     rel_idx, rel = rels[0]
     if rel_idx >= return_index:
       raise VerifyException(f"nest.release of slot '{slot}' must appear before nest.return")
-    for later_op in body[rel_idx + 1:]:
+    for later_op in body[rel_idx + 1 :]:
       if any(operand is buffer for operand in later_op.operands):
-        raise VerifyException(
-          f"nest.release of slot '{slot}' must follow every use of the allocation"
-        )
+        raise VerifyException(f"nest.release of slot '{slot}' must follow every use of the allocation")
 
     readers = [
-      (idx, dispatch)
-      for idx, dispatch in dispatches
-      if any(actual is buffer for actual in dispatch.ins)
+      (idx, dispatch) for idx, dispatch in dispatches if any(actual is buffer for actual in dispatch.ins)
     ]
     writers = [
-      (idx, dispatch)
-      for idx, dispatch in dispatches
-      if any(actual is buffer for actual in dispatch.outs)
+      (idx, dispatch) for idx, dispatch in dispatches if any(actual is buffer for actual in dispatch.outs)
     ]
     buffer_prefetches = prefetches.get(buffer, [])
     buffer_stores = stores.get(buffer, [])
 
     if role == "in" and writers:
-      raise VerifyException(
-        f"nest.alloc input slot '{slot}' may not be written by a tile dispatch"
-      )
+      raise VerifyException(f"nest.alloc input slot '{slot}' may not be written by a tile dispatch")
     if role in ("out", "inout"):
       if not writers:
         raise VerifyException(
-          f"nest.release of slot '{slot}' (role '{role}')"
-          " requires at least one actual tile writer"
+          f"nest.release of slot '{slot}' (role '{role}') requires at least one actual tile writer"
         )
       if not buffer_stores:
         raise VerifyException(
-          f"nest.release of slot '{slot}' (role '{role}')"
-          " requires at least one nest.dma.store.async"
+          f"nest.release of slot '{slot}' (role '{role}') requires at least one nest.dma.store.async"
         )
 
     for store_idx, store in buffer_stores:
       prior_writer_events = [
-        dispatch.output_ready
-        for dispatch_idx, dispatch in writers
-        if dispatch_idx < store_idx
+        dispatch.output_ready for dispatch_idx, dispatch in writers if dispatch_idx < store_idx
       ]
-      if any(
-        all(dep is not event for dep in store.depends_on)
-        for event in prior_writer_events
-      ):
+      if any(all(dep is not event for dep in store.depends_on) for event in prior_writer_events):
         raise VerifyException(
           f"store of slot '{slot}' must depend on every previously defined"
           " actual writer output_ready result"
@@ -593,13 +545,9 @@ def _verify_release_graph(body: list) -> None:
     if buffer_stores:
       last_store = buffer_stores[-1][1]
       writer_events = [dispatch.output_ready for _, dispatch in writers]
-      if any(
-        all(dep is not event for dep in last_store.depends_on)
-        for event in writer_events
-      ):
+      if any(all(dep is not event for dep in last_store.depends_on) for event in writer_events):
         raise VerifyException(
-          f"final store of slot '{slot}' must depend on every actual writer"
-          " output_ready result"
+          f"final store of slot '{slot}' must depend on every actual writer output_ready result"
         )
 
     expected_release_deps = [
@@ -608,10 +556,7 @@ def _verify_release_graph(body: list) -> None:
       *(store.result for _, store in buffer_stores),
     ]
     deps = list(rel.depends_on)
-    if (
-      len(set(deps)) != len(deps)
-      or set(deps) != set(expected_release_deps)
-    ):
+    if len(set(deps)) != len(deps) or set(deps) != set(expected_release_deps):
       raise VerifyException(
         f"nest.release of slot '{slot}' must depend on exactly all reader"
         " input_released, prefetch, and store completion events"
@@ -633,9 +578,7 @@ def _program_subviews_of_formal(prog: TileProgramDefOp, formal_pos: int) -> list
   return result
 
 
-def _verify_program(
-  prog: TileProgramDefOp,
-) -> tuple[frozenset[int], frozenset[int]]:
+def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[int]]:
   from .dialects.elenor import (
     TileAllocOp,
     TileAwaitOp,
@@ -667,16 +610,14 @@ def _verify_program(
       seen_l2_formal = True
       continue
     raise VerifyException(
-      f"tile.program '@{prog.sym_name.data}' formal {i}"
-      " must be !nest.global_view or !nest.l2_buffer"
+      f"tile.program '@{prog.sym_name.data}' formal {i} must be !nest.global_view or !nest.l2_buffer"
     )
 
   body = _body_ops(prog)
   returns = [op for op in body if isinstance(op, TileReturnOp)]
   if len(returns) != 1 or body[-1] is not returns[0]:
     raise VerifyException(
-      f"tile.program '@{prog.sym_name.data}' body must contain exactly one"
-      " terminal tile.return"
+      f"tile.program '@{prog.sym_name.data}' body must contain exactly one terminal tile.return"
     )
 
   seen_events: set[str] = set()
@@ -707,8 +648,7 @@ def _verify_program(
       or buffer not in live_l1
     ):
       raise VerifyException(
-        f"{operand_description} must be an earlier tile.alloc result"
-        " from the current tile.program"
+        f"{operand_description} must be an earlier tile.alloc result from the current tile.program"
       )
 
   for op in body:
@@ -747,19 +687,14 @@ def _verify_program(
     if isinstance(op, TileFreeOp):
       buffer = op.buffer
       owner = buffer.owner
-      if (
-        not isinstance(owner, TileAllocOp)
-        or owner not in body
-        or buffer not in defined_l1
-      ):
+      if not isinstance(owner, TileAllocOp) or owner not in body or buffer not in defined_l1:
         raise VerifyException(
           f"tile.free in '@{prog.sym_name.data}' requires an earlier"
           " tile.alloc result from the current tile.program"
         )
       if buffer in freed_l1:
         raise VerifyException(
-          f"tile.free in '@{prog.sym_name.data}' may not free"
-          " the same allocation more than once"
+          f"tile.free in '@{prog.sym_name.data}' may not free the same allocation more than once"
         )
       pending_accesses = l1_access_events[buffer] - awaited_events
       if pending_accesses:
@@ -792,18 +727,13 @@ def _verify_program(
         l1_access_events[op.dst].add(op.result)
         view = op.src.owner
         if not isinstance(view, TileSubviewOp) or view not in body:
-          raise VerifyException(
-            "tile.load source must be a tile.subview from the current tile.program"
-          )
+          raise VerifyException("tile.load source must be a tile.subview from the current tile.program")
         formal_index = _formal_index(view.src, block)
         if formal_index is None or not isinstance(args[formal_index].type, NestBuffer):
-          raise VerifyException(
-            "tile.load source must resolve directly to a tile.program l2 formal"
-          )
+          raise VerifyException("tile.load source must resolve directly to a tile.program l2 formal")
         if phase_counts["input_released"]:
           raise VerifyException(
-            f"tile.signal input_released in '@{prog.sym_name.data}'"
-            " may not be followed by another L2 load"
+            f"tile.signal input_released in '@{prog.sym_name.data}' may not be followed by another L2 load"
           )
         read_formals.add(formal_index)
         load_events.add(op.result)
@@ -821,13 +751,10 @@ def _verify_program(
           )
         formal_index = _formal_index(view.src, block)
         if formal_index is None or not isinstance(args[formal_index].type, NestBuffer):
-          raise VerifyException(
-            "tile.store destination must resolve directly to a tile.program l2 formal"
-          )
+          raise VerifyException("tile.store destination must resolve directly to a tile.program l2 formal")
         if phase_counts["output_ready"]:
           raise VerifyException(
-            f"tile.signal output_ready in '@{prog.sym_name.data}'"
-            " may not be followed by another L2 store"
+            f"tile.signal output_ready in '@{prog.sym_name.data}' may not be followed by another L2 store"
           )
         write_formals.add(formal_index)
         store_events.add(op.result)
@@ -851,10 +778,7 @@ def _verify_program(
           raise VerifyException("gather profile must contain at least one tile.profiled.access")
         if any(not isinstance(access, TileProfiledAccessOp) for access in accesses):
           raise VerifyException("gather profile may contain only tile.profiled.access operations")
-        profiled_accesses = [
-          cast(TileProfiledAccessOp, access)
-          for access in accesses
-        ]
+        profiled_accesses = [cast(TileProfiledAccessOp, access) for access in accesses]
 
         result_bytes = int(op.result_bytes.value.data)
         cache_min_bytes = int(op.cache_min_bytes.value.data)
@@ -927,21 +851,13 @@ def _verify_program(
         raise VerifyException("tile.signal operand must be the tile.program task formal (block arg 0)")
       phase_counts[phase] += 1
       if phase_counts[phase] > 1:
-        raise VerifyException(
-          f"tile.signal {phase} in '@{prog.sym_name.data}' may appear at most once"
-        )
-      if phase == "input_released" and any(
-        event not in awaited_events
-        for event in load_events
-      ):
+        raise VerifyException(f"tile.signal {phase} in '@{prog.sym_name.data}' may appear at most once")
+      if phase == "input_released" and any(event not in awaited_events for event in load_events):
         raise VerifyException(
           f"tile.signal input_released in '@{prog.sym_name.data}' requires"
           " every preceding L2 load completion event to be awaited"
         )
-      if phase == "output_ready" and any(
-        event not in awaited_events
-        for event in store_events
-      ):
+      if phase == "output_ready" and any(event not in awaited_events for event in store_events):
         raise VerifyException(
           f"tile.signal output_ready in '@{prog.sym_name.data}' requires"
           " every preceding L2 store completion event to be awaited"
@@ -979,7 +895,9 @@ def _body_ops(op) -> list:
   return list(region.blocks[0].ops)
 
 
-def _verify_nexus_program(program: NexusProgramOp, contexts: dict[str, NestContextOp]) -> None:
+def _verify_nexus_program(
+  program: NexusProgramOp, contexts: dict[str, NestContextOp], programs: dict[str, TileProgramDefOp]
+) -> None:
   body = _body_ops(program)
   if not body or not isinstance(body[-1], NexusReturnOp):
     raise VerifyException("nexus.program body must end with nexus.return")
@@ -995,7 +913,7 @@ def _verify_nexus_program(program: NexusProgramOp, contexts: dict[str, NestConte
       )
 
   seen_events: set[str] = set()
-  defined_events: set[str] = set()
+  defined_events: set[SSAValue] = set()
 
   for op in body:
     if isinstance(op, NexusSubmitContextOp):
@@ -1008,7 +926,15 @@ def _verify_nexus_program(program: NexusProgramOp, contexts: dict[str, NestConte
       if tag in seen_events:
         raise VerifyException(f"duplicate event tag '{tag}'")
       seen_events.add(tag)
-      defined_events.add(tag)
+      for dependency in op.depends_on:
+        assert isinstance(dependency.type, NexusEvent)
+        if dependency not in defined_events:
+          raise VerifyException(
+            f"submit_context depends_on references undefined event '{dependency.type.tag.data}'"
+          )
+      if len(set(op.depends_on)) != len(op.depends_on):
+        raise VerifyException("submit_context depends_on events must be unique")
+      defined_events.add(op.result)
       # Rule 3: submit↔context signature
       formal_types = [a.type for a in contexts[ctx_sym].body.block.args]
       if len(op.actuals) != len(formal_types):
@@ -1026,7 +952,7 @@ def _verify_nexus_program(program: NexusProgramOp, contexts: dict[str, NestConte
     if isinstance(op, NexusAwaitOp):
       for operand in op.events:
         tag = operand.type.tag.data  # type: ignore[attr-defined]
-        if tag not in defined_events:
+        if operand not in defined_events:
           raise VerifyException(f"nexus.await references undefined event '{tag}'")
       continue
 
@@ -1034,3 +960,78 @@ def _verify_nexus_program(program: NexusProgramOp, contexts: dict[str, NestConte
       continue
 
     raise VerifyException(f"unexpected nexus.program body op '{op.name}'")
+
+  _verify_device_memory_dependencies(body, contexts, programs)
+
+
+def _context_global_accesses(
+  context: NestContextOp, programs: dict[str, TileProgramDefOp]
+) -> list[tuple[int, int, int, bool]]:
+  """Conservative byte intervals for actual global reads/writes of a launch."""
+  from .dialects.elenor import NestDispatchOp, NestDMAStoreOp, NestPrefetchOp, TileGatherOp
+
+  accesses: list[tuple[SSAValue, bool]] = []
+  for op in _body_ops(context):
+    if isinstance(op, NestPrefetchOp):
+      accesses.append((op.src, False))
+    elif isinstance(op, NestDMAStoreOp):
+      accesses.append((op.dst, True))
+    elif isinstance(op, NestDispatchOp):
+      program = programs[op.program.data]
+      used = {nested.source for nested in _body_ops(program) if isinstance(nested, TileGatherOp)}
+      formals = (arg for arg in program.body.block.args if isinstance(arg.type, NestGlobalView))
+      accesses.extend((actual, False) for formal, actual in zip(formals, op.global_views) if formal in used)
+  intervals: list[tuple[int, int, int, bool]] = []
+  for value, writing in dict.fromkeys(accesses):
+    view = value.owner
+    assert isinstance(view, NestSubviewOp)
+    index = _formal_index(view.src, context.body.block)
+    assert index is not None
+    backing = _shape_type(view.src.type)
+    dims = _int_list(backing.dims)
+    offset = 0
+    for dim, component in enumerate(_int_list(view.offsets)):
+      stride = 1
+      for extent in dims[dim + 1 :]:
+        stride *= extent
+      offset += component * stride * DTYPE_BYTES[backing.dtype.data]
+    intervals.append((index, offset, offset + _shape_bytes(value.type), writing))
+  return intervals
+
+
+def _verify_device_memory_dependencies(
+  body: list, contexts: dict[str, NestContextOp], programs: dict[str, TileProgramDefOp]
+) -> None:
+  accesses = {name: _context_global_accesses(context, programs) for name, context in contexts.items()}
+  ancestors: dict[SSAValue, set[SSAValue]] = {}
+  awaited: set[SSAValue] = set()
+  prior: list[tuple[SSAValue, list[tuple[SSAValue, int, int, bool]]]] = []
+  for op in body:
+    if isinstance(op, NexusAwaitOp):
+      for event in op.events:
+        awaited.add(event)
+        awaited.update(ancestors[event])
+    elif isinstance(op, NexusSubmitContextOp):
+      ordered = set(awaited)
+      for event in op.depends_on:
+        ordered.add(event)
+        ordered.update(ancestors[event])
+      actuals = list(op.actuals)
+      current = [
+        (actuals[index], start, end, writing)
+        for index, start, end, writing in accesses[op.context_sym.data]
+      ]
+      for producer, previous in prior:
+        if producer in ordered:
+          continue
+        if any(
+          actual is old_actual and start < old_end and old_start < end and (writing or old_write)
+          for actual, start, end, writing in current
+          for old_actual, old_start, old_end, old_write in previous
+        ):
+          raise VerifyException(
+            "overlapping global accesses across context submissions require"
+            " depends_on or a preceding nexus.await"
+          )
+      ancestors[op.result] = ordered
+      prior.append((op.result, current))

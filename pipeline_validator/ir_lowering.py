@@ -2,8 +2,8 @@
 
 Lowers the function-call style IR (see reference.mlir) to the
 ``ExecTileGroupTask`` consumed by the cycle-accurate simulator.  The
-lowering is a direct 1:1 walk of the IR body, so the trace (engine jobs,
-event ids, PMU counters) corresponds exactly to the IR ops.
+lowering preserves explicit control fences and builds data-hazard dependencies
+for finite Group ready-action scheduling without ordering independent buffers.
 """
 
 from __future__ import annotations
@@ -90,29 +90,31 @@ def lower_model_ir(module) -> ExecModel:
   program = verify_workload_ir(module)
   assert isinstance(program, NexusProgramOp)
   program_args = list(program.body.block.args)
-  inputs = tuple(
-    _global_input(arg, i) for i, arg in enumerate(program_args)
-  )
+  inputs = tuple(_global_input(arg, i) for i, arg in enumerate(program_args))
   tasks: dict[str, ExecTileGroupTask] = {}
   context_pins: dict[str, int | None] = {}
   for op in module.body.block.ops:
     if isinstance(op, NestContextOp):
       tasks[op.sym_name.data] = _lower_context(module, op)
-      context_pins[op.sym_name.data] = (
-        None if op.context_id is None else int(op.context_id.value.data)
-      )
+      context_pins[op.sym_name.data] = None if op.context_id is None else int(op.context_id.value.data)
   body: list[ExecDeviceOp] = []
   for body_op in _body_ops(program):
     if isinstance(body_op, NexusSubmitContextOp):
+      actual_indices = tuple(_block_arg_index(actual, program_args) for actual in body_op.actuals)
+      if len(set(actual_indices)) != len(actual_indices):
+        task = tasks[body_op.context_sym.data]
+        _build_action_dependencies(
+          task.actions,
+          task.role_bindings,
+          {formal.name: inputs[index].name for formal, index in zip(task.global_inputs, actual_indices)},
+        )
       body.append(
         ExecDeviceOp(
           "submit",
           ctx_name=body_op.context_sym.data,
           event_tag=_event_tag(body_op.result.type),
-          actual_inputs=tuple(
-            _block_arg_index(actual, program_args)
-            for actual in body_op.actuals
-          ),
+          actual_inputs=actual_indices,
+          dependencies=tuple(_event_tag(dep.type) for dep in body_op.depends_on),
         )
       )
     elif isinstance(body_op, NexusAwaitOp):
@@ -123,11 +125,7 @@ def lower_model_ir(module) -> ExecModel:
     else:
       raise VerifyException(f"unexpected nexus.program body op '{body_op.name}'")
   return ExecModel(
-    name=program.sym_name.data,
-    tasks=tasks,
-    context_pins=context_pins,
-    body=body,
-    inputs=inputs,
+    name=program.sym_name.data, tasks=tasks, context_pins=context_pins, body=body, inputs=inputs
   )
 
 
@@ -144,16 +142,12 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
       programs[op.sym_name.data] = _lower_program(op)
 
   context_args = list(context.body.block.args)
-  global_inputs = tuple(
-    _global_input(arg, i) for i, arg in enumerate(context_args)
-  )
+  global_inputs = tuple(_global_input(arg, i) for i, arg in enumerate(context_args))
   formal_names: dict[SSAValue, str] = {
-    arg: global_input.name
-    for arg, global_input in zip(context_args, global_inputs)
+    arg: global_input.name for arg, global_input in zip(context_args, global_inputs)
   }
   formal_dims: dict[SSAValue, tuple[int, ...]] = {
-    arg: global_input.dims
-    for arg, global_input in zip(context_args, global_inputs)
+    arg: global_input.dims for arg, global_input in zip(context_args, global_inputs)
   }
   objects: dict[SSAValue, ExecMemoryView | ExecL2Buffer] = {}
   task_domains: dict[SSAValue, ExecTaskDomain] = {}
@@ -179,8 +173,7 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
     if isinstance(body_op, NestAllocOp):
       dims, dtype = _dims_dtype(body_op.result.type)
       element_bytes = DTYPE_BYTES[dtype]
-      alignment = (int(body_op.alignment.value.data)
-                   if body_op.alignment is not None else 1)
+      alignment = int(body_op.alignment.value.data) if body_op.alignment is not None else 1
       buffer = ExecL2Buffer(
         slot=body_op.slot.data,
         dims=dims,
@@ -194,8 +187,7 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
       objects[body_op.result] = buffer
     elif isinstance(body_op, NestTaskRangeOp):
       task_domains[body_op.result] = ExecTaskDomain(
-        from_task=int(body_op.from_task.value.data),
-        to_task=int(body_op.to_task.value.data),
+        from_task=int(body_op.from_task.value.data), to_task=int(body_op.to_task.value.data)
       )
     elif isinstance(body_op, NestSubviewOp):
       formal_name = formal_names.get(body_op.src)
@@ -221,73 +213,39 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
     elif isinstance(body_op, NestPrefetchOp):
       src = _memory_view(objects, body_op.src, body_op.name)
       dst_buffer = _l2_buffer(objects, body_op.dst, body_op.name)
-      transfer = ExecTransfer(
-        src=src,
-        dst=_l2_buffer_view(dst_buffer),
-        bytes=src.bytes,
-      )
+      transfer = ExecTransfer(src=src, dst=_l2_buffer_view(dst_buffer), bytes=src.bytes)
       actions.append(
         ExecGroupAction(
           ExecGroupActionOp.DMA_PREFETCH,
           args=(f"gdma_prefetch:{dst_buffer.slot}", transfer),
           dst=_event_tag(body_op.result.type),
+          dependencies=tuple(_event_tag(dep.type) for dep in body_op.depends_on),
+          writes=(dst_buffer.slot,),
         )
       )
     elif isinstance(body_op, NestDMAStoreOp):
-      # depends_on -> WAIT actions first
-      for dep in body_op.depends_on:
-        actions.append(
-          ExecGroupAction(
-            ExecGroupActionOp.WAIT_EVENT,
-            args=(_event_tag(dep.type),),
-          )
-        )
       src_buffer = _l2_buffer(objects, body_op.src, body_op.name)
       dst = _memory_view(objects, body_op.dst, body_op.name)
-      transfer = ExecTransfer(
-        src=_l2_buffer_view(src_buffer),
-        dst=dst,
-        bytes=dst.bytes,
-      )
+      transfer = ExecTransfer(src=_l2_buffer_view(src_buffer), dst=dst, bytes=dst.bytes)
       actions.append(
         ExecGroupAction(
           ExecGroupActionOp.DMA_STORE,
           args=(f"gdma_store:{src_buffer.slot}", transfer),
           dst=_event_tag(body_op.result.type),
+          dependencies=tuple(_event_tag(dep.type) for dep in body_op.depends_on),
+          reads=(src_buffer.slot,),
         )
       )
     elif isinstance(body_op, NestDispatchOp):
-      # depends_on -> WAIT actions first
-      for dep in body_op.depends_on:
-        actions.append(
-          ExecGroupAction(
-            ExecGroupActionOp.WAIT_EVENT,
-            args=(_event_tag(dep.type),),
-          )
-        )
       prog_sym = body_op.program.data
-      ctx_id = (
-        None
-        if body_op.context_id is None
-        else int(body_op.context_id.value.data)
-      )
+      ctx_id = None if body_op.context_id is None else int(body_op.context_id.value.data)
       task_domain = task_domains.get(body_op.tasks)
       if task_domain is None:
         raise VerifyException("dispatch task range has no lowered task domain")
-      global_actuals = tuple(
-        _memory_view(objects, actual, body_op.name)
-        for actual in body_op.global_views
-      )
-      actuals = tuple(
-        _l2_buffer(objects, actual, body_op.name).slot
-        for actual in body_op.bindings
-      )
-      read_slots = {
-        _l2_buffer(objects, actual, body_op.name).slot for actual in body_op.ins
-      }
-      write_slots = {
-        _l2_buffer(objects, actual, body_op.name).slot for actual in body_op.outs
-      }
+      global_actuals = tuple(_memory_view(objects, actual, body_op.name) for actual in body_op.global_views)
+      actuals = tuple(_l2_buffer(objects, actual, body_op.name).slot for actual in body_op.bindings)
+      read_slots = {_l2_buffer(objects, actual, body_op.name).slot for actual in body_op.ins}
+      write_slots = {_l2_buffer(objects, actual, body_op.name).slot for actual in body_op.outs}
       unique_actuals = dict.fromkeys(actuals)
       read_actuals = tuple(slot for slot in unique_actuals if slot in read_slots)
       write_actuals = tuple(slot for slot in unique_actuals if slot in write_slots)
@@ -311,8 +269,7 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
         role_id=role_id,
         dispatch_ordinal=dispatch_ordinals[body_op],
         signal_policy=ExecSignalPolicy(
-          input_released=policy.get("input_released"),
-          output_ready=policy.get("output_ready"),
+          input_released=policy.get("input_released"), output_ready=policy.get("output_ready")
         ),
         input_released_event=inrel_tag,
         output_ready_event=outready_tag,
@@ -322,50 +279,39 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
           ExecGroupActionOp.DISPATCH_ROLE,
           args=(request,),
           dst=grid_tag,
+          dependencies=tuple(_event_tag(dep.type) for dep in body_op.depends_on),
+          reads=read_actuals,
+          writes=write_actuals,
         )
       )
     elif isinstance(body_op, NestReleaseOp):
-      # depends_on -> WAIT actions first
-      for dep in body_op.depends_on:
-        actions.append(
-          ExecGroupAction(
-            ExecGroupActionOp.WAIT_EVENT,
-            args=(_event_tag(dep.type),),
-          )
-        )
       buffer = _l2_buffer(objects, body_op.buffer, body_op.name)
       actions.append(
         ExecGroupAction(
           ExecGroupActionOp.RELEASE_L2,
-          args=(ExecReleaseRequest(
-            buffer_slot=buffer.slot,
-            buffer_role=buffer.role,
-            reader_dispatch_ordinals=tuple(sorted(set(ins_consumers.get(body_op.buffer, ())))),
-            writer_dispatch_ordinals=tuple(sorted(set(outs_producers.get(body_op.buffer, ())))),
-            dependency_events=tuple(
-              _event_tag(dep.type) for dep in body_op.depends_on),
-          ),),
+          args=(
+            ExecReleaseRequest(
+              buffer_slot=buffer.slot,
+              buffer_role=buffer.role,
+              reader_dispatch_ordinals=tuple(sorted(set(ins_consumers.get(body_op.buffer, ())))),
+              writer_dispatch_ordinals=tuple(sorted(set(outs_producers.get(body_op.buffer, ())))),
+              dependency_events=tuple(_event_tag(dep.type) for dep in body_op.depends_on),
+            ),
+          ),
+          dependencies=tuple(_event_tag(dep.type) for dep in body_op.depends_on),
         )
       )
     elif isinstance(body_op, NestAwaitOp):
       for operand in body_op.events:
-        actions.append(
-          ExecGroupAction(
-            ExecGroupActionOp.WAIT_EVENT,
-            args=(_event_tag(operand.type),),
-          )
-        )
+        actions.append(ExecGroupAction(ExecGroupActionOp.WAIT_EVENT, args=(_event_tag(operand.type),)))
     elif isinstance(body_op, NestBarrierOp):
       actions.append(ExecGroupAction(ExecGroupActionOp.BARRIER_GROUP))
     elif isinstance(body_op, NestReturnOp):
-      actions.append(
-        ExecGroupAction(
-          ExecGroupActionOp.SIGNAL_EVENT,
-          args=(context.completion_event.data,),
-        )
-      )
+      actions.append(ExecGroupAction(ExecGroupActionOp.SIGNAL_EVENT, args=(context.completion_event.data,)))
     else:
       raise VerifyException(f"unexpected nest context body op '{body_op.name}'")
+
+  _build_action_dependencies(actions, role_bindings)
 
   return ExecTileGroupTask(
     name=context.sym_name.data,
@@ -376,6 +322,109 @@ def _lower_context(module, context: NestContextOp) -> ExecTileGroupTask:
     global_inputs=global_inputs,
     l2_buffers=tuple(l2_buffers),
   )
+
+
+def _build_action_dependencies(
+  actions: list[ExecGroupAction],
+  role_bindings: Mapping[int, ExecTileRoleBinding],
+  global_aliases: Mapping[str, str] | None = None,
+) -> None:
+  """Build only real access hazards; explicit fences remain controller actions.
+
+  Readwrite dispatches retain both milestones: output_ready does not imply
+  input_released. Global ranges are compared after binding known aliases.
+  This is compile-time analysis, not an unbounded hardware candidate scan.
+  """
+  last_writer: dict[str, str] = {}
+  readers: dict[str, set[str]] = {}
+  produced: set[str] = set()
+  global_accesses: list[tuple[str, int, int, bool, str]] = []
+  aliases = global_aliases or {}
+  for action in actions:
+    dependencies = set(action.dependencies)
+    if action.op is ExecGroupActionOp.WAIT_EVENT:
+      dependencies.update(action.args)
+    for slot in (*action.reads, *action.writes):
+      if slot in last_writer:
+        dependencies.add(last_writer[slot])
+    for slot in action.writes:
+      dependencies.update(readers.get(slot, ()))
+    if action.op is ExecGroupActionOp.RELEASE_L2:
+      slot = action.args[0].buffer_slot
+      if slot in last_writer:
+        dependencies.add(last_writer[slot])
+      dependencies.update(readers.get(slot, ()))
+    if action.op in (ExecGroupActionOp.BARRIER_GROUP, ExecGroupActionOp.SIGNAL_EVENT):
+      dependencies.update(produced)
+
+    accesses: list[tuple[ExecMemoryView, bool]] = []
+    if action.op in (ExecGroupActionOp.DMA_PREFETCH, ExecGroupActionOp.DMA_STORE):
+      transfer = action.args[1]
+      global_write = action.op is ExecGroupActionOp.DMA_STORE
+      accesses.append((transfer.dst if global_write else transfer.src, global_write))
+    elif action.op is ExecGroupActionOp.DISPATCH_ROLE:
+      binding = role_bindings[action.args[0].role_id]
+      global_formals = {
+        index: view
+        for (index, _), view in zip(
+          (
+            (i, formal) for i, formal in enumerate(binding.tile_program.formals) if formal.space == "global"
+          ),
+          binding.global_actuals,
+        )
+      }
+      for descriptor in binding.tile_program.descriptors.values():
+        gather = descriptor.params.get("gather")
+        if isinstance(gather, ExecGatherDesc):
+          formal_index = int(gather.source.base.removeprefix("formal:"))
+          accesses.append((global_formals[formal_index], False))
+    for view, global_write in dict.fromkeys(accesses):
+      name = view.base.removeprefix("global:")
+      name = aliases.get(name, name)
+      offset = 0
+      for index, value in enumerate(view.offsets):
+        stride = 1
+        for dim in view.backing_dims[index + 1 :]:
+          stride *= dim
+        offset += value * stride * view.element_bytes
+      end = offset + view.bytes
+      for prior_name, start, stop, prior_write, event in global_accesses:
+        if (
+          event != action.dst
+          and name == prior_name
+          and offset < stop
+          and start < end
+          and (global_write or prior_write)
+        ):
+          dependencies.add(event)
+      assert action.dst is not None
+      global_accesses.append((name, offset, end, global_write, action.dst))
+
+    if not dependencies <= produced:
+      raise VerifyException(
+        f"action '{action.op.value}' depends on unbound producer events: {sorted(dependencies - produced)}"
+      )
+    action.dependencies = tuple(sorted(dependencies))
+    read_done = action.dst
+    write_done = action.dst
+    if action.op is ExecGroupActionOp.DISPATCH_ROLE:
+      request = action.args[0]
+      read_done = request.input_released_event
+      write_done = request.output_ready_event
+    for slot in action.writes:
+      if not write_done:
+        raise VerifyException(f"write of '{slot}' has no completion event")
+      last_writer[slot] = write_done
+      readers[slot] = set()
+    for slot in action.reads:
+      if not read_done:
+        raise VerifyException(f"read of '{slot}' has no completion event")
+      readers.setdefault(slot, set()).add(read_done)
+    for event in action.output_events:
+      if event in produced:
+        raise VerifyException(f"duplicate action producer event '{event}'")
+      produced.add(event)
+
 
 def _register_role(
   bindings: dict[int, ExecTileRoleBinding],
@@ -462,8 +511,7 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
     if isinstance(body_op, TileAllocOp):
       dims, dtype = _dims_dtype(body_op.result.type)
       element_bytes = DTYPE_BYTES[dtype]
-      alignment = (int(body_op.alignment.value.data)
-                   if body_op.alignment is not None else 1)
+      alignment = int(body_op.alignment.value.data) if body_op.alignment is not None else 1
       name = f"l1:{l1_counter}"
       l1_counter += 1
       l1_buffers.append(
@@ -504,11 +552,7 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
         dtype=dtype,
         element_bytes=src.element_bytes,
         bytes=_view_bytes(dims, dtype),
-        task_dim=(
-          None
-          if body_op.task_dim is None
-          else int(body_op.task_dim.value.data)
-        ),
+        task_dim=(None if body_op.task_dim is None else int(body_op.task_dim.value.data)),
       )
     elif isinstance(body_op, TileLoadOp):
       desc_name = f"d{desc_counter}"
@@ -523,11 +567,7 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
         transfer=ExecTransfer(src=src, dst=dst, bytes=src.bytes),
       )
       insts.append(
-        ExecTileInst(
-          ExecTileOp.LAUNCH_MFE,
-          dst=_event_tag(body_op.result.type),
-          args=(desc_name,),
-        )
+        ExecTileInst(ExecTileOp.LAUNCH_MFE, dst=_event_tag(body_op.result.type), args=(desc_name,))
       )
     elif isinstance(body_op, TileStoreOp):
       desc_name = f"d{desc_counter}"
@@ -542,11 +582,7 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
         transfer=ExecTransfer(src=src, dst=dst, bytes=src.bytes),
       )
       insts.append(
-        ExecTileInst(
-          ExecTileOp.LAUNCH_MFE,
-          dst=_event_tag(body_op.result.type),
-          args=(desc_name,),
-        )
+        ExecTileInst(ExecTileOp.LAUNCH_MFE, dst=_event_tag(body_op.result.type), args=(desc_name,))
       )
     elif isinstance(body_op, TileGatherOp):
       desc_name = f"d{desc_counter}"
@@ -572,17 +608,10 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
         accesses=accesses,
       )
       descriptors[desc_name] = ExecEngineDesc(
-        name=desc_name,
-        kind="MFE",
-        op="gather",
-        params={"gather": gather},
+        name=desc_name, kind="MFE", op="gather", params={"gather": gather}
       )
       insts.append(
-        ExecTileInst(
-          ExecTileOp.LAUNCH_GATHER,
-          dst=_event_tag(body_op.result.type),
-          args=(desc_name,),
-        )
+        ExecTileInst(ExecTileOp.LAUNCH_GATHER, dst=_event_tag(body_op.result.type), args=(desc_name,))
       )
     elif isinstance(body_op, TilePowOp):
       desc_name = f"d{desc_counter}"
@@ -598,27 +627,16 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
         },
       )
       insts.append(
-        ExecTileInst(
-          ExecTileOp.LAUNCH_EVU,
-          dst=_event_tag(body_op.result.type),
-          args=(desc_name,),
-        )
+        ExecTileInst(ExecTileOp.LAUNCH_EVU, dst=_event_tag(body_op.result.type), args=(desc_name,))
       )
     elif isinstance(body_op, TileEvuOp):
       desc_name = f"d{desc_counter}"
       desc_counter += 1
       descriptors[desc_name] = ExecEngineDesc(
-        name=desc_name,
-        kind="EVU",
-        op=body_op.op_name.data,
-        params={"ops": int(body_op.evu_ops.value.data)},
+        name=desc_name, kind="EVU", op=body_op.op_name.data, params={"ops": int(body_op.evu_ops.value.data)}
       )
       insts.append(
-        ExecTileInst(
-          ExecTileOp.LAUNCH_EVU,
-          dst=_event_tag(body_op.result.type),
-          args=(desc_name,),
-        )
+        ExecTileInst(ExecTileOp.LAUNCH_EVU, dst=_event_tag(body_op.result.type), args=(desc_name,))
       )
     elif isinstance(body_op, TileBoaOp):
       desc_name = f"d{desc_counter}"
@@ -632,17 +650,10 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
       if body_op.accumulate is not None:
         params["accumulate"] = True
       descriptors[desc_name] = ExecEngineDesc(
-        name=desc_name,
-        kind="BOA",
-        op=body_op.op_name.data,
-        params=params,
+        name=desc_name, kind="BOA", op=body_op.op_name.data, params=params
       )
       insts.append(
-        ExecTileInst(
-          ExecTileOp.LAUNCH_BOA,
-          dst=_event_tag(body_op.result.type),
-          args=(desc_name,),
-        )
+        ExecTileInst(ExecTileOp.LAUNCH_BOA, dst=_event_tag(body_op.result.type), args=(desc_name,))
       )
     elif isinstance(body_op, TileAwaitOp):
       events = [_event_tag(operand.type) for operand in body_op.events]
@@ -653,16 +664,10 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
       else:
         raise VerifyException("tile.await requires at least one event operand")
     elif isinstance(body_op, TileSignalOp):
-      task_index = next(
-        (i for i, arg in enumerate(op.body.block.args) if arg is body_op.task),
-        None,
-      )
+      task_index = next((i for i, arg in enumerate(op.body.block.args) if arg is body_op.task), None)
       if task_index is None:
-        raise VerifyException(
-          "tile.signal operand must be a tile.program block argument")
-      insts.append(
-        ExecTileInst(ExecTileOp.SIGNAL_PHASE, args=(body_op.phase.data, task_index))
-      )
+        raise VerifyException("tile.signal operand must be a tile.program block argument")
+      insts.append(ExecTileInst(ExecTileOp.SIGNAL_PHASE, args=(body_op.phase.data, task_index)))
     elif isinstance(body_op, TileReturnOp):
       insts.append(ExecTileInst(ExecTileOp.RET))
     else:
@@ -676,7 +681,6 @@ def _lower_program(op: TileProgramDefOp) -> ExecTileProgram:
     formals=tuple(formals),
     l1_buffers=tuple(l1_buffers),
   )
-
 
 
 # ---------------------------------------------------------------------------
@@ -701,9 +705,7 @@ def _event_tag(event_type) -> str:
 
 
 def _dims_dtype(type_attr: Attribute) -> tuple[tuple[int, ...], str]:
-  if not isinstance(
-    type_attr, (NestBuffer, NestGlobalMemref, NestGlobalView, NestL2View, TileL1Buffer)
-  ):
+  if not isinstance(type_attr, (NestBuffer, NestGlobalMemref, NestGlobalView, NestL2View, TileL1Buffer)):
     raise VerifyException(f"expected shape-typed memory attribute, got {type(type_attr).__name__}")
   return tuple(_int_list(type_attr.dims)), type_attr.dtype.data
 
@@ -715,10 +717,7 @@ def _int_list(arr) -> list[int]:
 def _global_input(arg: SSAValue, index: int) -> ExecGlobalInput:
   dims, dtype = _dims_dtype(arg.type)
   return ExecGlobalInput(
-    name=arg.name_hint or f"arg{index}",
-    dims=dims,
-    dtype=dtype,
-    size_bytes=_view_bytes(dims, dtype),
+    name=arg.name_hint or f"arg{index}", dims=dims, dtype=dtype, size_bytes=_view_bytes(dims, dtype)
   )
 
 
@@ -730,9 +729,7 @@ def _block_arg_index(value: SSAValue, args: Sequence[SSAValue]) -> int:
 
 
 def _memory_view(
-  objects: Mapping[SSAValue, ExecMemoryView | ExecL2Buffer],
-  value: SSAValue,
-  op_name: str,
+  objects: Mapping[SSAValue, ExecMemoryView | ExecL2Buffer], value: SSAValue, op_name: str
 ) -> ExecMemoryView:
   result = objects.get(value)
   if not isinstance(result, ExecMemoryView):
@@ -741,9 +738,7 @@ def _memory_view(
 
 
 def _l2_buffer(
-  objects: Mapping[SSAValue, ExecMemoryView | ExecL2Buffer],
-  value: SSAValue,
-  op_name: str,
+  objects: Mapping[SSAValue, ExecMemoryView | ExecL2Buffer], value: SSAValue, op_name: str
 ) -> ExecL2Buffer:
   result = objects.get(value)
   if not isinstance(result, ExecL2Buffer):
