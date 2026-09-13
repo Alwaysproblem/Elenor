@@ -41,6 +41,16 @@ from .pmu import PMUCounter, StallReason
 from .stream_queue import StreamQueue, StreamToken
 from .trace import Tracer
 
+_LAUNCH_OPS: frozenset[ExecTileOp] = frozenset(
+  {
+    ExecTileOp.LAUNCH_BOA,
+    ExecTileOp.LAUNCH_EVU,
+    ExecTileOp.LAUNCH_USE,
+    ExecTileOp.LAUNCH_MFE,
+    ExecTileOp.LAUNCH_GATHER,
+  }
+)
+
 
 class _UCEContextState(Enum):
   EMPTY = "empty"
@@ -583,13 +593,7 @@ class TileUCE:
     ins = ctx.program.insts[ctx.pc]
     if ins.op in (ExecTileOp.WAIT, ExecTileOp.WAITALL):
       return self._probe_wait_instruction(ctx, ins)
-    if ins.op in (
-      ExecTileOp.LAUNCH_BOA,
-      ExecTileOp.LAUNCH_EVU,
-      ExecTileOp.LAUNCH_USE,
-      ExecTileOp.LAUNCH_MFE,
-      ExecTileOp.LAUNCH_GATHER,
-    ):
+    if ins.op in _LAUNCH_OPS:
       try:
         self._assert_launch_l1_live(ctx, ins)
         queue_key = self._launch_queue_key(ctx, ins)
@@ -714,9 +718,7 @@ class TileUCE:
       ExecTileOp.PROF_END,
     ):
       ctx.pc += 1
-    elif op == ExecTileOp.BR:
-      ctx.pc = prog.label_index(ins.args[0])
-    elif op == ExecTileOp.BRP:
+    elif op in (ExecTileOp.BR, ExecTileOp.BRP):
       ctx.pc = prog.label_index(ins.args[0])
     elif op == ExecTileOp.BR_EOS:
       tok = ctx.tokens.get(ins.args[0])
@@ -764,13 +766,7 @@ class TileUCE:
         self._fault_context(ctx, f"tile.free: {exc}", cycle)
       else:
         ctx.pc += 1
-    elif op in (
-      ExecTileOp.LAUNCH_BOA,
-      ExecTileOp.LAUNCH_EVU,
-      ExecTileOp.LAUNCH_USE,
-      ExecTileOp.LAUNCH_MFE,
-      ExecTileOp.LAUNCH_GATHER,
-    ):
+    elif op in _LAUNCH_OPS:
       try:
         self._assert_launch_l1_live(ctx, ins)
       except MemoryInvariantError as exc:
@@ -866,16 +862,9 @@ class TileUCE:
   def _assert_free_dependencies_complete(self, ctx: _UCEContext, buffer_name: str) -> None:
     """Check prior queued/active accesses without adding hot-path state."""
     assert ctx.program is not None
-    launch_ops = {
-      ExecTileOp.LAUNCH_BOA,
-      ExecTileOp.LAUNCH_EVU,
-      ExecTileOp.LAUNCH_USE,
-      ExecTileOp.LAUNCH_MFE,
-      ExecTileOp.LAUNCH_GATHER,
-    }
     relevant_events: set[str] = set()
     for prior in ctx.program.insts[: ctx.pc]:
-      if prior.op not in launch_ops:
+      if prior.op not in _LAUNCH_OPS:
         continue
       if prior.dst is None:
         continue
@@ -989,7 +978,11 @@ class TileUCE:
       return "USE"
     if ins.op == ExecTileOp.LAUNCH_GATHER:
       return "MFE_GATHER"
-    return self._queue_key_for_launch(ctx, ins)
+    desc_ref = ins.args[0] if ins.args else ""
+    desc = ctx.program.descriptors.get(desc_ref) if ctx.program is not None else None
+    if desc is not None and desc.op in ("store", "dma_store"):
+      return "MFE_STORE"
+    return "MFE_LOAD"
 
   def _issue_engine_launch(self, ctx: _UCEContext, queue_key: str, ins: ExecTileInst, cycle: int) -> None:
     if self.tracer is not None:
@@ -1036,15 +1029,6 @@ class TileUCE:
       )
     ctx.pc += 1
     return True
-
-  def _queue_key_for_launch(self, ctx: _UCEContext, ins: ExecTileInst) -> str:
-    if ins.op == ExecTileOp.LAUNCH_GATHER:
-      return "MFE_GATHER"
-    desc_ref = ins.args[0] if ins.args else ""
-    desc = ctx.program.descriptors.get(desc_ref) if ctx.program is not None else None
-    if desc is not None and desc.op in ("store", "dma_store"):
-      return "MFE_STORE"
-    return "MFE_LOAD"
 
   def _drain_engine_queues(self, cycle: int, tile: ComputeTile) -> None:
     from .memory.allocator import MemoryInvariantError
