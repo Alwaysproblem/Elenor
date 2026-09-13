@@ -39,7 +39,7 @@
 
 **这不等于数值正确性或全图最优调度认证。** 下文“主要目的”描述案例要检验的行为，不是把每一项都自动标为 PASS。外部 MLIR 的通用 CLI 检查不能替代逐条 tensor use-def、阶段事件和调度质量检查。
 
-**修正前调度诊断（详见 §8）**：静态发射顺序不能主动绕开无关等待、跨 Context 完成事件偏粗、中间 Buffer 的旧双绑定与回收过于保守，以及内存布局/性能指标限制了优化判断。它们不能统称为调度器错误。旧分析覆盖两模式全部 220 份基线 trace；本次只修正访问与释放合同，不改变调度、成本或 Context partition。
+**修正前调度诊断（详见 §8）**：静态发射顺序不能主动绕开无关等待、跨 Context 完成事件偏粗、中间 Buffer 的旧双绑定与回收过于保守，以及内存布局/性能指标限制了优化判断。它们不能统称为调度器错误。旧分析覆盖两模式全部 220 份基线 trace；"本次只修正访问与释放合同，不改变调度"一句描述的是 2026-09-11 访问合同修正轮的边界——Ready-Action 切换后调度语义已变（见 §9），本段其余归因只对历史基线负责。
 
 ### 1.2 可从当前 trace 直接观察的代表结论
 
@@ -84,7 +84,7 @@
 
 ### 2.2 Context 映射与数据可见性
 
-- **single**：全图在一个 Context，节点间主要通过 L2 与 `output_ready` 关联；不同 dispatch 的 UCE pin 明确区分。Context 仍有线性 PC，等待放置会影响可发射工作。
+- **single**：全图在一个 Context，节点间主要通过 L2 与 `output_ready` 关联；不同 dispatch 的 UCE pin 明确区分。Ready-Action 前基线描述"Context 仍有线性 PC，等待放置会影响可发射工作"；当前合同精确表述为：**Group action 已按 S1 依赖门控乱序发射（显式 `nest.await`/`nest.barrier` fence 除外），Tile Program 内部仍是线性 PC**，tile 级等待放置仍影响其队头发射。
 - **node**：S 图通常每节点一个 Context，跨 Context 边经 HBM；T01 按完整 chunk 切分，T03 按 step，T04 按请求内 A/B/C 节点。
 - **stage**：按分支或阶段合并。下文 `{A,B}/{C,D}` 表示两个 Context，不表示阶段事件可以跨 Context 导出。
 - 当前 IR 的跨 Context 可见事件粒度是 `context_done`：消费者 submit 前等待所需 producer Context，包含其必要 HBM 写回。这是当前 IR 的保守实现，不是架构上“所有边都必须等 context_done”的结论。
@@ -849,3 +849,69 @@ S02 stage 默认与 same_pin 的 Tile Program/HBM 总字节相同，物理配置
 | P3：执行配额与排空生命周期解耦          | 仅在 slot 饱和 trace 证明收益后评估                                             | Runtime、DMA ownership              | 必要 Store 完成前不得 context_done；旧通知/取消路径不能错误释放新实例资源                              |
 
 **应保留的正面基线**：N02 的 input-only 早释放、N03 的 release-driven 次周期启动、N04 的默认 FIFO 顺序、T04 的正常 slot-generation 复用，以及 N09/S09 short 的永久容量拒绝。优化应在这些合同之上进行，而不是绕过它们换取更小的周期数。
+
+## 9. 不足项状态核对（2026-09-13，Ready-Action 切换后）
+
+本节逐条对照 §8.1–§8.8 的七条不足与 §8.9 路线图，标注当前源码状态。判定依据是当前代码与测试（全量 342 tests；`ready-action-branch` s0/s1 CLI 实测 18,326/17,339 cycles；`test_ready_action.py` 的行为合同），不引用历史周期数——§1 头部已声明旧 trace 只是基线。实施细节见 [实施记录](../../../design/proposal/03_NEST_Ready_Action_Implementation_Plan.md)。
+
+| 不足                               | 状态                 | 说明                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ---------------------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 一：静态发射顺序不绕开无关等待     | ✅ 已解决（运行时侧） | Group 级已实现依赖门控的 ready-action：依赖随 action 携带，默认 S1 下 eligible 动作可越过 PENDING 依赖乱序发射（`group_scheduler.py`；`ir_lowering.py` 不再把 `depends_on` 展开成 WAIT）。S08 barrier 反例转为显式 fence 合同（`nest.await`/`nest.barrier` 阻止后续登记，已登记动作照常执行），行为保留为反例。**残留**：显式 fence 之后的动作仍不能提前登记——跨 fence 的重排仍需编译器，但优先级大幅下降。T04 single 的 A1→B1 间隔等旧数字需按新调度器重测后再引用。 |
+| 二：跨 Context 粗粒度事件边界      | ❌ 未解决             | 跨 Context 可见事件仍只有 `context_done`；§8.3 建议的带 tensor 身份/地址空间/代际的 per-tensor 可见事件未设计。S08 stage `{A}/{B,D}/{C}` 的组尾等待语义不变；合法重切（改用 node 映射）仍是编译器侧课题。                                                                                                                                                                                                                                                             |
+| 三（§8.4）：中间输出绑定与回收保守 | ✅ 已解决（双重）     | ① bindings + 真实 ins/outs 访问合同（2026-09-11 实测已记录于 §8.4）；② ready-action 又消除了 §8.4 中"顺序式 sequencer 让 release 等前面无关 action"的 PC 语义——release 现在带依赖集乱序发射。§8.4 中"本次不改变该 PC 调度语义"一句已被本轮 supersede。                                                                                                                                                                                                                |
+| 四：Strict FIFO HOL（N04）         | ❌ 未解决（有意保留） | L2 admission 仍为严格 FIFO + release 驱动重试；非 FIFO 接纳/aging 未做。实施记录 §5.3 重测 `nest-n04-fifo-hol`（43,511 cycles 完成）并明确"内存 FIFO HOL 仍是单独策略问题"。§8.9 P2 该行的另一半（动态 ready-action）已完成。                                                                                                                                                                                                                                         |
+| 五：内存布局与模型耦合             | ❌ 未解决             | 三项全部未动：HBM 单通道选择 `(addr//burst)%channels` 整 transfer 不分拆（`memory/transfer.py:789-790`）；allocator 仍 bank 升序 first-fit（`memory/allocator.py:245-246`）；容量测试仍同时改变 bank 几何。地址分散/bank-aware 对照未补。                                                                                                                                                                                                                             |
+| 六：优化目标与指标口径             | ⚠️ 部分               | `pmu.py:84-86` 的 utilization 仍是 active/tile-cycles 聚合口径，非区间并集，§8.7 的批评仍成立；重叠量分析框架未变。增量：新增 scheduler 观测计数（`group_ordering_stall`、`group_dependency_wait_candidate_checks`、`group_{prefetch,store,dispatch}_credit_wait`、`group_action_backpressure` 等），部分满足分层归因需求。T01 四类 action 编排（编译器侧）未做。                                                                                                     |
+| 七：成本模型、pin 策略与观测接口   | ⚠️ 部分               | 观测：device 级新增 `device_submit_wait`/`device_await_wait`，scheduler 级新增上述计数与 register/issue/complete 三段 trace 事件；§8.8 要求的完整分层清单（`PC_not_reached`/`memory_stage_wait`/`drain_only` 等）未全部落地。runtime 与 full_memory 的映射最优分歧、S02 same_pin 的 UCE pin 争用语义（`dispatch_wait` 保留）、成本模型联合改进均未动。                                                                                                                |
+
+### 9.1 §8.9 路线图逐行状态
+
+| 优先级                              | 状态           | 说明                                                                                                                                                               |
+| ----------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| P0：可信优化基线（时间戳/归因补齐） | ⚠️ 部分         | group 侧有 register/issue/complete 三段事件与 cycle；device 侧有 submit/admit/completion。`submitted_cycle`（transfer 提交到 manager）与 §8.8 全部分层口径未补齐。 |
+| P0：校准内存敏感性                  | ❌ 未动         | 同不足五。                                                                                                                                                         |
+| P1：先优化合法静态发射顺序          | ✅ 大部分被替代 | 运行时动态乱序（S1 默认）已覆盖"已登记动作"的无谓等待；静态 list scheduling 只剩跨显式 fence 场景的价值。验收用的 T04/T01 数字需重测。                             |
+| P1：优化 Context partition 成本     | ❌ 未动         | 编译器/选型课题。                                                                                                                                                  |
+| P2：细化访问与可见性合同            | ⚠️ 前半完成     | 实际读写集合分离 ✅（bindings 合同）；per-tensor 跨 Context 可见事件 ❌（同不足二）。                                                                                |
+| P2：非 FIFO 接纳或动态 ready-action | ⚠️ 各半         | 动态 ready-action ✅（Group S1/S2 + CPU submit 依赖）；非 FIFO 接纳 ❌（同不足四）。                                                                                 |
+| P3：执行配额与排空生命周期解耦      | ❌ 未动         | N01 的 drain 尾与 slot 保留合同未改；仍按 §8.9 条件（饱和 trace 证明收益后）再评估。                                                                               |
+
+### 9.2 仍有效的正面基线
+
+N02 input-only 早释放、N03 release 驱动的次周期启动、N04 默认 FIFO 顺序、T04 slot-generation 复用、N09/S09 short 永久容量拒绝——全部在当前合同下保留；实施记录 §5.3 已在新调度器下重测其中 n03（29,051）、n04（43,511）、n09（8 cycles，exit 1）。本节状态判定只覆盖上述源码事实；S08/S10/T02/T04 的周期级验收仍需按 §1 头部要求重新运行后再引用。
+
+### 9.3 已解决项的 2026-09-13 复测
+
+对状态为 ✅ 的不足一、不足三重新运行 trace（full_memory、全部统一 `--memory-trace`、clock 1000MHz；barrier 反例一并复测验证 fence 语义保留）。原始 trace/report、官方 Gantt viewer（`--trace-html`）、[指标汇总](../../artifacts/nest_subgraphs/sec9_ready_action_audit/metrics.json) 与 [HTML 分析面板](../../artifacts/nest_subgraphs/sec9_ready_action_audit/analysis.html) 见 [本目录](../../artifacts/nest_subgraphs/sec9_ready_action_audit/)。
+
+**输入一致性警示**：本目录 9 个输入均被 tile.free 审查修改（classification=insert_early_free）且其后又有变更——当前 SHA-256 与 §8.2/§8.4 旧基线输入不一致（逐文件 before/after hash 见 tile_free 审查的 file_decisions.json）。**旧基线数字（24,784 / 50,455 / 30,113）只作历史背景，不可与本次结果作 delta。** 唯一同输入 A/B 是 s08_single 的 S0 vs S1。
+
+**不足一（Ready-Action 越过无关等待）**：
+
+| 案例               | policy | cycles | A compute        | D compute        | D dispatch | D.start−A.end | 判定                           |
+| ------------------ | ------ | -----: | ---------------- | ---------------- | ---------: | ------------: | ------------------------------ |
+| s08_single         | S1     | 51,652 | [9,222, 35,420]  | [19,486, 43,064] |     15,981 |       −15,934 | D 越过 A 长尾 ✓                |
+| s08_single         | S0     | 55,538 | [9,222, 35,420]  | [16,986, 40,564] |     15,981 |       −18,434 | D 同样越过（源顺序对 D 有利） |
+| s08_single_barrier | S1     | 79,049 | [9,221, 35,419]  | [49,524, 73,102] |     38,298 |       +14,105 | 显式 fence 语义保留（反例预期） |
+| s08_node           | S1     | 62,925 | [11,786, 37,984] | [19,925, 43,503] |     18,920 |       −18,059 | ✓                             |
+| s08_node_barrier   | S1     | 87,769 | [11,786, 37,984] | [58,244, 81,822] |     54,697 |       +20,260 | fence 保留                    |
+
+**同输入 A/B（直接证据）**：s08_single S1=51,652 vs S0=55,538，**S1 快 3,886 cycles（7.0%）**。两 policy 下 D 均在 15,981 dispatch 并越过 A 长尾（该图源顺序对 D 有利）；差异来自其余 action 的发射序——S0 head-ordered 把 eligible 动作挡在慢 head 之后。s0/s1 分歧的更直接对照另有 ready-action-branch（18,326→17,339，同输入）。
+
+**T04 single（当前输入的新鲜验收值）**：A1 output_ready=17,508 → B1 role dispatch=17,510，**ready→dispatch 间隔 2 cycles**。§8.2 的 24,784 属旧输入（该文件被 tile.free 审查插入 3 个 free 且其后又有变更），两者不可作 delta；2 cycles 是当前输入在 A1→B1 路径上无关等待的新鲜验收结果。请求引入规则未变（R3 仍在 R1 完成后引入）。
+
+**不足三（中间输出回收 + N02 基线，当前输入的合同断言）**：
+
+| 案例                 | buffer release | 最后 reader input_released | D compute        | 晚于全部读取 | 早于 D 计算尾                                            |
+| -------------------- | -------------: | -------------------------: | ---------------- | ------------ | -------------------------------------------------------- |
+| s03_single（D 默认） |         25,464 |           25,464（read_D） | [20,970, 21,230] | ✓            | n/a（D 短版先结束；release 由必要 Store 门控，合同正确） |
+| s03_single_d100      |         25,464 |           25,464（read_D） | [20,970, 47,168] | ✓            | ✓ 提前 21,704                                            |
+| n02_delayed_read     |         45,958 |           45,957（read_D） | [14,321, 67,661] | ✓            | ✓ 提前 17,703                                            |
+
+合同断言在当前输入上全部成立：release 晚于全部真实读取、早于纯读者 D 的计算尾（d100 提前 21,704；n02 在最后读取后 1 cycle 释放，input-only 早释放基线保留）。§8.4 修正前基线（50,455 / 30,113）属旧输入，仅作历史背景。
+
+分析工具链（2026-09-13 起）改为 **Perfetto trace_processor（v58.2）SQL**：查询文件 [perfetto_queries.sql](../../artifacts/nest_subgraphs/sec9_ready_action_audit/perfetto_queries.sql) / [perfetto_queries_release.sql](../../artifacts/nest_subgraphs/sec9_ready_action_audit/perfetto_queries_release.sql)，结果 [metrics_perfetto.json](../../artifacts/nest_subgraphs/sec9_ready_action_audit/metrics_perfetto.json)，并与独立 Python 提取器逐字段比对为零差异。单位换算注意：tracer 的 ts 按 ms 写入 Chrome JSON，trace_processor 按 µs→ns 解析，故 **ts/dur 原值即 cycles**（ms→cycles 与 µs→ns 都是 ×1000）。
+
+**parse 完整性审计**（[perfetto_parse_audit.json](../../artifacts/nest_subgraphs/sec9_ready_action_audit/perfetto_parse_audit.json)）：trace_processor 对 9 份 trace 报告 101–321 条 `json_parser_failure`。逐类核对结论：这些失败**全部落在 legacy flow 事件（ph=s/t/f）**——每份 trace 约有 11 条 flow 未能绑定进 `flow` 表（82 条中 71 条成功）；而本分析依赖的全部类别**逐一与原始 JSON 计数精确相等**：X 计算切片（如 800=800）、dispatch 切片、phase_aggregate/l2_release instant、以及全部 counter（520=520）；slice 总数与 X+i+B/E 配对数精确吻合（5331=1000+4267+64）。因此 **§9.3 全部指标基于完整数据**；未验证的是 flow 箭头的完整呈现（仅影响 UI 里约 13% 流箭头显示，不参与任何指标计算）。
+
+ui.perfetto.dev 网页 UI 在托管 headless Chromium 中因 CSP 禁止 blob worker 创建而无法摄取 trace（环境限制；文件上传路径已试，摄取 worker 被 CSP 拒绝）；本地交互查看可直接在浏览器"Open trace file"/拖入同目录 `*.trace.json`。trace_processor 二进制存放于项目内 `examples/artifacts/tools/`（gitignored）。
