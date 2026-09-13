@@ -841,15 +841,17 @@ class NestPrefetchOp(_NestAsyncOp):
 
   src = operand_def(NestGlobalView)
   dst = operand_def(NestBuffer)
+  depends_on = var_operand_def(NestEvent)
 
-  def __init__(self, src, dst, tag: str):
-    self._finish(tag, operands=[src, dst])
+  def __init__(self, src, dst, tag: str, depends_on: Sequence = ()):
+    self._finish(tag, operands=[src, dst, list(depends_on)])
 
   def print(self, printer: Printer) -> None:
     printer.print_string(" ")
     printer.print_operand(self.src)
     printer.print_string(" into ")
     printer.print_operand(self.dst)
+    _print_depends_on(printer, self.depends_on)
     _print_event_type(printer, self.result.type)
 
   @classmethod
@@ -857,9 +859,10 @@ class NestPrefetchOp(_NestAsyncOp):
     src = parser.parse_operand()
     parser.parse_keyword("into")
     dst = parser.parse_operand()
+    depends_on = _parse_depends_on(parser)
     event_type = _parse_event_type(parser, NestEvent)
     tag = event_type.tag.data  # type: ignore[attr-defined]
-    return cls(src, dst, tag)
+    return cls(src, dst, tag, depends_on=depends_on)
 
 
 @irdl_op_definition
@@ -1244,15 +1247,19 @@ class NexusSubmitContextOp(IRDLOperation):
   """
 
   name = "nexus.submit_context.async"
+  irdl_options = (AttrSizedOperandSegments(),)
   context_sym = prop_def(StringAttr)
   actuals = var_operand_def(NestGlobalMemref)
+  depends_on = var_operand_def(NexusEvent)
   result = result_def(NexusEvent)
 
-  def __init__(self, context_sym: str, tag: str, actuals: Sequence = ()):
+  def __init__(
+    self, context_sym: str, tag: str, actuals: Sequence = (), depends_on: Sequence = (),
+  ):
     super().__init__(
       result_types=[NexusEvent(StringAttr(tag))],
       properties=_props({"context_sym": StringAttr(context_sym)}),
-      operands=[list(actuals)],
+      operands=[list(actuals), list(depends_on)],
     )
     self.result.name_hint = tag
 
@@ -1265,6 +1272,7 @@ class NexusSubmitContextOp(IRDLOperation):
           printer.print_string(", ")
         printer.print_operand(operand)
       printer.print_string(")")
+    _print_depends_on(printer, self.depends_on)
     _print_event_type(printer, self.result.type)
 
   @classmethod
@@ -1278,9 +1286,10 @@ class NexusSubmitContextOp(IRDLOperation):
         )
       )
       parser.parse_punctuation(")")
+    depends_on = _parse_depends_on(parser)
     event_type = _parse_event_type(parser, NexusEvent)
     tag = event_type.tag.data  # type: ignore[attr-defined]
-    return cls(context_sym, tag, actuals=actuals)
+    return cls(context_sym, tag, actuals=actuals, depends_on=depends_on)
 
 
 @irdl_op_definition

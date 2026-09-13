@@ -8,6 +8,12 @@
 >
 > [本轮重新生成的 trace、完整配置与执行结果](../../artifacts/tile_free/full_mlir_audit-20260912-110535Z/execution/summary.json)
 > 已覆盖239次调用；两种 fidelity 的112例仍各为108 completed、2 verify 拒绝、2容量 fault。
+>
+> Ready-Action 切换后，上述数字也只作为历史基线：当前默认是共享 S1，
+> CPU submit 通过独立 pending/message port，Tile context 不再由 Device 数量自动扩充。
+> `nest.await/barrier` 的显式控制边仍保留，L2 FIFO 与最后使用点 release 仍保留。
+> 请重新运行需要比较的子图；不要把历史多 sequencer 结果当作等带宽 S0。
+> 本轮实现与独立验证见 [实施记录](../../../design/proposal/03_NEST_Ready_Action_Implementation_Plan.md)。
 
 ## 1. 运行结论与证据边界
 

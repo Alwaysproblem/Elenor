@@ -1,16 +1,12 @@
-"""L1 Slot Frame — 16-slot binding + shadow + generation gate
-(Slot Frame design 3-5, review P0-2).
+"""L1 Slot Frame — fixed-slot bindings backed by allocator identities.
 
 Models the L1 SRAM binary binding contract: fixed slot ABI + variable
-Tile Frame.  Frame bind FSM (3.2), descriptor patch FSM (3.3), and slot
-lifecycle (3.4).  Bank policy enforcement (5.4).
+Tile Frame. Frame bind FSM (3.2), descriptor patch FSM (3.3), and slot
+lifecycle (3.4). Bank policy enforcement (5.4).
 
-PR 2: the actual L1 placement is delegated to the per-tile
-``BankedFreeExtentAllocator``; ``SlotFrame`` only owns the fixed-slot
-ABI, shadow-install FSM and generation gate.  ``prepare()`` maps
-``ExecL1Buffer`` specs to fixed slots and builds a shadow; ``bind()``
-runs the bind-cycle FSM on the prepared shadow; ``release()`` clears
-active/shadow slots.
+The per-tile ``BankedFreeExtentAllocator`` owns placement and generation.
+``SlotFrame`` records the exact allocation id, generation and owner in each
+slot; it does not maintain an unrelated frame-generation namespace.
 """
 
 from __future__ import annotations
@@ -28,6 +24,7 @@ if TYPE_CHECKING:
 
 class SlotRole(IntEnum):
   """elenor_slot_role_t (Slot Frame design 4.1)."""
+
   INPUT = 1 << 0
   OUTPUT = 1 << 1
   ACCUMULATOR = 1 << 2
@@ -41,6 +38,7 @@ class SlotRole(IntEnum):
 
 class SlotLifetime(IntEnum):
   """elenor_slot_lifetime_t (Slot Frame design 4.1)."""
+
   PER_COMMAND = 0
   PER_TILE_PROGRAM = 1
   PER_ROLE = 2
@@ -49,6 +47,7 @@ class SlotLifetime(IntEnum):
 
 class FrameState(IntEnum):
   """Slot Frame bind FSM (design 3.2)."""
+
   IDLE = 0
   FETCH_FRAME_DESC = 1
   VALIDATE_ABI = 2
@@ -68,6 +67,7 @@ class Slot:
   ``AllocationHandle`` from the per-tile L1 allocator; ``owner`` is a
   ``MemoryOwner`` (not an int).
   """
+
   slot_id: int
   base: int = 0
   size: int = 0
@@ -86,12 +86,12 @@ class Slot:
 class SlotFrame:
   """elenor_tile_frame_v0_t (Slot Frame design 4.1).
 
-  16 fixed slots with a shadow-install mechanism.  After bind, engines
-  only access the shadow copy (design 3.2).  Warm launch checks frame
-  generation; mismatch -> fault (design 5.2).
+  16 fixed slots with a shadow-install mechanism. After bind, engines
+  only access the shadow copy (design 3.2). Allocation-handle identity is
+  checked per slot on free; there is no independent synthetic generation.
   """
+
   frame_id: int = 0
-  generation: int = 0
   l1_bytes: int = 1 * 1024 * 1024  # 1 MB Balanced-small
   slot_count: int = 16
   state: FrameState = FrameState.IDLE
@@ -102,6 +102,25 @@ class SlotFrame:
     self._shadow_slots: list[Slot] | None = None
     self.pmu_bank_conflict_cycles: int = 0
     self.pmu_permission_fault_count: int = 0
+
+  @property
+  def is_available(self) -> bool:
+    """True only when this physical context frame has no staged binding."""
+    return (
+      self.state == FrameState.IDLE
+      and self.shadow is None
+      and self._shadow_slots is None
+      and all(slot.allocation_id is None for slot in self.slots)
+    )
+
+  @property
+  def generation(self) -> int | None:
+    """Allocator generation shared by the currently staged/bound handles."""
+    source = self._shadow_slots if self._shadow_slots is not None else self.slots
+    generations = {slot.generation for slot in source if slot.allocation_id is not None}
+    if len(generations) != 1:
+      return None
+    return next(iter(generations))
 
   def prepare(
     self,
@@ -116,6 +135,12 @@ class SlotFrame:
     ``layout=0``, ``bank_policy=0``.  On failure the active frame is
     not changed.
     """
+    if not self.is_available:
+      self.pmu_permission_fault_count += 1
+      return False
+    if len(handles) != len(specs):
+      self.pmu_permission_fault_count += 1
+      return False
     if len(specs) > self.slot_count:
       self.pmu_permission_fault_count += 1
       return False
@@ -123,6 +148,27 @@ class SlotFrame:
     if total > self.l1_bytes:
       self.pmu_permission_fault_count += 1
       return False
+    for spec, handle in zip(specs, handles):
+      if (
+        handle.memory_space != "l1"
+        or handle.size_bytes != spec.bytes
+        or handle.alignment != max(spec.alignment, 1)
+        or getattr(handle.owner, "buffer_id", None) != spec.name
+      ):
+        self.pmu_permission_fault_count += 1
+        return False
+      if (
+        not handle.bank_segments
+        or sum(segment.size_bytes for segment in handle.bank_segments) != handle.size_bytes
+        or any(
+          segment.address < 0
+          or segment.size_bytes <= 0
+          or segment.address + segment.size_bytes > self.l1_bytes
+          for segment in handle.bank_segments
+        )
+      ):
+        self.pmu_permission_fault_count += 1
+        return False
     new_slots: list[Slot] = [Slot(i) for i in range(self.slot_count)]
     for i, (spec, handle) in enumerate(zip(specs, handles)):
       new_slots[i] = Slot(
@@ -159,19 +205,29 @@ class SlotFrame:
     check fails.
     """
     if self._shadow_slots is None:
-      # No prepare() was called: empty frame (program has no L1 buffers).
-      # This is valid for timing_only and programs without tile.alloc.
-      self._shadow_slots = [Slot(i) for i in range(self.slot_count)]
+      self.pmu_permission_fault_count += 1
+      self.state = FrameState.FRAME_FAULTED
+      return (False, 0)
     # capacity + overlap already checked in prepare(); bank policy V1 pass
     self.state = FrameState.FRAME_ACTIVE
-    shadow = SlotFrame(frame_id=self.frame_id,
-                       generation=self.generation,
-                       l1_bytes=self.l1_bytes,
-                       slot_count=self.slot_count)
-    shadow.slots = [Slot(s.slot_id, s.base, s.size, s.layout, s.role,
-                         s.alignment, s.bank_policy, s.lifetime,
-                         s.allocation_id, s.generation, s.owner, s.flags)
-                    for s in self._shadow_slots]
+    shadow = SlotFrame(frame_id=self.frame_id, l1_bytes=self.l1_bytes, slot_count=self.slot_count)
+    shadow.slots = [
+      Slot(
+        s.slot_id,
+        s.base,
+        s.size,
+        s.layout,
+        s.role,
+        s.alignment,
+        s.bank_policy,
+        s.lifetime,
+        s.allocation_id,
+        s.generation,
+        s.owner,
+        s.flags,
+      )
+      for s in self._shadow_slots
+    ]
     shadow.state = FrameState.FRAME_ACTIVE
     self.shadow = shadow
     self.slots = list(self._shadow_slots)
@@ -194,11 +250,7 @@ class SlotFrame:
       raise MemoryInvariantError("L1 slot frame is not active")
     if self.shadow is None or self._shadow_slots is None:
       raise MemoryInvariantError("L1 slot frame copies are missing")
-    copies = (
-      ("active", self.slots),
-      ("shadow", self.shadow.slots),
-      ("prepared", self._shadow_slots),
-    )
+    copies = (("active", self.slots), ("shadow", self.shadow.slots), ("prepared", self._shadow_slots))
     for copy_name, slots in copies:
       if slot_id < 0 or slot_id >= len(slots):
         raise MemoryInvariantError("L1 slot id is out of range")
@@ -210,8 +262,7 @@ class SlotFrame:
         or slot.base != handle.base_address
         or slot.size != handle.size_bytes
       ):
-        raise MemoryInvariantError(
-          f"L1 {copy_name} slot binding does not match allocation")
+        raise MemoryInvariantError(f"L1 {copy_name} slot binding does not match allocation")
 
   def release_slot(
     self,
@@ -225,19 +276,6 @@ class SlotFrame:
     self.shadow.slots[slot_id] = Slot(slot_id)
     assert self._shadow_slots is not None
     self._shadow_slots[slot_id] = Slot(slot_id)
-
-
-  def check_generation(self, expected_gen: int) -> bool:
-    """Warm-launch generation gate (design 5.2).  Mismatch -> fault."""
-    return self.generation == expected_gen
-
-  def bump_generation(self) -> int:
-    self.generation += 1
-    return self.generation
-
-  def invalidate_desc_cache(self) -> None:
-    """Descriptor cache invalidate (design 5.2 warm path)."""
-    pass
 
   def reset(self) -> None:
     self.slots = [Slot(i) for i in range(self.slot_count)]

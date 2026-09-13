@@ -4,7 +4,9 @@
 
 已模拟能力（V1 scope）：
 
-- 控制流层级 Group Task->Tile role->Engine 的逐周期推进；
+- 独立 CPU Device interpreter → message port → Group/Tile 硬件模型；
+- Group 有限 S0/S1/S2 窗口、单登记/单发射、有限扫描与独立完成；
+- Tile 当前指令 eligibility + 公平 RR、Tile-owned L1/context 原子准入；
 - 4 引擎延迟（Roofline）与 launch/wait 重叠；
 - Stream Queue credit/backpressure/EOS；
 - role 完成聚合 -> group task 推进；
@@ -18,13 +20,13 @@
 - PR 3 task-bound phase/release protocol：`tile.signal <phase>(%task)`
   以 logical task 驱动每个 grid 的 `all_tasks` 聚合；显式 event、
   owner/generation 和 consumer pin 共同门控 role-aware L2 release。
-- PR 3.5 L2 admission wait：submit 被 device slot 接受后，若原子 L2
-  bundle 暂时放不下（合法但当前 free map 不满足），context 进入
-  `ADMISSION_WAIT`（占 slot，不占 UCE/L1/L2/stream/DMA，不 fault）；
-  只有 `nest.release` 的 allocator final-free 才会按 strict FIFO 唤醒
-  队首，且唤醒与 first action 固定为 `admit_cycle` / `admit_cycle + 1`。
-  非法或空池也无法容纳的 bundle 立即 fault、永不排队。
-  有意简化/未模拟（需明确告知用户的边界）：
+- CPU pending、硬件 outstanding、Group context/event/L2 admission 分开：
+  WAIT_DEPS 不占 Group/L2；端口接收后，临时 L2 或 event 预算不足
+  可以保留 Group context slot 等待。L2 final-free 与 event reservation
+  回收分别触发有序重试，不能再假定 first action 精确等于 admit+1。
+  非法或空池也无法容纳的 L2 bundle 立即 fault、永不排队。
+
+有意简化/未模拟（需明确告知用户的边界）：
 
 - 单 Tile Group：不模拟多 Group 间的 NoC/Collective 竞争（Collective 有
   1-cycle command/window 模型和 trace event，但 reduce datapath/bandwidth
@@ -39,15 +41,26 @@
 - 无真实 tensor 数值：transfer 的 bytes 是数值参数，payload tracker 只
   记录 layout/地址元数据（PR 2 起地址来自真实 transaction，不再 CRC 伪造）；
 - residency/cold-warm load 由 `ProgramResidencyManager` metadata 路径
-  管理（program_id/version/hash/epoch）。
+  管理（program_id/version/hash/epoch）；可选 same_program 执行 epoch
+  是独立门控，只限制 dispatch，不限制其他 DMA。
 - PR 3 聚合只支持 `#nest.aggregate<all_tasks>`；没有 quorum、subset 或
   其他 aggregation mode；
 - PR 3.5 admission queue 固定 strict FIFO：没有 utilization-first
   bypass、优先级或抢占；head-of-line blocking 是 V1 明确行为（PMU
   `l2_admission_queue_peak`/`l2_admission_wait_cycles` 观测，后续策略
-  独立 PR）；唤醒源只有 release final-free，没有跨层
-  `nexus.await_phase` 或 nest event export；
-- logical task 到 physical tile 的 scheduler 仍固定为当前 1:1 映射；
+  独立策略实验）；L2 final-free 和独立 event 预算回收是 admission
+  唤醒源；没有跨层 `nexus.await_phase` 或 nest event export；
+- logical task 到 physical tile 仍为 1:1 gang dispatch，静态零任务域
+  明确拒绝（可降为空 context）；未实现逻辑 task stealing/oversubscription；
+- 不实现同 context 内物理 reservation block 的 lease 复用、动态借用
+  或分阶段 admission；现有最后使用点安全 final-free 保留；
+- Group event 预算保守地为整个静态 context 输出事件预留；过大的
+  单 context 明确失败。CPU completion 预算不能推进时报告资源错误，
+  不借无限元数据掩盖。仿真诊断历史不是硬件 event/action 表；
+- 无 RTL 对拍、综合/P&R、实测频率或功耗；clock_mhz 是模型参数。
+- CPU `issue_width` 表示每个模拟周期可执行的 IR 控制指令数；不是实测
+  CPU IPC。真实 CPU/FPGA 异步时钟、PCIe/AXI 传输及 CDC 延迟尚未建模，
+  将来应替换 message port 的时序实现，而不是把 CPU PC 合并进 Group。
 - Gather 仅实现 deterministic profiled V1：不解释真实 index tensor，
   没有 tagged `AddressProvider`，不报告 address-accurate/value-accurate
   cache hit rate；没有 Scatter/ScatterReduce/FIFO delivery；

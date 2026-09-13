@@ -291,11 +291,7 @@ class TestXDSLIR:
     assert [formal.space for formal in binding.tile_program.formals] == ["task", "global"]
     assert len(binding.global_actuals) == 1
     assert binding.global_actuals[0].base == "global:table"
-    launch = next(
-      inst
-      for inst in binding.tile_program.insts
-      if inst.op == ExecTileOp.LAUNCH_GATHER
-    )
+    launch = next(inst for inst in binding.tile_program.insts if inst.op == ExecTileOp.LAUNCH_GATHER)
     descriptor = binding.tile_program.descriptors[launch.args[0]]
     gather = descriptor.params["gather"]
     assert descriptor.kind == "MFE"
@@ -330,29 +326,20 @@ class TestXDSLIR:
       assert any(action.op == ExecGroupActionOp.DMA_STORE for action in task.actions)
       for binding in task.role_bindings.values():
         store_descriptors = {
-          name
-          for name, descriptor in binding.tile_program.descriptors.items()
-          if descriptor.op == "store"
+          name for name, descriptor in binding.tile_program.descriptors.items() if descriptor.op == "store"
         }
         assert store_descriptors
         assert any(
-          inst.op == ExecTileOp.LAUNCH_MFE
-          and inst.args
-          and inst.args[0] in store_descriptors
+          inst.op == ExecTileOp.LAUNCH_MFE and inst.args and inst.args[0] in store_descriptors
           for inst in binding.tile_program.insts
         )
 
   def test_gather_source_requires_readable_binding(self):
     module = parse_workload_ir(GATHER_IR)
     with pytest.raises(
-      ValueError,
-      match="input binding 'table' is not readable but is used as gather source",
+      ValueError, match="input binding 'table' is not readable but is used as gather source"
     ):
-      Simulator(FAST_HW, SimConfig()).run(
-        module,
-        {"table": GlobalBinding("table", 0x100000, 4096, "w")},
-      )
-
+      Simulator(FAST_HW, SimConfig()).run(module, {"table": GlobalBinding("table", 0x100000, 4096, "w")})
 
   @pytest.mark.parametrize("group", ["globals(%table_view)", "bindings()", "ins()", "outs()"])
   def test_dispatch_rejects_missing_required_group(self, group):
@@ -373,10 +360,7 @@ class TestXDSLIR:
       ),
       (
         "%table : !nest.global_view<4096xi8>",
-        (
-          "%l2 : !nest.l2_buffer<1xi8>,"
-          " %table : !nest.global_view<4096xi8>"
-        ),
+        ("%l2 : !nest.l2_buffer<1xi8>, %table : !nest.global_view<4096xi8>"),
         "global formal 2 may not follow an l2 formal",
       ),
     ],
@@ -388,26 +372,11 @@ class TestXDSLIR:
   @pytest.mark.parametrize(
     ("text", "message"),
     [
-      (
-        GATHER_IR.replace(GATHER_PROFILE, ""),
-        "gather profile must contain at least one",
-      ),
-      (
-        GATHER_IR.replace('id = "r1"', 'id = "r0"', 1),
-        "duplicate gather request_id",
-      ),
-      (
-        GATHER_IR.replace('id = "r0"', 'id = ""', 1),
-        "gather request_id must be non-empty",
-      ),
-      (
-        GATHER_IR.replace('outcome = "L2_HIT"', 'outcome = "UNKNOWN"', 1),
-        "unknown gather outcome",
-      ),
-      (
-        GATHER_IR.replace("result_bytes = 256", "result_bytes = 0", 1),
-        "gather result_bytes must be > 0",
-      ),
+      (GATHER_IR.replace(GATHER_PROFILE, ""), "gather profile must contain at least one"),
+      (GATHER_IR.replace('id = "r1"', 'id = "r0"', 1), "duplicate gather request_id"),
+      (GATHER_IR.replace('id = "r0"', 'id = ""', 1), "gather request_id must be non-empty"),
+      (GATHER_IR.replace('outcome = "L2_HIT"', 'outcome = "UNKNOWN"', 1), "unknown gather outcome"),
+      (GATHER_IR.replace("result_bytes = 256", "result_bytes = 0", 1), "gather result_bytes must be > 0"),
       (
         GATHER_IR.replace("result_bytes = 256", "result_bytes = 257", 1),
         "gather result_bytes exceeds destination extent",
@@ -420,16 +389,10 @@ class TestXDSLIR:
         GATHER_IR.replace("cache_target_bytes = 65536", "cache_target_bytes = 8192", 1),
         "gather cache_target_bytes must be >= cache_min_bytes",
       ),
+      (GATHER_IR.replace("l1_mshr_hint = 16", "l1_mshr_hint = 0", 1), "gather l1_mshr_hint must be > 0"),
+      (GATHER_IR.replace('bytes = 64 line = "line0"', 'bytes = 0 line = "line0"', 1), "bytes must be > 0"),
       (
-        GATHER_IR.replace("l1_mshr_hint = 16", "l1_mshr_hint = 0", 1),
-        "gather l1_mshr_hint must be > 0",
-      ),
-      (
-        GATHER_IR.replace("bytes = 64 line = \"line0\"", "bytes = 0 line = \"line0\"", 1),
-        "bytes must be > 0",
-      ),
-      (
-        GATHER_IR.replace("bytes = 64 line = \"line0\"", "bytes = 4097 line = \"line0\"", 1),
+        GATHER_IR.replace('bytes = 64 line = "line0"', 'bytes = 4097 line = "line0"', 1),
         "exceeds source extent",
       ),
       (
@@ -454,16 +417,13 @@ class TestXDSLIR:
       ),
       (
         GATHER_IR.replace(
-          'bytes = 64 line = "line42" merge = "miss42"',
-          'bytes = 32 line = "line99" merge = "miss42"',
-          1,
+          'bytes = 64 line = "line42" merge = "miss42"', 'bytes = 32 line = "line99" merge = "miss42"', 1
         ),
         "must use one line_token and byte size",
       ),
       (
         GATHER_IR.replace(
-          'tile.profiled.access id = "r0" outcome = "L1_HIT"\n'
-          '        bytes = 64 line = "line0"',
+          'tile.profiled.access id = "r0" outcome = "L1_HIT"\n        bytes = 64 line = "line0"',
           "tile.return",
           1,
         ),
@@ -485,10 +445,7 @@ class TestXDSLIR:
       ),
       1,
     )
-    with pytest.raises(
-      VerifyException,
-      match="unexpected tile program body op 'tile.profiled.access'",
-    ):
+    with pytest.raises(VerifyException, match="unexpected tile program body op 'tile.profiled.access'"):
       parse_workload_ir(text, source_name="<top-level-profile>")
 
   def test_gather_builders_are_public_operations(self):
@@ -502,32 +459,9 @@ class TestXDSLIR:
     indices = TileAllocOp([1], "i32")
     destination = TileAllocOp([64], "i8")
     access = TileProfiledAccessOp("r0", "L1_HIT", 64, line_token="line0")
-    gather = TileGatherOp(
-      source,
-      indices.result,
-      destination.result,
-      64,
-      64,
-      64,
-      1,
-      [access],
-      "done",
-    )
-    program.body.block.add_ops(
-      [indices, destination, gather, TileAwaitOp([gather.result]), TileReturnOp()]
-    )
-    verify_workload_ir(
-      ModuleOp(
-        [
-          program,
-          NestContextOp(
-            "unused_context",
-            [NestReturnOp()],
-            placement=1,
-          ),
-        ]
-      )
-    )
+    gather = TileGatherOp(source, indices.result, destination.result, 64, 64, 64, 1, [access], "done")
+    program.body.block.add_ops([indices, destination, gather, TileAwaitOp([gather.result]), TileReturnOp()])
+    verify_workload_ir(ModuleOp([program, NestContextOp("unused_context", [NestReturnOp()], placement=1)]))
 
   def test_function_call_op_builders_verify(self):
     """Every function-call operation can participate in a verified module."""
@@ -589,8 +523,7 @@ class TestXDSLIR:
       src=buffer.result, dst=src.result, tag="store_done", depends_on=[dispatch.output_ready]
     )
     release = NestReleaseOp(
-      buffer.result,
-      depends_on=[dispatch.input_released, prefetch.result, dma_store.result],
+      buffer.result, depends_on=[dispatch.input_released, prefetch.result, dma_store.result]
     )
     ctx.body.block.add_ops(
       [
@@ -627,16 +560,7 @@ class TestXDSLIR:
     prog = make_identity_tile_program()
     tasks = NestTaskRangeOp(0, 1)
     dispatch = NestDispatchOp(
-      prog.sym_name.data,
-      tasks.result,
-      [],
-      [],
-      [],
-      "grid_done",
-      "",
-      "",
-      bindings=[],
-      signal_policy={},
+      prog.sym_name.data, tasks.result, [], [], [], "grid_done", "", "", bindings=[], signal_policy={}
     )
     ctx = NestContextOp(
       ctx_name,
@@ -649,16 +573,7 @@ class TestXDSLIR:
   def test_verifier_rejects_unknown_program_symbol(self):
     tasks = NestTaskRangeOp(0, 1)
     dispatch = NestDispatchOp(
-      "missing_program",
-      tasks.result,
-      [],
-      [],
-      [],
-      "grid_done",
-      "",
-      "",
-      bindings=[],
-      signal_policy={},
+      "missing_program", tasks.result, [], [], [], "grid_done", "", "", bindings=[], signal_policy={}
     )
     module = ModuleOp([NestContextOp("unknown_program", [tasks, dispatch, NestReturnOp()], placement=1)])
     self._assert_verify_failure(module, "dispatch references unknown tile program '@missing_program'")
@@ -782,16 +697,7 @@ class TestXDSLIR:
     for i in range(2):
       tasks = NestTaskRangeOp(0, 1)
       disp = NestDispatchOp(
-        prog.sym_name.data,
-        tasks.result,
-        [],
-        [],
-        [],
-        f"ev_grid_c{i}",
-        "",
-        "",
-        bindings=[],
-        signal_policy={},
+        prog.sym_name.data, tasks.result, [], [], [], f"ev_grid_c{i}", "", "", bindings=[], signal_policy={}
       )
       ctxs.append(
         NestContextOp(
@@ -860,7 +766,6 @@ class TestXDSLIR:
       ),
     ):
       parse_workload_ir(text, source_name="<type>")
-
 
   def test_nest_subview_out_of_bounds_fails(self):
     text = MODEL_CHAIN_IR.replace(
@@ -1197,8 +1102,12 @@ class TestExternalIRCLI:
     off_events = json.loads(off_trace.read_text(encoding="utf-8"))["traceEvents"]
     off_names = {e.get("name") for e in off_events}
     mem_names = {
-      "l2_allocated_bytes", "hbm_outstanding", "hbm_bind",
-      "l1_alloc", "l2_alloc", "noc_occupancy",
+      "l2_allocated_bytes",
+      "hbm_outstanding",
+      "hbm_bind",
+      "l1_alloc",
+      "l2_alloc",
+      "noc_occupancy",
     }
     assert not (off_names & mem_names), sorted(off_names & mem_names)
     assert not [e for e in off_events if e.get("ph") in ("s", "t", "f")]
@@ -1294,6 +1203,8 @@ class TestExternalIRCLI:
       "--ir-file",
       "examples/workloads/pow_dual_context.mlir",
       "--device-context-mode",
+      "2",
+      "--context-mode",
       "2",
       "--input-binding",
       "Y0=0x100000:131072:rw",
@@ -1560,9 +1471,7 @@ class TestHardwareConfigYaml:
 
   def test_hardware_config_has_67_strict_mappings(self):
     assert len(_HW_YAML_PATH_TO_FIELD) == 67
-    assert set(_HW_YAML_PATH_TO_FIELD.values()) == {
-      field.name for field in fields(HardwareConfig)
-    }
+    assert set(_HW_YAML_PATH_TO_FIELD.values()) == {field.name for field in fields(HardwareConfig)}
 
   @pytest.mark.parametrize(
     ("override", "message"),
@@ -1839,13 +1748,7 @@ class TestPR3SignalPolicy:
     )
     task_arg, l2_arg = prog.body.block.args
     view = TileSubviewOp(
-      l2_arg,
-      task_arg,
-      0,
-      [0, 0, 0],
-      [1, 4, 32],
-      [1, 1, 1],
-      NestL2View.of([1, 4, 32], "bf16"),
+      l2_arg, task_arg, 0, [0, 0, 0], [1, 4, 32], [1, 1, 1], NestL2View.of([1, 4, 32], "bf16")
     )
     l1 = TileAllocOp([4, 32], "bf16")
     ops = [view, l1]
@@ -1866,21 +1769,11 @@ class TestPR3SignalPolicy:
     reads = any(isinstance(op, TileLoadOp) for op in prog.body.block.ops)
     writes = any(isinstance(op, TileStoreOp) for op in prog.body.block.ops)
     ctx = NestContextOp(
-      "sig_ctx",
-      [],
-      arg_types=[NestGlobalMemref.of([1, 4, 32], "bf16")],
-      arg_names=["Y"],
-      placement=1,
+      "sig_ctx", [], arg_types=[NestGlobalMemref.of([1, 4, 32], "bf16")], arg_names=["Y"], placement=1
     )
     y_arg = ctx.body.block.args[0]
     buf = NestAllocOp("l2_buf", role, [1, 4, 32], "bf16", alignment=256)
-    src = NestSubviewOp(
-      y_arg,
-      [0, 0, 0],
-      [1, 4, 32],
-      [1, 1, 1],
-      NestGlobalView.of([1, 4, 32], "bf16"),
-    )
+    src = NestSubviewOp(y_arg, [0, 0, 0], [1, 4, 32], [1, 1, 1], NestGlobalView.of([1, 4, 32], "bf16"))
     ops = [buf, src]
     pref = NestPrefetchOp(src.result, buf.result, "ev_in") if reads else None
     if pref is not None:
@@ -1902,12 +1795,7 @@ class TestPR3SignalPolicy:
     ops.extend([tasks, disp])
     store = None
     if writes:
-      store = NestDMAStoreOp(
-        buf.result,
-        src.result,
-        "ev_out",
-        depends_on=[disp.output_ready],
-      )
+      store = NestDMAStoreOp(buf.result, src.result, "ev_out", depends_on=[disp.output_ready])
       ops.append(store)
     release_deps = []
     if reads:
@@ -1919,9 +1807,7 @@ class TestPR3SignalPolicy:
     ops.extend(
       [
         NestReleaseOp(buf.result, depends_on=release_deps),
-        NestAwaitOp(
-          [disp.grid_done] + ([store.result] if store is not None else [])
-        ),
+        NestAwaitOp([disp.grid_done] + ([store.result] if store is not None else [])),
         NestReturnOp(),
       ]
     )
@@ -1941,25 +1827,14 @@ class TestPR3SignalPolicy:
         prog = make_identity_tile_program()
         tasks = NestTaskRangeOp(0, 1)
         disp = NestDispatchOp(
-          prog.sym_name.data,
-          tasks.result,
-          [],
-          [],
-          [],
-          "ev_grid",
-          "",
-          "",
-          bindings=[],
-          signal_policy={},
+          prog.sym_name.data, tasks.result, [], [], [], "ev_grid", "", "", bindings=[], signal_policy={}
         )
         ctx = NestContextOp(
-          "sig_ctx",
-          [tasks, disp, NestAwaitOp([disp.grid_done]), NestReturnOp()],
-          placement=1,
+          "sig_ctx", [tasks, disp, NestAwaitOp([disp.grid_done]), NestReturnOp()], placement=1
         )
       else:
         prog = self._make_signal_prog(phases)
-        policy = {phase: "all_tasks" for phase in phases}
+        policy = dict.fromkeys(phases, "all_tasks")
         ctx = self._make_context(
           prog,
           role,
@@ -1986,29 +1861,17 @@ class TestPR3SignalPolicy:
 
   def test_signal_requires_program_task_formal(self):
     prog = TileProgramDefOp(
-      "bad_sig",
-      [],
-      arg_types=[NestTask(), NestBuffer.of([1, 4, 32], "bf16")],
-      arg_names=["task", "l2_buf"],
+      "bad_sig", [], arg_types=[NestTask(), NestBuffer.of([1, 4, 32], "bf16")], arg_names=["task", "l2_buf"]
     )
     _task_arg, l2_arg = prog.body.block.args
-    prog.body.block.add_ops(
-      [TileSignalOp("input_released", l2_arg), TileReturnOp()]
-    )
+    prog.body.block.add_ops([TileSignalOp("input_released", l2_arg), TileReturnOp()])
     with pytest.raises(VerifyException):
       verify_workload_ir(ModuleOp([prog]))
 
   def test_signal_policy_matches_program_phases(self):
     prog = self._make_signal_prog(("input_released",))
     ctx = self._make_context(
-      prog,
-      "in",
-      "ev_i",
-      "ev_o",
-      {
-        "input_released": "all_tasks",
-        "output_ready": "all_tasks",
-      },
+      prog, "in", "ev_i", "ev_o", {"input_released": "all_tasks", "output_ready": "all_tasks"}
     )
     with pytest.raises(VerifyException):
       verify_workload_ir(ModuleOp([prog, ctx]))
@@ -2028,7 +1891,7 @@ class TestPR3SignalPolicy:
       role,
       "ev_i" if "input_released" in phases else "",
       "ev_o" if "output_ready" in phases else "",
-      {phase: "all_tasks" for phase in phases},
+      dict.fromkeys(phases, "all_tasks"),
     )
     verify_workload_ir(ModuleOp([prog, ctx]))
 
@@ -2267,19 +2130,11 @@ class TestL2AccessContract:
   def test_bindings_and_effects_are_independent(self):
     module = parse_workload_ir(self.BINDING_IR, source_name="<bindings>")
     text = print_workload_ir(module)
-    assert print_workload_ir(
-      parse_workload_ir(text, source_name="<bindings-round-trip>")
-    ) == text
+    assert print_workload_ir(parse_workload_ir(text, source_name="<bindings-round-trip>")) == text
 
     mutations = [
-      (
-        "bindings(%X, %Y, %X)",
-        "bindings(%X, %Y)",
-      ),
-      (
-        "bindings(%X, %Y, %X)",
-        "bindings(%X, %Y, %Z)",
-      ),
+      ("bindings(%X, %Y, %X)", "bindings(%X, %Y)"),
+      ("bindings(%X, %Y, %X)", "bindings(%X, %Y, %Z)"),
       ("ins(%X)", "ins()"),
       ("outs(%Y)", "outs(%Y, %X)"),
       ("ins(%X)", "ins(%X, %X)"),
@@ -2292,10 +2147,7 @@ class TestL2AccessContract:
     parse_workload_ir(self.PHASE_IR, source_name="<phase>")
 
     mutations = [
-      (
-        "    tile.await %load\n",
-        "",
-      ),
+      ("    tile.await %load\n", ""),
       (
         "    tile.signal input_released(%task)\n",
         (
@@ -2305,10 +2157,7 @@ class TestL2AccessContract:
           "    tile.await %late_load\n"
         ),
       ),
-      (
-        "    tile.await %store\n",
-        "",
-      ),
+      ("    tile.await %store\n", ""),
       (
         "    tile.signal output_ready(%task)\n",
         (
@@ -2320,10 +2169,7 @@ class TestL2AccessContract:
       ),
       (
         "    tile.signal input_released(%task)\n",
-        (
-          "    tile.signal input_released(%task)\n"
-          "    tile.signal input_released(%task)\n"
-        ),
+        ("    tile.signal input_released(%task)\n    tile.signal input_released(%task)\n"),
       ),
     ]
     for old, new in mutations:
@@ -2350,10 +2196,7 @@ class TestL2AccessContract:
     tile.await %load
     tile.signal input_released(%task)
 """
-    parse_workload_ir(
-      self.PHASE_IR.replace(ordered, reversed_phases, 1),
-      source_name="<reversed-phases>",
-    )
+    parse_workload_ir(self.PHASE_IR.replace(ordered, reversed_phases, 1), source_name="<reversed-phases>")
 
   def test_release_requires_readers_and_all_transfers(self):
     parse_workload_ir(self.RELEASE_IR, source_name="<release>")
@@ -2361,16 +2204,14 @@ class TestL2AccessContract:
       self.RELEASE_IR.replace(
         (
           "    %early_store = nest.dma.store.async %shared into %view\n"
-          "        depends_on(%writer_ready) : !nest.event<\"early_store\">"
+          '        depends_on(%writer_ready) : !nest.event<"early_store">'
         ),
         (
-          "    %early_store = nest.dma.store.async %shared into %view\n"
-          "        : !nest.event<\"early_store\">"
+          '    %early_store = nest.dma.store.async %shared into %view\n        : !nest.event<"early_store">'
         ),
         1,
       )
     )
-
 
     release_line = (
       "    nest.release %shared depends_on(%reader_a_read, %reader_b_read, %pref,\n"
@@ -2400,9 +2241,7 @@ class TestL2AccessContract:
       ),
     ]
     for replacement in invalid_releases:
-      self._assert_rejected(
-        self.RELEASE_IR.replace(release_line, replacement, 1)
-      )
+      self._assert_rejected(self.RELEASE_IR.replace(release_line, replacement, 1))
 
     release_after_return = self.RELEASE_IR.replace(
       (
@@ -2420,29 +2259,14 @@ class TestL2AccessContract:
     )
     self._assert_rejected(release_after_return)
 
-    self._assert_rejected(
-      self.RELEASE_IR.replace('role = "inout"', 'role = "in"', 1)
-    )
+    self._assert_rejected(self.RELEASE_IR.replace('role = "inout"', 'role = "in"', 1))
 
-    parse_workload_ir(
-      self.INPUT_WITH_STORE_IR,
-      source_name="<input-with-store>",
-    )
+    parse_workload_ir(self.INPUT_WITH_STORE_IR, source_name="<input-with-store>")
     for role in ("out", "inout"):
-      self._assert_rejected(
-        self.INPUT_WITH_STORE_IR.replace(
-          'role = "in"',
-          f'role = "{role}"',
-          1,
-        )
-      )
+      self._assert_rejected(self.INPUT_WITH_STORE_IR.replace('role = "in"', f'role = "{role}"', 1))
 
     for role in ("out", "inout"):
-      valid_output = self.OUTPUT_IR.replace(
-        'role = "out"',
-        f'role = "{role}"',
-        1,
-      )
+      valid_output = self.OUTPUT_IR.replace('role = "out"', f'role = "{role}"', 1)
       parse_workload_ir(valid_output, source_name=f"<{role}-writer>")
       self._assert_rejected(
         valid_output.replace(
@@ -2500,9 +2324,9 @@ class TestTileFree:
     module = parse_workload_ir(self.IR)
     assert module.is_structurally_equivalent(parse_workload_ir(print_workload_ir(module)))
     # b's load is intentionally not awaited until after freeing a.
-    result = Simulator(
-      HardwareConfig(), SimConfig(fidelity="full_memory", max_cycles=100000)
-    ).run(module, input_bindings={"input": GlobalBinding("input", 0x100000, 128, "rw")})
+    result = Simulator(HardwareConfig(), SimConfig(fidelity="full_memory", max_cycles=100000)).run(
+      module, input_bindings={"input": GlobalBinding("input", 0x100000, 128, "rw")}
+    )
     assert result.completed, result.reason
     assert result.credit_invariant_ok
 
@@ -2512,18 +2336,21 @@ class TestTileFree:
       ("    tile.await %ra\n", ""),
       ("    tile.await %write\n", ""),
       ("tile.free %a", "tile.free %a\n    tile.free %a"),
-      (
-        "tile.free %a",
-        'tile.free %a\n    %again = tile.load.async %view into %a : !tile.event<"again">',
-      ),
+      ("tile.free %a", 'tile.free %a\n    %again = tile.load.async %view into %a : !tile.event<"again">'),
       ("tile.store.async %b into %view", "tile.store.async %a into %view"),
       (
         "tile.free %a",
         '%compute = tile.evu.async "relu" ops = 16448 : !tile.event<"compute">\n    tile.free %a',
       ),
     ],
-    ids=["pending-load", "pending-store", "double-free", "load-after-free",
-         "store-after-free", "pending-opaque-compute"],
+    ids=[
+      "pending-load",
+      "pending-store",
+      "double-free",
+      "load-after-free",
+      "store-after-free",
+      "pending-opaque-compute",
+    ],
   )
   def test_rejects_unsafe_lifetime(self, old, new):
     with pytest.raises(VerifyException, match="tile.free"):
@@ -2533,12 +2360,9 @@ class TestTileFree:
     from pipeline_validator.dialects.elenor import TileFreeOp
 
     foreign = TileAllocOp([64], "bf16")
-    owner = TileProgramDefOp(
-      "owner", [foreign, TileReturnOp()], arg_types=[NestTask()], arg_names=["task"]
-    )
+    owner = TileProgramDefOp("owner", [foreign, TileReturnOp()], arg_types=[NestTask()], arg_names=["task"])
     consumer = TileProgramDefOp(
-      "consumer", [TileFreeOp(foreign.result), TileReturnOp()],
-      arg_types=[NestTask()], arg_names=["task"]
+      "consumer", [TileFreeOp(foreign.result), TileReturnOp()], arg_types=[NestTask()], arg_names=["task"]
     )
     with pytest.raises(VerifyException):
       verify_workload_ir(ModuleOp([owner, consumer, NestContextOp("ctx", [NestReturnOp()], placement=1)]))
@@ -2549,8 +2373,8 @@ class TestTileFree:
   def test_gather_buffers_live_until_gather_completion(self, buffer):
     source = (Path(__file__).resolve().parents[2] / "examples/workloads/gather_profiled.mlir").read_text()
     with pytest.raises(VerifyException, match="tile.free"):
-      parse_workload_ir(source.replace(
-        "    tile.await %gather_done",
-        f"    tile.free %{buffer}\n    tile.await %gather_done",
-        1,
-      ))
+      parse_workload_ir(
+        source.replace(
+          "    tile.await %gather_done", f"    tile.free %{buffer}\n    tile.await %gather_done", 1
+        )
+      )

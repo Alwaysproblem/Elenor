@@ -51,6 +51,8 @@ Runnable workloads:
    pow-sequential-contexts        workloads/pow_sequential_contexts.mlir
 
 Protocol scenarios:
+  ready-action-branch           scenarios/ready_action_branch.mlir
+  device-dependency-submit      scenarios/device_dependency_submit.mlir
   l2-admission-wait              scenarios/l2_admission_wait.mlir
   sequential-release-counterexample
                                  scenarios/sequential_release_counterexample.mlir
@@ -233,6 +235,7 @@ case "$name" in
       --ir-file "$ROOT_DIR/examples/workloads/pow_dual_context.mlir" \
       --hw-override num_dma_channels=2 \
       --device-context-mode 2 \
+      --context-mode 2 \
       --input-binding Y0=0x100000:131072:rw \
       --input-binding Y1=0x200000:131072:rw \
       --hw-override hbm_fixed_latency_cycles=10 \
@@ -244,6 +247,7 @@ case "$name" in
       --ir-file "$ROOT_DIR/examples/workloads/pow_dual_context_mixed_shapes.mlir" \
       --hw-override num_dma_channels=2 \
       --device-context-mode 2 \
+      --context-mode 2 \
       --input-binding Y0=0x100000:131072:rw \
       --input-binding Y1=0x200000:262144:rw \
       --hw-override hbm_fixed_latency_cycles=10 \
@@ -334,6 +338,28 @@ case "$name" in
       *) nest_args+=(--input-binding arena=0x1000000:8388608:rw) ;;
     esac
     set -- "${nest_args[@]}" "$@"
+    ;;
+  ready-action-branch)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/scenarios/ready_action_branch.mlir" \
+      --context-mode 2 \
+      --input-binding arena=0x100000:8192:rw \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --max-cycles 200000 \
+      "$@"
+    ;;
+  device-dependency-submit)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/scenarios/device_dependency_submit.mlir" \
+      --context-mode 2 \
+      --device-context-mode 2 \
+      --input-binding src=0x100000:2048:r \
+      --input-binding a=0x110000:2048:rw \
+      --input-binding b=0x120000:2048:w \
+      --input-binding c=0x130000:2048:w \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --max-cycles 200000 \
+      "$@"
     ;;
   file)
     if [[ $# -lt 1 ]]; then

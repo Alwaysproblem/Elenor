@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import zlib
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from itertools import pairwise
 
 from xdsl.dialects.builtin import ModuleOp
 
 from .config import HardwareConfig, SimConfig
+from .device import CpuDeviceController
 from .dialects.elenor import NestContextOp, NexusProgramOp
 from .execution_ir import (
   ExecGatherDesc,
@@ -20,8 +21,8 @@ from .execution_ir import (
 )
 from .ir_lowering import lower_model_ir, lower_workload_ir
 from .pmu import PMUCounter
+from .runtime.group_port import GroupPortAdapter
 from .tile_group import TileGroup
-from .tile_group_sequencer import TileGroupSequencer
 from .trace import Tracer
 
 
@@ -34,21 +35,21 @@ class SimResult:
   reason: str = ""
   pmu: PMUCounter = field(default_factory=PMUCounter)
   group_snapshot: dict = field(default_factory=dict)
+  device_snapshot: dict = field(default_factory=dict)
   trace: list = field(default_factory=list)
   credit_invariant_ok: bool = True
   tracer: Tracer | None = None
   memory_trace: bool = False
   slot_count: int = 1
   input_bindings: dict[str, GlobalBinding] = field(default_factory=dict)
+  configuration: dict = field(default_factory=dict)
 
   def utilization(self, num_tiles: int = 4) -> float:
     return self.pmu.utilization(self.cycles * num_tiles)
 
 
 def _validate_input_bindings(
-  inputs: list[ExecGlobalInput],
-  bindings: Mapping[str, GlobalBinding],
-  hw: HardwareConfig,
+  inputs: list[ExecGlobalInput], bindings: Mapping[str, GlobalBinding], hw: HardwareConfig
 ) -> None:
   if bindings and not inputs:
     raise ValueError("input bindings provided but module declares no global inputs")
@@ -59,9 +60,7 @@ def _validate_input_bindings(
       raise ValueError(f"missing input binding for global '{input_.name}'")
   for name in bindings:
     if name not in inputs_by_name:
-      raise ValueError(
-        f"input binding '{name}' does not match any program input"
-      )
+      raise ValueError(f"input binding '{name}' does not match any program input")
   for input_ in inputs:
     binding = bindings[input_.name]
     if binding.size_bytes < input_.size_bytes:
@@ -73,42 +72,30 @@ def _validate_input_bindings(
   ordered = sorted(bindings.values(), key=lambda binding: binding.base_iova)
   for left, right in pairwise(ordered):
     if right.base_iova < left.base_iova + left.size_bytes:
-      raise ValueError(
-        f"input bindings '{left.name}' and '{right.name}' overlap"
-      )
+      raise ValueError(f"input bindings '{left.name}' and '{right.name}' overlap")
   for binding in bindings.values():
     if binding.base_iova + binding.size_bytes > hw.hbm_capacity_bytes:
       raise ValueError(f"input binding '{binding.name}' exceeds HBM capacity")
 
 
 def _validate_binding_permissions(
-  tasks_with_maps: list[tuple[ExecTileGroupTask, Mapping[str, str]]],
-  bindings: Mapping[str, GlobalBinding],
+  tasks_with_maps: list[tuple[ExecTileGroupTask, Mapping[str, str]]], bindings: Mapping[str, GlobalBinding]
 ) -> None:
   for task, name_map in tasks_with_maps:
     for action in task.actions:
-      if action.op not in (
-        ExecGroupActionOp.DMA_PREFETCH,
-        ExecGroupActionOp.DMA_STORE,
-      ):
+      if action.op not in (ExecGroupActionOp.DMA_PREFETCH, ExecGroupActionOp.DMA_STORE):
         continue
       transfer = action.args[1]
       if transfer.src.space == "global":
         formal_name = transfer.src.base.removeprefix("global:")
         input_name = name_map[formal_name]
         if "r" not in bindings[input_name].permissions:
-          raise ValueError(
-            f"input binding '{input_name}' is not readable but is used as"
-            " prefetch source"
-          )
+          raise ValueError(f"input binding '{input_name}' is not readable but is used as prefetch source")
       if transfer.dst.space == "global":
         formal_name = transfer.dst.base.removeprefix("global:")
         input_name = name_map[formal_name]
         if "w" not in bindings[input_name].permissions:
-          raise ValueError(
-            f"input binding '{input_name}' is not writable but is used as"
-            " store destination"
-          )
+          raise ValueError(f"input binding '{input_name}' is not writable but is used as store destination")
 
     for role_binding in task.role_bindings.values():
       for descriptor in role_binding.tile_program.descriptors.values():
@@ -147,18 +134,28 @@ class Simulator:
     self.hw = hw
     self.sim = sim
     self.tracer = Tracer(hw) if enable_tracer else None
-    # Single TileGroup shared across all device execution slots.
-    # context_count must be >= device_context_count so each slot gets
-    # its own UCE context for true concurrency on the shared tiles.
-    ctx_count = max(sim.context_count, sim.device_context_count)
-    self.group = TileGroup(hw, self.tracer, fidelity=sim.fidelity,
-                           context_count=ctx_count,
-                           memory_trace=sim.memory_trace)
-    self.groups = [self.group]  # legacy compat
+    # CPU outstanding launches and physical Tile contexts are independent.
+    self.group = TileGroup(
+      hw,
+      self.tracer,
+      fidelity=sim.fidelity,
+      context_count=sim.context_count,
+      memory_trace=sim.memory_trace,
+      scheduler_config=sim.group,
+    )
     self.cycle = 0
     self._trace: list = []
     self._program_name_registry: dict[str, int] = {}
     self._next_program_id: int = 1
+
+  def _validate_tile_placement(self, task: ExecTileGroupTask) -> None:
+    for binding in task.role_bindings.values():
+      pin = binding.context_id
+      if pin is not None and not 0 <= pin < self.sim.context_count:
+        raise ValueError(
+          f"dispatch '{binding.tile_program.name}' pins Tile context {pin}"
+          f" outside context_count={self.sim.context_count}"
+        )
 
   def _ensure_fault_drain(self, reason: str, cycle: int) -> None:
     """Begin reset/drain once for a sequencer/runtime fault."""
@@ -167,32 +164,45 @@ class Simulator:
     rd = self.group.reset_domain
     if rd.is_active or rd.is_done:
       return
-    self.group.trigger_fault(
-      self.group._fault_code_for_reason(reason),
-      cycle=cycle, desc_id=reason)
+    self.group.trigger_fault(self.group._fault_code_for_reason(reason), cycle=cycle, desc_id=reason)
 
-  def run(
-    self,
-    module: ModuleOp,
-    input_bindings: Mapping[str, GlobalBinding] | None = None,
-  ) -> SimResult:
+  def _observe_device_event(self, event: str, cycle: int, args: Mapping[str, object]) -> None:
+    if self.tracer is None:
+      return
+    lane = {
+      "launch_submit": "Controller",
+      "launch_dependencies_ready": "Pending",
+      "launch_admission": "Pending",
+      "launch_completion": "Completion",
+      "await_complete": "Controller",
+      "return": "Controller",
+      "fault": "Controller",
+    }.get(event, "Controller")
+    payload = dict(args)
+    if event == "launch_completion":
+      start_cycle = payload.get("submit_cycle")
+      request_id = payload.get("request_id")
+      context = payload.get("context")
+      if isinstance(start_cycle, int):
+        self.tracer.complete(
+          "CPU Device", "Completion", f"launch:{request_id}:{context}", start_cycle, cycle, args=payload
+        )
+    self.tracer.instant("CPU Device", lane, event, cycle, payload)
+
+  def run(self, module: ModuleOp, input_bindings: Mapping[str, GlobalBinding] | None = None) -> SimResult:
     bindings = {} if input_bindings is None else input_bindings
     if any(isinstance(op, NexusProgramOp) for op in module.body.block.ops):
       return self._run_model(module, bindings)
     task = lower_workload_ir(module)
+    context = next(op for op in module.body.block.ops if isinstance(op, NestContextOp))
+    if context.context_id is not None and int(context.context_id.value.data) != 0:
+      raise ValueError("standalone nest.context must use Group context slot 0")
+    self._validate_tile_placement(task)
     _validate_input_bindings(list(task.global_inputs), bindings, self.hw)
     _validate_binding_permissions(
-      [(task, {input_.name: input_.name for input_ in task.global_inputs})],
-      bindings,
+      [(task, {input_.name: input_.name for input_ in task.global_inputs})], bindings
     )
     self._assign_program_ids(task)
-    # Legacy pin validation
-    ctx_op = next(op for op in module.body.block.ops if isinstance(op, NestContextOp))
-    pin = None if ctx_op.context_id is None else int(ctx_op.context_id.value.data)
-    if pin is not None and pin >= self.sim.device_context_count:
-      raise ValueError(
-        f"context @{ctx_op.sym_name.data} pins device context {pin}"
-        f" but device_context_count is {self.sim.device_context_count}")
     self.group.load_task(task, input_bindings=bindings)
     self.cycle = 0
     self._trace.clear()
@@ -218,8 +228,7 @@ class Simulator:
       if fault_reason is not None:
         # Fault result is returned only after drain/reset cleanup completed
         # in runtime/full_memory. timing_only has no reset domain.
-        if (not self.group.runtime_enabled
-            or self.group.reset_domain.is_done):
+        if not self.group.runtime_enabled or self.group.reset_domain.is_done:
           completed = False
           reason = f"faulted: {fault_reason}"
           break
@@ -245,13 +254,10 @@ class Simulator:
       tracer=self.tracer,
       memory_trace=self.sim.memory_trace,
       input_bindings=dict(bindings),
+      configuration=self._configuration(bindings),
     )
 
-  def _run_model(
-    self,
-    module: ModuleOp,
-    bindings: Mapping[str, GlobalBinding],
-  ) -> SimResult:
+  def _run_model(self, module: ModuleOp, bindings: Mapping[str, GlobalBinding]) -> SimResult:
     model = lower_model_ir(module)
     _validate_input_bindings(list(model.inputs), bindings, self.hw)
     tasks_with_maps: list[tuple[ExecTileGroupTask, Mapping[str, str]]] = []
@@ -261,136 +267,68 @@ class Simulator:
       task = model.tasks[device_op.ctx_name]
       name_map = {
         formal.name: model.inputs[actual_index].name
-        for formal, actual_index in zip(
-          task.global_inputs,
-          device_op.actual_inputs,
-        )
+        for formal, actual_index in zip(task.global_inputs, device_op.actual_inputs)
       }
       tasks_with_maps.append((task, name_map))
     _validate_binding_permissions(tasks_with_maps, bindings)
     for task in model.tasks.values():
+      self._validate_tile_placement(task)
       self._assign_program_ids(task)
-    count = self.sim.device_context_count
-    for ctx_name, pin in model.context_pins.items():
-      if pin is not None and pin >= count:
+    for name, pin in model.context_pins.items():
+      if pin is not None and not 0 <= pin < self.sim.group.active_context_capacity:
         raise ValueError(
-          f"context @{ctx_name} pins device context {pin}"
-          f" but device_context_count is {count}")
-    # Reset the single shared TileGroup for a fresh model run
+          f"context '{name}' pins Group context slot {pin} outside"
+          f" active_context_capacity={self.sim.group.active_context_capacity}"
+        )
+
+    # A fresh adapter owns Group launch slots and sequencer identities.  The
+    # CPU sees only the DevicePort protocol and stable request IDs.
     self.group.reset()
-    self.group._active_sequencers = []
+    port = GroupPortAdapter(self.group, self.sim.group.active_context_capacity)
+    controller = CpuDeviceController(
+      model,
+      self.sim.device,
+      self.sim.device_context_count,
+      port,
+      bindings,
+      observer=self._observe_device_event,
+    )
     self.cycle = 0
     self._trace.clear()
-    pmu = PMUCounter()
-    slot_busy = [False] * count
-    slot_seq: list[TileGroupSequencer | None] = [None] * count
-    slot_tag: list[str | None] = [None] * count
-    slot_ctx: list[str | None] = [None] * count
-    slot_start = [0] * count
-    done_events: set[str] = set()
-    pc = 0
-    returned = False
     completed = False
     reason = ""
-    fault_reason: str | None = None
+    credit_invariant_ok = True
     trace_tile = self.sim.trace_tile
 
     while self.cycle < self.sim.max_cycles:
-      # 1. advance device PC only before a fault freezes new submits.
-      while fault_reason is None and pc < len(model.body):
-        dop = model.body[pc]
-        if dop.op == "submit":
-          pin = model.context_pins.get(dop.ctx_name)
-          if pin is not None:
-            slot = pin if not slot_busy[pin] else None
-          else:
-            slot = next((i for i in range(count) if not slot_busy[i]), None)
-          if slot is None:
-            pmu.add_cycle("device_submit_wait", 1)
-            break
-          task = model.tasks[dop.ctx_name]
-          name_map = {
-            formal.name: model.inputs[actual_index].name
-            for formal, actual_index in zip(
-              task.global_inputs, dop.actual_inputs)
-          }
-          seq = self.group.load_context_task(
-            task, slot_index=slot,
-            context_name=dop.ctx_name,
-            input_bindings=bindings,
-            formal_bindings=name_map,
-            cycle=self.cycle)
-          slot_busy[slot] = True
-          slot_seq[slot] = seq
-          slot_tag[slot] = dop.event_tag
-          slot_ctx[slot] = dop.ctx_name
-          slot_start[slot] = self.cycle
-          if self.tracer is not None:
-            self.tracer.instant("Device", f"Slot:{slot}", "context_submit",
-                                self.cycle,
-                                {"context": dop.ctx_name, "slot": slot,
-                                 "pin": pin, "event": dop.event_tag,
-                                 "cycle": self.cycle})
-          pc += 1
-        elif dop.op == "await":
-          if dop.event_tag not in done_events:
-            pmu.add_cycle("device_await_wait", 1)
-            break
-          pc += 1
-        else:  # "return"
-          returned = True
-          pc += 1
-
-      # 2. step the single shared TileGroup once
+      # Deterministic co-simulation order:
+      #   CPU submit/dependency phase -> one Group cycle -> CPU completion
+      #   harvest.  A completion from this Group step wakes deps next cycle.
+      controller.step(self.cycle)
       self.group.step(self.cycle)
       if self.sim.trace and (trace_tile is None or trace_tile):
         self._trace.append({"cycle": self.cycle, **self.group.snapshot()})
-      # 3. check which slots' sequencers completed this cycle
-      if fault_reason is None:
-        for i in range(count):
-          if not slot_busy[i]:
-            continue
-          done_seq = slot_seq[i]
-          if done_seq is not None and not done_seq.done:
-            continue
-          if done_seq is not None and done_seq.faulted:
-            fault_reason = done_seq.fault_reason
-            self._ensure_fault_drain(fault_reason, self.cycle)
-            break
-          tag = slot_tag[i]
-          assert tag is not None
-          done_events.add(tag)
-          if self.tracer is not None:
-            self.tracer.complete("Device", f"Slot:{i}",
-                                 f"context:{slot_ctx[i]}:run",
-                                 slot_start[i], self.cycle,
-                                 args={"context": slot_ctx[i], "slot": i,
-                                       "event": tag})
-            self.tracer.instant("Device", f"Slot:{i}", "context_done",
-                                self.cycle,
-                                {"context": slot_ctx[i], "slot": i,
-                                 "event": tag, "cycle": self.cycle})
-          slot_busy[i] = False
-          slot_seq[i] = None
-          slot_tag[i] = None
-          slot_ctx[i] = None
+      controller.harvest_completions(self.cycle)
+
+      if controller.faulted:
+        controller.note_fault_drain_started(self.cycle)
+        self._ensure_fault_drain(controller.fault_reason or "device launch failed", self.cycle)
 
       if not self.group.credit_invariants_hold():
-        completed = False
+        credit_invariant_ok = False
         reason = f"credit invariant violated at cycle {self.cycle}"
         break
 
-      if fault_reason is not None:
-        if (not self.group.runtime_enabled
-            or self.group.reset_domain.is_done):
+      if controller.faulted:
+        if not self.group.runtime_enabled or self.group.reset_domain.is_done:
+          controller.note_fault_drain_completed(self.cycle)
           completed = False
-          reason = f"faulted: {fault_reason}"
+          reason = f"faulted: {controller.fault_reason}"
           break
         self.cycle += 1
         continue
 
-      # 4. termination: return reached and every slot drained
-      if returned and not any(slot_busy):
+      if controller.succeeded:
         completed = True
         reason = "model complete"
         break
@@ -398,24 +336,41 @@ class Simulator:
     else:
       reason = f"cycle cap {self.sim.max_cycles} reached"
 
-    # Merge the group PMU (accumulates all sequencer/tile/queue counters)
+    pmu = PMUCounter()
+    pmu.merge(controller.pmu)
     pmu.merge(self.group.pmu)
+    port_snapshot = port.snapshot()
+    device_snapshot = controller.snapshot()
+    port_records = {record["request_id"]: record for record in port_snapshot["request_records"]}
+    for record in device_snapshot["launch_records"]:
+      port_record = port_records.get(record["request_id"])
+      if port_record is not None:
+        record["active_cycle"] = port_record["active_cycle"]
+      record["drain_cycle"] = controller.drain_start_cycle if record["status"] == "error" else None
+    device_snapshot["port"] = port_snapshot
+    credit_invariant_ok = credit_invariant_ok and self.group.credit_invariants_hold()
     return SimResult(
       cycles=self.cycle,
       completed=completed,
       reason=reason,
       pmu=pmu,
       group_snapshot=self.group.snapshot(),
+      device_snapshot=device_snapshot,
       trace=self._trace,
+      credit_invariant_ok=credit_invariant_ok,
       tracer=self.tracer,
       memory_trace=self.sim.memory_trace,
-      slot_count=count,
+      slot_count=self.sim.device_context_count,
       input_bindings=dict(bindings),
+      configuration=self._configuration(bindings),
     )
-    for g in self.groups:
-      g.reset()
-    self.cycle = 0
-    self._trace.clear()
+
+  def _configuration(self, bindings: Mapping[str, GlobalBinding]) -> dict:
+    return {
+      "hardware": asdict(self.hw),
+      "simulation": asdict(self.sim),
+      "bindings": {name: asdict(binding) for name, binding in bindings.items()},
+    }
 
   def _assign_program_ids(self, task: ExecTileGroupTask) -> None:
     for binding in task.role_bindings.values():

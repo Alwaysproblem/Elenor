@@ -13,19 +13,13 @@ from .execution_ir import GlobalBinding
 from .report import build_report, report_to_json, report_to_text
 from .simulator import Simulator
 from .trace import trace_to_html
-from .workload_ir import (
-  load_workload_ir,
-  print_workload_ir,
-  verify_workload_ir,
-)
+from .workload_ir import load_workload_ir, print_workload_ir, verify_workload_ir
 from .workloads import ALL_WORKLOADS, Workload
 
 
 def _parse_input_binding(spec: str) -> GlobalBinding:
   """Parse ``NAME=BASE:SIZE:PERM`` into a global launch binding."""
-  error = (
-    f"invalid --input-binding '{spec}': expected NAME=BASE:SIZE:PERM"
-  )
+  error = f"invalid --input-binding '{spec}': expected NAME=BASE:SIZE:PERM"
   try:
     name, value = spec.split("=", 1)
     base, size, permissions = value.split(":")
@@ -63,8 +57,7 @@ def main(argv=None) -> int:
   parser = argparse.ArgumentParser(
     prog="pipeline_validator",
     description=(
-      "ELENOR runtime pipeline efficiency validator "
-      "(1 Tile Group + 4 Compute Tiles, cycle-accurate)."
+      "ELENOR runtime pipeline efficiency validator (1 Tile Group + 4 Compute Tiles, cycle-accurate)."
     ),
   )
   mode = parser.add_mutually_exclusive_group()
@@ -98,28 +91,37 @@ def main(argv=None) -> int:
     action="append",
     default=[],
     metavar="KEY=VALUE",
-    help="override a SimConfig field, e.g. trace=True",
+    help="override a SimConfig field, e.g. group.action_capacity=16",
+  )
+  parser.add_argument(
+    "--group-policy",
+    choices=("s0", "s1", "s2"),
+    default=None,
+    help=(
+      "select the Group hardware scheduler policy; other Group resources "
+      "use --sim-override group.FIELD=VALUE"
+    ),
   )
   parser.add_argument(
     "--context-mode",
     type=int,
     default=None,
     metavar="N",
-    help="Tile UCE execution context count: 1-8 (default: 1)",
+    help="exact hardware Tile UCE context count per Tile: 1-8 (default: 1)",
   )
   parser.add_argument(
     "--device-context-mode",
     type=int,
     default=None,
     metavar="N",
-    help="device execution context (TileGroup slot) count: 1-8 (default: 1)",
+    help="CPU outstanding Group-launch limit: 1-8 (default: 1)",
   )
   parser.add_argument("--max-cycles", type=int, default=None, help="cycle cap (default 2_000_000)")
   parser.add_argument("--trace", action="store_true", help="enable per-cycle trace dump")
   parser.add_argument(
-      "--memory-trace",
-      action="store_true",
-      help="emit memory lanes/counters/flows in the trace and memory peaks in the report (PR 5)",
+    "--memory-trace",
+    action="store_true",
+    help="emit memory lanes/counters/flows in the trace and memory peaks in the report (PR 5)",
   )
   parser.add_argument(
     "--trace-json",
@@ -134,9 +136,7 @@ def main(argv=None) -> int:
     help="write standalone trace.html to PATH (enables tracing)",
   )
   parser.add_argument(
-    "--print-ir",
-    action="store_true",
-    help="print workload IR (custom assembly) and exit (no simulation)",
+    "--print-ir", action="store_true", help="print workload IR (custom assembly) and exit (no simulation)"
   )
   parser.add_argument("--json", action="store_true", help="emit JSON instead of text")
   parser.add_argument("--report", default=None, help="write report to this path (default: stdout)")
@@ -146,7 +146,6 @@ def main(argv=None) -> int:
     bindings = {b.name: b for b in (_parse_input_binding(s) for s in args.input_binding)}
   except ValueError as exc:
     parser.error(str(exc))
-
 
   if args.context_mode is not None and not 1 <= args.context_mode <= MAX_CONTEXT_COUNT:
     parser.error("--context-mode must be between 1 and 8")
@@ -163,6 +162,10 @@ def main(argv=None) -> int:
     return 2
   hw = hw.with_overrides(**_parse_overrides(args.hw_override))
   sim_overrides = _parse_overrides(args.sim_override)
+  if args.group_policy is not None:
+    if "group.policy" in sim_overrides:
+      parser.error("use either --group-policy or --sim-override group.policy=..., not both")
+    sim_overrides["group.policy"] = args.group_policy
   if args.max_cycles is not None:
     sim_overrides["max_cycles"] = args.max_cycles
   if args.context_mode is not None:
@@ -175,7 +178,7 @@ def main(argv=None) -> int:
     sim_overrides["memory_trace"] = True
   try:
     sim_cfg = SimConfig().with_overrides(**sim_overrides)
-  except ValueError as exc:
+  except (TypeError, ValueError) as exc:
     print(f"invalid input: {exc}", file=sys.stderr)
     return 2
 
@@ -189,12 +192,7 @@ def main(argv=None) -> int:
       print(f"failed to load IR '{ir_path}': {exc}", file=sys.stderr)
       return 2
     workloads.append(
-      Workload(
-        name=task.sym_name.data,
-        module=module,
-        expected={},
-        description=f"External IR: {ir_path}",
-      )
+      Workload(name=task.sym_name.data, module=module, expected={}, description=f"External IR: {ir_path}")
     )
   else:
     names = [args.workload or "pow"]
@@ -225,7 +223,7 @@ def main(argv=None) -> int:
     except ValueError as exc:
       print(f"invalid input: {exc}", file=sys.stderr)
       return 2
-    rep = build_report(wl, result)
+    rep = build_report(wl, result, num_tiles=hw.num_tiles)
     outputs.append(rep)
     if not all(ch.get("pass", False) for ch in rep.checks):
       overall_pass = False
