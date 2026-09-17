@@ -5,7 +5,13 @@ builtin.module {
       %lhs_l2 : !nest.l2_buffer<128x64xbf16>,
       %rhs_l2 : !nest.l2_buffer<64x128xbf16>,
       %indices_l2 : !nest.l2_buffer<1024xi32>,
-      %output_l2 : !nest.l2_buffer<1x128x128xbf16>) {
+      %output_l2 : !nest.l2_buffer<1x128x128xbf16>)
+                resource_contract = #tile.resources<allowed_profiles = [1, 2],
+          tile_l1_spm_bytes_per_context = 73728,
+          l1_cache = {required = true, access = "read", bypass = "forbidden", target_bytes = 65536},
+          l2_cache = {
+            required = true, access = "read", bypass = "forbidden", target_bytes = 65536}
+            > {
     %lhs_view = tile.subview %lhs_l2
         offsets = [0, 0] sizes = [128, 64] strides = [1, 1]
         : !nest.l2_view<128x64xbf16>
@@ -44,7 +50,7 @@ builtin.module {
 
     %gather_done = tile.gather.global.async %table
         indices(%indices_l1) into %gather_dst
-        result_bytes = 256 cache_min_bytes = 16384
+        result_bytes = 256
         cache_target_bytes = 65536 l1_mshr_hint = 16 {
       tile.profiled.access id = "r0" outcome = "L1_HIT"
           bytes = 64 line = "line0"
@@ -76,7 +82,12 @@ builtin.module {
       %rhs : !nest.global_memref<64x128xbf16>,
       %table : !nest.global_memref<8388608xi8>,
       %indices : !nest.global_memref<1024xi32>,
-      %output : !nest.global_memref<1x128x128xbf16>) placement = 1 {
+      %output : !nest.global_memref<1x128x128xbf16>) placement = 1
+                resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [1, 2],
+          logical_tasks = 1, l2_spm_bytes = 69632, requested_contexts_per_tile = 1,
+          l2_cache = {
+            required = true, access = "read", bypass = "forbidden", target_bytes = 65536}
+            > {
     %lhs_global = nest.subview %lhs
         offsets = [0, 0] sizes = [128, 64] strides = [1, 1]
         : !nest.global_view<128x64xbf16>
@@ -115,7 +126,7 @@ builtin.module {
 
     %tasks = nest.task.range from = 0 to = 1 : !nest.task_range
     %grid_done, %input_released, %output_ready =
-        nest.dispatch.tasks.async @matmul_gather_add_tile
+        nest.dispatch.tasks.async @matmul_gather_add_tile l1_mode = 1
         tasks(%tasks) globals(%table_global)
         bindings(%lhs_buffer, %rhs_buffer, %indices_buffer, %output_buffer)
         ins(%lhs_buffer, %rhs_buffer, %indices_buffer)

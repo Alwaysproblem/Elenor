@@ -23,10 +23,13 @@
 //       "tensors": {},
 //       "node_programs": {},
 //       "consumer_ready": {},
-//       "说明": "participant count=0：一个合法空 Context，仅 nest.return；无 task.range、dispatch、phase waiter、reducer 或 consumer。"
+//"说明": "participant count=0：一个合法空 Context，仅 nest.return；无 task.range、dispatch、phase waiter、reducer
+// 或 consumer。"
 //     }
 builtin.module {
-  nest.context @ctx_0 (%arena: !nest.global_memref<4194304xbf16>) placement = 15 {
+  nest.context @ctx_0 (%arena: !nest.global_memref<4194304xbf16>) placement = 15
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+      logical_tasks = 0, l2_spm_bytes = 0, requested_contexts_per_tile = 1> {
     nest.return
   }
   nexus.program @run (%arena: !nest.global_memref<4194304xbf16>) {

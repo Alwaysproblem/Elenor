@@ -78,7 +78,7 @@ Host / System SoC
 .
 ├── design/             # 架构设计主文档与分模块设计文档
 ├── image/              # 架构图、时序图、模块示意图
-├── pipeline_validator/ # Cycle-accurate runtime / memory pipeline validator
+├── pipeline_validator/ # 显式编译、只读加载与 cycle-accurate runtime / memory validator
 ├── examples/           # 可运行 MLIR、协议场景、fixtures 与 artifacts
 ├── scripts/            # 文档导出脚本
 ├── gen_docs_config/    # PDF 导出模板
@@ -87,14 +87,14 @@ Host / System SoC
 
 ## 运行 Pipeline Validator 示例
 
-`examples/` 已按用途整理，并使用一个统一入口运行：
+`examples/` 已按用途整理，并使用一个统一入口运行。`run.sh` 是开发便利封装；源码模式内部仍显式执行 compile→持久化→load→run，`Simulator.run` 本身不接受源 IR。
 
 ```text
 examples/
 ├── workloads/   # 可直接运行、适合复制修改的完整模型
 ├── scenarios/   # admission/release 等 runtime 协议场景
 ├── fixtures/    # 测试输入，不作为用户示例入口
-├── artifacts/   # 已生成的 trace/report JSON
+├── artifacts/   # 已生成的 compiled artifact、trace 与 report
 └── run.sh       # 单示例运行入口
 ```
 
@@ -119,6 +119,7 @@ bash examples/run.sh pow-dual-context
 
 ```bash
 bash examples/run.sh l2-admission-wait --json
+bash examples/run.sh profile-reconfiguration --json
 bash examples/run.sh sequential-release-counterexample
 ```
 
@@ -129,6 +130,26 @@ bash examples/run.sh gather-matmul \
   --trace-json /tmp/gather-matmul.json \
   --json
 ```
+
+显式编译并在独立进程重放可运行的 SRAM Profile 场景：
+
+```bash
+python -m pipeline_validator \
+  --ir-file examples/scenarios/profile_reconfiguration.mlir \
+  --compile-only \
+  --compiled-output /tmp/profile-reconfiguration.json
+
+python -m pipeline_validator \
+  --compiled-file /tmp/profile-reconfiguration.json \
+  --hw-config /tmp/profile-reconfiguration.target.yaml \
+  --sim-override fidelity=full_memory \
+  --json
+```
+
+第一步同时生成同 stem 的 `.exec.txt`、`.compiled.mlir.txt` 和 `.target.yaml`；
+第二步只解析、验证并执行不可变 artifact，不读取源文件，也不导入 compiler。未指定
+`--compiled-output` 时，源码模式按 artifact hash 写入
+`examples/artifacts/compiled/`。
 
 复制并修改自己的 MLIR：
 
@@ -145,7 +166,7 @@ bash examples/run.sh file /tmp/my_gather.mlir \
 ```
 
 内置名称会自动带上正确的 input bindings、context 数量和必要的硬件 override；`file`
-模式则要求显式提供自定义模型所需参数。未知示例名会直接失败，不会选择默认模型。
+模式则要求显式提供自定义模型所需参数。两者都会先产生可检查的编译 artifact，再只读加载执行；未知示例名会直接失败，不会选择默认模型。
 
 详细的示例说明、文件索引和 MLIR 修改约束见
 [`examples/README.md`](./examples/README.md)。
@@ -178,6 +199,7 @@ bash examples/run.sh file /tmp/my_gather.mlir \
 - [`design/elenor_compiler/ELENOR_Compiler_Stack_Design.md`](./design/elenor_compiler/ELENOR_Compiler_Stack_Design.md) — 编译器 lowering、descriptor template、package 生成
 - [`design/elenor_driver_firmware/ELENOR_Driver_Firmware_Runtime_Design.md`](./design/elenor_driver_firmware/ELENOR_Driver_Firmware_Runtime_Design.md) — driver / firmware / runtime 分工
 - [`design/elenor_workload_mapping/ELENOR_Workload_Mapping_Design.md`](./design/elenor_workload_mapping/ELENOR_Workload_Mapping_Design.md) — 工作负载映射方法
+- [`design/proposal/04_NEST_Context_Resource_Bank_Contract_Design.md`](./design/proposal/04_NEST_Context_Resource_Bank_Contract_Design.md) — 已实现的 NEST 分层 SRAM Profile、Arena、显式编译/重放合同与进行中的验收矩阵
 - [`design/elenor_verification_bringup/ELENOR_Verification_Bringup_Design.md`](./design/elenor_verification_bringup/ELENOR_Verification_Bringup_Design.md) — 验证与 bring-up 计划
 
 ## 建议阅读路径

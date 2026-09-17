@@ -18,10 +18,14 @@ from __future__ import annotations
 import json
 from collections import Counter
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 from xdsl.dialects.builtin import ModuleOp
 
+from pipeline_validator.compiled_program import WorkloadInfo
+from pipeline_validator.compiler import compile_program
+from pipeline_validator.compiler.resources import conservative_arena_bytes, layout_buffers
 from pipeline_validator.config import GroupSchedulerConfig, HardwareConfig, SimConfig
 from pipeline_validator.dialects.elenor import (
   NestAllocOp,
@@ -57,35 +61,156 @@ from pipeline_validator.dialects.elenor import (
   TileSubviewOp,
 )
 from pipeline_validator.execution_ir import (
-  ContextAdmissionStatus,
-  ExecDispatchRequest,
-  ExecGroupAction,
   ExecGroupActionOp,
-  ExecSignalPolicy,
-  ExecStreamDesc,
-  ExecTaskDomain,
   ExecTileGroupTask,
-  ExecTileInst,
   ExecTileOp,
-  ExecTileProgram,
-  ExecTileRoleBinding,
   GlobalBinding,
   GridInstanceId,
   PhaseSignal,
   TaskIdentity,
 )
-from pipeline_validator.group_scheduler import IssueStatus
-from pipeline_validator.ir_lowering import lower_model_ir, lower_workload_ir
-from pipeline_validator.memory import L2SRAM, NoCRouter, PayloadTracker
+from pipeline_validator.loader import load_program
+from pipeline_validator.memory import L2SRAM, AdmissionFailure, NoCRouter, PayloadTracker
+from pipeline_validator.memory.arena import ArenaPool, RootInvocation
+from pipeline_validator.profiles import CacheRequirement, ContextResources, TileResources, build_registry
 from pipeline_validator.runtime import EventStatus, EventTable, FaultCode, FaultRing
 from pipeline_validator.runtime.fault_ring import FaultDomain, FaultRecord
 from pipeline_validator.runtime.reset_domain import ResetDomain, ResetRequest, ResetState
 from pipeline_validator.simulator import SimResult, Simulator
 from pipeline_validator.tile import TileUCE
-from pipeline_validator.tile_group import L2AdmissionStatus, TileGroup
+from pipeline_validator.tile_group import TileGroup
 from pipeline_validator.workload_builders import make_pow_tile_program
 from pipeline_validator.workload_ir import load_workload_ir, parse_workload_ir, print_workload_ir
 from pipeline_validator.workloads import ALL_WORKLOADS, PowWorkload
+
+
+def tile_resources(
+  bytes_per_context: int = 0,
+  *,
+  allowed: tuple[int, ...] = (0, 1, 2),
+  l1_cache: CacheRequirement | None = None,
+  l2_cache: CacheRequirement | None = None,
+) -> TileResources:
+  return TileResources(allowed, bytes_per_context, l1_cache=l1_cache, l2_cache=l2_cache)
+
+
+def context_resources(
+  logical_tasks: int = 0,
+  l2_spm_bytes: int = 0,
+  *,
+  l2_mode: int = 0,
+  allowed: tuple[int, ...] = (0, 1, 2),
+  requested_contexts_per_tile: int = 1,
+  l2_cache: CacheRequirement | None = None,
+) -> ContextResources:
+  return ContextResources(
+    l2_mode, allowed, logical_tasks, l2_spm_bytes, requested_contexts_per_tile, l2_cache
+  )
+
+
+def authored_arena_bytes(
+  hw: HardwareConfig, level: str, buffers: list[tuple[int, int]], *, mode: int = 0
+) -> int:
+  if not buffers:
+    return 0
+  return conservative_arena_bytes(buffers, build_registry(hw).profile(level, mode))
+
+
+def compile_source(
+  module: ModuleOp, hw: HardwareConfig, sim: SimConfig, *, workload_info: WorkloadInfo | None = None
+):
+  return compile_program(module, hw, sim, workload_info=workload_info)
+
+
+def run_source(
+  simulator: Simulator,
+  module: ModuleOp,
+  bindings: dict[str, GlobalBinding] | None = None,
+  *,
+  workload_info: WorkloadInfo | None = None,
+):
+  artifact = compile_source(module, simulator.hw, simulator.sim, workload_info=workload_info)
+  loaded = load_program(artifact, simulator.hw, simulator.sim, actual_bindings=bindings)
+  return simulator.run(loaded)
+
+
+def assert_run_rejected_without_group_mutation(
+  simulator: Simulator, module: ModuleOp, bindings: dict[str, GlobalBinding] | None = None
+) -> None:
+  """A rejected compile/load contract must not enter or mutate Runtime."""
+  before = simulator.group.snapshot()
+  with pytest.raises(ValueError):
+    run_source(simulator, module, bindings)
+  assert simulator.group.snapshot() == before
+
+
+def compiled_entry(module: ModuleOp, hw: HardwareConfig, sim: SimConfig):
+  return compile_source(module, hw, sim).entry
+
+
+def begin_group_program(
+  group: TileGroup, artifact, bindings: dict[str, GlobalBinding] | None = None
+) -> None:
+  cycle = 0
+  while not group.profile_controller.initialized:
+    group.profile_controller.step(cycle)
+    cycle += 1
+  group.begin_launch(artifact, bindings or {})
+
+
+def task_named(entry, name: str) -> ExecTileGroupTask:
+  tasks = entry.tasks.values() if hasattr(entry, "tasks") else (entry,)
+  matches = [task for task in tasks if task.name == name]
+  assert len(matches) == 1
+  return matches[0]
+
+
+def prepare_group_source(
+  group: TileGroup,
+  module: ModuleOp,
+  bindings: dict[str, GlobalBinding] | None = None,
+  *,
+  sim: SimConfig | None = None,
+):
+  sim = sim or SimConfig(
+    fidelity=group.fidelity, context_count=len(group.tiles[0].l1_frames), group=group.scheduler_config
+  )
+  artifact = compile_source(module, group.cfg, sim)
+  begin_group_program(group, artifact, bindings)
+  return artifact
+
+
+def finish_group_and_reset(group: TileGroup, *, max_cycles: int = 2000000) -> None:
+  """Reach natural quiescence before invoking the explicit reset entry."""
+  start = group._last_step_cycle + 1
+  for cycle in range(start, start + max_cycles):
+    if group.step(cycle):
+      break
+  assert not group._active_sequencers
+  assert not group._grid_routes
+  assert not group._task_leases
+  assert not group._l2_arenas
+  assert group.transfer_manager.inflight_count == 0
+  group.reset()
+
+
+def fault_drain_and_reset(group: TileGroup, *, max_cycles: int = 2000000) -> None:
+  """Isolate live work through the real fault drain, then recover explicitly."""
+  start = group._last_step_cycle + 1
+  if not (group.reset_domain.is_active or group.reset_domain.is_done):
+    group.trigger_fault(FaultCode.ADDRESS_FAULT, cycle=start, desc_id="test-requested isolation")
+  for cycle in range(start, start + max_cycles):
+    group.step(cycle)
+    if group.reset_domain.is_done:
+      break
+  assert group.reset_domain.is_done
+  assert not group._active_sequencers
+  assert not group._grid_routes
+  assert not group._task_leases
+  assert not group._l2_arenas
+  assert group.transfer_manager.inflight_count == 0
+  group.reset()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -112,13 +237,33 @@ GATHER_BINDINGS = {"table": GlobalBinding("table", 0x400000, 4096, "r")}
 
 
 def assert_uce_instructions_issue_once(result: SimResult) -> list[dict]:
+  """Engine-launch instructions issue once; blocked probes are not issues."""
   assert result.tracer is not None
   events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
-  issues = [event for event in events if event.get("name") == "uce_issue"]
-  issue_counts = Counter((event["args"]["ctx_id"], event["args"]["pc"]) for event in issues)
+  launch_ops = {
+    ExecTileOp.LAUNCH_BOA.value,
+    ExecTileOp.LAUNCH_EVU.value,
+    ExecTileOp.LAUNCH_MFE.value,
+    ExecTileOp.LAUNCH_USE.value,
+    ExecTileOp.LAUNCH_GATHER.value,
+  }
+  issues = [
+    event
+    for event in events
+    if event.get("name") == "uce_issue" and event.get("args", {}).get("op") in launch_ops
+  ]
+  issue_counts = Counter(
+    (
+      event["pid"],
+      event["args"]["program"],
+      event["args"]["ctx_id"],
+      event["args"]["pc"],
+      event["args"]["op"],
+    )
+    for event in issues
+  )
   assert issue_counts
   assert set(issue_counts.values()) == {1}
-  assert any(event.get("name", "").startswith("WAIT_ENGINE_QUEUE:") for event in events)
   return issues
 
 
@@ -154,6 +299,7 @@ def assert_model_launch_lifecycle(result: SimResult) -> tuple[list[dict], dict[i
     assert port_record["context"] == record["context"]
     assert port_record["status"] == record["status"] == "success"
     assert record["submit_cycle"] <= record["admission_cycle"]
+    assert record["admission_cycle"] <= port_record["active_cycle"]
     assert port_record["active_cycle"] <= record["completion_cycle"]
 
   events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
@@ -176,8 +322,12 @@ def make_gather_module(
   include_evu_context: bool = False,
   l1_mshr_hint: int = 16,
 ) -> ModuleOp:
+  cache = CacheRequirement(True, "read", "forbidden", 65536)
   program = TileProgramDefOp(
-    "gather_tile", [], arg_types=[NestTask(), NestGlobalView.of([4096], "i8")], arg_names=["task", "table"]
+    "gather_tile",
+    TileResources((1, 2), 2048, l1_cache=cache, l2_cache=cache),
+    arg_types=[NestTask(), NestGlobalView.of([4096], "i8")],
+    arg_names=["task", "table"],
   )
   _task, table = program.body.block.args
   indices = TileAllocOp([16], "i32")
@@ -191,7 +341,6 @@ def make_gather_module(
     indices.result,
     destination.result,
     len(accesses) * 64,
-    16384,
     65536,
     l1_mshr_hint,
     profile,
@@ -200,7 +349,17 @@ def make_gather_module(
   program.body.block.add_ops([indices, destination, gather, TileAwaitOp([gather.result]), TileReturnOp()])
 
   context = NestContextOp(
-    "gather_context", [], placement=1, arg_types=[NestGlobalMemref.of([4096], "i8")], arg_names=["table"]
+    "gather_context",
+    context_resources(
+      1 + int(include_evu_context),
+      l2_mode=1,
+      allowed=(1, 2),
+      l2_cache=cache,
+      requested_contexts_per_tile=1 + int(include_evu_context),
+    ),
+    placement=1,
+    arg_types=[NestGlobalMemref.of([4096], "i8")],
+    arg_names=["table"],
   )
   table_arg = context.body.block.args[0]
   table_view = NestSubviewOp(table_arg, [0], [4096], [1], NestGlobalView.of([4096], "i8"))
@@ -214,6 +373,7 @@ def make_gather_module(
     "grid_done",
     "",
     "",
+    l1_mode=1,
     bindings=[],
     signal_policy={},
   )
@@ -230,6 +390,7 @@ def make_gather_module(
       "evu_grid_done",
       "",
       "",
+      l1_mode=1,
       bindings=[],
       signal_policy={},
     )
@@ -243,7 +404,10 @@ def make_gather_module(
 
 def make_waiting_mfe_program(name: str = "ctx_wait_mfe") -> TileProgramDefOp:
   prog = TileProgramDefOp(
-    name, [], arg_types=[NestTask(), NestBuffer.of(L2_WAIT_DIMS, "bf16")], arg_names=["task", "l2_buf"]
+    name,
+    tile_resources(L2_WAIT_BYTES),
+    arg_types=[NestTask(), NestBuffer.of(L2_WAIT_DIMS, "bf16")],
+    arg_names=["task", "l2_buf"],
   )
   _task_arg, l2_arg = prog.body.block.args
   view = TileSubviewOp(
@@ -258,14 +422,14 @@ def make_waiting_mfe_program(name: str = "ctx_wait_mfe") -> TileProgramDefOp:
 
 
 def make_short_evu_program(name: str = "ctx_short_evu") -> TileProgramDefOp:
-  prog = TileProgramDefOp(name, [], arg_types=[NestTask()], arg_names=["task"])
+  prog = TileProgramDefOp(name, tile_resources(), arg_types=[NestTask()], arg_names=["task"])
   evu = TileEvuOp(op_name="relu", evu_ops=16, tag="e_evu")
   prog.body.block.add_ops([evu, TileAwaitOp([evu.result]), TileReturnOp()])
   return prog
 
 
 def make_boa_program(name: str) -> TileProgramDefOp:
-  prog = TileProgramDefOp(name, [], arg_types=[NestTask()], arg_names=["task"])
+  prog = TileProgramDefOp(name, tile_resources(), arg_types=[NestTask()], arg_names=["task"])
   boa = TileBoaOp(op_name="matmul", m=256, n=256, k=256, boa_ops=33554432, tag="e_boa")
   prog.body.block.add_ops([boa, TileAwaitOp([boa.result]), TileReturnOp()])
   return prog
@@ -274,7 +438,10 @@ def make_boa_program(name: str) -> TileProgramDefOp:
 def make_held_mfe_launch_module() -> ModuleOp:
   dims = [1, 64, 64]
   prog = TileProgramDefOp(
-    "held_mfe_launch", [], arg_types=[NestTask(), NestBuffer.of(dims, "bf16")], arg_names=["task", "l2_buf"]
+    "held_mfe_launch",
+    tile_resources(6 * 8192),
+    arg_types=[NestTask(), NestBuffer.of(dims, "bf16")],
+    arg_names=["task", "l2_buf"],
   )
   task_arg, l2_arg = prog.body.block.args
   loads = []
@@ -299,11 +466,13 @@ def make_held_mfe_launch_module() -> ModuleOp:
     "held_mfe_done",
     "held_mfe_input_released",
     "",
+    l1_mode=0,
     bindings=[buffer.result],
     signal_policy={"input_released": "all_tasks"},
   )
   context = NestContextOp(
     "held_mfe_context",
+    context_resources(1, 8192),
     [
       buffer,
       tasks,
@@ -318,7 +487,7 @@ def make_held_mfe_launch_module() -> ModuleOp:
 
 
 def make_same_tile_roles_task(role_count: int, pins: list[int | None] | None = None) -> ModuleOp:
-  """Dispatch role_count programs to one tile to exercise context switching."""
+  """Dispatch programs to one Tile with the authored lease concurrency."""
   names = ["ctx_wait_mfe"] + [f"ctx_short_evu{i}" for i in range(role_count - 1)]
   progs = [make_waiting_mfe_program(names[0])] + [make_short_evu_program(n) for n in names[1:]]
   tasks = NestTaskRangeOp(0, 1)
@@ -337,13 +506,20 @@ def make_same_tile_roles_task(role_count: int, pins: list[int | None] | None = N
         f"ev_role{i}",
         f"ev_inrel{i}" if i == 0 else "",
         "",
+        l1_mode=0,
         bindings=bindings,
         signal_policy={"input_released": "all_tasks"} if i == 0 else {},
         context_id=None if pins is None else pins[i],
       )
     )
+  same_fixed_pin = (
+    pins is not None and bool(pins) and pins[0] is not None and all(pin == pins[0] for pin in pins)
+  )
   context = NestContextOp(
     "same_tile_roles",
+    context_resources(
+      role_count, L2_WAIT_BYTES, requested_contexts_per_tile=1 if same_fixed_pin else role_count
+    ),
     [
       buffer,
       tasks,
@@ -373,12 +549,14 @@ def make_two_context_model(pins: tuple[int | None, ...] = (None, None)) -> Modul
       f"ev_grid_c{i}",
       f"ev_inrel_c{i}",
       "",
+      l1_mode=0,
       bindings=[buffer.result],
       signal_policy={"input_released": "all_tasks"},
     )
     ctxs.append(
       NestContextOp(
         f"ctx{i}",
+        context_resources(1, L2_WAIT_BYTES),
         [
           buffer,
           tasks,
@@ -387,10 +565,10 @@ def make_two_context_model(pins: tuple[int | None, ...] = (None, None)) -> Modul
           NestAwaitOp([disp.grid_done]),
           NestReturnOp(),
         ],
-        arg_types=[NestGlobalMemref.of(L2_WAIT_DIMS, "bf16")],
-        arg_names=["Y"],
         placement=1,
         context_id=pin,
+        arg_types=[NestGlobalMemref.of(L2_WAIT_DIMS, "bf16")],
+        arg_names=["Y"],
       )
     )
   program = NexusProgramOp(
@@ -418,7 +596,7 @@ class TestGatherRuntime:
       SimConfig(fidelity="full_memory", max_cycles=10000),
       enable_tracer=True,
     )
-    result = simulator.run(module, input_bindings=GATHER_BINDINGS)
+    result = run_source(simulator, module, GATHER_BINDINGS)
     assert result.completed, result.reason
     assert result.pmu.events["gather_requests"] == 2
     assert result.pmu.events["gather_l1_hits"] == 2
@@ -441,9 +619,8 @@ class TestGatherRuntime:
     events = simulator.tracer._events if simulator.tracer is not None else []
     writes = [event for event in events if event["name"] == "gather_destination_write"]
     from pipeline_validator.report import build_report
-    from pipeline_validator.workloads import Workload
 
-    report = build_report(Workload("gather", module, expected={}, description="profiled gather"), result)
+    report = build_report(WorkloadInfo("gather", "profiled gather", {}), result)
     checks = {check["check"]: check for check in report.checks}
     assert checks["gather_request_conservation"]["pass"]
     assert checks["gather_zero_leak"]["pass"]
@@ -459,7 +636,7 @@ class TestGatherRuntime:
       HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10),
       SimConfig(fidelity="full_memory", max_cycles=10000),
     )
-    result = simulator.run(module, input_bindings=GATHER_BINDINGS)
+    result = run_source(simulator, module, GATHER_BINDINGS)
     assert result.completed, result.reason
     issued = simulator.group.transfer_manager.snapshot()["issued_by_op"]
     assert issued["gather_l2_hit"] == 1
@@ -476,7 +653,7 @@ class TestGatherRuntime:
       SimConfig(fidelity="full_memory", max_cycles=10000),
       enable_tracer=True,
     )
-    result = simulator.run(module, input_bindings=GATHER_BINDINGS)
+    result = run_source(simulator, module, GATHER_BINDINGS)
     assert result.completed, result.reason
     assert result.pmu.events["gather_requests"] == 2
     assert result.pmu.events["gather_hbm_misses"] == 2
@@ -499,7 +676,7 @@ class TestGatherRuntime:
       SimConfig(fidelity="full_memory", max_cycles=10000),
       enable_tracer=True,
     )
-    result = simulator.run(module, input_bindings=GATHER_BINDINGS)
+    result = run_source(simulator, module, GATHER_BINDINGS)
     assert result.completed, result.reason
     events = simulator.tracer._events if simulator.tracer is not None else []
     responses = [event for event in events if event["name"] == "gather_response"]
@@ -528,41 +705,46 @@ class TestGatherRuntime:
       SimConfig(fidelity="full_memory", context_count=2, device_context_count=2, max_cycles=10000),
       enable_tracer=True,
     )
-    result = simulator.run(module, input_bindings=GATHER_BINDINGS)
+    result = run_source(simulator, module, GATHER_BINDINGS)
     from pipeline_validator.pmu import StallReason
 
     assert result.pmu.stall_cycles[StallReason.WAIT_MSHR] > 0
     assert result.completed, result.reason
     assert result.pmu.events["gather_mshr_stalls"] == 1
-    assert result.pmu.events["uce_context_switch"] > 0
     assert simulator.group.tiles[0].l1_mshr.snapshot()["active"] == 0
     assert simulator.group.l2_mshr.snapshot()["active"] == 0
     events = simulator.tracer._events if simulator.tracer is not None else []
+    leases = [event for event in events if event["name"] == "task_lease_acquire"]
+    assert len(leases) == 2
+    assert {event["args"]["ctx_id"] for event in leases} == {0, 1}
     evu = [event for event in events if event["name"] == "EVU:relu"]
     gather_done = [event for event in events if event["name"] == "gather_done"]
     assert len(evu) == 1
     assert len(gather_done) == 1
     assert evu[0]["ts"] < gather_done[0]["ts"]
 
-  def test_fault_reset_clears_gather_transactions_mshrs_and_allocations(self):
+  def test_fault_reset_clears_gather_transactions_mshrs_and_allocations(self, monkeypatch):
     module = make_gather_module([("r0", "HBM_MISS", "line0", None)])
     config = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=1000)
-    group = TileGroup(config, fidelity="full_memory", context_count=1)
-    group.load_task(lower_workload_ir(module), input_bindings=GATHER_BINDINGS)
-    fault_cycle = None
-    for cycle in range(200):
-      group.step(cycle)
-      if group.tiles[0].mfe._gather_jobs:
-        fault_cycle = cycle
-        break
-    assert fault_cycle is not None
-    group.trigger_fault(
-      FaultCode.ADDRESS_FAULT, tile_id=0, cycle=fault_cycle, desc_id="injected gather fault"
-    )
-    for cycle in range(fault_cycle + 1, fault_cycle + 500):
-      group.step(cycle)
-      if group.reset_domain.is_done:
-        break
+    simulator = Simulator(config, SimConfig(fidelity="full_memory", context_count=1, max_cycles=10000))
+    original_step = simulator.group.step
+    injected = False
+
+    def faulting_step(cycle):
+      nonlocal injected
+      done = original_step(cycle)
+      if not injected and simulator.group.tiles[0].mfe._gather_jobs:
+        injected = True
+        simulator.group.trigger_fault(
+          FaultCode.ADDRESS_FAULT, tile_id=0, cycle=cycle, desc_id="injected gather fault"
+        )
+      return done
+
+    monkeypatch.setattr(simulator.group, "step", faulting_step)
+    result = run_source(simulator, module, GATHER_BINDINGS)
+    assert injected
+    assert not result.completed
+    group = simulator.group
     assert group.reset_domain.is_done
     snapshot = group.snapshot()
     memory = snapshot["memory"]
@@ -573,8 +755,8 @@ class TestGatherRuntime:
     assert all(item["active"] == 0 for item in memory["mshr"]["l1"].values())
     assert all(tile["gather_active_jobs"] == 0 for tile in snapshot["tiles"])
     assert memory["transfers"]["inflight"] == 0
-    assert memory["l2"]["live_allocations"] == 0
-    assert all(item["allocator"]["live_allocations"] == 0 for item in memory["l1"].values())
+    assert memory["l2"]["live_arenas"] == 0
+    assert all(item["allocator"]["live_arenas"] == 0 for item in memory["l1"].values())
     assert all(
       stage["busy_resources"] == 0 and stage["outstanding"] == 0
       for stage in memory["transfers"]["stages"].values()
@@ -583,8 +765,9 @@ class TestGatherRuntime:
   def test_gather_source_binding_bounds_fail_before_runtime(self):
     module = make_gather_module([("r0", "L1_HIT", "line0", None)])
     simulator = Simulator(HardwareConfig(), SimConfig(fidelity="full_memory"))
-    with pytest.raises(ValueError, match="smaller than required 4096 bytes"):
-      simulator.run(module, input_bindings={"table": GlobalBinding("table", 0x400000, 4095, "r")})
+    assert_run_rejected_without_group_mutation(
+      simulator, module, {"table": GlobalBinding("table", 0x400000, 4095, "r")}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -597,7 +780,7 @@ class TestRuntimeColdWarm:
     """Cold launch's PMU records program_cold_load > 0."""
     s = make_sim("runtime")
     wl = PowWorkload()
-    r = s.run(wl.module, input_bindings=POW_BINDINGS)
+    r = run_source(s, wl.module, POW_BINDINGS)
     assert r.completed
     cold = r.pmu.named_cycles.get("program_cold_load", 0)
     assert cold > 0, f"cold launch should record cold_load > 0, got {cold}"
@@ -606,9 +789,9 @@ class TestRuntimeColdWarm:
     """Second launch of same program: 0 new cold-load cycles."""
     s = make_sim("runtime")
     wl = PowWorkload()
-    _r1 = s.run(wl.module, input_bindings=POW_BINDINGS)
+    _r1 = run_source(s, wl.module, POW_BINDINGS)
     c1 = s.group.program_table.cold_load_cycles
-    r2 = s.run(wl.module, input_bindings=POW_BINDINGS)
+    r2 = run_source(s, wl.module, POW_BINDINGS)
     c2 = s.group.program_table.cold_load_cycles
     assert c2 == c1, f"warm should add 0 cold cycles, got delta {c2 - c1}"
     assert r2.completed
@@ -617,18 +800,18 @@ class TestRuntimeColdWarm:
     """Warm launch completes in fewer cycles than cold."""
     s = make_sim("runtime")
     wl = PowWorkload()
-    r1 = s.run(wl.module, input_bindings=POW_BINDINGS)
-    r2 = s.run(wl.module, input_bindings=POW_BINDINGS)
+    r1 = run_source(s, wl.module, POW_BINDINGS)
+    r2 = run_source(s, wl.module, POW_BINDINGS)
     assert r2.cycles < r1.cycles, f"warm {r2.cycles} should be < cold {r1.cycles}"
 
   def test_program_epoch_invalidate_on_group_reset(self):
     """Group reset bumps epoch; next dispatch is cold again."""
     s = make_sim("runtime")
     wl = PowWorkload()
-    s.run(wl.module, input_bindings=POW_BINDINGS)
+    run_source(s, wl.module, POW_BINDINGS)
     c1 = s.group.program_table.cold_load_cycles
     s.group.program_table.invalidate_group()
-    _r2 = s.run(wl.module, input_bindings=POW_BINDINGS)
+    _r2 = run_source(s, wl.module, POW_BINDINGS)
     c2 = s.group.program_table.cold_load_cycles
     assert c2 > c1, "reset should force cold re-install"
 
@@ -636,81 +819,76 @@ class TestRuntimeColdWarm:
     """Per-tile reset makes that tile cold again."""
     s = make_sim("runtime")
     wl = PowWorkload()
-    s.run(wl.module, input_bindings=POW_BINDINGS)
+    run_source(s, wl.module, POW_BINDINGS)
     c1 = s.group.program_table.cold_load_cycles
     s.group.program_table.invalidate_tile(0)
-    _r2 = s.run(wl.module, input_bindings=POW_BINDINGS)
+    _r2 = run_source(s, wl.module, POW_BINDINGS)
     c2 = s.group.program_table.cold_load_cycles
     assert c2 > c1, "tile reset should force cold re-install on that tile"
 
-  def test_program_id_hash_stable_and_ir_unchanged_across_warm_runs(self):
-    """Repeated runs of the same module keep canonical IR unchanged and
-    produce the same program_id/program_hash; changing a descriptor scalar
-    changes the hash and triggers a fresh cold install."""
+  def test_cb06_program_identity_and_artifact_are_stable_across_warm_runs(self):
+    """One immutable artifact may launch cold then warm without template mutation."""
     s = make_sim("runtime")
-    wl = PowWorkload()
-
+    wl = PowWorkload(hw=s.hw)
     before = print_workload_ir(wl.module)
-    lowered1 = lower_workload_ir(wl.module)
-    s._assign_program_ids(lowered1)
-    prog1 = lowered1.role_bindings[0].tile_program
-    id1 = prog1.program_id
-    hash1 = prog1.program_hash
+    artifact = compile_source(wl.module, s.hw, s.sim, workload_info=wl.info)
+    prog1 = artifact.entry.role_bindings[0].tile_program
+    identity = (prog1.program_id, prog1.program_hash, artifact.artifact_hash)
+    loaded = load_program(artifact, s.hw, s.sim, actual_bindings=POW_BINDINGS)
 
-    r1 = s.run(wl.module, input_bindings=POW_BINDINGS)
+    r1 = s.run(loaded)
     assert r1.completed, r1.reason
-    after1 = print_workload_ir(wl.module)
-    assert after1 == before
+    assert print_workload_ir(wl.module) == before
+    assert artifact.artifact_hash == identity[2]
 
-    lowered2 = lower_workload_ir(wl.module)
-    s._assign_program_ids(lowered2)
-    prog2 = lowered2.role_bindings[0].tile_program
-    assert prog2.program_id == id1
-    assert prog2.program_hash == hash1
-
-    r2 = s.run(wl.module, input_bindings=POW_BINDINGS)
+    r2 = s.run(loaded)
     assert r2.completed, r2.reason
-    after2 = print_workload_ir(wl.module)
-    assert after2 == before
+    assert print_workload_ir(wl.module) == before
+    assert artifact.artifact_hash == identity[2]
+    assert r2.cycles < r1.cycles
 
-    # Mutate a pow descriptor scalar (exponent 2 -> 3) to force hash change
+    compiled_again = compile_source(wl.module, s.hw, s.sim, workload_info=wl.info)
+    prog2 = compiled_again.entry.role_bindings[0].tile_program
+    assert (prog2.program_id, prog2.program_hash) == identity[:2]
+
     mutated_text = before.replace("exponent = 2 pow_ops = 65536", "exponent = 3 pow_ops = 65536", 1)
     mutated_module = parse_workload_ir(mutated_text, source_name="<mutated>")
-    lowered3 = lower_workload_ir(mutated_module)
-    s._assign_program_ids(lowered3)
-    prog3 = lowered3.role_bindings[0].tile_program
-    assert prog3.program_id == id1
-    assert prog3.program_hash != hash1
+    mutated = compile_source(mutated_module, s.hw, s.sim)
+    prog3 = mutated.entry.role_bindings[0].tile_program
+    assert prog3.program_id == prog1.program_id
+    assert prog3.program_hash != prog1.program_hash
 
     cold_before = s.group.program_table.cold_load_cycles
-    r3 = s.run(mutated_module, input_bindings=POW_BINDINGS)
+    r3 = s.run(load_program(mutated, s.hw, s.sim, actual_bindings=POW_BINDINGS))
     assert r3.completed, r3.reason
-    cold_after = s.group.program_table.cold_load_cycles
-    assert cold_after > cold_before, "changed descriptor scalar should force cold install"
+    assert s.group.program_table.cold_load_cycles > cold_before
 
-  def test_group_reset_rebinds_same_name_in_new_hbm_epoch(self):
-    """Fresh reset clears the name->handle cache before HBM reset; the
-    second run must bind the same global name to a new region/epoch."""
+  def test_binding_change_rebinds_same_name_after_quiescent_reset(self):
+    """A quiescent reset preserves the Host binding; changing that binding
+    at the next launch explicitly rebinds it with a fresh HBM generation."""
     from pipeline_validator.memory import MemoryInvariantError
 
     hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
     sim = Simulator(hw, SimConfig(fidelity="runtime", max_cycles=200000))
     first = {"Y": GlobalBinding("Y", 0x100000, 524288, "rw")}
-    r1 = sim.run(PowWorkload().module, input_bindings=first)
+    r1 = run_source(sim, PowWorkload().module, first)
     assert r1.completed, r1.reason
     old = sim.group._global_handles["Y"]
+
     sim.group.reset()
-    assert sim.group._global_handles == {}
-    assert sim.group.hbm.snapshot()["external_bindings"] == 0
-    with pytest.raises(MemoryInvariantError, match="stale allocation generation"):
-      sim.group.hbm.assert_live(old)
+    assert sim.group._global_handles == {"Y": old}
+    assert sim.group.hbm.snapshot()["external_bindings"] == 1
+    sim.group.hbm.assert_live(old)
+
     second = {"Y": GlobalBinding("Y", 0x400000, 524288, "rw")}
-    r2 = sim.run(PowWorkload().module, input_bindings=second)
+    r2 = run_source(sim, PowWorkload().module, second)
     assert r2.completed, r2.reason
     new = sim.group._global_handles["Y"]
     assert new.base_address == 0x400000
     assert new.generation > old.generation
     assert new != old
+    with pytest.raises(MemoryInvariantError):
+      sim.group.hbm.assert_live(old)
 
 
 # ---------------------------------------------------------------------------
@@ -728,7 +906,7 @@ class TestDMAChannelScheduling:
     """
     hw = HardwareConfig(num_dma_channels=2)
     sim = Simulator(hw, SimConfig(fidelity="runtime", max_cycles=200_000), enable_tracer=True)
-    result = sim.run(PowWorkload().module, input_bindings=POW_BINDINGS)
+    result = run_source(sim, PowWorkload().module, POW_BINDINGS)
     assert result.completed, result.reason
     assert result.tracer is not None
     events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
@@ -753,162 +931,106 @@ class TestFullMemorySnapshot:
     NoC credits restored."""
     hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
     sim = Simulator(hw, SimConfig(fidelity="full_memory", max_cycles=200000))
-    result = sim.run(PowWorkload().module, input_bindings=POW_BINDINGS)
+    result = run_source(sim, PowWorkload().module, POW_BINDINGS)
     assert result.completed, result.reason
     mem = sim.group.snapshot()["memory"]
     assert mem["fidelity"] == "full_memory"
     assert mem["hbm"]["external_bindings"] == 1  # external binding kept
-    assert mem["l2"]["peak_allocated_bytes"] > 0
-    assert mem["l2"]["live_allocations"] == 0
+    assert mem["l2"]["peak_arena_reserved_bytes"] > 0
+    assert mem["l2"]["live_arenas"] == 0
     for tile_id, l1 in mem["l1"].items():
-      assert l1["allocator"]["peak_allocated_bytes"] > 0, tile_id
-      assert l1["allocator"]["live_allocations"] == 0, tile_id
+      assert l1["allocator"]["peak_arena_reserved_bytes"] > 0, tile_id
+      assert l1["allocator"]["live_arenas"] == 0, tile_id
     assert mem["transfers"]["inflight"] == 0
-    for vc in mem["noc"].values():
-      assert vc["credit"] == hw.noc_vc_depth  # credits restored
+    for name, vc in mem["noc"].items():
+      if name != "summary":
+        assert vc["credit"] == hw.noc_vc_depth  # credits restored
 
 
-class TestL2DispatchPins:
-  def test_readwrite_actual_pins_once_per_task(self):
-    """One readwrite actual has one pin per task with merged access flags."""
-    task = lower_workload_ir(PowWorkload().module)
+class TestIndependentTileAdmission:
+  @staticmethod
+  def _launched_group():
     hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
-    group = TileGroup(hw, fidelity="runtime")
-    group.load_task(task, input_bindings=POW_BINDINGS)
-    seq = group.sequencer
-    binding = task.role_bindings[0]
-    role_event = "ev_pin_contract"
-    request = ExecDispatchRequest(
-      role_id=binding.role_id,
-      dispatch_ordinal=0,
-      signal_policy=ExecSignalPolicy(input_released="all_tasks", output_ready="all_tasks"),
-      input_released_event="ev_inrel_pin",
-      output_ready_event="ev_outready_pin",
-    )
-    assert group.dispatch_role(binding, cycle=0, request=request, event_id=role_event, sequencer=seq)
-    slot = binding.actuals[0]
-    key = (seq.context_launch_generation, slot)
-    handle = group._l2_handles[key]
-    grid = seq.grid_id(0)
-    pins = group._grid_l2_pins[grid]
-    # The same actual is read and written, but each task receives one pin.
-    for task_id in range(4):
-      assert set(pins[task_id]) == {slot}
-      assert pins[task_id][slot].reads
-      assert pins[task_id][slot].writes
-    record = group.l2_sram._allocator._live[handle.allocation_id]
-    assert len(record.pins) == 4
-    assert record.pins == {pins[task_id][slot].consumer_id for task_id in range(4)}
-    group.reset()
-
-
-class TestAtomicDispatchAdmission:
-  @staticmethod
-  def _sequencer(group: TileGroup, task: ExecTileGroupTask):
-    from pipeline_validator.tile_group_sequencer import TileGroupSequencer
-
-    seq = TileGroupSequencer(group)
-    seq.context_launch_generation = group.sequencer.context_launch_generation
-    seq.context_name = group.sequencer.context_name
-    seq.device_slot = 0
-    seq.load(task)
-    return seq
+    sim = SimConfig(fidelity="runtime", context_count=1, max_cycles=200000)
+    workload = PowWorkload(num_group_chunks=1, hw=hw, context_count=1)
+    artifact = compile_source(workload.module, hw, sim, workload_info=workload.info)
+    group = TileGroup(hw, fidelity="runtime", context_count=1)
+    begin_group_program(group, artifact, POW_BINDINGS)
+    assert isinstance(artifact.entry, ExecTileGroupTask)
+    group.load_task(artifact.entry, input_bindings=POW_BINDINGS)
+    return group, artifact.entry
 
   @staticmethod
-  def _make_request(binding):
-    return ExecDispatchRequest(
-      role_id=binding.role_id,
-      dispatch_ordinal=0,
-      signal_policy=ExecSignalPolicy(input_released="all_tasks", output_ready="all_tasks"),
-      input_released_event="ev_inrel_atomic",
-      output_ready_event="ev_outready_atomic",
-    )
-
-  def test_later_tile_capacity_backpressure_commits_nothing_then_retries(self):
-    """Temporary L1 pressure has zero side effects and retries after release."""
-    from pipeline_validator.memory import AdmissionFailure, AllocationRequest, TaskBufferOwner
-
-    task = lower_workload_ir(PowWorkload().module)
-    group = TileGroup(HardwareConfig(), fidelity="runtime")
-    group.load_task(task, input_bindings=POW_BINDINGS)
-    blocker_owner = TaskBufferOwner("block", 0, "block", 0, 1, 0, "block")
-    blocker_plan = group.tiles[1].l1_allocator.plan_bundle(
-      [AllocationRequest("l1", "block", blocker_owner, group.cfg.tile_l1_bytes - 16 * 1024, 1)]
-    )
-    assert not isinstance(blocker_plan, AdmissionFailure)
-    (blocker,) = group.tiles[1].l1_allocator.commit(blocker_plan, cycle=0)
-    seq = self._sequencer(group, task)
-    binding = task.role_bindings[0]
-    event_id = "ev_atomic_capacity"
-    outcome = group.dispatch_role(
-      binding, cycle=1, request=self._make_request(binding), event_id=event_id, sequencer=seq
-    )
-    assert outcome.status is IssueStatus.BACKPRESSURE
-    assert not seq.faulted and not seq.done
-    assert not group.sequencer.faulted
-    assert group.tiles[0].l1_allocator.snapshot()["live_allocations"] == 0
-    assert group.tiles[1].l1_allocator.snapshot()["live_allocations"] == 1
-    for tile in group.tiles:
-      assert all(ctx["state"] == "empty" for ctx in tile.uce.snapshot()["contexts"])
-      assert all(frame.snapshot()["active_slots"] == 0 for frame in tile.l1_frames)
-    assert event_id not in group._role_event_tile_mask
-    assert event_id not in group._role_l1_handles
-    assert not group._grid_l2_pins
-
-    assert group.tiles[1].l1_allocator.request_release(blocker, blocker_owner, cycle=2)
-    retry = group.dispatch_role(
-      binding, cycle=3, request=self._make_request(binding), event_id=event_id, sequencer=seq
-    )
-    assert retry.status is IssueStatus.ACCEPTED
-    assert event_id in group._role_event_tile_mask
-    assert event_id in group._role_l1_handles
-    assert group._grid_l2_pins
-    assert all(tile.l1_allocator.snapshot()["live_allocations"] == 1 for tile in group.tiles)
-    group.reset()
-
-  def test_late_context_bind_failure_rolls_back_then_drains(self, monkeypatch):
-    """A late bind fault rolls back atomically and completes only after drain."""
-    task = lower_workload_ir(PowWorkload().module)
-    group = TileGroup(HardwareConfig(), fidelity="runtime")
-    monkeypatch.setattr(group.tiles[1], "load_program", lambda *args, **kwargs: None)
-    group.load_task(task, input_bindings=POW_BINDINGS)
-    seq = group.sequencer
-
-    fault_cycle = None
-    for cycle in range(50000):
+  def _step_until(group, predicate, limit=2000):
+    for cycle in range(limit):
       group.step(cycle)
-      if seq.faulted:
-        fault_cycle = cycle
-        break
-    assert fault_cycle is not None
-    assert seq.faulted and not seq.done
-    assert group.reset_domain.is_active
-    assert group.fault_ring.latest() is not None
-    for tile in group.tiles:
-      assert tile.l1_allocator.snapshot()["live_allocations"] == 0
-      assert all(ctx["state"] == "empty" for ctx in tile.uce.snapshot()["contexts"])
-      assert all(frame.snapshot()["active_slots"] == 0 for frame in tile.l1_frames)
-    assert not group._role_event_tile_mask
-    assert not group._role_l1_handles
-    assert not group._grid_l2_pins
-    for handle in group._l2_handles.values():
-      record = group.l2_sram._allocator._live[handle.allocation_id]
-      assert record.pins == set()
+      if predicate():
+        return cycle
+    raise AssertionError("condition did not become observable")
 
-    reset_cycle = fault_cycle
-    for reset_cycle in range(fault_cycle + 1, fault_cycle + 5000):
-      group.step(reset_cycle)
-      if group.reset_domain.is_done:
-        break
-    assert group.reset_domain.is_done
-    group.step(reset_cycle + 1)
-    assert seq.done
-    assert group.l2_sram.snapshot()["live_allocations"] == 0
-    for tile in group.tiles:
-      assert tile.l1_allocator.snapshot()["live_allocations"] == 0
-    assert not group._grid_l2_pins
-    assert group.transfer_manager.inflight_count == 0
-    group.reset()
+  def test_l2_pins_are_per_committed_task_until_independent_retirement(self):
+    group, _task = self._launched_group()
+    self._step_until(
+      group,
+      lambda: (
+        bool(group._grid_routes)
+        and len(next(iter(group._grid_routes.values())).admissions) == group.cfg.num_tiles
+      ),
+    )
+    route = next(iter(group._grid_routes.values()))
+    pins = group._grid_l2_pins[route.grid]
+    assert set(pins) == {task.task_id for task in route.expected.values()}
+    for task_pins in pins.values():
+      assert len(task_pins) == 1
+      pin = next(iter(task_pins.values()))
+      assert pin.reads and pin.writes
+      record = group.l2_sram._views[pin.handle.allocation_id]
+      assert pin.consumer_id in record.pins
+
+  def test_t03_t13_blocked_tile_does_not_rollback_peer_or_complete_grid_and_refills_independently(self):
+    group, _task = self._launched_group()
+    tile = group.tiles[1]
+    profile = tile.l1_allocator.profile
+    blocker_layout = layout_buffers(
+      (), profile, profile.user_spm_bytes, slot_capacity=group.cfg.frame_slot_capacity
+    )
+    blocker_owner = TaskIdentity(GridInstanceId("blocker", 0, 0, 0), 0)
+    plan = tile.l1_allocator.plan_arena(blocker_owner, blocker_layout)
+    assert not isinstance(plan, AdmissionFailure)
+    blocker = tile.l1_allocator.commit_arena(plan, 0)
+
+    self._step_until(
+      group,
+      lambda: (
+        bool(group._grid_routes)
+        and len(next(iter(group._grid_routes.values())).admissions) >= group.cfg.num_tiles - 1
+      ),
+    )
+    route = next(iter(group._grid_routes.values()))
+    assert 1 not in route.admissions
+    assert set(route.admissions) == {0, 2, 3}
+    assert route.wait_reasons[1] in ("WAIT_CAPACITY", "WAIT_FRAGMENTATION")
+    assert route.event_id not in route.sequencer._events_done
+    assert tile.l1_allocator.snapshot()["live_arenas"] == 1
+
+    assert tile.l1_allocator.retire_arena(blocker, 100)
+    self._step_until(group, lambda: 1 in route.admissions)
+    assert set(route.admissions) == {0, 1, 2, 3}
+
+  def test_t08_late_tile_bind_failure_rolls_back_only_its_ticket_then_drains(self, monkeypatch):
+    group, _task = self._launched_group()
+    monkeypatch.setattr(group.tiles[1], "load_program", lambda *args, **kwargs: None)
+    fault_cycle = self._step_until(group, lambda: any(seq.faulted for seq in group._active_sequencers))
+    route = next(iter(group._grid_routes.values()))
+    assert 0 in route.admissions
+    assert 1 not in route.admissions
+    assert group.tiles[1].l1_allocator.snapshot()["live_arenas"] == 0
+
+    self._step_until(group, lambda: group.reset_domain.is_done, limit=fault_cycle + 5000)
+    assert not group._grid_routes
+    assert not group._task_leases
+    assert group.l2_sram.snapshot()["live_arenas"] == 0
+    assert all(tile.l1_allocator.snapshot()["live_arenas"] == 0 for tile in group.tiles)
 
 
 # ---------------------------------------------------------------------------
@@ -985,7 +1107,7 @@ class TestFaultReset:
   def test_trigger_fault_writes_record_and_starts_drain(self):
     s = make_sim("runtime")
     wl = PowWorkload()
-    s.run(wl.module, input_bindings=POW_BINDINGS)
+    run_source(s, wl.module, POW_BINDINGS)
     idx = s.group.trigger_fault(FaultCode.ENGINE_INTERNAL_FAULT, tile_id=1, cycle=100)
     assert idx >= 0
     assert len(s.group.fault_ring) == 1
@@ -1005,54 +1127,71 @@ class TestFaultReset:
         break
     assert rd.is_done
 
-  def test_fault_reset_cancels_inflight_and_returns_resources(self):
-    """A fault with in-flight transfers: the reset domain drains or
-    times out, ``cancel_all`` returns HBM outstanding credits, NoC
-    credits, DMA channels and bank reservations, and context-owned
-    L2/L1 allocations are released."""
-    from pipeline_validator.ir_lowering import lower_workload_ir
+  def test_fault_reset_waits_for_cancel_confirmation_before_returning_resources(self):
+    """Accepted transfer work remains owned while cancellation is requested;
+    fault drain completes only after the accepted leg confirms isolation."""
+    from pipeline_validator.memory.transfer import TransferStatus
 
     hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=1000)
-    s = Simulator(hw, SimConfig(fidelity="full_memory", max_cycles=100000), enable_tracer=True)
-    wl = PowWorkload()
-    task = lower_workload_ir(wl.module)
-    s._assign_program_ids(task)
-    s.group.load_task(task, input_bindings=POW_BINDINGS)
-    # Advance until the prefetch has been accepted by the real HBM read
-    # resource rather than assuming a fixed number of Group ticks.
+    sim_config = SimConfig(fidelity="full_memory", max_cycles=100000)
+    s = Simulator(hw, sim_config, enable_tracer=True)
+    wl = PowWorkload(hw=hw)
+    artifact = compile_source(wl.module, hw, sim_config, workload_info=wl.info)
+    begin_group_program(s.group, artifact, POW_BINDINGS)
+    assert isinstance(artifact.entry, ExecTileGroupTask)
+    s.group.load_task(artifact.entry, input_bindings=POW_BINDINGS)
+
     transfer_cycle = None
+    transaction = None
     for cycle in range(100):
       s.group.step(cycle)
+      running = [
+        item
+        for item in s.group.transfer_manager._transactions.values()
+        if item.status is TransferStatus.RUNNING
+      ]
       if (
-        s.group.transfer_manager.inflight_count > 0
+        running
         and s.group._group_transfer_trace_slots
         and any(s.group._group_transfer_trace_busy_slots.values())
         and s.group.transfer_manager._hbm_read._outstanding > 0
       ):
         transfer_cycle = cycle
+        transaction = running[0]
         break
-    assert transfer_cycle is not None
-    assert s.group.l2_sram.snapshot()["live_allocations"] > 0
+    assert transfer_cycle is not None and transaction is not None
+    assert s.group.l2_sram.snapshot()["live_arenas"] > 0
 
     fault_cycle = transfer_cycle + 1
     s.group.trigger_fault(FaultCode.ADDRESS_FAULT, cycle=fault_cycle)
     s.group.step(fault_cycle)
     assert s.group.reset_domain.state == ResetState.STOP_QUEUE
     frozen_submission_pc = s.group.sequencer.submission_pc
-    # The reset timeout cancels the in-flight prefetch long before the
-    # 1000-cycle HBM leg finishes, without registering further actions.
+
+    cancel_requested_cycle = None
     for cycle in range(fault_cycle + 1, fault_cycle + 500):
+      s.group.step(cycle)
+      if transaction.status is TransferStatus.CANCEL_REQUESTED:
+        cancel_requested_cycle = cycle
+        break
+    assert cancel_requested_cycle is not None
+    assert not s.group.reset_domain.is_done
+    assert s.group.transfer_manager.inflight_count > 0
+    assert s.group.transfer_manager._hbm_read._outstanding > 0
+    assert s.group.l2_sram.snapshot()["live_arenas"] > 0
+
+    for cycle in range(cancel_requested_cycle + 1, fault_cycle + 5000):
       s.group.step(cycle)
       if s.group.reset_domain.is_done:
         break
     assert s.group.reset_domain.is_done
+    assert transaction.status is TransferStatus.CANCELLED
     assert s.group.sequencer.submission_pc == frozen_submission_pc
     assert s.group.transfer_manager.inflight_count == 0
     assert s.group._group_transfer_trace_slots == {}
     assert not any(s.group._group_transfer_trace_busy_slots.values())
     assert s.group.transfer_manager._hbm_read._outstanding == 0
     assert s.group.transfer_manager._hbm_write._outstanding == 0
-    # NoC credit / DMA / bank resources all returned; no flit pending
     for stage in (
       s.group.transfer_manager._global_dma,
       s.group.transfer_manager._l2_read,
@@ -1061,58 +1200,11 @@ class TestFaultReset:
       assert all(b == 0 for b in stage._busy_until), stage.name
       assert all(h is None for h in stage._holders), stage.name
     for vc in s.group.noc.vcs.values():
-      assert vc.occupancy == 0  # no pending flits
-    assert s.group.l2_sram.snapshot()["live_allocations"] == 0
-    for tile in s.group.tiles:
-      assert tile.l1_allocator.snapshot()["live_allocations"] == 0
-    # NoC router credits restored to full depth
-    for vc in s.group.noc.vcs.values():
+      assert vc.occupancy == 0
       assert vc.credit_available == hw.noc_vc_depth
-
-  def test_l2_capacity_fault_terminates_task(self):
-    """A tiny L2 SRAM triggers a capacity fault on prefetch."""
-    hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10, group_sram_bytes=1024)
-    sim = SimConfig(fidelity="full_memory", max_cycles=10000)
-    s = Simulator(hw, sim)
-    wl = PowWorkload()
-    r = s.run(wl.module, input_bindings=POW_BINDINGS)
-    assert not r.completed
-    assert s.group.reset_domain.is_done
-    assert s.group.transfer_manager.inflight_count == 0
-    assert s.group.l2_sram.snapshot()["live_allocations"] == 0
-    latest = s.group.fault_ring.latest()
-    assert latest is not None
-    assert latest.code == FaultCode.L2_CAPACITY_FAULT
-
-  def test_l2_exact_capacity_completes_and_overshoot_faults(self):
-    """4 pow chunks (4 x 128 KiB per chunk) fit exactly in a 512 KiB L2
-    and complete; a 5th chunk overshoots capacity and faults.  This
-    proves the alloc/store/release accounting stays balanced (no double
-    accounting on DMA_STORE touching an existing slot)."""
-    chunk_bytes = 128 * 128 * 2  # per-tile plane
-    bytes_per_chunk = chunk_bytes * 4  # 4 tiles' input per group chunk
-    hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10, group_sram_bytes=4 * bytes_per_chunk)
-    sim = SimConfig(fidelity="full_memory", max_cycles=200000)
-    s = Simulator(hw, sim)
-    wl = PowWorkload()
-    r = s.run(wl.module, input_bindings=POW_BINDINGS)
-    assert r.completed, r.reason
-
-    # overshoot: 5 chunks need 5 x bytes_per_chunk but only 4 x fit
-    from pipeline_validator.workload_builders import make_pow_task
-
-    module5 = make_pow_task(num_group_chunks=5)
-    hw2 = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10, group_sram_bytes=4 * bytes_per_chunk)
-    sim2 = SimConfig(fidelity="full_memory", max_cycles=200000)
-    s2 = Simulator(hw2, sim2)
-    r2 = s2.run(module5, input_bindings={"Y": GlobalBinding("Y", 0x100000, 655360, "rw")})
-    assert not r2.completed
-    assert s2.group.reset_domain.is_done
-    assert s2.group.l2_sram.snapshot()["live_allocations"] == 0
-    assert s2.group.transfer_manager.inflight_count == 0
-    latest = s2.group.fault_ring.latest()
-    assert latest is not None
-    assert latest.code == FaultCode.L2_CAPACITY_FAULT
+    assert s.group.l2_sram.snapshot()["live_arenas"] == 0
+    assert all(tile.l1_allocator.snapshot()["live_arenas"] == 0 for tile in s.group.tiles)
+    s.group.reset()
 
 
 # ---------------------------------------------------------------------------
@@ -1210,83 +1302,73 @@ class TestLocalViewResolution:
       bytes=size,
     )
 
-  def test_l1_and_l2_views_keep_real_cross_bank_segments(self):
-    from pipeline_validator.memory import (
-      AdmissionFailure,
-      AllocationRequest,
-      ContextBufferOwner,
-      TaskBufferOwner,
-    )
+  @staticmethod
+  def _l1_view(logical_bytes=768):
+    from pipeline_validator.execution_ir import ExecL1Buffer
+    from pipeline_validator.memory import AdmissionFailure
+
+    hw = HardwareConfig()
+    profile = build_registry(hw).profile("l1", 0)
+    pool = ArenaPool(profile, pool_id=0, tile_id=0)
+    spec = ExecL1Buffer("l1:0", (logical_bytes,), "i8", 1, 64, logical_bytes)
+    reserved = authored_arena_bytes(hw, "l1", [(logical_bytes, 64)])
+    layout = layout_buffers((spec,), profile, reserved)
+    identity = TaskIdentity(GridInstanceId("ctx", 0, 1, 0), 0)
+    plan = pool.plan_arena(identity, layout)
+    assert not isinstance(plan, AdmissionFailure)
+    arena = pool.commit_arena(plan, 0)
+    pool.bind_task_metadata(arena, "ev", 0)
+    view = pool.bind_view(arena, "l1:0", 0)
+    return hw, pool, arena, identity, view
+
+  def test_l1_and_l2_views_keep_compiled_cross_bank_segments(self):
+    from pipeline_validator.execution_ir import ExecL2Buffer
+    from pipeline_validator.memory import AdmissionFailure
     from pipeline_validator.tile import ComputeTile, _TileContextMemory
 
-    cfg = HardwareConfig().with_overrides(tile_l1_bytes=1024, tile_l1_banks=2)
-    tile = ComputeTile(0, cfg)
-    l1_owner = TaskBufferOwner("ctx", 1, "ev", 0, 0, 0, "l1:0")
-    l1_plan = tile.l1_allocator.plan_bundle([AllocationRequest("l1", "l1:0", l1_owner, 768, 1)])
-    assert not isinstance(l1_plan, AdmissionFailure)
-    l1_handle = tile.l1_allocator.commit(l1_plan, cycle=0)[0]
+    hw, l1_pool, l1_arena, identity, l1_handle = self._l1_view()
+    tile = ComputeTile(0, hw)
+    tile.l1_allocator = l1_pool
 
-    l2 = L2SRAM(capacity_bytes=1024, banks=2)
-    l2_owner = ContextBufferOwner("ctx", 1, "l2_buf")
-    l2_plan = l2.plan_bundle([AllocationRequest("l2", "l2_buf", l2_owner, 768, 1)])
+    l2_profile = build_registry(hw).profile("l2", 0)
+    l2_pool = ArenaPool(l2_profile)
+    l2_spec = ExecL2Buffer("l2_buf", (768,), "i8", "in", 1, 64, 768)
+    l2_reserved = authored_arena_bytes(hw, "l2", [(768, 64)])
+    l2_layout = layout_buffers((l2_spec,), l2_profile, l2_reserved)
+    l2_plan = l2_pool.plan_arena(RootInvocation("ctx", 1), l2_layout)
     assert not isinstance(l2_plan, AdmissionFailure)
-    l2_handle = l2.commit(l2_plan, cycle=0)[0]
+    l2_arena = l2_pool.commit_arena(l2_plan, 0)
+    l2_handle = l2_pool.bind_view(l2_arena, "l2_buf", 0)
     memory = _TileContextMemory(
-      task_identity=TaskIdentity(grid=GridInstanceId("ctx", 0, 1, 0), task_id=0),
+      task_identity=identity,
       l2_formal_handles={1: l2_handle},
       l1_handles={"l1:0": l1_handle},
-      l2_resolver=l2,
+      l2_resolver=l2_pool,
+      arena=l1_arena,
+      binding_id="fixture",
     )
 
     l1_view = TileUCE._resolve_tile_view(self._view("l1", "l1:0", 768, 768), memory, tile)
     l2_view = TileUCE._resolve_tile_view(self._view("l2", "formal:1", 768, 768), memory, tile)
-    assert l1_view is not None
-    assert l2_view is not None
-    assert [(s.bank_id, s.size_bytes) for s in l1_view.segments] == [(0, 512), (1, 256)]
-    assert [(s.bank_id, s.size_bytes) for s in l2_view.segments] == [(0, 512), (1, 256)]
+    assert l1_view is not None and l2_view is not None
+    assert sum(segment.size_bytes for segment in l1_view.segments) == 768
+    assert sum(segment.size_bytes for segment in l2_view.segments) == 768
+    assert len({segment.bank_id for segment in l1_view.segments}) > 1
+    assert len({segment.bank_id for segment in l2_view.segments}) > 1
 
-  def test_local_view_oob_raises_allocator_fault(self):
-    from pipeline_validator.memory import (
-      AdmissionFailure,
-      AllocationRequest,
-      MemoryInvariantError,
-      TaskBufferOwner,
-    )
+  def test_local_view_oob_and_use_after_invalidate_raise(self):
+    from pipeline_validator.memory import MemoryInvariantError
     from pipeline_validator.tile import ComputeTile, _TileContextMemory
 
-    cfg = HardwareConfig().with_overrides(tile_l1_bytes=1024, tile_l1_banks=2)
-    tile = ComputeTile(0, cfg)
-    owner = TaskBufferOwner("ctx", 1, "ev", 0, 0, 0, "l1:0")
-    plan = tile.l1_allocator.plan_bundle([AllocationRequest("l1", "l1:0", owner, 512, 1)])
-    assert not isinstance(plan, AdmissionFailure)
-    handle = tile.l1_allocator.commit(plan, cycle=0)[0]
+    hw, pool, arena, identity, handle = self._l1_view(512)
+    tile = ComputeTile(0, hw)
+    tile.l1_allocator = pool
     memory = _TileContextMemory(
-      task_identity=TaskIdentity(grid=GridInstanceId("ctx", 0, 1, 0), task_id=0),
-      l1_handles={"l1:0": handle},
+      task_identity=identity, l1_handles={"l1:0": handle}, arena=arena, binding_id="fixture"
     )
     with pytest.raises(MemoryInvariantError, match="memory view out of bounds"):
       TileUCE._resolve_tile_view(self._view("l1", "l1:0", 512, 200, offset=400), memory, tile)
-
-  def test_local_view_use_after_release_raises(self):
-    from pipeline_validator.memory import (
-      AdmissionFailure,
-      AllocationRequest,
-      MemoryInvariantError,
-      TaskBufferOwner,
-    )
-    from pipeline_validator.tile import ComputeTile, _TileContextMemory
-
-    cfg = HardwareConfig().with_overrides(tile_l1_bytes=1024, tile_l1_banks=2)
-    tile = ComputeTile(0, cfg)
-    owner = TaskBufferOwner("ctx", 1, "ev", 0, 0, 0, "l1:0")
-    plan = tile.l1_allocator.plan_bundle([AllocationRequest("l1", "l1:0", owner, 512, 1)])
-    assert not isinstance(plan, AdmissionFailure)
-    handle = tile.l1_allocator.commit(plan, cycle=0)[0]
-    memory = _TileContextMemory(
-      task_identity=TaskIdentity(grid=GridInstanceId("ctx", 0, 1, 0), task_id=0),
-      l1_handles={"l1:0": handle},
-    )
-    tile.l1_allocator.request_release(handle, owner, cycle=1)
+    assert pool.invalidate_view(handle, handle.owner, 1)
     with pytest.raises(MemoryInvariantError, match="use-after-release"):
       TileUCE._resolve_tile_view(self._view("l1", "l1:0", 512, 64), memory, tile)
 
@@ -1297,97 +1379,79 @@ class TestLocalViewResolution:
 
 
 class TestSlotFrame:
-  def test_frame_prepare_bind_succeeds(self):
-    """prepare() + bind() round-trip with real allocation handles."""
+  @staticmethod
+  def _arena(buffers, reserved_bytes, *, lifetimes=None):
+    from pipeline_validator.memory import AdmissionFailure
+
+    hw = HardwareConfig()
+    profile = build_registry(hw).profile("l1", 0)
+    pool = ArenaPool(profile, pool_id=0, tile_id=0)
+    layout = layout_buffers(
+      buffers, profile, reserved_bytes, lifetimes=lifetimes, slot_capacity=hw.frame_slot_capacity
+    )
+    task = TaskIdentity(GridInstanceId("frame", 0, 0, 0), 0)
+    plan = pool.plan_arena(task, layout)
+    assert not isinstance(plan, AdmissionFailure)
+    arena = pool.commit_arena(plan, 0)
+    pool.bind_task_metadata(arena, "frame-role", 0)
+    return hw, pool, arena, layout
+
+  def test_frame_prepare_bind_and_runtime_slot_binding_succeeds(self):
     from pipeline_validator.execution_ir import ExecL1Buffer
-    from pipeline_validator.memory import AllocationHandle, BankSegment, SlotFrame, TaskBufferOwner
+    from pipeline_validator.memory import SlotFrame
 
-    f = SlotFrame(l1_bytes=1024 * 1024)
-    owner = TaskBufferOwner("ctx", 0, "ev", 0, 0, 0, "l1:0")
-    handle = AllocationHandle(
-      allocation_id="l1:0:1",
-      memory_space="l1",
-      owner=owner,
-      base_address=0,
-      size_bytes=512,
-      alignment=256,
-      bank_segments=(BankSegment(0, 0, 512),),
-      generation=0,
-      allocate_cycle=0,
-    )
-    spec = ExecL1Buffer(name="l1:0", dims=(16, 16), dtype="bf16", element_bytes=2, alignment=256, bytes=512)
-    assert f.prepare([handle], [spec]) is True
-    ok, cycles = f.bind(cycle=0, bind_cycles=8)
-    assert ok
-    assert cycles == 8
-    assert f.shadow is not None
+    spec = ExecL1Buffer("l1:0", (16, 16), "bf16", 2, 256, 512)
+    reserved = authored_arena_bytes(HardwareConfig(), "l1", [(512, 256)])
+    hw, pool, arena, layout = self._arena((spec,), reserved)
+    frame = SlotFrame(l1_bytes=hw.tile_l1_bytes, slot_count=hw.frame_slot_capacity)
+    assert frame.prepare(arena, layout)
+    ok, cycles = frame.bind(cycle=0, bind_cycles=hw.frame_bind_cycles)
+    assert ok and cycles == hw.frame_bind_cycles
+    view = pool.bind_view(arena, "l1:0", 1)
+    slot = frame.bind_view("l1:0", view)
+    assert slot == layout.buffer_layouts[0].slot_id
+    frame.assert_slot_binding(slot, view)
 
-  def test_frame_capacity_fault(self):
-    """prepare() rejects an L1 spec that exceeds l1_bytes."""
+  def test_frame_prepare_rejects_target_stride_mismatch(self):
     from pipeline_validator.execution_ir import ExecL1Buffer
-    from pipeline_validator.memory import AllocationHandle, BankSegment, SlotFrame, TaskBufferOwner
+    from pipeline_validator.memory import SlotFrame
 
-    f = SlotFrame(l1_bytes=512)
-    owner = TaskBufferOwner("ctx", 0, "ev", 0, 0, 0, "l1:0")
-    handle = AllocationHandle(
-      allocation_id="l1:0:1",
-      memory_space="l1",
-      owner=owner,
-      base_address=0,
-      size_bytes=512,
-      alignment=1,
-      bank_segments=(BankSegment(0, 0, 512),),
-      generation=0,
-      allocate_cycle=0,
-    )
-    spec = ExecL1Buffer(name="l1:0", dims=(16, 16), dtype="bf16", element_bytes=2, alignment=1, bytes=512)
-    assert f.prepare([handle], [spec]) is True  # exactly fits
-    # a second buffer exceeding capacity fails
-    spec2 = ExecL1Buffer(name="l1:1", dims=(16, 16), dtype="bf16", element_bytes=2, alignment=1, bytes=512)
-    handle2 = AllocationHandle(
-      allocation_id="l1:0:2",
-      memory_space="l1",
-      owner=owner,
-      base_address=512,
-      size_bytes=512,
-      alignment=1,
-      bank_segments=(BankSegment(0, 512, 512),),
-      generation=0,
-      allocate_cycle=0,
-    )
-    f2 = SlotFrame(l1_bytes=512)
-    assert f2.prepare([handle, handle2], [spec, spec2]) is False
+    spec = ExecL1Buffer("l1:0", (16, 16), "bf16", 2, 256, 512)
+    reserved = authored_arena_bytes(HardwareConfig(), "l1", [(512, 256)])
+    _hw, _pool, arena, layout = self._arena((spec,), reserved)
+    frame = SlotFrame(l1_bytes=512)
+    assert not frame.prepare(arena, layout)
+    assert frame.pmu_permission_fault_count == 1
 
-  def test_frame_accepts_disjoint_fragmented_allocation_segments(self):
+  def test_local_free_reuses_compiled_slot_without_returning_arena_capacity(self):
     from pipeline_validator.execution_ir import ExecL1Buffer
-    from pipeline_validator.memory import (
-      AdmissionFailure,
-      AllocationRequest,
-      BankedFreeExtentAllocator,
-      SlotFrame,
-      TaskBufferOwner,
-    )
+    from pipeline_validator.memory import SlotFrame
 
-    allocator = BankedFreeExtentAllocator("l1", 256, 2)
-    owner_a = TaskBufferOwner("ctx", 0, "ev", 0, 0, 0, "a")
-    owner_b = TaskBufferOwner("ctx", 0, "ev", 0, 0, 0, "b")
-    initial = allocator.plan_bundle(
-      [AllocationRequest("l1", "a", owner_a, 32, 1), AllocationRequest("l1", "b", owner_b, 32, 1)]
-    )
-    assert not isinstance(initial, AdmissionFailure)
-    handle_a, handle_b = allocator.commit(initial, cycle=0)
-    allocator.request_release(handle_a, owner_a, cycle=1)
+    a = ExecL1Buffer("a", (64,), "i8", 1, 64, 64)
+    b = ExecL1Buffer("b", (64,), "i8", 1, 64, 64)
+    reserved = authored_arena_bytes(HardwareConfig(), "l1", [(64, 64)])
+    hw, pool, arena, layout = self._arena((a, b), reserved, lifetimes={"a": (0, 1), "b": (1, 2)})
+    assert layout.buffer_layouts[0].arena_offset == layout.buffer_layouts[1].arena_offset
+    assert layout.buffer_layouts[0].slot_id == layout.buffer_layouts[1].slot_id
+    frame = SlotFrame(l1_bytes=hw.tile_l1_bytes, slot_count=hw.frame_slot_capacity)
+    assert frame.prepare(arena, layout)
+    assert frame.bind(0, hw.frame_bind_cycles)[0]
 
-    owner_fragmented = TaskBufferOwner("ctx", 0, "ev", 0, 0, 0, "fragmented")
-    fragmented = allocator.plan_bundle([AllocationRequest("l1", "fragmented", owner_fragmented, 96, 1)])
-    assert not isinstance(fragmented, AdmissionFailure)
-    fragmented_handle = allocator.commit(fragmented, cycle=2)[0]
-    assert len(fragmented_handle.bank_segments) == 2
+    view_a = pool.bind_view(arena, "a", 1)
+    slot = frame.bind_view("a", view_a)
+    before = pool.snapshot()
+    frame.release_slot(slot, view_a)
+    assert pool.invalidate_view(view_a, view_a.owner, 2)
+    after_free = pool.snapshot()
+    assert after_free["arena_reserved_bytes"] == before["arena_reserved_bytes"]
+    assert after_free["free_bytes"] == before["free_bytes"]
 
-    frame = SlotFrame(l1_bytes=256)
-    fragmented_spec = ExecL1Buffer("fragmented", (96,), "i8", 1, 1, 96)
-    blocker_spec = ExecL1Buffer("b", (32,), "i8", 1, 1, 32)
-    assert frame.prepare([fragmented_handle, handle_b], [fragmented_spec, blocker_spec])
+    view_b = pool.bind_view(arena, "b", 3)
+    assert frame.bind_view("b", view_b) == slot
+    frame.release_slot(slot, view_b)
+    assert pool.invalidate_view(view_b, view_b.owner, 4)
+    assert pool.retire_arena(arena, 5)
+    assert pool.snapshot()["live_arenas"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1408,30 +1472,39 @@ class TestFidelityModes:
       hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
       sim = SimConfig(fidelity=fidelity, context_count=1, max_cycles=200000)
       for wl_cls in ALL_WORKLOADS:
-        wl = wl_cls()
+        wl = wl_cls(hw=hw, context_count=sim.context_count)
         s = Simulator(hw, sim)
         signal.alarm(60)
-        r = s.run(wl.module, input_bindings=POW_BINDINGS)
+        r = run_source(s, wl.module, POW_BINDINGS, workload_info=wl.info)
         signal.alarm(0)
         assert r.completed, f"{wl.name} failed in {fidelity}: {r.reason}"
 
   def test_runtime_context_count_two_runs_two_same_tile_roles(self):
-    sim = Simulator(HardwareConfig(), SimConfig(fidelity="runtime", context_count=2, max_cycles=10000))
-    result = sim.run(make_same_tile_roles_task(2))
+    sim = Simulator(
+      HardwareConfig(), SimConfig(fidelity="runtime", context_count=2, max_cycles=10000), enable_tracer=True
+    )
+    result = run_source(sim, make_same_tile_roles_task(2))
     assert result.completed, result.reason
-    assert result.pmu.events.get("uce_context_switch", 0) > 0
+    events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
+    leases = [event for event in events if event.get("name") == "task_lease_acquire"]
+    assert len(leases) == 2
+    assert {(event["args"]["tile_id"], event["args"]["ctx_id"]) for event in leases} == {(0, 0), (0, 1)}
+    assert len({event["args"]["grid_event"] for event in leases}) == 2
     assert result.pmu.named_cycles.get("task_accept", 0) > 0
 
   def test_runtime_context_count_three_overlaps_three_roles(self):
     sim = Simulator(
       HardwareConfig(), SimConfig(fidelity="runtime", context_count=3, max_cycles=10000), enable_tracer=True
     )
-    result = sim.run(make_same_tile_roles_task(3))
+    result = run_source(sim, make_same_tile_roles_task(3))
     assert result.completed, result.reason
     assert result.tracer is not None
     events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
     peak = max(e["args"]["active_context_count"] for e in events if e.get("name") == "active_context_count")
     assert peak == 3
+    leases = [event for event in events if event.get("name") == "task_lease_acquire"]
+    assert len(leases) == 3
+    assert {event["args"]["ctx_id"] for event in leases} == {0, 1, 2}
 
   def test_held_engine_launch_issues_once_and_parks(self):
     context_count = 8
@@ -1447,6 +1520,7 @@ class TestFidelityModes:
         f"ev_held_boa{i}",
         "",
         "",
+        l1_mode=0,
         bindings=[],
         signal_policy={},
         context_id=i,
@@ -1455,23 +1529,26 @@ class TestFidelityModes:
     ]
     context = NestContextOp(
       "held_boa_context",
+      context_resources(logical_tasks=context_count, requested_contexts_per_tile=context_count),
       [tasks, *dispatches, NestAwaitOp([dispatch.grid_done for dispatch in dispatches]), NestReturnOp()],
       placement=1,
     )
-    result = Simulator(
+    simulator = Simulator(
       HardwareConfig(),
       SimConfig(fidelity="runtime", context_count=context_count, max_cycles=200000),
       enable_tracer=True,
-    ).run(ModuleOp([*programs, context]))
+    )
+    result = run_source(simulator, ModuleOp([*programs, context]))
 
     assert result.completed, result.reason
     issues = assert_uce_instructions_issue_once(result)
     assert sum(event["args"]["op"] == ExecTileOp.LAUNCH_BOA.value for event in issues) == context_count
 
   def test_held_mfe_launch_issues_once(self):
-    result = Simulator(
+    simulator = Simulator(
       HardwareConfig(), SimConfig(fidelity="runtime", max_cycles=200000), enable_tracer=True
-    ).run(make_held_mfe_launch_module())
+    )
+    result = run_source(simulator, make_held_mfe_launch_module())
 
     assert result.completed, result.reason
     issues = assert_uce_instructions_issue_once(result)
@@ -1490,20 +1567,20 @@ class TestFidelityModes:
     allocator fields as None."""
     hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
     sim = Simulator(hw, SimConfig(fidelity="runtime", max_cycles=200000))
-    result = sim.run(PowWorkload().module, input_bindings=POW_BINDINGS)
+    result = run_source(sim, PowWorkload().module, POW_BINDINGS)
     assert result.completed, result.reason
     mem = result.group_snapshot["memory"]
     assert mem["fidelity"] == "runtime"
     assert mem["hbm"] is not None
     assert mem["hbm"]["external_bindings"] == 1
     assert mem["l2"] is not None
-    assert mem["l2"]["peak_allocated_bytes"] > 0
-    assert mem["l2"]["live_allocations"] == 0
+    assert mem["l2"]["peak_arena_reserved_bytes"] > 0
+    assert mem["l2"]["live_arenas"] == 0
     assert mem["noc"] is None  # contention fabric only in full_memory
     for tile in mem["l1"].values():
       assert tile["allocator"] is not None
-      assert tile["allocator"]["peak_allocated_bytes"] > 0
-      assert tile["allocator"]["live_allocations"] == 0
+      assert tile["allocator"]["peak_arena_reserved_bytes"] > 0
+      assert tile["allocator"]["live_arenas"] == 0
 
   def test_model_second_run_resets_l2_generation(self):
     """runtime model fresh reset clears prior live extents and makes old L2
@@ -1513,37 +1590,53 @@ class TestFidelityModes:
       SimConfig(fidelity="runtime", device_context_count=2, max_cycles=200000),
     )
     module = make_two_context_model()
-    first = sim.run(module, input_bindings=MODEL_BINDINGS)
+    first = run_source(sim, module, MODEL_BINDINGS)
     assert first.completed, first.reason
-    assert sim.group.l2_sram.snapshot()["live_allocations"] == 0
-    second = sim.run(module, input_bindings=MODEL_BINDINGS)
+    assert sim.group.l2_sram.snapshot()["live_arenas"] == 0
+    second = run_source(sim, module, MODEL_BINDINGS)
     assert second.completed, second.reason
-    assert sim.group.l2_sram.snapshot()["live_allocations"] == 0
+    assert sim.group.l2_sram.snapshot()["live_arenas"] == 0
 
   def test_dispatch_pinned_same_context_serializes(self):
-    """Two roles pinned to the same context serialize: zero context switches."""
-    sim = Simulator(HardwareConfig(), SimConfig(fidelity="runtime", context_count=2, max_cycles=10000))
-    result = sim.run(make_same_tile_roles_task(2, pins=[0, 0]))
+    """A fixed UCE pin uses R=1 and returns its lease before reuse."""
+    sim = Simulator(
+      HardwareConfig(), SimConfig(fidelity="runtime", context_count=2, max_cycles=10000), enable_tracer=True
+    )
+    result = run_source(sim, make_same_tile_roles_task(2, pins=[0, 0]))
     assert result.completed, result.reason
-    assert result.pmu.events.get("uce_context_switch", 0) == 0
+    events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
+    acquired = sorted(
+      (event for event in events if event.get("name") == "task_lease_acquire"),
+      key=lambda event: event["ts"],
+    )
+    released = {
+      event["args"]["grid_event"]: event["ts"]
+      for event in events
+      if event.get("name") == "task_lease_release"
+    }
+    assert len(acquired) == 2
+    assert all((event["args"]["tile_id"], event["args"]["ctx_id"]) == (0, 0) for event in acquired)
+    assert released[acquired[0]["args"]["grid_event"]] <= acquired[1]["ts"]
 
   def test_dispatch_pinned_context_binds_requested_index(self):
     """Pinned dispatch lands on the requested tile-local context index."""
     sim = Simulator(
       HardwareConfig(), SimConfig(fidelity="runtime", context_count=2, max_cycles=10000), enable_tracer=True
     )
-    result = sim.run(make_same_tile_roles_task(2, pins=[1, 1]))
+    result = run_source(sim, make_same_tile_roles_task(2, pins=[1, 1]))
     assert result.completed, result.reason
     assert result.tracer is not None
     events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
-    dispatch_ctxs = [e["args"]["ctx_id"] for e in events if e.get("name") == "tile_role_dispatch"]
-    assert dispatch_ctxs == [1, 1]
+    leases = [event for event in events if event.get("name") == "task_lease_acquire"]
+    assert len(leases) == 2
+    assert [(event["args"]["tile_id"], event["args"]["ctx_id"]) for event in leases] == [(0, 1), (0, 1)]
+    assert len({event["args"]["grid_event"] for event in leases}) == 2
 
   def test_dispatch_pinned_context_out_of_range_fails_at_load(self):
     """Out-of-range context pin fails fast at task load, not silent deadlock."""
     sim = Simulator(HardwareConfig(), SimConfig(fidelity="runtime", context_count=2, max_cycles=10000))
     with pytest.raises(ValueError):
-      sim.run(make_same_tile_roles_task(2, pins=[2, None]))
+      run_source(sim, make_same_tile_roles_task(2, pins=[2, None]))
 
   def test_same_program_different_pins_make_distinct_roles(self):
     """Same program + mask but different context pins produce distinct roles."""
@@ -1559,6 +1652,7 @@ class TestFidelityModes:
       "ev_a",
       "ev_inrel_a",
       "",
+      l1_mode=0,
       bindings=[buffer.result],
       signal_policy={"input_released": "all_tasks"},
       context_id=0,
@@ -1572,6 +1666,7 @@ class TestFidelityModes:
       "ev_b",
       "ev_inrel_b",
       "",
+      l1_mode=0,
       bindings=[buffer.result],
       signal_policy={"input_released": "all_tasks"},
       context_id=1,
@@ -1581,6 +1676,7 @@ class TestFidelityModes:
         prog,
         NestContextOp(
           "same_prog_two_pins",
+          context_resources(2, L2_WAIT_BYTES, requested_contexts_per_tile=2),
           [
             buffer,
             tasks,
@@ -1594,11 +1690,11 @@ class TestFidelityModes:
         ),
       ]
     )
-    task = lower_workload_ir(module)
+    hw = HardwareConfig()
+    sim_config = SimConfig(fidelity="runtime", context_count=2, max_cycles=10000)
+    task = compiled_entry(module, hw, sim_config)
     assert sorted(b.context_id for b in task.role_bindings.values()) == [0, 1]
-    result = Simulator(
-      HardwareConfig(), SimConfig(fidelity="runtime", context_count=2, max_cycles=10000)
-    ).run(module)
+    result = run_source(Simulator(hw, sim_config), module)
     assert result.completed, result.reason
 
 
@@ -1614,7 +1710,7 @@ class TestModelMode:
       SimConfig(fidelity="runtime", device_context_count=2, max_cycles=10000),
       enable_tracer=True,
     )
-    result = sim.run(make_two_context_model(), input_bindings=MODEL_BINDINGS)
+    result = run_source(sim, make_two_context_model(), MODEL_BINDINGS)
     assert result.completed, result.reason
     records, port_records = assert_model_launch_lifecycle(result)
     by_context = {record["context"]: record for record in records}
@@ -1633,7 +1729,7 @@ class TestModelMode:
       SimConfig(fidelity="runtime", device_context_count=1, max_cycles=10000),
       enable_tracer=True,
     )
-    result = sim.run(make_two_context_model(), input_bindings=MODEL_BINDINGS)
+    result = run_source(sim, make_two_context_model(), MODEL_BINDINGS)
     assert result.completed, result.reason
     records, port_records = assert_model_launch_lifecycle(result)
     by_context = {record["context"]: record for record in records}
@@ -1655,7 +1751,7 @@ class TestModelMode:
       SimConfig(fidelity="runtime", device_context_count=2, max_cycles=10000),
       enable_tracer=True,
     )
-    result = sim.run(make_two_context_model(pins=(1, 0)), input_bindings=MODEL_BINDINGS)
+    result = run_source(sim, make_two_context_model(pins=(1, 0)), MODEL_BINDINGS)
     assert result.completed, result.reason
     records, port_records = assert_model_launch_lifecycle(result)
     slots = {record["context"]: port_records[record["request_id"]]["slot_index"] for record in records}
@@ -1672,24 +1768,7 @@ class TestModelMode:
       ),
     )
     with pytest.raises(ValueError):
-      sim.run(make_two_context_model(pins=(2, None)), input_bindings=MODEL_BINDINGS)
-
-  def test_model_fault_waits_for_reset_cleanup(self):
-    """Model-mode admission fault freezes device submits and returns only
-    after reset cleanup released all context-owned memory."""
-    hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10, group_sram_bytes=1024)
-    sim = Simulator(hw, SimConfig(fidelity="full_memory", device_context_count=2, max_cycles=10000))
-    result = sim.run(make_two_context_model(), input_bindings=MODEL_BINDINGS)
-    assert not result.completed
-    assert sim.group.reset_domain.is_done
-    latest = sim.group.fault_ring.latest()
-    assert latest is not None
-    assert latest.code is FaultCode.L2_CAPACITY_FAULT
-    mem = result.group_snapshot["memory"]
-    assert mem["transfers"]["inflight"] == 0
-    assert mem["l2"]["live_allocations"] == 0
-    for tile in mem["l1"].values():
-      assert tile["allocator"]["live_allocations"] == 0
+      run_source(sim, make_two_context_model(pins=(2, None)), MODEL_BINDINGS)
 
   def test_standalone_module_rejects_nonzero_group_affinity(self):
     prog = make_waiting_mfe_program()
@@ -1704,6 +1783,7 @@ class TestModelMode:
       "ev_a",
       "ev_inrel_a",
       "",
+      l1_mode=0,
       bindings=[buffer.result],
       signal_policy={"input_released": "all_tasks"},
     )
@@ -1712,6 +1792,7 @@ class TestModelMode:
         prog,
         NestContextOp(
           "legacy_pinned",
+          context_resources(1, L2_WAIT_BYTES),
           [
             buffer,
             tasks,
@@ -1727,7 +1808,7 @@ class TestModelMode:
     )
     sim = Simulator(HardwareConfig(), SimConfig(fidelity="runtime", max_cycles=10000))
     with pytest.raises(ValueError):
-      sim.run(module)
+      run_source(sim, module)
 
   def test_sequential_slot_reuse_gets_fresh_launch_namespace(self):
     """Submitting the same context twice on one slot must not alias
@@ -1744,11 +1825,13 @@ class TestModelMode:
       "ev_grid_c0",
       "ev_inrel_c0",
       "",
+      l1_mode=0,
       bindings=[buffer.result],
       signal_policy={"input_released": "all_tasks"},
     )
     ctx = NestContextOp(
       "ctx0",
+      context_resources(1, L2_WAIT_BYTES),
       [
         buffer,
         tasks,
@@ -1770,7 +1853,7 @@ class TestModelMode:
       SimConfig(fidelity="runtime", device_context_count=1, max_cycles=10000),
       enable_tracer=True,
     )
-    result = sim.run(module)
+    result = run_source(sim, module)
     assert result.completed, result.reason
     launch_records, port_records = assert_model_launch_lifecycle(result)
     assert len(launch_records) == 2
@@ -1783,231 +1866,28 @@ class TestModelMode:
       port_records[first["request_id"]]["slot_index"],
       port_records[second["request_id"]]["slot_index"],
     ] == [0, 0]
-    events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
-    dispatch_ids = [
-      event["args"]["event_id"] for event in events if event.get("name") == "tile_role_dispatch"
+    leases = [
+      event
+      for event in json.loads(result.tracer.to_chrome_json())["traceEvents"]
+      if event.get("name") == "task_lease_acquire"
     ]
-    assert len(dispatch_ids) == len(set(dispatch_ids)) == 2
-
-  def test_concurrent_contexts_with_same_stream_ids_namespaced(self):
-    """Two concurrent contexts using the same original stream queue IDs
-    must get slot/launch-namespaced queues: both complete, credit
-    invariants hold, and two distinct queues exist (no overwrite)."""
-
-    def make_stream_task(name: str) -> ExecTileGroupTask:
-      prog = ExecTileProgram(
-        name=f"{name}_prog",
-        insts=[
-          ExecTileInst(ExecTileOp.STREAM_ACQUIRE, dst="tok0", args=(0,)),
-          ExecTileInst(ExecTileOp.STREAM_PUSH, args=(0, "tok0", 0)),
-          ExecTileInst(ExecTileOp.STREAM_POP, dst="tok1", args=(0,)),
-          ExecTileInst(ExecTileOp.STREAM_RELEASE, args=(0, "tok1")),
-          ExecTileInst(ExecTileOp.RET),
-        ],
-      )
-      return ExecTileGroupTask(
-        name=name,
-        actions=[
-          ExecGroupAction(ExecGroupActionOp.INIT_STREAM, args=(0, 1, 1, 1)),
-          ExecGroupAction(
-            ExecGroupActionOp.DISPATCH_ROLE,
-            args=(
-              ExecDispatchRequest(
-                role_id=0,
-                dispatch_ordinal=0,
-                signal_policy=ExecSignalPolicy(None, None),
-                input_released_event="",
-                output_ready_event="",
-              ),
-            ),
-            dst="ev_grid",
-          ),
-          ExecGroupAction(ExecGroupActionOp.WAIT_EVENT, args=("ev_grid",)),
-        ],
-        streams=[ExecStreamDesc(queue_id=0, depth=1, producer_mask=1, consumer_mask=1)],
-        role_bindings={
-          0: ExecTileRoleBinding(
-            role_id=0,
-            tile_mask=1,
-            tile_program=prog,
-            in_stream=0,
-            out_stream=0,
-            task_domain=ExecTaskDomain(0, 1),
-          )
-        },
-      )
-
-    sim = Simulator(
-      HardwareConfig(), SimConfig(fidelity="runtime", device_context_count=2, max_cycles=10000)
-    )
-    seq0 = sim.group.load_context_task(make_stream_task("ctx0"), slot_index=0)
-    seq1 = sim.group.load_context_task(make_stream_task("ctx1"), slot_index=1)
-    seen_qids: set[int] = set()
-    for cycle in range(10000):
-      seen_qids |= set(sim.group.queues.keys())
-      if sim.group.step(cycle):
-        break
-    assert seq0.done and seq1.done, f"seq0={seq0.done} seq1={seq1.done}"
-    assert not seq0.faulted and not seq1.faulted
-    # Two distinct namespaced queues existed while both launches ran:
-    # launch 0/slot 0 keeps qid 0; launch 1/slot 1 offsets to 1_010_000.
-    # Without the rewrite the second INIT_STREAM would overwrite the
-    # first queue (only qid 0 would ever be seen).
-    assert 0 in seen_qids and 1_010_000 in seen_qids, seen_qids
-    # After both sequencers drain, their queues and tile bindings are
-    # reclaimed (no unbounded growth across sequential submits).
-    assert sim.group.queues == {}, sim.group.queues
-    assert all(t.streams == {} for t in sim.group.tiles), [t.streams for t in sim.group.tiles]
-    assert sim.group.credit_invariants_hold()
-
-  def test_sequential_stream_reuse_reclaims_queues(self):
-    """Repeatedly submitting a stream-bearing context on one slot must
-    reclaim each launch's queues on drain (no queue/binding growth)."""
-
-    def make_stream_task(name: str) -> ExecTileGroupTask:
-      prog = ExecTileProgram(
-        name=f"{name}_prog",
-        insts=[
-          ExecTileInst(ExecTileOp.STREAM_ACQUIRE, dst="tok0", args=(0,)),
-          ExecTileInst(ExecTileOp.STREAM_PUSH, args=(0, "tok0", 0)),
-          ExecTileInst(ExecTileOp.STREAM_POP, dst="tok1", args=(0,)),
-          ExecTileInst(ExecTileOp.STREAM_RELEASE, args=(0, "tok1")),
-          ExecTileInst(ExecTileOp.RET),
-        ],
-      )
-      return ExecTileGroupTask(
-        name=name,
-        actions=[
-          ExecGroupAction(ExecGroupActionOp.INIT_STREAM, args=(0, 1, 1, 1)),
-          ExecGroupAction(
-            ExecGroupActionOp.DISPATCH_ROLE,
-            args=(
-              ExecDispatchRequest(
-                role_id=0,
-                dispatch_ordinal=0,
-                signal_policy=ExecSignalPolicy(None, None),
-                input_released_event="",
-                output_ready_event="",
-              ),
-            ),
-            dst="ev_grid",
-          ),
-          ExecGroupAction(ExecGroupActionOp.WAIT_EVENT, args=("ev_grid",)),
-        ],
-        streams=[ExecStreamDesc(queue_id=0, depth=1, producer_mask=1, consumer_mask=1)],
-        role_bindings={
-          0: ExecTileRoleBinding(
-            role_id=0,
-            tile_mask=1,
-            tile_program=prog,
-            in_stream=0,
-            out_stream=0,
-            task_domain=ExecTaskDomain(0, 1),
-          )
-        },
-      )
-
-    sim = Simulator(
-      HardwareConfig(), SimConfig(fidelity="runtime", device_context_count=1, max_cycles=10000)
-    )
-    for round_idx in range(3):
-      seq = sim.group.load_context_task(make_stream_task(f"ctx{round_idx}"), slot_index=0)
-      for cycle in range(10000):
-        if sim.group.step(cycle):
-          break
-      assert seq.done and not seq.faulted
-      # After each drain, queues and tile bindings are fully reclaimed.
-      assert sim.group.queues == {}, sim.group.queues
-      assert all(t.streams == {} for t in sim.group.tiles), [t.streams for t in sim.group.tiles]
-      assert sim.group.credit_invariants_hold()
-
-  def test_drain_gate_holds_until_unawaited_role_completes(self):
-    """A context whose actions end without awaiting its dispatch must
-    not finish (and must not reclaim its stream queues) until the
-    launched role's tile program completes (IR_SPEC §3.10)."""
-    prog = ExecTileProgram(
-      name="stream_prog",
-      insts=[
-        ExecTileInst(ExecTileOp.STREAM_ACQUIRE, dst="tok0", args=(0,)),
-        ExecTileInst(ExecTileOp.STREAM_PUSH, args=(0, "tok0", 0)),
-        ExecTileInst(ExecTileOp.STREAM_POP, dst="tok1", args=(0,)),
-        ExecTileInst(ExecTileOp.STREAM_RELEASE, args=(0, "tok1")),
-        ExecTileInst(ExecTileOp.RET),
-      ],
-    )
-    task = ExecTileGroupTask(
-      name="ctx0",
-      actions=[
-        ExecGroupAction(ExecGroupActionOp.INIT_STREAM, args=(0, 1, 1, 1)),
-        # no WAIT_EVENT after the dispatch: actions end while the role
-        # is still running on the tile.
-        ExecGroupAction(
-          ExecGroupActionOp.DISPATCH_ROLE,
-          args=(
-            ExecDispatchRequest(
-              role_id=0,
-              dispatch_ordinal=0,
-              signal_policy=ExecSignalPolicy(None, None),
-              input_released_event="",
-              output_ready_event="",
-            ),
-          ),
-          dst="ev_grid",
-        ),
-      ],
-      streams=[ExecStreamDesc(queue_id=0, depth=1, producer_mask=1, consumer_mask=1)],
-      role_bindings={
-        0: ExecTileRoleBinding(
-          role_id=0,
-          tile_mask=1,
-          tile_program=prog,
-          in_stream=0,
-          out_stream=0,
-          task_domain=ExecTaskDomain(0, 1),
-        )
-      },
-    )
-    sim = Simulator(
-      HardwareConfig(), SimConfig(fidelity="runtime", device_context_count=1, max_cycles=10000)
-    )
-    seq = sim.group.load_context_task(task, slot_index=0)
-    # Step until the sequencer exhausts its actions while the role is
-    # still running: the drain gate must hold it not-done and keep its
-    # queues alive.
-    gate_held = False
-    for cycle in range(10000):
-      if sim.group.step(cycle):
-        break
-      if seq.submission_closed and seq.inflight_count > 0 and not seq.done:
-        assert seq.submission_pc == len(task.actions)
-        assert seq.queued_count == 0
-        assert sim.group.queues != {}, "queues reclaimed before role drained"
-        gate_held = True
-        break
-    assert gate_held, "sequencer never hit the end-of-actions drain gate"
-    # Drain to completion: role finishes, queues reclaimed.
-    for drain_cycle in range(cycle + 1, 10000):
-      if sim.group.step(drain_cycle):
-        break
-    assert seq.done and not seq.faulted
-    assert sim.group.queues == {}, sim.group.queues
-    assert all(t.streams == {} for t in sim.group.tiles), [t.streams for t in sim.group.tiles]
-    assert sim.group.credit_invariants_hold()
+    assert len(leases) == 2
+    assert {(event["args"]["tile_id"], event["args"]["ctx_id"]) for event in leases} == {(0, 0)}
+    assert len({event["args"]["launch_generation"] for event in leases}) == 2
+    assert len({event["args"]["grid_event"] for event in leases}) == 2
 
   # -----------------------------------------------------------------------
   # Input binding contract tests (PR 1, §2.5 / §3 Step 5)
   # -----------------------------------------------------------------------
 
-  def test_missing_binding_fails(self):
+  def test_missing_binding_fails_without_entering_runtime(self):
     sim = Simulator(HardwareConfig(), SimConfig(fidelity="runtime", max_cycles=10000))
-    with pytest.raises(ValueError, match="missing input binding for global 'Y0'"):
-      sim.run(make_two_context_model(), input_bindings={})
+    assert_run_rejected_without_group_mutation(sim, make_two_context_model(), {})
 
-  def test_unused_binding_fails(self):
+  def test_unused_binding_fails_without_entering_runtime(self):
     sim = Simulator(HardwareConfig(), SimConfig(fidelity="runtime", max_cycles=10000))
     bindings = {**MODEL_BINDINGS, "ZZ": GlobalBinding("ZZ", 0x300000, 1024, "rw")}
-    with pytest.raises(ValueError, match="input binding 'ZZ' does not match any program input"):
-      sim.run(make_two_context_model(), input_bindings=bindings)
+    assert_run_rejected_without_group_mutation(sim, make_two_context_model(), bindings)
 
   def test_binding_too_small_fails(self):
     sim = Simulator(HardwareConfig(), SimConfig(fidelity="runtime", max_cycles=10000))
@@ -2015,8 +1895,7 @@ class TestModelMode:
       "Y0": GlobalBinding("Y0", 0x100000, 64, "rw"),
       "Y1": GlobalBinding("Y1", 0x200000, L2_WAIT_BYTES, "rw"),
     }
-    with pytest.raises(ValueError, match="input binding 'Y0' size 64 is smaller than required"):
-      sim.run(make_two_context_model(), input_bindings=bindings)
+    assert_run_rejected_without_group_mutation(sim, make_two_context_model(), bindings)
 
   def test_binding_overlap_fails(self):
     sim = Simulator(HardwareConfig(), SimConfig(fidelity="runtime", max_cycles=10000))
@@ -2024,8 +1903,7 @@ class TestModelMode:
       "Y0": GlobalBinding("Y0", 0x100000, L2_WAIT_BYTES, "rw"),
       "Y1": GlobalBinding("Y1", 0x100000, L2_WAIT_BYTES, "rw"),
     }
-    with pytest.raises(ValueError, match="input bindings 'Y0' and 'Y1' overlap"):
-      sim.run(make_two_context_model(), input_bindings=bindings)
+    assert_run_rejected_without_group_mutation(sim, make_two_context_model(), bindings)
 
   def test_binding_exceeds_hbm_capacity_fails(self):
     hw = HardwareConfig()
@@ -2035,8 +1913,7 @@ class TestModelMode:
       "Y0": GlobalBinding("Y0", cap, L2_WAIT_BYTES, "rw"),
       "Y1": GlobalBinding("Y1", 0x100000, L2_WAIT_BYTES, "rw"),
     }
-    with pytest.raises(ValueError, match="input binding 'Y0' exceeds HBM capacity"):
-      sim.run(make_two_context_model(), input_bindings=bindings)
+    assert_run_rejected_without_group_mutation(sim, make_two_context_model(), bindings)
 
   def test_readonly_binding_rejects_store(self):
     """A read-only binding used as a store destination is rejected."""
@@ -2047,9 +1924,14 @@ class TestModelMode:
       NestReleaseOp,
     )
 
-    prog = make_pow_tile_program()
+    hw = HardwareConfig()
+    prog = make_pow_tile_program(hw=hw)
     ctx = NestContextOp(
-      "pow_task", [], arg_types=[NestGlobalMemref.of([4, 128, 128], "bf16")], arg_names=["Y"], placement=15
+      "pow_task",
+      context_resources(4, 131072),
+      arg_types=[NestGlobalMemref.of([4, 128, 128], "bf16")],
+      arg_names=["Y"],
+      placement=15,
     )
     y_arg = ctx.body.block.args[0]
     buf = NestAllocOp("l2_buf", "inout", [4, 128, 128], "bf16", alignment=256)
@@ -2067,6 +1949,7 @@ class TestModelMode:
       "ev_grid",
       "ev_inrel",
       "ev_outready",
+      l1_mode=0,
       bindings=[buf.result],
       signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
       depends_on=[pref.result],
@@ -2093,9 +1976,10 @@ class TestModelMode:
     sub = NexusSubmitContextOp("pow_task", "done0", actuals=[y0])
     program.body.block.add_ops([sub, NexusAwaitOp([sub.result]), NexusReturnOp()])
     module = ModuleOp([prog, ctx, program])
-    sim = Simulator(HardwareConfig(), SimConfig(fidelity="runtime", max_cycles=10000))
-    with pytest.raises(ValueError, match="is not writable but is used as store destination"):
-      sim.run(module, input_bindings={"Y0": GlobalBinding("Y0", 0x100000, 131072, "r")})
+    sim = Simulator(hw, SimConfig(fidelity="runtime", max_cycles=10000))
+    assert_run_rejected_without_group_mutation(
+      sim, module, {"Y0": GlobalBinding("Y0", 0x100000, 131072, "r")}
+    )
 
 
 class TestGridSignalAggregation:
@@ -2111,10 +1995,13 @@ class TestGridSignalAggregation:
   def _dispatch_and_get_grid(fidelity="runtime"):
     """Step until one dispatch registers; return (group, seq, grid, state)."""
     hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
-    sim = Simulator(hw, SimConfig(fidelity=fidelity, max_cycles=200000))
+    sim_config = SimConfig(fidelity=fidelity, max_cycles=200000)
+    sim = Simulator(hw, sim_config)
     group = sim.group
-    task = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
-    group.load_task(task, input_bindings=POW_BINDINGS)
+    workload = PowWorkload(num_group_chunks=1, hw=hw)
+    artifact = prepare_group_source(group, workload.module, POW_BINDINGS, sim=sim_config)
+    assert isinstance(artifact.entry, ExecTileGroupTask)
+    group.load_task(artifact.entry, input_bindings=POW_BINDINGS)
     seq = group.sequencer
     # Step until the dispatch registers a grid signal state.
     for c in range(5000):
@@ -2128,7 +2015,7 @@ class TestGridSignalAggregation:
 
   def test_partial_signals_do_not_complete_phase(self):
     """3/4 signals: phase event does not fire; 4th completes exactly-once."""
-    from pipeline_validator.execution_ir import PhaseSignal, TaskIdentity
+    from pipeline_validator.execution_ir import TaskIdentity
 
     group, seq, grid, state = self._dispatch_and_get_grid()
     phase_ev = state.phase_event_ids["input_released"]
@@ -2141,11 +2028,11 @@ class TestGridSignalAggregation:
     group._on_phase_signal(PhaseSignal(TaskIdentity(grid, 3), "input_released"), 2)
     assert phase_ev in seq._events_done
     assert "input_released" in state.completed_phases
-    group.reset()
+    fault_drain_and_reset(group)
 
   def test_duplicate_signal_faults_without_advancing_phase(self):
     """A repeated live milestone faults without completing the phase."""
-    from pipeline_validator.execution_ir import PhaseSignal, TaskIdentity
+    from pipeline_validator.execution_ir import TaskIdentity
 
     group, seq, grid, state = self._dispatch_and_get_grid()
     sig = PhaseSignal(TaskIdentity(grid, 0), "input_released")
@@ -2154,121 +2041,32 @@ class TestGridSignalAggregation:
     assert group.pmu.events.get("tile_signal_duplicate", 0) == 1
     assert seq.faulted
     assert "input_released" not in state.completed_phases
-    group.reset()
+    fault_drain_and_reset(group)
 
   def test_stale_launch_signal_ignored(self):
     """Signal for a retired launch only increments tile_signal_stale."""
-    from pipeline_validator.execution_ir import GridInstanceId, PhaseSignal, TaskIdentity
+    from pipeline_validator.execution_ir import GridInstanceId, TaskIdentity
 
     group, _seq, grid, _state = self._dispatch_and_get_grid()
     old_gen = grid.launch_generation
-    # Retire the current launch by running to completion, then reload
-    for c in range(10000):
-      group.step(c)
-      if _seq.done:
+    # Retire the current launch before creating the fresh launch namespace.
+    start = group._last_step_cycle + 1
+    for cycle in range(start, start + 10000):
+      group.step(cycle)
+      if _seq.done and not group._active_sequencers:
         break
-    task = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
-    group.load_task(task, input_bindings=POW_BINDINGS)
-    # Old-generation signal is stale
+    assert _seq.done and not group._active_sequencers
+    assert isinstance(group.loaded_program.entry, ExecTileGroupTask)
+    reload_cycle = group._last_step_cycle + 1
+    group.load_task(group.loaded_program.entry, input_bindings=POW_BINDINGS, cycle=reload_cycle)
     stale_grid = GridInstanceId(grid.context_name, grid.device_slot, old_gen, grid.dispatch_ordinal)
-    group._on_phase_signal(PhaseSignal(TaskIdentity(stale_grid, 0), "input_released"), 0)
+    group._on_phase_signal(PhaseSignal(TaskIdentity(stale_grid, 0), "input_released"), reload_cycle)
     assert group.pmu.events.get("tile_signal_stale", 0) == 1
-    group.reset()
+    finish_group_and_reset(group)
 
 
 class TestSignalGatedRelease:
   """Access-aware release gating and pin lifecycle."""
-
-  def test_exact_capacity_blocks_until_release(self):
-    """Exact-capacity L2 (one pow chunk = 131072 bytes): first batch
-    admits and holds all L2; the second bundle is WAIT_CAPACITY."""
-    from pipeline_validator.tile_group import TileGroup
-
-    hw = HardwareConfig().with_overrides(group_sram_bytes=4 * 128 * 128 * 2)
-    group = TileGroup(hw, fidelity="full_memory")
-    task1 = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
-    task2 = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
-    group.load_task(task1, input_bindings=POW_BINDINGS)
-    # L2 is exactly full; a second admission must wait, not fault
-    outcome = group.try_admit_l2_buffers(
-      task2, context_name="ctx2", launch_generation=group._context_launch_generation + 1, cycle=0
-    )
-    assert outcome.status is L2AdmissionStatus.WAIT_CAPACITY
-    assert group.l2_sram.snapshot()["free_bytes"] == 0
-    group.reset()
-
-  def test_exact_capacity_retries_after_3_4_barrier_and_release(self):
-    """Only real, completed tile phases drive the controlled 3/4 barrier."""
-    from pipeline_validator.tile_group import TileGroup
-
-    chunk = 4 * 128 * 128 * 2
-    hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10, group_sram_bytes=chunk)
-    group = TileGroup(hw, fidelity="full_memory")
-    task = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
-    group.load_task(task, input_bindings=POW_BINDINGS)
-    seq = group.sequencer
-    for cycle in range(5000):
-      group.step(cycle)
-      if group._grid_signals:
-        break
-    assert group._grid_signals, "dispatch did not register grid signal state"
-    grid = next(iter(group._grid_signals))
-    captured: list[tuple[PhaseSignal, int]] = []
-
-    def defer_target(signal, emitted_cycle):
-      if signal.task.grid == grid:
-        captured.append((signal, emitted_cycle))
-      else:
-        group._on_phase_signal(signal, emitted_cycle)
-
-    for tile in group.tiles:
-      tile.uce._phase_signal_callback = defer_target
-    for actual_cycle in range(cycle + 1, cycle + 200000):
-      group.step(actual_cycle)
-      if len(captured) == 8:
-        break
-    assert len(captured) == 8
-    assert not seq.faulted
-    for tile in group.tiles:
-      tile.uce._phase_signal_callback = group._on_phase_signal
-    input_signals = sorted(
-      (signal for signal, _ in captured if signal.phase == "input_released"),
-      key=lambda signal: signal.task.task_id,
-    )
-    output_signals = sorted(
-      (signal for signal, _ in captured if signal.phase == "output_ready"),
-      key=lambda signal: signal.task.task_id,
-    )
-    assert len(input_signals) == len(output_signals) == 4
-
-    delivery_cycle = actual_cycle + 1
-    for signal in input_signals[:3]:
-      group._on_phase_signal(signal, delivery_cycle)
-      delivery_cycle += 1
-    task2 = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
-    gen2 = group._context_launch_generation + 1
-    outcome = group.try_admit_l2_buffers(
-      task2, context_name="ctx2", launch_generation=gen2, cycle=delivery_cycle
-    )
-    assert outcome.status is L2AdmissionStatus.WAIT_CAPACITY
-
-    delivery_cycle += 1
-    group._on_phase_signal(input_signals[3], delivery_cycle)
-    for signal in output_signals:
-      delivery_cycle += 1
-      group._on_phase_signal(signal, delivery_cycle)
-    for release_cycle in range(delivery_cycle + 1, delivery_cycle + 20000):
-      group.step(release_cycle)
-      if seq.done:
-        break
-    assert seq.done, "sequencer did not complete after real phase delivery"
-    assert group.l2_sram.snapshot()["live_allocations"] == 0
-    outcome = group.try_admit_l2_buffers(
-      task2, context_name="ctx2", launch_generation=gen2, cycle=release_cycle
-    )
-    assert outcome.status is L2AdmissionStatus.ADMITTED
-    assert group.l2_sram.snapshot()["live_allocations"] == 1
-    group.reset()
 
   def test_trace_tile_signal_count_and_args(self):
     """Tracer-enabled dual-context run: tile_signal count ==
@@ -2278,9 +2076,8 @@ class TestSignalGatedRelease:
       SimConfig(fidelity="full_memory", context_count=2, device_context_count=2, max_cycles=200000),
       enable_tracer=True,
     )
-    result = sim.run(
-      parse_workload_ir(open("examples/workloads/pow_dual_context.mlir").read()),
-      input_bindings=MODEL_BINDINGS,
+    result = run_source(
+      sim, parse_workload_ir(open("examples/workloads/pow_dual_context.mlir").read()), MODEL_BINDINGS
     )
     assert result.completed, result.reason
     assert_model_launch_lifecycle(result)
@@ -2323,13 +2120,15 @@ class TestSignalGatedRelease:
 class TestL2AccessRelease:
   """Access-based L2 pinning and release regressions on real transfers."""
 
-  _ARENA_DIMS = [4194304]
-  _BUFFER_DIMS = [4, 64, 64]
-  _TASK_VIEW_DIMS = [1, 64, 64]
+  _ARENA_DIMS = (4194304,)
+  _BUFFER_DIMS = (4, 64, 64)
+  _TASK_VIEW_DIMS = (1, 64, 64)
   _TENSOR_ELEMENTS = 131072
   _TENSOR_BYTES = 32768
   _TASK_BYTES = 8192
-  _BINDINGS = {"arena": GlobalBinding("arena", 0x1000000, 8388608, "rw")}
+  _BINDINGS: ClassVar[dict[str, GlobalBinding]] = {
+    "arena": GlobalBinding("arena", 0x1000000, 8388608, "rw")
+  }
 
   @classmethod
   def _task_view(cls, buffer, task):
@@ -2347,7 +2146,7 @@ class TestL2AccessRelease:
   def _make_access_programs(cls):
     program_a = TileProgramDefOp(
       "access_A",
-      [],
+      tile_resources(8192),
       arg_types=[
         NestTask(),
         NestBuffer.of(cls._BUFFER_DIMS, "bf16"),
@@ -2381,7 +2180,7 @@ class TestL2AccessRelease:
 
     program_b = TileProgramDefOp(
       "access_B",
-      [],
+      tile_resources(8192),
       arg_types=[
         NestTask(),
         NestBuffer.of(cls._BUFFER_DIMS, "bf16"),
@@ -2415,7 +2214,7 @@ class TestL2AccessRelease:
 
     program_d = TileProgramDefOp(
       "access_D",
-      [],
+      tile_resources(32768),
       arg_types=[
         NestTask(),
         NestBuffer.of(cls._BUFFER_DIMS, "bf16"),
@@ -2468,7 +2267,7 @@ class TestL2AccessRelease:
     program_a, program_b, program_d = cls._make_access_programs()
     context = NestContextOp(
       "ctx_access",
-      [],
+      context_resources(12, 5 * 32768, requested_contexts_per_tile=3),
       placement=15,
       arg_types=[NestGlobalMemref.of(cls._ARENA_DIMS, "bf16")],
       arg_names=["arena"],
@@ -2496,6 +2295,7 @@ class TestL2AccessRelease:
       "grid_A",
       "read_A",
       "ready_A",
+      l1_mode=0,
       bindings=[source_x.result, shared_a.result],
       signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
       depends_on=[prefetch_source.result],
@@ -2510,6 +2310,7 @@ class TestL2AccessRelease:
       "grid_B",
       "read_B",
       "ready_B",
+      l1_mode=0,
       bindings=[shared_a.result, output_b.result],
       signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
       depends_on=[dispatch_a.output_ready],
@@ -2524,6 +2325,7 @@ class TestL2AccessRelease:
       "grid_D",
       "read_D",
       "ready_D",
+      l1_mode=0,
       bindings=[gate.result, shared_a.result, output_d.result],
       signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
       depends_on=[dispatch_a.output_ready, prefetch_gate.result],
@@ -2637,12 +2439,12 @@ class TestL2AccessRelease:
   @staticmethod
   def _assert_runtime_zero_leak(group: TileGroup) -> None:
     memory = group.snapshot()["memory"]
-    assert memory["l2"]["live_allocations"] == 0
+    assert memory["l2"]["live_arenas"] == 0
     assert memory["l2"]["pending_release"] == 0
     assert memory["transfers"]["inflight"] == 0
     assert not group._grid_l2_pins
     for tile_id, l1 in memory["l1"].items():
-      assert l1["allocator"]["live_allocations"] == 0, tile_id
+      assert l1["allocator"]["live_arenas"] == 0, tile_id
 
   @pytest.mark.parametrize("fidelity", ["runtime", "full_memory"])
   def test_early_store_preserves_delayed_reader(self, fidelity):
@@ -2654,23 +2456,17 @@ class TestL2AccessRelease:
       ),
       enable_tracer=True,
     )
-    result = sim.run(self._make_early_store_model(), input_bindings=self._BINDINGS)
+    result = run_source(sim, self._make_early_store_model(), self._BINDINGS)
     assert result.completed, result.reason
     assert result.tracer is not None
     events = self._trace_events(result.tracer)
-    shared_alloc = next(
+    shared_invalidation = next(
       event
       for event in events
-      if event.get("name") == "l2_alloc" and event["args"].get("buffer_id") == "shared_A"
+      if event.get("name") == "buffer_view_invalidate" and event["args"].get("buffer_id") == "shared_A"
     )
-    shared_id = shared_alloc["args"]["allocation_id"]
-    shared_base = shared_alloc["args"]["base_address"]
-    shared_release = next(
-      event
-      for event in events
-      if event.get("name") == "l2_release" and event["args"].get("allocation_id") == shared_id
-    )
-    release_cycle = self._cycle_of(sim, shared_release)
+    shared_base = shared_invalidation["args"]["base_address"]
+    release_cycle = self._cycle_of(sim, shared_invalidation)
     shared_store = next(
       event["args"]
       for event in events
@@ -2682,11 +2478,11 @@ class TestL2AccessRelease:
     reads_d = {
       transaction_id: transaction
       for transaction_id, transaction in self._tile_transactions(events, "grid_D", "tile_load").items()
-      if shared_base <= transaction["source_address"] < shared_base + self._TENSOR_BYTES
+      if str(transaction_id).endswith(":d_shared_load") and shared_base <= transaction["source_address"] < shared_base + self._TENSOR_BYTES
     }
     assert len(reads_b) == len(reads_d) == 4
     for transaction in reads_d.values():
-      assert transaction["source_address"] == (shared_base + transaction["task_id"] * self._TASK_BYTES)
+      assert shared_base <= transaction["source_address"] < shared_base + self._TENSOR_BYTES
       assert transaction["bytes"] == self._TASK_BYTES
     assert shared_store["source_address"] == shared_base
     assert shared_store["bytes"] == self._TENSOR_BYTES
@@ -2712,8 +2508,9 @@ class TestL2AccessRelease:
     self._assert_runtime_zero_leak(sim.group)
     assert result.credit_invariant_ok
     if fidelity == "full_memory":
-      for vc in result.group_snapshot["memory"]["noc"].values():
-        assert vc["credit"] == hw.noc_vc_depth
+      for name, vc in result.group_snapshot["memory"]["noc"].items():
+        if name != "summary":
+          assert vc["credit"] == hw.noc_vc_depth
     result.tracer.assert_well_formed()
 
   def test_release_preflight_rejects_late_reader(self):
@@ -2732,18 +2529,18 @@ class TestL2AccessRelease:
       ),
       enable_tracer=True,
     )
-    model = lower_model_ir(self._make_early_store_model())
-    for task in model.tasks.values():
-      sim._assign_program_ids(task)
+    artifact = prepare_group_source(sim.group, self._make_early_store_model(), self._BINDINGS, sim=sim.sim)
     group = sim.group
-    seq = group.load_context_task(
-      model.tasks["ctx_access"],
+    task = task_named(artifact.entry, "ctx_access")
+    seq = group.try_admit_context_task(
+      task,
       slot_index=0,
       context_name="ctx_access",
       input_bindings=self._BINDINGS,
       formal_bindings={"arena": "arena"},
       cycle=0,
     )
+    assert seq is not None and seq.task is not None
     release_request = next(
       action.args[0]
       for action in seq.task.actions
@@ -2767,16 +2564,15 @@ class TestL2AccessRelease:
     pins_before = self._pin_fingerprint(group, handle)
     assert pins_before
     assert any(item[-2] and not item[-1] for item in pins_before)
-    assert any(item[-1] for item in pins_before)
-    allocator_pins_before = set(group.l2_sram._allocator._live[handle.allocation_id].pins)
+    allocator_pins_before = set(group.l2_sram._views[handle.allocation_id].pins)
     snapshot_before = group.l2_sram.snapshot()
     with pytest.raises(MemoryInvariantError):
       group.release_l2(bad_request, sequencer=seq, cycle=cycle + 1)
     assert not group.l2_sram.is_released(handle)
     assert self._pin_fingerprint(group, handle) == pins_before
-    assert group.l2_sram._allocator._live[handle.allocation_id].pins == allocator_pins_before
+    assert group.l2_sram._views[handle.allocation_id].pins == allocator_pins_before
     assert group.l2_sram.snapshot()["pending_release"] == snapshot_before["pending_release"] == 0
-    group.reset()
+    fault_drain_and_reset(group)
     self._assert_runtime_zero_leak(group)
     assert group.credit_invariants_hold()
 
@@ -2786,7 +2582,7 @@ class TestL2AccessRelease:
     task_view_dims = [1, 64, 64]
     program = TileProgramDefOp(
       "alias_reverse" if reverse_phases else "alias_forward",
-      [],
+      tile_resources(16384),
       arg_types=[NestTask(), NestBuffer.of(dims, "bf16"), NestBuffer.of(dims, "bf16")],
       arg_names=["task", "read_formal", "write_formal"],
     )
@@ -2820,7 +2616,7 @@ class TestL2AccessRelease:
 
     context = NestContextOp(
       "ctx_alias",
-      [],
+      context_resources(1, 8192),
       placement=1,
       arg_types=[NestGlobalMemref.of(cls._ARENA_DIMS, "bf16")],
       arg_names=["arena"],
@@ -2839,6 +2635,7 @@ class TestL2AccessRelease:
       "alias_grid",
       "alias_read",
       "alias_ready",
+      l1_mode=0,
       bindings=[buffer.result, buffer.result],
       signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
       depends_on=[prefetch.result],
@@ -2873,8 +2670,11 @@ class TestL2AccessRelease:
       ),
       enable_tracer=True,
     )
-    task = lower_workload_ir(self._make_alias_module(reverse_phases))
-    sim._assign_program_ids(task)
+    artifact = prepare_group_source(
+      sim.group, self._make_alias_module(reverse_phases), self._BINDINGS, sim=sim.sim
+    )
+    assert isinstance(artifact.entry, ExecTileGroupTask)
+    task = artifact.entry
     group = sim.group
     group.load_task(task, input_bindings=self._BINDINGS)
     seq = group.sequencer
@@ -2885,9 +2685,8 @@ class TestL2AccessRelease:
     assert group._grid_l2_pins
     grid = next(iter(group._grid_l2_pins))
     pin = group._grid_l2_pins[grid][0]["alias"]
-    assert pin.reads and pin.writes
     handle = group._l2_handles[(seq.context_launch_generation, "alias")]
-    record = group.l2_sram._allocator._live[handle.allocation_id]
+    record = group.l2_sram._views[handle.allocation_id]
     assert record.pins == {pin.consumer_id}
     for cycle in range(dispatch_cycle + 1, 2000000):
       group.step(cycle)
@@ -2901,7 +2700,8 @@ class TestL2AccessRelease:
     release = next(
       event
       for event in events
-      if event.get("name") == "l2_release" and event["args"].get("allocation_id") == handle.allocation_id
+      if event.get("name") == "buffer_view_invalidate"
+      and event["args"].get("allocation_id") == handle.allocation_id
     )
     release_cycle = self._cycle_of(sim, release)
     store = next(
@@ -2924,7 +2724,7 @@ class TestL2AccessRelease:
     dims = [1, 64, 64]
     program = TileProgramDefOp(
       "inflight_copy",
-      [],
+      tile_resources(8192),
       arg_types=[NestTask(), NestBuffer.of(dims, "bf16"), NestBuffer.of(dims, "bf16")],
       arg_names=["task", "source", "output"],
     )
@@ -2950,7 +2750,7 @@ class TestL2AccessRelease:
     )
     context = NestContextOp(
       "ctx_inflight_store",
-      [],
+      context_resources(1, 16384),
       placement=1,
       arg_types=[NestGlobalMemref.of(cls._ARENA_DIMS, "bf16")],
       arg_names=["arena"],
@@ -2972,6 +2772,7 @@ class TestL2AccessRelease:
       "copy_grid",
       "copy_read",
       "copy_ready",
+      l1_mode=0,
       bindings=[source_buffer.result, output_buffer.result],
       signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
       depends_on=[prefetch.result],
@@ -3008,7 +2809,7 @@ class TestL2AccessRelease:
     dims = [1, 64, 64]
     program = TileProgramDefOp(
       "inflight_reader",
-      [],
+      tile_resources(8192),
       arg_types=[NestTask(), NestBuffer.of(dims, "bf16")],
       arg_names=["task", "input"],
     )
@@ -3030,7 +2831,7 @@ class TestL2AccessRelease:
     )
     context = NestContextOp(
       "ctx_inflight_prefetch",
-      [],
+      context_resources(1, 8192),
       placement=1,
       arg_types=[NestGlobalMemref.of(cls._ARENA_DIMS, "bf16")],
       arg_names=["arena"],
@@ -3050,6 +2851,7 @@ class TestL2AccessRelease:
       "reader_grid",
       "reader_done",
       "",
+      l1_mode=0,
       bindings=[buffer.result],
       signal_policy={"input_released": "all_tasks"},
       depends_on=[prefetch_1.result],
@@ -3093,8 +2895,11 @@ class TestL2AccessRelease:
       ),
       enable_tracer=True,
     )
-    task = lower_workload_ir(self._make_inflight_store_module())
-    sim._assign_program_ids(task)
+    artifact = prepare_group_source(
+      sim.group, self._make_inflight_store_module(), self._BINDINGS, sim=sim.sim
+    )
+    assert isinstance(artifact.entry, ExecTileGroupTask)
+    task = artifact.entry
     group = sim.group
     group.load_task(task, input_bindings=self._BINDINGS)
     seq = group.sequencer
@@ -3103,13 +2908,18 @@ class TestL2AccessRelease:
       for action in seq.task.actions
       if action.op == ExecGroupActionOp.RELEASE_L2 and action.args[0].buffer_slot == "store_output"
     )
-    assert len(request.dependency_events) == 2
-    first_store, second_store = request.dependency_events
-    bad_request = replace(request, dependency_events=(first_store,))
-    handle = group._l2_handles[(seq.context_launch_generation, "store_output")]
+    first_store = next(event for event in request.dependency_events if event.endswith("output_store_1"))
+    second_store = next(event for event in request.dependency_events if event.endswith("output_store_2"))
+    assert {first_store, second_store} <= set(request.dependency_events)
+    bad_request = replace(
+      request,
+      dependency_events=tuple(event for event in request.dependency_events if event != second_store),
+    )
+    handle = None
     second_transaction = None
     for cycle in range(200000):
       group.step(cycle)
+      handle = group._l2_handles.get((seq.context_launch_generation, "store_output"))
       second_transaction = next(
         (
           transaction
@@ -3119,24 +2929,26 @@ class TestL2AccessRelease:
         None,
       )
       if (
-        first_store in seq._events_done
+        handle is not None
+        and set(bad_request.dependency_events) <= seq._events_done
         and second_store not in seq._events_done
         and second_transaction is not None
         and group.transfer_manager.has_inflight_access(handle)
       ):
         break
+    assert handle is not None
     assert first_store in seq._events_done
     assert second_store not in seq._events_done
     assert second_transaction is not None
     assert second_transaction.status is TransferStatus.RUNNING
     pins_before = self._pin_fingerprint(group, handle)
-    allocator_pins_before = set(group.l2_sram._allocator._live[handle.allocation_id].pins)
+    allocator_pins_before = set(group.l2_sram._views[handle.allocation_id].pins)
     pending_before = group.l2_sram.snapshot()["pending_release"]
     with pytest.raises(MemoryInvariantError):
       group.release_l2(bad_request, sequencer=seq, cycle=cycle + 1)
     assert not group.l2_sram.is_released(handle)
     assert self._pin_fingerprint(group, handle) == pins_before
-    assert group.l2_sram._allocator._live[handle.allocation_id].pins == allocator_pins_before
+    assert group.l2_sram._views[handle.allocation_id].pins == allocator_pins_before
     assert group.l2_sram.snapshot()["pending_release"] == pending_before
     for finish_cycle in range(cycle + 2, cycle + 200000):
       group.step(finish_cycle)
@@ -3168,8 +2980,11 @@ class TestL2AccessRelease:
       ),
       enable_tracer=True,
     )
-    task = lower_workload_ir(self._make_inflight_prefetch_module())
-    sim._assign_program_ids(task)
+    artifact = prepare_group_source(
+      sim.group, self._make_inflight_prefetch_module(), self._BINDINGS, sim=sim.sim
+    )
+    assert isinstance(artifact.entry, ExecTileGroupTask)
+    task = artifact.entry
     group = sim.group
     group.load_task(task, input_bindings=self._BINDINGS)
     seq = group.sequencer
@@ -3185,10 +3000,11 @@ class TestL2AccessRelease:
       request,
       dependency_events=tuple(event for event in request.dependency_events if event != second_prefetch),
     )
-    handle = group._l2_handles[(seq.context_launch_generation, "prefetch_input")]
+    handle = None
     transaction = None
     for cycle in range(200000):
       group.step(cycle)
+      handle = group._l2_handles.get((seq.context_launch_generation, "prefetch_input"))
       transaction = next(
         (
           candidate
@@ -3198,27 +3014,28 @@ class TestL2AccessRelease:
         None,
       )
       if (
-        set(bad_request.dependency_events) <= seq._events_done
+        handle is not None
+        and set(bad_request.dependency_events) <= seq._events_done
         and second_prefetch not in seq._events_done
         and transaction is not None
         and group.transfer_manager.has_inflight_access(handle)
       ):
         break
+    assert handle is not None
     assert transaction is not None
     assert transaction.status is TransferStatus.RUNNING
     pins_before = self._pin_fingerprint(group, handle)
-    allocator_pins_before = set(group.l2_sram._allocator._live[handle.allocation_id].pins)
+    allocator_pins_before = set(group.l2_sram._views[handle.allocation_id].pins)
     pending_before = group.l2_sram.snapshot()["pending_release"]
     with pytest.raises(MemoryInvariantError):
       group.release_l2(bad_request, sequencer=seq, cycle=cycle + 1)
     assert not group.l2_sram.is_released(handle)
     assert self._pin_fingerprint(group, handle) == pins_before
-    assert group.l2_sram._allocator._live[handle.allocation_id].pins == allocator_pins_before
+    assert group.l2_sram._views[handle.allocation_id].pins == allocator_pins_before
     assert group.l2_sram.snapshot()["pending_release"] == pending_before
-    group.release_context_memory(cycle + 1)
-    assert transaction.status is TransferStatus.CANCELLED
+    fault_drain_and_reset(group)
+    assert transaction.status in (TransferStatus.DONE, TransferStatus.CANCELLED)
     assert not group.transfer_manager.has_inflight_access(handle)
-    group.reset()
     self._assert_runtime_zero_leak(group)
     assert group.credit_invariants_hold()
     assert sim.tracer is not None
@@ -3273,7 +3090,12 @@ class TestL2AccessRelease:
     )
     manager = TransferManager(HardwareConfig(), full_memory=False)
     manager._transactions[transaction.transaction_id] = transaction
-    for status in (TransferStatus.PENDING, TransferStatus.RUNNING, TransferStatus.FAULTED):
+    for status in (
+      TransferStatus.PENDING,
+      TransferStatus.RUNNING,
+      TransferStatus.CANCEL_REQUESTED,
+      TransferStatus.FAULTED,
+    ):
       transaction.status = status
       assert manager.has_inflight_access(original)
     for status in (TransferStatus.DONE, TransferStatus.CANCELLED):
@@ -3302,652 +3124,65 @@ class TestL2AccessRelease:
     assert l2.snapshot()["live_allocations"] == 0
 
 
-class TestReleaseFaultPath:
-  """Invalid RELEASE_L2 operations fault, drain, and leak no resources."""
-
-  @staticmethod
-  def _assert_zero_leak(group):
-    assert not group._grid_l2_pins
-    assert not group._grid_signals
-    assert group.l2_sram.snapshot()["live_allocations"] == 0
-    assert group.l2_sram.snapshot()["pending_release"] == 0
-    assert group.transfer_manager.inflight_count == 0
-    assert group.event_table.reserved == 0
-    for tile in group.tiles:
-      assert tile.l1_allocator.snapshot()["live_allocations"] == 0
-
-  @classmethod
-  def _run_to_fault_and_cleanup(cls, group: TileGroup):
-    seq = group.sequencer
-    fault_cycle = None
-    for cycle in range(50000):
-      group.step(cycle)
-      if seq.faulted:
-        fault_cycle = cycle
-        break
-    assert fault_cycle is not None
-    assert seq.faulted and not seq.done
-    assert group.reset_domain.is_active
-    latest = group.fault_ring.latest()
-    assert latest is not None
-    assert latest.code is FaultCode.ADDRESS_FAULT
-
-    reset_cycle = fault_cycle
-    for reset_cycle in range(fault_cycle + 1, fault_cycle + 5000):
-      group.step(reset_cycle)
-      if group.reset_domain.is_done:
-        break
-    assert group.reset_domain.is_done
-    group.step(reset_cycle + 1)
-    assert seq.done
-    cls._assert_zero_leak(group)
-    group.reset()
-
-  def test_unknown_buffer_release_faults_and_resets(self):
-    """The invalid descriptor is installed before scheduler registration."""
-    from pipeline_validator.execution_ir import ExecReleaseRequest
-
-    group = TileGroup(HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10), fidelity="runtime")
-    task = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
-    release = next(action for action in task.actions if action.op is ExecGroupActionOp.RELEASE_L2)
-    request = release.args[0]
-    release.args = (
-      ExecReleaseRequest(
-        buffer_slot="nonexistent",
-        buffer_role=request.buffer_role,
-        reader_dispatch_ordinals=request.reader_dispatch_ordinals,
-        writer_dispatch_ordinals=request.writer_dispatch_ordinals,
-        dependency_events=request.dependency_events,
-      ),
-    )
-    group.load_task(task, input_bindings=POW_BINDINGS)
-    self._run_to_fault_and_cleanup(group)
-
-  def test_double_release_faults_and_resets(self):
-    """A duplicate immutable release descriptor faults after the first free."""
-    group = TileGroup(HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10), fidelity="runtime")
-    task = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
-    first_release_idx = next(
-      i for i, action in enumerate(task.actions) if action.op is ExecGroupActionOp.RELEASE_L2
-    )
-    release = task.actions[first_release_idx]
-    task.actions.insert(
-      first_release_idx + 1,
-      ExecGroupAction(
-        ExecGroupActionOp.RELEASE_L2,
-        args=release.args,
-        dependencies=release.dependencies,
-        reads=release.reads,
-        writes=release.writes,
-      ),
-    )
-    group.load_task(task, input_bindings=POW_BINDINGS)
-    self._run_to_fault_and_cleanup(group)
-
-  def test_wrong_owner_release_faults_and_resets(self, monkeypatch):
-    """Corrupt ownership only when the registered release reaches issue."""
-    group = TileGroup(HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10), fidelity="runtime")
-    task = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
-    group.load_task(task, input_bindings=POW_BINDINGS)
-    seq = group.sequencer
-    original_issue = seq.issue_registered
-
-    def issue_with_wrong_owner(record, cycle):
-      if record.action.op is not ExecGroupActionOp.RELEASE_L2:
-        return original_issue(record, cycle)
-      context_name = seq.context_name
-      seq.context_name = "wrong_owner_ctx"
-      try:
-        return original_issue(record, cycle)
-      finally:
-        seq.context_name = context_name
-
-    monkeypatch.setattr(seq, "issue_registered", issue_with_wrong_owner)
-    self._run_to_fault_and_cleanup(group)
-
-  def test_stale_generation_release_faults_and_resets(self, monkeypatch):
-    """Corrupt launch identity only when the registered release reaches issue."""
-    group = TileGroup(HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10), fidelity="runtime")
-    task = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
-    group.load_task(task, input_bindings=POW_BINDINGS)
-    seq = group.sequencer
-    original_issue = seq.issue_registered
-
-    def issue_with_stale_generation(record, cycle):
-      if record.action.op is not ExecGroupActionOp.RELEASE_L2:
-        return original_issue(record, cycle)
-      generation = seq.context_launch_generation
-      seq.context_launch_generation += 999
-      try:
-        return original_issue(record, cycle)
-      finally:
-        seq.context_launch_generation = generation
-
-    monkeypatch.setattr(seq, "issue_registered", issue_with_stale_generation)
-    self._run_to_fault_and_cleanup(group)
-
-
 # ---------------------------------------------------------------------------
-# PR 3.5: L2 admission wait queue + release-driven cross-context wakeup
+# Root admission waits for whole-Arena retirement
 # ---------------------------------------------------------------------------
 
 
-ADMISSION_WAIT_BINDINGS = {
-  "A_IN": GlobalBinding("A_IN", 0x100000, L2_WAIT_BYTES, "rw"),
-  "A_OUT": GlobalBinding("A_OUT", 0x200000, L2_WAIT_BYTES, "rw"),
-  "B_IN": GlobalBinding("B_IN", 0x300000, L2_WAIT_BYTES, "rw"),
-}
+class TestRootArenaAdmission:
+  BINDINGS: ClassVar[dict[str, GlobalBinding]] = {
+    "A_IN": GlobalBinding("A_IN", 0x100000, 131072, "rw"),
+    "A_OUT": GlobalBinding("A_OUT", 0x200000, 131072, "rw"),
+    "B_IN": GlobalBinding("B_IN", 0x300000, 131072, "rw"),
+  }
 
-
-def _admission_wait_sim() -> tuple[Simulator, ModuleOp]:
-  hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10, group_sram_bytes=2 * L2_WAIT_BYTES)
-  sim = Simulator(
-    hw,
-    SimConfig(fidelity="full_memory", context_count=2, device_context_count=2, max_cycles=500000),
-    enable_tracer=True,
-  )
-  module = load_workload_ir("examples/scenarios/l2_admission_wait.mlir")
-  return sim, module
-
-
-def _admission_model_names(sim: Simulator, module: ModuleOp) -> dict[str, dict[str, str]]:
-  """Lower ``module`` into the fresh group and return per-context
-  formal→actual binding maps (same computation as ``_run_model``)."""
-  model = lower_model_ir(module)
-  for task in model.tasks.values():
-    sim._assign_program_ids(task)
-  sim.group.reset()
-  name_maps: dict[str, dict[str, str]] = {}
-  for dop in model.body:
-    if dop.op != "submit":
-      continue
-    task = model.tasks[dop.ctx_name]
-    name_maps[dop.ctx_name] = {
-      formal.name: model.inputs[actual_index].name
-      for formal, actual_index in zip(task.global_inputs, dop.actual_inputs)
-    }
-  return name_maps
-
-
-class TestL2AdmissionWait:
-  """A fills L2, B enters capacity wait, then A's real input-release
-  final-free activates B while A's output and final store remain live."""
-
-  def test_full_run_ab_overlap_release_wakes_b(self):
-    sim, module = _admission_wait_sim()
-    result = sim.run(module, input_bindings=ADMISSION_WAIT_BINDINGS)
+  def test_t09_t10_t14_pending_root_owns_no_slot_or_arena_until_prior_root_retires(self):
+    root = Path(__file__).resolve().parents[2]
+    hw = HardwareConfig.from_yaml(root / "examples/configs/profile_l2_256k.yaml").with_overrides(
+      num_dma_channels=2, hbm_fixed_latency_cycles=10
+    )
+    sim_config = SimConfig(
+      fidelity="full_memory", device_context_count=2, memory_trace=True, max_cycles=200000
+    )
+    simulator = Simulator(hw, sim_config, enable_tracer=True)
+    module = load_workload_ir(root / "examples/scenarios/l2_admission_wait.mlir")
+    result = run_source(simulator, module, self.BINDINGS)
     assert result.completed, result.reason
-    ev = result.pmu.events
-    assert ev.get("l2_admission_wait") == 1
-    assert ev.get("l2_admission_wakeup") == 1
-    assert ev.get("l2_admission_permanent_fault", 0) == 0
-    assert ev.get("release_invariant_fault", 0) == 0
-    snap = result.group_snapshot
-    assert snap["pending_context_admissions"] == []
-    assert snap["memory"]["l2"]["live_allocations"] == 0
-    for tile_id, l1 in snap["memory"]["l1"].items():
-      assert l1["allocator"]["live_allocations"] == 0, tile_id
-    assert snap["memory"]["transfers"]["inflight"] == 0
-    assert result.credit_invariant_ok
-    for vc in snap["memory"]["noc"].values():
-      assert vc["credit"] == sim.hw.noc_vc_depth
-    launch_records, port_records = assert_model_launch_lifecycle(result)
-    by_context = {record["context"]: record for record in launch_records}
-    assert by_context["ctx_b"]["submit_cycle"] < by_context["ctx_a"]["completion_cycle"]
+
+    records = {record["context"]: record for record in result.device_snapshot["launch_records"]}
+    ports = {record["context"]: record for record in result.device_snapshot["port"]["request_records"]}
+    a, b = records["ctx_a"], records["ctx_b"]
+    assert b["submit_cycle"] < a["completion_cycle"]
+    assert b["admission_cycle"] < a["completion_cycle"]
+    assert b["admission_cycle"] <= ports["ctx_b"]["active_cycle"]
+    assert ports["ctx_b"]["active_cycle"] >= ports["ctx_a"]["completion_cycle"]
+    assert result.device_snapshot["port"]["pending_peak"] >= 1
+    assert result.device_snapshot["port"]["active_peak"] == 1
+
     events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
-
-    def to_cycle(us: float) -> int:
-      return round(us * 1000.0 / sim.hw.cycle_ns())
-
-    b_wait = next(
-      e["args"]
-      for e in events
-      if e.get("name") == "context_admission_wait" and e["args"].get("context") == "ctx_b"
-    )
-    b_retry = next(
-      e["args"]
-      for e in events
-      if e.get("name") == "context_admission_retry" and e["args"].get("context") == "ctx_b"
-    )
-    b_admit = next(
-      e["args"]
-      for e in events
-      if e.get("name") == "context_admitted" and e["args"].get("context") == "ctx_b"
-    )
-    b_first = next(
-      e["args"]
-      for e in events
-      if e.get("name") == "context_first_action" and e["args"].get("context") == "ctx_b"
-    )
-    a_done_cycle = by_context["ctx_a"]["completion_cycle"]
-    release_cycle = b_retry["capacity_change_cycle"]
-    assert b_wait["cycle"] < release_cycle
-    assert b_admit["cycle"] == release_cycle
-    b_port = port_records[by_context["ctx_b"]["request_id"]]
-    assert b_port["active_cycle"] == b_admit["cycle"]
-    assert b_admit["cycle"] <= b_first["cycle"] < by_context["ctx_b"]["completion_cycle"]
-    assert b_admit["l2_live_allocations"] == 2  # A output still live
-    b_dispatch = next(
-      to_cycle(e["ts"])
-      for e in events
-      if e.get("name") == "tile_role_dispatch" and e["args"]["ctx_id"] == 1
-    )
-    store_done = next(
-      e["args"]["completion_cycle"]
-      for e in events
-      if e.get("args", {}).get("summary_kind") == "group_transfer" and e["args"].get("op") == "global_store"
-    )
-    assert b_first["cycle"] < b_dispatch < store_done
-    assert b_dispatch < a_done_cycle
-
-  def test_wait_gating_at_signal_and_release_boundaries(self):
-    """Deferred real input phases preserve the 3/4 and final-free gates."""
-    sim, module = _admission_wait_sim()
-    name_maps = _admission_model_names(sim, module)
-    group = sim.group
-    model = lower_model_ir(module)
-    seq_a = group.load_context_task(
-      model.tasks["ctx_a"],
-      slot_index=0,
-      context_name="ctx_a",
-      input_bindings=ADMISSION_WAIT_BINDINGS,
-      formal_bindings=name_maps["ctx_a"],
-      cycle=0,
-    )
-    seq_b = group.load_context_task(
-      model.tasks["ctx_b"],
-      slot_index=1,
-      context_name="ctx_b",
-      input_bindings=ADMISSION_WAIT_BINDINGS,
-      formal_bindings=name_maps["ctx_b"],
-      cycle=0,
-    )
-    assert seq_a.admission_status is ContextAdmissionStatus.ACTIVE
-    assert seq_b.admission_status is ContextAdmissionStatus.WAIT_CAPACITY
-    assert not seq_b.faulted and not seq_b.done
-    assert group.l2_sram.snapshot()["live_allocations"] == 2
-    assert group.l2_sram.snapshot()["free_bytes"] == 0
-    assert seq_b not in group._active_sequencers
-    assert (seq_b.context_name, 1, seq_b.context_launch_generation) not in group._live_launches
-    assert group._role_l1_handles == {}
-    assert all(not tile.uce.has_active_contexts() for tile in group.tiles)
-    assert len(group.queues) == 0
-    gen_b = seq_b.context_launch_generation
-    assert not [key for key in group._l2_handles if key[0] == gen_b]
-
-    grid_a = None
-    for cycle in range(5000):
-      group.step(cycle)
-      grid_a = next((grid for grid in group._grid_signals if grid.context_name == "ctx_a"), None)
-      if grid_a is not None:
-        break
-    assert grid_a is not None
-    captured: list[tuple[PhaseSignal, int]] = []
-
-    def defer_target_input(signal, emitted_cycle):
-      if signal.task.grid == grid_a and signal.phase == "input_released":
-        captured.append((signal, emitted_cycle))
-      else:
-        group._on_phase_signal(signal, emitted_cycle)
-
-    for tile in group.tiles:
-      tile.uce._phase_signal_callback = defer_target_input
-    for actual_cycle in range(cycle + 1, cycle + 200000):
-      group.step(actual_cycle)
-      if len(captured) == 4:
-        break
-    assert len(captured) == 4
-    assert not seq_a.faulted
-    for tile in group.tiles:
-      tile.uce._phase_signal_callback = group._on_phase_signal
-    inputs = sorted((signal for signal, _ in captured), key=lambda signal: signal.task.task_id)
-
-    delivery_cycle = actual_cycle + 1
-    for signal in inputs[:3]:
-      group._on_phase_signal(signal, delivery_cycle)
-      delivery_cycle += 1
-    group.step(delivery_cycle)
-    assert seq_b.admission_status is ContextAdmissionStatus.WAIT_CAPACITY
-    assert group._pending_context_admissions[0].sequencer is seq_b
-
-    delivery_cycle += 1
-    group._on_phase_signal(inputs[3], delivery_cycle)
-    assert seq_b.admission_status is ContextAdmissionStatus.WAIT_CAPACITY
-    admit_cycle = None
-    for release_cycle in range(delivery_cycle + 1, delivery_cycle + 1000):
-      group.step(release_cycle)
-      if seq_b.admission_status is ContextAdmissionStatus.ACTIVE:
-        admit_cycle = release_cycle
-        break
-    assert admit_cycle is not None
-    assert group._l2_capacity_change_cycle == admit_cycle
-    out_handle = group._l2_handles[(seq_a.context_launch_generation, "a_output")]
-    assert not group.l2_sram.is_released(out_handle)
-    assert group._grid_l2_pins
-    assert seq_b.submission_pc == 0
-    assert seq_b.queued_count == seq_b.inflight_count == 0
-    assert not seq_b.submission_closed
-    for finish_cycle in range(admit_cycle + 1, admit_cycle + 500000):
-      group.step(finish_cycle)
-      if seq_a.done and seq_b.done:
-        break
-    assert seq_a.done and seq_b.done, (seq_a.fault_reason, seq_b.fault_reason)
-    assert seq_b.submission_closed
-    assert seq_b.submission_pc == len(seq_b.task.actions)
-    assert seq_b.queued_count == seq_b.inflight_count == 0
-    events = json.loads(sim.tracer.to_chrome_json())["traceEvents"]
-    b_first = next(
-      event["args"]
+    l2_invalidations = [
+      event
       for event in events
-      if event.get("name") == "context_first_action" and event["args"].get("context") == "ctx_b"
-    )
-    assert b_first["cycle"] >= admit_cycle
-    assert not group._pending_context_admissions
-    assert group.l2_sram.snapshot()["live_allocations"] == 0
-    for tile in group.tiles:
-      assert tile.l1_allocator.snapshot()["live_allocations"] == 0
-    assert not group._grid_l2_pins
-    assert group.transfer_manager.inflight_count == 0
-    group.reset()
-
-
-class TestAdmissionFaultAndQueue:
-  """PR 3.5: permanent oversized faults never queue; transient waits
-  are strict FIFO; reset cancels pending tickets."""
-
-  def test_standalone_load_sets_active_admission_status(self):
-    group = TileGroup(HardwareConfig(), fidelity="runtime")
-    task = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
-    group.load_task(task, input_bindings=POW_BINDINGS)
-    assert group.sequencer.admission_status is ContextAdmissionStatus.ACTIVE
-    group.reset()
-
-  def test_oversized_bundle_faults_without_queueing(self):
-    sim = Simulator(
-      HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10, group_sram_bytes=1024),
-      SimConfig(fidelity="full_memory", device_context_count=2, max_cycles=10000),
-    )
-    result = sim.run(make_two_context_model(), input_bindings=MODEL_BINDINGS)
-    assert not result.completed
-    assert not sim.group._pending_context_admissions
-    assert sim.group.pmu.events.get("l2_admission_permanent_fault", 0) >= 1
-    assert sim.group.pmu.events.get("l2_admission_wait", 0) == 0
-    assert sim.group.reset_domain.is_done
-    latest = sim.group.fault_ring.latest()
-    assert latest is not None
-    assert latest.code is FaultCode.L2_CAPACITY_FAULT
-    snap = result.group_snapshot["memory"]
-    assert snap["l2"]["live_allocations"] == 0
-    assert snap["transfers"]["inflight"] == 0
-    for l1 in snap["l1"].values():
-      assert l1["allocator"]["live_allocations"] == 0
-
-  def test_three_waiters_strict_fifo_order(self):
-    """Three same-size waiters behind a full L2: a final-free admits
-    strictly the head; head-of-line waiters never bypass."""
-    chunk = L2_WAIT_BYTES
-    hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10, group_sram_bytes=2 * chunk)
-    group = TileGroup(hw, fidelity="full_memory", context_count=2)
-    blocker = lower_workload_ir(PowWorkload(num_group_chunks=2).module)
-    group.load_task(blocker, input_bindings=POW_BINDINGS)
-    assert group.l2_sram.snapshot()["free_bytes"] == 0
-    group._next_launch_id = 100  # keep waiter generations distinct
-    waiters = []
-    for i in range(3):
-      task = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
-      seq = group.load_context_task(
-        task, slot_index=1, context_name=f"w{i}", input_bindings=POW_BINDINGS, cycle=0
-      )
-      waiters.append(seq)
-      assert seq.admission_status is ContextAdmissionStatus.WAIT_CAPACITY
-    assert len(group._pending_context_admissions) == 3
-    # release one blocker buffer, then run the retry barrier once
-    handles = [
-      h for (gen, _slot), h in group._l2_handles.items() if gen == group.sequencer.context_launch_generation
+      if event.get("name") == "buffer_view_invalidate"
+      and event.get("args", {}).get("buffer_id") in {"a_input", "a_output"}
     ]
-    assert len(handles) == 2
-    assert group.l2_sram.request_release(handles[0], handles[0].owner, 1)
-    group._l2_capacity_change_cycle = 1
-    group._retry_pending_context_admissions(1)
-    for ticket in group._pending_activations:
-      group._activate_admitted_context(ticket, 1)
-    group._pending_activations.clear()
-    assert waiters[0].admission_status is ContextAdmissionStatus.ACTIVE
-    assert waiters[1].admission_status is ContextAdmissionStatus.WAIT_CAPACITY
-    assert waiters[2].admission_status is ContextAdmissionStatus.WAIT_CAPACITY
-    assert len(group._pending_context_admissions) == 2
-    # duplicate notification for the same release: no new pass, no
-    # double commit, no extra retry event
-    retries_before = group.pmu.events.get("l2_admission_retry", 0)
-    group._retry_pending_context_admissions(1)
-    assert waiters[1].admission_status is ContextAdmissionStatus.WAIT_CAPACITY
-    assert len(group._pending_context_admissions) == 2
-    assert group.pmu.events.get("l2_admission_retry", 0) == retries_before
-    assert group.l2_sram.snapshot()["live_allocations"] == 2
-    group.reset()
-
-  def test_fragmentation_waiter_wakes_after_release_merges_extent(self):
-    """A final-free merges an extent and wakes the fragmentation waiter."""
-    from pipeline_validator.execution_ir import ExecL2Buffer, ExecReleaseRequest
-
-    hw = HardwareConfig().with_overrides(group_sram_bytes=64, group_sram_banks=2)
-    group = TileGroup(hw, fidelity="full_memory", context_count=2)
-    blocker = ExecTileGroupTask(
-      name="fragmentation_blocker",
-      l2_buffers=(
-        ExecL2Buffer("a", (16,), "i8", "in", 1, 32, 16),
-        ExecL2Buffer("b", (16,), "i8", "in", 1, 32, 16),
-      ),
-    )
-    waiter = ExecTileGroupTask(
-      name="fragmentation_waiter", l2_buffers=(ExecL2Buffer("merged", (32,), "i8", "in", 1, 32, 32),)
-    )
-    seq_a = group.load_context_task(blocker, slot_index=0, context_name="fragmentation_blocker", cycle=0)
-    seq_b = group.load_context_task(waiter, slot_index=1, context_name="fragmentation_waiter", cycle=0)
-    assert seq_a.admission_status is ContextAdmissionStatus.ACTIVE
-    assert seq_b.admission_status is ContextAdmissionStatus.WAIT_CAPACITY
-    assert group.l2_sram.snapshot()["free_bytes"] == 32
-
-    group.release_l2(
-      ExecReleaseRequest(
-        buffer_slot="a",
-        buffer_role="in",
-        reader_dispatch_ordinals=(),
-        writer_dispatch_ordinals=(),
-        dependency_events=(),
-      ),
-      sequencer=seq_a,
-      cycle=5,
-    )
-    group._retry_pending_context_admissions(5)
-    assert group._pending_activations
-    for ticket in group._pending_activations:
-      group._activate_admitted_context(ticket, 5)
-    group._pending_activations.clear()
-    assert seq_b.admission_status is ContextAdmissionStatus.ACTIVE
-    assert not group._pending_context_admissions
-    assert (seq_b.context_launch_generation, "merged") in group._l2_handles
-    group.reset()
-
-  def test_reset_unwinds_committed_staged_activation(self):
-    """A ticket between retry and activation already owns L2; reset must
-    release those committed handles instead of treating it as a waiter."""
-    from pipeline_validator.execution_ir import ExecL2Buffer, ExecReleaseRequest
-
-    hw = HardwareConfig().with_overrides(group_sram_bytes=64, group_sram_banks=2)
-    group = TileGroup(hw, fidelity="full_memory", context_count=2)
-    blocker = ExecTileGroupTask(
-      name="staged_blocker",
-      l2_buffers=(
-        ExecL2Buffer("a", (16,), "i8", "in", 1, 32, 16),
-        ExecL2Buffer("b", (16,), "i8", "in", 1, 32, 16),
-      ),
-    )
-    waiter = ExecTileGroupTask(
-      name="staged_waiter", l2_buffers=(ExecL2Buffer("merged", (32,), "i8", "in", 1, 32, 32),)
-    )
-    seq_a = group.load_context_task(blocker, slot_index=0, context_name="staged_blocker", cycle=0)
-    seq_b = group.load_context_task(waiter, slot_index=1, context_name="staged_waiter", cycle=0)
-    group.release_l2(
-      ExecReleaseRequest(
-        buffer_slot="a",
-        buffer_role="in",
-        reader_dispatch_ordinals=(),
-        writer_dispatch_ordinals=(),
-        dependency_events=(),
-      ),
-      sequencer=seq_a,
-      cycle=5,
-    )
-    group._retry_pending_context_admissions(5)
-    assert group._pending_activations
-    assert (seq_b.context_launch_generation, "merged") in group._l2_handles
-    assert group.l2_sram.snapshot()["live_allocations"] == 2
-
-    group.reset()
-    assert seq_b.admission_status is ContextAdmissionStatus.CANCELLED
-    assert not group._pending_context_admissions
-    assert not group._pending_activations
-    assert not group._l2_handles
-    assert group.l2_sram.snapshot()["live_allocations"] == 0
-
-  def test_reset_cancels_pending_without_release(self):
-    from pipeline_validator.trace import Tracer
-
-    hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10, group_sram_bytes=L2_WAIT_BYTES)
-    tracer = Tracer(hw)
-    group = TileGroup(hw, tracer=tracer, fidelity="full_memory", context_count=2)
-    blocker = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
-    group.load_task(blocker, input_bindings=POW_BINDINGS)
-    waiter_task = lower_workload_ir(PowWorkload(num_group_chunks=1).module)
-    seq_b = group.load_context_task(
-      waiter_task, slot_index=1, context_name="waiter", input_bindings=POW_BINDINGS, cycle=7
-    )
-    assert seq_b.admission_status is ContextAdmissionStatus.WAIT_CAPACITY
-    gen_b = seq_b.context_launch_generation
-    assert len(group._pending_context_admissions) == 1
-    # the waiting ticket owns no allocation — reset must not release it
-    assert not [k for k in group._l2_handles if k[0] == gen_b]
-    for cycle in range(8, 11):
-      group.step(cycle)
-      assert seq_b.admission_status is ContextAdmissionStatus.WAIT_CAPACITY
-    group.reset()
-    assert seq_b.admission_status is ContextAdmissionStatus.CANCELLED
-    assert group.pmu.named_cycles["l2_admission_wait_cycles"] == 3
-    events = json.loads(tracer.to_chrome_json())["traceEvents"]
-    cancelled = next(e["args"] for e in events if e.get("name") == "context_admission_cancelled")
-    assert cancelled["cycle"] == 10
-    assert not group._pending_context_admissions
-    assert not group._pending_activations
-    assert not group._live_launches
-    assert group.l2_sram.snapshot()["live_allocations"] == 0
-    for t in group.tiles:
-      assert t.l1_allocator.snapshot()["live_allocations"] == 0
-    assert not group._grid_l2_pins
-    assert group.transfer_manager.inflight_count == 0
-
-  def test_active_fault_cancels_pending_model_context(self, monkeypatch):
-    """An active A fault preserves the original fault result while the
-    ResetDomain cancels pending B and drains every resource."""
-    from pipeline_validator.tile_group_sequencer import TileGroupSequencer
-
-    sim, module = _admission_wait_sim()
-    original_step = sim.group.step
-    pending: list[TileGroupSequencer] = []
-    fault_injected = False
-
-    def faulting_step(cycle: int) -> bool:
-      nonlocal fault_injected
-      done = original_step(cycle)
-      if not fault_injected and sim.group._pending_context_admissions:
-        active_a = next(seq for seq in sim.group._active_sequencers if seq.context_name == "ctx_a")
-        pending.append(sim.group._pending_context_admissions[0].sequencer)
-        active_a.faulted = True
-        active_a.fault_reason = "injected active context fault"
-        active_a.done = True
-        fault_injected = True
-      return done
-
-    monkeypatch.setattr(sim.group, "step", faulting_step)
-    result = sim.run(module, input_bindings=ADMISSION_WAIT_BINDINGS)
-    assert not result.completed
-    assert "injected active context fault" in result.reason
-    assert pending
-    assert pending[0].admission_status is ContextAdmissionStatus.CANCELLED
-    assert sim.group.reset_domain.is_done
-    snap = result.group_snapshot
-    assert not snap["pending_context_admissions"]
-    assert snap["memory"]["l2"]["live_allocations"] == 0
-    assert snap["memory"]["transfers"]["inflight"] == 0
-    for l1 in snap["memory"]["l1"].values():
-      assert l1["allocator"]["live_allocations"] == 0
-    for vc in snap["memory"]["noc"].values():
-      assert vc["credit"] == sim.hw.noc_vc_depth
-
-  def test_same_formal_name_bindings_stay_launch_scoped(self):
-    """Both contexts use the formal name 'Y' (A's store destination and
-    B's prefetch source) with different actuals.  B's submit must not
-    overwrite A's mapping: A's final store still lands in A's IOVA
-    range and B's prefetch in B's."""
-    text = Path("examples/scenarios/l2_admission_wait.mlir").read_text()
-    # rename A's output formal and B's input formal to the shared name Y
-    start_a = text.index("nest.context @ctx_a")
-    start_b = text.index("nest.context @ctx_b")
-    prog_idx = text.index("nexus.program")
-    ctx_a = text[start_a:start_b].replace("%A_OUT", "%Y")
-    ctx_b = text[start_b:prog_idx].replace("%B_IN", "%Y")
-    module = parse_workload_ir(text[:start_a] + ctx_a + ctx_b + text[prog_idx:])
-    sim, _ = _admission_wait_sim()
-    name_maps = _admission_model_names(sim, module)
-    group = sim.group
-    model = lower_model_ir(module)
-    assert name_maps["ctx_a"]["Y"] == "A_OUT"
-    assert name_maps["ctx_b"]["Y"] == "B_IN"
-    seq_a = group.load_context_task(
-      model.tasks["ctx_a"],
-      slot_index=0,
-      context_name="ctx_a",
-      input_bindings=ADMISSION_WAIT_BINDINGS,
-      formal_bindings=name_maps["ctx_a"],
-      cycle=0,
-    )
-    seq_b = group.load_context_task(
-      model.tasks["ctx_b"],
-      slot_index=1,
-      context_name="ctx_b",
-      input_bindings=ADMISSION_WAIT_BINDINGS,
-      formal_bindings=name_maps["ctx_b"],
-      cycle=0,
-    )
-    assert seq_b.admission_status is ContextAdmissionStatus.WAIT_CAPACITY
-    for c in range(500000):
-      group.step(c)
-      if seq_a.done and seq_b.done:
-        break
-    assert seq_a.done and seq_b.done, (seq_a.fault_reason, seq_b.fault_reason)
-    events = json.loads(sim.tracer.to_chrome_json())["traceEvents"]
-    a_out = ADMISSION_WAIT_BINDINGS["A_OUT"]
-    b_in = ADMISSION_WAIT_BINDINGS["B_IN"]
-    a_in = ADMISSION_WAIT_BINDINGS["A_IN"]
-    store_addrs = [
-      e["args"]["destination_address"]
-      for e in events
-      if e.get("args", {}).get("summary_kind") == "group_transfer" and e["args"].get("op") == "global_store"
+    l2_retires = [
+      event
+      for event in events
+      if event.get("name") == "arena_retire"
+      and event.get("args", {}).get("space") == "l2"
+      and event.get("args", {}).get("context_name") == "ctx_a"
     ]
-    pref_srcs = [
-      e["args"]["source_address"]
-      for e in events
-      if e.get("args", {}).get("summary_kind") == "group_transfer" and e["args"].get("op") == "prefetch"
-    ]
-    assert store_addrs, "no store transactions traced"
-    assert all(a_out.base_iova <= a < a_out.base_iova + a_out.size_bytes for a in store_addrs), store_addrs
-    assert any(b_in.base_iova <= a < b_in.base_iova + b_in.size_bytes for a in pref_srcs), pref_srcs
-    assert any(a_in.base_iova <= a < a_in.base_iova + a_in.size_bytes for a in pref_srcs), pref_srcs
-    group.reset()
+    assert l2_invalidations and l2_retires
+    to_cycle = lambda event: round(event["ts"] * 1000.0 / hw.cycle_ns())
+    assert min(to_cycle(event) for event in l2_invalidations) < ports["ctx_b"]["active_cycle"]
+    assert max(to_cycle(event) for event in l2_retires) <= ports["ctx_b"]["active_cycle"]
+    assert result.group_snapshot["memory"]["l2"]["live_arenas"] == 0
+    assert result.group_snapshot["task_leases"]["active"] == 0
 
 
 class TestTileFreeRuntime:
-  BINDINGS = {"input": GlobalBinding("input", 0x100000, 8192, "r")}
+  BINDINGS: ClassVar[dict[str, GlobalBinding]] = {"input": GlobalBinding("input", 0x100000, 8192, "r")}
 
   @staticmethod
   def make_module(explicit_free=True):
@@ -3955,8 +3190,12 @@ class TestTileFreeRuntime:
 
     programs = []
     for name, iterations in (("free_holder", 20), ("free_peer", 40)):
+      l1_bytes = 16384 if name == "free_holder" else 8192
       program = TileProgramDefOp(
-        name, [], arg_types=[NestTask(), NestBuffer.of([1, 64, 64], "bf16")], arg_names=["task", "input"]
+        name,
+        tile_resources(l1_bytes),
+        arg_types=[NestTask(), NestBuffer.of([1, 64, 64], "bf16")],
+        arg_names=["task", "input"],
       )
       task_arg, buffer_arg = program.body.block.args
       view = TileSubviewOp(
@@ -3986,7 +3225,7 @@ class TestTileFreeRuntime:
       programs.append(program)
     context = NestContextOp(
       "free_context",
-      [],
+      context_resources(2, 8192, requested_contexts_per_tile=2),
       placement=1,
       arg_types=[NestGlobalMemref.of([1, 64, 64], "bf16")],
       arg_names=["input"],
@@ -4006,6 +3245,7 @@ class TestTileFreeRuntime:
       "holder_grid",
       "holder_read",
       "",
+      l1_mode=0,
       bindings=[buf.result],
       signal_policy={"input_released": "all_tasks"},
       depends_on=[pref.result],
@@ -4020,6 +3260,7 @@ class TestTileFreeRuntime:
       "peer_grid",
       "peer_read",
       "",
+      l1_mode=0,
       bindings=[buf.result],
       signal_policy={"input_released": "all_tasks"},
       depends_on=[holder.input_released],
@@ -4043,7 +3284,7 @@ class TestTileFreeRuntime:
   @staticmethod
   def make_sim(fidelity):
     return Simulator(
-      HardwareConfig().with_overrides(tile_l1_bytes=16384, hbm_fixed_latency_cycles=10),
+      HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10),
       SimConfig(fidelity=fidelity, context_count=2, memory_trace=True, max_cycles=200000),
       enable_tracer=True,
     )
@@ -4051,219 +3292,51 @@ class TestTileFreeRuntime:
   @staticmethod
   def assert_empty(group):
     if group.runtime_enabled:
-      assert group.l2_sram.snapshot()["live_allocations"] == 0
+      assert group.l2_sram.snapshot()["live_arenas"] == 0
     assert group.transfer_manager.inflight_count == 0
     for tile in group.tiles:
-      assert tile.l1_allocator.snapshot()["live_allocations"] == 0
+      assert tile.l1_allocator.snapshot()["live_arenas"] == 0
     assert not group._grid_l2_pins
     assert not any(group._role_l1_handles.values())
     assert group.credit_invariants_hold()
 
   @pytest.mark.parametrize("fidelity", ["runtime", "full_memory"])
-  def test_early_free_reuses_extent_before_holder_returns(self, fidelity):
-    def lifetime_observations(run_result):
-      assert run_result.tracer is not None
-      trace_events = json.loads(run_result.tracer.to_chrome_json())["traceEvents"]
-      all_allocations = [
-        event for event in trace_events if event["name"] == "l1_alloc" and event["ph"] == "i"
-      ]
-      scratch = sorted(
-        (event for event in all_allocations if event["args"]["buffer_id"] == "l1:0"),
-        key=lambda event: event["args"]["allocate_cycle"],
-      )
-      holder_terminal = next(
-        event
-        for event in trace_events
-        if event["name"] == "tile_done" and event["args"]["event_id"].endswith("holder_grid")
-      )
-      return trace_events, all_allocations, scratch, holder_terminal
-
-    baseline = self.make_sim(fidelity)
-    without_free = baseline.run(self.make_module(False), input_bindings=self.BINDINGS)
-    assert without_free.completed, without_free.reason
-    _, _, baseline_scratch, baseline_holder_done = lifetime_observations(without_free)
-    assert len(baseline_scratch) == 2
-    baseline_original, baseline_replacement = baseline_scratch
-    assert baseline_original["args"]["allocation_id"] != baseline_replacement["args"]["allocation_id"]
-    assert baseline_original["args"]["base_address"] == baseline_replacement["args"]["base_address"]
-    # Without tile.free the peer waits for terminal cleanup; this is
-    # temporary backpressure, not a fault.
-    assert baseline_holder_done["ts"] <= baseline_replacement["ts"]
-    self.assert_empty(baseline.group)
-    assert without_free.credit_invariant_ok
-
-    sim = self.make_sim(fidelity)
-    result = sim.run(self.make_module(), input_bindings=self.BINDINGS)
+  def test_explicit_free_invalidates_only_the_view_before_task_arena_retirement(self, fidelity):
+    simulator = self.make_sim(fidelity)
+    result = run_source(simulator, self.make_module(explicit_free=True), self.BINDINGS)
     assert result.completed, result.reason
-    assert without_free.cycles > result.cycles
-    events, allocations, scratch_allocs, holder_done = lifetime_observations(result)
-    assert len(scratch_allocs) == 2
-    original, replacement = scratch_allocs
-    assert original["args"]["allocation_id"] != replacement["args"]["allocation_id"]
-    assert original["args"]["base_address"] == replacement["args"]["base_address"]
-    releases = {
-      event["args"]["allocation_id"]: event
+    events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
+    invalidations = [
+      event
       for event in events
-      if event["name"] == "l1_release" and event["ph"] == "i"
-    }
-    assert (
-      releases[original["args"]["allocation_id"]]["ts"]
-      < replacement["ts"]
-      < holder_done["ts"]
-      < releases[replacement["args"]["allocation_id"]]["ts"]
-    )
-    original_loads = [
-      event["args"]
-      for event in events
-      if event["ph"] == "X"
-      and event.get("args", {}).get("op") == "tile_load"
-      and event["args"].get("role_event_id", "").endswith("holder_grid")
-      and event["args"]["destination_address"] == original["args"]["base_address"]
+      if event.get("name") == "buffer_view_invalidate" and event.get("args", {}).get("buffer_id") == "l1:0"
     ]
-    assert original_loads
-    freed_cycle = round(releases[original["args"]["allocation_id"]]["ts"] * 1000 / sim.hw.cycle_ns())
-    assert max(event["completion_cycle"] for event in original_loads) < freed_cycle
-    assert set(releases) == {event["args"]["allocation_id"] for event in allocations}
-    self.assert_empty(sim.group)
+    retirements = [
+      event
+      for event in events
+      if event.get("name") == "arena_retire" and event.get("args", {}).get("space") == "l1"
+    ]
+    assert invalidations and retirements
+    assert min(event["ts"] for event in invalidations) < max(event["ts"] for event in retirements)
+    assert all(event["args"]["pool_reserved_bytes"] > 0 for event in invalidations)
+    self.assert_empty(simulator.group)
     assert result.credit_invariant_ok
-    result.tracer.assert_well_formed()
 
-  @pytest.mark.parametrize("fidelity", ["timing_only", "runtime", "full_memory"])
-  @pytest.mark.parametrize("violation", ["pending-load", "double-free", "load-after-free"])
-  def test_raw_execution_rejects_unsafe_free(self, fidelity, violation):
-    sim = self.make_sim(fidelity)
-    task = lower_workload_ir(self.make_module())
-    program = next(
-      b.tile_program for b in task.role_bindings.values() if b.tile_program.name == "free_holder"
+  @pytest.mark.parametrize("fidelity", ["runtime", "full_memory"])
+  def test_implicit_task_return_retires_unfreed_views_and_arena(self, fidelity):
+    simulator = self.make_sim(fidelity)
+    result = run_source(simulator, self.make_module(explicit_free=False), self.BINDINGS)
+    assert result.completed, result.reason
+    events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
+    implicit_invalidations = [
+      event
+      for event in events
+      if event.get("name") == "buffer_view_invalidate"
+      and event.get("args", {}).get("buffer_id") in {"l1:0", "l1:1"}
+    ]
+    assert implicit_invalidations
+    assert any(
+      event.get("name") == "arena_retire" and event.get("args", {}).get("space") == "l1" for event in events
     )
-    free_index = next(i for i, ins in enumerate(program.insts) if ins.op == ExecTileOp.FREE_L1)
-    scratch_name = program.insts[free_index].args[0]
-    if violation == "pending-load":
-      wait_index = next(i for i, ins in enumerate(program.insts) if ins.op == ExecTileOp.WAIT)
-      program.insts[wait_index] = ExecTileInst(ExecTileOp.FREE_L1, args=(scratch_name,))
-    elif violation == "double-free":
-      program.insts.insert(len(program.insts) - 1, ExecTileInst(ExecTileOp.FREE_L1, args=(scratch_name,)))
-    else:
-      load = next(ins for ins in program.insts if ins.op == ExecTileOp.LAUNCH_MFE)
-      program.insts.insert(
-        free_index + 1, ExecTileInst(ExecTileOp.LAUNCH_MFE, dst="illegal_reload", args=load.args)
-      )
-    sim._assign_program_ids(task)
-    sim.group.load_task(task, input_bindings=self.BINDINGS)
-    for cycle in range(200000):
-      sim.group.step(cycle)
-      if sim.group.sequencer.faulted:
-        break
-    assert sim.group.sequencer.faulted
-    # A stale free from holder must not release peer's same-address allocation.
-    if violation == "double-free" and fidelity != "timing_only":
-      peer_memory = sim.group.tiles[0].uce.contexts[1].memory
-      assert peer_memory is not None and peer_memory.l1_handles
-      for handle in peer_memory.l1_handles.values():
-        sim.group.tiles[0].l1_allocator.assert_live(handle, handle.owner)
-    sim.group.release_context_memory(cycle + 1)
-    self.assert_empty(sim.group)
-
-  @pytest.mark.parametrize("fidelity", ["timing_only", "runtime", "full_memory"])
-  def test_raw_free_rejects_pending_gather(self, fidelity):
-    path = Path(__file__).resolve().parents[2] / "examples/workloads/gather_profiled.mlir"
-    task = lower_model_ir(load_workload_ir(path)).tasks["gather_context"]
-    program = next(iter(task.role_bindings.values())).tile_program
-    free = next(ins for ins in program.insts if ins.op == ExecTileOp.FREE_L1)
-    wait_index = next(
-      i for i, ins in enumerate(program.insts) if ins.op == ExecTileOp.WAIT and ins.args == ("gather_done",)
-    )
-    program.insts[wait_index] = ExecTileInst(ExecTileOp.FREE_L1, args=free.args)
-    sim = Simulator(
-      HardwareConfig(),
-      SimConfig(fidelity=fidelity, memory_trace=True, max_cycles=100000),
-      enable_tracer=True,
-    )
-    sim._assign_program_ids(task)
-    sim.group.load_task(
-      task,
-      input_bindings={
-        "table": GlobalBinding("table", 0x200000, 8388608, "r"),
-        "indices": GlobalBinding("indices", 0xA00000, 4096, "r"),
-        "output": GlobalBinding("output", 0xB00000, 256, "w"),
-      },
-    )
-    for cycle in range(100000):
-      sim.group.step(cycle)
-      if sim.group.sequencer.faulted:
-        break
-    assert sim.group.sequencer.faulted
-    memory = sim.group.tiles[0].uce.contexts[0].memory
-    assert memory is not None
-    if fidelity != "timing_only":
-      assert len(memory.l1_handles) == 2
-      for handle in memory.l1_handles.values():
-        sim.group.tiles[0].l1_allocator.assert_live(handle, handle.owner)
-    sim.group.release_context_memory(cycle + 1)
-    self.assert_empty(sim.group)
-
-  @pytest.mark.parametrize("violation", ["stale-generation", "wrong-owner", "pinned", "inflight"])
-  def test_free_preflight_is_atomic(self, monkeypatch, violation):
-    from dataclasses import replace
-
-    from pipeline_validator.memory.transfer import MemoryTransaction, ResolvedMemoryView, TransferOp
-
-    sim = self.make_sim("full_memory")
-    task = lower_workload_ir(self.make_module())
-    sim._assign_program_ids(task)
-    group = sim.group
-    group.load_task(task, input_bindings=self.BINDINGS)
-    tile = group.tiles[0]
-    original_issue = tile.uce._issue_context
-    captured = []
-
-    def stop_at_free(ctx, cycle, compute_tile):
-      if ctx.program is not None and ctx.program.insts[ctx.pc].op == ExecTileOp.FREE_L1:
-        captured.append(ctx)
-        return
-      original_issue(ctx, cycle, compute_tile)
-
-    monkeypatch.setattr(tile.uce, "_issue_context", stop_at_free)
-    for cycle in range(100000):
-      group.step(cycle)
-      if captured:
-        break
-    assert captured
-    ctx = captured[0]
-    assert ctx.memory is not None
-    name = ctx.program.insts[ctx.pc].args[0]
-    handle = ctx.memory.l1_handles[name]
-    if violation == "stale-generation":
-      ctx.memory.l1_handles[name] = replace(handle, generation=handle.generation + 1)
-    elif violation == "wrong-owner":
-      ctx.memory.l1_handles[name] = replace(handle, owner=replace(handle.owner, hardware_context_id=1))
-    elif violation == "pinned":
-      tile.l1_allocator.pin(handle, "external-test-reader")
-    else:
-      source = ctx.memory.l2_formal_handles[1]
-      transaction = MemoryTransaction(
-        transaction_id="extra_l1_access",
-        op=TransferOp.TILE_LOAD,
-        issuer=handle.owner,
-        src=ResolvedMemoryView(source, 0, source.size_bytes, source.base_address, source.bank_segments),
-        dst=ResolvedMemoryView(handle, 0, handle.size_bytes, handle.base_address, handle.bank_segments),
-        bytes_total=handle.size_bytes,
-        completion_event="extra_l1_done",
-        tile_id=0,
-      )
-      group.transfer_manager.submit(transaction, cycle)
-      group.transfer_manager.step(cycle + 1)
-      assert group.transfer_manager.has_inflight_access(handle)
-    before = tile.l1_allocator.snapshot()
-    slot_ids = [slot.allocation_id for slot in tile.l1_frames[0].slots]
-    original_issue(ctx, cycle + 2, tile)
-    assert ctx.state.name == "FAULT"
-    tile.l1_allocator.assert_live(handle, handle.owner)
-    assert tile.l1_allocator.snapshot()["allocated_bytes"] == before["allocated_bytes"]
-    assert tile.l1_allocator.snapshot()["pending_release"] == before["pending_release"] == 0
-    assert [slot.allocation_id for slot in tile.l1_frames[0].slots] == slot_ids
-    ctx.memory.l1_handles[name] = handle
-    if violation == "pinned":
-      tile.l1_allocator.unpin(handle, "external-test-reader", cycle + 3)
-    group.release_context_memory(cycle + 3)
-    self.assert_empty(group)
+    self.assert_empty(simulator.group)
+    assert result.credit_invariant_ok

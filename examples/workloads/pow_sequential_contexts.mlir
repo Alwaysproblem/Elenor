@@ -1,5 +1,7 @@
 builtin.module {
-  tile.program @pow_tile (%task: !nest.task, %l2_buf: !nest.l2_buffer<4x128x128xbf16>) {
+  tile.program @pow_tile (%task: !nest.task, %l2_buf: !nest.l2_buffer<4x128x128xbf16>)
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+      tile_l1_spm_bytes_per_context = 32768> {
     %0 = tile.subview %l2_buf task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 128, 128]
       strides = [1, 1, 1] : !nest.l2_view<1x128x128xbf16>
     %1 = tile.alloc shape = [128, 128] dtype = "bf16" alignment = 256
@@ -14,7 +16,9 @@ builtin.module {
     tile.signal output_ready(%task)
     tile.return
   }
-  nest.context @pow_ctx0 (%Y: !nest.global_memref<4x128x128xbf16>) placement = 15 {
+  nest.context @pow_ctx0 (%Y: !nest.global_memref<4x128x128xbf16>) placement = 15
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+      logical_tasks = 4, l2_spm_bytes = 131072, requested_contexts_per_tile = 1> {
     %l2_buf_1 = nest.alloc slot = "l2_buf" role = "inout" shape = [4, 128, 128] dtype = "bf16"
       alignment = 256 : !nest.l2_buffer<4x128x128xbf16>
     %2 = nest.subview %Y offsets = [0, 0, 0] sizes = [4, 128, 128] strides = [1, 1, 1]
@@ -22,7 +26,7 @@ builtin.module {
     %ev_in = nest.dma.prefetch.async %2 into %l2_buf_1 : !nest.event<"ev_in">
     %3 = nest.task.range from = 0 to = 4 : !nest.task_range
     %ev_grid, %ev_inrel, %ev_outready =
-      nest.dispatch.tasks.async @pow_tile tasks(%3) globals() bindings(%l2_buf_1)
+      nest.dispatch.tasks.async @pow_tile l1_mode = 0 tasks(%3) globals() bindings(%l2_buf_1)
       ins(%l2_buf_1) outs(%l2_buf_1)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>,
@@ -35,7 +39,9 @@ builtin.module {
     nest.await %ev_grid, %ev_out
     nest.return
   }
-  nest.context @pow_ctx1 (%Y_1: !nest.global_memref<4x128x128xbf16>) placement = 15 {
+  nest.context @pow_ctx1 (%Y_1: !nest.global_memref<4x128x128xbf16>) placement = 15
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+      logical_tasks = 4, l2_spm_bytes = 131072, requested_contexts_per_tile = 1> {
     %l2_buf_2 = nest.alloc slot = "l2_buf" role = "inout" shape = [4, 128, 128] dtype = "bf16"
       alignment = 256 : !nest.l2_buffer<4x128x128xbf16>
     %4 = nest.subview %Y_1 offsets = [0, 0, 0] sizes = [4, 128, 128] strides = [1, 1, 1]
@@ -43,7 +49,7 @@ builtin.module {
     %ev_in_1 = nest.dma.prefetch.async %4 into %l2_buf_2 : !nest.event<"ev_in">
     %5 = nest.task.range from = 0 to = 4 : !nest.task_range
     %ev_grid_1, %ev_inrel_1, %ev_outready_1 =
-      nest.dispatch.tasks.async @pow_tile tasks(%5) globals() bindings(%l2_buf_2)
+      nest.dispatch.tasks.async @pow_tile l1_mode = 0 tasks(%5) globals() bindings(%l2_buf_2)
       ins(%l2_buf_2) outs(%l2_buf_2)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>,

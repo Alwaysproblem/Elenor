@@ -1,404 +1,518 @@
 # ELENOR Runtime Pipeline Validator
 
-A **cycle-stepped CPU + accelerator functional simulator**: an independent
-CPU Device controller connects through a message port to one FPGA-oriented
-Tile Group (shared finite Group scheduler + 4 Compute Tiles).
+The validator is a cycle-stepped CPU + accelerator simulator for one
+FPGA-oriented Tile Group with four Compute Tiles. It models the
+`Graph → Context → Grid → Task → Tile Program → Engine` control path,
+finite controller/storage resources, profiled L1/L2 SRAM partitioning,
+HBM/NoC/DMA traffic, Stream Queue credit, and PMU attribution.
 
-It models the full `Graph → Group Task → Tile-SPMD Tile Program roles → Engine`
-control flow, the Stream Queue producer-consumer pipeline, and the
-BOA / EVU / MFE / USE engine partition, then reports a PMU fingerprint
-with pass/fail checks against the architecture's predicted bottlenecks.
+The supported execution path is deliberately explicit:
 
-## CPU / hardware boundary and ready-action scheduling
-
-- `device.py`: CPU `nexus.program` interpreter, dependency-ready pending
-  descriptors, explicit await, and bounded outstanding/completion credits.
-- `runtime/group_port.py`: submission/completion adapter; owns Group context
-  slots and hides sequencers from the CPU.
-- `group_scheduler.py`: shared hardware-model action window, finite rotating
-  scan, one REGISTER plus one ISSUE per cycle, and independent completion.
-- `tile.py`: exact physical Tile contexts, eligible-head round robin, and
-  Tile-owned atomic L1/frame admission.
-
-`--device-context-mode N` limits hardware-admitted CPU requests; WAIT_DEPS
-uses `device.pending_capacity` instead. `--context-mode N` is the exact
-physical Tile context count: no implicit max(), and no Device-slot→Tile-slot
-binding. Optional `nest.context context=N` is an affinity to a Group context
-slot, not a Tile slot or a Group ID. Explicit dispatch `context=N` remains a
-physical Tile pin.
-
-```bash
-bash examples/run.sh ready-action-branch --group-policy s0 --json
-bash examples/run.sh ready-action-branch --group-policy s1 --json
-bash examples/run.sh ready-action-branch --group-policy s2 \
-  --sim-override group.action_capacity=32 \
-  --sim-override group.context_action_quota=16 \
-  --sim-override group.scan_width=8 --json
-bash examples/run.sh device-dependency-submit --json
+```text
+source xDSL ModuleOp
+  └─ compiler.compile_program(...)
+       └─ immutable CompiledProgram (strict persistent artifact)
+            └─ loader.load_program(..., actual_bindings=...)
+                 └─ LoadedProgram
+                      └─ Simulator.run(LoadedProgram)
 ```
 
-S0 selects each context's earliest unissued action; S1/S2 select eligible
-visible actions through the same finite backend. S2 has no hidden wider issue:
-its resource sizes are explicit. Ordinary dependencies stay on descriptors;
-explicit await and context-local barrier remain frontend fences. Dependencies
-are checked by SSA identity and actual buffer/global-range hazards; cross-context
-overlapping global accesses with a writer require explicit submit dependencies
-or a preceding CPU await. Group bank/adapter pressure is not CPU scheduling.
+`Simulator.run` accepts only `LoadedProgram`. It rejects source `ModuleOp`,
+private execution DTOs, and an unloaded `CompiledProgram`; there is no
+runtime source-lowering fallback. Compiler lowering helpers are private to
+`pipeline_validator.compiler`; the only public compiler entry is
+`pipeline_validator.compiler.compile_program`.
 
-Group/CPU configurations and timing are reported separately. `same_program`
-epoch is optional (`--sim-override group.epoch_policy=same_program`), gates
-only dispatch, and does not freeze independent prefetch/store. No RTL, Fmax,
-power, tensor numerics, task stealing, or reusable reservation layouts are
-claimed by this executable model.
+## Explicit compile, load, and run API
 
-## IR Dialect
+```python
+from pipeline_validator import (
+    GlobalBinding,
+    HardwareConfig,
+    SimConfig,
+    Simulator,
+    load_program,
+    parse_compiled_program,
+    serialize_compiled_program,
+)
+from pipeline_validator.compiler import compile_program
+from pipeline_validator.workload_ir import load_workload_ir
 
-The validator uses a **function-call style** xDSL dialect (see
-`reference.mlir`). The module contains top-level named definitions:
-`nest.context @name { ... }` and `tile.program @name { ... }`. The
-context body dispatches tile programs by symbol reference
-(`@prog_name`), producing SSA event values typed
-`!nest.event<tag>` / `!tile.event<tag>`.
+hw = HardwareConfig()
+sim = SimConfig(context_count=1, device_context_count=1)
+module = load_workload_ir("examples/fixtures/pow_single_context.mlir")
+bindings = {"Y": GlobalBinding("Y", 0x100000, 524288, "rw")}
 
-### Prefix hierarchy
-
-| Prefix    | Level        | Examples                                                                                   |
-| --------- | ------------ | ------------------------------------------------------------------------------------------ |
-| `tile.*`  | Tile program | `tile.program`, `tile.load.async`, `tile.gather.global.async`, `tile.await`, `tile.signal` |
-| `nest.*`  | Tile group   | `nest.context`, `nest.dispatch.tasks.async`, `nest.dma.prefetch.async`, `nest.await`       |
-| `nexus.*` | Host / CPU   | `nexus.program`, `nexus.submit_context.async`, `nexus.await`, `nexus.return`               |
-
-### Key IR design points (per `reference.mlir`)
-
-**Placement** — `nest.context @name placement = M` declares the Tile
-Group placement mask (`0xF` = all 4 placement slots in the group).
-This is a **group-level** constraint: the CPU/IR does NOT specify
-physical Tile IDs or Hardware Context IDs. The tile-local scheduler
-maps logical tasks to physical tiles/contexts at runtime (reference.mlir
-§27-33, §188-189). In this validator the mapping is 1:1 (logical task
-i → tile i), so `placement = 0xF` with `task.range 0..4` dispatches
-4 tasks across 4 tiles.
-
-**Dispatch** — `nest.dispatch.tasks.async @prog` consumes a logical
-task range, mandatory `globals(...)`, `bindings(...)`, `ins(...)`, and
-`outs(...)`, plus optional `depends_on` events. All operand groups print
-even when empty. `bindings` alone binds all L2 formals positionally;
-`ins`/`outs` are exact, unique actual read/write sets. Aliases merge effects;
-unused formals stay bound without pins. It returns THREE events: `grid_done` (all tasks
-returned), `input_released` (all tasks completed their L2 read phase),
-and `output_ready` (all tasks completed their L2 write phase). Its
-always-printed `signal_policy { ... }` block declares each emitted phase
-with `#nest.aggregate<all_tasks>`.
-
-**Tile phase signals** — `tile.signal input_released(%task)` /
-`tile.signal output_ready(%task)` drive per-grid phase aggregation; the
-operand is tile-program block argument 0 (`!nest.task`). Each emission
-is keyed by `(context launch generation, grid instance, phase, logical
-task)`, and a phase result fires exactly once only after every expected
-logical task in that grid has signalled. Physical tile masks and UCE
-hardware-context ids are not aggregation identities.
-Programs await all actual L2 loads before sealing `input_released`, with
-no later loads; stores and `output_ready` obey the symmetric rule.
-Each real access direction requires its phase exactly once. Either phase
-order is legal; readwrite release must independently satisfy both.
-
-**Buffers** — `nest.alloc` produces SSA values typed
-`!nest.l2_buffer<slot>`; the slot name is the runtime L2 buffer id.
-At context admission, every `l2_buffers` entry is planned and committed
-as one atomic bundle on the L2 `BankedFreeExtentAllocator` (owner,
-generation, alignment, bank segments). Pins record actual reads/writes,
-not allocation roles. `input_released` unpins pure readers of any role;
-write/readwrite pins stay until explicit release. Every HBM Store waits
-on its previously defined real writers' `output_ready`; the final Store
-covers all writers, not pure readers. For every role, release dependencies
-are exactly all reader `input_released`, all prefetch completions, and all
-HBM Store completions. Input-role writes are forbidden; out/inout requires
-a real writer and Store. An asynchronously unused input may release with
-empty dependencies; no buffer use may follow release.
-Release preflights owner, role, generations, live handle, every event and
-phase, pins, and unfinished allocation-identity-matched transfers before
-unpinning any writer. Successful final-free wakes L2 capacity waiters;
-finite event-budget waiters also wake when event reservations retire.
-The event type tag doubles as the runtime event id shared by simulator
-and trace.
-
-**Tile-local free** — `tile.free %scratch` synchronously returns a
-`tile.alloc` L1 allocation before the Tile Program ends. Await its last
-load/store/Gather access first, and also prior BOA/EVU/Pow events because
-those timing descriptors do not expose L1 operands. Unrelated memory
-operations may remain pending. Double free, foreign buffers, and later
-explicit accesses are rejected; runtime also checks ownership, generations,
-frame slots and queued/in-flight accesses before freeing.
-Only that allocation's frame binding is removed, so later dispatches can
-reuse its extents without waiting for the original program to return.
-Unfreed buffers still receive automatic terminal/reset cleanup.
-`tile.alloc` remains eager at dispatch admission; this is not dynamic
-allocation, a new L1 wait queue, or an alternative to L2 `nest.release`.
-See `IR_SPEC.md` §4.2.1 and the executable `examples/workloads/gather_profiled.mlir`.
-The [two-fidelity reuse smoke](../examples/artifacts/tile_free/run-20260911-final/verification.json)
-uses a 16 KiB Tile L1: a holder frees 8 KiB, a second dispatch reuses the
-same address before the holder returns, and terminal cleanup preserves the
-replacement allocation. Omitting free makes that same admission fail.
-The evidence includes full hardware/simulator/binding snapshots and source hashes.
-
-**Admission wait** — after the CPU port accepts a request, a Group context
-slot may be retained while its atomic L2 bundle or event budget cannot fit.
-WAIT_DEPS requests never reach that port. No UCE/L1/L2/stream/DMA work is
-partially held on a failed L2 plan. Admission remains FIFO; L2 final-free
-and independent event-budget reclamation are explicit wake sources.
-Newly registered actions cannot issue in the same cycle; exact first-issue
-latency additionally depends on window/scan/adapter pressure.
-Permanent capacity errors fault instead of waiting indefinitely. The CPU
-completion still covers grids, final store, and safe resource cleanup.
-
-**`depends_on(%e)`** stays on prefetch/dispatch/store/release descriptors,
-not synthetic blocking WAIT actions. `nexus.submit_context.async` accepts
-Nexus dependencies independently of the Group's internal events.
-
-### Print / parse
-
-The IR is printed and parsed in **custom-assembly format** (not generic
-xDSL). `--print-ir` outputs the custom assembly; `--ir-file` loads
-custom-assembly IR from disk.
-
-## Scope
-
-| Aspect               | Modelled                                                             | Source spec                                     |
-| -------------------- | -------------------------------------------------------------------- | ----------------------------------------------- |
-| Tile Group           | 1 group, 4 tiles                                                     | `design/elenor_tile_group/`                     |
-| Tile Group Sequencer | Group Task actions, role dispatch, DMA prefetch, barriers            | `design/elenor_tile_group_sequencer/`, arch §16 |
-| Compute Tile         | UCE + BOA/EVU/MFE/USE + L1 SRAM bandwidth                            | `design/elenor_compute_tile/`                   |
-| Tile UCE             | Tile Program ISA: launch/wait/signal                                 | arch §16.4, §17.6                               |
-| Stream Queue         | credit invariant, backpressure, EOS, reset/drain, PMU                | `design/elenor_stream_queue/`                   |
-| BOA                  | 4×OPA (16×16) MAC throughput, bandwidth ceiling                      | `design/elenor_boa/`                            |
-| EVU                  | 32-lane vector FMA throughput                                        | `design/elenor_evu/`                            |
-| MFE                  | load/store plus deterministic profiled Gather through Cache/MSHR/HBM | `design/elenor_mfe/`                            |
-| USE                  | slower-clock state engine                                            | `design/elenor_use/`                            |
-| PMU                  | unique stall attribution (one primary owner per cycle)               | arch §21.6                                      |
-
-## Fidelity modes
-
-`SimConfig(fidelity=...)` selects the memory model depth (default
-`full_memory`):
-
-| Fidelity      | Handles / addresses                 | Latency model                         |
-| ------------- | ----------------------------------- | ------------------------------------- |
-| `timing_only` | none (src/dst views are null)       | one collapsed bandwidth+launch leg    |
-| `runtime`     | real L1/L2 allocation + HBM binding | one collapsed bandwidth+launch leg    |
-| `full_memory` | real L1/L2 allocation + HBM binding | full per-leg route (HBM/NoC/DMA/bank) |
-
-Gather never collapses to a synthetic single latency. In all fidelity
-modes it keeps the same profiled
-`L1 lookup → L2 lookup/MSHR → optional HBM/NoC refill → L1 fill →
-ordered destination write` state machine; `timing_only` simply leaves
-physical views null. Cache quota is metadata-only and does not consume
-live L1/L2 scratchpad extents.
-
-All three modes enforce the global-binding contract (missing / overlapping /
-out-of-capacity / wrong-permission bindings fail at load time). In
-`runtime`/`full_memory`, every allocation is an immutable
-`AllocationHandle` with owner, generation and bank segments; capacity,
-alignment, owner, generation and use-after-release errors raise
-`MemoryInvariantError` and never produce a success event.
-
-`full_memory` advances regular transfers leg-by-leg: prefetch walks
-`HBM_READ → GLOBAL_DMA → NOC_RESPONSE → L2_WRITE`, tile load walks
-`L2_READ → LOCAL_DMA → L1_WRITE`, with per-bank segment issuance.
-Gather uses dedicated lookup/fill stages and reuses real HBM outstanding,
-NoC credit, local DMA, and destination L1-bank resources. Snapshot
-verification is available under
-`memory.cache/mshr/transfers` plus `memory.hbm/l2/l1/noc`.
-
-Hardware defaults follow the **Balanced-small** profile (arch §12.3):
-64 tiles / 1 MB L1 per tile / 8 MB Group SRAM. The validator runs a
-4-tile slice of that group.
-
-## Setup (conda)
-
-```bash
-conda env create -f pipeline_validator/environment.yml
-conda activate elenor-validator
+compiled = compile_program(
+    module,
+    hw,
+    sim,
+    binding_assumptions=bindings,
+    source_name="examples/fixtures/pow_single_context.mlir",
+)
+text = serialize_compiled_program(compiled)
+parsed = parse_compiled_program(text)
+loaded = load_program(parsed, hw, sim, actual_bindings=bindings)
+result = Simulator(hw, sim).run(loaded)
 ```
 
-## Run
+`CompiledProgram` is deeply immutable and contains the canonical source,
+Registry, target/artifact hashes, frozen executable, call bindings,
+relocations, source map, dependency proofs, entry/exit Profiles, resource
+budgets, binding guards, and workload metadata. The compiled package format
+currently has `schema_version=1` and `compiler_abi="v0"`; this is distinct
+from hardware YAML schema 2. Parsing uses an explicit type/opcode allowlist
+and rejects unknown fields/types, duplicate JSON keys, non-finite numbers,
+unknown versions, and a mismatched artifact hash.
 
-````bash
-# run the default pow workload (bind its global input Y)
-python -m pipeline_validator -w pow --input-binding Y=0x100000:524288:rw
+`load_program` does not import or invoke the compiler. It verifies artifact
+integrity and executable semantics, matches the embedded Registry/static
+target fingerprint to `HardwareConfig` and `SimConfig`, and validates actual
+binding names, ranges, alias guards, and permissions. Loading never repairs
+dependencies, inserts waits, chooses a different Profile, or rebuilds source
+IR.
 
-# list workloads
-python -m pipeline_validator -l
+## CPU / hardware boundary and scheduling
 
-# override a hardware param (e.g. faster clock)
-python -m pipeline_validator -w pow --input-binding Y=0x100000:524288:rw \
-  --hw-override clock_mhz=2000
+- `device.py` interprets the compiled `nexus.program`, manages dependency-ready
+  pending descriptors, explicit awaits, and bounded outstanding/completion
+  credits.
+- `runtime/group_port.py` is the message/control adapter. Accepted root requests
+  initially consume only bounded pending metadata; Group slots, L2 Arena,
+  event/control resources, and execution ownership are committed atomically
+  later.
+- `group_scheduler.py` implements the finite S0/S1/S2 ready-action window:
+  one REGISTER plus one ISSUE per cycle, bounded scan, per-Context quota, and
+  independent completion.
+- `tile_group.py` registers a bounded Grid Route, then lets each Tile admit at
+  most one eligible Task per Tick. One blocked Tile does not roll back Tasks
+  already committed on other Tiles.
+- `tile.py` owns exact physical UCE contexts, eligible-head round robin,
+  L1 Arena/Frame planning, and atomic per-Task commit.
 
-# print the IR (custom assembly) without simulating
-python -m pipeline_validator -w pow --print-ir
+`--device-context-mode N` limits hardware-admitted CPU requests;
+`device.pending_capacity` separately bounds dependency-waiting metadata.
+`--context-mode N` is the exact physical Tile UCE context count. Optional
+`nest.context context=N` pins a Group execution slot; dispatch `context=N`
+pins the same UCE context index on every selected Tile. Neither is a physical
+Tile ID.
 
-# load and run an external IR file (model IR that declares global inputs
-# requires one --input-binding NAME=BASE:SIZE:PERM per input)
-python -m pipeline_validator --ir-file path/to/workload.mlir --input-binding Y=0x100000:131072:rw
+Root admission keeps independent SAME and COMPATIBLE FIFO heads for the active
+L2 Profile. SAME is tried first; if its head cannot fully commit, the
+COMPATIBLE head may fill the target without skipping within either category.
+Task admission applies the same comparison to the active L1 Profile per Tile.
+Profile-incompatible work is not a runtime candidate: the compiler must emit a
+complete transition beforehand.
 
-# JSON output
-python -m pipeline_validator -w pow --input-binding Y=0x100000:524288:rw --json
+## Source IR and mandatory resource contracts
 
-# run with dual tile-UCE contexts and emit an HTML trace
-python -m pipeline_validator -w pow --input-binding Y=0x100000:524288:rw \
-  --context-mode 2 --trace-html ctx2.html
+The custom-assembly xDSL dialect has three ownership levels:
 
-# organized examples include their required bindings and overrides
-bash examples/run.sh list
-bash examples/run.sh pow-dual-context
-bash examples/run.sh gather --json
+| Prefix    | Owner                       | Examples                                                                                 |
+| --------- | --------------------------- | ---------------------------------------------------------------------------------------- |
+| `tile.*`  | one Task/Tile Program       | `tile.alloc`, `tile.load.async`, `tile.gather.global.async`, `tile.await`, `tile.signal` |
+| `nest.*`  | one root Context/Tile Group | `nest.alloc`, `nest.dispatch.tasks.async`, `nest.dma.prefetch.async`, `nest.await`       |
+| `nexus.*` | Host/CPU model              | `nexus.submit_context.async`, `nexus.await`, `nexus.return`                              |
 
-# edit/copy a custom IR and provide its bindings explicitly
-bash examples/run.sh file path/to/workload.mlir \
+Every `nest.context` has a mandatory L2-only contract:
+
+```mlir
+#nest.context_resources<
+  l2_mode = 0,
+  allowed_profiles = [0, 1, 2],
+  logical_tasks = 1,
+  l2_spm_bytes = 4096,
+  requested_contexts_per_tile = 1
+>
+```
+
+Every `tile.program` has a mandatory L1 contract:
+
+```mlir
+#tile.resources<
+  allowed_profiles = [0, 1, 2],
+  tile_l1_spm_bytes_per_context = 4096
+>
+```
+
+`nest.dispatch.tasks.async` has a mandatory `l1_mode=N`. Context owns the L2
+selector; the dispatch owns the requested L1 selector. `allowed_profiles` is
+non-empty, unique, and must contain the Context's `l2_mode` or the dispatch's
+requested `l1_mode`. Mode IDs are identifiers, not an ordering by capacity.
+The compiler checks every advertised mode, every real L1/L2 combination used
+by the call, per-bank striped layout/padding, Frame Slots, live event frontier,
+Grid/control bounds, and the `R ×` child-Arena envelope. It never drops an
+illegal allowed mode or silently lowers `requested_contexts_per_tile`.
+
+The optional `l1_cache`/`l2_cache` member has exactly four fields:
+
+```mlir
+l1_cache = {
+  required = true,
+  access = "read",
+  bypass = "forbidden",
+  target_bytes = 8192
+}
+```
+
+`access` is `"none"`, `"read"`, or `"read_write"`; `bypass` is `"allowed"`
+or `"forbidden"`. These are capability declarations. `target_bytes` and
+Gather's `cache_target_bytes` are shared-cache hints, not private allocations,
+minimum-capacity quotas, or predictors of hit rate. Gather accepts no separate
+minimum-cache property.
+
+This is a complete legal source example; the 64-byte logical buffer is padded
+to one 16-bank × 256-byte stripe round, so each declared Arena is 4096 bytes:
+
+```mlir
+builtin.module {
+  tile.program @read_tile(
+    %task : !nest.task,
+    %buf : !nest.l2_buffer<1x32xbf16>
+  ) resource_contract = #tile.resources<
+    allowed_profiles = [0, 1, 2],
+    tile_l1_spm_bytes_per_context = 4096
+  > {
+    %view = tile.subview %buf task = %task task_dim = 0
+      offsets = [0, 0] sizes = [1, 32] strides = [1, 1]
+      : !nest.l2_view<1x32xbf16>
+    %scratch = tile.alloc shape = [32] dtype = "bf16" alignment = 256
+      : !tile.l1_buffer<32xbf16>
+    %loaded = tile.load.async %view into %scratch : !tile.event<"loaded">
+    tile.await %loaded
+    tile.signal input_released(%task)
+    tile.free %scratch
+    tile.return
+  }
+
+  nest.context @read_context(
+    %input : !nest.global_memref<1x32xbf16>
+  ) placement = 1 resource_contract = #nest.context_resources<
+    l2_mode = 0,
+    allowed_profiles = [0, 1, 2],
+    logical_tasks = 1,
+    l2_spm_bytes = 4096,
+    requested_contexts_per_tile = 1
+  > {
+    %buf = nest.alloc slot = "input" role = "in"
+      shape = [1, 32] dtype = "bf16" alignment = 256
+      : !nest.l2_buffer<1x32xbf16>
+    %src = nest.subview %input offsets = [0, 0] sizes = [1, 32]
+      strides = [1, 1] : !nest.global_view<1x32xbf16>
+    %pref = nest.dma.prefetch.async %src into %buf : !nest.event<"pref">
+    %tasks = nest.task.range from = 0 to = 1 : !nest.task_range
+    %grid, %inrel, %unused = nest.dispatch.tasks.async @read_tile
+      l1_mode = 0 tasks(%tasks) globals() bindings(%buf) ins(%buf) outs()
+      signal_policy {
+        input_released = #nest.aggregate<all_tasks>
+      } depends_on(%pref)
+      : (!nest.event<"grid">, !nest.event<"inrel">, !nest.event<"">)
+    nest.release %buf depends_on(%inrel, %pref)
+    nest.await %grid
+    nest.return
+  }
+
+  nexus.program @run(%input : !nest.global_memref<1x32xbf16>) {
+    %done = nexus.submit_context.async @read_context(%input)
+      : !nexus.event<"done">
+    nexus.await %done
+    nexus.return
+  }
+}
+```
+
+`logical_tasks` is the sum of all dispatch task counts, including repeated
+ranges. The current mapping still requires each non-empty range count to equal
+`popcount(placement)`. A zero-dispatch Context is legal with
+`logical_tasks=0`; a zero-length `nest.task.range` is not.
+
+## Arena, view, free, and lease semantics
+
+The compiler lays each owner out as a deterministic striped `ArenaLayout`.
+The physical bank stride is always the target bank size; the current Profile
+only moves the user-SPM/cache boundary. Padding is reserved but is never
+visible through a buffer view.
+
+- One root invocation owns one L2 Arena (`RootInvocation`).
+- One committed logical Task owns one L1 Arena (`TaskIdentity`).
+- L2 `nest.alloc` and L1 `tile.alloc` create buffer views inside their
+  already-reserved parent Arena at compiled bind points.
+- `nest.release` and `tile.free` invalidate only the named view after its real
+  events, pins, Frame references, and in-flight transactions are safe. They do
+  **not** return parent Arena extents to the global pool and do not wake another
+  owner for capacity.
+- A Task Arena returns only when that Task safely retires (or cancellation is
+  confirmed). A root Arena returns only after every Route/Task, required
+  output, transfer, view, pin, and lease has retired.
+- A zero-byte owner still has an explicit Arena/control/lease record even
+  though it reserves no SRAM extent.
+
+`requested_contexts_per_tile` is the R lease bound for
+`(parent binding, launch generation, tile)`. The lease is acquired only on
+successful Task commit and is returned only at safe Task retirement or
+confirmed cancellation. `tile.free`, `input_released`, `output_ready`, and a
+cancel request do not return R early. A Grid cannot complete while any selected
+Tile is pending admission, active, or retiring.
+
+Temporary capacity, fragmentation, Slot, controller, and R-limit waits are
+reported separately. A pure plan has no side effects; permanently impossible
+per-bank/empty-pool requests fail instead of entering a wait queue.
+
+## Profile Registry, transitions, maintenance, and reset
+
+L1 and L2 Profiles are independent. For each call the compiler keeps the
+current mode when it is in that owner's allowed set (COMPATIBLE when it differs
+from the requested baseline), otherwise it selects the requested baseline and
+emits the required transition. SAME/COMPATIBLE admission never changes a
+generation or issues a Commit.
+
+Every actual transition is explicit in the compiled executable. A
+`ProfileReconfigDesc` contains the expected/target mode, Registry hash,
+generation-bound ordinary-await proof, affected domain, full member list,
+source reference, and the fixed sequence:
+
+```text
+ACQUIRE → CHECK_FRONTIER → CLOSE_ISSUE → DRAIN_REFERENCES
+→ CLEAN_INVALIDATE → DRAIN_DOWNSTREAM → PREPARE → WAIT_READY_ACK
+→ COMMIT → WAIT_COMMIT_ACK → OPEN_ISSUE → RELEASE
+```
+
+`ProfileController` is the unique L1/L2 writer shared by Device and Group.
+The real member bus services one ready request/response per Tick. A new mode is
+published and its issue gate opens only after every target member has matching
+Prepare and Commit ACKs. L1-only reconfiguration rebuilds only the per-Tile L1
+Arena/cache/MSHR generation; it does not reset or invalidate a live parent L2
+Arena. L2-only reconfiguration leaves the L1 mode/generation unchanged but
+must first close all work that can touch L2.
+
+The compiler also emits range-qualified `MemoryMaintenanceDesc` controls when
+HBM writes conflict with cached readers. Their fixed sequence blocks only the
+affected ranges where supported, drains references, clean/invalidates, waits
+for real downstream writeback, acknowledges, and reopens issue. A target with
+only full-domain maintenance requires the correspondingly quiescent compiled
+boundary. Runtime does not invent maintenance or turn an ordinary await into a
+global barrier.
+
+Startup initializes every member to each layer's `reset_mode`, generation 0,
+and consumes actual ACKs. A warm launch must match the artifact's compiled
+entry Profile. `Simulator.run` neither resets nor replans a mismatch; explicit
+quiescent recovery is required. Faulted or cancelled commands keep their gates
+closed until emitted member/DMA work is isolated. Generations are monotonic,
+so late returns cannot write a newly reused SPM/cache generation.
+
+## Fidelity and byte-proof boundary
+
+`SimConfig(fidelity=...)` selects memory timing depth:
+
+| Fidelity      | Physical allocation/addressing                   | Transfer timing                         |
+| ------------- | ------------------------------------------------ | --------------------------------------- |
+| `timing_only` | logical contracts only                           | one collapsed leg                       |
+| `runtime`     | real HBM bindings and L1/L2 Arena/view lifetimes | one collapsed leg                       |
+| `full_memory` | real bindings/Arenas plus bank segments          | HBM/Global DMA/NoC/L2/L1/Local DMA legs |
+
+All fidelities execute the same compiled resource, Profile, maintenance,
+generation, and gate contracts. Only `full_memory` with an injected
+`ByteStore` proves byte movement. `ByteStore` is sparse, rejects uninitialized
+reads, validates host seed coverage against actual bindings, captures source
+bytes when the read leg completes, and commits destination bytes only when the
+write leg completes:
+
+```python
+from pipeline_validator.memory.byte_store import ByteStore
+
+store = ByteStore()
+store.seed_hbm(0x100000, bytes(range(64)))
+simulator = Simulator(hw, sim, byte_store=store)
+result = simulator.run(loaded)
+copied = store.read_hbm(0x200000, 64)
+```
+
+For byte-checked profiled Gather, each request additionally needs
+`bind_profiled_source(binding_id, request_id, source_offset)`. Cache test
+seeding is available through `seed_cache_line(...)`. Without `ByteStore`,
+Gather remains a deterministic source-authored `L1_HIT`/`L2_HIT`/`HBM_MISS`
+timing profile. Cache capacity never predicts a hit rate, and BOA/EVU/USE do
+not compute tensor values.
+
+## Hardware YAML schema 2 and default experimental modes
+
+`pipeline_validator/hardware_config.yaml` is schema 2. `memory.target` and
+`memory.profile_source` are typed subtrees; unknown/duplicate keys are
+rejected. A partial user YAML may omit `schema_version` and inherits omitted
+subtrees from the bundled target. If a layer's `memory.target` is explicitly
+present, `system_reserved_spm_per_bank` is mandatory. A custom layer `modes`
+mapping replaces that whole table rather than merging individual modes.
+
+The bundled `simulator_experiment` modes are per-bank bytes:
+
+| Layer | Mode | SPM bytes | Cache bytes | System-reserved SPM |
+| ----- | ---: | --------: | ----------: | ------------------: |
+| L1    |    0 |    65,536 |           0 |               2,048 |
+| L1    |    1 |    57,344 |       8,192 |               2,048 |
+| L1    |    2 |    49,152 |      16,384 |               2,048 |
+| L2    |    0 |   524,288 |           0 |               4,096 |
+| L2    |    1 |   458,752 |      65,536 |               4,096 |
+| L2    |    2 |   393,216 |     131,072 |               4,096 |
+
+SPM includes the system reservation; user capacity is
+`banks × (spm_bytes_per_bank - system_reserved_spm_per_bank)`. SPM + Cache
+must exactly conserve each physical bank, and SPM/Cache/reserved bytes must be
+aligned to `lcm(partition_granule_bytes, cache_line_bytes)`. The active Profile
+is the sole Cache-capacity source; lookup latency and MSHR counts remain
+independent target parameters.
+
+Both layers use `reset_mode=0`, `spm_mapping_id="striped_arena_v0"`,
+`cache_org_id="profiled_lru_v0"`, `cache_write_policy="read_only"`, and
+`maintenance_caps=[invalidate_range, clean_invalidate_all, bypass]` in the
+bundled target. Tag/MSHR/ACK/control storage is separate from user SPM; it is
+not subtracted from the Profile data-region bytes.
+
+The default target has 16 banks per Tile L1 (1 MiB physical) and 16 banks in
+the Group L2 (8 MiB physical), reset mode 0, 64-byte partition granule, and a
+2,000,000-cycle Profile command timeout. These values are simulator modelling
+choices, `由后续规格冻结`; they are not RTL/PPA commitments.
+
+## CLI: source compilation and independent replay
+
+```bash
+# Source convenience path: compile, persist, load, and run.
+python -m pipeline_validator -w pow \
+  --input-binding Y=0x100000:524288:rw
+
+# Compile source only. Writes review.json plus sibling executable/source/target dumps.
+python -m pipeline_validator --ir-file path/to/workload.mlir \
+  --input-binding Y=0x100000:131072:rw \
+  --compile-only --compiled-output artifacts/review.json
+
+# Replay the artifact in an independent process; no source or compiler import is needed.
+python -m pipeline_validator --compiled-file artifacts/review.json \
+  --hw-config artifacts/review.target.yaml \
   --input-binding Y=0x100000:131072:rw
 
-# full example catalog and modification workflow: examples/README.md
+# Override one existing mode only while compiling source.
+python -m pipeline_validator --ir-file path/to/workload.mlir \
+  --profile-bytes l1:1=53248:12288 --compile-only
 
-### Profiling / Trace Visualization
-
-The validator can emit **Perfetto / Chrome `chrome://tracing`-compatible**
-trace files for visual Gantt-chart + counter inspection. By default,
-`--trace-json` / `--trace-html` only enable the lightweight control-flow
-trace (engine jobs, task/tile lifecycle, stream-queue counters). Pass
-`--memory-trace` to add the PR 5 memory-detail lanes/counters/flows and
-to populate `WorkloadReport.memory`.
-
-```bash
-# write a Perfetto-loadable control-flow trace.json
-python -m pipeline_validator -w pow --input-binding Y=0x100000:524288:rw \
-  --trace-json trace.json
-
-# add PR 5 memory-detail lanes/counters/flows + report.memory
-python -m pipeline_validator -w pow --input-binding Y=0x100000:524288:rw \
-  --memory-trace --trace-json trace-memory.json --trace-html trace-memory.html
+# Print author source IR only; this does not compile or run.
+python -m pipeline_validator --ir-file path/to/workload.mlir --print-ir
 ```
 
-**Lane hierarchy** (PR 5): control-flow lanes are always present once
-tracing is enabled. The memory-detail lanes/counters/flows below require
-`--memory-trace`. Directional group-transfer summaries are always present;
-their clickable `flow_id` handoff to per-leg slices only appears with
-`--memory-trace`. Concurrent summaries take the first free visual slot in
-their direction; `#{n}` identifies a display slot, not a hardware channel.
-Within each `Tile{n}` process, the dataflow region has a fixed visual order:
-`MFE_LD{i}` → `BOA` / `EVU` / `MFE` / `USE` → `MFE_ST{j}`.
+Other current controls remain orthogonal to the source/artifact mode:
 
-| Process | Thread lane | Contents |
-|---|---|---|
-| Device | `Slot:{i}` | `context_submit` → `context_done` windows |
-| TileGroup | `Task` | group task begin→end |
-| TileGroup | `TileRole:{role_id}` | role dispatch→complete window |
-| TileGroup | `Scheduler:L2` | admission wait/retry/first-action instants, `phase_aggregate`, `transfer_cancelled` |
-| TileGroup | `HBM → L2 Input #{n}` | Prefetch summaries; bars are named `context / buffer` |
-| TileGroup | `L2 → HBM Output #{n}` | Storeback summaries; bars are named `context / buffer` |
-| TileGroup | `Memory:HBM` | `hbm_bind`/`hbm_unbind` instants, `hbm_allocated_bytes`, `hbm_free_bytes`, `hbm_outstanding`, `hbm_credits` |
-| TileGroup | `Memory:L2 Read` | `l2_read`, `l2_cache_lookup` leg slices |
-| TileGroup | `Memory:L2 Write` | `l2_write`, `l2_cache_fill` leg slices |
-| TileGroup | `Memory:L2 State` | L2 capacity/cache/MSHR counters, `{l2,hbm}_alloc`/`{l2,hbm}_release` instants |
-| TileGroup | `L2 Bank:{n}` | `l2_bank_allocated_bytes` |
-| TileGroup | `Global DMA Ch:{n}` | per-channel leg slices + `busy` counter |
-| TileGroup | `HBM Ch:{n}` | per-channel leg slices + `busy` counter |
-| TileGroup | `NoC:VC{n}` | `noc_occupancy`, `noc_credit_available`, NoC leg slices |
-| TileGroup | `StreamQ:{id}` | `occupancy`, `credit_available` |
-| Tile{n} | `UCE CTX{i}` | UCE state slices (`ACCEPT`/`READY`/`WAIT_*`/`DONE`) |
-| Tile{n} | `UCE` | `active_context_count`, `ready_context_count` |
-| Tile{n} | `BOA`/`EVU`/`MFE`/`USE` | engine job slices |
-| Tile{n} | `MFE_LD{i}` / `MFE_ST{j}` | MFE lane slices |
-| Tile{n} | `Local DMA Load`/`Store` | tile-local DMA leg slices |
-| Tile{n} | `Memory:L1 Read` | `l1_read`, `l1_cache_lookup` leg slices |
-| Tile{n} | `Memory:L1 Write` | `l1_write`, `l1_cache_fill` leg slices |
-| Tile{n} | `Memory:L1 State` | L1 capacity/cache counters, `l1_alloc`/`l1_release` instants |
-| Tile{n} | `L1 Bank:{n}` | `l1_bank_allocated_bytes` |
-| Tile{n} | `MSHR` | `l1_mshr_*` counters |
-| Tile{n} | `Lifecycle` | `frame_prepare`/`frame_bind`/`frame_release` instants |
+| Option                                           | Meaning                                                                     |
+| ------------------------------------------------ | --------------------------------------------------------------------------- | --- | -------------------------------------------- |
+| `-l`, `--list`                                   | list built-in workloads                                                     |
+| `-w NAME` / `-a`                                 | compile/run one or all built-ins (`-a` cannot use one explicit output path) |
+| `--hw-config PATH` / `--hw-override KEY=VALUE`   | select or override `HardwareConfig`                                         |
+| `--sim-override KEY=VALUE`                       | override `SimConfig`, including nested `device.*`/`group.*` capacities      |
+| `--group-policy s0                               | s1                                                                          | s2` | select the runtime Group ready-action policy |
+| `--context-mode N`                               | exact Tile UCE contexts per Tile                                            |
+| `--device-context-mode N`                        | CPU outstanding Group-launch limit                                          |
+| `--max-cycles N`                                 | execution cycle cap                                                         |
+| `--json` / `--report PATH`                       | choose report encoding/destination                                          |
+| `--trace-json`, `--trace-html`, `--memory-trace` | select trace outputs/detail                                                 |
 
-**Counter directory** (all change-only — a sample is emitted only when the
-value changes, not every cycle):
+`--compile-only`, `--compiled-output`, and `--profile-bytes` are source-mode
+options. `--compiled-file` is mutually exclusive with source input,
+`--compile-only`, `--compiled-output`, `--profile-bytes`, and `--print-ir`.
+Without `--compiled-output`, artifacts use
+`examples/artifacts/compiled/<artifact_hash>.json`. Existing files are reused
+only when their contents match; the CLI refuses to overwrite different
+content.
 
-- HBM: `hbm_allocated_bytes`, `hbm_free_bytes`, `hbm_outstanding`, `hbm_credits`.
-- L2: `l2_allocated_bytes`, `l2_free_bytes`, `l2_largest_free_extent`,
-  `l2_live_allocations`, `l2_pending_release`, `l2_bank_allocated_bytes`,
-  `l2_cache_resident_bytes`, `l2_cache_resident_lines`, `l2_mshr_*`.
-- L1 (per tile): the `l1_*` mirror of the L2 set above.
-- NoC: `noc_occupancy`, `noc_credit_available` per VC.
-- Channels: `busy` (0/1) per Global DMA / HBM channel.
-- Stream queues: `occupancy`, `credit_available` per queue.
-- UCE: `active_context_count`, `ready_context_count` per tile.
+For `review.json`, the siblings are:
 
-**Flows**: every memory transaction is a Chrome flow. Each transfer leg
-emits an `X` slice named after its `TransferLegKind` (e.g. `hbm_read`,
-`noc_response`, `l2_read`, `local_dma`); the first completed leg opens
-the flow (`s`), intermediate legs step it (`t`), and the last leg closes
-it (`f`). Each directional `context / buffer` summary carries the same
-`flow_id`, so clicking it in the HTML viewer highlights all legs of that
-transaction across lanes and draws connecting arrows.
+- `review.exec.txt`: the complete strict executable/package dump;
+- `review.compiled.mlir.txt`: inspectable generic MLIR with compiler-inserted
+  ordinary awaits, Profile commands, maintenance controls, instruction IDs,
+  and source references;
+- `review.target.yaml`: a complete `HardwareConfig` schema-2 snapshot.
 
-**Sampling fidelity**: leg slices are emitted when a leg *completes*
-(using its real accept/complete cycles), so cancelled legs never leave a
-fabricated prediction. Counters are change-only. Collapsed-leg fidelities
-(`timing_only`, `runtime`) produce one leg per transaction, so a flow
-degrades to a single `s`+`f` pair. `Tracer.assert_well_formed()` (called
-by the test suite) enforces: metadata coverage, no consecutive duplicate
-counter samples, closed B/E pairs, one `s`/one `f` per flow, and the
-required identity args on every leg slice.
+The target YAML does **not** snapshot `SimConfig`. Compiled replay must also use
+the same static simulation capacities used at compile time:
+`context_count`, `device_context_count`, Device pending/completion capacity,
+and Group active/pending/action/quota/scan/event/inflight/prefetch/store/
+dispatch capacities. Supply those again with `--context-mode`,
+`--device-context-mode`, and matching `--sim-override` values.
+Trace/fidelity/max-cycles/timing knobs and Group scheduling policy are not in
+the static target fingerprint.
 
-**Report reconciliation**: with `--memory-trace`, `WorkloadReport.memory`
-exposes `l2_peak_allocated_bytes`, `l1_peak_allocated_bytes` (per tile),
-`hbm_outstanding_peak`, and `hbm_used_bytes` read from the group snapshot
-(never reconstructed from the trace); tests compare these against the
-trace counter maxima. Without `--memory-trace`, the report's `memory`
-field is an empty dict.
+## Profiling, dumps, and observability
 
-## Tests
+`--trace-json` emits Perfetto/Chrome trace JSON; `--trace-html` emits the
+standalone viewer. `--memory-trace` additionally records per-leg memory
+traffic, capacity counters, and report memory peaks.
 
-```bash
-python -m pytest pipeline_validator/tests/ -v
-```
+Profile/control observability includes:
 
-## Workloads
+- `profile_command` and every `profile_step`;
+- `profile_member_request`/`profile_member_ack` with command, member,
+  transaction, generation, stage, status, binding, and `source_ref`;
+- ordinary `nexus.await`/`nest.await` as separate instructions rather than
+  hidden drains;
+- requested/resolved L1 modes and L1 generation on Task lease events;
+- requested/resolved L2 modes in compiled `call_bindings`, plus active L2 mode
+  and generation in the Profile snapshot.
 
-| Workload | Roles            | Validates                                                  |
-| -------- | ---------------- | ---------------------------------------------------------- |
-| `pow`    | single (4 tiles) | EVU elementwise pow + MFE load/store + pipelined group DMA |
+Memory lifetime observability includes `arena_reserve`, `arena_retire`,
+`buffer_view_invalidate`, `task_lease_acquire`, and `task_lease_release`,
+along with per-pool/per-bank reserved, live-view, padding, system-reserved,
+Cache, and free bytes. Reports expose bounded `profile`, `arenas`, and
+`task_leases` snapshots plus `compiled_artifact_hash` and `registry_hash`.
 
-Each workload declares an **expected PMU fingerprint** (e.g. EVU-active,
-low stream stall). The report checks the measured fingerprint against
-these expectations and prints `PASS` / `FAIL`.
+Every executable instruction has an `instruction_id` and `SourceRef`
+(`source_name`, symbol, body-op index, op name). Compiler-generated controls
+also record `generated_by` and a reason. xDSL source locations do not invent
+file line numbers when none exist.
 
-Profiled Gather reports `gather_requests`, `gather_l1_hits`,
-`gather_l2_hits`, `gather_hbm_misses`, `gather_mshr_merges`,
-`gather_mshr_stalls`, `gather_reorder_wait_cycles`, and `gather_bytes`.
-Reports automatically check request conservation and zero MSHR/transfer/
-allocation leakage. `gather_fidelity` is explicitly
-`deterministic_profiled_not_address_or_value_accurate`; these counters are
-not measured cache hit rates from real indices.
+Transfer legs are emitted at completion using real accept/complete cycles;
+cancelled predictions are not fabricated. Chrome `s`/`t`/`f` flow events join
+the legs of a transaction. Counters are change-only. In collapsed
+`timing_only`/`runtime` modes a transaction has one leg and the flow reduces to
+an `s`+`f` pair.
+
+## Workloads and reports
+
+Built-in workloads and `--ir-file` source follow the same compile/persist/
+load/run boundary. `WorkloadInfo` is embedded in the artifact, so
+`--compiled-file` reporting does not rebuild a source `ModuleOp`.
+
+Reports retain engine/PMU fingerprints and profiled Gather request counters.
+The label `deterministic_profiled_not_address_or_value_accurate` means the hit/
+miss sequence comes from `tile.profiled.access`; it is not a measured cache hit
+rate. Byte equality claims require the explicit `full_memory` + `ByteStore`
+path described above.
 
 ## Files
 
-```
+```text
 pipeline_validator/
-├── __init__.py          # public API
-├── config.py            # HardwareConfig / WorkloadConfig / SimConfig
-├── hardware_config.yaml # HardwareConfig 默认值（分组 YAML 单一事实来源）
-├── dialects/            # xDSL `elenor` dialect (function-call style: tile.*/nest.* ops)
-├── workload_ir.py       # parse / print / verify / load custom-assembly IR
-├── workload_builders.py # direct xDSL workload builders (pow + identity)
-├── execution_ir.py      # private execution DTOs for the hot path
-├── ir_lowering.py       # xDSL -> execution DTO lowering (1:1 walk of IR body)
-├── stream_queue.py      # StreamQueue (credit, backpressure, EOS, PMU)
-├── engines.py           # BOA/EVU/MFE/USE timing models
-├── pmu.py               # PMU counters + unique stall attribution
-├── tile.py              # ComputeTile + TileUCE controller
-├── tile_group_sequencer.py  # TileGroupSequencer controller
-├── tile_group.py        # TileGroup (sequencer + 4 tiles + phase aggregation)
-├── simulator.py         # cycle-accurate driver
-├── workloads.py         # PowWorkload
-├── report.py            # PMU fingerprint + pass/fail checks
-├── cli.py               # CLI entry point
-├── tests/               # pytest suite
-└── environment.yml      # conda env spec
+├── compiler/
+│   ├── __init__.py          # public compile_program only
+│   ├── api.py               # compile pipeline and inspectable compiled-source dump
+│   ├── lowering.py          # private source → immutable execution DTO lowering
+│   ├── resources.py         # striped layouts, capabilities, static budgets
+│   └── profile_pass.py      # Profile binding, awaits, maintenance/control
+├── compiled_program.py      # immutable package, strict codec, executable dump
+├── execution_verifier.py    # read-only package semantic verification
+├── loader.py                # CompiledProgram + actual bindings → LoadedProgram
+├── profiles.py              # Registry, contracts, layouts, control descriptors
+├── config.py                # HardwareConfig / SimConfig and schema-2 YAML
+├── hardware_config.yaml     # bundled target/Profile defaults
+├── dialects/elenor.py       # xDSL custom-assembly dialect
+├── workload_ir.py           # source parse / print / verify
+├── execution_ir.py          # frozen compiler/Loader/runtime DTOs
+├── memory/
+│   ├── arena.py             # owner-scoped striped Arena pools and views
+│   ├── profile_controller.py # unique writer, ACK protocol, maintenance/recovery
+│   ├── byte_store.py        # sparse optional full-memory byte oracle
+│   ├── cache.py             # profiled Cache and maintenance
+│   └── transfer.py          # generation-aware transfer/cancel isolation
+├── runtime/group_port.py    # bounded root/control message adapter
+├── group_scheduler.py       # finite ready-action scheduler
+├── tile_group.py            # root/Grid admission and retirement
+├── tile.py                  # per-Tile Task admission/UCE
+├── simulator.py             # LoadedProgram-only cycle driver
+├── report.py                # report from immutable metadata + real snapshots
+└── cli.py                   # source compile and compiled replay entry point
 ```
-````

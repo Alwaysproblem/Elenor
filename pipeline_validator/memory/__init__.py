@@ -5,6 +5,7 @@ from __future__ import annotations
 from .allocator import (
   AdmissionFailure,
   AdmissionFailureKind,
+  AdmissionWaitReason,
   AllocationHandle,
   AllocationPlan,
   AllocationRequest,
@@ -44,6 +45,7 @@ __all__ = [
   "L2SRAM",
   "AdmissionFailure",
   "AdmissionFailureKind",
+  "AdmissionWaitReason",
   "AllocationHandle",
   "AllocationPlan",
   "AllocationRequest",

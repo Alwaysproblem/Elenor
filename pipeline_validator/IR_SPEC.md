@@ -1,110 +1,172 @@
-# ELENOR Pipeline Validator — IR Specification
+# ELENOR Pipeline Validator — Source and Executable IR Specification
 
-This document specifies the function-call style xDSL dialect used by the
-pipeline validator. The design follows `reference.mlir` at
-`/reference.mlir`.
+This document specifies the function-call-style xDSL source dialect, its
+explicit compiler boundary, and the runtime contracts carried by the immutable
+executable. Source IR is never executed directly.
 
-## 1. Module Structure
+## 1. Module Structure and Execution Boundary
 
-A valid module is one of two shapes:
+A valid source module has one of two shapes.
 
-**Legacy** (exactly one `nest.context`, no `nexus.program`):
-
-```mlir
-builtin.module {
-  tile.program @pow_4k_tile { ... }    // tile program definition
-  nest.context @pow_task placement = 15 { ... }  // tile group context
-}
-```
-
-**Model** (exactly one `nexus.program` + one or more `nest.context`):
+**Standalone** contains exactly one `nest.context` and no `nexus.program`.
+This complete zero-dispatch module is executable after explicit compilation
+and loading:
 
 ```mlir
 builtin.module {
-  tile.program @pow_4k_tile (%task : !nest.task, %l2_buf : !nest.l2_buffer<4x128x128xbf16>) { ... }
-  nest.context @pow_task (%Y : !nest.global_memref<4x128x128xbf16>) placement = 15 { ... }
-  nexus.program @run_pow (%Y0 : !nest.global_memref<4x128x128xbf16>, %Y1 : !nest.global_memref<4x128x128xbf16>) { ... }
+  nest.context @empty placement = 1
+    resource_contract = #nest.context_resources<
+      l2_mode = 0,
+      allowed_profiles = [0, 1, 2],
+      logical_tasks = 0,
+      l2_spm_bytes = 0,
+      requested_contexts_per_tile = 1
+    > {
+    nest.return
+  }
 }
 ```
 
-### 1.1 `nest.context @name (%Y : !nest.global_memref<...>) placement = M context = N { ... }`
-
-Defines one Tile Group context. The `placement` property is the Tile Group
-placement mask (integer bitmask). This is a **group-level** constraint: the
-CPU/IR does NOT specify physical Tile IDs or Hardware Context IDs, except
-that `nest.context` and `nest.dispatch.tasks.async` may carry an optional
-`context = N` (see §3.5 for dispatch semantics).
-
-- **Semantics**: The placement mask selects which placement slots in the
-  Tile Group participate in dispatches. The tile-local scheduler maps
-  logical tasks to physical tiles/contexts at runtime (reference.mlir
-  §27-33, §188-189).
-- **Group context-slot affinity**: optional `nest.context context = N` is
-  carried by the CPU message and honored by the Group port's active-context
-  table. The range is `0..group.active_context_capacity-1`; an unavailable
-  occupied slot backpressures admission. It is neither a Group ID nor a
-  physical Tile context. Standalone single-context launches accept only slot 0.
-- **Validator mapping**: In this validator the mapping is 1:1 (logical
-  task i → tile i), so `placement = 0xF` (4 bits set) with `task.range
-0..4` dispatches 4 tasks across 4 tiles.
-- **Verifier**: placement must be non-zero; `context = N` (if present)
-  must be >= 0 and below the Group port's active-context capacity.
-
-### 1.2 `tile.program @name (%task : !nest.task, %global : !nest.global_view<...>, %l2 : !nest.l2_buffer<...>) { ... }`
-
-Defines one tile program. The body contains tile-level async engine ops,
-`tile.await`, `tile.free`, `tile.signal`, and `tile.return`. The program is referenced
-by `nest.dispatch.tasks.async` via its symbol name.
-
-The entry block declares the program's data formals in one fixed order:
-the **first** formal is `!nest.task`; zero or more
-`!nest.global_view<...>` formals follow; zero or more
-`!nest.l2_buffer<...>` formals come last. Global/L2 formals may not
-interleave. Dispatch `globals(...)` bind the global prefix positionally;
-`bindings(...)` alone binds all L2 formals positionally. `ins(...)` and
-`outs(...)` declare actual L2 read/write sets, not parameter positions.
-`tile.subview` remains L2-only. `tile.gather.global.async` is the only
-tile-side consumer of a global-view formal in PR 4.
-
-### 1.3 `nexus.program @name (%a : !nest.global_memref<...>) { ... }`
-
-Model entry point. A model-mode module contains exactly one
-`nexus.program`. The body is a linear device-level program consisting of
-`nexus.submit_context.async`, `nexus.await`, and `nexus.return` (ending
-with return). Entry block args are named global inputs (each must carry a
-non-empty SSA name, e.g. `%Y0`). They flow as real SSA values:
-`nexus.submit_context.async @ctx(%Y0)` binds each arg to a `nest.context`
-formal by position; the context body subviews the formal and moves it
-with explicit `src`/`dst` transfer ops. Bytes are derived from
-view/buffer shapes, not from a `bytes` property.
-
-**CPU/hardware separation**: `CpuDeviceController` in `device.py` interprets
-the CPU body. It uses only `DevicePort.try_submit` and `poll_completions`;
-`runtime/group_port.py` owns concrete hardware slots/sequencer references.
-`Simulator` only coordinates CPU-before-Group and completion-after-Group
-cycle phases. A completion in cycle N can wake CPU dependencies in N+1.
+**Model** contains exactly one `nexus.program` and one or more
+`nest.context` definitions. This complete module is also executable after
+explicit compilation and loading:
 
 ```mlir
-%a = nexus.submit_context.async @producer(%input, %middle) : !nexus.event<"a">
-%c = nexus.submit_context.async @consumer(%middle, %out) depends_on(%a) : !nexus.event<"c">
-%b = nexus.submit_context.async @independent(%other) : !nexus.event<"b">
+builtin.module {
+  nest.context @empty(%arena : !nest.global_memref<32xbf16>) placement = 1
+    resource_contract = #nest.context_resources<
+      l2_mode = 0,
+      allowed_profiles = [0, 1, 2],
+      logical_tasks = 0,
+      l2_spm_bytes = 0,
+      requested_contexts_per_tile = 1
+    > {
+    nest.return
+  }
+  nexus.program @run(%arena : !nest.global_memref<32xbf16>) {
+    %done = nexus.submit_context.async @empty(%arena)
+      : !nexus.event<"done">
+    nexus.await %done
+    nexus.return
+  }
+}
+```
+
+### 1.1 `nest.context`
+
+Grammar:
+
+```text
+nest.context @name(%global-formals...)
+  placement = M [context = N] [completion = "event"]
+  resource_contract = #nest.context_resources<...> { ... }
+```
+
+`placement` is a nonzero Tile mask. The current validator maps logical Task
+$i$ to selected Tile $i$, so every non-empty dispatch range count must equal
+`popcount(placement)`. Optional `context=N` is a model-mode Group execution
+slot affinity bounded by `group.active_context_capacity`; it is not a Tile ID
+or Tile UCE context. The standalone driver uses Group slot 0.
+
+The mandatory resource contract is L2-only:
+
+```text
+#nest.context_resources<
+  l2_mode = N,
+  allowed_profiles = [N, ...],
+  logical_tasks = N,
+  l2_spm_bytes = N,
+  requested_contexts_per_tile = R
+  [, l2_cache = {required = bool, access = "none"|"read"|"read_write",
+                 bypass = "allowed"|"forbidden", target_bytes = N}]
+>
+```
+
+`l2_mode` must belong to the non-empty, duplicate-free
+`allowed_profiles`. `logical_tasks` is the sum of all dispatch range counts.
+`l2_spm_bytes` is the whole root-Arena reservation, including layout padding;
+zero is legal when there are no L2 buffers. `requested_contexts_per_tile` is a
+positive R lease bound and may not exceed `SimConfig.context_count`.
+
+### 1.2 `tile.program`
+
+Grammar:
+
+```text
+tile.program @name(%task : !nest.task, %globals..., %l2-buffers...)
+  resource_contract = #tile.resources<...> { ... }
+```
+
+The first formal is `!nest.task`; zero or more
+`!nest.global_view<...>` formals follow, then zero or more
+`!nest.l2_buffer<...>` formals. The mandatory contract is:
+
+```text
+#tile.resources<
+  allowed_profiles = [N, ...],
+  tile_l1_spm_bytes_per_context = N
+  [, l1_cache = {required = bool, access = "none"|"read"|"read_write",
+                 bypass = "allowed"|"forbidden", target_bytes = N}]
+  [, l2_cache = {required = bool, access = "none"|"read"|"read_write",
+                 bypass = "allowed"|"forbidden", target_bytes = N}]
+>
+```
+
+The allowed L1 set is non-empty and duplicate-free.
+`tile_l1_spm_bytes_per_context` is the whole per-Task L1 Arena reservation,
+including striped padding. Cache declarations are hard capabilities;
+`target_bytes` is a shared-cache hint, not a private allocation or minimum
+quota.
+
+### 1.3 `nexus.program`
+
+The model entry is linear: `nexus.submit_context.async`, `nexus.await`, and
+one terminal `nexus.return`. Entry block arguments are named
+`!nest.global_memref` inputs. Submit actuals bind Context formals positionally,
+while external HBM bindings are matched by entry-argument name at load time.
+
+The following is a **Device-body fragment**, not a standalone module:
+
+```mlir
+%a = nexus.submit_context.async @producer(%input, %middle)
+  : !nexus.event<"a">
+%c = nexus.submit_context.async @consumer(%middle, %out) depends_on(%a)
+  : !nexus.event<"c">
+%b = nexus.submit_context.async @independent(%other)
+  : !nexus.event<"b">
 nexus.await %b, %c
 ```
 
-Submit acceptance consumes bounded CPU pending metadata. WAIT_DEPS does not
-consume Group slots, L2 or Tile resources; the CPU scans past dependent
-pending requests to admit independent work. `device_context_count` limits
-hardware-admitted outstanding requests, not WAIT_DEPS metadata.
-`context_count` is independently the exact physical Tile context count;
-there is no automatic max() or slot-index binding.
+Submit dependencies and compiler-derived cross-root RAW/WAR/WAW hazards are
+preserved in the executable. WAIT_DEPS consumes CPU pending metadata but no
+Group slot, Arena, event table, UCE, or engine resource. Completion means the
+entire root is retired, not merely submitted or at its final PC.
 
-The Group port retains accepted requests across temporary L2/event-budget
-admission waits. L2 admission atomically plans every declared allocation;
-failure leaves no partial L2/L1/UCE/stream/DMA state. Strict FIFO remains the
-capacity policy. L2 final-free and event reservation retirement independently
-wake their waiters. Permanently impossible budgets fail, not wait forever.
-The return event denotes full context completion and safe cleanup, not
-submission, admission, or PC reaching the final instruction.
+### 1.4 Source → immutable executable → runtime
+
+The formal API is:
+
+```python
+from pipeline_validator.compiler import compile_program
+from pipeline_validator import load_program, Simulator
+
+compiled = compile_program(module, hw, sim, source_name="input.mlir")
+loaded = load_program(compiled, hw, sim, actual_bindings=bindings)
+result = Simulator(hw, sim).run(loaded)
+```
+
+`compile_program(ModuleOp, HardwareConfig, SimConfig, ...)` is the sole public
+source compiler entry. It returns a deeply immutable `CompiledProgram`.
+`load_program` verifies and binds that artifact without importing the compiler.
+`Simulator.run` accepts only `LoadedProgram`; source `ModuleOp`, private
+execution DTOs, and unloaded `CompiledProgram` are rejected.
+
+The compiler specializes each submit call from a clean Context template,
+derives static dependencies/effects/layouts, binds L1/L2 Profiles, inserts
+ordinary awaits plus explicit configuration/maintenance controls, assigns
+content identities, and seals a strict artifact. The Loader is read-only: it
+never recompiles source, mutates the graph, inserts a missing edge, or performs
+a runtime Profile choice.
 
 ## 2. SSA Types
 
@@ -125,9 +187,9 @@ single tile. Produced by: `tile.load.async`, `tile.store.async`,
 ### 2.3 `!nest.l2_buffer<DxDx...xdtype>`
 
 Context-owned L2 buffer, shape-typed: e.g.
-`!nest.l2_buffer<4x128x128xbf16>`. Produced by `nest.alloc`. The L2 slot
-id (used by the group DMA latency model and the L2 allocator) lives on
-the defining `nest.alloc`'s `slot` attribute, not in the type.
+`!nest.l2_buffer<4x128x128xbf16>`. Produced by `nest.alloc`. The defining
+operation's `slot` is the compiled buffer/layout identity; it is not encoded
+in the type.
 
 ### 2.4 `!nest.task`
 
@@ -173,6 +235,11 @@ Host-visible global input, shape-typed: e.g.
 
 ## 3. nest.\* Context-Body Ops
 
+Unless a block is explicitly called a complete module, the MLIR snippets in
+§§3–4 are operation/body fragments. They assume legal enclosing
+`resource_contract` attributes, symbol definitions, SSA producers, and (for
+dispatch) a mandatory `l1_mode`; they are not standalone executable files.
+
 ### 3.1 `nest.alloc`
 
 ```mlir
@@ -181,11 +248,13 @@ Host-visible global input, shape-typed: e.g.
     : !nest.l2_buffer<4x128x128xbf16>
 ```
 
-Allocates a context-owned L2 buffer. `slot` is the L2 object id (used by
-the DMA latency model and L2 allocator); `role` is `in`/`out`/`inout`;
-`shape`/`dtype` must match the result type; `alignment` is optional. No
-runtime action (the L2 slot is allocated lazily by the DMA latency model
-in `full_memory` fidelity).
+Declares a Context-owned L2 buffer. `slot` is the compiled buffer/view id;
+`role` is `in`/`out`/`inout`; `shape`/`dtype` must match the result type;
+`alignment` is optional. The compiler places every declaration in the
+Context's striped L2 `ArenaLayout`. Root admission atomically reserves the
+whole Arena, including padding. A generated `BIND_L2_VIEW` action binds this
+buffer's valid-byte segments at its compiled lifetime start; the source op is
+not a standalone dynamic allocation.
 
 ### 3.2 `nest.subview`
 
@@ -240,7 +309,8 @@ retain WAW order; independent destination ranges are not implicitly serialized.
 ### 3.6 `nest.dispatch.tasks.async`
 
 ```mlir
-%grid, %inrel, %out = nest.dispatch.tasks.async @pow_4k_tile context = 1
+%grid, %inrel, %out = nest.dispatch.tasks.async @pow_4k_tile
+    l1_mode = 0 context = 1
     tasks(%t) globals() bindings(%buf) ins(%buf) outs(%buf)
     signal_policy {
       input_released = #nest.aggregate<all_tasks>,
@@ -251,12 +321,16 @@ retain WAW order; independent destination ranges are not implicitly serialized.
 ```
 
 The tile program is referenced by symbol. All four groups `globals(...)`,
-`bindings(...)`, `ins(...)`, and `outs(...)` are mandatory, including when
-empty. Old dispatch syntax without `bindings` is rejected, not inferred.
-`globals` binds global-view formals; `bindings` is the sole positional
+`bindings(...)`, `ins(...)`, and `outs(...)` are mandatory and print even when
+empty. `globals` binds global-view formals; `bindings` is the sole positional
 binding for all L2 formals. Each count and shape/dtype must match exactly.
 Each L2 actual must be a `nest.alloc` result in this context body.
 Placement comes from the enclosing `nest.context`, not this op.
+
+`l1_mode` is mandatory and must belong to the referenced Tile Program's
+`allowed_profiles`. It is the dispatch baseline request, not a mutable runtime
+override. The compiler may resolve the call to the already-active compatible
+L1 mode; the requested and resolved modes are both frozen in the executable.
 
 `ins` and `outs` must each be duplicate-free subsets of `bindings`, exactly
 equal to the program's actual read/write effects mapped to actual buffers.
@@ -293,11 +367,10 @@ Context are location details, never phase-aggregation identities.
 Optional `context = N` pins every task of this dispatch to the
 tile-local UCE context index `N` — the same index on every tile in the
 placement, not a physical tile id. Omitted = first available context.
-When the pinned context is occupied the dispatch waits for it to be
-released (`dispatch_wait` stall), reusing the existing backpressure
-path — no new fault mode. Legal range is `0..context_count-1`; an
-out-of-range pin is rejected at task load (not at IR verify) to avoid
-a silent deadlock to the cycle cap.
+When the pinned context is occupied, that Tile waits with `WAIT_SLOT`;
+other Tiles and eligible Routes may continue. The legal range is
+`0..SimConfig.context_count-1`; compilation and loading reject an
+out-of-range static pin instead of allowing a runtime deadlock.
 
 ### 3.7 `nest.collective.async`
 
@@ -313,8 +386,9 @@ Collective engine op (reduce/broadcast/multicast). Produces one event.
 nest.release %buf depends_on(%reader_inrel, %prefetch_ev, %store_ev)
 ```
 
-Reclaims the context-owned L2 buffer. For **every** allocation role, the
-dependency SSA set must be exactly `R(buffer) ∪ P(buffer) ∪ S(buffer)`:
+Invalidates the Context-owned L2 buffer view after its required closure. For
+**every** allocation role, the dependency SSA set is exactly
+`R(buffer) ∪ P(buffer) ∪ S(buffer)`:
 
 - `R`: `input_released` of every distinct dispatch that actually reads it.
 - `P`: every prefetch completion into this allocation.
@@ -328,12 +402,13 @@ Role `"in"` forbids Tile writes; `"out"`/`"inout"` require a real Tile
 writer and at least one HBM Store.
 
 Every allocation has exactly one release before `nest.return`; no binding,
-prefetch, Store, or other buffer use may appear after that release.
-Runtime preflights all events, owner, role, live handle, allocation/launch
-generation, reader/writer phases, remaining pins, and in-flight transfers
-before mutating any pin. Failed preflight cannot partially sweep writers.
-Readwrite pins require both phases independently. Only successful allocator
-final-free changes capacity and wakes admission.
+prefetch, Store, or other buffer use may appear after it. Runtime preflights
+events, owner, role, Arena/allocation/Profile generations, reader/writer
+phases, remaining pins, and in-flight transactions before mutation. Failed
+preflight cannot partially sweep writers. A successful release invalidates
+only this L2 view. It does not change the Arena free map, return root capacity,
+or wake another root; only safe root-Arena retirement does so after the whole
+Context closes.
 
 ### 3.9 `nest.await`
 
@@ -391,12 +466,12 @@ dtype must match the source.
     : !tile.l1_buffer<128x128xbf16>
 ```
 
-Declares a tile-local L1 buffer. `shape`/`dtype` must match the result
-type; `alignment` is optional. All declarations are allocated as one bundle
-at dispatch admission, not when the Tile PC reaches their source position.
-`tile.free` may end an allocation's lifetime early; otherwise it remains live
-until automatic terminal/reset cleanup. A later `tile.alloc` declaration in
-the same program is still part of the initial bundle, not a dynamic allocation.
+Declares a Tile-local L1 buffer. `shape`/`dtype` must match the result type;
+`alignment` is optional. The compiler places all declarations in the Task's
+striped `ArenaLayout`, with proven non-overlapping lifetimes eligible for
+static Slot/offset reuse. Task admission reserves the whole Arena atomically.
+When the Tile PC reaches `tile.alloc`, `ALLOC_L1` binds that buffer's
+valid-byte view to its compiled Slot. This is not a dynamic pool allocation.
 
 #### 4.2.1 `tile.free`
 
@@ -407,35 +482,27 @@ tile.await %loaded
 tile.free %scratch
 ```
 
-Synchronous one-operand release of a current-program `tile.alloc` result.
+Synchronous one-operand invalidation of a current-program `tile.alloc` view.
 There is no result event, type suffix, implicit wait, or `depends_on` group.
-Free consumes a normal UCE instruction issue and returns the allocation's
-L1 extents immediately in runtime/full_memory. This permits a subsequent
-dispatch to reuse capacity while the releasing program continues.
+Free consumes a normal UCE instruction issue but does **not** return the
+parent Task Arena's extents or R lease. Thus another owner cannot gain
+capacity merely because one local view was freed.
 
 Before free, every preceding load destination, Store source, or Gather
 indices/destination access to that allocation must have been awaited by SSA
 event identity. Unrelated asynchronous memory operations do not block it.
-BOA/EVU/Pow currently have opaque timing descriptors without L1 operands:
-all preceding such compute events must also have been awaited. The programmer
-remains responsible for their implicit data lifetime; no numerical use-def
-analysis is claimed. Later explicit load/store/Gather use, double free,
-forward/foreign allocation references, and L2/global operands are rejected.
-Freeing an unused local allocation is valid.
+BOA/EVU/Pow currently have opaque timing descriptors without L1 operands, so
+all preceding such compute events must also have been awaited. Later explicit
+load/store/Gather use, double free, forward/foreign references, and L2/global
+operands are rejected. Freeing an unused local allocation is legal.
 
-Runtime separately preflights owner, tile/UCE/task/launch identity, allocator
-generation, pins, active/shadow frame binding, queued/active engine accesses,
-and unfinished transfers before any mutation. It removes the allocation
-from live context/terminal-cleanup bookkeeping and invalidates only its frame
-slot; other slots and the frame generation are preserved. Failed free faults
-through the existing Tile/group reset path. Timing-only enforces logical
-lifetime without pretending to return physical capacity.
-
-This operation neither frees L2 (`nest.release` owns that lifetime), global
-bindings, nor Gather cache/MSHR resources. It does not change eager admission
-or add an L1 wait queue: software must order a capacity-dependent dispatch
-after the relevant free. Existing programs may omit explicit frees and keep
-automatic program-terminal cleanup.
+Runtime preflights owner, Tile/UCE/Task/launch identity, Arena/allocation/
+Profile generations, pins, active/shadow Frame binding, queued/active engine
+accesses, and unfinished transfers. It invalidates only the named Frame Slot
+view; other Slots and the Frame generation remain. Timing-only still enforces
+the logical lifetime. The whole Task Arena and R lease return only after safe
+Task retirement or confirmed cancellation; unfreed views are invalidated
+during that retirement.
 
 ### 4.3 `tile.load.async`
 
@@ -489,8 +556,7 @@ rather than overwriting).
 ```mlir
 %done = tile.gather.global.async %table
     indices(%indices_l1) into %gather_dst
-    result_bytes = 256 cache_min_bytes = 16384
-    cache_target_bytes = 65536 l1_mshr_hint = 16 {
+    result_bytes = 128 cache_target_bytes = 65536 l1_mshr_hint = 16 {
   tile.profiled.access id = "r0" outcome = "L1_HIT"
       bytes = 64 line = "line0"
   tile.profiled.access id = "r1" outcome = "HBM_MISS"
@@ -514,6 +580,12 @@ of order, but destination L1 writes follow profile ordinal order.
 non-empty merge group has one leader and waiter completions. The result
 exists only in the explicit L1 destination; Gather creates no L2 output
 and no StreamQueue token.
+
+`cache_target_bytes` is a non-negative performance hint for the shared Cache;
+it is not a minimum or a private quota and is not added across Contexts.
+Required access/bypass capability belongs in the Tile/Context resource
+contracts. Cache sizes do not infer or rewrite source-authored outcomes, and
+Gather accepts no separate minimum-cache property.
 
 ### 4.9 `tile.await`
 
@@ -548,10 +620,11 @@ Waiting on compute or another event cannot substitute for transfer completion.
 The phases may occur in either order. Explicit empty phases are allowed;
 their policy/tag declarations still match the emitted phase set exactly.
 
-The dispatch's `signal_policy` selects the declared phases. For each
-phase, the event fires exactly once only after every expected logical task
-in that `GridInstanceId` has signalled; duplicate task/phase signals are
-ignored. The physical placement mask does not aggregate phase signals.
+The dispatch's `signal_policy` selects the declared phases. For each phase,
+the event fires exactly once only after every expected logical Task in that
+`GridInstanceId` has signalled. A duplicate signal in a live Grid is a
+protocol fault; a signal from a retired generation is stale and ignored.
+Physical Tile and UCE context IDs are not aggregation identities.
 
 ### 4.11 `tile.return`
 
@@ -564,284 +637,436 @@ are single-block, straight-line bodies with exactly one terminal return;
 memory accesses or signals after an early return are rejected. This does not
 restrict the private execution IR's branch/stream instructions.
 
-## 5. Verification Rules
+## 5. Verification and Compilation Rules
 
-### 5.1 Module-level
+### 5.1 Source/module rules
 
-- **Legacy mode**: exactly one `nest.context`, no `nexus.program`.
-- **Model mode**: exactly one `nexus.program` + one or more
-  `nest.context` ops.
-- Zero or more `tile.program` ops (both modes).
-- No other top-level ops.
-- Tile program symbol names must be unique.
-- `nest.context` symbol names must be unique.
+- **Standalone**: exactly one `nest.context`, no `nexus.program`.
+- **Model**: exactly one `nexus.program` plus one or more `nest.context`
+  definitions.
+- Zero or more uniquely named `tile.program` definitions; no other top-level
+  operations.
+- Every Context and Tile Program has its mandatory typed resource contract.
+- Source verification is necessary but not sufficient for execution: static
+  layout/Profile/control analysis occurs in `compile_program`, and target/
+  binding/executable verification occurs again in `load_program`.
 
-### 5.2 Inputs, bindings, and views (PR 1 memory contract)
+### 5.2 Inputs, bindings, views, and Gather
 
-- **`nexus.program` inputs**: every block arg must be
-  `!nest.global_memref` and must carry a non-empty SSA name (used as the
-  input-binding key).
-- **`nest.context` formals**: every block arg must be
-  `!nest.global_memref`.
-- **submit ↔ context signature**: `nexus.submit_context.async @ctx` must
-  pass exactly as many actuals as `@ctx` declares formals, and each
-  actual's dims+dtype must equal the corresponding formal's.
-- **`tile.program` formals**: at least one formal; the first is
-  `!nest.task`, followed by a contiguous global-view prefix and then a
-  contiguous L2-buffer suffix. Global formals may not follow L2 formals.
-- **dispatch ↔ tile.program binding**: mandatory `globals` binds all global
-  formals; mandatory `bindings` binds all L2 formals with exact arity and
-  dims+dtype, using only current-context allocations. `ins`/`outs` are exact,
-  unique mapped read/write sets (§3.6), independent of formal positions.
-  Aliases merge effects; unused formals stay bound without effects.
-- **View bounds (`nest.subview` / `tile.subview`)**: every dim requires
-  `offset >= 0`, `size >= 1`, `offset + size <= parent_dim`; view byte
-  count must not overflow int64. `tile.subview` bounds against a task
-  dimension are checked at the dispatch checkpoint with the maximum task
-  id of the dispatch's task range.
-- **Strides**: V1 requires all-1 strides on both subview ops.
-- **Transfer byte equality**: prefetch/store/load/store require
-  `prod(src dims) * dtype_size == prod(dst dims) * dtype_size`.
-- **Root-object constraint (no view chains)**: `nest.subview` `src` must
-  be a context global formal; `tile.subview` `src` must be a
-  `tile.program` L2 formal.
-- **Gather**: source is a current-program global formal; indices and
-  destination are different current-program `tile.alloc` results; profile
-  is non-empty and contains only `tile.profiled.access`; `result_bytes`
-  is positive, fits destination, and equals the sum of request bytes;
-  `cache_min_bytes > 0`, `cache_target_bytes >= cache_min_bytes`, and
-  `l1_mshr_hint > 0`; request ids are non-empty/unique; request bytes are
-  positive and fit the source; outcomes are exactly
-  `L1_HIT|L2_HIT|HBM_MISS`. A non-empty merge group is HBM-miss-only,
-  requires a non-empty line token, and every member has identical line
-  token and byte size. Invalid profiles fail verification; there is no
-  inferred hit-rate fallback.
-- **Input bindings** (simulator load time, not IR verify): every program
-  input needs a same-name binding; unknown bindings, undersized bindings,
-  overlapping IOVA ranges, and ranges past HBM capacity are rejected with
-  a `ValueError`.
+- Every `nexus.program` and `nest.context` block argument is a shape-typed
+  `!nest.global_memref`; Device entry arguments have non-empty names.
+- Submit arity and dims/dtype exactly match the referenced Context.
+- A Tile Program starts with `!nest.task`, followed by a contiguous
+  global-view prefix and then a contiguous L2-buffer suffix.
+- Dispatch `globals` and `bindings` positionally cover all corresponding
+  formals. `ins`/`outs` are exact duplicate-free actual read/write sets;
+  aliases merge effects and unused formals remain bound without pins.
+- Every view dimension has non-negative offset, positive size, and stays
+  inside its backing shape. V1 strides are all 1; view chains are unsupported.
+  Transfer endpoints have identical derived byte counts.
+- Gather source is a current-program global formal. Indices and destination
+  are distinct live `tile.alloc` results. Its profile is non-empty and contains
+  only `tile.profiled.access`; request IDs are unique, byte counts are
+  positive/in-range, and their sum equals positive `result_bytes`.
+  `cache_target_bytes >= 0` and `l1_mshr_hint > 0`; no separate minimum-cache
+  field is accepted. Outcomes are exactly `L1_HIT`, `L2_HIT`, or `HBM_MISS`.
+  A non-empty merge group is HBM-miss-only and all members have the same
+  non-empty line token and byte size.
+- Actual HBM bindings are Loader inputs, not source verification data. The
+  Loader rejects missing/unknown names, insufficient ranges or permissions,
+  forbidden alias/overlap, ranges beyond target HBM, and violations of the
+  compiled binding guards.
 
-### 5.3 Context body
+### 5.3 Context body, phases, and release
 
-- `context = N` on `nest.context` is a non-negative Group context-slot
-  affinity, bounded by `group.active_context_capacity`, not CPU or Tile count.
-- All event tags (from `!nest.event<tag>` results) must be unique within
-  the context body. Empty tags (for unused phase events) are skipped.
-- `nest.dispatch.tasks.async`:
-  - `@prog` must reference a defined `tile.program`.
-  - Task range count must equal `popcount(placement)` (1:1 mapping).
-  - `depends_on` operands must be events defined earlier in the body.
-  - Its `signal_policy` key set must exactly match the referenced
-    program's emitted `tile.signal` phase set; each mode must be
-    `all_tasks`. A declared phase requires a non-empty matching result
-    tag, and an undeclared phase requires an empty tag.
-  - `context = N` (if present) must be >= 0; the upper bound is the
-    simulator's `context_count` (checked at task load, not at IR verify).
-- `nest.dma.prefetch.async` / `nest.dma.store.async` / `nest.release` dependencies must be earlier SSA
-  events. Each Store waits on all earlier real writers; the final Store
-  covers all writers. Every allocation has exactly one release before
-  return, with exactly the full `R ∪ P ∪ S` set (§3.8), including all parallel
-  Stores and prefetches. No buffer use may follow release. Input-role Tile
-  writes and output/inout allocations without real writers/Stores are rejected.
-- `nest.await` operands must be events defined earlier.
+- `context=N` is a non-negative Group-slot affinity and is checked against the
+  static Group capacity.
+- `logical_tasks` equals the sum of all dispatch range counts. Every non-empty
+  range count equals `popcount(placement)`; a range itself cannot be empty.
+- Every dispatch references a defined Tile Program, supplies mandatory
+  `l1_mode`, and requests a mode in that program's `allowed_profiles`.
+  `context=N`, when present, is below `SimConfig.context_count`.
+- Group event tags are unique, except empty result tags for omitted phase
+  results. Dependencies refer to earlier SSA events owned by this Context.
+- `signal_policy` exactly matches the Tile Program's emitted phase set and
+  uses only `#nest.aggregate<all_tasks>`. A declared phase has a non-empty
+  result tag; an omitted phase has an empty result tag.
+- Each Store depends on every earlier real writer's `output_ready`; the last
+  Store covers all writers. Each allocation has exactly one release before
+  return, with exactly `R(buffer) ∪ P(buffer) ∪ S(buffer)` (§3.8). Input-role
+  Tile writes are forbidden; `out`/`inout` requires a real writer and HBM
+  Store. No use follows release.
+- An ordinary `nest.await` references earlier events and remains a local
+  frontend fence. It is not rewritten into a global barrier.
 
-### 5.4 Tile program body
+### 5.4 Tile Program body and lifetimes
 
-- All event tags (from `!tile.event<tag>` results) must be unique within
-  the program body.
-- `tile.await` operands must be events defined earlier.
-- `tile.signal` phase must be `input_released` or `output_ready`, and
-  its sole operand must be block argument 0 (the program's `!nest.task`
-  formal).
-- Load sources and Store destinations must be current-program subviews of
-  direct L2 formals. Actual access indices are collected once per program.
-- Each real access direction requires exactly one corresponding signal;
-  every phase occurs at most once. Signals seal already-awaited transfers by
-  SSA identity, forbidding later accesses in that direction (§4.10).
-- Exactly one terminal `tile.return` is required; no unreachable accesses
-  or signals may be used to satisfy the contract.
-- `tile.gather.global.async` obeys the complete Gather rule set in §5.2;
-  its `gather_done` event participates in the same unique-tag and
-  defined-before-await rules as other tile async events.
-- L1 load/store/Gather operands must be earlier current-program `tile.alloc`
-  results still live at the access. `tile.free` enforces the lifetime and
-  completed-async-use contract in §4.2.1; unfreed buffers retain terminal cleanup.
+- Tile event tags are unique and every `tile.await` references earlier
+  same-program events.
+- Each real L2 read/write direction emits exactly one corresponding
+  `tile.signal`; the signal operand is block argument 0. All prior transfers
+  in that direction are awaited, and no later transfer in that direction is
+  allowed.
+- L1 load/store/Gather operands are earlier live current-program
+  `tile.alloc` results. `tile.free` obeys §4.2.1 and no explicit use follows it.
+- Exactly one terminal `tile.return` is required. Public source Tile Programs
+  remain single-block and straight-line.
 
-### 5.5 `nexus.program` body
+### 5.5 Resource, Profile, and finite-control proof
 
-- `nexus.submit_context.async` `@ctx` must reference a defined
-  `nest.context`.
-- Event tags (from `!nexus.event<"tag">` results) must be non-empty and
-  unique within the program body.
-- `nexus.await` operands must be events defined earlier in the body
-  (by a prior `nexus.submit_context.async`).
-- Submit `depends_on` operands must be unique earlier Nexus SSA results,
-  not matching-tag values from another scope. Overlapping global ranges
-  across launches with any writer require a transitive dependency or prior await.
-- The body must end with `nexus.return`.
-- No other ops are allowed in the body.
+- Context `allowed_profiles` is non-empty/unique and contains `l2_mode`;
+  Tile `allowed_profiles` is non-empty/unique and contains every referencing
+  dispatch's `l1_mode`. Every mode exists in the embedded Registry.
+- The compiler derives deterministic all-bank striped L1/L2 layouts. Declared
+  bytes must cover logical bytes plus padding and align to the Profile quantum.
+  Every advertised mode is checked per bank and against the empty pool.
+- `requested_contexts_per_tile` is positive, no larger than the physical Tile
+  context count, and its `R × max(child per-bank Arena)` envelope fits every
+  allowed L1 Profile. It is never reduced automatically.
+- Cache capability declarations cannot understate actual access. Required hits
+  need nonzero Cache; disabled Cache paths need target and contract bypass
+  support. `read_write` requires a write-back target. `target_bytes` hints do
+  not reserve capacity.
+- Frame Slot demand, maximum live Grid Routes, event live frontier (not all
+  historical events), engine/control queues, program SRAM, and finite Device/
+  Group capacities are checked against the same `HardwareConfig`/`SimConfig`
+  used to compile.
+- The compiler validates every actual permitted L1/L2 combination. Independent
+  allowed sets do not imply their Cartesian product is legal at runtime.
 
-## 6. Lowering (IR → Runtime)
+### 5.6 Device body
 
-Lowering builds `ExecTileGroupTask` descriptors with explicit dependencies and
-actual L2 read/write effects, including RAW/WAR/WAW and overlapping global
-transfer/Gather-range hazards. Event tags are instantiated with launch identity;
-hardware does not carry xDSL SSA values. Memory-subsystem trace lanes, counters and
-per-transaction flows are documented in `README.md` §Profiling / Trace
-Visualization; the trace well-formedness contract is enforced by
-`Tracer.assert_well_formed()` (see `pipeline_validator/tests/test_trace.py`).
+- Submit symbols/signatures are valid; Device event tags are non-empty and
+  unique.
+- Await and `depends_on` operands are unique earlier Nexus SSA results.
+- Overlapping cross-root global ranges with a writer receive a transitive
+  dependency or prior await. Each call site is specialized from an unmodified
+  source template, so aliases from one call cannot pollute another.
+- The body ends in `nexus.return` and contains no other source operations.
 
-### 6.1 Context body → ExecGroupAction list
+## 6. Compiler and Immutable Executable
 
-| IR op                       | ExecGroupAction                                                                |
-| --------------------------- | ------------------------------------------------------------------------------ |
-| `nest.alloc`                | (no action; records `ExecL2Buffer`; L2 bundle admitted at context start)       |
-| `nest.subview`              | (no action; records `ExecMemoryView`)                                          |
-| `nest.task.range`           | (no action; records `ExecTaskDomain`, attached to dispatch role bindings)      |
-| `nest.dma.prefetch.async`   | `DMA_PREFETCH` args=(desc_id, ExecTransfer)                                    |
-| `nest.dma.store.async`      | `DMA_STORE` with descriptor dependencies and source read effect                |
-| `nest.dispatch.tasks.async` | `DISPATCH_ROLE` with dependencies, actual reads/writes and three output events |
-| `nest.collective.async`     | `COLLECTIVE_RUN` args=(name, op, bytes, mask)                                  |
-| `nest.release`              | `RELEASE_L2` with dependencies and verified access ordinals                    |
-| `nest.await`                | `WAIT_EVENT` per operand                                                       |
-| `nest.barrier`              | `BARRIER_GROUP`                                                                |
-| `nest.return`               | `SIGNAL_EVENT` args=(completion_event)                                         |
+### 6.1 `CompiledProgram`
 
-`ExecTransfer` carries explicit `src`/`dst` `ExecMemoryView`s and the
-byte count. `global_inputs`, `l2_buffers`, `task_domain`, L2 `actuals`,
-and per-binding `global_actuals` are recorded on
-`ExecTileGroupTask`/`ExecTileRoleBinding`. Tile global formals lower to
-`ExecMemoryView(space="global", base="formal:<index>", ...)`; runtime
-never carries an xDSL SSA value.
+The public compiler call is:
 
-`ExecDispatchRequest` preserves the role id, source-order dispatch ordinal,
-per-phase `ExecSignalPolicy`, and phase event ids; its action `dst` remains
-the `grid_done` event. `ExecReleaseRequest` preserves the verified buffer
-slot/role, separate reader and writer dispatch ordinals, and complete `R/P/S`
-event ids. These structured DTOs are consumed directly by the runtime; it
-does not recover identity or release dependencies by parsing event strings.
+```python
+compile_program(
+    module: ModuleOp,
+    hw: HardwareConfig,
+    sim: SimConfig,
+    *,
+    binding_assumptions: Mapping[str, GlobalBinding] | None = None,
+    source_name: str = "<memory>",
+    workload_info: WorkloadInfo | None = None,
+) -> CompiledProgram
+```
 
-### 6.2 Tile program body → ExecTileInst list
+The result has compiled schema 1 and compiler ABI `v0`. It contains canonical
+`source_ir`/`source_hash`, embedded `ProfileRegistry`/`registry_hash`, static
+`target_hash`, `artifact_hash`, `"standalone"|"model"` entry kind, immutable
+entry/prefix, call bindings, explicit relocations, instruction source map,
+dependency proofs, entry/exit Profile states, static effects/resource budgets,
+binding guards, and `WorkloadInfo`.
 
-| IR op                      | ExecTileInst                                        |
-| -------------------------- | --------------------------------------------------- |
-| `tile.alloc`               | (no action; records `ExecL1Buffer`)                 |
-| `tile.free`                | `FREE_L1` args=(lowered_l1_buffer_name,)            |
-| `tile.subview`             | (no action; records `ExecMemoryView`)               |
-| `tile.load.async`          | `LAUNCH_MFE` (MFE "load", transfer on the desc)     |
-| `tile.store.async`         | `LAUNCH_MFE` (MFE "store", transfer on the desc)    |
-| `tile.gather.global.async` | `LAUNCH_GATHER` with `ExecGatherDesc` on MFE        |
-| `tile.pow.async`           | `LAUNCH_EVU` (EVU "pow")                            |
-| `tile.evu.async`           | `LAUNCH_EVU` (EVU op_name)                          |
-| `tile.boa.async`           | `LAUNCH_BOA` (BOA op_name)                          |
-| `tile.await`               | `WAIT` (1 operand) or `WAITALL` (2+)                |
-| `tile.signal`              | `SIGNAL_PHASE` args=(phase_name, task_formal_index) |
-| `tile.return`              | `RET`                                               |
+All executable dataclasses are frozen; sequences are tuples and mappings are
+deep immutable. Program IDs are positive deterministic first-appearance IDs.
+Program/content/artifact/target/Registry identities are canonical SHA-256
+digests; the 256-bit program hash is encoded as a 64-hex-digit JSON string.
+Dynamic launch IDs, physical addresses, Slot assignment, and runtime
+generations are not baked into content identity.
 
-MFE load/store descriptors carry an `ExecTransfer` (src/dst views +
-bytes); the tile reads `desc.transfer.bytes` for the latency model.
+Serialization is strict JSON with an explicit type/opcode/enum allowlist:
 
-Gather lowering preserves every `ExecProfiledAccess` and its enum outcome
-inside immutable `ExecGatherDesc`. Runtime follows
-`L1 lookup → L2 lookup/MSHR → optional HBM/NoC refill → L1 cache fill →
-ordered L1 destination write`. Opaque line tokens are never converted to
-physical addresses. This is deterministic profiled timing, not
-address-accurate or value-accurate Gather.
+```python
+text = serialize_compiled_program(compiled)
+compiled_again = parse_compiled_program(text)
+loaded = load_program(compiled_again, hw, sim, actual_bindings=bindings)
+```
 
-### 6.3 Role binding
+Unknown/missing fields, unknown schema/ABI, duplicate keys, non-finite numbers,
+invalid enums or integer domains, identity mismatches, and artifact-hash
+mismatches are rejected. Parsing does not use pickle, `eval`, dynamic import,
+or source recompilation.
 
-Each unique `(program, placement_mask, context identity, task domain,
-actuals, global_actuals, read_actuals, write_actuals)` binding gets an
-auto-assigned `role_id` (starting from 0).
-Device slot is deliberately not part of this static role-binding identity.
-Each source dispatch still receives its own source-order `dispatch_ordinal`
-inside `ExecDispatchRequest`, which becomes part of `GridInstanceId` at
-runtime.
+### 6.2 Source references, dumps, and relocations
 
-`actuals` contains exactly one entry per L2 formal, sourced only from
-`bindings`. `read_actuals` and `write_actuals` are unique slot tuples in
-first-occurrence binding order. Runtime binds exact arity without truncation.
-Each task pins each accessed actual once; unused bindings are not pinned.
-Aggregate `input_released` unpins pure readers regardless of allocation role.
-Write/readwrite pins remain until explicit release passes full preflight,
-including both phases for readwrite and absence of PENDING/RUNNING/FAULTED
-transfers with the same `(memory_space, allocation_id, generation)`.
+Every executable Device, Group, and Tile instruction has a stable
+`instruction_id` and `SourceRef(source_name, symbol, body_op_index, op_name)`.
+Generated instructions additionally carry `generated_by` and a reason. xDSL
+does not provide source line numbers here, so the compiler never invents them.
 
-### 6.4 Model lowering (`nexus.*` → `ExecDeviceOp`)
+`dump_executable_ir(program)` is a complete strict package/executable dump.
+The CLI also writes a generic `.compiled.mlir.txt` view where generated
+ordinary awaits, `profile.reconfig`, and `memory.maintenance` appear as actual
+operations with source references—not comments or runtime inference.
 
-In model mode, `lower_model_ir` produces an `ExecModel` containing:
+Launch instantiation applies only declared relocations (event namespaces,
+queues, actual HBM bindings). It uses immutable replacement objects and never
+writes back into the shared template or guesses relocations from event names.
 
-- `tasks`: `nest.context` ops lowered to `ExecTileGroupTask` (same as
-  §6.1) keyed by context symbol name.
-- `context_pins`: per-context Group context-slot affinity from `context=N`.
-- `body`: `nexus.submit_context.async` → `ExecDeviceOp("submit", ...)`,
-  `nexus.await` → `ExecDeviceOp("await", ...)` per operand,
-  `nexus.return` → `ExecDeviceOp("return")`.
+### 6.3 Source operation mapping
 
-`CpuDeviceController` interprets the body with bounded pending descriptors,
-dependency handles and hardware-outstanding credits. GroupPortAdapter owns
-hardware slots and launch namespacing. The Group's shared scheduler registers
-and issues at most one action each per cycle, rather than stepping one
-independently issuing sequencer per context. Submission and completion messages
-are the only CPU/hardware execution boundary.
+| Source operation                       | Immutable executable operation                                                 |
+| -------------------------------------- | ------------------------------------------------------------------------------ |
+| `nest.alloc`                           | `BIND_L2_VIEW` with compiled buffer/layout index and internal completion event |
+| `nest.subview`                         | immutable `ExecMemoryView`                                                     |
+| `nest.task.range`                      | immutable `ExecTaskDomain`                                                     |
+| `nest.dma.prefetch.async`              | `DMA_PREFETCH` + `ExecTransfer`                                                |
+| `nest.dma.store.async`                 | `DMA_STORE` + `ExecTransfer`                                                   |
+| `nest.dispatch.tasks.async`            | `DISPATCH_ROLE` + `ExecDispatchRequest`                                        |
+| `nest.collective.async`                | `COLLECTIVE_RUN`                                                               |
+| `nest.release`                         | `RELEASE_L2` + structured `ExecReleaseRequest`                                 |
+| `nest.await`                           | one `WAIT_EVENT` per operand                                                   |
+| `nest.barrier`                         | `BARRIER_GROUP`                                                                |
+| `nest.return`                          | `SIGNAL_EVENT`                                                                 |
+| `tile.alloc`                           | `ALLOC_L1` with compiled buffer/layout index                                   |
+| `tile.free`                            | `FREE_L1`                                                                      |
+| `tile.load.async` / `tile.store.async` | `LAUNCH_MFE` + `ExecTransfer`                                                  |
+| `tile.gather.global.async`             | `LAUNCH_GATHER` + immutable `ExecGatherDesc`                                   |
+| `tile.pow.async` / `tile.evu.async`    | `LAUNCH_EVU`                                                                   |
+| `tile.boa.async`                       | `LAUNCH_BOA`                                                                   |
+| `tile.await`                           | `WAIT` or `WAITALL` over the original Tile events                              |
+| `tile.signal`                          | `SIGNAL_PHASE`                                                                 |
+| `tile.return`                          | `RET`                                                                          |
 
-## 7. Runtime: Phase Signal Aggregation
+WAIT/WAITALL mechanically preserve the named events. Release dependencies,
+access effects, dispatch phases, requested/resolved modes, and binding identity
+are structured fields; runtime does not reconstruct them from names.
 
-When a tile executes `tile.signal <phase>(%task)`, the UCE resolves the
-lowered task-formal index against its current `TaskIdentity` and calls
-`_on_phase_signal(PhaseSignal(task, phase), cycle)`.
+### 6.4 Profile binding and generated synchronization
 
-`TileGroup` keeps one signal state per `GridInstanceId`, with the expected
-logical task-id set, declared `ExecSignalPolicy`, phase event ids, and
-already-seen task ids. A signal is processed as follows:
+The compiler starts from target reset modes. For each Context it keeps the
+current L2 mode when allowed, otherwise selects the declared `l2_mode`.
+For each dispatch it keeps the current L1 mode when allowed, otherwise selects
+the dispatch's requested `l1_mode`. A kept non-baseline mode is COMPATIBLE;
+equal requested/current is SAME. The resolved cross-layer combination is
+frozen in `CallBinding.permitted_profiles`.
 
-1. A retired/non-live launch generation is stale and ignored.
-2. A live but unknown grid, task, or phase is invalid and faults the
-   owning sequencer.
-3. A duplicate live `(grid, phase, task_id)` faults the owner without recounting.
-4. A first valid signal is recorded; when its seen task ids exactly equal
-   the grid's expected logical-task set, `notify_event` fires that phase
-   event exactly once.
+An internal L1 change requires a finite prior Grid frontier. The compiler
+preserves source `nest.await` and inserts missing ordinary waits for every
+still-live `grid_done`, followed by explicit L1 configuration. A root
+containing an internal L1 transition becomes L1-exclusive at Device level:
+the compiler drains other L1 producers before it and prevents a new producer
+until it retires. L2 transitions occur only at Device/root boundaries after
+all prior L2 roots retire. When both layers change, control order is L2 then
+L1.
 
-Thus `input_released` and `output_ready` resolve only the matching grid's
-waiters; physical tile id and UCE hardware-context id do not participate in
-the aggregation key.
+For an HBM writer followed by an overlapping cached reader, the compiler emits
+range-qualified maintenance after the writer dependency. A write-back target
+also emits the required pre-clean so an older dirty line cannot overwrite a
+new producer. If the target lacks range invalidation, the compiler uses a
+full-domain range only where the source control flow supplies a legal
+quiescent boundary; otherwise compilation fails.
 
-## 8. Runtime: L2 Buffer Lifecycle
+The Loader independently derives effects from descriptors, views, and roles.
+Deleting a required dependency, ordinary await, configuration step, or
+maintenance command remains invalid even if an attacker recomputes the
+artifact hash. Extra legal dependencies are allowed; the Loader does not
+require textual equality with one optimizer output.
 
-- `nest.alloc` - no runtime action at issue time; at context admission
-  every `l2_buffers` entry is planned and committed as one atomic
-  bundle on the L2 `BankedFreeExtentAllocator` (owner
-  `ContextBufferOwner`, launch generation, alignment, bank segments).
-  A typed `AdmissionFailureKind` classifies a failed plan:
-  `INVALID_REQUEST` (size/alignment never legal) and
-  `PERMANENT_CAPACITY` (cannot fit even an empty pool) fault the
-  sequencer before any DMA starts; `TEMPORARY_CAPACITY` (legally
-  placeable but not under the current live free map) enters the
-  strict-FIFO admission wait queue instead. A failed plan never
-  mutates the free map, pool version, counters or peak.
-- Dispatch pins are access-based: one pin per task and distinct accessed
-  actual, with read/write flags merged across aliases; unused formals do not
-  pin. `input_released` unpins pure readers of any allocation role. Normal
-  unpin failure faults/reset the owning sequencer; cancel/rollback cleanup
-  remains idempotent. Write/readwrite pins remain for explicit release.
-- `nest.release` - `RELEASE_L2` preflights every explicit `R/P/S` dependency,
-  allocation owner/role/live handle and both generations. Reader/writer
-  ordinals must be unique, known grids of this launch with their respective
-  aggregate phases complete. Any remaining pure-read pin rejects release;
-  readwrite pins independently require input release even if a request
-  omitted the reader ordinal. No PENDING/RUNNING/FAULTED transfer may still
-  access the allocation identity; DONE/CANCELLED do not block it.
-  Only after all checks pass may writer pins be removed and
-  `request_release` final-free the allocation. Rejection cannot partially
-  unpin or enter RELEASE_PENDING. Inconsistent release faults/reset, never
-  silently succeeds. Only successful **final-free** marks capacity change;
-  phase aggregates and unpins alone never wake admission.
-- `L2SRAM` capacity fault: a permanent/invalid `AdmissionFailure`
-  faults the sequencer with `L2 capacity fault during context
-admission` and no completion event is produced; a transient miss
-  never writes the fault ring. FIFO admission retries on relevant L2 final-free
-  or event-budget reclamation. The admitted context next participates in shared
-  registration; issue occurs no earlier than the following cycle. Reset/fault cleanup
-  cancels waiting tickets (they own no allocation) and accumulates
-  `l2_admission_wait_cycles = terminal - enqueue` exactly once.
+## 7. Runtime Scheduling, Signals, and Admission
+
+### 7.1 Phase aggregation
+
+A signal is keyed by `(root launch generation, GridInstanceId, phase,
+logical Task)`. A valid first signal is recorded; when the seen Task IDs equal
+the expected set, its aggregate event fires exactly once. A duplicate in a
+live Grid faults the owner without recounting. A retired-generation signal is
+stale and ignored. Physical Tile/UCE context IDs are not part of the
+aggregation identity.
+
+`input_released` may remove that Task's pure-read L2 pin only after the Tile
+Program has awaited its last real load. `output_ready` similarly proves the
+last real L2 Store. Neither phase means the Task, Grid, or parent Arena has
+retired.
+
+### 7.2 Root admission
+
+`GroupPortAdapter.try_submit` accepts only bounded pending metadata
+(`group.context_pending_capacity`). It does not pre-occupy a Group hardware
+slot, L2 Arena, Event Table reservation, UCE context, or engine queue.
+
+For each active L2 Profile, ready roots have independent SAME and COMPATIBLE
+FIFO heads. SAME is attempted first; if its head cannot fully commit, the
+COMPATIBLE head may fill, but no request may bypass the head of its own
+category. Full root admission atomically commits a vacant/pinned Group slot,
+L2 Arena, event/control budget, and launch state. A failed read-only plan has
+zero resource side effects. Empty-pool impossible requests are permanent
+errors, not waiters.
+
+### 7.3 Grid Route and per-Tile Task admission
+
+`DISPATCH_ROLE` registers one bounded Grid Route and consumes a dispatch credit
+until the complete Grid retires. It does not gang-commit Tile resources. Each
+Tile may commit at most one candidate per Tick, comparing only its SAME and
+COMPATIBLE FIFO heads. A blocked Tile does not roll back already committed
+Tasks on other Tiles.
+
+One Task commit atomically covers its L1 Arena, UCE pin/Slot, Frame/control
+state, parent L2 pins, and R lease. Observable wait classes are
+`WAIT_CAPACITY`, `WAIT_FRAGMENTATION`, `WAIT_SLOT`,
+`WAIT_CONTROL_RESOURCE`, and `WAIT_CONTEXT_LIMIT`. Total free bytes do not
+erase a stripe-fragmentation failure. A Grid cannot complete while any
+selected Task is pending admission, active, or retiring.
+
+The R ledger key is `(parent binding_id, launch_generation, tile_id)`.
+`requested_contexts_per_tile` bounds committed Tasks across all Grids of that
+parent. The lease is returned only at safe Task retirement or confirmed
+cancellation—not at local free, input release, output readiness, or cancel
+request.
+
+## 8. Arena and View Lifecycle
+
+`ArenaPool` owns one physical L1 Tile pool or the Group L2 pool.
+`RootInvocation` owns an L2 Arena; `TaskIdentity` owns an L1 Arena. Planning is
+pure and records the pool/Profile versions. Commit atomically consumes exact
+per-bank extents and mints an `ArenaHandle` containing the whole reservation,
+including padding.
+
+`bind_view` creates an `AllocationHandle` whose segments contain only logical
+valid bytes and carry both allocation and Profile generations. Local
+`invalidate_view` returns `False` while pins/in-flight users remain and
+finishes later; it never changes the free map. Repeated, stale, wrong-owner, or
+out-of-generation operations are invariant failures.
+
+Only `retire_arena` returns extents. A Task Arena retires after all views,
+Frame state, accesses, transactions, and the Task terminal event are safe. A
+root Arena retires after every Route/Task, required HBM output, view, pin,
+transfer, and lease closes; only then can `context_done` publish. L1-only
+reconfiguration operates on separate L1 pools and cannot mutate a parent L2
+handle or generation.
+
+The compiler may reuse a Tile Slot/offset only for a proven non-overlapping
+view lifetime. L2 reuse additionally requires a release followed by a
+dominating Context barrier; otherwise the old region remains conservatively
+live through Context end. No runtime optimization invents overlap.
+
+## 9. Profile Controller, Maintenance, Cancellation, and Recovery
+
+`ProfileController` is the unique writer for both layers. Device and Group
+submit typed descriptors to the same instance; a busy controller returns
+backpressure. Runtime command identity is
+`(run_generation, owner_launch_generation, static_command_id)`, so a warm run
+cannot reuse an old await or ACK.
+
+A `ProfileReconfigDesc` executes exactly:
+
+```text
+ACQUIRE → CHECK_FRONTIER → CLOSE_ISSUE → DRAIN_REFERENCES
+→ CLEAN_INVALIDATE → DRAIN_DOWNSTREAM → PREPARE → WAIT_READY_ACK
+→ COMMIT → WAIT_COMMIT_ACK → OPEN_ISSUE → RELEASE
+```
+
+The frontier step consumes the compiled same-run ordinary-await proof.
+Issue closes only after the proof succeeds; old completion traffic continues
+to progress. Every real member `(level, pool_id, bank_id)` maintains active
+and shadow mode/generation. The controller publishes the new mode and
+increments only that layer's generation after every matching Prepare and
+Commit ACK. Missing, duplicate, stale-generation, unknown-member, or failed
+ACKs cannot open the gate.
+
+A `MemoryMaintenanceDesc` executes exactly:
+
+```text
+ACQUIRE → WAIT_DEPENDENCIES → BLOCK_RANGE_ISSUE
+→ DRAIN_RANGE_REFERENCES → CLEAN_INVALIDATE → DRAIN_DOWNSTREAM
+→ ACK → UNBLOCK_RANGE_ISSUE → RELEASE
+```
+
+Range maintenance blocks only overlapping new requests. Existing/non-
+overlapping traffic progresses. Dirty clean creates real downstream L1→L2 or
+L2→HBM transactions and waits for them before ACK. Non-oracle Gather cache
+entries retain allocation-qualified conservative source-view provenance;
+`ByteStore` mode binds each request to its actual source byte range.
+
+Initialization installs each layer's target `reset_mode`, generation 0, and
+waits for all member ACKs before opening issue. `Simulator.run` requires the
+actual modes to match the artifact's compiled entry state and never performs
+an implicit reset or replan. Explicit recovery requires quiescent/isolated
+domains, re-acknowledges every member, and advances generations monotonically.
+
+Cancellation is not deletion. Unissued work may be withdrawn synchronously;
+an accepted DMA/refill/member request remains `CANCEL_REQUESTED` until its real
+completion or explicit isolation confirmation. Credits, addresses, pins,
+Arenas, and gates are not reused early. Late old-generation returns are
+isolated/faulted and cannot write a new SPM/cache generation.
+
+## 10. Configuration and Target Binding
+
+Hardware YAML uses `schema_version: 2`. `memory.target` and
+`memory.profile_source` are typed subtrees. Duplicate/unknown keys, unknown
+versions, incomplete explicit layer targets, illegal geometry, and duplicate
+effective modes are rejected. Partial override YAML may omit its version and
+inherits omitted subtrees; a custom layer `modes` table replaces the entire
+table.
+
+The bundled per-bank experimental modes are:
+
+| Layer | Mode |    SPM |  Cache | System-reserved SPM |
+| ----- | ---: | -----: | -----: | ------------------: |
+| L1    |    0 |  65536 |      0 |                2048 |
+| L1    |    1 |  57344 |   8192 |                2048 |
+| L1    |    2 |  49152 |  16384 |                2048 |
+| L2    |    0 | 524288 |      0 |                4096 |
+| L2    |    1 | 458752 |  65536 |                4096 |
+| L2    |    2 | 393216 | 131072 |                4096 |
+
+For each layer/mode, SPM + Cache equals the fixed physical bank size and SPM,
+Cache, and reservation align to
+`lcm(partition_granule_bytes, cache_line_bytes)`. SPM includes the system
+reservation. The active Profile is the only Cache-capacity source; lookup
+latency and MSHR counts remain independent target controls. The bundled values
+and 2,000,000-cycle Profile-command timeout are simulator experiments,
+`由后续规格冻结`.
+
+The compiled target fingerprint covers topology/storage and static simulation
+feasibility: `context_count`, `device_context_count`, Device pending/completion
+capacity, and Group active/pending/action/quota/scan/event/inflight/prefetch/
+store/dispatch capacities. It excludes runtime-only trace, fidelity,
+max-cycles, timing knobs, seed, and scheduler policy.
+
+## 11. Fidelity and Byte Semantics
+
+All fidelities enforce source/executable contracts, Profile/maintenance
+control, gates, generations, and static budgets.
+
+- `timing_only`: no physical allocation handles; transfers collapse to one
+  timing leg.
+- `runtime`: real HBM bindings and L1/L2 Arena/view ownership, but one
+  collapsed transfer leg.
+- `full_memory`: real bank segments and staged HBM/DMA/NoC/L2/L1 routes.
+
+Only `full_memory` with an injected `ByteStore` proves byte movement. The
+sparse store rejects uninitialized reads, validates seeded HBM coverage against
+actual bindings, captures source data at read completion, and writes the
+destination only at write completion. Byte-checked Gather additionally
+requires `bind_profiled_source(binding_id, request_id, source_offset)`.
+
+Without the oracle, Gather outcomes remain explicit source-authored timing
+profiles. Cache capacity never predicts a hit rate. BOA/EVU/USE remain timing
+models and do not establish tensor numerical correctness.
+
+## 12. CLI Artifacts, Replay, and Observability
+
+Source mode explicitly compiles and persists before loading/running.
+`--compile-only` stops after persistence; `--compiled-output PATH` chooses the
+JSON artifact; `--profile-bytes LEVEL:MODE=SPM:CACHE` changes an existing mode
+only during source compilation. `--compiled-file PATH` independently parses,
+loads, and runs without source or compiler import and is mutually exclusive
+with those source options and `--print-ir`.
+
+For `name.json`, the CLI writes `name.exec.txt`,
+`name.compiled.mlir.txt`, and `name.target.yaml`. The target snapshot contains
+the complete `HardwareConfig` only. It does not store `SimConfig`; replay must
+repeat the static simulation capacities listed in §10 with matching
+`--context-mode`, `--device-context-mode`, and `--sim-override` values.
+
+Trace includes `profile_command`, each `profile_step`, member request/ACK,
+ordinary awaits, source references, Arena reserve/retire, view invalidation,
+Task lease acquire/release, requested/resolved L1 mode and generation, and
+per-bank reserved/live/padding/system-reserved/Cache/free counters. The
+artifact's `call_bindings` records requested/resolved L2 modes; Profile
+snapshots expose active modes/generations. Reports include bounded
+`profile`/`arenas`/`task_leases` snapshots plus `compiled_artifact_hash` and
+`registry_hash`.

@@ -1,8 +1,8 @@
 """Workload definitions.
 
-Each workload builds one xDSL ModuleOp plus a human-readable description.
-The validator runs the module and compares the measured PMU fingerprint
-against the architecture's predictions.
+Each workload builds one xDSL ModuleOp plus immutable metadata persisted in the
+compiled artifact.  Runtime and report code consume ``WorkloadInfo`` without
+reconstructing author source IR.
 """
 
 from __future__ import annotations
@@ -11,19 +11,24 @@ from dataclasses import dataclass, field
 
 from xdsl.dialects.builtin import ModuleOp
 
-from .config import WorkloadConfig
+from .compiled_program import WorkloadInfo
+from .config import HardwareConfig, WorkloadConfig
 from .workload_builders import make_pow_task
 
 
 @dataclass
 class Workload:
-  """Base workload: a name + a ModuleOp + expected PMU observations."""
+  """Base workload: author source plus expected observable results."""
 
   name: str
   module: ModuleOp
   expected: dict = field(default_factory=dict)
   description: str = ""
   config: WorkloadConfig | None = None
+
+  @property
+  def info(self) -> WorkloadInfo:
+    return WorkloadInfo(name=self.name, description=self.description, expected=self.expected)
 
 
 class PowWorkload(Workload):
@@ -35,9 +40,17 @@ class PowWorkload(Workload):
   No BOA role participates in this workload.
   """
 
-  def __init__(self, cfg: WorkloadConfig | None = None, num_group_chunks: int = 4):
+  def __init__(
+    self,
+    cfg: WorkloadConfig | None = None,
+    num_group_chunks: int = 4,
+    *,
+    hw: HardwareConfig | None = None,
+    context_count: int = 1,
+  ):
     cfg = cfg or WorkloadConfig(name="pow")
-    module = make_pow_task(num_group_chunks=num_group_chunks)
+    hw = hw or HardwareConfig()
+    module = make_pow_task(num_group_chunks=num_group_chunks, hw=hw, context_count=context_count)
     super().__init__(
       name="pow",
       module=module,
@@ -58,4 +71,4 @@ class PowWorkload(Workload):
     )
 
 
-ALL_WORKLOADS: list = [PowWorkload]
+ALL_WORKLOADS: list[type[PowWorkload]] = [PowWorkload]

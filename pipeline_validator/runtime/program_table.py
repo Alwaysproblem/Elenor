@@ -15,10 +15,10 @@ from enum import IntEnum
 
 
 class ResidencyState(IntEnum):
-  HBM_ONLY = 0       # program in HBM, not installed to any tile
-  FETCHING = 1       # Group/Tile DMA in flight to install
+  HBM_ONLY = 0  # program in HBM, not installed to any tile
+  FETCHING = 1  # Group/Tile DMA in flight to install
   TILE_RESIDENT = 2  # installed to tile-local program SRAM
-  EVICTED = 3        # slot reclaimed, needs re-fetch
+  EVICTED = 3  # slot reclaimed, needs re-fetch
 
 
 @dataclass
@@ -54,16 +54,29 @@ class ProgramResidencyManager:
     self._entries: dict[int, ProgramTableEntry] = {}
     self.cold_load_cycles: int = 0  # PMU: total cold-load cycles spent
 
-  def register(self, program_id: int, version: int, program_hash: int,
-               hbm_iova: int, hbm_bytes: int) -> ProgramTableEntry:
+  def register(
+    self, program_id: int, version: int, program_hash: int, hbm_iova: int, hbm_bytes: int
+  ) -> ProgramTableEntry:
+    if program_id <= 0 or version <= 0 or program_hash <= 0 or hbm_bytes <= 0:
+      raise ValueError("program registration requires complete compiled identity and size")
+    prior = self._entries.get(program_id)
+    if prior is not None and (prior.version, prior.program_hash, prior.hbm_bytes) == (
+      version,
+      program_hash,
+      hbm_bytes,
+    ):
+      return prior
     e = ProgramTableEntry(
-      program_id=program_id, version=version, program_hash=program_hash,
-      hbm_iova=hbm_iova, hbm_bytes=hbm_bytes)
+      program_id=program_id,
+      version=version,
+      program_hash=program_hash,
+      hbm_iova=hbm_iova,
+      hbm_bytes=hbm_bytes,
+    )
     self._entries[program_id] = e
     return e
 
-  def ensure_resident(self, program_id: int, tile_id: int,
-                      cycle: int) -> int:
+  def ensure_resident(self, program_id: int, tile_id: int, cycle: int) -> int:
     """Ensure a program is resident on a tile.  Returns the cold-launch
     latency penalty (0 for warm hit, >0 for cold miss).
 
@@ -74,11 +87,9 @@ class ProgramResidencyManager:
     """
     e = self._entries.get(program_id)
     if e is None:
-      # unregistered program: treat as cold miss with default size
-      return self._cold_latency(64 * 1024)
+      raise ValueError(f"program {program_id} was not registered")
     state = e.tile_states.get(tile_id, ResidencyState.HBM_ONLY)
-    if state == ResidencyState.TILE_RESIDENT and e.tile_epochs.get(
-        tile_id, -1) == e.epoch:
+    if state == ResidencyState.TILE_RESIDENT and e.tile_epochs.get(tile_id, -1) == e.epoch:
       # warm hit: program resident, epoch matches
       return 0
     # cold miss (or epoch mismatch after reset): install
@@ -130,7 +141,7 @@ class ProgramResidencyManager:
       pid: {
         "version": e.version,
         "epoch": e.epoch,
-        "tile_states": {
-          t: s.name for t, s in e.tile_states.items()},
-      } for pid, e in self._entries.items()
+        "tile_states": {t: s.name for t, s in e.tile_states.items()},
+      }
+      for pid, e in self._entries.items()
     }

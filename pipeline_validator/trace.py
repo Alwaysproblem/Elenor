@@ -53,12 +53,16 @@ _THREAD_SORT = {
     "TileRole:": 20,
     "Scheduler:Control": 25,
     "Scheduler:L2": 30,
+    "Profile:Command": 26,
+    "Profile:Step": 27,
+    "Profile:Member": 28,
     "HBM → L2 Input #": 40,
     "L2 → HBM Output #": 50,
     "Memory:HBM": 60,
     "Memory:L2 Read": 70,
     "Memory:L2 Write": 71,
     "Memory:L2 State": 72,
+    "Memory:L2 Arena": 73,
     "L2 Bank:": 80,
     "Global DMA Ch:": 90,
     "HBM Ch:": 100,
@@ -77,6 +81,7 @@ _THREAD_SORT = {
     "Memory:L1 Read": 50,
     "Memory:L1 Write": 51,
     "Memory:L1 State": 52,
+    "Memory:L1 Arena": 53,
     "L1 Bank:": 60,
     "Local DMA Load": 70,
     "Local DMA Store": 71,
@@ -160,6 +165,11 @@ _LEG_REQUIRED_ARGS = frozenset(
 )
 _GROUP_ACTION_EVENTS = frozenset({"group_action_register", "group_action_issue", "group_action_complete"})
 _GROUP_ACTION_REQUIRED_ARGS = frozenset({"context", "launch_generation", "ordinal", "kind", "cycle"})
+_PROFILE_SLICE_EVENTS = frozenset({"profile_command", "profile_step"})
+_PROFILE_MEMBER_EVENTS = frozenset({"profile_member_request", "profile_member_ack"})
+_PROFILE_REQUIRED_ARGS = frozenset(
+  {"command_id", "level", "member", "transaction", "generation", "stage", "status", "source_ref"}
+)
 
 
 @dataclass
@@ -462,10 +472,18 @@ class Tracer:
           missing = _LEG_REQUIRED_ARGS - set(ev.get("args", {}))
           if missing:
             errors.append(f"leg slice '{ev.get('name')}' missing args {sorted(missing)}")
+        if ev.get("name") in _PROFILE_SLICE_EVENTS:
+          missing = _PROFILE_REQUIRED_ARGS - set(ev.get("args", {}))
+          if missing:
+            errors.append(f"profile slice '{ev.get('name')}' missing args {sorted(missing)}")
       elif ph == "i" and ev.get("name") in _GROUP_ACTION_EVENTS:
         missing = _GROUP_ACTION_REQUIRED_ARGS - set(ev.get("args", {}))
         if missing:
           errors.append(f"Group action instant '{ev.get('name')}' missing args {sorted(missing)}")
+      elif ph == "i" and ev.get("name") in _PROFILE_MEMBER_EVENTS:
+        missing = _PROFILE_REQUIRED_ARGS - set(ev.get("args", {}))
+        if missing:
+          errors.append(f"profile member instant '{ev.get('name')}' missing args {sorted(missing)}")
       elif ph == "B":
         bkey = (pid, tid, ev.get("name"))
         open_stack[bkey] = open_stack.get(bkey, 0) + 1
@@ -590,6 +608,19 @@ class _LegRecord:
   channel_thread: str | None = None  # Ch lane for channel-type stages
 
 
+@dataclass
+class _ProfileTrace:
+  """In-flight command/step timing sourced from the controller FSM."""
+
+  runtime_id: str
+  command_id: str
+  start_cycle: int
+  step_start_cycle: int
+  current_step: str
+  base_args: dict[str, Any]
+  generation: int | None = None
+
+
 class MemoryTrace:
   """Semantic sink memory components call with DTOs they already hold.
 
@@ -611,6 +642,13 @@ class MemoryTrace:
     self._last_leg_lane: dict[str, tuple[str, str]] = {}
     # transaction id -> most recent StageWait reason before the next issue
     self._last_wait: dict[str, str] = {}
+    # runtime command id -> currently open command and FSM step.  Complete
+    # slices are emitted only at real transitions/terminal states.
+    self._profile_records: dict[str, _ProfileTrace] = {}
+    self._arena_flows: set[str] = set()
+    # Retained identity metadata lets late/ignored member responses remain
+    # attributable after their command slice has reached a terminal state.
+    self._profile_metadata: dict[str, dict[str, Any]] = {}
 
   # -- lane helpers -----------------------------------------------------
 
@@ -660,7 +698,11 @@ class MemoryTrace:
     args: dict = {"owner_kind": type(owner).__name__}
     if hasattr(owner, "context_name"):
       args["context_name"] = owner.context_name
-      args["context_launch_generation"] = owner.context_launch_generation
+      generation = getattr(owner, "context_launch_generation", None)
+      if generation is None:
+        generation = getattr(owner, "launch_generation", None)
+      if generation is not None:
+        args["context_launch_generation"] = generation
     if hasattr(owner, "buffer_id"):
       args["buffer_id"] = owner.buffer_id
     if hasattr(owner, "role_event_id"):
@@ -681,6 +723,124 @@ class MemoryTrace:
       "allocate_cycle": handle.allocate_cycle,
     }
 
+  @staticmethod
+  def _source_ref_args(source_ref) -> dict[str, Any]:
+    if source_ref is None:
+      return {
+        "source_ref": "",
+        "source_name": "",
+        "source_symbol": "",
+        "source_body_op_index": -1,
+        "source_op_name": "",
+        "generated_by": "",
+        "source_reason": "",
+      }
+    source_name = getattr(source_ref, "source_name", "")
+    symbol = getattr(source_ref, "symbol", "")
+    body_op_index = getattr(source_ref, "body_op_index", -1)
+    op_name = getattr(source_ref, "op_name", "")
+    return {
+      "source_ref": f"{source_name}:{symbol}:{body_op_index}:{op_name}",
+      "source_name": source_name,
+      "source_symbol": symbol,
+      "source_body_op_index": body_op_index,
+      "source_op_name": op_name,
+      "generated_by": getattr(source_ref, "generated_by", ""),
+      "source_reason": getattr(source_ref, "reason", ""),
+    }
+
+  @staticmethod
+  def _member_name(member) -> str:
+    if isinstance(member, (tuple, list)):
+      return ":".join(str(item) for item in member)
+    return "" if member is None else str(member)
+
+  @classmethod
+  def _profile_record_args(cls, record) -> dict[str, Any]:
+    descriptor = record.descriptor
+    level = getattr(descriptor, "level", None)
+    if level is None:
+      level = ",".join(getattr(descriptor, "levels", ()))
+    members = tuple(getattr(descriptor, "member_ids", ()))
+    owner = getattr(record, "owner", "")
+    binding_id = owner.rpartition("@")[0] if "@" in owner else owner
+    args = {
+      "command_id": getattr(descriptor, "command_id", ""),
+      "level": level,
+      "member": ",".join(cls._member_name(member) for member in members),
+      "transaction": record.runtime_id,
+      "runtime_id": record.runtime_id,
+      "generation": None,
+      "stage": "command",
+      "accepted_cycle": record.accepted_cycle,
+      "status": record.state,
+      "kind": record.kind,
+      "owner": owner,
+      "binding_id": binding_id,
+      **cls._source_ref_args(getattr(descriptor, "source_ref", None)),
+    }
+    for name in ("expected_mode", "target_mode", "registry_hash", "exclusive_binding_id"):
+      if hasattr(descriptor, name):
+        args[name] = getattr(descriptor, name)
+    for name in ("wait_instruction_ids", "frontier", "affected_domains", "dependencies", "levels"):
+      if hasattr(descriptor, name):
+        args[name] = ",".join(str(value) for value in getattr(descriptor, name))
+    return args
+
+  @classmethod
+  def _arena_args(cls, arena, snapshot: dict) -> dict[str, Any]:
+    owner = arena.owner
+    args = {
+      "arena_id": arena.arena_id,
+      "space": arena.memory_space,
+      "pool_id": snapshot.get("pool_id"),
+      "tile_id": snapshot.get("tile_id"),
+      "owner_kind": type(owner).__name__,
+      "profile_mode": arena.profile.mode,
+      "profile_generation": arena.profile_generation,
+      "allocation_generation": arena.allocation_generation,
+      "reserved_bytes": arena.reserved_bytes,
+      "allocate_cycle": arena.allocate_cycle,
+      "layout_hash": arena.layout.layout_hash,
+      "stripe_bytes": arena.layout.stripe_bytes,
+      "live_arenas": snapshot.get("live_arenas"),
+      "live_views": snapshot.get("live_views"),
+      "pool_reserved_bytes": snapshot.get("arena_reserved_bytes"),
+      "pool_live_view_bytes": snapshot.get("live_view_bytes"),
+      "pool_padding_bytes": snapshot.get("padding_bytes"),
+      "pool_free_bytes": snapshot.get("free_bytes"),
+    }
+    args.update(cls._owner_args(owner))
+    task = getattr(owner, "grid", None)
+    if task is not None:
+      args.update(
+        {
+          "context_name": task.context_name,
+          "device_slot": task.device_slot,
+          "launch_generation": task.launch_generation,
+          "dispatch_ordinal": task.dispatch_ordinal,
+          "task_id": owner.task_id,
+        }
+      )
+    elif hasattr(owner, "launch_generation"):
+      args["launch_generation"] = owner.launch_generation
+    return args
+
+  @classmethod
+  def _view_args(cls, view, snapshot: dict) -> dict[str, Any]:
+    return {
+      **cls._allocation_args(view),
+      "arena_id": view.arena_id,
+      "profile_generation": view.profile_generation,
+      "pool_id": snapshot.get("pool_id"),
+      "tile_id": snapshot.get("tile_id"),
+      "live_views": snapshot.get("live_views"),
+      "pool_reserved_bytes": snapshot.get("arena_reserved_bytes"),
+      "pool_live_view_bytes": snapshot.get("live_view_bytes"),
+      "pool_padding_bytes": snapshot.get("padding_bytes"),
+      "pool_free_bytes": snapshot.get("free_bytes"),
+    }
+
   # -- capacity / bank counters (PR 5 §2.5) ----------------------------
 
   def capacity(self, space: str, tile_id: int | None, snapshot: dict, cycle: int) -> None:
@@ -692,16 +852,33 @@ class MemoryTrace:
       "largest_free_extent",
       "live_allocations",
       "pending_release",
+      "arena_reserved_bytes",
+      "live_view_bytes",
+      "padding_bytes",
+      "system_reserved_bytes",
+      "cache_bytes",
     ):
-      tr.counter_if_changed(track, f"{space}_{key}", cycle, snapshot[key], thread=thread)
+      if key in snapshot:
+        tr.counter_if_changed(track, f"{space}_{key}", cycle, snapshot[key], thread=thread)
 
   def banks(self, space: str, tile_id: int | None, per_bank: list[dict], cycle: int) -> None:
     track = self._space_lane(space, tile_id)[0]
-    name = f"{space}_bank_allocated_bytes"
+    fields = {
+      "allocated_bytes": "allocated_bytes",
+      "arena_reserved_bytes": "reserved_bytes",
+      "live_view_bytes": "live_bytes",
+      "padding_bytes": "padding_bytes",
+      "system_reserved_bytes": "system_reserved_bytes",
+      "cache_bytes": "cache_bytes",
+      "free_bytes": "free_bytes",
+    }
     for item in per_bank:
-      self.tracer.counter_if_changed(
-        track, name, cycle, item["allocated_bytes"], thread=f"{space.upper()} Bank:{item['bank_id']}"
-      )
+      thread = f"{space.upper()} Bank:{item['bank_id']}"
+      for counter_field, suffix in fields.items():
+        if counter_field in item:
+          self.tracer.counter_if_changed(
+            track, f"{space}_bank_{suffix}", cycle, item[counter_field], thread=thread
+          )
 
   def cache(self, space: str, tile_id: int | None, stats, cycle: int) -> None:
     track, thread = self._space_lane(space, tile_id)
@@ -767,6 +944,168 @@ class MemoryTrace:
     self.tracer.flow_end(
       track, thread, name, cycle, handle.allocation_id, {"allocation_id": handle.allocation_id}
     )
+
+  def _pool_snapshot(self, space: str, tile_id: int | None, snapshot: dict, cycle: int) -> None:
+    """Emit counters from an ArenaPool-owned post-mutation snapshot."""
+    self.capacity(space, tile_id, snapshot, cycle)
+    self.banks(space, tile_id, snapshot.get("per_bank_occupancy", []), cycle)
+
+  def arena_reserve(self, space: str, tile_id: int | None, arena, snapshot: dict, cycle: int) -> None:
+    """Record a committed whole-Arena reservation and actual pool state."""
+    track = self._space_lane(space, tile_id)[0]
+    args = self._arena_args(arena, snapshot)
+    self.tracer.instant(track, f"Memory:{space.upper()} Arena", "arena_reserve", cycle, args)
+    self.tracer.flow_start(
+      track,
+      f"Memory:{space.upper()} Arena",
+      "arena_reserve",
+      cycle,
+      arena.arena_id,
+      {"arena_id": arena.arena_id},
+    )
+    self._arena_flows.add(arena.arena_id)
+    self._pool_snapshot(space, tile_id, snapshot, cycle)
+
+  def arena_retire(self, space: str, tile_id: int | None, arena, snapshot: dict, cycle: int) -> None:
+    """Record only a successful whole-Arena retirement."""
+    track = self._space_lane(space, tile_id)[0]
+    thread = f"Memory:{space.upper()} Arena"
+    args = self._arena_args(arena, snapshot)
+    args["retire_cycle"] = cycle
+    self.tracer.instant(track, thread, "arena_retire", cycle, args)
+    self.tracer.complete(track, thread, "arena_lifetime", arena.allocate_cycle, cycle, args)
+    if arena.arena_id in self._arena_flows:
+      self.tracer.flow_end(
+        track, thread, "arena_retire", cycle, arena.arena_id, {"arena_id": arena.arena_id}
+      )
+      self._arena_flows.remove(arena.arena_id)
+    self._pool_snapshot(space, tile_id, snapshot, cycle)
+
+  def buffer_view_invalidate(
+    self, space: str, tile_id: int | None, view, snapshot: dict, cycle: int
+  ) -> None:
+    """Record final view invalidation without implying Arena capacity release."""
+    track = self._space_lane(space, tile_id)[0]
+    self.tracer.instant(
+      track,
+      f"Memory:{space.upper()} Arena",
+      "buffer_view_invalidate",
+      cycle,
+      self._view_args(view, snapshot),
+    )
+    self._pool_snapshot(space, tile_id, snapshot, cycle)
+
+  # -- profile controller protocol -------------------------------------
+
+  def _emit_profile_step(self, trace: _ProfileTrace, cycle: int, status: str, reason: str = "") -> None:
+    args = {
+      **trace.base_args,
+      "generation": trace.generation,
+      "stage": trace.current_step,
+      "status": status,
+    }
+    if reason:
+      args["reason"] = reason
+    self.tracer.complete("TileGroup", "Profile:Step", "profile_step", trace.step_start_cycle, cycle, args)
+
+  def profile_command(self, record, cycle: int) -> None:
+    """Open or finish the actual controller transaction."""
+    trace = self._profile_records.get(record.runtime_id)
+    if trace is None:
+      base_args = self._profile_record_args(record)
+      trace = _ProfileTrace(
+        runtime_id=record.runtime_id,
+        command_id=record.command_id,
+        start_cycle=record.accepted_cycle,
+        step_start_cycle=record.accepted_cycle,
+        current_step=record.step,
+        base_args=base_args,
+      )
+      self._profile_records[record.runtime_id] = trace
+      self._profile_metadata[record.runtime_id] = base_args
+    if record.state not in ("completed", "faulted", "cancelled"):
+      return
+    self._emit_profile_step(trace, cycle, record.state, getattr(record, "reason", ""))
+    args = {
+      **trace.base_args,
+      "generation": trace.generation,
+      "stage": "command",
+      "status": record.state,
+      "completed_cycle": record.completed_cycle,
+    }
+    if record.reason:
+      args["reason"] = record.reason
+    self.tracer.complete("TileGroup", "Profile:Command", "profile_command", trace.start_cycle, cycle, args)
+    del self._profile_records[record.runtime_id]
+
+  def profile_step(self, record, cycle: int) -> None:
+    """Close the prior FSM step and start the controller-reported step."""
+    trace = self._profile_records.get(record.runtime_id)
+    if trace is None:
+      self.profile_command(record, record.accepted_cycle)
+      trace = self._profile_records.get(record.runtime_id)
+    if trace is None or trace.current_step == record.step:
+      return
+    self._emit_profile_step(trace, cycle, "completed")
+    trace.current_step = record.step
+    trace.step_start_cycle = cycle
+
+  def profile_member_ack(self, item, cycle: int, status: str) -> None:
+    """Record one real member-bus request or validated response."""
+    runtime_id = getattr(item, "runtime_id", "")
+    trace = self._profile_records.get(runtime_id)
+    generation = getattr(item, "generation", None)
+    if trace is not None:
+      trace.generation = generation
+      base_args = trace.base_args
+    else:
+      base_args = self._profile_metadata.get(runtime_id, self._source_ref_args(None))
+    metadata = self._profile_metadata.get(runtime_id)
+    if metadata is not None:
+      metadata["generation"] = generation
+    member = getattr(item, "member_id", None)
+    args = {
+      **base_args,
+      "command_id": getattr(item, "static_command_id", ""),
+      "level": member[0] if isinstance(member, (tuple, list)) and member else "",
+      "member": self._member_name(member),
+      "transaction": runtime_id,
+      "runtime_id": runtime_id,
+      "generation": generation,
+      "stage": getattr(item, "stage", ""),
+      "status": status,
+    }
+    if hasattr(item, "success"):
+      args["success"] = bool(item.success)
+    if hasattr(item, "ready_cycle"):
+      args["ready_cycle"] = item.ready_cycle
+    if getattr(item, "reason", ""):
+      args["reason"] = item.reason
+    event = "profile_member_request" if status == "request" else "profile_member_ack"
+    self.tracer.instant("TileGroup", "Profile:Member", event, cycle, args)
+
+  def _profile_event(self, name: str, cycle: int, args: dict[str, Any], status: str) -> None:
+    self.tracer.instant("TileGroup", "Profile:Command", name, cycle, {**args, "status": status})
+
+  def profile_initialize(self, cycle: int, args: dict[str, Any]) -> None:
+    self._profile_event("profile_initialize", cycle, args, "running")
+
+  def profile_initialized(self, cycle: int, args: dict[str, Any]) -> None:
+    self._profile_event("profile_initialized", cycle, args, "completed")
+
+  def profile_recover(self, cycle: int, args: dict[str, Any]) -> None:
+    self._profile_event("profile_recover", cycle, args, "running")
+
+  def profile_recovered(self, cycle: int, args: dict[str, Any]) -> None:
+    self._profile_event("profile_recovered", cycle, args, "completed")
+
+  def profile_recover_failed(self, cycle: int, args: dict[str, Any]) -> None:
+    self._profile_event("profile_recover_failed", cycle, args, "faulted")
+
+  def profile_cancel_requested(self, cycle: int, args: dict[str, Any]) -> None:
+    runtime_id = args.get("runtime_id", "")
+    context = self._profile_metadata.get(runtime_id, {})
+    self._profile_event("profile_cancel_requested", cycle, {**context, **args}, "cancel_requested")
 
   def hbm_bind(self, binding, handle, cycle: int) -> None:
     self.tracer.instant(

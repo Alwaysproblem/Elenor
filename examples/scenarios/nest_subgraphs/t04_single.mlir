@@ -59,9 +59,11 @@
 //         "时序/生命周期 Correctness": "检查真实 HBM/L2 数据边、input_released/output_ready、最终 Store 与释放顺序",
 //         "数值": "未建模；仅使用真实搬运和合成 engine service，不作为 tensor 数值证明",
 //         "Liveness": "应完成；以同次运行 trace 和退出状态确认",
-//         "Scheduling Quality": "单一 Context 内先 issue R0/R1/R2 的 grid，等待 R1 的 C grid 后再启动 R3；此映射不能证明 device-slot generation"
+//"Scheduling Quality": "单一 Context 内先 issue R0/R1/R2 的 grid，等待 R1 的 C grid 后再启动 R3；此映射不能证明
+// device-slot generation"
 //       },
-//       "forbidden_dependencies": "只允许表列真数据边；UCE 共享 pin 争用不是数据依赖；跨 Context 仅使用当前 IR 可见的 context_done/HBM 可见性",
+//"forbidden_dependencies": "只允许表列真数据边；UCE 共享 pin 争用不是数据依赖；跨 Context 仅使用当前 IR 可见的 context_done/HBM
+// 可见性",
 //       "tensors": {
 //         "R0.input": {
 //           "formal": "R0",
@@ -271,14 +273,17 @@
 //       "notes": {
 //         "request_intervals": "每个 Rr formal 内 interval 0/1/2/3 分别为 input/A/B/C；请求间不别名",
 //         "shared_weight": "W 是 4x64x64xbf16 只读 formal，所有 A 实际读取",
-//         "reuse_identity": "stage 的 R1/R2/R3（uniform 还包括 R0）重复提交同一 ctx_request_fast；局部 event tag 相同，nexus done_Rr 唯一",
+//"reuse_identity": "stage 的 R1/R2/R3（uniform 还包括 R0）重复提交同一 ctx_request_fast；局部 event tag 相同，nexus
+// done_Rr 唯一",
 //         "generation_scope": "只证明正常重复 submit 的 namespace/slot generation 隔离；不伪造旧通知注入"
 //       }
 //     }
 builtin.module {
   tile.program @prog_A_slow(
     %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %i1: !nest.l2_buffer<4x64x64xbf16>,
-    %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 24576> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -601,7 +606,9 @@ builtin.module {
   }
   tile.program @prog_A_fast(
     %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %i1: !nest.l2_buffer<4x64x64xbf16>,
-    %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 16384> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -623,7 +630,9 @@ builtin.module {
     tile.return
   }
   tile.program @prog_B(
-    %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %task : !nest.task, %i0 : !nest.l2_buffer<4x64x64xbf16>, %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 8192> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -640,7 +649,9 @@ builtin.module {
     tile.return
   }
   tile.program @prog_C(
-    %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %task : !nest.task, %i0 : !nest.l2_buffer<4x64x64xbf16>, %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 8192> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -660,7 +671,9 @@ builtin.module {
     %R0: !nest.global_memref<4194304xbf16>, %R1: !nest.global_memref<4194304xbf16>,
     %R2: !nest.global_memref<4194304xbf16>, %R3: !nest.global_memref<4194304xbf16>,
     %W: !nest.global_memref<4x64x64xbf16>)
-    placement = 15 {
+    placement = 15
+            resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+        logical_tasks = 48, l2_spm_bytes = 557056, requested_contexts_per_tile = 4> {
     %b_W = nest.alloc slot = "shared_W" role = "in" shape = [4, 64, 64] dtype = "bf16"
       alignment = 256 : !nest.l2_buffer<4x64x64xbf16>
     %h_W = nest.subview %W offsets = [0, 0, 0] sizes = [4, 64, 64] strides = [1, 1, 1]
@@ -737,63 +750,72 @@ builtin.module {
     %pref_R2_input = nest.dma.prefetch.async %h_R2_input into %b_R2_input
       : !nest.event<"pref_R2_input">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_A0, %read_A0, %ready_A0 = nest.dispatch.tasks.async @prog_A_slow context = 0 tasks(%tasks)
+    %grid_A0, %read_A0, %ready_A0 = nest.dispatch.tasks.async @prog_A_slow l1_mode = 0 context = 0
+      tasks(%tasks)
       globals() bindings(%b_R0_input, %b_W, %b_R0_A) ins(%b_R0_input, %b_W) outs(%b_R0_A)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
         output_ready = #nest.aggregate<all_tasks>
       } depends_on(%pref_R0_input, %pref_W)
       : (!nest.event<"grid_A0">, !nest.event<"read_A0">, !nest.event<"ready_A0">)
-    %grid_A1, %read_A1, %ready_A1 = nest.dispatch.tasks.async @prog_A_fast context = 1 tasks(%tasks)
+    %grid_A1, %read_A1, %ready_A1 = nest.dispatch.tasks.async @prog_A_fast l1_mode = 0 context = 1
+      tasks(%tasks)
       globals() bindings(%b_R1_input, %b_W, %b_R1_A) ins(%b_R1_input, %b_W) outs(%b_R1_A)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
         output_ready = #nest.aggregate<all_tasks>
       } depends_on(%pref_R1_input, %pref_W)
       : (!nest.event<"grid_A1">, !nest.event<"read_A1">, !nest.event<"ready_A1">)
-    %grid_A2, %read_A2, %ready_A2 = nest.dispatch.tasks.async @prog_A_fast context = 2 tasks(%tasks)
+    %grid_A2, %read_A2, %ready_A2 = nest.dispatch.tasks.async @prog_A_fast l1_mode = 0 context = 2
+      tasks(%tasks)
       globals() bindings(%b_R2_input, %b_W, %b_R2_A) ins(%b_R2_input, %b_W) outs(%b_R2_A)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
         output_ready = #nest.aggregate<all_tasks>
       } depends_on(%pref_R2_input, %pref_W)
       : (!nest.event<"grid_A2">, !nest.event<"read_A2">, !nest.event<"ready_A2">)
-    %grid_B0, %read_B0, %ready_B0 = nest.dispatch.tasks.async @prog_B context = 0 tasks(%tasks)
+    %grid_B0, %read_B0, %ready_B0 = nest.dispatch.tasks.async @prog_B l1_mode = 0 context = 0
+      tasks(%tasks)
       globals() bindings(%b_R0_A, %b_R0_B) ins(%b_R0_A) outs(%b_R0_B)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
         output_ready = #nest.aggregate<all_tasks>
       } depends_on(%ready_A0)
       : (!nest.event<"grid_B0">, !nest.event<"read_B0">, !nest.event<"ready_B0">)
-    %grid_C0, %read_C0, %ready_C0 = nest.dispatch.tasks.async @prog_C context = 0 tasks(%tasks)
+    %grid_C0, %read_C0, %ready_C0 = nest.dispatch.tasks.async @prog_C l1_mode = 0 context = 0
+      tasks(%tasks)
       globals() bindings(%b_R0_B, %b_R0_C) ins(%b_R0_B) outs(%b_R0_C)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
         output_ready = #nest.aggregate<all_tasks>
       } depends_on(%ready_B0)
       : (!nest.event<"grid_C0">, !nest.event<"read_C0">, !nest.event<"ready_C0">)
-    %grid_B1, %read_B1, %ready_B1 = nest.dispatch.tasks.async @prog_B context = 1 tasks(%tasks)
+    %grid_B1, %read_B1, %ready_B1 = nest.dispatch.tasks.async @prog_B l1_mode = 0 context = 1
+      tasks(%tasks)
       globals() bindings(%b_R1_A, %b_R1_B) ins(%b_R1_A) outs(%b_R1_B)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
         output_ready = #nest.aggregate<all_tasks>
       } depends_on(%ready_A1)
       : (!nest.event<"grid_B1">, !nest.event<"read_B1">, !nest.event<"ready_B1">)
-    %grid_C1, %read_C1, %ready_C1 = nest.dispatch.tasks.async @prog_C context = 1 tasks(%tasks)
+    %grid_C1, %read_C1, %ready_C1 = nest.dispatch.tasks.async @prog_C l1_mode = 0 context = 1
+      tasks(%tasks)
       globals() bindings(%b_R1_B, %b_R1_C) ins(%b_R1_B) outs(%b_R1_C)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
         output_ready = #nest.aggregate<all_tasks>
       } depends_on(%ready_B1)
       : (!nest.event<"grid_C1">, !nest.event<"read_C1">, !nest.event<"ready_C1">)
-    %grid_B2, %read_B2, %ready_B2 = nest.dispatch.tasks.async @prog_B context = 2 tasks(%tasks)
+    %grid_B2, %read_B2, %ready_B2 = nest.dispatch.tasks.async @prog_B l1_mode = 0 context = 2
+      tasks(%tasks)
       globals() bindings(%b_R2_A, %b_R2_B) ins(%b_R2_A) outs(%b_R2_B)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
         output_ready = #nest.aggregate<all_tasks>
       } depends_on(%ready_A2)
       : (!nest.event<"grid_B2">, !nest.event<"read_B2">, !nest.event<"ready_B2">)
-    %grid_C2, %read_C2, %ready_C2 = nest.dispatch.tasks.async @prog_C context = 2 tasks(%tasks)
+    %grid_C2, %read_C2, %ready_C2 = nest.dispatch.tasks.async @prog_C l1_mode = 0 context = 2
+      tasks(%tasks)
       globals() bindings(%b_R2_B, %b_R2_C) ins(%b_R2_B) outs(%b_R2_C)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
@@ -803,21 +825,24 @@ builtin.module {
     nest.await %grid_C1
     %pref_R3_input = nest.dma.prefetch.async %h_R3_input into %b_R3_input
       : !nest.event<"pref_R3_input">
-    %grid_A3, %read_A3, %ready_A3 = nest.dispatch.tasks.async @prog_A_fast context = 3 tasks(%tasks)
+    %grid_A3, %read_A3, %ready_A3 = nest.dispatch.tasks.async @prog_A_fast l1_mode = 0 context = 3
+      tasks(%tasks)
       globals() bindings(%b_R3_input, %b_W, %b_R3_A) ins(%b_R3_input, %b_W) outs(%b_R3_A)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
         output_ready = #nest.aggregate<all_tasks>
       } depends_on(%pref_R3_input, %pref_W)
       : (!nest.event<"grid_A3">, !nest.event<"read_A3">, !nest.event<"ready_A3">)
-    %grid_B3, %read_B3, %ready_B3 = nest.dispatch.tasks.async @prog_B context = 3 tasks(%tasks)
+    %grid_B3, %read_B3, %ready_B3 = nest.dispatch.tasks.async @prog_B l1_mode = 0 context = 3
+      tasks(%tasks)
       globals() bindings(%b_R3_A, %b_R3_B) ins(%b_R3_A) outs(%b_R3_B)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
         output_ready = #nest.aggregate<all_tasks>
       } depends_on(%ready_A3)
       : (!nest.event<"grid_B3">, !nest.event<"read_B3">, !nest.event<"ready_B3">)
-    %grid_C3, %read_C3, %ready_C3 = nest.dispatch.tasks.async @prog_C context = 3 tasks(%tasks)
+    %grid_C3, %read_C3, %ready_C3 = nest.dispatch.tasks.async @prog_C l1_mode = 0 context = 3
+      tasks(%tasks)
       globals() bindings(%b_R3_B, %b_R3_C) ins(%b_R3_B) outs(%b_R3_C)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>

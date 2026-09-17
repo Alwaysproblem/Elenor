@@ -17,6 +17,7 @@ from typing import Protocol
 from .config import DeviceConfig
 from .execution_ir import ExecModel, ExecTileGroupTask, GlobalBinding
 from .pmu import PMUCounter
+from .profiles import MemoryMaintenanceDesc, ProfileReconfigDesc
 
 
 class DeviceCompletionStatus(StrEnum):
@@ -55,14 +56,44 @@ class DeviceCompletion:
   cycle: int
 
 
+@dataclass(frozen=True)
+class DeviceControlRequest:
+  """Immutable CPU-to-Group profile or maintenance command."""
+
+  command_id: str
+  command: ProfileReconfigDesc | MemoryMaintenanceDesc
+
+
+@dataclass(frozen=True)
+class DeviceControlCompletion:
+  """Terminal Group-to-CPU control completion."""
+
+  command_id: str
+  status: str
+  reason: str
+  cycle: int
+
+
 class DevicePort(Protocol):
   """The complete hardware-facing interface visible to the CPU model."""
 
   def try_submit(self, request: DeviceLaunchRequest, cycle: int) -> bool:
-    """Accept ``request`` atomically, or return ``False`` for backpressure."""
+    """Accept launch metadata atomically, or return ``False`` for backpressure."""
 
   def poll_completions(self, cycle: int) -> tuple[DeviceCompletion, ...]:
-    """Return terminal completions made visible by the preceding Group step."""
+    """Return launch completions made visible by the preceding Group step."""
+
+  def try_submit_control(self, request: DeviceControlRequest, cycle: int) -> bool:
+    """Accept one explicit control command, or return ``False`` while its writer is busy."""
+
+  def poll_control_completions(self, cycle: int) -> tuple[DeviceControlCompletion, ...]:
+    """Return control completions made visible by the preceding Group step."""
+
+  def note_await(self, instruction_id: str, events: tuple[str, ...], cycle: int) -> None:
+    """Record one successfully consumed ordinary await for this run generation."""
+
+  def note_dependencies(self, events: tuple[str, ...], cycle: int) -> None:
+    """Forward successfully consumed explicit control dependencies."""
 
 
 DeviceEventObserver = Callable[[str, int, Mapping[str, object]], None]
@@ -172,6 +203,9 @@ class CpuDeviceController:
     self._pending: list[_PendingLaunch] = []
     self._active: dict[int, _LaunchRecord] = {}
     self._records: dict[int, _LaunchRecord] = {}
+    self._active_control_id: str | None = None
+    self._control_completion: DeviceControlCompletion | None = None
+    self._control_receipts: set[str] = set()
     self._counters: Counter[str] = Counter()
     self._pending_peak = 0
     self._active_peak = 0
@@ -186,19 +220,28 @@ class CpuDeviceController:
   def _validate_and_count_references(model: ExecModel) -> Counter[str]:
     """Validate direct DTO use and count event references before execution."""
     defined: set[str] = set()
+    instruction_ids: set[str] = set()
+    command_ids: set[str] = set()
     references: Counter[str] = Counter()
     returned = False
     for op in model.body:
       if returned:
         raise ValueError("device operation follows nexus.return")
+      if not op.instruction_id or op.instruction_id in instruction_ids:
+        raise ValueError("device operations require unique non-empty instruction_id values")
+      instruction_ids.add(op.instruction_id)
       if op.op == "submit":
         if not op.event_tag:
           raise ValueError("device submit must define a non-empty event tag")
         if op.event_tag in defined:
           raise ValueError(f"duplicate device event tag '{op.event_tag}'")
-        if op.ctx_name not in model.tasks:
-          raise ValueError(f"device submit references unknown context '{op.ctx_name}'")
-        task = model.tasks[op.ctx_name]
+        if not op.binding_id or op.binding_id not in model.tasks:
+          raise ValueError(f"device submit references unknown binding '{op.binding_id}'")
+        task = model.tasks[op.binding_id]
+        if task.binding_id != op.binding_id or task.name != op.ctx_name:
+          raise ValueError("device submit task identity disagrees with its binding")
+        if op.binding_id not in model.context_pins:
+          raise ValueError(f"device submit binding '{op.binding_id}' has no context pin entry")
         if len(op.actual_inputs) != len(task.global_inputs):
           raise ValueError(
             f"device submit for '{op.ctx_name}' has "
@@ -218,10 +261,34 @@ class CpuDeviceController:
           references[dependency] += 1
         defined.add(op.event_tag)
       elif op.op == "await":
-        if op.event_tag not in defined:
-          raise ValueError(f"device await event '{op.event_tag}' is not bound")
+        if op.event_tag not in defined or op.dependencies or op.command is not None:
+          raise ValueError(f"device await event '{op.event_tag}' is invalid")
         references[op.event_tag] += 1
+      elif op.op in ("profile_reconfig", "memory_maintenance"):
+        expected_type = ProfileReconfigDesc if op.op == "profile_reconfig" else MemoryMaintenanceDesc
+        if (
+          not isinstance(op.command, expected_type)
+          or op.command.command_id != op.instruction_id
+          or op.command.command_id in command_ids
+          or op.event_tag
+          or op.actual_inputs
+        ):
+          raise ValueError(f"invalid device control operation '{op.op}'")
+        if op.op == "profile_reconfig" and op.dependencies:
+          raise ValueError("profile reconfiguration cannot carry device dependencies")
+        command_ids.add(op.command.command_id)
+        if op.op == "memory_maintenance" and (
+          len(op.dependencies) != len(set(op.dependencies)) or not set(op.dependencies) <= defined
+        ):
+          raise ValueError("memory maintenance has invalid device dependencies")
+        if op.op == "memory_maintenance":
+          assert isinstance(op.command, MemoryMaintenanceDesc)
+          if not set(op.command.dependencies) <= set(op.dependencies):
+            raise ValueError("maintenance command dependencies are absent from its Device operation")
+          references.update(op.dependencies)
       elif op.op == "return":
+        if op.event_tag or op.actual_inputs or op.dependencies or op.command is not None:
+          raise ValueError("device return carries unexpected operands")
         returned = True
       else:
         raise ValueError(f"unknown device operation '{op.op}'")
@@ -243,9 +310,16 @@ class CpuDeviceController:
 
   @property
   def done(self) -> bool:
+    control_done = self._active_control_id is None and self._control_completion is None
     if self.faulted:
-      return not self._pending and not self._active
-    return self._returned and not self._pending and not self._active and not self._completion_reserved
+      return not self._pending and not self._active and control_done
+    return (
+      self._returned
+      and not self._pending
+      and not self._active
+      and not self._completion_reserved
+      and control_done
+    )
 
   @property
   def succeeded(self) -> bool:
@@ -274,7 +348,7 @@ class CpuDeviceController:
     self._sample_occupancy()
 
   def harvest_completions(self, cycle: int) -> tuple[DeviceCompletion, ...]:
-    """Harvest completions after the Group's cycle ``cycle`` step."""
+    """Harvest launch and control completions after the Group's cycle step."""
     completions = self.port.poll_completions(cycle)
     first_error: DeviceCompletion | None = None
     for completion in completions:
@@ -310,9 +384,48 @@ class CpuDeviceController:
       if completion.status is DeviceCompletionStatus.ERROR and first_error is None:
         first_error = completion
 
+    control_error: DeviceControlCompletion | None = None
+    for control_completion in self.port.poll_control_completions(cycle):
+      if control_completion.command_id != self._active_control_id or self._control_completion is not None:
+        self._protocol_fault(
+          f"control completion for unknown or retired command {control_completion.command_id!r}", cycle
+        )
+        continue
+      if control_completion.cycle > cycle:
+        control_completion = DeviceControlCompletion(
+          control_completion.command_id,
+          "faulted",
+          f"control completion cycle {control_completion.cycle} is later than poll cycle {cycle}",
+          cycle,
+        )
+      if control_completion.status not in ("completed", "faulted", "cancelled"):
+        control_completion = DeviceControlCompletion(
+          control_completion.command_id,
+          "faulted",
+          f"control command {control_completion.command_id!r} returned invalid status",
+          cycle,
+        )
+      if control_completion.status == "completed" and not self.faulted:
+        self._control_completion = control_completion
+      else:
+        self._active_control_id = None
+        self._control_completion = None
+        if control_completion.status != "completed":
+          control_error = control_completion
+          self._counters["controls_failed"] += 1
+          self.pmu.add_event("device_control_failed")
+
     if first_error is not None:
       reason = first_error.reason or f"request {first_error.request_id} failed"
       self._enter_fault(reason, first_error.cycle)
+      if self._control_completion is not None:
+        self._active_control_id = None
+        self._control_completion = None
+    if control_error is not None:
+      reason = control_error.reason or (
+        f"control command {control_error.command_id} {control_error.status}"
+      )
+      self._enter_fault(reason, control_error.cycle)
     return completions
 
   def note_fault_drain_started(self, cycle: int) -> None:
@@ -334,7 +447,7 @@ class CpuDeviceController:
         dependency_ids = tuple(self._event_handles[tag] for tag in op.dependencies)
         request_id = self._next_request_id
         self._next_request_id += 1
-        task = self.model.tasks[op.ctx_name]
+        task = self.model.tasks[op.binding_id]
         formal_bindings = {
           formal.name: self.model.inputs[actual_index].name
           for formal, actual_index in zip(task.global_inputs, op.actual_inputs)
@@ -345,7 +458,7 @@ class CpuDeviceController:
           context_name=op.ctx_name,
           global_bindings=self.global_bindings,
           formal_bindings=MappingProxyType(formal_bindings),
-          group_affinity=self.model.context_pins.get(op.ctx_name),
+          group_affinity=self.model.context_pins[op.binding_id],
         )
         state = DeviceLaunchState.WAIT_DEPS if dependency_ids else DeviceLaunchState.WAIT_ADMISSION
         record = _LaunchRecord(
@@ -384,12 +497,101 @@ class CpuDeviceController:
         if completion.status is DeviceCompletionStatus.ERROR:
           self._enter_fault(completion.reason or f"awaited request {request_id} failed", cycle)
           break
+        try:
+          self.port.note_await(op.instruction_id, (op.event_tag,), cycle)
+        except (RuntimeError, ValueError) as exc:
+          self._protocol_fault(f"ordinary await proof was rejected: {exc}", cycle)
+          break
         self._release_reference(request_id)
         self._pc += 1
         issued += 1
         self._counters["awaits_completed"] += 1
         self.pmu.add_event("device_await_complete")
-        self._emit("await_complete", cycle, {"request_id": request_id, "event": op.event_tag})
+        self._emit(
+          "await_complete",
+          cycle,
+          {
+            "request_id": request_id,
+            "event": op.event_tag,
+            "instruction_id": op.instruction_id,
+            "events": (op.event_tag,),
+          },
+        )
+        continue
+      if op.op in ("profile_reconfig", "memory_maintenance"):
+        assert op.command is not None
+        command_id = op.command.command_id
+        if self._active_control_id is None:
+          if op.op == "memory_maintenance":
+            assert isinstance(op.command, MemoryMaintenanceDesc)
+            dependency_ids = tuple(self._event_handles[event] for event in op.dependencies)
+            completed = [self._completions.get(request_id) for request_id in dependency_ids]
+            if any(completion is None for completion in completed):
+              self._counters["control_dependency_wait_cycles"] += 1
+              self.pmu.add_cycle("device_control_dependency_wait")
+              break
+            failed = next(
+              (
+                item
+                for item in completed
+                if item is not None and item.status is DeviceCompletionStatus.ERROR
+              ),
+              None,
+            )
+            if failed is not None:
+              self._enter_fault(failed.reason or "control dependency failed", cycle)
+              break
+            if command_id not in self._control_receipts:
+              self.port.note_dependencies(op.command.dependencies, cycle)
+              self._control_receipts.add(command_id)
+          control_request = DeviceControlRequest(command_id, op.command)
+          if not self.port.try_submit_control(control_request, cycle):
+            self._counters["control_backpressure_cycles"] += 1
+            self.pmu.add_cycle("device_control_wait")
+            break
+          self._active_control_id = command_id
+          if op.op == "memory_maintenance":
+            for request_id in dependency_ids:
+              self._release_reference(request_id)
+          self._counters["controls_submitted"] += 1
+          self.pmu.add_event("device_control_submit")
+          self._emit(
+            "control_submit",
+            cycle,
+            {"command_id": command_id, "kind": op.op, "instruction_id": op.instruction_id},
+          )
+          break
+        if self._active_control_id != command_id:
+          self._protocol_fault(
+            f"control fence for {command_id!r} found active command {self._active_control_id!r}", cycle
+          )
+          break
+        control_result = self._control_completion
+        if control_result is None:
+          self._counters["control_wait_cycles"] += 1
+          self.pmu.add_cycle("device_control_wait")
+          break
+        if control_result.status != "completed":
+          self._enter_fault(
+            control_result.reason or f"control command {command_id} {control_result.status}", cycle
+          )
+          break
+        self._active_control_id = None
+        self._control_completion = None
+        self._pc += 1
+        issued += 1
+        self._counters["controls_completed"] += 1
+        self.pmu.add_event("device_control_complete")
+        self._emit(
+          "control_complete",
+          cycle,
+          {
+            "command_id": command_id,
+            "kind": op.op,
+            "instruction_id": op.instruction_id,
+            "completion_cycle": control_result.cycle,
+          },
+        )
         continue
 
       self._returned = True
@@ -601,6 +803,7 @@ class CpuDeviceController:
     self.pmu.add_cycle("device_pending_occupancy", pending)
     self.pmu.add_cycle("device_active_occupancy", active)
     self.pmu.add_cycle("device_completion_occupancy", retained)
+    self.pmu.add_cycle("device_control_occupancy", int(self._active_control_id is not None))
 
   def _observe(self, event: str, cycle: int, record: _LaunchRecord) -> None:
     self._emit(
@@ -637,6 +840,9 @@ class CpuDeviceController:
       "faults",
       "protocol_faults",
       "awaits_completed",
+      "controls_submitted",
+      "controls_completed",
+      "controls_failed",
       "returns",
       "await_wait_cycles",
       "dependency_wait_cycles",
@@ -644,6 +850,8 @@ class CpuDeviceController:
       "outstanding_backpressure_cycles",
       "completion_backpressure_cycles",
       "admission_backpressure_cycles",
+      "control_backpressure_cycles",
+      "control_wait_cycles",
       "issue_width_limited_cycles",
     )
     counters = {name: self._counters[name] for name in counter_names}
@@ -677,6 +885,17 @@ class CpuDeviceController:
       "fault_cycle": self.fault_cycle,
       "drain_start_cycle": self.drain_start_cycle,
       "drain_complete_cycle": self.drain_complete_cycle,
+      "active_control_id": self._active_control_id,
+      "control_completion": (
+        None
+        if self._control_completion is None
+        else {
+          "command_id": self._control_completion.command_id,
+          "status": self._control_completion.status,
+          "reason": self._control_completion.reason,
+          "cycle": self._control_completion.cycle,
+        }
+      ),
       "counters": counters,
       "launch_records": [self._records[request_id].snapshot() for request_id in sorted(self._records)],
     }

@@ -56,6 +56,7 @@ Protocol scenarios:
   l2-admission-wait              scenarios/l2_admission_wait.mlir
   sequential-release-counterexample
                                  scenarios/sequential_release_counterexample.mlir
+  profile-reconfiguration         scenarios/profile_reconfiguration.mlir
 EOF
   printf '\nNEST subgraphs (timing/lifetime, not tensor numerics):\n'
   local model stem
@@ -267,9 +268,9 @@ case "$name" in
   l2-admission-wait)
     set -- \
       --ir-file "$ROOT_DIR/examples/scenarios/l2_admission_wait.mlir" \
+      --hw-config "$ROOT_DIR/examples/configs/profile_l2_256k.yaml" \
       --hw-override num_dma_channels=2 \
       --sim-override fidelity=full_memory \
-      --hw-override group_sram_bytes=262144 \
       --hw-override hbm_fixed_latency_cycles=10 \
       --context-mode 2 \
       --device-context-mode 2 \
@@ -282,6 +283,7 @@ case "$name" in
   sequential-release-counterexample)
     set -- \
       --ir-file "$ROOT_DIR/examples/scenarios/sequential_release_counterexample.mlir" \
+      --hw-config "$ROOT_DIR/examples/configs/profile_l2_256k.yaml" \
       --hw-override num_dma_channels=2 \
       --input-binding YA_in=0x100000:131072:rw \
       --input-binding YA_out=0x200000:131072:rw \
@@ -318,11 +320,11 @@ case "$name" in
       t01_single_one_uce)
         nest_args+=(--context-mode 1 --device-context-mode 1) ;;
       n03_wait_capacity|n09_impossible)
-        nest_args+=(--hw-override group_sram_bytes=65536) ;;
+        nest_args+=(--hw-config "$ROOT_DIR/examples/configs/profile_l2_64k.yaml") ;;
       n04_fifo_hol|s09_single_exact)
-        nest_args+=(--hw-override group_sram_bytes=196608) ;;
+        nest_args+=(--hw-config "$ROOT_DIR/examples/configs/profile_l2_192k.yaml") ;;
       s09_single_short)
-        nest_args+=(--hw-override group_sram_bytes=196352) ;;
+        nest_args+=(--hw-config "$ROOT_DIR/examples/configs/profile_l2_short.yaml") ;;
       s07_node_c100|s12_node_v100_evu)
         nest_args+=(--max-cycles 8000000) ;;
     esac
@@ -359,6 +361,15 @@ case "$name" in
       --input-binding c=0x130000:2048:w \
       --hw-override hbm_fixed_latency_cycles=10 \
       --max-cycles 200000 \
+      "$@"
+    ;;
+  profile-reconfiguration)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/scenarios/profile_reconfiguration.mlir" \
+      --context-mode 1 \
+      --device-context-mode 1 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --max-cycles 500000 \
       "$@"
     ;;
   file)

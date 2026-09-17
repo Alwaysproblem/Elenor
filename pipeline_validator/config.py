@@ -14,6 +14,14 @@ from typing import Any
 
 import yaml
 
+from .profiles import (
+  MemoryTargetConfig,
+  ProfileSourceConfig,
+  build_registry,
+  parse_memory_target,
+  parse_profile_source,
+)
+
 # Tile UCE execution contexts per tile.  Hardware V1.x caps at 2
 # (design/elenor_tile_uce §3.2.1); the validator allows up to 8 for
 # what-if exploration.
@@ -31,6 +39,8 @@ _HW_YAML_PATH_TO_FIELD = {
   "system.topology.tiles_per_group": "num_tiles",
   "system.clock.core_mhz": "clock_mhz",
   "memory.cache.line_bytes": "cache_line_bytes",
+  "memory.target": "memory_target",
+  "memory.profile_source": "profile_source",
   "memory.hbm.capacity_bytes": "hbm_capacity_bytes",
   "memory.hbm.bandwidth_gbs": "hbm_bandwidth_gbs",
   "memory.hbm.outstanding_limit": "hbm_outstanding_limit",
@@ -41,14 +51,12 @@ _HW_YAML_PATH_TO_FIELD = {
   "memory.group_sram.banks": "group_sram_banks",
   "memory.group_sram.access_latency_cycles": "l2_access_latency_cycles",
   "memory.group_sram.bank_bandwidth_gbs": "l2_bank_bandwidth_gbs",
-  "memory.group_sram.cache.capacity_bytes": "l2_cache_capacity_bytes",
   "memory.group_sram.cache.lookup_latency_cycles": "l2_cache_lookup_latency_cycles",
   "memory.group_sram.cache.mshr_entries": "l2_mshr_entries",
   "memory.tile_l1.capacity_bytes": "tile_l1_bytes",
   "memory.tile_l1.banks": "tile_l1_banks",
   "memory.tile_l1.access_latency_cycles": "l1_access_latency_cycles",
   "memory.tile_l1.bandwidth_gbs": "tile_l1_bandwidth_gbs",
-  "memory.tile_l1.cache.capacity_bytes": "l1_cache_capacity_bytes",
   "memory.tile_l1.cache.lookup_latency_cycles": "l1_cache_lookup_latency_cycles",
   "memory.tile_l1.cache.mshr_entries": "l1_mshr_entries",
   "memory.tile_program_sram.capacity_bytes": "tile_program_sram_bytes",
@@ -77,6 +85,7 @@ _HW_YAML_PATH_TO_FIELD = {
   "engines.use.launch_cycles": "use_launch_cycles",
   "control.tile_uce.clock_mhz": "uce_clock_mhz",
   "control.tile_uce.dispatch_per_cycle": "uce_dispatch_per_cycle",
+  "control.slot_frame.slot_count": "frame_slot_capacity",
   "control.slot_frame.bind_cycles": "frame_bind_cycles",
   "fabric.dma.bandwidth_gbs": "group_dma_bandwidth_gbs",
   "fabric.dma.channels": "num_dma_channels",
@@ -131,7 +140,7 @@ class _StrictHwYamlLoader(yaml.SafeLoader):
     return super().construct_mapping(node, deep)
 
 
-def _flatten_hw_yaml(data: dict[Any, Any], path: Path) -> dict[str, Any]:
+def _flatten_hw_yaml(data: dict[Any, Any], path: Path, defaults: dict[str, Any]) -> dict[str, Any]:
   """Recursively flatten the grouped YAML into flat field values.
 
   Group paths must be mappings, leaf paths must be scalars, and any unknown
@@ -150,6 +159,10 @@ def _flatten_hw_yaml(data: dict[Any, Any], path: Path) -> dict[str, Any]:
             f"group path '{child}' in '{path}' must be a mapping, got {type(value).__name__}"
           )
         walk(value, child)
+      elif child == "memory.target":
+        flat["memory_target"] = parse_memory_target(value, defaults.get("memory_target"))
+      elif child == "memory.profile_source":
+        flat["profile_source"] = parse_profile_source(value, defaults.get("profile_source"))
       elif child in _HW_YAML_PATH_TO_FIELD:
         if isinstance(value, (dict, list)):
           raise ValueError(f"leaf path '{child}' in '{path}' must be a scalar, got {type(value).__name__}")
@@ -165,7 +178,7 @@ def _load_hw_yaml(path: Path, *, required: bool) -> dict[str, Any]:
   """Load grouped YAML and return flat HardwareConfig field values.
 
   ``required=True`` is the bundled defaults file: it must declare
-  ``schema_version: 1`` and every mapped field.  ``required=False`` is a
+  ``schema_version: 2`` and every mapped field.  ``required=False`` is a
   user override file: ``schema_version`` may be omitted and any legal
   subtree may be left out; missing fields fall back to bundled defaults.
   """
@@ -180,12 +193,12 @@ def _load_hw_yaml(path: Path, *, required: bool) -> dict[str, Any]:
 
   if "schema_version" in raw:
     version = raw.pop("schema_version")
-    if version != 1:
-      raise ValueError(f"unsupported schema_version {version!r} in '{path}' (expected 1)")
+    if type(version) is not int or version != 2:
+      raise ValueError(f"unsupported schema_version {version!r} in '{path}' (expected 2)")
   elif required:
-    raise ValueError(f"missing schema_version in '{path}' (expected 1)")
+    raise ValueError(f"missing schema_version in '{path}' (expected 2)")
 
-  flat = _flatten_hw_yaml(raw, path)
+  flat = _flatten_hw_yaml(raw, path, {} if required else _HW_DEFAULTS)
   if required:
     missing = sorted(_HW_MAPPED_FIELD_NAMES - flat.keys())
     if missing:
@@ -218,6 +231,8 @@ class HardwareConfig:
   # --- Group / L2 ------------------------------------------------------
   group_sram_bytes: int = _HW_DEFAULTS["group_sram_bytes"]  # 8 MB Balanced-small (12.3)
   group_sram_banks: int = _HW_DEFAULTS["group_sram_banks"]
+  memory_target: MemoryTargetConfig = _HW_DEFAULTS["memory_target"]
+  profile_source: ProfileSourceConfig = _HW_DEFAULTS["profile_source"]
   hbm_bandwidth_gbs: float = _HW_DEFAULTS["hbm_bandwidth_gbs"]  # 8 HBM stacks * 102.4 GB/s
   group_dma_bandwidth_gbs: float = _HW_DEFAULTS["group_dma_bandwidth_gbs"]  # per-channel peak
   num_dma_channels: int = _HW_DEFAULTS["num_dma_channels"]  # concurrent Global DMA channels
@@ -290,10 +305,8 @@ class HardwareConfig:
   hbm_fixed_latency_cycles: int = _HW_DEFAULTS["hbm_fixed_latency_cycles"]  # 由后续规格冻结
   hbm_burst_bytes: int = _HW_DEFAULTS["hbm_burst_bytes"]  # 2^N, 由后续规格冻结
   cache_line_bytes: int = _HW_DEFAULTS["cache_line_bytes"]
-  l2_cache_capacity_bytes: int = _HW_DEFAULTS["l2_cache_capacity_bytes"]
   l2_cache_lookup_latency_cycles: int = _HW_DEFAULTS["l2_cache_lookup_latency_cycles"]
   l2_mshr_entries: int = _HW_DEFAULTS["l2_mshr_entries"]
-  l1_cache_capacity_bytes: int = _HW_DEFAULTS["l1_cache_capacity_bytes"]
   l1_cache_lookup_latency_cycles: int = _HW_DEFAULTS["l1_cache_lookup_latency_cycles"]
   l1_mshr_entries: int = _HW_DEFAULTS["l1_mshr_entries"]
   l2_access_latency_cycles: int = _HW_DEFAULTS["l2_access_latency_cycles"]  # 由 SRAM profile 冻结
@@ -311,6 +324,7 @@ class HardwareConfig:
   firmware_fetch_cycles: int = _HW_DEFAULTS["firmware_fetch_cycles"]
   firmware_validate_cycles: int = _HW_DEFAULTS["firmware_validate_cycles"]
   frame_bind_cycles: int = _HW_DEFAULTS["frame_bind_cycles"]  # slot frame 3.2 FSM (8 states)
+  frame_slot_capacity: int = _HW_DEFAULTS["frame_slot_capacity"]
 
   def __post_init__(self) -> None:
     if self.mfe_pipeline_depth < 1:
@@ -335,14 +349,10 @@ class HardwareConfig:
       raise ValueError("l2_access_latency_cycles must be >= 1")
     if self.l1_access_latency_cycles < 1:
       raise ValueError("l1_access_latency_cycles must be >= 1")
+    if type(self.frame_slot_capacity) is not int or not 1 <= self.frame_slot_capacity <= (1 << 64) - 1:
+      raise ValueError("frame_slot_capacity must be a positive integer")
     if self.cache_line_bytes <= 0 or (self.cache_line_bytes & (self.cache_line_bytes - 1)) != 0:
       raise ValueError("cache_line_bytes must be a positive power of 2")
-    for field_name, capacity in (
-      ("l2_cache_capacity_bytes", self.l2_cache_capacity_bytes),
-      ("l1_cache_capacity_bytes", self.l1_cache_capacity_bytes),
-    ):
-      if capacity < self.cache_line_bytes or capacity % self.cache_line_bytes:
-        raise ValueError(f"{field_name} must be line-aligned and at least one cache line")
     if self.l2_cache_lookup_latency_cycles <= 0:
       raise ValueError("l2_cache_lookup_latency_cycles must be > 0")
     if self.l1_cache_lookup_latency_cycles <= 0:
@@ -351,6 +361,7 @@ class HardwareConfig:
       raise ValueError("l2_mshr_entries must be > 0")
     if self.l1_mshr_entries <= 0:
       raise ValueError("l1_mshr_entries must be > 0")
+    build_registry(self)
 
   def cycle_ns(self) -> float:
     """Length of one simulator cycle in nanoseconds."""
@@ -440,6 +451,7 @@ class GroupSchedulerConfig:
 
   policy: str = "s1"
   active_context_capacity: int = 8
+  context_pending_capacity: int = 32
   action_capacity: int = 16
   context_action_quota: int = 8
   scan_width: int = 4
@@ -447,7 +459,7 @@ class GroupSchedulerConfig:
   inflight_capacity: int = 32
   prefetch_capacity: int = 8
   store_capacity: int = 8
-  dispatch_capacity: int = 8
+  dispatch_capacity: int = 16
   epoch_policy: str = "mixed"
 
   def __post_init__(self) -> None:

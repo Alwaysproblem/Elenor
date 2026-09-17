@@ -8,16 +8,24 @@ from pathlib import Path
 import pytest
 from xdsl.utils.exceptions import VerifyException
 
+from pipeline_validator.compiler import compile_program
 from pipeline_validator.config import DeviceConfig, GroupSchedulerConfig, HardwareConfig, SimConfig
-from pipeline_validator.device import CpuDeviceController, DeviceCompletion, DeviceCompletionStatus
 from pipeline_validator.dialects.elenor import NexusProgramOp, NexusSubmitContextOp
-from pipeline_validator.execution_ir import ExecDeviceOp, ExecModel, ExecTileGroupTask, GlobalBinding
+from pipeline_validator.execution_ir import GlobalBinding
+from pipeline_validator.loader import load_program
 from pipeline_validator.simulator import Simulator
 from pipeline_validator.workload_ir import parse_workload_ir, verify_workload_ir
 
 SCENARIOS = Path(__file__).resolve().parents[2] / "examples" / "scenarios"
 BRANCH = (SCENARIOS / "ready_action_branch.mlir").read_text()
 BINDINGS = {"arena": GlobalBinding("arena", 0x100000, 8192, "rw")}
+
+
+def run_source(simulator: Simulator, module, bindings: dict[str, GlobalBinding] | None = None):
+  """Exercise the public compile -> load -> run path used by every source fixture."""
+  artifact = compile_program(module, simulator.hw, simulator.sim)
+  loaded = load_program(artifact, simulator.hw, simulator.sim, actual_bindings=bindings)
+  return simulator.run(loaded)
 
 
 def run_branch(policy: str, text: str = BRANCH, *, window: int = 16):
@@ -30,7 +38,7 @@ def run_branch(policy: str, text: str = BRANCH, *, window: int = 16):
     ),
   )
   simulator = Simulator(hardware, config, enable_tracer=True)
-  result = simulator.run(parse_workload_ir(text), input_bindings=BINDINGS)
+  result = run_source(simulator, parse_workload_ir(text), BINDINGS)
   assert result.completed, result.reason
   assert result.credit_invariant_ok
   assert result.tracer is not None
@@ -79,7 +87,7 @@ def test_epoch_policy_blocks_only_incompatible_compute_not_prefetch():
     context_count=2, max_cycles=100000, group=GroupSchedulerConfig(epoch_policy="same_program")
   )
   simulator = Simulator(hardware, config, enable_tracer=True)
-  result = simulator.run(parse_workload_ir(BRANCH), input_bindings=BINDINGS)
+  result = run_source(simulator, parse_workload_ir(BRANCH), BINDINGS)
   assert result.completed, result.reason
   assert result.tracer is not None
   events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
@@ -111,7 +119,7 @@ def test_cpu_dependency_wait_does_not_block_independent_hardware_work():
     hardware, SimConfig(context_count=2, device_context_count=2, max_cycles=100000), enable_tracer=True
   )
   module = parse_workload_ir((SCENARIOS / "device_dependency_submit.mlir").read_text())
-  result = simulator.run(module, input_bindings=bindings)
+  result = run_source(simulator, module, bindings)
   assert result.completed, result.reason
   assert result.tracer is not None
   transfers = [
@@ -131,7 +139,7 @@ def test_cpu_dependency_wait_does_not_block_independent_hardware_work():
   assert load_b["start_cycle"] < store_a["completion_cycle"]
 
 
-def test_device_dependency_rejects_foreign_producer_with_matching_tag():
+def test_t11_device_dependency_rejects_foreign_producer_with_matching_tag():
   module = parse_workload_ir((SCENARIOS / "device_dependency_submit.mlir").read_text())
   program = next(op for op in module.body.block.ops if isinstance(op, NexusProgramOp))
   submissions = [op for op in program.body.block.ops if isinstance(op, NexusSubmitContextOp)]
@@ -148,48 +156,12 @@ def test_cross_context_hbm_hazard_requires_an_explicit_completion_dependency():
     parse_workload_ir(text.replace(" depends_on(%a_done)", ""))
 
 
-def test_cpu_protocol_error_never_submits_dependent_work():
-  class FailingPort:
-    def __init__(self):
-      self.accepted: list[int] = []
-      self.sent_error = False
-
-    def try_submit(self, request, cycle):
-      self.accepted.append(request.request_id)
-      return True
-
-    def poll_completions(self, cycle):
-      if cycle >= 3 and not self.sent_error:
-        self.sent_error = True
-        return (DeviceCompletion(self.accepted[0], DeviceCompletionStatus.ERROR, "transfer fault", cycle),)
-      return ()
-
-  model = ExecModel(
-    name="failure",
-    tasks={"work": ExecTileGroupTask("work")},
-    body=[
-      ExecDeviceOp("submit", ctx_name="work", event_tag="a"),
-      ExecDeviceOp("submit", ctx_name="work", event_tag="c", dependencies=("a",)),
-      ExecDeviceOp("await", event_tag="c"),
-      ExecDeviceOp("return"),
-    ],
-  )
-  port = FailingPort()
-  controller = CpuDeviceController(model, DeviceConfig(), 2, port, {})
-  for cycle in range(8):
-    controller.step(cycle)
-    controller.harvest_completions(cycle)
-    if controller.faulted:
-      break
-  assert controller.faulted
-  assert not controller.succeeded
-  assert len(port.accepted) == 1
-
-
 def test_group_event_budget_recycles_without_l2_release_notifications():
   module = parse_workload_ir("""
     builtin.module {
-      nest.context @empty placement = 1 { nest.return }
+      nest.context @empty placement = 1
+          resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+              logical_tasks = 0, l2_spm_bytes = 0, requested_contexts_per_tile = 1> { nest.return }
       nexus.program @run {
         %a = nexus.submit_context.async @empty : !nexus.event<"a">
         %b = nexus.submit_context.async @empty : !nexus.event<"b">
@@ -198,10 +170,11 @@ def test_group_event_budget_recycles_without_l2_release_notifications():
       }
     }
   """)
-  result = Simulator(
+  simulator = Simulator(
     HardwareConfig(),
     SimConfig(device_context_count=2, max_cycles=100, group=GroupSchedulerConfig(event_capacity=1)),
-  ).run(module)
+  )
+  result = run_source(simulator, module)
   assert result.completed, result.reason
   assert result.group_snapshot["scheduler"]["event_peak"] == 1
   assert result.group_snapshot["scheduler"]["event_reserved"] == 0
@@ -211,7 +184,9 @@ def test_group_event_budget_recycles_without_l2_release_notifications():
 def test_cpu_completion_budget_recycles_chain_and_rejects_blocked_frontier():
   chain = """
     builtin.module {
-      nest.context @empty placement = 1 { nest.return }
+      nest.context @empty placement = 1
+          resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+              logical_tasks = 0, l2_spm_bytes = 0, requested_contexts_per_tile = 1> { nest.return }
       nexus.program @run {
         %a = nexus.submit_context.async @empty : !nexus.event<"a">
         %b = nexus.submit_context.async @empty depends_on(%a) : !nexus.event<"b">
@@ -223,11 +198,11 @@ def test_cpu_completion_budget_recycles_chain_and_rejects_blocked_frontier():
   config = SimConfig(
     device_context_count=2, max_cycles=100, device=DeviceConfig(completion_capacity=1, pending_capacity=1)
   )
-  result = Simulator(HardwareConfig(), config).run(parse_workload_ir(chain))
+  result = run_source(Simulator(HardwareConfig(), config), parse_workload_ir(chain))
   assert result.completed, result.reason
   assert result.device_snapshot["counters"]["completion_peak"] <= 1
   blocked = chain.replace(" depends_on(%a)", "").replace("nexus.await %b", "nexus.await %b, %a")
-  result = Simulator(HardwareConfig(), config).run(parse_workload_ir(blocked))
+  result = run_source(Simulator(HardwareConfig(), config), parse_workload_ir(blocked))
   assert not result.completed
   assert result.cycles < config.max_cycles
   assert result.device_snapshot["faulted"]

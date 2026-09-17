@@ -5,7 +5,13 @@ builtin.module {
       %lhs_l2 : !nest.l2_buffer<4x128x64xbf16>,
       %rhs_l2 : !nest.l2_buffer<4x64x128xbf16>,
       %indices_l2 : !nest.l2_buffer<4x16xi32>,
-      %output_l2 : !nest.l2_buffer<4x128x128xbf16>) {
+      %output_l2 : !nest.l2_buffer<4x128x128xbf16>)
+                resource_contract = #tile.resources<allowed_profiles = [1, 2],
+          tile_l1_spm_bytes_per_context = 73728,
+          l1_cache = {required = true, access = "read", bypass = "forbidden", target_bytes = 65536},
+          l2_cache = {
+            required = true, access = "read", bypass = "forbidden", target_bytes = 65536}
+            > {
     %lhs_view = tile.subview %lhs_l2 task = %task task_dim = 0
         offsets = [0, 0, 0] sizes = [1, 128, 64] strides = [1, 1, 1]
         : !nest.l2_view<1x128x64xbf16>
@@ -44,7 +50,7 @@ builtin.module {
 
     %gather_done = tile.gather.global.async %table
         indices(%indices_l1) into %gather_dst
-        result_bytes = 256 cache_min_bytes = 16384
+        result_bytes = 256
         cache_target_bytes = 65536 l1_mshr_hint = 16 {
       tile.profiled.access id = "r0" outcome = "L1_HIT"
           bytes = 64 line = "shared_hot_line"
@@ -77,7 +83,12 @@ builtin.module {
       %table : !nest.global_memref<8388608xi8>,
       %indices : !nest.global_memref<4x16xi32>,
       %output : !nest.global_memref<4x128x128xbf16>)
-      placement = 15 context = 0 {
+      placement = 15 context = 0
+                resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [1, 2],
+          logical_tasks = 4, l2_spm_bytes = 266240, requested_contexts_per_tile = 1,
+          l2_cache = {
+            required = true, access = "read", bypass = "forbidden", target_bytes = 65536}
+            > {
     %lhs_global = nest.subview %lhs
         offsets = [0, 0, 0] sizes = [4, 128, 64] strides = [1, 1, 1]
         : !nest.global_view<4x128x64xbf16>
@@ -113,7 +124,7 @@ builtin.module {
         : !nest.event<"indices_prefetched">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
     %grid_done, %input_released, %output_ready =
-        nest.dispatch.tasks.async @matmul_gather_add_4tile context = 0
+        nest.dispatch.tasks.async @matmul_gather_add_4tile l1_mode = 1 context = 0
         tasks(%tasks) globals(%table_global)
         bindings(%lhs_buffer, %rhs_buffer, %indices_buffer, %output_buffer)
         ins(%lhs_buffer, %rhs_buffer, %indices_buffer)
@@ -141,7 +152,12 @@ builtin.module {
       %table : !nest.global_memref<8388608xi8>,
       %indices : !nest.global_memref<4x16xi32>,
       %output : !nest.global_memref<4x128x128xbf16>)
-      placement = 15 context = 1 {
+      placement = 15 context = 1
+                resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [1, 2],
+          logical_tasks = 4, l2_spm_bytes = 266240, requested_contexts_per_tile = 1,
+          l2_cache = {
+            required = true, access = "read", bypass = "forbidden", target_bytes = 65536}
+            > {
     %lhs_global = nest.subview %lhs
         offsets = [0, 0, 0] sizes = [4, 128, 64] strides = [1, 1, 1]
         : !nest.global_view<4x128x64xbf16>
@@ -177,7 +193,7 @@ builtin.module {
         : !nest.event<"indices_prefetched">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
     %grid_done, %input_released, %output_ready =
-        nest.dispatch.tasks.async @matmul_gather_add_4tile context = 1
+        nest.dispatch.tasks.async @matmul_gather_add_4tile l1_mode = 1 context = 1
         tasks(%tasks) globals(%table_global)
         bindings(%lhs_buffer, %rhs_buffer, %indices_buffer, %output_buffer)
           ins(%lhs_buffer, %rhs_buffer, %indices_buffer)

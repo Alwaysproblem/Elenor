@@ -20,7 +20,8 @@
 //         "Liveness": "应完成；以同次运行 trace 和退出状态确认",
 //         "Scheduling Quality": "1 次静态展开；活动 grid 数应为 1，不得解释为运行时 early-exit"
 //       },
-//       "forbidden_dependencies": "只允许表列真数据边；UCE 共享 pin 争用不是数据依赖；跨 Context 仅使用当前 IR 可见的 context_done/HBM 可见性",
+//"forbidden_dependencies": "只允许表列真数据边；UCE 共享 pin 争用不是数据依赖；跨 Context 仅使用当前 IR 可见的 context_done/HBM
+// 可见性",
 //       "tensors": {
 //         "State0": {
 //           "formal": "arena",
@@ -76,7 +77,9 @@
 builtin.module {
   tile.program @prog_Step0(
     %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %i1: !nest.l2_buffer<4x64x64xbf16>,
-    %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 16384> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -97,7 +100,9 @@ builtin.module {
     tile.signal output_ready(%task)
     tile.return
   }
-  nest.context @ctx_0 (%arena: !nest.global_memref<4194304xbf16>) placement = 15 {
+  nest.context @ctx_0 (%arena: !nest.global_memref<4194304xbf16>) placement = 15
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+      logical_tasks = 4, l2_spm_bytes = 98304, requested_contexts_per_tile = 1> {
     %b_State0 = nest.alloc slot = "State0" role = "in" shape = [4, 64, 64] dtype = "bf16"
       alignment = 256 : !nest.l2_buffer<4x64x64xbf16>
     %h_State0 = nest.subview %arena offsets = [0] sizes = [16384] strides = [1]
@@ -113,7 +118,8 @@ builtin.module {
     %pref_State0 = nest.dma.prefetch.async %h_State0 into %b_State0 : !nest.event<"pref_State0">
     %pref_Input0 = nest.dma.prefetch.async %h_Input0 into %b_Input0 : !nest.event<"pref_Input0">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_Step0, %read_Step0, %ready_Step0 = nest.dispatch.tasks.async @prog_Step0 tasks(%tasks)
+    %grid_Step0, %read_Step0, %ready_Step0 = nest.dispatch.tasks.async @prog_Step0 l1_mode = 0
+      tasks(%tasks)
       globals() bindings(%b_State0, %b_Input0, %b_State1) ins(%b_State0, %b_Input0) outs(%b_State1)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>

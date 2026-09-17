@@ -31,7 +31,9 @@ builtin.module {
       %task : !nest.task,
       %a_l2 : !nest.l2_buffer<4x2x256x32xbf16>,
       %b_l2 : !nest.l2_buffer<2x32x256xbf16>,
-      %c_l2 : !nest.l2_buffer<4x256x256xbf16>) {
+      %c_l2 : !nest.l2_buffer<4x256x256xbf16>)
+                resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+          tile_l1_spm_bytes_per_context = 196608> {
     %a_k0 = tile.subview %a_l2 task = %task task_dim = 0
         offsets = [0, 0, 0, 0] sizes = [1, 1, 256, 32] strides = [1, 1, 1, 1]
         : !nest.l2_view<1x1x256x32xbf16>
@@ -98,7 +100,10 @@ builtin.module {
       %A : !nest.global_memref<2x4x2x256x32xbf16>,
       %B : !nest.global_memref<2x2x32x256xbf16>,
       %C : !nest.global_memref<2x2x4x256x256xbf16>)
-      placement = 15 context = 0 {
+      placement = 15 context = 0
+                resource_contract = #nest.context_resources<l2_mode = 0,
+          allowed_profiles = [0, 1, 2], logical_tasks = 4, l2_spm_bytes = 688128,
+          requested_contexts_per_tile = 1> {
     %a_blk = nest.subview %A
         offsets = [0, 0, 0, 0, 0] sizes = [1, 4, 2, 256, 32] strides = [1, 1, 1, 1, 1]
         : !nest.global_view<1x4x2x256x32xbf16>
@@ -123,7 +128,7 @@ builtin.module {
         : !nest.event<"mm_m0n0_b_prefetched">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
     %grid_done, %input_released, %output_ready =
-        nest.dispatch.tasks.async @mm_ktiled_256x256x64 context = 0
+        nest.dispatch.tasks.async @mm_ktiled_256x256x64 l1_mode = 0 context = 0
         tasks(%tasks) globals()
         bindings(%a_l2, %b_l2, %c_l2) ins(%a_l2, %b_l2) outs(%c_l2)
         signal_policy {
@@ -146,7 +151,10 @@ builtin.module {
       %A : !nest.global_memref<2x4x2x256x32xbf16>,
       %B : !nest.global_memref<2x2x32x256xbf16>,
       %C : !nest.global_memref<2x2x4x256x256xbf16>)
-      placement = 15 context = 1 {
+      placement = 15 context = 1
+                resource_contract = #nest.context_resources<l2_mode = 0,
+          allowed_profiles = [0, 1, 2], logical_tasks = 4, l2_spm_bytes = 688128,
+          requested_contexts_per_tile = 1> {
     %a_blk = nest.subview %A
         offsets = [0, 0, 0, 0, 0] sizes = [1, 4, 2, 256, 32] strides = [1, 1, 1, 1, 1]
         : !nest.global_view<1x4x2x256x32xbf16>
@@ -171,7 +179,7 @@ builtin.module {
         : !nest.event<"mm_m0n1_b_prefetched">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
     %grid_done, %input_released, %output_ready =
-        nest.dispatch.tasks.async @mm_ktiled_256x256x64 context = 1
+        nest.dispatch.tasks.async @mm_ktiled_256x256x64 l1_mode = 0 context = 1
         tasks(%tasks) globals()
         bindings(%a_l2, %b_l2, %c_l2) ins(%a_l2, %b_l2) outs(%c_l2)
         signal_policy {
@@ -194,7 +202,10 @@ builtin.module {
       %A : !nest.global_memref<2x4x2x256x32xbf16>,
       %B : !nest.global_memref<2x2x32x256xbf16>,
       %C : !nest.global_memref<2x2x4x256x256xbf16>)
-      placement = 15 context = 2 {
+      placement = 15 context = 2
+                resource_contract = #nest.context_resources<l2_mode = 0,
+          allowed_profiles = [0, 1, 2], logical_tasks = 4, l2_spm_bytes = 688128,
+          requested_contexts_per_tile = 1> {
     %a_blk = nest.subview %A
         offsets = [1, 0, 0, 0, 0] sizes = [1, 4, 2, 256, 32] strides = [1, 1, 1, 1, 1]
         : !nest.global_view<1x4x2x256x32xbf16>
@@ -219,7 +230,7 @@ builtin.module {
         : !nest.event<"mm_m1n0_b_prefetched">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
     %grid_done, %input_released, %output_ready =
-        nest.dispatch.tasks.async @mm_ktiled_256x256x64 context = 2
+        nest.dispatch.tasks.async @mm_ktiled_256x256x64 l1_mode = 0 context = 2
         tasks(%tasks) globals()
         bindings(%a_l2, %b_l2, %c_l2) ins(%a_l2, %b_l2) outs(%c_l2)
         signal_policy {
@@ -242,7 +253,10 @@ builtin.module {
       %A : !nest.global_memref<2x4x2x256x32xbf16>,
       %B : !nest.global_memref<2x2x32x256xbf16>,
       %C : !nest.global_memref<2x2x4x256x256xbf16>)
-      placement = 15 context = 3 {
+      placement = 15 context = 3
+                resource_contract = #nest.context_resources<l2_mode = 0,
+          allowed_profiles = [0, 1, 2], logical_tasks = 4, l2_spm_bytes = 688128,
+          requested_contexts_per_tile = 1> {
     %a_blk = nest.subview %A
         offsets = [1, 0, 0, 0, 0] sizes = [1, 4, 2, 256, 32] strides = [1, 1, 1, 1, 1]
         : !nest.global_view<1x4x2x256x32xbf16>
@@ -267,7 +281,7 @@ builtin.module {
         : !nest.event<"mm_m1n1_b_prefetched">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
     %grid_done, %input_released, %output_ready =
-        nest.dispatch.tasks.async @mm_ktiled_256x256x64 context = 3
+        nest.dispatch.tasks.async @mm_ktiled_256x256x64 l1_mode = 0 context = 3
         tasks(%tasks) globals()
         bindings(%a_l2, %b_l2, %c_l2) ins(%a_l2, %b_l2) outs(%c_l2)
         signal_policy {

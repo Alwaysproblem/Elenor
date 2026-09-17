@@ -57,9 +57,11 @@
 //         "时序/生命周期 Correctness": "检查真实 HBM/L2 数据边、input_released/output_ready、最终 Store 与释放顺序",
 //         "数值": "未建模；仅使用真实搬运和合成 engine service，不作为 tensor 数值证明",
 //         "Liveness": "应完成；以同次运行 trace 和退出状态确认",
-//         "Scheduling Quality": "先 submit R0/R1/R2，R1 context_done 后立即 submit R3；默认长 R0 下检查实际 slot owner/generation，不声称覆盖旧通知注入"
+//"Scheduling Quality": "先 submit R0/R1/R2，R1 context_done 后立即 submit R3；默认长 R0 下检查实际 slot
+// owner/generation，不声称覆盖旧通知注入"
 //       },
-//       "forbidden_dependencies": "只允许表列真数据边；UCE 共享 pin 争用不是数据依赖；跨 Context 仅使用当前 IR 可见的 context_done/HBM 可见性",
+//"forbidden_dependencies": "只允许表列真数据边；UCE 共享 pin 争用不是数据依赖；跨 Context 仅使用当前 IR 可见的 context_done/HBM
+// 可见性",
 //       "tensors": {
 //         "R0.input": {
 //           "formal": "R0",
@@ -269,14 +271,17 @@
 //       "notes": {
 //         "request_intervals": "每个 Rr formal 内 interval 0/1/2/3 分别为 input/A/B/C；请求间不别名",
 //         "shared_weight": "W 是 4x64x64xbf16 只读 formal，所有 A 实际读取",
-//         "reuse_identity": "stage 的 R1/R2/R3（uniform 还包括 R0）重复提交同一 ctx_request_fast；局部 event tag 相同，nexus done_Rr 唯一",
+//"reuse_identity": "stage 的 R1/R2/R3（uniform 还包括 R0）重复提交同一 ctx_request_fast；局部 event tag 相同，nexus
+// done_Rr 唯一",
 //         "generation_scope": "只证明正常重复 submit 的 namespace/slot generation 隔离；不伪造旧通知注入"
 //       }
 //     }
 builtin.module {
   tile.program @prog_A_slow(
     %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %i1: !nest.l2_buffer<4x64x64xbf16>,
-    %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 24576> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -599,7 +604,9 @@ builtin.module {
   }
   tile.program @prog_A_fast(
     %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %i1: !nest.l2_buffer<4x64x64xbf16>,
-    %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 16384> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -621,7 +628,9 @@ builtin.module {
     tile.return
   }
   tile.program @prog_B(
-    %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %task : !nest.task, %i0 : !nest.l2_buffer<4x64x64xbf16>, %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 8192> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -638,7 +647,9 @@ builtin.module {
     tile.return
   }
   tile.program @prog_C(
-    %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %task : !nest.task, %i0 : !nest.l2_buffer<4x64x64xbf16>, %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 8192> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -656,7 +667,9 @@ builtin.module {
   }
   nest.context @ctx_A0(
     %Req: !nest.global_memref<4194304xbf16>, %W: !nest.global_memref<4x64x64xbf16>)
-    placement = 15 {
+    placement = 15
+            resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+        logical_tasks = 4, l2_spm_bytes = 98304, requested_contexts_per_tile = 1> {
     %b_input = nest.alloc slot = "R0_input" role = "in" shape = [4, 64, 64] dtype = "bf16"
       alignment = 256 : !nest.l2_buffer<4x64x64xbf16>
     %h_input = nest.subview %Req offsets = [0] sizes = [16384] strides = [1]
@@ -672,7 +685,8 @@ builtin.module {
     %pref_input = nest.dma.prefetch.async %h_input into %b_input : !nest.event<"pref_input">
     %pref_W = nest.dma.prefetch.async %h_W into %b_W : !nest.event<"pref_W">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_A0, %read_A0, %ready_A0 = nest.dispatch.tasks.async @prog_A_slow tasks(%tasks) globals()
+    %grid_A0, %read_A0, %ready_A0 = nest.dispatch.tasks.async @prog_A_slow l1_mode = 0 tasks(%tasks)
+      globals()
       bindings(%b_input, %b_W, %b_A) ins(%b_input, %b_W) outs(%b_A)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
@@ -686,7 +700,9 @@ builtin.module {
     nest.await %grid_A0, %store_A
     nest.return
   }
-  nest.context @ctx_B0 (%Req: !nest.global_memref<4194304xbf16>) placement = 15 {
+  nest.context @ctx_B0 (%Req: !nest.global_memref<4194304xbf16>) placement = 15
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+      logical_tasks = 4, l2_spm_bytes = 65536, requested_contexts_per_tile = 1> {
     %b_A = nest.alloc slot = "R0_A" role = "in" shape = [4, 64, 64] dtype = "bf16" alignment = 256
       : !nest.l2_buffer<4x64x64xbf16>
     %h_A = nest.subview %Req offsets = [131072] sizes = [16384] strides = [1]
@@ -697,7 +713,8 @@ builtin.module {
       : !nest.global_view<16384xbf16>
     %pref_A = nest.dma.prefetch.async %h_A into %b_A : !nest.event<"pref_A">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_B0, %read_B0, %ready_B0 = nest.dispatch.tasks.async @prog_B tasks(%tasks) globals()
+    %grid_B0, %read_B0, %ready_B0 = nest.dispatch.tasks.async @prog_B l1_mode = 0 tasks(%tasks)
+      globals()
       bindings(%b_A, %b_B) ins(%b_A) outs(%b_B)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
@@ -710,7 +727,9 @@ builtin.module {
     nest.await %grid_B0, %store_B
     nest.return
   }
-  nest.context @ctx_C0 (%Req: !nest.global_memref<4194304xbf16>) placement = 15 {
+  nest.context @ctx_C0 (%Req: !nest.global_memref<4194304xbf16>) placement = 15
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+      logical_tasks = 4, l2_spm_bytes = 65536, requested_contexts_per_tile = 1> {
     %b_B = nest.alloc slot = "R0_B" role = "in" shape = [4, 64, 64] dtype = "bf16" alignment = 256
       : !nest.l2_buffer<4x64x64xbf16>
     %h_B = nest.subview %Req offsets = [262144] sizes = [16384] strides = [1]
@@ -721,7 +740,8 @@ builtin.module {
       : !nest.global_view<16384xbf16>
     %pref_B = nest.dma.prefetch.async %h_B into %b_B : !nest.event<"pref_B">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_C0, %read_C0, %ready_C0 = nest.dispatch.tasks.async @prog_C tasks(%tasks) globals()
+    %grid_C0, %read_C0, %ready_C0 = nest.dispatch.tasks.async @prog_C l1_mode = 0 tasks(%tasks)
+      globals()
       bindings(%b_B, %b_C) ins(%b_B) outs(%b_C)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
@@ -736,7 +756,9 @@ builtin.module {
   }
   nest.context @ctx_A1(
     %Req: !nest.global_memref<4194304xbf16>, %W: !nest.global_memref<4x64x64xbf16>)
-    placement = 15 {
+    placement = 15
+            resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+        logical_tasks = 4, l2_spm_bytes = 98304, requested_contexts_per_tile = 1> {
     %b_input = nest.alloc slot = "R1_input" role = "in" shape = [4, 64, 64] dtype = "bf16"
       alignment = 256 : !nest.l2_buffer<4x64x64xbf16>
     %h_input = nest.subview %Req offsets = [0] sizes = [16384] strides = [1]
@@ -752,7 +774,8 @@ builtin.module {
     %pref_input = nest.dma.prefetch.async %h_input into %b_input : !nest.event<"pref_input">
     %pref_W = nest.dma.prefetch.async %h_W into %b_W : !nest.event<"pref_W">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_A1, %read_A1, %ready_A1 = nest.dispatch.tasks.async @prog_A_fast tasks(%tasks) globals()
+    %grid_A1, %read_A1, %ready_A1 = nest.dispatch.tasks.async @prog_A_fast l1_mode = 0 tasks(%tasks)
+      globals()
       bindings(%b_input, %b_W, %b_A) ins(%b_input, %b_W) outs(%b_A)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
@@ -766,7 +789,9 @@ builtin.module {
     nest.await %grid_A1, %store_A
     nest.return
   }
-  nest.context @ctx_B1 (%Req: !nest.global_memref<4194304xbf16>) placement = 15 {
+  nest.context @ctx_B1 (%Req: !nest.global_memref<4194304xbf16>) placement = 15
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+      logical_tasks = 4, l2_spm_bytes = 65536, requested_contexts_per_tile = 1> {
     %b_A = nest.alloc slot = "R1_A" role = "in" shape = [4, 64, 64] dtype = "bf16" alignment = 256
       : !nest.l2_buffer<4x64x64xbf16>
     %h_A = nest.subview %Req offsets = [131072] sizes = [16384] strides = [1]
@@ -777,7 +802,8 @@ builtin.module {
       : !nest.global_view<16384xbf16>
     %pref_A = nest.dma.prefetch.async %h_A into %b_A : !nest.event<"pref_A">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_B1, %read_B1, %ready_B1 = nest.dispatch.tasks.async @prog_B tasks(%tasks) globals()
+    %grid_B1, %read_B1, %ready_B1 = nest.dispatch.tasks.async @prog_B l1_mode = 0 tasks(%tasks)
+      globals()
       bindings(%b_A, %b_B) ins(%b_A) outs(%b_B)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
@@ -790,7 +816,9 @@ builtin.module {
     nest.await %grid_B1, %store_B
     nest.return
   }
-  nest.context @ctx_C1 (%Req: !nest.global_memref<4194304xbf16>) placement = 15 {
+  nest.context @ctx_C1 (%Req: !nest.global_memref<4194304xbf16>) placement = 15
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+      logical_tasks = 4, l2_spm_bytes = 65536, requested_contexts_per_tile = 1> {
     %b_B = nest.alloc slot = "R1_B" role = "in" shape = [4, 64, 64] dtype = "bf16" alignment = 256
       : !nest.l2_buffer<4x64x64xbf16>
     %h_B = nest.subview %Req offsets = [262144] sizes = [16384] strides = [1]
@@ -801,7 +829,8 @@ builtin.module {
       : !nest.global_view<16384xbf16>
     %pref_B = nest.dma.prefetch.async %h_B into %b_B : !nest.event<"pref_B">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_C1, %read_C1, %ready_C1 = nest.dispatch.tasks.async @prog_C tasks(%tasks) globals()
+    %grid_C1, %read_C1, %ready_C1 = nest.dispatch.tasks.async @prog_C l1_mode = 0 tasks(%tasks)
+      globals()
       bindings(%b_B, %b_C) ins(%b_B) outs(%b_C)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
@@ -816,7 +845,9 @@ builtin.module {
   }
   nest.context @ctx_A2(
     %Req: !nest.global_memref<4194304xbf16>, %W: !nest.global_memref<4x64x64xbf16>)
-    placement = 15 {
+    placement = 15
+            resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+        logical_tasks = 4, l2_spm_bytes = 98304, requested_contexts_per_tile = 1> {
     %b_input = nest.alloc slot = "R2_input" role = "in" shape = [4, 64, 64] dtype = "bf16"
       alignment = 256 : !nest.l2_buffer<4x64x64xbf16>
     %h_input = nest.subview %Req offsets = [0] sizes = [16384] strides = [1]
@@ -832,7 +863,8 @@ builtin.module {
     %pref_input = nest.dma.prefetch.async %h_input into %b_input : !nest.event<"pref_input">
     %pref_W = nest.dma.prefetch.async %h_W into %b_W : !nest.event<"pref_W">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_A2, %read_A2, %ready_A2 = nest.dispatch.tasks.async @prog_A_fast tasks(%tasks) globals()
+    %grid_A2, %read_A2, %ready_A2 = nest.dispatch.tasks.async @prog_A_fast l1_mode = 0 tasks(%tasks)
+      globals()
       bindings(%b_input, %b_W, %b_A) ins(%b_input, %b_W) outs(%b_A)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
@@ -846,7 +878,9 @@ builtin.module {
     nest.await %grid_A2, %store_A
     nest.return
   }
-  nest.context @ctx_B2 (%Req: !nest.global_memref<4194304xbf16>) placement = 15 {
+  nest.context @ctx_B2 (%Req: !nest.global_memref<4194304xbf16>) placement = 15
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+      logical_tasks = 4, l2_spm_bytes = 65536, requested_contexts_per_tile = 1> {
     %b_A = nest.alloc slot = "R2_A" role = "in" shape = [4, 64, 64] dtype = "bf16" alignment = 256
       : !nest.l2_buffer<4x64x64xbf16>
     %h_A = nest.subview %Req offsets = [131072] sizes = [16384] strides = [1]
@@ -857,7 +891,8 @@ builtin.module {
       : !nest.global_view<16384xbf16>
     %pref_A = nest.dma.prefetch.async %h_A into %b_A : !nest.event<"pref_A">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_B2, %read_B2, %ready_B2 = nest.dispatch.tasks.async @prog_B tasks(%tasks) globals()
+    %grid_B2, %read_B2, %ready_B2 = nest.dispatch.tasks.async @prog_B l1_mode = 0 tasks(%tasks)
+      globals()
       bindings(%b_A, %b_B) ins(%b_A) outs(%b_B)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
@@ -870,7 +905,9 @@ builtin.module {
     nest.await %grid_B2, %store_B
     nest.return
   }
-  nest.context @ctx_C2 (%Req: !nest.global_memref<4194304xbf16>) placement = 15 {
+  nest.context @ctx_C2 (%Req: !nest.global_memref<4194304xbf16>) placement = 15
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+      logical_tasks = 4, l2_spm_bytes = 65536, requested_contexts_per_tile = 1> {
     %b_B = nest.alloc slot = "R2_B" role = "in" shape = [4, 64, 64] dtype = "bf16" alignment = 256
       : !nest.l2_buffer<4x64x64xbf16>
     %h_B = nest.subview %Req offsets = [262144] sizes = [16384] strides = [1]
@@ -881,7 +918,8 @@ builtin.module {
       : !nest.global_view<16384xbf16>
     %pref_B = nest.dma.prefetch.async %h_B into %b_B : !nest.event<"pref_B">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_C2, %read_C2, %ready_C2 = nest.dispatch.tasks.async @prog_C tasks(%tasks) globals()
+    %grid_C2, %read_C2, %ready_C2 = nest.dispatch.tasks.async @prog_C l1_mode = 0 tasks(%tasks)
+      globals()
       bindings(%b_B, %b_C) ins(%b_B) outs(%b_C)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
@@ -896,7 +934,9 @@ builtin.module {
   }
   nest.context @ctx_A3(
     %Req: !nest.global_memref<4194304xbf16>, %W: !nest.global_memref<4x64x64xbf16>)
-    placement = 15 {
+    placement = 15
+            resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+        logical_tasks = 4, l2_spm_bytes = 98304, requested_contexts_per_tile = 1> {
     %b_input = nest.alloc slot = "R3_input" role = "in" shape = [4, 64, 64] dtype = "bf16"
       alignment = 256 : !nest.l2_buffer<4x64x64xbf16>
     %h_input = nest.subview %Req offsets = [0] sizes = [16384] strides = [1]
@@ -912,7 +952,8 @@ builtin.module {
     %pref_input = nest.dma.prefetch.async %h_input into %b_input : !nest.event<"pref_input">
     %pref_W = nest.dma.prefetch.async %h_W into %b_W : !nest.event<"pref_W">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_A3, %read_A3, %ready_A3 = nest.dispatch.tasks.async @prog_A_fast tasks(%tasks) globals()
+    %grid_A3, %read_A3, %ready_A3 = nest.dispatch.tasks.async @prog_A_fast l1_mode = 0 tasks(%tasks)
+      globals()
       bindings(%b_input, %b_W, %b_A) ins(%b_input, %b_W) outs(%b_A)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
@@ -926,7 +967,9 @@ builtin.module {
     nest.await %grid_A3, %store_A
     nest.return
   }
-  nest.context @ctx_B3 (%Req: !nest.global_memref<4194304xbf16>) placement = 15 {
+  nest.context @ctx_B3 (%Req: !nest.global_memref<4194304xbf16>) placement = 15
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+      logical_tasks = 4, l2_spm_bytes = 65536, requested_contexts_per_tile = 1> {
     %b_A = nest.alloc slot = "R3_A" role = "in" shape = [4, 64, 64] dtype = "bf16" alignment = 256
       : !nest.l2_buffer<4x64x64xbf16>
     %h_A = nest.subview %Req offsets = [131072] sizes = [16384] strides = [1]
@@ -937,7 +980,8 @@ builtin.module {
       : !nest.global_view<16384xbf16>
     %pref_A = nest.dma.prefetch.async %h_A into %b_A : !nest.event<"pref_A">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_B3, %read_B3, %ready_B3 = nest.dispatch.tasks.async @prog_B tasks(%tasks) globals()
+    %grid_B3, %read_B3, %ready_B3 = nest.dispatch.tasks.async @prog_B l1_mode = 0 tasks(%tasks)
+      globals()
       bindings(%b_A, %b_B) ins(%b_A) outs(%b_B)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
@@ -950,7 +994,9 @@ builtin.module {
     nest.await %grid_B3, %store_B
     nest.return
   }
-  nest.context @ctx_C3 (%Req: !nest.global_memref<4194304xbf16>) placement = 15 {
+  nest.context @ctx_C3 (%Req: !nest.global_memref<4194304xbf16>) placement = 15
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+      logical_tasks = 4, l2_spm_bytes = 65536, requested_contexts_per_tile = 1> {
     %b_B = nest.alloc slot = "R3_B" role = "in" shape = [4, 64, 64] dtype = "bf16" alignment = 256
       : !nest.l2_buffer<4x64x64xbf16>
     %h_B = nest.subview %Req offsets = [262144] sizes = [16384] strides = [1]
@@ -961,7 +1007,8 @@ builtin.module {
       : !nest.global_view<16384xbf16>
     %pref_B = nest.dma.prefetch.async %h_B into %b_B : !nest.event<"pref_B">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_C3, %read_C3, %ready_C3 = nest.dispatch.tasks.async @prog_C tasks(%tasks) globals()
+    %grid_C3, %read_C3, %ready_C3 = nest.dispatch.tasks.async @prog_C l1_mode = 0 tasks(%tasks)
+      globals()
       bindings(%b_B, %b_C) ins(%b_B) outs(%b_C)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>

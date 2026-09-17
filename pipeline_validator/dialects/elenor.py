@@ -29,21 +29,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import ClassVar, Self, TypeAlias, cast
 
-from xdsl.dialects.builtin import (
-  ArrayAttr,
-  IndexType,
-  IntegerAttr,
-  StringAttr,
-)
-from xdsl.ir import (
-  Attribute,
-  Block,
-  Dialect,
-  Operation,
-  ParametrizedAttribute,
-  Region,
-  TypeAttribute,
-)
+from xdsl.dialects.builtin import ArrayAttr, DictionaryAttr, IndexType, IntegerAttr, NoneAttr, StringAttr
+from xdsl.ir import Attribute, Block, Dialect, Operation, ParametrizedAttribute, Region, TypeAttribute
 from xdsl.irdl import (
   AttrSizedOperandSegments,
   IRDLOperation,
@@ -61,12 +48,15 @@ from xdsl.parser import AttrParser, Parser
 from xdsl.printer import Printer
 from xdsl.traits import NoTerminator
 
+from ..profiles import CacheRequirement, ContextResources, TileResources
+
 # ---------------------------------------------------------------------------
 # Element byte widths and shape-type parse/print helpers
 # ---------------------------------------------------------------------------
 
 DTYPE_BYTES: dict[str, int] = {"i8": 1, "bf16": 2, "f16": 2, "i32": 4, "f32": 4}
 """Element byte widths accepted by every shape-typed ELENOR type."""
+
 
 def _parse_dims_dtype(parser: AttrParser) -> tuple[list[int], str]:
   """Parse ``<Dx...xDtype>`` returning (dims, dtype).
@@ -118,12 +108,15 @@ class NexusEvent(ParametrizedAttribute, TypeAttribute):
 
   Tag is the runtime event id shared by the device scheduler and trace.
   """
+
   name = "nexus.event"
   tag: StringAttr
+
 
 @irdl_attr_definition
 class TileEvent(ParametrizedAttribute, TypeAttribute):
   """Tile-level async event: ``!tile.event<tag>``."""
+
   name = "tile.event"
   tag: StringAttr
 
@@ -141,8 +134,7 @@ class NestBuffer(ParametrizedAttribute, TypeAttribute):
 
   @staticmethod
   def of(dims: Sequence[int], dtype: str) -> NestBuffer:
-    return NestBuffer(
-      ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype))
+    return NestBuffer(ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype))
 
   @classmethod
   def parse_parameters(cls, parser: AttrParser) -> list:
@@ -167,8 +159,7 @@ class NestGlobalMemref(ParametrizedAttribute, TypeAttribute):
 
   @staticmethod
   def of(dims: Sequence[int], dtype: str) -> NestGlobalMemref:
-    return NestGlobalMemref(
-      ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype))
+    return NestGlobalMemref(ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype))
 
   @classmethod
   def parse_parameters(cls, parser: AttrParser) -> list:
@@ -192,8 +183,7 @@ class NestGlobalView(ParametrizedAttribute, TypeAttribute):
 
   @staticmethod
   def of(dims: Sequence[int], dtype: str) -> NestGlobalView:
-    return NestGlobalView(
-      ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype))
+    return NestGlobalView(ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype))
 
   @classmethod
   def parse_parameters(cls, parser: AttrParser) -> list:
@@ -217,8 +207,7 @@ class NestL2View(ParametrizedAttribute, TypeAttribute):
 
   @staticmethod
   def of(dims: Sequence[int], dtype: str) -> NestL2View:
-    return NestL2View(
-      ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype))
+    return NestL2View(ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype))
 
   @classmethod
   def parse_parameters(cls, parser: AttrParser) -> list:
@@ -242,8 +231,7 @@ class TileL1Buffer(ParametrizedAttribute, TypeAttribute):
 
   @staticmethod
   def of(dims: Sequence[int], dtype: str) -> TileL1Buffer:
-    return TileL1Buffer(
-      ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype))
+    return TileL1Buffer(ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype))
 
   @classmethod
   def parse_parameters(cls, parser: AttrParser) -> list:
@@ -261,6 +249,7 @@ class NestTask(ParametrizedAttribute, TypeAttribute):
   First formal of every ``tile.program``; ``tile.subview task = %task``
   offsets a view by the logical task id along ``task_dim``.
   """
+
   name = "nest.task"
 
 
@@ -306,6 +295,278 @@ class NestAggregate(ParametrizedAttribute):
 
   def print_parameters(self, printer: Printer) -> None:
     printer.print_string(f"<{self.mode.data}>")
+
+
+def _cache_requirement_attr(requirement: CacheRequirement | None) -> DictionaryAttr | NoneAttr:
+  if requirement is None:
+    return NoneAttr()
+  return DictionaryAttr(
+    {
+      "required": IntegerAttr.from_bool(requirement.required),
+      "access": StringAttr(requirement.access),
+      "bypass": StringAttr(requirement.bypass),
+      "target_bytes": _index_attr(requirement.target_bytes),
+    }
+  )
+
+
+def _cache_requirement_value(value: DictionaryAttr | NoneAttr) -> CacheRequirement | None:
+  if isinstance(value, NoneAttr):
+    return None
+  fields = value.data
+  if set(fields) != {"required", "access", "bypass", "target_bytes"}:
+    raise ValueError("cache requirement must contain required, access, bypass, and target_bytes")
+  required = fields["required"]
+  access = fields["access"]
+  bypass = fields["bypass"]
+  target_bytes = fields["target_bytes"]
+  if (
+    not isinstance(required, IntegerAttr)
+    or not isinstance(access, StringAttr)
+    or not isinstance(bypass, StringAttr)
+    or not isinstance(target_bytes, IntegerAttr)
+  ):
+    raise ValueError("invalid cache requirement attribute values")
+  return CacheRequirement(
+    required=bool(required.value.data),
+    access=access.data,
+    bypass=bypass.data,
+    target_bytes=int(target_bytes.value.data),
+  )
+
+
+def _parse_cache_requirement(parser: AttrParser, owner: str) -> CacheRequirement:
+  fields: dict[str, bool | str | int] = {}
+
+  def parse_field() -> None:
+    key = parser.parse_identifier()
+    if key not in {"required", "access", "bypass", "target_bytes"}:
+      parser.raise_error(f"unknown {owner} cache capability field '{key}'")
+    if key in fields:
+      parser.raise_error(f"duplicate {owner} cache capability field '{key}'")
+    parser.parse_punctuation("=")
+    if key == "required":
+      fields[key] = parser.parse_boolean()
+    elif key in ("access", "bypass"):
+      fields[key] = parser.parse_str_literal()
+    else:
+      fields[key] = parser.parse_integer()
+
+  parser.parse_comma_separated_list(parser.Delimiter.BRACES, parse_field)
+  missing = {"required", "access", "bypass", "target_bytes"} - fields.keys()
+  if missing:
+    parser.raise_error(f"{owner} cache capability is missing required fields: {', '.join(sorted(missing))}")
+  try:
+    return CacheRequirement(
+      required=cast(bool, fields["required"]),
+      access=cast(str, fields["access"]),
+      bypass=cast(str, fields["bypass"]),
+      target_bytes=cast(int, fields["target_bytes"]),
+    )
+  except ValueError as exc:
+    parser.raise_error(str(exc))
+
+
+def _print_cache_requirement(printer: Printer, requirement: CacheRequirement) -> None:
+  printer.print_string("{required = ")
+  printer.print_string("true" if requirement.required else "false")
+  printer.print_string(", access = ")
+  printer.print_string_literal(requirement.access)
+  printer.print_string(", bypass = ")
+  printer.print_string_literal(requirement.bypass)
+  printer.print_string(", target_bytes = ")
+  printer.print_int(requirement.target_bytes)
+  printer.print_string("}")
+
+
+@irdl_attr_definition
+class NestContextResourcesAttr(ParametrizedAttribute):
+  """L2-only source resource contract for one ``nest.context``."""
+
+  name = "nest.context_resources"
+
+  l2_mode: IntegerAttr
+  allowed_profiles: ArrayAttr[IntegerAttr]
+  logical_tasks: IntegerAttr
+  l2_spm_bytes: IntegerAttr
+  requested_contexts_per_tile: IntegerAttr
+  l2_cache: DictionaryAttr | NoneAttr
+
+  def __init__(self, contract: ContextResources):
+    if not isinstance(contract, ContextResources):
+      raise TypeError("NestContextResourcesAttr requires a ContextResources value")
+    super().__init__(
+      _index_attr(contract.l2_mode),
+      ArrayAttr([_index_attr(mode) for mode in contract.allowed_profiles]),
+      _index_attr(contract.logical_tasks),
+      _index_attr(contract.l2_spm_bytes),
+      _index_attr(contract.requested_contexts_per_tile),
+      _cache_requirement_attr(contract.l2_cache),
+    )
+
+  def to_contract(self) -> ContextResources:
+    return ContextResources(
+      l2_mode=int(self.l2_mode.value.data),
+      allowed_profiles=tuple(_int_list(self.allowed_profiles)),
+      logical_tasks=int(self.logical_tasks.value.data),
+      l2_spm_bytes=int(self.l2_spm_bytes.value.data),
+      requested_contexts_per_tile=int(self.requested_contexts_per_tile.value.data),
+      l2_cache=_cache_requirement_value(self.l2_cache),
+    )
+
+  @classmethod
+  def parse_parameters(cls, parser: AttrParser) -> list[Attribute]:
+    fields: dict[str, int | list[int] | CacheRequirement] = {}
+    valid = {
+      "l2_mode",
+      "allowed_profiles",
+      "logical_tasks",
+      "l2_spm_bytes",
+      "requested_contexts_per_tile",
+      "l2_cache",
+    }
+
+    def parse_field() -> None:
+      key = parser.parse_identifier()
+      if key not in valid:
+        parser.raise_error(f"unknown nest.context_resources field '{key}'")
+      if key in fields:
+        parser.raise_error(f"duplicate nest.context_resources field '{key}'")
+      parser.parse_punctuation("=")
+      if key == "allowed_profiles":
+        fields[key] = list(
+          parser.parse_comma_separated_list(
+            parser.Delimiter.SQUARE, parser.parse_integer, " in allowed_profiles = [...] list"
+          )
+        )
+      elif key == "l2_cache":
+        fields[key] = _parse_cache_requirement(parser, "l2")
+      else:
+        fields[key] = parser.parse_integer()
+
+    parser.parse_comma_separated_list(parser.Delimiter.ANGLE, parse_field)
+    required = valid - {"l2_cache"}
+    missing = required - fields.keys()
+    if missing:
+      parser.raise_error(f"nest.context_resources is missing required fields: {', '.join(sorted(missing))}")
+    try:
+      contract = ContextResources(
+        l2_mode=cast(int, fields["l2_mode"]),
+        allowed_profiles=tuple(cast(list[int], fields["allowed_profiles"])),
+        logical_tasks=cast(int, fields["logical_tasks"]),
+        l2_spm_bytes=cast(int, fields["l2_spm_bytes"]),
+        requested_contexts_per_tile=cast(int, fields["requested_contexts_per_tile"]),
+        l2_cache=cast(CacheRequirement | None, fields.get("l2_cache")),
+      )
+    except ValueError as exc:
+      parser.raise_error(str(exc))
+    return list(cls(contract).parameters)
+
+  def print_parameters(self, printer: Printer) -> None:
+    contract = self.to_contract()
+    printer.print_string("<l2_mode = ")
+    printer.print_int(contract.l2_mode)
+    printer.print_string(", allowed_profiles = [")
+    for i, mode in enumerate(contract.allowed_profiles):
+      if i:
+        printer.print_string(", ")
+      printer.print_int(mode)
+    printer.print_string("], logical_tasks = ")
+    printer.print_int(contract.logical_tasks)
+    printer.print_string(", l2_spm_bytes = ")
+    printer.print_int(contract.l2_spm_bytes)
+    printer.print_string(", requested_contexts_per_tile = ")
+    printer.print_int(contract.requested_contexts_per_tile)
+    if contract.l2_cache is not None:
+      printer.print_string(", l2_cache = ")
+      _print_cache_requirement(printer, contract.l2_cache)
+    printer.print_string(">")
+
+
+@irdl_attr_definition
+class TileResourcesAttr(ParametrizedAttribute):
+  """L1 source resource contract and cache capabilities for one Tile Program."""
+
+  name = "tile.resources"
+
+  allowed_profiles: ArrayAttr[IntegerAttr]
+  tile_l1_spm_bytes_per_context: IntegerAttr
+  l1_cache: DictionaryAttr | NoneAttr
+  l2_cache: DictionaryAttr | NoneAttr
+
+  def __init__(self, contract: TileResources):
+    if not isinstance(contract, TileResources):
+      raise TypeError("TileResourcesAttr requires a TileResources value")
+    super().__init__(
+      ArrayAttr([_index_attr(mode) for mode in contract.allowed_profiles]),
+      _index_attr(contract.tile_l1_spm_bytes_per_context),
+      _cache_requirement_attr(contract.l1_cache),
+      _cache_requirement_attr(contract.l2_cache),
+    )
+
+  def to_contract(self) -> TileResources:
+    return TileResources(
+      allowed_profiles=tuple(_int_list(self.allowed_profiles)),
+      tile_l1_spm_bytes_per_context=int(self.tile_l1_spm_bytes_per_context.value.data),
+      l1_cache=_cache_requirement_value(self.l1_cache),
+      l2_cache=_cache_requirement_value(self.l2_cache),
+    )
+
+  @classmethod
+  def parse_parameters(cls, parser: AttrParser) -> list[Attribute]:
+    fields: dict[str, int | list[int] | CacheRequirement] = {}
+    valid = {"allowed_profiles", "tile_l1_spm_bytes_per_context", "l1_cache", "l2_cache"}
+
+    def parse_field() -> None:
+      key = parser.parse_identifier()
+      if key not in valid:
+        parser.raise_error(f"unknown tile.resources field '{key}'")
+      if key in fields:
+        parser.raise_error(f"duplicate tile.resources field '{key}'")
+      parser.parse_punctuation("=")
+      if key == "allowed_profiles":
+        fields[key] = list(
+          parser.parse_comma_separated_list(
+            parser.Delimiter.SQUARE, parser.parse_integer, " in allowed_profiles = [...] list"
+          )
+        )
+      elif key in ("l1_cache", "l2_cache"):
+        fields[key] = _parse_cache_requirement(parser, key[:2])
+      else:
+        fields[key] = parser.parse_integer()
+
+    parser.parse_comma_separated_list(parser.Delimiter.ANGLE, parse_field)
+    required = {"allowed_profiles", "tile_l1_spm_bytes_per_context"}
+    missing = required - fields.keys()
+    if missing:
+      parser.raise_error(f"tile.resources is missing required fields: {', '.join(sorted(missing))}")
+    try:
+      contract = TileResources(
+        allowed_profiles=tuple(cast(list[int], fields["allowed_profiles"])),
+        tile_l1_spm_bytes_per_context=cast(int, fields["tile_l1_spm_bytes_per_context"]),
+        l1_cache=cast(CacheRequirement | None, fields.get("l1_cache")),
+        l2_cache=cast(CacheRequirement | None, fields.get("l2_cache")),
+      )
+    except ValueError as exc:
+      parser.raise_error(str(exc))
+    return list(cls(contract).parameters)
+
+  def print_parameters(self, printer: Printer) -> None:
+    contract = self.to_contract()
+    printer.print_string("<allowed_profiles = [")
+    for i, mode in enumerate(contract.allowed_profiles):
+      if i:
+        printer.print_string(", ")
+      printer.print_int(mode)
+    printer.print_string("], tile_l1_spm_bytes_per_context = ")
+    printer.print_int(contract.tile_l1_spm_bytes_per_context)
+    if contract.l1_cache is not None:
+      printer.print_string(", l1_cache = ")
+      _print_cache_requirement(printer, contract.l1_cache)
+    if contract.l2_cache is not None:
+      printer.print_string(", l2_cache = ")
+      _print_cache_requirement(printer, contract.l2_cache)
+    printer.print_string(">")
 
 
 # ---------------------------------------------------------------------------
@@ -379,9 +640,11 @@ def _parse_opt_str_kw(parser: Parser, keyword: str) -> str | None:
   parser.parse_punctuation("=")
   return parser.parse_str_literal()
 
+
 def _print_body_region(printer: Printer, region: Region) -> None:
   printer.print_string(" ")
   printer.print_region(region, print_entry_block_args=False, print_empty_block=False)
+
 
 def _parse_body_region(parser: Parser, arguments: list | None = None) -> Region:
   """Parse one single-block region, preserving SSA identity of block args.
@@ -395,8 +658,6 @@ def _parse_body_region(parser: Parser, arguments: list | None = None) -> Region:
   if len(region.blocks) != 1:
     parser.raise_error("expected exactly one block in region")
   return region
-
-
 
 
 def _parse_block_args(parser: Parser) -> list:
@@ -432,6 +693,7 @@ def _parse_event_type(parser: AttrParser, cls: type[Attribute]) -> Attribute:
     parser.raise_error(f"expected {cls.name} type")
   return attr
 
+
 def _print_event_type(printer: Printer, event_type: Attribute) -> None:
   printer.print_string(" : ")
   printer.print_attribute(event_type)
@@ -464,8 +726,7 @@ def _parse_signal_policy(parser: Parser) -> dict[str, str]:
     parser.parse_punctuation("=")
     attr = parser.parse_attribute()
     if not isinstance(attr, NestAggregate):
-      parser.raise_error(
-        f"signal policy phase '{phase}' expects a #nest.aggregate attribute")
+      parser.raise_error(f"signal policy phase '{phase}' expects a #nest.aggregate attribute")
     policy[phase] = attr.mode.data
     parser.parse_optional_punctuation(",")
   return policy
@@ -557,6 +818,7 @@ class NestContextOp(IRDLOperation):
   placement = prop_def(IntegerAttr)
   context_id = opt_prop_def(IntegerAttr)
   completion_event = prop_def(StringAttr, default_value=StringAttr("context_done"))
+  resource_contract = prop_def(NestContextResourcesAttr)
 
   body = region_def("single_block")
 
@@ -565,6 +827,7 @@ class NestContextOp(IRDLOperation):
   def __init__(
     self,
     sym_name: str,
+    resource_contract: ContextResources,
     body: Sequence[NestActionLike] = (),
     placement: int = 0x0F,
     completion_event: str = "context_done",
@@ -585,6 +848,7 @@ class NestContextOp(IRDLOperation):
           "placement": _index_attr(placement),
           "context_id": None if context_id is None else _index_attr(context_id),
           "completion_event": StringAttr(completion_event),
+          "resource_contract": NestContextResourcesAttr(resource_contract),
         }
       ),
       regions=[region],
@@ -598,6 +862,8 @@ class NestContextOp(IRDLOperation):
       _print_int_kw(printer, "context", self.context_id.value.data)
     if self.completion_event.data != "context_done":
       _print_str_kw(printer, "completion", self.completion_event.data)
+    printer.print_string(" resource_contract = ")
+    printer.print_attribute(self.resource_contract)
     _print_body_region(printer, self.body)
 
   @classmethod
@@ -610,12 +876,21 @@ class NestContextOp(IRDLOperation):
     if parser.parse_optional_keyword("completion") is not None:
       parser.parse_punctuation("=")
       completion_event = parser.parse_str_literal()
+    parser.parse_keyword("resource_contract")
+    parser.parse_punctuation("=")
+    resource_contract = parser.parse_attribute()
+    if not isinstance(resource_contract, NestContextResourcesAttr):
+      parser.raise_error("nest.context resource_contract expects #nest.context_resources")
     region = _parse_body_region(parser, arguments)
     return cls(
-      sym_name, placement=placement,
-      completion_event=completion_event, context_id=context_id,
+      sym_name,
+      resource_contract.to_contract(),
+      placement=placement,
+      completion_event=completion_event,
+      context_id=context_id,
       _region=region,
     )
+
 
 @irdl_op_definition
 class TileProgramDefOp(IRDLOperation):
@@ -629,35 +904,53 @@ class TileProgramDefOp(IRDLOperation):
   name = "tile.program"
 
   sym_name = prop_def(StringAttr)
+  resource_contract = prop_def(TileResourcesAttr)
 
   body = region_def("single_block")
 
   traits = traits_def(NoTerminator())
 
-  def __init__(self, sym_name: str, body: Sequence[TileActionLike] = (),
-               arg_types: Sequence = (), arg_names: Sequence[str] = (),
-               _region: Region | None = None):
+  def __init__(
+    self,
+    sym_name: str,
+    resource_contract: TileResources,
+    body: Sequence[TileActionLike] = (),
+    arg_types: Sequence = (),
+    arg_names: Sequence[str] = (),
+    _region: Region | None = None,
+  ):
     if _region is not None:
       region = _region
     else:
       region = Region([Block(list(body), arg_types=list(arg_types))])
       _set_arg_names(region.blocks[0], arg_names)
     super().__init__(
-      properties=_props({"sym_name": StringAttr(sym_name)}),
+      properties=_props(
+        {"sym_name": StringAttr(sym_name), "resource_contract": TileResourcesAttr(resource_contract)}
+      ),
       regions=[region],
     )
 
   def print(self, printer: Printer) -> None:
     _print_symbol(printer, self.sym_name.data)
     _print_block_args(printer, self.body.block)
+    printer.print_string(" resource_contract = ")
+    printer.print_attribute(self.resource_contract)
     _print_body_region(printer, self.body)
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
     sym_name = _parse_symbol(parser)
     arguments = _parse_block_args(parser)
+    parser.parse_keyword("resource_contract")
+    parser.parse_punctuation("=")
+    resource_contract = parser.parse_attribute()
+    if not isinstance(resource_contract, TileResourcesAttr):
+      parser.raise_error("tile.program resource_contract expects #tile.resources")
     region = _parse_body_region(parser, arguments)
-    return cls(sym_name, _region=region)
+    return cls(sym_name, resource_contract.to_contract(), _region=region)
+
+
 # ---------------------------------------------------------------------------
 # nest.* context-body actions
 # ---------------------------------------------------------------------------
@@ -681,8 +974,7 @@ class NestAllocOp(IRDLOperation):
 
   result = result_def(NestBuffer)
 
-  def __init__(self, slot: str, role: str, shape: Sequence[int], dtype: str,
-               alignment: int | None = None):
+  def __init__(self, slot: str, role: str, shape: Sequence[int], dtype: str, alignment: int | None = None):
     super().__init__(
       result_types=[NestBuffer.of(shape, dtype)],
       properties=_props(
@@ -738,12 +1030,7 @@ class NestTaskRangeOp(IRDLOperation):
   def __init__(self, from_task: int, to_task: int):
     super().__init__(
       result_types=[TaskRange()],
-      properties=_props(
-        {
-          "from_task": _index_attr(from_task),
-          "to_task": _index_attr(to_task),
-        }
-      ),
+      properties=_props({"from_task": _index_attr(from_task), "to_task": _index_attr(to_task)}),
     )
 
   @property
@@ -784,8 +1071,14 @@ class NestSubviewOp(IRDLOperation):
 
   result = result_def(NestGlobalView)
 
-  def __init__(self, src, offsets: Sequence[int], sizes: Sequence[int],
-               strides: Sequence[int], view_type: NestGlobalView):
+  def __init__(
+    self,
+    src,
+    offsets: Sequence[int],
+    sizes: Sequence[int],
+    strides: Sequence[int],
+    view_type: NestGlobalView,
+  ):
     super().__init__(
       operands=[src],
       result_types=[view_type],
@@ -882,6 +1175,7 @@ class NestDMAStoreOp(_NestAsyncOp):
   def __init__(self, src, dst, tag: str, depends_on: Sequence = ()):
 
     self._finish(tag, operands=[src, dst, list(depends_on)])
+
   def print(self, printer: Printer) -> None:
     printer.print_string(" ")
     printer.print_operand(self.src)
@@ -937,6 +1231,7 @@ class NestDispatchOp(IRDLOperation):
 
   program = prop_def(StringAttr)
   context_id = opt_prop_def(IntegerAttr)
+  l1_mode = prop_def(IntegerAttr)
   input_released_policy = opt_prop_def(NestAggregate)
   output_ready_policy = opt_prop_def(NestAggregate)
   tasks = operand_def(TaskRange)
@@ -961,6 +1256,7 @@ class NestDispatchOp(IRDLOperation):
     inrel_tag: str,
     outready_tag: str,
     *,
+    l1_mode: int,
     bindings: Sequence,
     signal_policy: Mapping[str, str],
     depends_on: Sequence = (),
@@ -977,24 +1273,22 @@ class NestDispatchOp(IRDLOperation):
         NestEvent(StringAttr(inrel_tag)),
         NestEvent(StringAttr(outready_tag)),
       ],
-      properties=_props({
-        "program": StringAttr(program),
-        "context_id": None if context_id is None else _index_attr(context_id),
-        "input_released_policy": (
-          None if "input_released" not in signal_policy
-          else NestAggregate.of(signal_policy["input_released"])),
-        "output_ready_policy": (
-          None if "output_ready" not in signal_policy
-          else NestAggregate.of(signal_policy["output_ready"])),
-      }),
-      operands=[
-        [tasks],
-        list(global_views),
-        list(bindings),
-        list(ins),
-        list(outs),
-        list(depends_on),
-      ],
+      properties=_props(
+        {
+          "program": StringAttr(program),
+          "l1_mode": _index_attr(l1_mode),
+          "context_id": None if context_id is None else _index_attr(context_id),
+          "input_released_policy": (
+            None
+            if "input_released" not in signal_policy
+            else NestAggregate.of(signal_policy["input_released"])
+          ),
+          "output_ready_policy": (
+            None if "output_ready" not in signal_policy else NestAggregate.of(signal_policy["output_ready"])
+          ),
+        }
+      ),
+      operands=[[tasks], list(global_views), list(bindings), list(ins), list(outs), list(depends_on)],
     )
     self.grid_done.name_hint = grid_tag
     if inrel_tag:
@@ -1014,6 +1308,7 @@ class NestDispatchOp(IRDLOperation):
 
   def print(self, printer: Printer) -> None:
     _print_symbol(printer, self.program.data)
+    _print_int_kw(printer, "l1_mode", self.l1_mode.value.data)
     if self.context_id is not None:
       _print_int_kw(printer, "context", self.context_id.value.data)
     printer.print_string(" tasks(")
@@ -1035,6 +1330,7 @@ class NestDispatchOp(IRDLOperation):
   @classmethod
   def parse(cls, parser: Parser) -> Self:
     program = _parse_symbol(parser)
+    l1_mode = _parse_int_kw(parser, "l1_mode")
     context_id = _parse_opt_int_kw(parser, "context")
     tasks = _parse_operand_group(parser, "tasks")
     global_ops = _parse_operand_group(parser, "globals")
@@ -1063,6 +1359,7 @@ class NestDispatchOp(IRDLOperation):
       tags[0],
       tags[1],
       tags[2],
+      l1_mode=l1_mode,
       bindings=bindings_ops,
       signal_policy=signal_policy,
       depends_on=depends_on,
@@ -1212,17 +1509,20 @@ class NexusProgramOp(IRDLOperation):
   body = region_def("single_block")
   traits = traits_def(NoTerminator())
 
-  def __init__(self, sym_name: str, body: Sequence = (), arg_types: Sequence = (),
-               arg_names: Sequence[str] = (), _region: Region | None = None):
+  def __init__(
+    self,
+    sym_name: str,
+    body: Sequence = (),
+    arg_types: Sequence = (),
+    arg_names: Sequence[str] = (),
+    _region: Region | None = None,
+  ):
     if _region is not None:
       region = _region
     else:
       region = Region([Block(list(body), arg_types=list(arg_types))])
       _set_arg_names(region.blocks[0], arg_names)
-    super().__init__(
-      properties=_props({"sym_name": StringAttr(sym_name)}),
-      regions=[region],
-    )
+    super().__init__(properties=_props({"sym_name": StringAttr(sym_name)}), regions=[region])
 
   def print(self, printer: Printer) -> None:
     _print_symbol(printer, self.sym_name.data)
@@ -1236,6 +1536,7 @@ class NexusProgramOp(IRDLOperation):
     arguments = _parse_block_args(parser)
     region = _parse_body_region(parser, arguments)
     return cls(sym_name, _region=region)
+
 
 @irdl_op_definition
 class NexusSubmitContextOp(IRDLOperation):
@@ -1253,9 +1554,7 @@ class NexusSubmitContextOp(IRDLOperation):
   depends_on = var_operand_def(NexusEvent)
   result = result_def(NexusEvent)
 
-  def __init__(
-    self, context_sym: str, tag: str, actuals: Sequence = (), depends_on: Sequence = (),
-  ):
+  def __init__(self, context_sym: str, tag: str, actuals: Sequence = (), depends_on: Sequence = ()):
     super().__init__(
       result_types=[NexusEvent(StringAttr(tag))],
       properties=_props({"context_sym": StringAttr(context_sym)}),
@@ -1371,13 +1670,19 @@ class TileSubviewOp(IRDLOperation):
 
   result = result_def(NestL2View)
 
-  def __init__(self, src, task, task_dim: int | None,
-               offsets: Sequence[int], sizes: Sequence[int],
-               strides: Sequence[int], view_type: NestL2View):
+  def __init__(
+    self,
+    src,
+    task,
+    task_dim: int | None,
+    offsets: Sequence[int],
+    sizes: Sequence[int],
+    strides: Sequence[int],
+    view_type: NestL2View,
+  ):
     super().__init__(
       operands=[[src], [task] if task is not None else []],
       result_types=[view_type],
-
       properties=_props(
         {
           "task_dim": None if task_dim is None else _index_attr(task_dim),
@@ -1605,7 +1910,6 @@ class TileGatherOp(_TileAsyncOp):
   indices = operand_def(TileL1Buffer)
   destination = operand_def(TileL1Buffer)
   result_bytes = prop_def(IntegerAttr)
-  cache_min_bytes = prop_def(IntegerAttr)
   cache_target_bytes = prop_def(IntegerAttr)
   l1_mshr_hint = prop_def(IntegerAttr)
   profile = region_def("single_block")
@@ -1618,7 +1922,6 @@ class TileGatherOp(_TileAsyncOp):
     indices,
     destination,
     result_bytes: int,
-    cache_min_bytes: int,
     cache_target_bytes: int,
     l1_mshr_hint: int,
     accesses: Sequence[TileProfiledAccessOp],
@@ -1632,7 +1935,6 @@ class TileGatherOp(_TileAsyncOp):
       properties=_props(
         {
           "result_bytes": _index_attr(result_bytes),
-          "cache_min_bytes": _index_attr(cache_min_bytes),
           "cache_target_bytes": _index_attr(cache_target_bytes),
           "l1_mshr_hint": _index_attr(l1_mshr_hint),
         }
@@ -1648,7 +1950,6 @@ class TileGatherOp(_TileAsyncOp):
     printer.print_string(") into ")
     printer.print_operand(self.destination)
     _print_int_kw(printer, "result_bytes", self.result_bytes.value.data)
-    _print_int_kw(printer, "cache_min_bytes", self.cache_min_bytes.value.data)
     _print_int_kw(printer, "cache_target_bytes", self.cache_target_bytes.value.data)
     _print_int_kw(printer, "l1_mshr_hint", self.l1_mshr_hint.value.data)
     _print_body_region(printer, self.profile)
@@ -1661,7 +1962,6 @@ class TileGatherOp(_TileAsyncOp):
     parser.parse_keyword("into")
     destination = parser.parse_operand()
     result_bytes = _parse_int_kw(parser, "result_bytes")
-    cache_min_bytes = _parse_int_kw(parser, "cache_min_bytes")
     cache_target_bytes = _parse_int_kw(parser, "cache_target_bytes")
     l1_mshr_hint = _parse_int_kw(parser, "l1_mshr_hint")
     profile = _parse_body_region(parser)
@@ -1674,7 +1974,6 @@ class TileGatherOp(_TileAsyncOp):
       indices[0],
       destination,
       result_bytes,
-      cache_min_bytes,
       cache_target_bytes,
       l1_mshr_hint,
       (),
@@ -1731,15 +2030,7 @@ class TileEvuOp(_TileAsyncOp):
   evu_ops = prop_def(IntegerAttr)
 
   def __init__(self, op_name: str, evu_ops: int, tag: str):
-    self._finish(
-      tag,
-      properties=_props(
-        {
-          "op_name": StringAttr(op_name),
-          "evu_ops": _index_attr(evu_ops),
-        }
-      ),
-    )
+    self._finish(tag, properties=_props({"op_name": StringAttr(op_name), "evu_ops": _index_attr(evu_ops)}))
 
   def print(self, printer: Printer) -> None:
     printer.print_string(" ")
@@ -1770,14 +2061,7 @@ class TileBoaOp(_TileAsyncOp):
   accumulate = opt_prop_def(IntegerAttr)
 
   def __init__(
-    self,
-    op_name: str,
-    m: int,
-    n: int,
-    k: int,
-    boa_ops: int,
-    tag: str,
-    accumulate: bool = False,
+    self, op_name: str, m: int, n: int, k: int, boa_ops: int, tag: str, accumulate: bool = False
   ):
     self._finish(
       tag,
@@ -1865,10 +2149,7 @@ class TileSignalOp(IRDLOperation):
   PHASES: ClassVar[tuple[str, ...]] = ("input_released", "output_ready")
 
   def __init__(self, phase: str, task):
-    super().__init__(
-      properties=_props({"phase": StringAttr(phase)}),
-      operands=[[task]],
-    )
+    super().__init__(properties=_props({"phase": StringAttr(phase)}), operands=[[task]])
 
   def print(self, printer: Printer) -> None:
     printer.print_string(" ")
@@ -1951,8 +2232,10 @@ Elenor = Dialect(
     NestTask,
     TaskRange,
     NestAggregate,
+    NestContextResourcesAttr,
     NexusEvent,
     NestGlobalMemref,
+    TileResourcesAttr,
   ],
 )
 
@@ -1967,6 +2250,7 @@ __all__ = [
   "NestBuffer",
   "NestCollectiveOp",
   "NestContextOp",
+  "NestContextResourcesAttr",
   "NestDMAStoreOp",
   "NestDispatchOp",
   "NestEvent",
@@ -1999,6 +2283,7 @@ __all__ = [
   "TilePowOp",
   "TileProfiledAccessOp",
   "TileProgramDefOp",
+  "TileResourcesAttr",
   "TileReturnOp",
   "TileSignalOp",
   "TileStoreOp",

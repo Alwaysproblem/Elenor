@@ -63,6 +63,7 @@ class GroupScheduler:
     self.pmu = PMUCounter()
     self._queued: list[RegisteredAction] = []
     self._inflight_by_event: dict[str, tuple[RegisteredAction, str]] = {}
+    self._control_inflight: dict[str, RegisteredAction] = {}
     self._register_cursor = 0
     self._scan_cursor = 0
     self._epoch_key: tuple[int, int, int] | None = None
@@ -95,32 +96,35 @@ class GroupScheduler:
     return f"{sequencer.context_name}@{sequencer.device_slot}"
 
   def reserve_context_events(self, sequencer: TileGroupSequencer, task: ExecTileGroupTask) -> IssueResult:
-    """Reserve a launch's complete finite event budget atomically."""
+    """Atomically reserve the compiler-proved event frontier, without entries."""
 
-    producers: dict[str, int] = {}
-    for ordinal, action in enumerate(task.actions):
-      for event in action.output_events:
-        prior = producers.get(event)
-        if prior is not None and prior != ordinal:
-          return IssueResult(
-            IssueStatus.FAULT, reason=f"event {event!r} has producers {prior} and {ordinal}"
-          )
-        producers[event] = ordinal
-    if len(producers) > self.config.event_capacity:
+    program = self.group.loaded_program
+    if program is None:
+      return IssueResult(IssueStatus.FAULT, reason="event admission requires a loaded program")
+    budget = program.resource_budgets.get(task.binding_id)
+    if budget is None:
+      return IssueResult(
+        IssueStatus.FAULT, reason=f"Context binding {task.binding_id!r} has no compiled resource budget"
+      )
+    if budget.event_frontier > self.config.event_capacity:
       return IssueResult(
         IssueStatus.FAULT,
         reason=(
-          f"context requires {len(producers)} events but Group capacity is {self.config.event_capacity}"
+          f"compiled event frontier {budget.event_frontier} exceeds "
+          f"Group capacity {self.config.event_capacity}"
         ),
       )
     try:
-      accepted = self.group.event_table.reserve_many(
-        tuple(producers), owner=self.event_owner(sequencer), generation=sequencer.context_launch_generation
+      accepted = self.group.event_table.reserve_quota(
+        budget.event_frontier,
+        task.event_uses,
+        owner=self.event_owner(sequencer),
+        generation=sequencer.context_launch_generation,
       )
     except EventProtocolError as exc:
       return IssueResult(IssueStatus.FAULT, reason=str(exc))
     if not accepted:
-      return IssueResult(IssueStatus.BACKPRESSURE, reason="event table full")
+      return IssueResult(IssueStatus.BACKPRESSURE, reason="event quota unavailable")
     return IssueResult(IssueStatus.ACCEPTED)
 
   def cancel_context_events(self, sequencer: TileGroupSequencer) -> None:
@@ -139,6 +143,8 @@ class GroupScheduler:
 
   def step(self, contexts: list[TileGroupSequencer], cycle: int) -> None:
     """Issue from old entries, then register at most one new entry."""
+
+    self._poll_controls(cycle)
 
     self.pmu.add_cycle("group_scheduler_cycles")
     self.pmu.add_cycle("group_scheduler_queued", self.queued)
@@ -168,18 +174,22 @@ class GroupScheduler:
         continue
       ordinal, action = sequencer.peek_registration()
       dependencies = sequencer.dependencies_for(action)
+      outputs = action.output_events
       try:
-        self._preflight_registration(sequencer, ordinal, action, dependencies)
-        for event in dependencies:
-          self.group.event_table.add_consumer(
-            event, owner=self.event_owner(sequencer), generation=sequencer.context_launch_generation
-          )
-        for event in action.output_events:
+        self._preflight_registration(sequencer, action, dependencies)
+        self.group.event_table.reserve_outputs(
+          outputs, owner=self.event_owner(sequencer), generation=sequencer.context_launch_generation
+        )
+        for event in outputs:
           self.group.event_table.bind_producer(
             event,
             owner=self.event_owner(sequencer),
             generation=sequencer.context_launch_generation,
             producer_id=ordinal,
+          )
+        for event in dependencies:
+          self.group.event_table.add_consumer(
+            event, owner=self.event_owner(sequencer), generation=sequencer.context_launch_generation
           )
       except EventProtocolError as exc:
         self._fault_context(sequencer, str(exc), cycle)
@@ -199,30 +209,14 @@ class GroupScheduler:
     return False
 
   def _preflight_registration(
-    self,
-    sequencer: TileGroupSequencer,
-    ordinal: int,
-    action: ExecGroupAction,
-    dependencies: tuple[str, ...],
+    self, sequencer: TileGroupSequencer, action: ExecGroupAction, dependencies: tuple[str, ...]
   ) -> None:
-    owner = self.event_owner(sequencer)
-    generation = sequencer.context_launch_generation
-    for event in dependencies:
-      entry = self.group.event_table.get(event)
-      if entry is None:
-        raise EventProtocolError(f"dependency event {event!r} is not reserved")
-      if entry.owner != owner or entry.generation != generation:
-        raise EventProtocolError(f"dependency event {event!r} has foreign owner/generation")
-      if not entry.producer_bound:
-        raise EventProtocolError(f"dependency event {event!r} has no bound producer")
-    for event in action.output_events:
-      entry = self.group.event_table.get(event)
-      if entry is None:
-        raise EventProtocolError(f"output event {event!r} is not reserved")
-      if entry.owner != owner or entry.generation != generation:
-        raise EventProtocolError(f"output event {event!r} has foreign owner/generation")
-      if entry.producer_bound and entry.producer_id != ordinal:
-        raise EventProtocolError(f"output event {event!r} already has another producer")
+    self.group.event_table.preflight_action(
+      action.output_events,
+      dependencies,
+      owner=self.event_owner(sequencer),
+      generation=sequencer.context_launch_generation,
+    )
 
   def _issue_one(self, cycle: int) -> bool:
     if not self._queued:
@@ -291,11 +285,27 @@ class GroupScheduler:
       if result.status is IssueStatus.FAULT:
         self._fault_context(record.sequencer, result.reason, cycle)
         return False
+      dependency_fault = ""
+      try:
+        self.group.event_table.consume_dependencies(
+          record.sequencer.dependencies_for(record.action),
+          owner=self.event_owner(record.sequencer),
+          generation=record.sequencer.context_launch_generation,
+          cycle=cycle,
+        )
+      except EventProtocolError as exc:
+        # The action has already been accepted.  Preserve its independent
+        # inflight/control bookkeeping, then fault the Context below.
+        dependency_fault = str(exc)
+        self.protocol_fault_total += 1
       self._queued.remove(record)
       record.issue_cycle = cycle
       self.issued_total += 1
       self.pmu.add_event("group_action_issued")
-      if result.asynchronous:
+      if result.adapter == "control":
+        self._control_inflight[result.completion_event] = record
+        record.sequencer.note_issued(record, asynchronous=True)
+      elif result.asynchronous:
         completion_event = result.completion_event
         if not completion_event:
           self._fault_context(record.sequencer, "async action has no completion event", cycle)
@@ -318,8 +328,23 @@ class GroupScheduler:
         self.completed_total += 1
         self.pmu.add_event("group_action_completed")
         self._trace_action("group_action_complete", record, cycle, status="done")
+      if dependency_fault:
+        self._fault_context(record.sequencer, dependency_fault, cycle)
+        return False
       return True
     return False
+
+  def _poll_controls(self, cycle: int) -> None:
+    for command_id, record in tuple(self._control_inflight.items()):
+      status = self.group.profile_controller.status(command_id)
+      if status in ("pending", "running"):
+        continue
+      del self._control_inflight[command_id]
+      record.sequencer.note_action_completed(record)
+      self.completed_total += 1
+      self._trace_action("group_action_complete", record, cycle, status=status)
+      if status != "completed":
+        self._fault_context(record.sequencer, f"control {command_id} {status}", cycle)
 
   def _dependency_status(self, record: RegisteredAction) -> EventStatus:
     dependencies = record.sequencer.dependencies_for(record.action)
@@ -433,11 +458,33 @@ class GroupScheduler:
       self._epoch_key = None
 
   def cancel_context(self, sequencer: TileGroupSequencer, cycle: int) -> None:
-    """Remove unissued actions; already accepted work drains independently."""
+    """Remove unissued metadata; already accepted work drains independently."""
 
+    for command_id, record in self._control_inflight.items():
+      if record.sequencer is sequencer:
+        self.group.profile_controller.request_cancel(command_id, cycle)
     cancelled = [record for record in self._queued if record.sequencer is sequencer]
-    if not cancelled:
-      return
+    owner = self.event_owner(sequencer)
+    generation = sequencer.context_launch_generation
+    try:
+      # First terminalize outputs that can no longer receive a completion.
+      # Current consumer pins prevent premature reclamation.
+      for record in cancelled:
+        self.group.event_table.cancel_outputs(
+          record.action.output_events,
+          owner=owner,
+          generation=generation,
+          producer_id=record.ordinal,
+          cycle=cycle,
+        )
+      for record in cancelled:
+        self.group.event_table.cancel_dependencies(
+          record.sequencer.dependencies_for(record.action), owner=owner, generation=generation, cycle=cycle
+        )
+      self.group.event_table.abandon_future_uses(owner=owner, generation=generation, cycle=cycle)
+    except EventProtocolError:
+      self.protocol_fault_total += 1
+      raise
     self._queued = [record for record in self._queued if record.sequencer is not sequencer]
     for record in cancelled:
       sequencer.note_action_cancelled(record)
@@ -507,6 +554,14 @@ class GroupScheduler:
       "events",
       thread="Scheduler:Control",
     )
+    tracer.counter_if_changed(
+      "TileGroup",
+      "group_event_active",
+      cycle,
+      self.group.event_table.active,
+      "events",
+      thread="Scheduler:Control",
+    )
 
   def snapshot(self) -> dict:
     return {
@@ -517,6 +572,8 @@ class GroupScheduler:
       "inflight_peak": self.inflight_peak,
       "event_reserved": self.group.event_table.reserved,
       "event_peak": self.group.event_table.peak_reserved,
+      "event_active": self.group.event_table.active,
+      "event_active_peak": self.group.event_table.peak_active,
       "active_context_peak": self.active_context_peak,
       "registered": self.registered_total,
       "issued": self.issued_total,
@@ -533,6 +590,8 @@ class GroupScheduler:
   def reset(self) -> None:
     self._queued.clear()
     self._inflight_by_event.clear()
+    if self._control_inflight:
+      raise RuntimeError("scheduler reset before configuration control retirement")
     self._register_cursor = 0
     self._scan_cursor = 0
     self._epoch_key = None

@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 from .cli import main
+from .compiled_program import (
+  CompiledProgram,
+  LoadedProgram,
+  WorkloadInfo,
+  dump_executable_ir,
+  parse_compiled_program,
+  serialize_compiled_program,
+)
 from .config import DeviceConfig, GroupSchedulerConfig, HardwareConfig, SimConfig, WorkloadConfig
 from .device import (
   CpuDeviceController,
   DeviceCompletion,
   DeviceCompletionStatus,
+  DeviceControlCompletion,
+  DeviceControlRequest,
   DeviceLaunchRequest,
   DevicePort,
 )
@@ -20,6 +30,7 @@ from .dialects.elenor import (
   NestBuffer,
   NestCollectiveOp,
   NestContextOp,
+  NestContextResourcesAttr,
   NestDispatchOp,
   NestDMAStoreOp,
   NestEvent,
@@ -44,6 +55,7 @@ from .dialects.elenor import (
   TilePowOp,
   TileProfiledAccessOp,
   TileProgramDefOp,
+  TileResourcesAttr,
   TileReturnOp,
   TileSignalOp,
   TileStoreOp,
@@ -51,6 +63,7 @@ from .dialects.elenor import (
 )
 from .engines import BOAEngine, EngineState, EVUEngine, MFEEngine, USEEngine
 from .execution_ir import GlobalBinding
+from .loader import load_program
 from .memory import (
   L2SRAM,
   CacheStats,
@@ -98,12 +111,15 @@ __all__ = [
   "L2SRAM",
   "BOAEngine",
   "CacheStats",
+  "CompiledProgram",
   "ComputeTile",
   "CpuDeviceController",
   "DeterministicLRUCache",
   "DeviceCompletion",
   "DeviceCompletionStatus",
   "DeviceConfig",
+  "DeviceControlCompletion",
+  "DeviceControlRequest",
   "DeviceLaunchRequest",
   "DevicePort",
   "EOSPolicy",
@@ -122,6 +138,7 @@ __all__ = [
   "HardwareConfig",
   "HostRuntime",
   "KernelDriver",
+  "LoadedProgram",
   "MFEEngine",
   "MshrAllocation",
   "MshrStats",
@@ -134,6 +151,7 @@ __all__ = [
   "NestBuffer",
   "NestCollectiveOp",
   "NestContextOp",
+  "NestContextResourcesAttr",
   "NestDMAStoreOp",
   "NestDispatchOp",
   "NestEvent",
@@ -173,6 +191,7 @@ __all__ = [
   "TilePowOp",
   "TileProfiledAccessOp",
   "TileProgramDefOp",
+  "TileResourcesAttr",
   "TileReturnOp",
   "TileSignalOp",
   "TileStoreOp",
@@ -183,14 +202,19 @@ __all__ = [
   "USEEngine",
   "Workload",
   "WorkloadConfig",
+  "WorkloadInfo",
+  "dump_executable_ir",
+  "load_program",
   "load_workload_ir",
   "main",
   "make_elenor_context",
   "make_identity_tile_program",
   "make_pow_task",
   "make_pow_tile_program",
+  "parse_compiled_program",
   "parse_workload_ir",
   "print_workload_ir",
+  "serialize_compiled_program",
   "trace_to_html",
   "verify_workload_ir",
 ]

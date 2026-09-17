@@ -1,7 +1,7 @@
 # ELENOR pipeline_validator 硬件配置（HardwareConfig 默认值，单一事实来源）。
 # 参数取值来自 design/ 规格；未冻结项（由后续规格冻结 / 由 SRAM profile 冻结 /
 # 由 PPA exploration 冻结）取 First Silicon V1 推荐值，保证基线仿真可复现。
-schema_version: 1
+schema_version: 2
 
 system:
   profile: balanced-small # 12.3 config table
@@ -14,6 +14,36 @@ system:
     core_mhz: 1000.0
 
 memory:
+  # Simulator experiment data-region partitions, 由后续规格冻结.
+  target:
+    profile_command_timeout_cycles: 2000000
+    l1:
+      system_reserved_spm_per_bank: 2048
+      reset_mode: 0
+      spm_mapping_id: striped_arena_v0
+      cache_org_id: profiled_lru_v0
+      cache_write_policy: read_only
+      maintenance_caps: [invalidate_range, clean_invalidate_all, bypass]
+    l2:
+      system_reserved_spm_per_bank: 4096
+      reset_mode: 0
+      spm_mapping_id: striped_arena_v0
+      cache_org_id: profiled_lru_v0
+      cache_write_policy: read_only
+      maintenance_caps: [invalidate_range, clean_invalidate_all, bypass]
+  profile_source:
+    kind: simulator_experiment
+    partition_granule_bytes: 64
+    l1:
+      modes:
+        0: { spm_bytes_per_bank: 65536, cache_bytes_per_bank: 0 }
+        1: { spm_bytes_per_bank: 57344, cache_bytes_per_bank: 8192 }
+        2: { spm_bytes_per_bank: 49152, cache_bytes_per_bank: 16384 }
+    l2:
+      modes:
+        0: { spm_bytes_per_bank: 524288, cache_bytes_per_bank: 0 }
+        1: { spm_bytes_per_bank: 458752, cache_bytes_per_bank: 65536 }
+        2: { spm_bytes_per_bank: 393216, cache_bytes_per_bank: 131072 }
   cache:
     line_bytes: 64 # synthetic reference profile 40-74
 
@@ -31,7 +61,6 @@ memory:
     access_latency_cycles: 4 # 由 SRAM profile 冻结
     bank_bandwidth_gbs: 12.8 # per-bank，由 SRAM profile 冻结
     cache:
-      capacity_bytes: 4194304 # 50% of 8 MiB L2，由 SRAM profile 冻结
       lookup_latency_cycles: 4 # synthetic reference profile 40-74
       mshr_entries: 64 # synthetic reference profile 40-74
 
@@ -41,7 +70,6 @@ memory:
     bandwidth_gbs: 512.0 # per-tile SRAM read peak，frozen later
     access_latency_cycles: 1 # 由 SRAM profile 冻结
     cache:
-      capacity_bytes: 524288 # 50% of 1 MiB L1，由 SRAM profile 冻结
       lookup_latency_cycles: 1 # synthetic reference profile 40-74
       mshr_entries: 16 # synthetic reference profile 40-74
 
@@ -97,6 +125,7 @@ control:
 
   slot_frame:
     bind_cycles: 8 # slot frame 3.2 FSM
+    slot_count: 16 # fixed L1 slot ABI
 
 fabric:
   # 当前 validator 的 group-level HBM <-> L2 DMA 模型。

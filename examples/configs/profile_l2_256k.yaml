@@ -1,0 +1,21 @@
+# Small-pool experiment target for l2-admission-wait / sequential-release-counterexample.
+# L1 inherits bundled defaults; L2 is a single mode0 with 16 banks,
+# 4096 B/Bank system reserved, and 20480 B/Bank total SPM
+# (user L2 = (20480 - 4096) * 16 = 262144 B; total physical = 327680 B).
+schema_version: 2
+memory:
+  target:
+    profile_command_timeout_cycles: 2000000
+    l2:
+      system_reserved_spm_per_bank: 4096
+      reset_mode: 0
+      spm_mapping_id: striped_arena_v0
+      cache_org_id: profiled_lru_v0
+      cache_write_policy: read_only
+      maintenance_caps: [invalidate_range, clean_invalidate_all, bypass]
+  profile_source:
+    l2:
+      modes:
+        0: { spm_bytes_per_bank: 20480, cache_bytes_per_bank: 0 }
+  group_sram:
+    capacity_bytes: 327680

@@ -2,24 +2,15 @@
 
 from __future__ import annotations
 
-import zlib
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field
-from itertools import pairwise
+from dataclasses import dataclass, field, replace
 
-from xdsl.dialects.builtin import ModuleOp
-
+from .compiled_program import LoadedProgram
 from .config import HardwareConfig, SimConfig
 from .device import CpuDeviceController
-from .dialects.elenor import NestContextOp, NexusProgramOp
-from .execution_ir import (
-  ExecGatherDesc,
-  ExecGlobalInput,
-  ExecGroupActionOp,
-  ExecTileGroupTask,
-  GlobalBinding,
-)
-from .ir_lowering import lower_model_ir, lower_workload_ir
+from .execution_ir import ExecDeviceOp, ExecModel, ExecTileGroupTask, GlobalBinding
+from .immutable import canonical_value
+from .loader import load_program
 from .pmu import PMUCounter
 from .runtime.group_port import GroupPortAdapter
 from .tile_group import TileGroup
@@ -48,89 +39,8 @@ class SimResult:
     return self.pmu.utilization(self.cycles * num_tiles)
 
 
-def _validate_input_bindings(
-  inputs: list[ExecGlobalInput], bindings: Mapping[str, GlobalBinding], hw: HardwareConfig
-) -> None:
-  if bindings and not inputs:
-    raise ValueError("input bindings provided but module declares no global inputs")
-
-  inputs_by_name = {input_.name: input_ for input_ in inputs}
-  for input_ in inputs:
-    if input_.name not in bindings:
-      raise ValueError(f"missing input binding for global '{input_.name}'")
-  for name in bindings:
-    if name not in inputs_by_name:
-      raise ValueError(f"input binding '{name}' does not match any program input")
-  for input_ in inputs:
-    binding = bindings[input_.name]
-    if binding.size_bytes < input_.size_bytes:
-      raise ValueError(
-        f"input binding '{binding.name}' size {binding.size_bytes} is smaller"
-        f" than required {input_.size_bytes} bytes"
-      )
-
-  ordered = sorted(bindings.values(), key=lambda binding: binding.base_iova)
-  for left, right in pairwise(ordered):
-    if right.base_iova < left.base_iova + left.size_bytes:
-      raise ValueError(f"input bindings '{left.name}' and '{right.name}' overlap")
-  for binding in bindings.values():
-    if binding.base_iova + binding.size_bytes > hw.hbm_capacity_bytes:
-      raise ValueError(f"input binding '{binding.name}' exceeds HBM capacity")
-
-
-def _validate_binding_permissions(
-  tasks_with_maps: list[tuple[ExecTileGroupTask, Mapping[str, str]]], bindings: Mapping[str, GlobalBinding]
-) -> None:
-  for task, name_map in tasks_with_maps:
-    for action in task.actions:
-      if action.op not in (ExecGroupActionOp.DMA_PREFETCH, ExecGroupActionOp.DMA_STORE):
-        continue
-      transfer = action.args[1]
-      if transfer.src.space == "global":
-        formal_name = transfer.src.base.removeprefix("global:")
-        input_name = name_map[formal_name]
-        if "r" not in bindings[input_name].permissions:
-          raise ValueError(f"input binding '{input_name}' is not readable but is used as prefetch source")
-      if transfer.dst.space == "global":
-        formal_name = transfer.dst.base.removeprefix("global:")
-        input_name = name_map[formal_name]
-        if "w" not in bindings[input_name].permissions:
-          raise ValueError(f"input binding '{input_name}' is not writable but is used as store destination")
-
-    for role_binding in task.role_bindings.values():
-      for descriptor in role_binding.tile_program.descriptors.values():
-        gather = descriptor.params.get("gather")
-        if not isinstance(gather, ExecGatherDesc):
-          continue
-        if not gather.source.base.startswith("formal:"):
-          raise ValueError("gather source must reference a global formal")
-        try:
-          formal_index = int(gather.source.base.removeprefix("formal:"))
-        except ValueError as exc:
-          raise ValueError("gather source formal index is invalid") from exc
-        if (
-          formal_index >= len(role_binding.tile_program.formals)
-          or role_binding.tile_program.formals[formal_index].space != "global"
-        ):
-          raise ValueError("gather source formal index does not name a global formal")
-        global_index = formal_index - 1
-        if global_index < 0 or global_index >= len(role_binding.global_actuals):
-          raise ValueError("gather source global actual index is out of range")
-        global_actual = role_binding.global_actuals[global_index]
-        if not global_actual.base.startswith("global:"):
-          raise ValueError("gather global actual must reference a context formal")
-        formal_name = global_actual.base.removeprefix("global:")
-        gather_input_name = name_map.get(formal_name)
-        if gather_input_name is None or gather_input_name not in bindings:
-          raise ValueError(f"gather source mapping for global '{formal_name}' is missing")
-        if "r" not in bindings[gather_input_name].permissions:
-          raise ValueError(
-            f"input binding '{gather_input_name}' is not readable but is used as gather source"
-          )
-
-
 class Simulator:
-  def __init__(self, hw: HardwareConfig, sim: SimConfig, enable_tracer: bool = False):
+  def __init__(self, hw: HardwareConfig, sim: SimConfig, enable_tracer: bool = False, *, byte_store=None):
     self.hw = hw
     self.sim = sim
     self.tracer = Tracer(hw) if enable_tracer else None
@@ -142,25 +52,13 @@ class Simulator:
       context_count=sim.context_count,
       memory_trace=sim.memory_trace,
       scheduler_config=sim.group,
+      byte_store=byte_store,
     )
     self.cycle = 0
     self._trace: list = []
-    self._program_name_registry: dict[str, int] = {}
-    self._next_program_id: int = 1
-
-  def _validate_tile_placement(self, task: ExecTileGroupTask) -> None:
-    for binding in task.role_bindings.values():
-      pin = binding.context_id
-      if pin is not None and not 0 <= pin < self.sim.context_count:
-        raise ValueError(
-          f"dispatch '{binding.tile_program.name}' pins Tile context {pin}"
-          f" outside context_count={self.sim.context_count}"
-        )
 
   def _ensure_fault_drain(self, reason: str, cycle: int) -> None:
     """Begin reset/drain once for a sequencer/runtime fault."""
-    if not self.group.runtime_enabled:
-      return
     rd = self.group.reset_domain
     if rd.is_active or rd.is_done:
       return
@@ -189,23 +87,49 @@ class Simulator:
         )
     self.tracer.instant("CPU Device", lane, event, cycle, payload)
 
-  def run(self, module: ModuleOp, input_bindings: Mapping[str, GlobalBinding] | None = None) -> SimResult:
-    bindings = {} if input_bindings is None else input_bindings
-    if any(isinstance(op, NexusProgramOp) for op in module.body.block.ops):
-      return self._run_model(module, bindings)
-    task = lower_workload_ir(module)
-    context = next(op for op in module.body.block.ops if isinstance(op, NestContextOp))
-    if context.context_id is not None and int(context.context_id.value.data) != 0:
-      raise ValueError("standalone nest.context must use Group context slot 0")
-    self._validate_tile_placement(task)
-    _validate_input_bindings(list(task.global_inputs), bindings, self.hw)
-    _validate_binding_permissions(
-      [(task, {input_.name: input_.name for input_ in task.global_inputs})], bindings
-    )
-    self._assign_program_ids(task)
-    self.group.load_task(task, input_bindings=bindings)
+  def run(self, program: LoadedProgram) -> SimResult:
+    if not isinstance(program, LoadedProgram):
+      raise ValueError("Simulator.run requires LoadedProgram; compile and load explicitly")
+    checked = load_program(program.compiled, self.hw, self.sim, actual_bindings=program.actual_bindings)
+    if checked.target_hash != program.target_hash:
+      raise ValueError("LoadedProgram target fingerprint mismatch")
+    compiled = program.compiled
+    bindings = program.actual_bindings
+    controller = self.group.profile_controller
+    init_cycle = 0
+    while not controller.initialized:
+      if init_cycle >= self.hw.memory_target.profile_command_timeout_cycles:
+        raise ValueError("profile initialization proof timed out")
+      controller.step(init_cycle)
+      init_cycle += 1
+    expected = compiled.entry_profiles
+    if (
+      controller.active_modes["l1"] != expected.l1_mode or controller.active_modes["l2"] != expected.l2_mode
+    ):
+      raise ValueError("actual entry profile differs from compiled entry; explicit recovery required")
+    self.group.begin_launch(compiled, bindings)
     self.cycle = 0
     self._trace.clear()
+    if compiled.entry_kind == "model":
+      if not isinstance(compiled.entry, ExecModel):
+        raise ValueError("model artifact has wrong entry type")
+      return self._run_model(
+        replace(compiled.entry, body=compiled.entry_prefix + compiled.entry.body), bindings
+      )
+    task = compiled.entry
+    if not isinstance(task, ExecTileGroupTask):
+      raise ValueError("standalone artifact has wrong entry type")
+    if compiled.entry_prefix:
+      reason = self._execute_prefix(compiled.entry_prefix, bindings)
+      if reason is not None:
+        return SimResult(
+          cycles=self.cycle,
+          reason=reason,
+          group_snapshot=self.group.snapshot(),
+          tracer=self.tracer,
+          configuration=self._configuration(bindings),
+        )
+    self.group.load_task(task, input_bindings=bindings, cycle=self.cycle)
     completed = False
     reason = ""
     fault_reason: str | None = None
@@ -228,7 +152,7 @@ class Simulator:
       if fault_reason is not None:
         # Fault result is returned only after drain/reset cleanup completed
         # in runtime/full_memory. timing_only has no reset domain.
-        if not self.group.runtime_enabled or self.group.reset_domain.is_done:
+        if self.group.reset_domain.is_done:
           completed = False
           reason = f"faulted: {fault_reason}"
           break
@@ -257,33 +181,28 @@ class Simulator:
       configuration=self._configuration(bindings),
     )
 
-  def _run_model(self, module: ModuleOp, bindings: Mapping[str, GlobalBinding]) -> SimResult:
-    model = lower_model_ir(module)
-    _validate_input_bindings(list(model.inputs), bindings, self.hw)
-    tasks_with_maps: list[tuple[ExecTileGroupTask, Mapping[str, str]]] = []
-    for device_op in model.body:
-      if device_op.op != "submit":
-        continue
-      task = model.tasks[device_op.ctx_name]
-      name_map = {
-        formal.name: model.inputs[actual_index].name
-        for formal, actual_index in zip(task.global_inputs, device_op.actual_inputs)
-      }
-      tasks_with_maps.append((task, name_map))
-    _validate_binding_permissions(tasks_with_maps, bindings)
-    for task in model.tasks.values():
-      self._validate_tile_placement(task)
-      self._assign_program_ids(task)
-    for name, pin in model.context_pins.items():
-      if pin is not None and not 0 <= pin < self.sim.group.active_context_capacity:
-        raise ValueError(
-          f"context '{name}' pins Group context slot {pin} outside"
-          f" active_context_capacity={self.sim.group.active_context_capacity}"
-        )
+  def _execute_prefix(
+    self, instructions: tuple[ExecDeviceOp, ...], bindings: Mapping[str, GlobalBinding]
+  ) -> str | None:
+    model = ExecModel(
+      name="entry_prefix", body=(*instructions, ExecDeviceOp("return", instruction_id="entry:return"))
+    )
+    port = GroupPortAdapter(self.group, self.sim.group.active_context_capacity)
+    cpu = CpuDeviceController(model, self.sim.device, self.sim.device_context_count, port, bindings)
+    while self.cycle < self.sim.max_cycles:
+      cpu.step(self.cycle)
+      self.group.step(self.cycle)
+      cpu.harvest_completions(self.cycle)
+      self.cycle += 1
+      if cpu.faulted:
+        return f"faulted: {cpu.fault_reason}"
+      if cpu.succeeded:
+        return None
+    return f"cycle cap {self.sim.max_cycles} reached during entry configuration"
 
+  def _run_model(self, model: ExecModel, bindings: Mapping[str, GlobalBinding]) -> SimResult:
     # A fresh adapter owns Group launch slots and sequencer identities.  The
     # CPU sees only the DevicePort protocol and stable request IDs.
-    self.group.reset()
     port = GroupPortAdapter(self.group, self.sim.group.active_context_capacity)
     controller = CpuDeviceController(
       model,
@@ -320,7 +239,7 @@ class Simulator:
         break
 
       if controller.faulted:
-        if not self.group.runtime_enabled or self.group.reset_domain.is_done:
+        if self.group.reset_domain.is_done:
           controller.note_fault_drain_completed(self.cycle)
           completed = False
           reason = f"faulted: {controller.fault_reason}"
@@ -367,52 +286,7 @@ class Simulator:
 
   def _configuration(self, bindings: Mapping[str, GlobalBinding]) -> dict:
     return {
-      "hardware": asdict(self.hw),
-      "simulation": asdict(self.sim),
-      "bindings": {name: asdict(binding) for name, binding in bindings.items()},
+      "hardware": canonical_value(self.hw),
+      "simulation": canonical_value(self.sim),
+      "bindings": canonical_value(bindings),
     }
-
-  def _assign_program_ids(self, task: ExecTileGroupTask) -> None:
-    for binding in task.role_bindings.values():
-      prog = binding.tile_program
-      if prog.program_id == 0:
-        if prog.name not in self._program_name_registry:
-          self._program_name_registry[prog.name] = self._next_program_id
-          self._next_program_id += 1
-        prog.program_id = self._program_name_registry[prog.name]
-      if prog.program_hash == 0:
-        prog.program_hash = self._program_hash(prog)
-
-  def _program_hash(self, prog) -> int:
-    canonical = (
-      prog.name,
-      prog.version,
-      tuple(
-        (ins.op.value, ins.dst, tuple(self._tag_scalar(arg) for arg in ins.args)) for ins in prog.insts
-      ),
-      tuple(sorted(prog.labels.items())),
-      tuple(
-        (
-          name,
-          prog.descriptors[name].kind,
-          prog.descriptors[name].op,
-          tuple(
-            (key, self._tag_scalar(value)) for key, value in sorted(prog.descriptors[name].params.items())
-          ),
-        )
-        for name in sorted(prog.descriptors)
-      ),
-    )
-    return zlib.crc32(repr(canonical).encode()) & 0xFFFFFFFF
-
-  @staticmethod
-  def _tag_scalar(value):
-    if isinstance(value, bool):
-      return ("bool", value)
-    if isinstance(value, int):
-      return ("int", value)
-    if isinstance(value, float):
-      return ("float", value)
-    if isinstance(value, str):
-      return ("str", value)
-    return (type(value).__name__, value)

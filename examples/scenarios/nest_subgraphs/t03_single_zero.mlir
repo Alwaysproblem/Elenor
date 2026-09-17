@@ -20,7 +20,8 @@
 //         "Liveness": "应完成；以同次运行 trace 和退出状态确认",
 //         "Scheduling Quality": "0 次静态展开；活动 grid 数应为 0，不得解释为运行时 early-exit"
 //       },
-//       "forbidden_dependencies": "只允许表列真数据边；UCE 共享 pin 争用不是数据依赖；跨 Context 仅使用当前 IR 可见的 context_done/HBM 可见性",
+//"forbidden_dependencies": "只允许表列真数据边；UCE 共享 pin 争用不是数据依赖；跨 Context 仅使用当前 IR 可见的 context_done/HBM
+// 可见性",
 //       "tensors": {
 //         "State0": {
 //           "formal": "arena",
@@ -50,7 +51,9 @@
 //       }
 //     }
 builtin.module {
-  nest.context @ctx_empty (%arena: !nest.global_memref<4194304xbf16>) placement = 15 {
+  nest.context @ctx_empty (%arena: !nest.global_memref<4194304xbf16>) placement = 15
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+      logical_tasks = 0, l2_spm_bytes = 0, requested_contexts_per_tile = 1> {
     nest.return
   }
   nexus.program @run (%arena: !nest.global_memref<4194304xbf16>) {

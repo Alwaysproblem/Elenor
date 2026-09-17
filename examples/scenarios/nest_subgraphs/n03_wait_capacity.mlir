@@ -1,5 +1,6 @@
 // 可复现 NEST 边界子图；中文元数据是人类可读说明，不是可执行 schema。
-// 容量必须以 group_sram_bytes=65536 运行。Holder 只分配一份 X L2，并把同一 X load 到两份 L1 做 X×X。
+//容量必须以 profile_l2_64k.yaml 运行（user L2 = 65536 B，物理 131072 B）。Holder 只分配一份 X L2，并把同一 X load 到两份 L1 做
+// X×X。
 // Waiter 是 input-only dispatch，第三事件 tag 为空，不声明 output_ready。
 // case: {
 //       "id": "N03",
@@ -16,16 +17,20 @@
 //         "fidelity": "full_memory",
 //         "num_dma_channels": 2,
 //         "arena_binding": "arena=0x1000000:8388608:rw",
-//         "group_sram_bytes": 65536,
+//         "profile": "profile_l2_64k.yaml",
+//         "user_l2_bytes": 65536,
+//         "physical_l2_bytes": 131072,
 //         "placement": 15
 //       },
 //       "expected": {
-//         "时序/生命周期 Correctness": "Holder 的 input U + output U 原子占满 2U；其 input_released final-free 后 Waiter 才 admission，且 Waiter 可与 Holder 的 BOA100 重叠",
+//"时序/生命周期 Correctness": "Holder 的 input U + output U 原子占满 2U；其 input_released final-free 后 Waiter 才
+// admission，且 Waiter 可与 Holder 的 BOA100 重叠",
 //         "数值": "未建模；engine descriptor 与未初始化的合成输出只用于时序",
 //         "Liveness": "所有已接纳 Context 完成",
 //         "Scheduling Quality": "仅记录实际 service/等待，不声称最优调度"
 //       },
-//       "forbidden_dependencies": "WAIT_CAPACITY 期间 Waiter 不得有 L2/L1 分配、role dispatch、DMA 或 engine service",
+//"forbidden_dependencies": "WAIT_CAPACITY 期间 Waiter 不得有 L2/L1 分配、role dispatch、DMA 或 engine
+// service",
 //       "tensors": {
 //         "Holder_input": {
 //           "index": 0,
@@ -76,7 +81,9 @@
 //     }
 builtin.module {
   tile.program @prog_Holder(
-    %task: !nest.task, %x: !nest.l2_buffer<4x64x64xbf16>, %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %task : !nest.task, %x : !nest.l2_buffer<4x64x64xbf16>, %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 24576> {
     %vx = tile.subview %x task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %vo = tile.subview %out task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
@@ -395,7 +402,9 @@ builtin.module {
     tile.signal output_ready(%task)
     tile.return
   }
-  tile.program @prog_Waiter (%task: !nest.task, %input: !nest.l2_buffer<4x64x64xbf16>) {
+  tile.program @prog_Waiter (%task: !nest.task, %input: !nest.l2_buffer<4x64x64xbf16>)
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+      tile_l1_spm_bytes_per_context = 8192> {
     %v = tile.subview %input task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -406,7 +415,9 @@ builtin.module {
     tile.await %compute
     tile.return
   }
-  nest.context @ctx_holder (%arena: !nest.global_memref<4194304xbf16>) placement = 15 {
+  nest.context @ctx_holder (%arena: !nest.global_memref<4194304xbf16>) placement = 15
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0],
+      logical_tasks = 4, l2_spm_bytes = 65536, requested_contexts_per_tile = 1> {
     %b_holder_input = nest.alloc slot = "holder_input" role = "in" shape = [4, 64, 64]
       dtype = "bf16" alignment = 256 : !nest.l2_buffer<4x64x64xbf16>
     %b_holder_output = nest.alloc slot = "holder_output" role = "inout" shape = [4, 64, 64]
@@ -418,7 +429,8 @@ builtin.module {
     %pref_holder_input = nest.dma.prefetch.async %h_holder_input into %b_holder_input
       : !nest.event<"pref_holder_input">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_Holder, %read_Holder, %ready_Holder = nest.dispatch.tasks.async @prog_Holder tasks(%tasks)
+    %grid_Holder, %read_Holder, %ready_Holder = nest.dispatch.tasks.async @prog_Holder l1_mode = 0
+      tasks(%tasks)
       globals() bindings(%b_holder_input, %b_holder_output) ins(%b_holder_input)
       outs(%b_holder_output)
       signal_policy {
@@ -433,7 +445,9 @@ builtin.module {
     nest.await %grid_Holder, %store_Holder
     nest.return
   }
-  nest.context @ctx_waiter (%arena: !nest.global_memref<4194304xbf16>) placement = 15 {
+  nest.context @ctx_waiter (%arena: !nest.global_memref<4194304xbf16>) placement = 15
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0],
+      logical_tasks = 4, l2_spm_bytes = 32768, requested_contexts_per_tile = 1> {
     %b_waiter_input = nest.alloc slot = "waiter_input" role = "in" shape = [4, 64, 64]
       dtype = "bf16" alignment = 256 : !nest.l2_buffer<4x64x64xbf16>
     %h_waiter_input = nest.subview %arena offsets = [131072] sizes = [16384] strides = [1]
@@ -441,7 +455,8 @@ builtin.module {
     %pref_waiter_input = nest.dma.prefetch.async %h_waiter_input into %b_waiter_input
       : !nest.event<"pref_waiter_input">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_Waiter, %read_Waiter, %unused_ready = nest.dispatch.tasks.async @prog_Waiter tasks(%tasks)
+    %grid_Waiter, %read_Waiter, %unused_ready = nest.dispatch.tasks.async @prog_Waiter l1_mode = 0
+      tasks(%tasks)
       globals() bindings(%b_waiter_input) ins(%b_waiter_input) outs()
       signal_policy {
         input_released = #nest.aggregate<all_tasks>

@@ -11,15 +11,16 @@ slot; it does not maintain an unrelated frame-generation namespace.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
 from .allocator import MemoryInvariantError
 
 if TYPE_CHECKING:
-  from ..execution_ir import ExecL1Buffer
+  from ..profiles import ArenaLayout
   from .allocator import AllocationHandle, MemoryOwner
+  from .arena import ArenaHandle
 
 
 class SlotRole(IntEnum):
@@ -80,6 +81,8 @@ class Slot:
   generation: int = 0
   owner: MemoryOwner | None = None  # type: ignore[name-defined]
   flags: int = 0
+  arena_id: str = ""
+  profile_generation: int = 0
 
 
 @dataclass
@@ -102,6 +105,9 @@ class SlotFrame:
     self._shadow_slots: list[Slot] | None = None
     self.pmu_bank_conflict_cycles: int = 0
     self.pmu_permission_fault_count: int = 0
+    self.arena: ArenaHandle | None = None
+    self._layout: ArenaLayout | None = None
+    self._slot_segments: dict[int, tuple] = {}
 
   @property
   def is_available(self) -> bool:
@@ -115,87 +121,90 @@ class SlotFrame:
 
   @property
   def generation(self) -> int | None:
-    """Allocator generation shared by the currently staged/bound handles."""
-    source = self._shadow_slots if self._shadow_slots is not None else self.slots
-    generations = {slot.generation for slot in source if slot.allocation_id is not None}
-    if len(generations) != 1:
-      return None
-    return next(iter(generations))
+    """Allocation generation of the committed Task Arena, including empty Frames."""
+    return None if self.arena is None else self.arena.allocation_generation
 
-  def prepare(
-    self,
-    handles: list[AllocationHandle],  # type: ignore[name-defined]
-    specs: list[ExecL1Buffer],  # type: ignore[name-defined]
-  ) -> bool:
-    """Map ``ExecL1Buffer`` specs to fixed slots and build a shadow.
-
-    Checks slot count, capacity, alignment, overlap and generation
-    before building the shadow.  Each L1 buffer uses
-    ``SlotRole.WORKSPACE``, ``SlotLifetime.PER_TILE_PROGRAM``,
-    ``layout=0``, ``bank_policy=0``.  On failure the active frame is
-    not changed.
-    """
-    if not self.is_available:
+  def prepare(self, arena: ArenaHandle, layout: ArenaLayout) -> bool:
+    """Validate the committed Arena and stage an empty live-slot Frame."""
+    profile = arena.profile
+    if (
+      not self.is_available
+      or arena.memory_space != "l1"
+      or profile.level != "l1"
+      or profile.bank_bytes * profile.banks != self.l1_bytes
+      or arena.layout != layout
+      or any(not 0 <= item.slot_id < self.slot_count for item in layout.buffer_layouts)
+    ):
       self.pmu_permission_fault_count += 1
       return False
-    if len(handles) != len(specs):
-      self.pmu_permission_fault_count += 1
-      return False
-    if len(specs) > self.slot_count:
-      self.pmu_permission_fault_count += 1
-      return False
-    total = sum(s.bytes for s in specs)
-    if total > self.l1_bytes:
-      self.pmu_permission_fault_count += 1
-      return False
-    for spec, handle in zip(specs, handles):
+    for segment in arena.reserve:
+      local = segment.address - segment.bank_id * profile.bank_bytes
       if (
-        handle.memory_space != "l1"
-        or handle.size_bytes != spec.bytes
-        or handle.alignment != max(spec.alignment, 1)
-        or getattr(handle.owner, "buffer_id", None) != spec.name
+        not 0 <= segment.bank_id < profile.banks
+        or local < profile.system_reserved_spm_per_bank
+        or local % layout.alignment
+        or segment.size_bytes <= 0
+        or local + segment.size_bytes > profile.spm_bytes_per_bank
       ):
         self.pmu_permission_fault_count += 1
         return False
-      if (
-        not handle.bank_segments
-        or sum(segment.size_bytes for segment in handle.bank_segments) != handle.size_bytes
-        or any(
-          segment.address < 0
-          or segment.size_bytes <= 0
-          or segment.address + segment.size_bytes > self.l1_bytes
-          for segment in handle.bank_segments
-        )
-      ):
-        self.pmu_permission_fault_count += 1
-        return False
-    new_slots: list[Slot] = [Slot(i) for i in range(self.slot_count)]
-    for i, (spec, handle) in enumerate(zip(specs, handles)):
-      new_slots[i] = Slot(
-        slot_id=i,
-        base=handle.base_address,
-        size=spec.bytes,
-        alignment=spec.alignment,
-        role=SlotRole.WORKSPACE,
-        lifetime=SlotLifetime.PER_TILE_PROGRAM,
-        allocation_id=handle.allocation_id,
-        generation=handle.generation,
-        owner=handle.owner,
-      )
-    # Overlap is physical-segment based.  ``base + logical size`` is not a
-    # physical range when one allocation spans fragmented bank extents.
-    ranges = [
-      (segment.address, segment.address + segment.size_bytes)
-      for handle in handles
-      for segment in handle.bank_segments
-    ]
-    ranges.sort()
-    for i in range(1, len(ranges)):
-      if ranges[i][0] < ranges[i - 1][1]:
-        self.pmu_permission_fault_count += 1
-        return False
-    self._shadow_slots = new_slots
+    if sum(segment.size_bytes for segment in arena.reserve) != layout.reserved_bytes:
+      self.pmu_permission_fault_count += 1
+      return False
+    self.arena = arena
+    self._layout = layout
+    self._slot_segments.clear()
+    self._shadow_slots = [Slot(i) for i in range(self.slot_count)]
     return True
+
+  def bind_view(self, buffer_id: str, handle: AllocationHandle) -> int:
+    """Install one executed ALLOC_L1 into its compiler-selected live slot."""
+    if self.arena is None or self._layout is None or self.state != FrameState.FRAME_ACTIVE:
+      raise MemoryInvariantError("L1 allocation without an active Arena Frame")
+    item = next((item for item in self._layout.buffer_layouts if item.buffer_id == buffer_id), None)
+    if item is None or handle.size_bytes != item.logical_bytes:
+      raise MemoryInvariantError("L1 allocation differs from compiled buffer layout")
+    if (
+      handle.arena_id != self.arena.arena_id
+      or handle.profile_generation != self.arena.profile_generation
+      or self.slots[item.slot_id].allocation_id is not None
+      or sum(segment.size_bytes for segment in handle.bank_segments) != item.logical_bytes
+    ):
+      raise MemoryInvariantError("L1 slot generation or live binding mismatch")
+    for segment in handle.bank_segments:
+      if not any(
+        reserve.bank_id == segment.bank_id
+        and reserve.address <= segment.address
+        and segment.address + segment.size_bytes <= reserve.address + reserve.size_bytes
+        for reserve in self.arena.reserve
+      ):
+        raise MemoryInvariantError("L1 view escapes Arena reservation")
+      for previous in self._slot_segments.values():
+        if any(
+          segment.address < other.address + other.size_bytes
+          and other.address < segment.address + segment.size_bytes
+          for other in previous
+        ):
+          raise MemoryInvariantError("L1 view overlaps a live Frame binding")
+    slot = Slot(
+      item.slot_id,
+      base=handle.base_address,
+      size=handle.size_bytes,
+      alignment=handle.alignment,
+      role=SlotRole.WORKSPACE,
+      lifetime=SlotLifetime.PER_TILE_PROGRAM,
+      allocation_id=handle.allocation_id,
+      generation=handle.generation,
+      owner=handle.owner,
+      arena_id=handle.arena_id,
+      profile_generation=handle.profile_generation,
+    )
+    assert self.shadow is not None and self._shadow_slots is not None
+    self.slots[item.slot_id] = slot
+    self.shadow.slots[item.slot_id] = replace(slot)
+    self._shadow_slots[item.slot_id] = replace(slot)
+    self._slot_segments[item.slot_id] = handle.bank_segments
+    return item.slot_id
 
   def bind(self, cycle: int, bind_cycles: int = 8) -> tuple[bool, int]:
     """Run the frame bind FSM (design 3.2) on the prepared shadow.
@@ -211,23 +220,9 @@ class SlotFrame:
     # capacity + overlap already checked in prepare(); bank policy V1 pass
     self.state = FrameState.FRAME_ACTIVE
     shadow = SlotFrame(frame_id=self.frame_id, l1_bytes=self.l1_bytes, slot_count=self.slot_count)
-    shadow.slots = [
-      Slot(
-        s.slot_id,
-        s.base,
-        s.size,
-        s.layout,
-        s.role,
-        s.alignment,
-        s.bank_policy,
-        s.lifetime,
-        s.allocation_id,
-        s.generation,
-        s.owner,
-        s.flags,
-      )
-      for s in self._shadow_slots
-    ]
+    shadow.slots = [replace(slot) for slot in self._shadow_slots]
+    shadow.arena = self.arena
+    shadow._layout = self._layout
     shadow.state = FrameState.FRAME_ACTIVE
     self.shadow = shadow
     self.slots = list(self._shadow_slots)
@@ -239,6 +234,9 @@ class SlotFrame:
     self.shadow = None
     self._shadow_slots = None
     self.state = FrameState.IDLE
+    self.arena = None
+    self._layout = None
+    self._slot_segments.clear()
 
   def assert_slot_binding(
     self,
@@ -258,6 +256,8 @@ class SlotFrame:
       if (
         slot.allocation_id != handle.allocation_id
         or slot.generation != handle.generation
+        or slot.arena_id != handle.arena_id
+        or slot.profile_generation != handle.profile_generation
         or slot.owner != handle.owner
         or slot.base != handle.base_address
         or slot.size != handle.size_bytes
@@ -276,12 +276,10 @@ class SlotFrame:
     self.shadow.slots[slot_id] = Slot(slot_id)
     assert self._shadow_slots is not None
     self._shadow_slots[slot_id] = Slot(slot_id)
+    self._slot_segments.pop(slot_id)
 
   def reset(self) -> None:
-    self.slots = [Slot(i) for i in range(self.slot_count)]
-    self.shadow = None
-    self._shadow_slots = None
-    self.state = FrameState.IDLE
+    self.release()
     self.pmu_bank_conflict_cycles = 0
     self.pmu_permission_fault_count = 0
 

@@ -26,6 +26,7 @@ from .dialects.elenor import (
   Elenor,
   NestBuffer,
   NestContextOp,
+  NestContextResourcesAttr,
   NestDispatchOp,
   NestEvent,
   NestGlobalMemref,
@@ -44,6 +45,7 @@ from .dialects.elenor import (
   TileL1Buffer,
   TileProfiledAccessOp,
   TileProgramDefOp,
+  TileResourcesAttr,
   TileSignalOp,
   TileSubviewOp,
   _int_list,
@@ -187,6 +189,16 @@ def _verify_dispatch_contract(
   if prog_sym not in programs:
     raise VerifyException(f"dispatch references unknown tile program '@{prog_sym}'")
   prog_def = programs[prog_sym]
+  if not isinstance(prog_def.resource_contract, TileResourcesAttr):
+    raise VerifyException(f"tile.program '@{prog_sym}' must own a #tile.resources contract")
+  tile_resources = _resource_contract(
+    prog_def.resource_contract, f"tile.program '@{prog_sym}' resource_contract"
+  )
+  requested_l1_mode = int(op.l1_mode.value.data)
+  if requested_l1_mode not in tile_resources.allowed_profiles:
+    raise VerifyException(
+      f"dispatch '@{prog_sym}' l1_mode {requested_l1_mode} must belong to tile.program allowed_profiles"
+    )
   # Rule 5: dispatch↔tile.program binding.  Program data formals are
   # zero or more globals followed by zero or more L2 buffers.
   data_formals = list(enumerate(prog_def.body.block.args[1:], start=1))
@@ -304,6 +316,20 @@ def _verify_dispatch_contract(
     )
 
 
+def _resource_contract(attr, owner: str):
+  """Validate a resource-contract attribute into an immutable value.
+
+  Structurally-valid attributes constructed outside the typed path can
+  still carry invalid allowed/cache fields; surface those as
+  ``VerifyException`` so source verification and the CLI rejection
+  path handle them uniformly.
+  """
+  try:
+    return attr.to_contract()
+  except ValueError as exc:
+    raise VerifyException(f"invalid {owner}: {exc}") from exc
+
+
 def _verify_tile_subview(op: TileSubviewOp, block: Block) -> None:
   # tile.subview remains L2-only; gather is the only tile-side global
   # consumer in this PR.
@@ -345,17 +371,14 @@ def _verify_gather_profile(op: TileGatherOp) -> None:
   profiled_accesses = [cast(TileProfiledAccessOp, access) for access in accesses]
 
   result_bytes = int(op.result_bytes.value.data)
-  cache_min_bytes = int(op.cache_min_bytes.value.data)
   cache_target_bytes = int(op.cache_target_bytes.value.data)
   l1_mshr_hint = int(op.l1_mshr_hint.value.data)
   if result_bytes <= 0:
     raise VerifyException("gather result_bytes must be > 0")
   if result_bytes > _shape_bytes(op.destination.type):
     raise VerifyException("gather result_bytes exceeds destination extent")
-  if cache_min_bytes <= 0:
-    raise VerifyException("gather cache_min_bytes must be > 0")
-  if cache_target_bytes < cache_min_bytes:
-    raise VerifyException("gather cache_target_bytes must be >= cache_min_bytes")
+  if cache_target_bytes < 0:
+    raise VerifyException("gather cache_target_bytes must be >= 0")
   if l1_mshr_hint <= 0:
     raise VerifyException("gather l1_mshr_hint must be > 0")
 
@@ -457,6 +480,13 @@ def _verify_context(
   programs: dict[str, TileProgramDefOp],
   program_accesses: dict[str, tuple[frozenset[int], frozenset[int]]],
 ) -> None:
+  if not isinstance(context.resource_contract, NestContextResourcesAttr):
+    raise VerifyException(
+      f"nest.context '@{context.sym_name.data}' must own a #nest.context_resources contract"
+    )
+  context_resources = _resource_contract(
+    context.resource_contract, f"nest.context '@{context.sym_name.data}' resource_contract"
+  )
   placement = int(context.placement.value.data)
   if placement == 0:
     raise VerifyException("nest.context placement must be non-zero")
@@ -488,6 +518,7 @@ def _verify_context(
   seen_events: set[str] = set()
   defined_events: set[SSAValue] = set()
   seen_buffers: set[str] = set()
+  logical_tasks = 0
 
   for op in body:
     if isinstance(op, NestAllocOp):
@@ -525,6 +556,10 @@ def _verify_context(
       continue
 
     if isinstance(op, NestDispatchOp):
+      task_op = op.tasks.owner
+      if not isinstance(task_op, NestTaskRangeOp):
+        raise VerifyException("dispatch tasks operand must be a nest.task.range result")
+      logical_tasks += task_op.num_tasks
       _verify_dispatch_contract(op, programs, program_accesses, context_allocs, placement)
       # phase tags (input_released / output_ready) are optional (empty = no phase)
       for r in op.results:
@@ -569,6 +604,11 @@ def _verify_context(
     raise VerifyException(f"unexpected nest context body op '{op.name}'")
 
   _verify_release_graph(body)
+  if logical_tasks != context_resources.logical_tasks:
+    raise VerifyException(
+      f"nest.context '@{context.sym_name.data}' resource_contract logical_tasks"
+      f" ({context_resources.logical_tasks}) does not match dispatched tasks ({logical_tasks})"
+    )
 
 
 def _program_signal_phases(prog: TileProgramDefOp) -> frozenset[str]:
@@ -702,6 +742,9 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
     TileStoreOp,
   )
 
+  if not isinstance(prog.resource_contract, TileResourcesAttr):
+    raise VerifyException(f"tile.program '@{prog.sym_name.data}' must own a #tile.resources contract")
+  _resource_contract(prog.resource_contract, f"tile.program '@{prog.sym_name.data}' resource_contract")
   block = prog.body.block
   args = list(block.args)
   if not args or not isinstance(args[0].type, NestTask):

@@ -11,12 +11,16 @@ from __future__ import annotations
 
 import json
 import subprocess
+from itertools import pairwise
+from pathlib import Path
 
 import pytest
 
+from pipeline_validator.compiler import compile_program
 from pipeline_validator.config import HardwareConfig
 from pipeline_validator.execution_ir import GlobalBinding
-from pipeline_validator.simulator import Simulator, SimConfig
+from pipeline_validator.loader import load_program
+from pipeline_validator.simulator import SimConfig, Simulator
 from pipeline_validator.trace import Tracer
 from pipeline_validator.workloads import PowWorkload
 
@@ -26,24 +30,21 @@ def _events_of(sim: Simulator) -> list[dict]:
   return json.loads(sim.tracer.to_chrome_json())["traceEvents"]
 
 
+def run_source(
+  simulator: Simulator, module, bindings: dict[str, GlobalBinding] | None = None, *, workload_info=None
+):
+  artifact = compile_program(module, simulator.hw, simulator.sim, workload_info=workload_info)
+  return simulator.run(load_program(artifact, simulator.hw, simulator.sim, actual_bindings=bindings))
+
+
 def _process_meta(events: list[dict]) -> dict[str, int]:
-  names = {
-    e["pid"]: e["args"]["name"]
-    for e in events if e["name"] == "process_name"
-  }
-  sorts = {
-    e["pid"]: e["args"]["sort_index"]
-    for e in events if e["name"] == "process_sort_index"
-  }
+  names = {e["pid"]: e["args"]["name"] for e in events if e["name"] == "process_name"}
+  sorts = {e["pid"]: e["args"]["sort_index"] for e in events if e["name"] == "process_sort_index"}
   return {names[pid]: sort for pid, sort in sorts.items()}
 
 
 def _thread_meta(events: list[dict], pid: int) -> dict[str, int]:
-  names = {
-    e["tid"]: e["args"]["name"]
-    for e in events
-    if e["name"] == "thread_name" and e["pid"] == pid
-  }
+  names = {e["tid"]: e["args"]["name"] for e in events if e["name"] == "thread_name" and e["pid"] == pid}
   sorts = {
     e["tid"]: e["args"]["sort_index"]
     for e in events
@@ -87,22 +88,34 @@ class TestSortMetadata:
     events = json.loads(tr.to_chrome_json())["traceEvents"]
     proc = _process_meta(events)
     assert proc["Device"] < proc["TileGroup"] < proc["Tile0"] < proc["Tile1"]
-    pids = {
-      e["args"]["name"]: e["pid"]
-      for e in events if e["name"] == "process_name"
-    }
+    pids = {e["args"]["name"]: e["pid"] for e in events if e["name"] == "process_name"}
     tg = _thread_meta(events, pids["TileGroup"])
-    assert (tg["Scheduler:L2"] < tg["HBM → L2 Input #0"]
-            < tg["HBM → L2 Input #10"] < tg["L2 → HBM Output #0"]
-            < tg["L2 → HBM Output #10"] < tg["Memory:HBM"]
-            < tg["Memory:L2 Read"] < tg["Memory:L2 Write"]
-            < tg["Memory:L2 State"] < tg["StreamQ:2"])
+    assert (
+      tg["Scheduler:L2"]
+      < tg["HBM → L2 Input #0"]
+      < tg["HBM → L2 Input #10"]
+      < tg["L2 → HBM Output #0"]
+      < tg["L2 → HBM Output #10"]
+      < tg["Memory:HBM"]
+      < tg["Memory:L2 Read"]
+      < tg["Memory:L2 Write"]
+      < tg["Memory:L2 State"]
+      < tg["StreamQ:2"]
+    )
     t0 = _thread_meta(events, pids["Tile0"])
     assert t0["UCE CTX1"] < t0["MFE_LD0"] < t0["MFE_LD10"]
-    assert (t0["MFE_LD10"] < t0["BOA"] < t0["EVU"] < t0["MFE"]
-            < t0["USE"] < t0["MFE_ST0"] < t0["MFE_ST10"]
-            < t0["Memory:L1 Read"] < t0["Memory:L1 Write"]
-            < t0["Memory:L1 State"])
+    assert (
+      t0["MFE_LD10"]
+      < t0["BOA"]
+      < t0["EVU"]
+      < t0["MFE"]
+      < t0["USE"]
+      < t0["MFE_ST0"]
+      < t0["MFE_ST10"]
+      < t0["Memory:L1 Read"]
+      < t0["Memory:L1 Write"]
+      < t0["Memory:L1 State"]
+    )
     tr.assert_well_formed()
 
   def test_unknown_process_and_thread_get_fallback_sort(self):
@@ -121,16 +134,11 @@ class TestSortMetadata:
 class TestChangeOnlyCounters:
   def test_counter_if_changed_dedups(self):
     tr = Tracer(HardwareConfig())
-    tr.counter_if_changed("TileGroup", "occupancy", 0, 1, "tokens",
-                          thread="StreamQ:0")
-    tr.counter_if_changed("TileGroup", "occupancy", 1, 1, "tokens",
-                          thread="StreamQ:0")
-    tr.counter_if_changed("TileGroup", "occupancy", 2, 2, "tokens",
-                          thread="StreamQ:0")
-    tr.counter_if_changed("TileGroup", "occupancy", 3, 2, "tokens",
-                          thread="StreamQ:0")
-    samples = [e for e in json.loads(tr.to_chrome_json())["traceEvents"]
-              if e["name"] == "occupancy"]
+    tr.counter_if_changed("TileGroup", "occupancy", 0, 1, "tokens", thread="StreamQ:0")
+    tr.counter_if_changed("TileGroup", "occupancy", 1, 1, "tokens", thread="StreamQ:0")
+    tr.counter_if_changed("TileGroup", "occupancy", 2, 2, "tokens", thread="StreamQ:0")
+    tr.counter_if_changed("TileGroup", "occupancy", 3, 2, "tokens", thread="StreamQ:0")
+    samples = [e for e in json.loads(tr.to_chrome_json())["traceEvents"] if e["name"] == "occupancy"]
     assert [s["args"]["occupancy"] for s in samples] == [1, 2]
     tr.assert_well_formed()
 
@@ -138,12 +146,9 @@ class TestChangeOnlyCounters:
     tr = Tracer(HardwareConfig())
     tr.counter("Tile0", "active_context_count", 5, 3, "contexts")
     events = json.loads(tr.to_chrome_json())["traceEvents"]
-    sample = next(e for e in events
-                  if e["name"] == "active_context_count")
+    sample = next(e for e in events if e["name"] == "active_context_count")
     threads = {
-      e["args"]["name"]
-      for e in events
-      if e["name"] == "thread_name" and e["pid"] == sample["pid"]
+      e["args"]["name"] for e in events if e["name"] == "thread_name" and e["pid"] == sample["pid"]
     }
     assert "active_context_count" in threads
 
@@ -174,27 +179,20 @@ class TestMemoryLanes:
     """Memory counters stay on state lanes; transfer legs split by direction."""
     hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
     sim = Simulator(
-      hw, SimConfig(fidelity="full_memory", max_cycles=200000,
-                    memory_trace=True),
-      enable_tracer=True,
+      hw, SimConfig(fidelity="full_memory", max_cycles=200000, memory_trace=True), enable_tracer=True
     )
-    result = sim.run(PowWorkload().module, input_bindings=POW_BINDINGS)
+    workload = PowWorkload(hw=hw)
+    result = run_source(sim, workload.module, POW_BINDINGS, workload_info=workload.info)
     assert result.completed, result.reason
     assert sim.tracer is not None
     sim.tracer.assert_well_formed()
     events = _events_of(sim)
-    pname = {
-      e["pid"]: e["args"]["name"]
-      for e in events if e.get("name") == "process_name"
-    }
+    pname = {e["pid"]: e["args"]["name"] for e in events if e.get("name") == "process_name"}
     thread_names = {
-      (e["pid"], e["tid"]): e["args"]["name"]
-      for e in events if e.get("name") == "thread_name"
+      (e["pid"], e["tid"]): e["args"]["name"] for e in events if e.get("name") == "thread_name"
     }
-    tile_pids = {pid for pid, name in pname.items()
-                 if name.startswith("Tile")}
-    tg_pid = next(pid for pid, name in pname.items()
-                  if name == "TileGroup")
+    tile_pids = {pid for pid, name in pname.items() if name.startswith("Tile")}
+    tg_pid = next(pid for pid, name in pname.items() if name == "TileGroup")
     for e in events:
       if e.get("name") == "l1_allocated_bytes":
         assert e["pid"] in tile_pids, e
@@ -202,8 +200,7 @@ class TestMemoryLanes:
       if e.get("name") == "l2_allocated_bytes":
         assert e["pid"] == tg_pid, e
         assert thread_names[(e["pid"], e["tid"])] == "Memory:L2 State"
-      if e.get("name") in ("hbm_outstanding", "noc_occupancy",
-                            "noc_credit_available"):
+      if e.get("name") in ("hbm_outstanding", "noc_occupancy", "noc_credit_available"):
         assert e["pid"] == tg_pid, e
 
     expected_leg_lanes = {
@@ -224,11 +221,10 @@ class TestMemoryLanes:
   def test_no_consecutive_duplicate_counter_samples(self):
     hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
     sim = Simulator(
-      hw, SimConfig(fidelity="full_memory", max_cycles=200000,
-                    memory_trace=True),
-      enable_tracer=True,
+      hw, SimConfig(fidelity="full_memory", max_cycles=200000, memory_trace=True), enable_tracer=True
     )
-    result = sim.run(PowWorkload().module, input_bindings=POW_BINDINGS)
+    workload = PowWorkload(hw=hw)
+    result = run_source(sim, workload.module, POW_BINDINGS, workload_info=workload.info)
     assert result.completed, result.reason
     sim.tracer.assert_well_formed()
 
@@ -238,22 +234,23 @@ class TestMemoryLanes:
 
     hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
     sim = Simulator(
-      hw, SimConfig(fidelity="full_memory", max_cycles=200000,
-                    memory_trace=True),
-      enable_tracer=True,
+      hw, SimConfig(fidelity="full_memory", max_cycles=200000, memory_trace=True), enable_tracer=True
     )
-    wl = PowWorkload()
-    result = sim.run(wl.module, input_bindings=POW_BINDINGS)
+    wl = PowWorkload(hw=hw)
+    result = run_source(sim, wl.module, POW_BINDINGS, workload_info=wl.info)
     assert result.completed, result.reason
-    report = build_report(wl, result, num_tiles=hw.num_tiles)
+    report = build_report(wl.info, result, num_tiles=hw.num_tiles)
     events = _events_of(sim)
     if report.memory.get("l2_peak_allocated_bytes") is not None:
-      peak = max((e["args"]["l2_allocated_bytes"] for e in events
-                  if e.get("name") == "l2_allocated_bytes"), default=0)
+      peak = max(
+        (e["args"]["l2_allocated_bytes"] for e in events if e.get("name") == "l2_allocated_bytes"),
+        default=0,
+      )
       assert peak == report.memory["l2_peak_allocated_bytes"]
     if report.memory.get("hbm_outstanding_peak") is not None:
-      peak = max((e["args"]["hbm_outstanding"] for e in events
-                  if e.get("name") == "hbm_outstanding"), default=0)
+      peak = max(
+        (e["args"]["hbm_outstanding"] for e in events if e.get("name") == "hbm_outstanding"), default=0
+      )
       assert peak == report.memory["hbm_outstanding_peak"]
 
 
@@ -261,27 +258,20 @@ class TestLegSlicesAndFlows:
   def test_leg_slices_carry_identity_and_flows_close(self):
     """Gather leg slices carry the required identity args and every
     flow has exactly one start and one end."""
-    from pipeline_validator.tests.test_runtime import (
-      GATHER_BINDINGS, make_gather_module,
-    )
-    module = make_gather_module([
-      ("r0", "L1_HIT", "line0", None),
-      ("r1", "L2_HIT", "line1", None),
-    ])
+    from pipeline_validator.tests.test_runtime import GATHER_BINDINGS, make_gather_module
+
+    module = make_gather_module([("r0", "L1_HIT", "line0", None), ("r1", "L2_HIT", "line1", None)])
     hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
     sim = Simulator(
-      hw, SimConfig(fidelity="full_memory", max_cycles=10000,
-                    memory_trace=True),
-      enable_tracer=True,
+      hw, SimConfig(fidelity="full_memory", max_cycles=10000, memory_trace=True), enable_tracer=True
     )
-    result = sim.run(module, input_bindings=GATHER_BINDINGS)
+    result = run_source(sim, module, GATHER_BINDINGS)
     assert result.completed, result.reason
     assert sim.tracer is not None
     sim.tracer.assert_well_formed()
     events = _events_of(sim)
     thread_names = {
-      (e["pid"], e["tid"]): e["args"]["name"]
-      for e in events if e.get("name") == "thread_name"
+      (e["pid"], e["tid"]): e["args"]["name"] for e in events if e.get("name") == "thread_name"
     }
     expected_memory_lanes = {
       "l1_read": "Memory:L1 Read",
@@ -294,13 +284,30 @@ class TestLegSlicesAndFlows:
       "l2_cache_fill": "Memory:L2 Write",
     }
     required = {
-      "transaction_id", "flow_id", "bytes", "accepted_cycle",
-      "completion_cycle", "source_space", "destination_space",
+      "transaction_id",
+      "flow_id",
+      "bytes",
+      "accepted_cycle",
+      "completion_cycle",
+      "source_space",
+      "destination_space",
     }
-    leg_names = {"hbm_read", "hbm_write", "global_dma", "noc_request",
-                 "noc_response", "l2_read", "l2_write", "local_dma",
-                 "l1_read", "l1_write", "l1_cache_lookup", "l2_cache_lookup",
-                 "l1_cache_fill", "l2_cache_fill"}
+    leg_names = {
+      "hbm_read",
+      "hbm_write",
+      "global_dma",
+      "noc_request",
+      "noc_response",
+      "l2_read",
+      "l2_write",
+      "local_dma",
+      "l1_read",
+      "l1_write",
+      "l1_cache_lookup",
+      "l2_cache_lookup",
+      "l1_cache_fill",
+      "l2_cache_fill",
+    }
     legs = [e for e in events if e.get("ph") == "X" and e["name"] in leg_names]
     assert legs, "no leg slices emitted"
     for e in legs:
@@ -318,33 +325,39 @@ class TestLegSlicesAndFlows:
     for fid in set(starts) | set(ends):
       assert starts.get(fid, 0) == 1, fid
       assert ends.get(fid, 0) == 1, fid
-    summary = [
-      e for e in events
-      if e.get("args", {}).get("summary_kind") == "group_transfer"
-    ]
+    summary = [e for e in events if e.get("args", {}).get("summary_kind") == "group_transfer"]
     if summary:
       fid = summary[0]["args"]["flow_id"]
-      leg_threads = {e["tid"] for e in events
-                     if e.get("ph") == "X" and e["name"] in leg_names
-                     and e.get("args", {}).get("flow_id") == fid}
+      leg_threads = {
+        e["tid"]
+        for e in events
+        if e.get("ph") == "X" and e["name"] in leg_names and e.get("args", {}).get("flow_id") == fid
+      }
       assert len(leg_threads) >= 2, leg_threads
 
 
 class TestDualContextFixtureWellFormed:
-  def test_dual_context_fixture_well_formed(self):
+  def test_dual_context_fixture_well_formed(self, tmp_path):
     """The dual-context gather example produces a well-formed trace via
     the CLI pipeline (lanes correct, flows closed, no dup counters)."""
-    repo = "/home/yongxiy/Desktop/nexus"
+    repo = Path(__file__).resolve().parents[2]
+    trace_path = tmp_path / "memory.json"
     proc = subprocess.run(
-      ["bash", f"{repo}/examples/run.sh",
-       "gather-matmul-4tiles-2contexts",
-       "--memory-trace",
-       "--trace-json", "/tmp/nexus-memory.json"],
-      capture_output=True, text=True, cwd=repo, timeout=300,
+      [
+        "bash",
+        str(repo / "examples/run.sh"),
+        "gather-matmul-4tiles-2contexts",
+        "--memory-trace",
+        "--trace-json",
+        str(trace_path),
+      ],
+      capture_output=True,
+      text=True,
+      cwd=repo,
+      timeout=300,
     )
     assert proc.returncode == 0, proc.stderr[-2000:]
-    with open("/tmp/nexus-memory.json") as f:
-      trace = json.load(f)
+    trace = json.loads(trace_path.read_text())
     events = trace["traceEvents"]
     pids = {e["pid"] for e in events if e.get("name") == "process_name"}
     assert pids, "no process metadata"
@@ -358,25 +371,20 @@ class TestDualContextFixtureWellFormed:
     for fid in set(starts) | set(ends):
       assert starts.get(fid, 0) == 1, f"flow {fid} double start"
       assert ends.get(fid, 0) == 1, f"flow {fid} double end"
-    pname = {e["pid"]: e["args"]["name"]
-             for e in events if e.get("name") == "process_name"}
+    pname = {e["pid"]: e["args"]["name"] for e in events if e.get("name") == "process_name"}
     tile_pids = {pid for pid, n in pname.items() if n.startswith("Tile")}
-    tg_pid = next((pid for pid, n in pname.items()
-                   if n == "TileGroup"), None)
+    tg_pid = next((pid for pid, n in pname.items() if n == "TileGroup"), None)
     for e in events:
       if e.get("name") == "l1_allocated_bytes":
         assert e["pid"] in tile_pids, e
       if e.get("name") == "l2_allocated_bytes" and tg_pid is not None:
         assert e["pid"] == tg_pid, e
     thread_names = {
-      (e["pid"], e["tid"]): e["args"]["name"]
-      for e in events if e.get("name") == "thread_name"
+      (e["pid"], e["tid"]): e["args"]["name"] for e in events if e.get("name") == "thread_name"
     }
     assert "GroupDMA" not in thread_names.values()
     summaries = [
-      e for e in events
-      if e.get("ph") == "X"
-      and e.get("args", {}).get("summary_kind") == "group_transfer"
+      e for e in events if e.get("ph") == "X" and e.get("args", {}).get("summary_kind") == "group_transfer"
     ]
     assert summaries
     input_lanes: set[str] = set()
@@ -400,7 +408,7 @@ class TestDualContextFixtureWellFormed:
     assert len(input_lanes) >= 2
     for lane_events in events_by_lane.values():
       ordered = sorted(lane_events, key=lambda event: event["ts"])
-      for previous, current in zip(ordered, ordered[1:], strict=False):
+      for previous, current in pairwise(ordered):
         assert previous["ts"] + previous["dur"] <= current["ts"]
     last: dict = {}
     for e in events:
@@ -414,33 +422,61 @@ class TestDualContextFixtureWellFormed:
 
 
 class TestAdmissionLanes:
-  def test_admission_instants_on_scheduler_lane(self):
+  def test_admission_instants_on_scheduler_lane(self, tmp_path):
     """l2_admission_wait scenario: admission instants on the Scheduler:L2
     lane and phase_aggregate carries expected/seen counts."""
-    repo = "/home/yongxiy/Desktop/nexus"
+    repo = Path(__file__).resolve().parents[2]
+    trace_path = tmp_path / "admission.json"
     proc = subprocess.run(
-      ["bash", f"{repo}/examples/run.sh", "l2-admission-wait",
-       "--trace-json", "/tmp/nexus-admission.json"],
-      capture_output=True, text=True, cwd=repo, timeout=300,
+      [
+        "bash",
+        str(repo / "examples/run.sh"),
+        "l2-admission-wait",
+        "--memory-trace",
+        "--trace-json",
+        str(trace_path),
+      ],
+      capture_output=True,
+      text=True,
+      cwd=repo,
+      timeout=300,
     )
     assert proc.returncode == 0, proc.stderr[-2000:]
-    with open("/tmp/nexus-admission.json") as f:
-      trace = json.load(f)
+    trace = json.loads(trace_path.read_text())
     events = trace["traceEvents"]
-    sched = {e["tid"]: e["args"]["name"] for e in events
-             if e.get("name") == "thread_name"
-             and e["args"]["name"] == "Scheduler:L2"}
+    sched = {
+      e["tid"]: e["args"]["name"]
+      for e in events
+      if e.get("name") == "thread_name" and e["args"]["name"] == "Scheduler:L2"
+    }
     assert sched, "Scheduler:L2 thread not registered"
     sched_tid = next(iter(sched))
-    admission_names = {
-      "context_admission_wait", "context_admission_retry",
-      "context_first_action",
-    }
-    on_lane = {e["name"] for e in events
-               if e.get("ph") == "i" and e.get("tid") == sched_tid}
+    admission_names = {"context_admission_wait", "context_admission_retry", "context_first_action"}
+    admission_events = [
+      event for event in events if event.get("ph") == "i" and event.get("name") in admission_names
+    ]
+    assert admission_events
+    assert all(event.get("tid") == sched_tid for event in admission_events)
+    on_lane = {event["name"] for event in admission_events}
     assert admission_names <= on_lane, admission_names - on_lane
-    aggregates = [e for e in events
-                  if e.get("ph") == "i" and e.get("name") == "phase_aggregate"]
+
+    waits = [event for event in admission_events if event["name"] == "context_admission_wait"]
+    retries = [event for event in admission_events if event["name"] == "context_admission_retry"]
+    first_b = next(
+      event
+      for event in admission_events
+      if event["name"] == "context_first_action" and event.get("args", {}).get("context") == "ctx_b"
+    )
+    assert waits and retries
+    assert {event["args"]["wait_reason"] for event in waits} <= {"WAIT_CAPACITY", "WAIT_FRAGMENTATION"}
+    assert all(event["args"]["retry_count"] >= 1 for event in retries)
+    assert {event["args"]["context"] for event in waits + retries} == {"ctx_b"}
+    wait_requests = {event["args"]["request_id"] for event in waits}
+    retry_requests = {event["args"]["request_id"] for event in retries}
+    assert wait_requests == retry_requests
+    assert min(event["ts"] for event in waits) <= min(event["ts"] for event in retries)
+    assert max(event["ts"] for event in retries) <= first_b["ts"]
+    aggregates = [e for e in events if e.get("ph") == "i" and e.get("name") == "phase_aggregate"]
     assert aggregates, "no phase_aggregate instant"
     for e in aggregates:
       assert "expected" in e["args"] and "seen" in e["args"]

@@ -28,16 +28,14 @@ from .memory import (
   AdmissionFailure,
   AdmissionFailureKind,
   AllocationHandle,
-  AllocationPlan,
-  AllocationRequest,
-  AllocationState,
   MemoryInvariantError,
   ResolvedMemoryView,
   TaskBufferOwner,
 )
+from .memory.arena import ArenaHandle, ArenaPlan, ArenaPool
 from .memory.l1_slot_frame import SlotFrame
-from .memory.l2_sram import L2SRAM
 from .pmu import PMUCounter, StallReason
+from .profiles import build_registry
 from .stream_queue import StreamQueue, StreamToken
 from .trace import Tracer
 
@@ -94,6 +92,7 @@ class _UCETerminalEvent:
   role_event_id: str | None
   status: str
   reason: str = ""
+  task_identity: TaskIdentity | None = None
 
 
 @dataclass
@@ -134,7 +133,9 @@ class _TileContextMemory:
   l2_formal_handles: dict[int, AllocationHandle] = field(default_factory=dict)
   global_formal_views: dict[int, ResolvedMemoryView] = field(default_factory=dict)
   l1_handles: dict[str, AllocationHandle] = field(default_factory=dict)
-  l2_resolver: L2SRAM | None = None
+  l2_resolver: ArenaPool | None = None
+  arena: ArenaHandle | None = None
+  binding_id: str = ""
 
 
 @dataclass
@@ -144,10 +145,12 @@ class TileAdmission:
   tile: ComputeTile
   logical_task_id: int
   context_id: int
-  l1_plan: AllocationPlan | None
+  l1_plan: ArenaPlan | None
   prepare_cycles: int = 0
   l1_handles: dict[str, AllocationHandle] = field(default_factory=dict)
   bound: bool = False
+  arena: ArenaHandle | None = None
+  role_event_id: str = ""
 
 
 @dataclass
@@ -269,7 +272,7 @@ class TileUCE:
       ctx.frame_bind_remaining = self.cfg.frame_bind_cycles if self.runtime_enabled else 0
       ctx.memory = memory
       ctx.task_identity = task_identity
-      ctx.l1_live_names = {buffer.name for buffer in program.l1_buffers}
+      ctx.l1_live_names.clear()
       if self.runtime_enabled:
         ctx.state = _UCEContextState.ACCEPT
       else:
@@ -759,6 +762,19 @@ class TileUCE:
           )
       self.pmu.add_event("tile_signal")
       ctx.pc += 1
+    elif op == ExecTileOp.ALLOC_L1:
+      try:
+        if ctx.memory is None or ctx.memory.arena is None or not ins.args:
+          raise MemoryInvariantError("L1 allocation has no committed Task Arena")
+        buffer_name = ins.args[0]
+        handle = tile.l1_allocator.bind_view(ctx.memory.arena, buffer_name, cycle)
+        tile.l1_frames[ctx.ctx_id].bind_view(buffer_name, handle)
+        ctx.memory.l1_handles[buffer_name] = handle
+        ctx.l1_live_names.add(buffer_name)
+      except MemoryInvariantError as exc:
+        self._fault_context(ctx, f"tile.alloc: {exc}", cycle)
+      else:
+        ctx.pc += 1
     elif op == ExecTileOp.FREE_L1:
       try:
         self._free_l1(ctx, ins, cycle, tile)
@@ -856,7 +872,7 @@ class TileUCE:
     for base in bases:
       if base not in ctx.l1_live_names:
         raise MemoryInvariantError(f"use-after-free of L1 buffer '{base}'")
-      if self.runtime_enabled and (ctx.memory is None or base not in ctx.memory.l1_handles):
+      if ctx.memory is None or base not in ctx.memory.l1_handles:
         raise MemoryInvariantError(f"missing physical L1 binding for '{base}'")
 
   def _assert_free_dependencies_complete(self, ctx: _UCEContext, buffer_name: str) -> None:
@@ -894,8 +910,10 @@ class TileUCE:
     if len(ins.args) != 1 or not isinstance(ins.args[0], str) or ctx.program is None:
       raise MemoryInvariantError("requires one L1 buffer name")
     buffer_name = ins.args[0]
+    if ctx.program.layout is None:
+      raise MemoryInvariantError("L1 program lacks compiled layout")
     slot_ids = [
-      slot_id for slot_id, buffer in enumerate(ctx.program.l1_buffers) if buffer.name == buffer_name
+      buffer.slot_id for buffer in ctx.program.layout.buffer_layouts if buffer.buffer_id == buffer_name
     ]
     if len(slot_ids) != 1:
       raise MemoryInvariantError(f"L1 buffer '{buffer_name}' is not a unique program allocation")
@@ -903,10 +921,6 @@ class TileUCE:
       raise MemoryInvariantError(f"double free of L1 buffer '{buffer_name}'")
 
     self._assert_free_dependencies_complete(ctx, buffer_name)
-    if not self.runtime_enabled:
-      ctx.l1_live_names.remove(buffer_name)
-      self.pmu.add_event("l1_free")
-      return
 
     if ctx.memory is None or ctx.task_identity is None:
       raise MemoryInvariantError("physical L1 context identity is missing")
@@ -929,13 +943,6 @@ class TileUCE:
       buffer_name,
     )
     tile.l1_allocator.assert_live(handle, expected_owner)
-    record = tile.l1_allocator._live.get(handle.allocation_id)
-    if record is None or record.handle != handle:
-      raise MemoryInvariantError("stale allocation generation")
-    if record.state != AllocationState.LIVE:
-      raise MemoryInvariantError(f"double free of L1 buffer '{buffer_name}'")
-    if record.pins:
-      raise MemoryInvariantError(f"L1 buffer '{buffer_name}' still has allocator pins")
 
     slot_id = slot_ids[0]
     frame = tile.l1_frames[ctx.ctx_id]
@@ -946,8 +953,8 @@ class TileUCE:
     if transfer_manager.has_inflight_access(handle):
       raise MemoryInvariantError(f"L1 buffer '{buffer_name}' has an in-flight transfer")
 
-    if not tile.l1_allocator.request_release(handle, expected_owner, cycle):
-      raise MemoryInvariantError(f"L1 buffer '{buffer_name}' did not final-free")
+    if not tile.l1_allocator.invalidate_view(handle, expected_owner, cycle):
+      raise MemoryInvariantError(f"L1 buffer '{buffer_name}' remains pinned or in flight")
     frame.release_slot(slot_id, handle)
     del ctx.memory.l1_handles[buffer_name]
     ctx.l1_live_names.remove(buffer_name)
@@ -1091,51 +1098,32 @@ class TileUCE:
     """
     assert ctx.program is not None
     base = ctx.program.descriptors[entry.desc_ref]
-    desc = ExecEngineDesc(base.name, base.kind, base.op, dict(base.params))
+    params = dict(base.params)
     transaction = None
     launch_params: dict = {}
     if base.transfer is not None:
-      desc.params["bytes"] = base.transfer.bytes
+      params["bytes"] = base.transfer.bytes
       transaction = self._build_tile_transaction(ctx, base.transfer, entry, tile)
     elif base.op == "gather":
       gather = base.params.get("gather")
       if not isinstance(gather, ExecGatherDesc):
         raise ValueError("gather descriptor is missing")
-      if gather.cache_target_bytes > self.cfg.l1_cache_capacity_bytes:
-        raise ValueError("gather cache_target_bytes exceeds L1 cache capacity")
       if gather.l1_mshr_hint > self.cfg.l1_mshr_entries:
         raise ValueError("gather l1_mshr_hint exceeds L1 MSHR capacity")
-      source = None
-      indices = None
-      destination = None
-      if tile.runtime_enabled:
-        if ctx.memory is None:
-          raise ValueError("gather context memory is missing")
-        source = self._resolve_tile_view(gather.source, ctx.memory, tile)
-        indices = self._resolve_tile_view(gather.indices, ctx.memory, tile)
-        destination = self._resolve_tile_view(gather.destination, ctx.memory, tile)
-      from .memory.allocator import TaskBufferOwner
-
+      if ctx.memory is None or ctx.task_identity is None:
+        raise ValueError("gather context memory is missing")
+      source = self._resolve_tile_view(gather.source, ctx.memory, tile)
+      indices = self._resolve_tile_view(gather.indices, ctx.memory, tile)
+      destination = self._resolve_tile_view(gather.destination, ctx.memory, tile)
       task = ctx.task_identity
-      grid = task.grid if task is not None else None
-      owner = (
-        destination.handle.owner
-        if destination is not None
-        else TaskBufferOwner(
-          grid.context_name if grid is not None else "ctx",
-          grid.launch_generation if grid is not None else 0,
-          ctx.role_event_id or "ev",
-          task.task_id if task is not None else 0,
-          self.tile_id,
-          ctx.ctx_id,
-          gather.destination.base,
-        )
-      )
+      grid = task.grid
+      owner = destination.handle.owner
       launch_params = {
         "source": source,
         "indices": indices,
         "destination": destination,
         "issuer": owner,
+        "binding_id": ctx.memory.binding_id,
         "namespace": (
           grid.launch_generation if grid is not None else 0,
           grid.dispatch_ordinal if grid is not None else 0,
@@ -1144,13 +1132,15 @@ class TileUCE:
           entry.event_ref.local_name,
         ),
       }
-    desc.params = {
-      **desc.params,
-      "tile_id": self.tile_id,
-      "ctx_id": ctx.ctx_id,
-      "program": ctx.program.name,
-      "local_event_id": entry.event_ref.local_name,
-    }
+    params.update(
+      {
+        "tile_id": self.tile_id,
+        "ctx_id": ctx.ctx_id,
+        "program": ctx.program.name,
+        "local_event_id": entry.event_ref.local_name,
+      }
+    )
+    desc = ExecEngineDesc(base.name, base.kind, base.op, params)
     return _ResolvedEngineLaunch(desc=desc, transaction=transaction, launch_params=launch_params)
 
   def _build_tile_transaction(
@@ -1169,35 +1159,25 @@ class TileUCE:
     logical_task = task.task_id if task is not None else 0
     gen = task.grid.launch_generation if task is not None else 0
     txn_id = f"{gen}:{role_ev}:t{logical_task}:{entry.event_ref.local_name}"
-    src = None
-    dst = None
-    if tile.runtime_enabled:
-      if ctx.memory is None or task is None:
-        raise ValueError("tile context memory identity is missing")
-      src = self._resolve_tile_view(transfer.src, ctx.memory, tile)
-      dst = self._resolve_tile_view(transfer.dst, ctx.memory, tile)
-      l1_endpoint = dst if op == TransferOp.TILE_LOAD else src
-      owner = l1_endpoint.handle.owner
-      if (
-        not isinstance(owner, TaskBufferOwner)
-        or owner.context_name != task.grid.context_name
-        or owner.context_launch_generation != task.grid.launch_generation
-        or owner.role_event_id != role_ev
-        or owner.logical_task_id != task.task_id
-        or owner.physical_tile_id != self.tile_id
-        or owner.hardware_context_id != ctx.ctx_id
-      ):
-        raise MemoryInvariantError("tile transaction L1 endpoint has an invalid owner")
-    else:
-      owner = TaskBufferOwner(
-        task.grid.context_name if task is not None else "ctx",
-        gen,
-        role_ev,
-        logical_task,
-        self.tile_id,
-        ctx.ctx_id,
-        "task",
-      )
+    if ctx.memory is None or task is None:
+      raise ValueError("tile context memory identity is missing")
+    src = self._resolve_tile_view(transfer.src, ctx.memory, tile)
+    dst = self._resolve_tile_view(transfer.dst, ctx.memory, tile)
+    l1_endpoint = dst if op == TransferOp.TILE_LOAD else src
+    owner = l1_endpoint.handle.owner
+    if (
+      not isinstance(owner, TaskBufferOwner)
+      or owner.context_name != task.grid.context_name
+      or owner.context_launch_generation != task.grid.launch_generation
+      or owner.role_event_id != role_ev
+      or owner.logical_task_id != task.task_id
+      or owner.physical_tile_id != self.tile_id
+      or owner.hardware_context_id != ctx.ctx_id
+    ):
+      raise MemoryInvariantError("tile transaction L1 endpoint has an invalid owner")
+    run_generation, profile_generations = tile.mfe.transfer_manager.transaction_identity(
+      (("l1", self.tile_id), ("l2", 0))
+    )
     return MemoryTransaction(
       transaction_id=txn_id,
       op=op,
@@ -1207,6 +1187,8 @@ class TileUCE:
       bytes_total=transfer.bytes,
       completion_event=entry.event_ref.runtime_id,
       tile_id=self.tile_id,
+      run_generation=run_generation,
+      profile_generations=profile_generations,
     )
 
   @staticmethod
@@ -1263,6 +1245,12 @@ class TileUCE:
   def _complete_context(self, ctx: _UCEContext, cycle: int) -> None:
     if ctx.state in (_UCEContextState.DONE, _UCEContextState.FAULT):
       return
+    if any(
+      reference.scope is _UCEEventScope.LOCAL and name not in ctx.events_done
+      for name, reference in ctx.event_records.items()
+    ):
+      self.pmu.add_cycle("task_retirement_wait")
+      return
     self.pmu.add_event("tile_done")
     self._terminal_events.append(
       _UCETerminalEvent(
@@ -1271,6 +1259,7 @@ class TileUCE:
         role_id=ctx.role_id,
         role_event_id=ctx.role_event_id,
         status="done",
+        task_identity=ctx.task_identity,
       )
     )
     self._set_context_state(ctx, _UCEContextState.DONE, cycle)
@@ -1291,6 +1280,7 @@ class TileUCE:
         role_event_id=ctx.role_event_id,
         status="fault",
         reason=reason,
+        task_identity=ctx.task_identity,
       )
     )
     self._set_context_state(ctx, _UCEContextState.FAULT, cycle)
@@ -1445,7 +1435,14 @@ class ComputeTile:
     self.evu = EVUEngine(cfg, tile_id, tracer)
     from .memory import DeterministicLRUCache, MshrTable
 
-    self.l1_cache = DeterministicLRUCache(cfg.l1_cache_capacity_bytes, cfg.cache_line_bytes)
+    profile = build_registry(cfg).profile("l1", cfg.memory_target.l1.reset_mode)
+    self.l1_cache = DeterministicLRUCache(
+      profile.cache_bytes,
+      cfg.cache_line_bytes,
+      write_policy=profile.cache_write_policy,
+      level="l1",
+      pool_id=tile_id,
+    )
     self.l1_mshr = MshrTable(cfg.l1_mshr_entries)
     self.mfe = MFEEngine(
       cfg,
@@ -1461,18 +1458,10 @@ class ComputeTile:
     self.use = USEEngine(cfg, tile_id, tracer)
     self.streams: dict[int, StreamQueue] = {}
     self.pmu = PMUCounter()
-    # PR 2: per-tile L1 allocator + one frame per UCE context
-    from .memory.allocator import BankedFreeExtentAllocator
-
-    self.l1_allocator = BankedFreeExtentAllocator(
-      memory_space="l1",
-      capacity_bytes=cfg.tile_l1_bytes,
-      banks=cfg.tile_l1_banks,
-      trace=memory_trace,
-      trace_tile_id=tile_id,
-    )
+    self.l1_allocator = ArenaPool(profile, pool_id=tile_id, tile_id=tile_id, trace=memory_trace)
     self.l1_frames: list[SlotFrame] = [
-      SlotFrame(frame_id=context_id, l1_bytes=cfg.tile_l1_bytes) for context_id in range(context_count)
+      SlotFrame(frame_id=context_id, l1_bytes=cfg.tile_l1_bytes, slot_count=cfg.frame_slot_capacity)
+      for context_id in range(context_count)
     ]
 
   def bind_stream(self, qid: int, q: StreamQueue) -> None:
@@ -1504,81 +1493,45 @@ class ComputeTile:
     if selected is None:
       return None
 
-    l1_plan = None
-    if (self.memory_enabled or self.runtime_enabled) and program.l1_buffers:
-      task = TaskIdentity(grid=grid, task_id=logical_task_id)
-      requests = [
-        AllocationRequest(
-          memory_space="l1",
-          buffer_id=buffer.name,
-          owner=TaskBufferOwner(
-            task.grid.context_name,
-            task.grid.launch_generation,
-            role_event_id,
-            task.task_id,
-            self.tile_id,
-            selected,
-            buffer.name,
-          ),
-          size_bytes=buffer.bytes,
-          alignment=max(buffer.alignment, 1),
-        )
-        for buffer in program.l1_buffers
-      ]
-      candidate = self.l1_allocator.plan_bundle(requests)
-      if isinstance(candidate, AdmissionFailure):
-        return candidate
-      l1_plan = candidate
-    return TileAdmission(tile=self, logical_task_id=logical_task_id, context_id=selected, l1_plan=l1_plan)
+    if program.layout is None or program.resource_contract is None:
+      return AdmissionFailure(AdmissionFailureKind.INVALID_REQUEST, "missing compiled L1 resource layout")
+    task = TaskIdentity(grid=grid, task_id=logical_task_id)
+    candidate = self.l1_allocator.plan_arena(task, program.layout)
+    if isinstance(candidate, AdmissionFailure):
+      return candidate
+    return TileAdmission(
+      tile=self,
+      logical_task_id=logical_task_id,
+      context_id=selected,
+      l1_plan=candidate,
+      role_event_id=role_event_id,
+    )
 
   def commit_admission(self, admission: TileAdmission, program: ExecTileProgram, cycle: int) -> None:
-    """Commit one Tile-local plan and prepare its exact context frame."""
-    if admission.tile is not self:
-      raise MemoryInvariantError("Tile admission belongs to another tile")
-    if admission.bound or admission.l1_handles:
-      raise MemoryInvariantError("Tile admission was already committed")
+    """Commit one Tile's complete Arena/Frame ticket; no view is live yet."""
+    if admission.tile is not self or admission.arena is not None or admission.l1_plan is None:
+      raise MemoryInvariantError("invalid or already committed Tile admission")
     if self.available_context_id(admission.context_id) != admission.context_id:
-      raise MemoryInvariantError(f"UCE context {admission.context_id} is no longer available")
-    if (self.memory_enabled or self.runtime_enabled) and program.l1_buffers and admission.l1_plan is None:
-      raise MemoryInvariantError("Tile admission is missing its L1 plan")
-
-    handles: tuple[AllocationHandle, ...] = ()
+      raise MemoryInvariantError("UCE context is no longer available")
+    if program.layout is None or admission.l1_plan.layout != program.layout:
+      raise MemoryInvariantError("Tile admission differs from compiled layout")
     frame = self.l1_frames[admission.context_id]
-    materialize_l1 = self.memory_enabled or self.runtime_enabled
-    materialized_specs = tuple(program.l1_buffers) if materialize_l1 else ()
+    arena = self.l1_allocator.commit_arena(admission.l1_plan, cycle)
+    admission.arena = arena
     try:
-      if admission.l1_plan is not None:
-        expected_names = tuple(buffer.name for buffer in materialized_specs)
-        planned_names = tuple(request.buffer_id for request in admission.l1_plan.requests)
-        if planned_names != expected_names:
-          raise MemoryInvariantError("Tile admission plan does not match the tile program")
-        handles = self.l1_allocator.commit(admission.l1_plan, cycle)
-      if len(handles) != len(materialized_specs):
-        raise MemoryInvariantError("Tile admission committed an incomplete L1 bundle")
-      admission.l1_handles = {buffer.name: handle for buffer, handle in zip(materialized_specs, handles)}
-      if materialize_l1 and not frame.prepare(list(handles), list(materialized_specs)):
-        raise MemoryInvariantError(f"L1 frame prepare failed on tile {self.tile_id}")
-    except (MemoryInvariantError, ValueError):
+      self.l1_allocator.bind_task_metadata(arena, admission.role_event_id, admission.context_id)
+      if not frame.prepare(arena, program.layout):
+        raise MemoryInvariantError(f"L1 Frame prepare failed on tile {self.tile_id}")
+      if not self.runtime_enabled:
+        ok, _cycles = frame.bind(cycle, 0)
+        if not ok:
+          raise MemoryInvariantError("L1 Frame activation failed")
+    except (MemoryInvariantError, ValueError) as exc:
       frame.release()
-      for handle in handles:
-        if not self.l1_allocator.is_released(handle):
-          self.l1_allocator.request_release(handle, handle.owner, cycle)
-      admission.l1_handles.clear()
+      if not self.l1_allocator.retire_arena(arena, cycle):
+        raise MemoryInvariantError("unexecuted Task Arena failed rollback") from exc
+      admission.arena = None
       raise
-
-    if materialize_l1 and self.memory_trace is not None and self.tracer is not None:
-      self.tracer.instant(
-        f"Tile{self.tile_id}",
-        "Lifecycle",
-        "frame_prepare",
-        cycle,
-        {
-          "ctx_id": admission.context_id,
-          "generation": frame.generation,
-          "tile_id": self.tile_id,
-          "slots": len(materialized_specs),
-        },
-      )
 
   def abort_admission(self, admission: TileAdmission, cycle: int) -> None:
     """Undo a committed/prepared/bound Tile admission without partial residue."""
@@ -1605,7 +1558,12 @@ class ComputeTile:
         )
     for handle in tuple(admission.l1_handles.values()):
       if not self.l1_allocator.is_released(handle):
-        self.l1_allocator.request_release(handle, handle.owner, cycle)
+        if not self.l1_allocator.invalidate_view(handle, handle.owner, cycle):
+          raise MemoryInvariantError("cannot rollback a Task with issued references")
+    if admission.arena is not None:
+      if not self.l1_allocator.retire_arena(admission.arena, cycle):
+        raise MemoryInvariantError("cannot rollback live Task Arena")
+      admission.arena = None
     admission.l1_handles.clear()
     admission.l1_plan = None
     admission.bound = False
@@ -1695,7 +1653,8 @@ class ComputeTile:
     for eng in (self.boa, self.evu, self.mfe, self.use):
       eng.reset()
     self.pmu.reset()
-    self.l1_allocator.reset()
+    if self.l1_allocator.snapshot()["arena_reserved_bytes"]:
+      raise MemoryInvariantError("Tile reset before Task Arena retirement")
     for f in self.l1_frames:
       f.reset()
 

@@ -63,7 +63,8 @@
 //         "Liveness": "应完成；以同次运行 trace 和退出状态确认",
 //         "Scheduling Quality": "串行反例：每个 chunk 后立即等待 grid 与 global Store，不应满足跨 chunk 的真实流水重叠"
 //       },
-//       "forbidden_dependencies": "只允许表列真数据边；UCE 共享 pin 争用不是数据依赖；跨 Context 仅使用当前 IR 可见的 context_done/HBM 可见性",
+//"forbidden_dependencies": "只允许表列真数据边；UCE 共享 pin 争用不是数据依赖；跨 Context 仅使用当前 IR 可见的 context_done/HBM
+// 可见性",
 //       "tensors": {
 //         "A0": {
 //           "formal": "arena",
@@ -251,27 +252,30 @@
 //       "consumer_ready_granularity": {
 //         "Load_A0->Compute0": "该 chunk A prefetch 完成",
 //         "Load_B0->Compute0": "该 chunk B prefetch 完成",
-//         "Compute0->Store0": "output_ready(all_tasks)；复用集合的最终 Store depends_on 列全历次 producer output_ready",
+//"Compute0->Store0": "output_ready(all_tasks)；复用集合的最终 Store depends_on 列全历次 producer output_ready",
 //         "Load_A1->Compute1": "该 chunk A prefetch 完成",
 //         "Load_B1->Compute1": "该 chunk B prefetch 完成",
-//         "Compute1->Store1": "output_ready(all_tasks)；复用集合的最终 Store depends_on 列全历次 producer output_ready",
+//"Compute1->Store1": "output_ready(all_tasks)；复用集合的最终 Store depends_on 列全历次 producer output_ready",
 //         "Load_A2->Compute2": "该 chunk A prefetch 完成",
 //         "Load_B2->Compute2": "该 chunk B prefetch 完成",
-//         "Compute2->Store2": "output_ready(all_tasks)；复用集合的最终 Store depends_on 列全历次 producer output_ready",
+//"Compute2->Store2": "output_ready(all_tasks)；复用集合的最终 Store depends_on 列全历次 producer output_ready",
 //         "Load_A3->Compute3": "该 chunk A prefetch 完成",
 //         "Load_B3->Compute3": "该 chunk B prefetch 完成",
-//         "Compute3->Store3": "output_ready(all_tasks)；复用集合的最终 Store depends_on 列全历次 producer output_ready"
+//"Compute3->Store3": "output_ready(all_tasks)；复用集合的最终 Store depends_on 列全历次 producer output_ready"
 //       },
 //       "notes": {
 //         "allocations": "single 恰好 6 个 L2 allocation（A/B/O 两套）",
-//         "reuse": "chunk 0/2 复用 set0，chunk 1/3 复用 set1；输入覆盖前 await 上次 input_released，输出覆盖前 await 上次 global Store",
+//"reuse": "chunk 0/2 复用 set0，chunk 1/3 复用 set1；输入覆盖前 await 上次 input_released，输出覆盖前 await 上次 global
+// Store",
 //         "load_store_nodes": "Load/Store 是真实 DMA 活动，不伪造 tile Copy/数值 compute"
 //       }
 //     }
 builtin.module {
   tile.program @prog_Compute0(
     %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %i1: !nest.l2_buffer<4x64x64xbf16>,
-    %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 24576> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -324,7 +328,9 @@ builtin.module {
   }
   tile.program @prog_Compute1(
     %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %i1: !nest.l2_buffer<4x64x64xbf16>,
-    %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 24576> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -377,7 +383,9 @@ builtin.module {
   }
   tile.program @prog_Compute2(
     %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %i1: !nest.l2_buffer<4x64x64xbf16>,
-    %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 24576> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -430,7 +438,9 @@ builtin.module {
   }
   tile.program @prog_Compute3(
     %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %i1: !nest.l2_buffer<4x64x64xbf16>,
-    %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 24576> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -481,7 +491,9 @@ builtin.module {
     tile.signal output_ready(%task)
     tile.return
   }
-  nest.context @ctx_pipeline (%arena: !nest.global_memref<4194304xbf16>) placement = 15 {
+  nest.context @ctx_pipeline (%arena: !nest.global_memref<4194304xbf16>) placement = 15
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+      logical_tasks = 16, l2_spm_bytes = 196608, requested_contexts_per_tile = 1> {
     %b_A0 = nest.alloc slot = "A_set0" role = "in" shape = [4, 64, 64] dtype = "bf16"
       alignment = 256 : !nest.l2_buffer<4x64x64xbf16>
     %b_B0 = nest.alloc slot = "B_set0" role = "in" shape = [4, 64, 64] dtype = "bf16"
@@ -522,6 +534,7 @@ builtin.module {
     %pref_A0 = nest.dma.prefetch.async %h_A0 into %b_A0 : !nest.event<"pref_A0">
     %pref_B0 = nest.dma.prefetch.async %h_B0 into %b_B0 : !nest.event<"pref_B0">
     %grid_Compute0, %read_Compute0, %ready_Compute0 = nest.dispatch.tasks.async @prog_Compute0
+      l1_mode = 0
       context = 0 tasks(%tasks) globals() bindings(%b_A0, %b_B0, %b_O0) ins(%b_A0, %b_B0)
       outs(%b_O0)
       signal_policy {
@@ -535,6 +548,7 @@ builtin.module {
     %pref_A1 = nest.dma.prefetch.async %h_A1 into %b_A1 : !nest.event<"pref_A1">
     %pref_B1 = nest.dma.prefetch.async %h_B1 into %b_B1 : !nest.event<"pref_B1">
     %grid_Compute1, %read_Compute1, %ready_Compute1 = nest.dispatch.tasks.async @prog_Compute1
+      l1_mode = 0
       context = 1 tasks(%tasks) globals() bindings(%b_A1, %b_B1, %b_O1) ins(%b_A1, %b_B1)
       outs(%b_O1)
       signal_policy {
@@ -549,6 +563,7 @@ builtin.module {
     %pref_A2 = nest.dma.prefetch.async %h_A2 into %b_A0 : !nest.event<"pref_A2">
     %pref_B2 = nest.dma.prefetch.async %h_B2 into %b_B0 : !nest.event<"pref_B2">
     %grid_Compute2, %read_Compute2, %ready_Compute2 = nest.dispatch.tasks.async @prog_Compute2
+      l1_mode = 0
       context = 0 tasks(%tasks) globals() bindings(%b_A0, %b_B0, %b_O0) ins(%b_A0, %b_B0)
       outs(%b_O0)
       signal_policy {
@@ -563,6 +578,7 @@ builtin.module {
     %pref_A3 = nest.dma.prefetch.async %h_A3 into %b_A1 : !nest.event<"pref_A3">
     %pref_B3 = nest.dma.prefetch.async %h_B3 into %b_B1 : !nest.event<"pref_B3">
     %grid_Compute3, %read_Compute3, %ready_Compute3 = nest.dispatch.tasks.async @prog_Compute3
+      l1_mode = 0
       context = 1 tasks(%tasks) globals() bindings(%b_A1, %b_B1, %b_O1) ins(%b_A1, %b_B1)
       outs(%b_O1)
       signal_policy {

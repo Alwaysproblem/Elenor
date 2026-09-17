@@ -16,7 +16,7 @@ become stale.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -124,6 +124,8 @@ class AllocationHandle:
   bank_segments: tuple[BankSegment, ...]
   generation: int
   allocate_cycle: int
+  arena_id: str = ""
+  profile_generation: int = 0
 
   @property
   def end_address(self) -> int:
@@ -145,6 +147,14 @@ class AdmissionFailureKind(Enum):
   TEMPORARY_CAPACITY = "temporary_capacity"
 
 
+class AdmissionWaitReason(StrEnum):
+  CAPACITY = "WAIT_CAPACITY"
+  FRAGMENTATION = "WAIT_FRAGMENTATION"
+  SLOT = "WAIT_SLOT"
+  CONTROL_RESOURCE = "WAIT_CONTROL_RESOURCE"
+  CONTEXT_LIMIT = "WAIT_CONTEXT_LIMIT"
+
+
 @dataclass(frozen=True)
 class AdmissionFailure:
   """Typed result of a failed ``plan_bundle`` (PR 3.5)."""
@@ -152,6 +162,17 @@ class AdmissionFailure:
   kind: AdmissionFailureKind
   reason: str
   buffer_id: str = ""
+  wait_reason: AdmissionWaitReason | None = None
+
+  def __post_init__(self) -> None:
+    if self.kind is AdmissionFailureKind.TEMPORARY_CAPACITY:
+      if self.wait_reason is None:
+        object.__setattr__(self, "wait_reason", AdmissionWaitReason.CAPACITY)
+      elif not isinstance(self.wait_reason, AdmissionWaitReason):
+        raise ValueError("admission wait requires a typed reason")
+    elif self.wait_reason is not None:
+      raise ValueError("permanent admission failure cannot enter a wait queue")
+
 
 @dataclass(frozen=True)
 class AllocationPlan:
@@ -198,29 +219,35 @@ class BankedFreeExtentAllocator:
     - ``request_release(handle, owner, cycle)`` — release or pending.
     - ``resolve_segments(handle, offset, size)`` — physical byte ranges.
     - ``reset()`` / ``snapshot()``.
+    - ``free_extents_snapshot`` — immutable bank-local extent view.
+    - ``commit_exact / release_exact`` — atomic exact per-bank reserves.
+    - ``reconfigure_free_intervals`` — quiescent profiled SPM boundary.
   """
 
-  def __init__(self, memory_space: str, capacity_bytes: int, banks: int,
-               bytes_per_bank: int | None = None, *,
-               trace: MemoryTrace | None = None,
-               trace_tile_id: int | None = None):
+  def __init__(
+    self,
+    memory_space: str,
+    capacity_bytes: int,
+    banks: int,
+    bytes_per_bank: int | None = None,
+    *,
+    trace: MemoryTrace | None = None,
+    trace_tile_id: int | None = None,
+  ):
     if capacity_bytes <= 0:
       raise ValueError("invalid allocation capacity")
     if banks < 1:
       raise ValueError("banks must be >= 1")
     if capacity_bytes % banks != 0:
-      raise ValueError(
-        f"{memory_space} capacity {capacity_bytes} not divisible by"
-        f" banks {banks}")
+      raise ValueError(f"{memory_space} capacity {capacity_bytes} not divisible by banks {banks}")
     self.memory_space = memory_space
     self.capacity_bytes = capacity_bytes
     self.banks = banks
     self.bytes_per_bank = capacity_bytes // banks
     # bank-local free extents: list of (local_start, local_size)
-    self._free: list[list[tuple[int, int]]] = [
-      [(0, self.bytes_per_bank)] for _ in range(banks)
-    ]
+    self._free: list[list[tuple[int, int]]] = [[(0, self.bytes_per_bank)] for _ in range(banks)]
     self._live: dict[str, _AllocationRecord] = {}
+    self._exact_live: set[BankSegment] = set()
     self._pool_version: int = 0
     self._generation: int = 0
     self._counter: int = 0
@@ -234,12 +261,80 @@ class BankedFreeExtentAllocator:
     """Monotonic live free-map version (bumped on commit/final-free)."""
     return self._pool_version
 
+  def free_extents_snapshot(self) -> tuple[tuple[tuple[int, int], ...], ...]:
+    """Return an immutable bank-local snapshot of the current free map."""
+    return tuple(tuple(extents) for extents in self._free)
+
+  def commit_exact(self, expected_pool_version: int, segments: tuple[BankSegment, ...], cycle: int) -> None:
+    """Atomically reserve caller-planned exact physical bank extents."""
+    if expected_pool_version != self._pool_version:
+      raise MemoryInvariantError("stale exact extent plan")
+    self._validate_exact_bundle(segments)
+    new_free = [list(extents) for extents in self._free]
+    for segment in segments:
+      local_start = self._segment_local_start(segment)
+      if not self._range_available(new_free[segment.bank_id], local_start, segment.size_bytes):
+        raise MemoryInvariantError("exact extent is not wholly available")
+      self._consume(new_free[segment.bank_id], local_start, segment.size_bytes)
+    self._free = new_free
+    self._exact_live.update(segments)
+    reserved_bytes = sum(segment.size_bytes for segment in segments)
+    self._allocated_bytes += reserved_bytes
+    self._peak_allocated = max(self._peak_allocated, self._allocated_bytes)
+    self._pool_version += 1
+    self._emit_trace(cycle)
+
+  def release_exact(
+    self, expected_pool_version: int, segments: tuple[BankSegment, ...], cycle: int
+  ) -> None:
+    """Atomically return an earlier exact reservation and coalesce extents."""
+    if expected_pool_version != self._pool_version:
+      raise MemoryInvariantError("stale exact extent release")
+    self._validate_exact_bundle(segments)
+    if any(segment not in self._exact_live for segment in segments):
+      raise MemoryInvariantError("unknown or already released exact extent")
+    new_free = [list(extents) for extents in self._free]
+    for segment in segments:
+      local_start = self._segment_local_start(segment)
+      if self._range_overlaps(new_free[segment.bank_id], local_start, segment.size_bytes):
+        raise MemoryInvariantError("exact extent overlaps the live free map")
+      new_free[segment.bank_id].append((local_start, segment.size_bytes))
+      new_free[segment.bank_id] = self._coalesce_extents(new_free[segment.bank_id])
+    released_bytes = sum(segment.size_bytes for segment in segments)
+    if released_bytes > self._allocated_bytes:
+      raise MemoryInvariantError("exact extent accounting underflow")
+    self._free = new_free
+    self._exact_live.difference_update(segments)
+    self._allocated_bytes -= released_bytes
+    self._pool_version += 1
+    self._emit_trace(cycle)
+
+  def reconfigure_free_intervals(self, start: int, end: int, cycle: int) -> None:
+    """Install identical quiescent per-bank free intervals ``[start, end)``."""
+    if (
+      type(start) is not int
+      or type(end) is not int
+      or start < 0
+      or end < start
+      or end > self.bytes_per_bank
+    ):
+      raise MemoryInvariantError("invalid exact free interval")
+    if any(record.state != AllocationState.RELEASED for record in self._live.values()):
+      raise MemoryInvariantError("cannot reconfigure allocator with live allocations")
+    if self._exact_live:
+      raise MemoryInvariantError("cannot reconfigure allocator with exact reservations")
+    if self._allocated_bytes != 0:
+      raise MemoryInvariantError("cannot reconfigure allocator with allocated bytes")
+    self._generation += 1
+    self._counter = 0
+    self._free = [[(start, end - start)] if end > start else [] for _ in range(self.banks)]
+    self._live.clear()
+    self._pool_version += 1
+    self._emit_trace(cycle)
+
   # -- planning ---------------------------------------------------------
 
-
-  def plan_bundle(
-    self, requests: list[AllocationRequest],
-  ) -> AllocationPlan | AdmissionFailure:
+  def plan_bundle(self, requests: list[AllocationRequest]) -> AllocationPlan | AdmissionFailure:
     """Plan a bundle on a cloned free map — zero side effects.
 
     Deterministic first-fit: request order, bank id ascending, extent
@@ -251,12 +346,12 @@ class BankedFreeExtentAllocator:
     for req in requests:
       if req.size_bytes <= 0:
         return AdmissionFailure(
-          AdmissionFailureKind.INVALID_REQUEST,
-          "invalid allocation size", req.buffer_id)
+          AdmissionFailureKind.INVALID_REQUEST, "invalid allocation size", req.buffer_id
+        )
       if req.alignment <= 0 or (req.alignment & (req.alignment - 1)) != 0:
         return AdmissionFailure(
-          AdmissionFailureKind.INVALID_REQUEST,
-          "invalid allocation alignment", req.buffer_id)
+          AdmissionFailureKind.INVALID_REQUEST, "invalid allocation alignment", req.buffer_id
+        )
     cloned_free = [list(extents) for extents in self._free]
     placements: dict[str, tuple[BankSegment, ...]] = {}
     for req in requests:
@@ -265,15 +360,11 @@ class BankedFreeExtentAllocator:
         kind = (
           AdmissionFailureKind.PERMANENT_CAPACITY
           if not self.can_ever_fit_bundle(requests)
-          else AdmissionFailureKind.TEMPORARY_CAPACITY)
-        return AdmissionFailure(kind, "allocation capacity exceeded",
-                                req.buffer_id)
+          else AdmissionFailureKind.TEMPORARY_CAPACITY
+        )
+        return AdmissionFailure(kind, "allocation capacity exceeded", req.buffer_id)
       placements[req.buffer_id] = segments
-    return AllocationPlan(
-      pool_version=self._pool_version,
-      requests=tuple(requests),
-      placements=placements,
-    )
+    return AllocationPlan(pool_version=self._pool_version, requests=tuple(requests), placements=placements)
 
   def can_ever_fit_bundle(self, requests: list[AllocationRequest]) -> bool:
     """Dry-run the whole bundle on an empty free map with the same bank
@@ -286,7 +377,7 @@ class BankedFreeExtentAllocator:
     return True
 
   def _plan_one(
-    self, free: list[list[tuple[int, int]]], req: AllocationRequest,
+    self, free: list[list[tuple[int, int]]], req: AllocationRequest
   ) -> tuple[BankSegment, ...] | None:
     """First-fit a single request across banks.  Returns segments or None."""
     remaining = req.size_bytes
@@ -329,9 +420,7 @@ class BankedFreeExtentAllocator:
 
   # -- commit / rollback ------------------------------------------------
 
-  def commit(
-    self, plan: AllocationPlan, cycle: int,
-  ) -> tuple[AllocationHandle, ...]:
+  def commit(self, plan: AllocationPlan, cycle: int) -> tuple[AllocationHandle, ...]:
     if plan.pool_version != self._pool_version:
       raise MemoryInvariantError("stale allocation plan")
     # apply placements to the live free map atomically
@@ -349,10 +438,8 @@ class BankedFreeExtentAllocator:
       self._counter += 1
       # tile-scoped pools must not mint colliding ids across tiles
       # (allocation flows are keyed by this string)
-      scope = (f"t{self._trace_tile_id}:" if self._trace_tile_id is not None
-               else "")
-      alloc_id = (
-        f"{self.memory_space}:{scope}{self._generation}:{self._counter}")
+      scope = f"t{self._trace_tile_id}:" if self._trace_tile_id is not None else ""
+      alloc_id = f"{self.memory_space}:{scope}{self._generation}:{self._counter}"
       handle = AllocationHandle(
         allocation_id=alloc_id,
         memory_space=self.memory_space,
@@ -371,8 +458,7 @@ class BankedFreeExtentAllocator:
         self._peak_allocated = self._allocated_bytes
       handles.append(handle)
       if self._trace is not None:
-        self._trace.alloc_committed(self.memory_space, self._trace_tile_id,
-                                    handle, cycle)
+        self._trace.alloc_committed(self.memory_space, self._trace_tile_id, handle, cycle)
     self._pool_version += 1
     self._emit_trace(cycle)
     return tuple(results)
@@ -382,15 +468,11 @@ class BankedFreeExtentAllocator:
     if self._trace is None:
       return
     snapshot = self.snapshot()
-    self._trace.capacity(self.memory_space, self._trace_tile_id, snapshot,
-                         cycle)
-    self._trace.banks(self.memory_space, self._trace_tile_id,
-                      snapshot["per_bank_occupancy"], cycle)
+    self._trace.capacity(self.memory_space, self._trace_tile_id, snapshot, cycle)
+    self._trace.banks(self.memory_space, self._trace_tile_id, snapshot["per_bank_occupancy"], cycle)
 
   @staticmethod
-  def _consume(
-    extents: list[tuple[int, int]], start: int, size: int,
-  ) -> None:
+  def _consume(extents: list[tuple[int, int]], start: int, size: int) -> None:
     """Remove [start, start+size) from one bank's extent list."""
     new: list[tuple[int, int]] = []
     for estart, esize in extents:
@@ -407,6 +489,67 @@ class BankedFreeExtentAllocator:
     extents.clear()
     extents.extend(new)
 
+  def _validate_exact_bundle(self, segments: tuple[BankSegment, ...]) -> None:
+    if not isinstance(segments, tuple) or not segments:
+      raise MemoryInvariantError("exact extent bundle must be a non-empty tuple")
+    per_bank: dict[int, list[tuple[int, int]]] = {}
+    for segment in segments:
+      if not isinstance(segment, BankSegment):
+        raise MemoryInvariantError("invalid exact extent segment")
+      local_start = self._segment_local_start(segment)
+      ranges = per_bank.setdefault(segment.bank_id, [])
+      ranges.append((local_start, local_start + segment.size_bytes))
+    for ranges in per_bank.values():
+      ranges.sort()
+      for index in range(1, len(ranges)):
+        if ranges[index][0] < ranges[index - 1][1]:
+          raise MemoryInvariantError("exact extent bundle overlaps itself")
+
+  def _segment_local_start(self, segment: BankSegment) -> int:
+    if (
+      type(segment.bank_id) is not int
+      or type(segment.address) is not int
+      or type(segment.size_bytes) is not int
+      or not 0 <= segment.bank_id < self.banks
+      or segment.size_bytes <= 0
+    ):
+      raise MemoryInvariantError("invalid exact extent segment")
+    local_start = segment.address - segment.bank_id * self.bytes_per_bank
+    if local_start < 0 or local_start + segment.size_bytes > self.bytes_per_bank:
+      raise MemoryInvariantError("exact extent crosses its physical bank")
+    return local_start
+
+  @staticmethod
+  def _range_available(extents: list[tuple[int, int]], start: int, size: int) -> bool:
+    return any(
+      start >= extent_start and start + size <= extent_start + extent_size
+      for extent_start, extent_size in extents
+    )
+
+  @staticmethod
+  def _range_overlaps(extents: list[tuple[int, int]], start: int, size: int) -> bool:
+    end = start + size
+    return any(
+      start < extent_start + extent_size and extent_start < end for extent_start, extent_size in extents
+    )
+
+  @staticmethod
+  def _coalesce_extents(extents: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    if not extents:
+      return []
+    ordered = sorted(extents)
+    merged: list[tuple[int, int]] = [ordered[0]]
+    for start, size in ordered[1:]:
+      last_start, last_size = merged[-1]
+      last_end = last_start + last_size
+      if start < last_end:
+        raise MemoryInvariantError("free extents overlap")
+      if start == last_end:
+        merged[-1] = (last_start, last_size + size)
+      else:
+        merged.append((start, size))
+    return merged
+
   def rollback(self, plan: AllocationPlan) -> None:
     if plan.pool_version != self._pool_version:
       raise MemoryInvariantError("stale allocation plan")
@@ -416,8 +559,7 @@ class BankedFreeExtentAllocator:
 
   # -- live checks ------------------------------------------------------
 
-  def assert_live(self, handle: AllocationHandle,
-                  owner: MemoryOwner | None = None) -> None:
+  def assert_live(self, handle: AllocationHandle, owner: MemoryOwner | None = None) -> None:
     rec = self._live.get(handle.allocation_id)
     if rec is None or rec.handle.generation != handle.generation:
       raise MemoryInvariantError("stale allocation generation")
@@ -440,8 +582,7 @@ class BankedFreeExtentAllocator:
       raise MemoryInvariantError("duplicate allocation pin")
     rec.pins.add(consumer_id)
 
-  def unpin(self, handle: AllocationHandle, consumer_id: str,
-            cycle: int) -> bool:
+  def unpin(self, handle: AllocationHandle, consumer_id: str, cycle: int) -> bool:
     rec = self._live.get(handle.allocation_id)
     if rec is None or rec.handle.generation != handle.generation:
       raise MemoryInvariantError("stale allocation generation")
@@ -455,8 +596,7 @@ class BankedFreeExtentAllocator:
 
   # -- release ----------------------------------------------------------
 
-  def request_release(self, handle: AllocationHandle, owner: MemoryOwner,
-                      cycle: int) -> bool:
+  def request_release(self, handle: AllocationHandle, owner: MemoryOwner, cycle: int) -> bool:
     rec = self._live.get(handle.allocation_id)
     if rec is None or rec.handle.generation != handle.generation:
       raise MemoryInvariantError("stale allocation generation")
@@ -472,8 +612,7 @@ class BankedFreeExtentAllocator:
     self._do_release(rec, cycle)
     return True
 
-  def _do_release(self, rec: _AllocationRecord, cycle: int,
-                  reason: str = "release") -> None:
+  def _do_release(self, rec: _AllocationRecord, cycle: int, reason: str = "release") -> None:
     for seg in rec.handle.bank_segments:
       local_start = seg.address - seg.bank_id * self.bytes_per_bank
       self._free[seg.bank_id].append((local_start, seg.size_bytes))
@@ -486,28 +625,16 @@ class BankedFreeExtentAllocator:
     rec.release_cycle = cycle
     self._pool_version += 1
     if self._trace is not None:
-      self._trace.alloc_released(self.memory_space, self._trace_tile_id,
-                                 rec.handle, cycle, reason)
+      self._trace.alloc_released(self.memory_space, self._trace_tile_id, rec.handle, cycle, reason)
     self._emit_trace(cycle)
 
   def _merge_bank(self, bank_id: int) -> None:
-    extents = self._free[bank_id]
-    if not extents:
-      return
-    extents.sort()
-    merged: list[tuple[int, int]] = [extents[0]]
-    for start, size in extents[1:]:
-      last_start, last_size = merged[-1]
-      if start == last_start + last_size:
-        merged[-1] = (last_start, last_size + size)
-      else:
-        merged.append((start, size))
-    self._free[bank_id] = merged
+    self._free[bank_id] = self._coalesce_extents(self._free[bank_id])
 
   # -- segment resolution ----------------------------------------------
 
   def resolve_segments(
-    self, handle: AllocationHandle, offset_bytes: int, size_bytes: int,
+    self, handle: AllocationHandle, offset_bytes: int, size_bytes: int
   ) -> tuple[BankSegment, ...]:
     if offset_bytes < 0:
       raise MemoryInvariantError("memory view out of bounds")
@@ -530,11 +657,7 @@ class BankedFreeExtentAllocator:
       clip_end = min(seg.size_bytes, offset_bytes + size_bytes - cursor)
       take = clip_end - clip_start
       if take > 0:
-        result.append(BankSegment(
-          bank_id=seg.bank_id,
-          address=seg.address + clip_start,
-          size_bytes=take,
-        ))
+        result.append(BankSegment(bank_id=seg.bank_id, address=seg.address + clip_start, size_bytes=take))
       cursor = seg_end
     return tuple(result)
 
@@ -550,15 +673,14 @@ class BankedFreeExtentAllocator:
     self._counter = 0
     self._free = [[(0, self.bytes_per_bank)] for _ in range(self.banks)]
     self._live.clear()
+    self._exact_live.clear()
     self._pool_version = 0
     self._peak_allocated = 0
     self._allocated_bytes = 0
 
   def snapshot(self) -> dict:
-    live = sum(1 for r in self._live.values()
-               if r.state != AllocationState.RELEASED)
-    pending = sum(1 for r in self._live.values()
-                  if r.state == AllocationState.RELEASE_PENDING)
+    live = sum(1 for r in self._live.values() if r.state != AllocationState.RELEASED)
+    pending = sum(1 for r in self._live.values() if r.state == AllocationState.RELEASE_PENDING)
     per_bank: list[dict] = []
     free_total = 0
     largest = 0
@@ -567,12 +689,14 @@ class BankedFreeExtentAllocator:
       bank_largest = max((s for _, s in self._free[bank_id]), default=0)
       free_total += bank_free
       largest = max(largest, bank_largest)
-      per_bank.append({
-        "bank_id": bank_id,
-        "free_bytes": bank_free,
-        "allocated_bytes": self.bytes_per_bank - bank_free,
-        "largest_free_extent": bank_largest,
-      })
+      per_bank.append(
+        {
+          "bank_id": bank_id,
+          "free_bytes": bank_free,
+          "allocated_bytes": self.bytes_per_bank - bank_free,
+          "largest_free_extent": bank_largest,
+        }
+      )
     return {
       "memory_space": self.memory_space,
       "capacity_bytes": self.capacity_bytes,
@@ -581,7 +705,9 @@ class BankedFreeExtentAllocator:
       "largest_free_extent": largest,
       "peak_allocated_bytes": self._peak_allocated,
       "live_allocations": live,
+      "live_exact_extents": len(self._exact_live),
       "pending_release": pending,
       "per_bank_occupancy": per_bank,
       "generation": self._generation,
+      "pool_version": self._pool_version,
     }

@@ -21,32 +21,49 @@ if TYPE_CHECKING:
 
 class VCId(IntEnum):
   """NoC virtual channels (NoC design 3.4)."""
-  VC0_COMMAND_EVENT = 0   # command, event, fault, barrier — highest priority
-  VC1_DMA_READ_RSP = 1    # DMA read response, memory completion
-  VC2_DMA_WRITE = 2       # DMA write, MFE stream fill, bulk data
-  VC3_COLLECTIVE = 3      # collective
+
+  VC0_COMMAND_EVENT = 0  # command, event, fault, barrier — highest priority
+  VC1_DMA_READ_RSP = 1  # DMA read response, memory completion
+  VC2_DMA_WRITE = 2  # DMA write, MFE stream fill, bulk data
+  VC3_COLLECTIVE = 3  # collective
+
+
+def normalize_vc_id(vc: int | VCId) -> int:
+  """Normalize the public enum/int VC protocol to its integer wire id."""
+  if isinstance(vc, bool) or not isinstance(vc, (int, VCId)):
+    raise TypeError("NoC VC id must be an integer or VCId")
+  try:
+    return VCId(int(vc)).value
+  except ValueError as exc:
+    raise ValueError(f"unknown NoC VC id {vc!r}") from exc
 
 
 @dataclass
 class Flit:
   """One NoC flit.  ``tag`` is a deterministic transaction/leg string
   used by the TransferManager to query or cancel the pending flit."""
-  vc: int
+
+  vc: int | VCId
   src: int
   dst: int
   bytes_total: int
   tag: str = ""
   arrived_cycle: int = 0
 
+  def __post_init__(self) -> None:
+    self.vc = normalize_vc_id(self.vc)
+
 
 @dataclass
 class VirtualChannel:
   """One virtual channel with credit + a FIFO of pending flits."""
-  vc_id: int
+
+  vc_id: int | VCId
   depth: int = 8
   priority: int = 0  # lower = higher priority; VC0 = 0
 
   def __post_init__(self) -> None:
+    self.vc_id = normalize_vc_id(self.vc_id)
     self.credit_available: int = self.depth
     self._pending: deque[Flit] = deque()
     self.occupancy_cycles: int = 0
@@ -57,6 +74,9 @@ class VirtualChannel:
     return self.credit_available > 0
 
   def enqueue(self, flit: Flit, cycle: int) -> None:
+    if normalize_vc_id(flit.vc) != self.vc_id:
+      raise ValueError("NoC flit enqueued on the wrong virtual channel")
+    flit.vc = self.vc_id
     flit.arrived_cycle = cycle
     self._pending.append(flit)
 
@@ -107,23 +127,23 @@ class NoCRouter:
 
   def __post_init__(self) -> None:
     self.vcs: dict[int, VirtualChannel] = {
-      vc_id.value: VirtualChannel(
-        vc_id=vc_id.value,
-        depth=self.vc_depth,
-        priority=vc_id.value)
+      vc_id.value: VirtualChannel(vc_id=vc_id.value, depth=self.vc_depth, priority=vc_id.value)
       for vc_id in VCId
     }
     self.pmu_switch_contention: int = 0
     # last observed cycle for hooks without a cycle parameter
     self._last_cycle: int = 0
+    # Flits which left the queue but whose downstream receiver has not
+    # acknowledged them.  Credits are returned only with that acknowledgement.
+    self._traversed: dict[str, int] = {}
 
-  def _trace_vc(self, vc_id: int) -> None:
+  def _trace_vc(self, vc_id: int | VCId) -> None:
     """Push per-VC occupancy/credit counters (change-only)."""
     if self.trace is None:
       return
-    vc = self.vcs[vc_id]
-    self.trace.noc_vc(vc_id, vc.occupancy, vc.credit_available,
-                      self._last_cycle)
+    normalized = normalize_vc_id(vc_id)
+    vc = self.vcs[normalized]
+    self.trace.noc_vc(normalized, vc.occupancy, vc.credit_available, self._last_cycle)
 
   def _trace_all_vcs(self) -> None:
     if self.trace is None:
@@ -131,11 +151,15 @@ class NoCRouter:
     for vc_id in sorted(self.vcs):
       self._trace_vc(vc_id)
 
-  def send(self, vc: int, flit: Flit, cycle: int) -> None:
+  def send(self, vc: int | VCId, flit: Flit, cycle: int) -> None:
     """Enqueue a flit onto a VC (upstream side)."""
+    normalized = normalize_vc_id(vc)
+    if normalize_vc_id(flit.vc) != normalized:
+      raise ValueError("NoC flit VC does not match enqueue VC")
+    flit.vc = normalized
     self._last_cycle = cycle
-    self.vcs[vc].enqueue(flit, cycle)
-    self._trace_vc(vc)
+    self.vcs[normalized].enqueue(flit, cycle)
+    self._trace_vc(normalized)
 
   def step(self, cycle: int) -> list[Flit]:
     """Advance one cycle.  Returns the list of flits that traversed.
@@ -162,21 +186,31 @@ class NoCRouter:
           vc.credit_available -= 1
           vc._starvation = 0
           sent.append(flit)
+          if flit.tag:
+            if flit.tag in self._traversed:
+              raise RuntimeError(f"duplicate in-flight NoC tag {flit.tag!r}")
+            self._traversed[flit.tag] = vc_id
           continue
       flit = vc.try_send(cycle)
       if flit is not None:
         sent.append(flit)
+        if flit.tag:
+          if flit.tag in self._traversed:
+            raise RuntimeError(f"duplicate in-flight NoC tag {flit.tag!r}")
+          self._traversed[flit.tag] = vc_id
       elif vc.occupancy > 0:
         contention += 1
     self.pmu_switch_contention += contention
     self._trace_all_vcs()
     return sent
+
   def contains(self, tag: str) -> bool:
-    """True if a pending (not yet traversed) flit carries ``tag``."""
-    return any(
-      flit.tag == tag
-      for vc in self.vcs.values()
-      for flit in vc._pending)
+    """True if a queued (not yet traversed) flit carries ``tag``."""
+    return any(flit.tag == tag for vc in self.vcs.values() for flit in vc._pending)
+
+  def traversed(self, tag: str) -> bool:
+    """True while a traversed flit still owns downstream credit."""
+    return tag in self._traversed
 
   def cancel(self, tag: str) -> int | None:
     """Remove a pending flit with ``tag``; return its VC id, or None.
@@ -192,21 +226,47 @@ class NoCRouter:
           return vc.vc_id
     return None
 
-  def return_credit(self, vc: int, n: int = 1) -> None:
-    self.vcs[vc].return_credit(n)
-    self._trace_vc(vc)
+  def return_credit(self, vc: int | VCId, n: int = 1, *, tag: str | None = None) -> None:
+    normalized = normalize_vc_id(vc)
+    if tag is not None:
+      traversed_vc = self._traversed.pop(tag, None)
+      if traversed_vc is None:
+        raise RuntimeError(f"unknown or already acknowledged NoC tag {tag!r}")
+      if traversed_vc != normalized or n != 1:
+        self._traversed[tag] = traversed_vc
+        raise RuntimeError("NoC acknowledgement does not match traversed flit")
+    self.vcs[normalized].return_credit(n)
+    self._trace_vc(normalized)
+
+  @property
+  def is_quiescent(self) -> bool:
+    return not self._traversed and all(
+      not vc._pending and vc.credit_available == vc.depth for vc in self.vcs.values()
+    )
 
   def reset(self) -> None:
+    if not self.is_quiescent:
+      raise RuntimeError("NoC reset requires queued and traversed flits to drain")
     for vc in self.vcs.values():
       vc.reset()
+    self._traversed.clear()
     self.pmu_switch_contention = 0
 
   def snapshot(self) -> dict:
-    return {
+    rows = {
       VCId(vc.vc_id).name: {
         "occupancy": vc.occupancy,
         "credit": vc.credit_available,
+        "traversed_unacknowledged": sum(
+          traversed_vc == vc.vc_id for traversed_vc in self._traversed.values()
+        ),
         "stall_cycles": vc.stall_cycles,
       }
       for vc in self.vcs.values()
     }
+    rows["summary"] = {
+      "queued": sum(vc.occupancy for vc in self.vcs.values()),
+      "traversed_unacknowledged": len(self._traversed),
+      "quiescent": self.is_quiescent,
+    }
+    return rows

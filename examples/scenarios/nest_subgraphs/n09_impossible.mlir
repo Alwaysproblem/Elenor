@@ -1,5 +1,5 @@
 // 可复现 NEST 边界子图；中文元数据是人类可读说明，不是可执行 schema。
-// 容量必须以 group_sram_bytes=65536 运行；单 Context bundle=98304，属于永久不可能而非暂时等待。
+// 容量必须以 profile_l2_64k.yaml 运行（user L2 = 65536 B）；单 Context bundle=98304，属于永久不可能而非暂时等待。
 // case: {
 //       "id": "N09",
 //       "name": "n09_impossible",
@@ -14,12 +14,14 @@
 //         "fidelity": "full_memory",
 //         "num_dma_channels": 2,
 //         "arena_binding": "arena=0x1000000:8388608:rw",
-//         "group_sram_bytes": 65536,
+//         "profile": "profile_l2_64k.yaml",
+//         "user_l2_bytes": 65536,
+//         "physical_l2_bytes": 131072,
 //         "placement": 15,
-//         "expected_runtime_fault": "L2 capacity fault during context admission"
+//"expected_fault": "compile/load permanent L2 capacity error (bundle 98304 > user L2 65536)"
 //       },
 //       "expected": {
-//         "时序/生命周期 Correctness": "单 Context 原子需求 input U + output 2U = 98304，大于 65536；不得进入 WAIT_CAPACITY",
+//"时序/生命周期 Correctness": "单 Context 原子需求 input U + output 2U = 98304，大于 65536；不得进入 WAIT_CAPACITY",
 //         "数值": "未建模；engine descriptor 与未初始化的合成输出只用于时序",
 //         "Liveness": "预期立即容量 fault、非零退出，且不是 max-cycle 超时",
 //         "Scheduling Quality": "应有零成功 engine service"
@@ -59,7 +61,9 @@
 //     }
 builtin.module {
   tile.program @prog_Impossible(
-    %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %out: !nest.l2_buffer<4x128x64xbf16>) {
+    %task : !nest.task, %i0 : !nest.l2_buffer<4x64x64xbf16>, %out : !nest.l2_buffer<4x128x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 24576> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -78,7 +82,9 @@ builtin.module {
     tile.signal output_ready(%task)
     tile.return
   }
-  nest.context @ctx_0 (%arena: !nest.global_memref<4194304xbf16>) placement = 15 {
+  nest.context @ctx_0 (%arena: !nest.global_memref<4194304xbf16>) placement = 15
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0],
+      logical_tasks = 4, l2_spm_bytes = 98304, requested_contexts_per_tile = 1> {
     %b_input = nest.alloc slot = "input" role = "in" shape = [4, 64, 64] dtype = "bf16"
       alignment = 256 : !nest.l2_buffer<4x64x64xbf16>
     %b_output = nest.alloc slot = "output" role = "inout" shape = [4, 128, 64] dtype = "bf16"
@@ -90,7 +96,7 @@ builtin.module {
     %pref_input = nest.dma.prefetch.async %h_input into %b_input : !nest.event<"pref_input">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
     %grid_Impossible, %read_Impossible, %ready_Impossible =
-      nest.dispatch.tasks.async @prog_Impossible context = 0 tasks(%tasks) globals()
+      nest.dispatch.tasks.async @prog_Impossible l1_mode = 0 context = 0 tasks(%tasks) globals()
       bindings(%b_input, %b_output) ins(%b_input) outs(%b_output)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>

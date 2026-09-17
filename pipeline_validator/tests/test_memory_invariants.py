@@ -33,13 +33,11 @@ def _ctx_owner(name: str = "ctx", gen: int = 0, buf: str = "b") -> ContextBuffer
   return ContextBufferOwner(name, gen, buf)
 
 
-def _task_owner(tile: int = 0, ctx: int = 0, task: int = 0,
-                buf: str = "l1") -> TaskBufferOwner:
+def _task_owner(tile: int = 0, ctx: int = 0, task: int = 0, buf: str = "l1") -> TaskBufferOwner:
   return TaskBufferOwner("ctx", 0, "ev_role", task, tile, ctx, buf)
 
 
-def _req(owner, size: int, align: int = 1, buf_id: str = "b",
-         space: str = "l2") -> AllocationRequest:
+def _req(owner, size: int, align: int = 1, buf_id: str = "b", space: str = "l2") -> AllocationRequest:
   return AllocationRequest(space, buf_id, owner, size, align)
 
 
@@ -68,8 +66,7 @@ class TestFreeExtent:
     # place a 1-byte alloc to create a gap, then align the next to 256
     h1 = alloc.commit(alloc.plan_bundle([_req(o, 1, align=1)]) or [], 0)[0]
     assert h1.base_address == 0
-    h2 = alloc.commit(
-      alloc.plan_bundle([_req(o, 1024, align=256, buf_id="b2")]) or [], 0)[0]
+    h2 = alloc.commit(alloc.plan_bundle([_req(o, 1024, align=256, buf_id="b2")]) or [], 0)[0]
     assert h2.base_address % 256 == 0
 
   def test_cross_bank_segments(self):
@@ -86,8 +83,7 @@ class TestFreeExtent:
   def test_arbitrary_release_order_no_overlap(self):
     alloc = BankedFreeExtentAllocator("l2", 4096, 4)
     owners = [_ctx_owner(buf=f"b{i}") for i in range(4)]
-    plan = alloc.plan_bundle([_req(owners[i], 512, buf_id=f"b{i}")
-                              for i in range(4)])
+    plan = alloc.plan_bundle([_req(owners[i], 512, buf_id=f"b{i}") for i in range(4)])
     handles = alloc.commit(plan, 0)
     # release in reverse order
     for h, o in zip(reversed(handles), reversed(owners)):
@@ -135,10 +131,7 @@ class TestPlanCommitRollback:
     alloc = BankedFreeExtentAllocator("l2", 1024, 2)
     o = _ctx_owner()
     # one fits, one doesn't → whole bundle fails
-    plan = alloc.plan_bundle([
-      _req(o, 512, buf_id="ok"),
-      _req(o, 600, buf_id="big"),
-    ])
+    plan = alloc.plan_bundle([_req(o, 512, buf_id="ok"), _req(o, 600, buf_id="big")])
     assert isinstance(plan, AdmissionFailure)
     # nothing committed
     assert alloc.snapshot()["allocated_bytes"] == 0
@@ -386,37 +379,42 @@ class TestL2SRAMWrapper:
 # ---------------------------------------------------------------------------
 
 
-class TestStageCancel:
-  def test_cancel_returns_bank_and_outstanding(self):
-    """Cancelling a transaction frees its bank and outstanding credit
-    immediately, so a later issue succeeds at the same cycle."""
+class TestStageIsolationRelease:
+  def test_confirmed_isolation_returns_bank_and_outstanding(self):
+    """The stage-level isolation primitive returns all held resources."""
     from pipeline_validator.config import HardwareConfig
     from pipeline_validator.memory.transfer import StageRequest, StageWait, StageWaitReason, TransferStage
+
     cfg = HardwareConfig()
     stage = TransferStage(
-      "hbm_read", StageWaitReason.HBM_OUTSTANDING,
-      cfg.hbm_fixed_latency_cycles, 1024.0, 1,
-      cfg.hbm_burst_bytes, max_outstanding=1)
+      "hbm_read",
+      StageWaitReason.HBM_OUTSTANDING,
+      cfg.hbm_fixed_latency_cycles,
+      1024.0,
+      1,
+      cfg.hbm_burst_bytes,
+      max_outstanding=1,
+    )
     result = stage.try_issue("t0", [StageRequest("x", 4096)], cycle=0)
     assert not isinstance(result, StageWait)
     # outstanding limit reached -> wait
     blocked = stage.try_issue("t1", [StageRequest("x", 4096)], cycle=0)
     assert isinstance(blocked, StageWait)
     assert blocked.reason == StageWaitReason.HBM_OUTSTANDING
-    # cancel t0 -> resource + credit returned
+    # ``TransferStage.cancel`` is invoked only after the manager has confirmed
+    # isolation; at that point the resource and credit may be returned.
     stage.cancel("t0")
     assert stage._outstanding == 0
     assert all(h is None for h in stage._holders)
     retry = stage.try_issue("t1", [StageRequest("x", 4096)], cycle=0)
     assert not isinstance(retry, StageWait)
 
-  def test_cancel_bank_based_stage_frees_all_segments(self):
-    """Cancel frees every bank segment a multi-segment issue occupied."""
+  def test_confirmed_isolation_frees_all_bank_segments(self):
+    """Confirmed isolation frees every segment of a multi-bank issue."""
     from pipeline_validator.memory.transfer import StageRequest, StageWait, StageWaitReason, TransferStage
-    stage = TransferStage(
-      "l2_write", StageWaitReason.L2_BANK, 4, 12.8, 16, 1)
-    result = stage.try_issue(
-      "t0", [StageRequest("0", 512), StageRequest("3", 512)], cycle=0)
+
+    stage = TransferStage("l2_write", StageWaitReason.L2_BANK, 4, 12.8, 16, 1)
+    result = stage.try_issue("t0", [StageRequest("0", 512), StageRequest("3", 512)], cycle=0)
     assert not isinstance(result, StageWait)
     assert stage._holders[0] == "t0"
     assert stage._holders[3] == "t0"
@@ -425,17 +423,15 @@ class TestStageCancel:
     assert stage._holders[3] is None
     assert stage._busy_until[0] == 0
     assert stage._busy_until[3] == 0
-    # same banks usable immediately
-    retry = stage.try_issue(
-      "t1", [StageRequest("0", 512), StageRequest("3", 512)], cycle=0)
+    # the same banks are usable after isolation is confirmed
+    retry = stage.try_issue("t1", [StageRequest("0", 512), StageRequest("3", 512)], cycle=0)
     assert not isinstance(retry, StageWait)
 
   def test_step_reconciles_expired_holder(self):
     """step() clears an expired busy window and returns the credit."""
     from pipeline_validator.memory.transfer import StageRequest, StageWaitReason, TransferStage
-    stage = TransferStage(
-      "hbm_read", StageWaitReason.HBM_OUTSTANDING,
-      0, 100.0, 1, 1, max_outstanding=1)
+
+    stage = TransferStage("hbm_read", StageWaitReason.HBM_OUTSTANDING, 0, 100.0, 1, 1, max_outstanding=1)
     stage.try_issue("t0", [StageRequest("x", 100)], cycle=0)
     assert stage._outstanding == 1
     # window = 1 cycle; step past it without an explicit release
@@ -443,11 +439,10 @@ class TestStageCancel:
     assert stage._outstanding == 0
     assert stage._holders[0] is None
 
-  def test_cancel_idempotent(self):
+  def test_confirmed_isolation_is_idempotent(self):
     from pipeline_validator.memory.transfer import StageRequest, StageWaitReason, TransferStage
-    stage = TransferStage(
-      "hbm_read", StageWaitReason.HBM_OUTSTANDING, 0, 100.0, 1, 1,
-      max_outstanding=1)
+
+    stage = TransferStage("hbm_read", StageWaitReason.HBM_OUTSTANDING, 0, 100.0, 1, 1, max_outstanding=1)
     stage.try_issue("t0", [StageRequest("x", 100)], cycle=0)
     stage.cancel("t0")
     stage.cancel("t0")  # second cancel is a no-op, must not raise
@@ -457,43 +452,55 @@ class TestStageCancel:
 class TestManagerCancel:
   def _manager(self, cfg):
     from pipeline_validator.memory.transfer import TransferManager
+
     return TransferManager(cfg, full_memory=True)
 
   @staticmethod
   def _txn(txn_id, owner, op, tile_id=None):
     from pipeline_validator.memory.transfer import MemoryTransaction
+
     return MemoryTransaction(
-      transaction_id=txn_id, op=op, issuer=owner,
-      src=None, dst=None, bytes_total=4096,
-      completion_event=txn_id, tile_id=tile_id)
+      transaction_id=txn_id,
+      op=op,
+      issuer=owner,
+      src=None,
+      dst=None,
+      bytes_total=4096,
+      completion_event=txn_id,
+      tile_id=tile_id,
+    )
 
   @staticmethod
   def _view():
     """A minimal resolved HBM/L2 view (single segment on bank 0)."""
     from pipeline_validator.memory.allocator import AllocationHandle, BankSegment
     from pipeline_validator.memory.transfer import ResolvedMemoryView
+
     seg = (BankSegment(0, 0, 4096),)
     handle = AllocationHandle(
-      allocation_id="l2:0:1", memory_space="l2", owner=_ctx_owner(),
-      base_address=0, size_bytes=4096, alignment=1,
-      bank_segments=seg, generation=0, allocate_cycle=0)
-    return ResolvedMemoryView(
-      handle=handle, offset_bytes=0, size_bytes=4096, address=0,
-      segments=seg)
+      allocation_id="l2:0:1",
+      memory_space="l2",
+      owner=_ctx_owner(),
+      base_address=0,
+      size_bytes=4096,
+      alignment=1,
+      bank_segments=seg,
+      generation=0,
+      allocate_cycle=0,
+    )
+    return ResolvedMemoryView(handle=handle, offset_bytes=0, size_bytes=4096, address=0, segments=seg)
 
-  def test_cancel_owner_returns_hbm_outstanding(self):
-    """cancel_owner returns the HBM outstanding credit and lets the
-    channel be reused immediately."""
+  def test_cancel_owner_holds_hbm_credit_until_leg_completion(self):
     from pipeline_validator.config import HardwareConfig
     from pipeline_validator.memory.transfer import TransferOp, TransferStatus
-    cfg = HardwareConfig().with_overrides(
-      hbm_fixed_latency_cycles=1000, hbm_outstanding_limit=1)
+
+    cfg = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=4, hbm_outstanding_limit=1)
     tm = self._manager(cfg)
     o1 = _task_owner(tile=0)
     o2 = _task_owner(tile=1)
     t1 = self._txn("t1", o1, TransferOp.PREFETCH)
     t2 = self._txn("t2", o2, TransferOp.PREFETCH)
-    # real views so the full_memory route (HBM_READ first leg) builds
+    # Real views force the full-memory HBM_READ leg.
     t1.src = self._view()
     t1.dst = self._view()
     t2.src = self._view()
@@ -501,75 +508,116 @@ class TestManagerCancel:
     tm.submit(t1, cycle=0)
     tm.submit(t2, cycle=0)
     tm.step(cycle=0)
-    # limit=1: t1 holds the credit; t2 waits (outstanding full)
+    completion_cycle = t1.leg_completion_cycle
+    assert completion_cycle > 0
     assert tm._hbm_read._outstanding == 1
-    tm.cancel_owner(o1, cycle=0)
-    assert tm.status("t1") == TransferStatus.CANCELLED
-    # credit returned immediately on cancel
-    assert tm._hbm_read._outstanding == 0
-    # t2 issues on the next step and takes the credit
-    tm.step(cycle=1)
+    assert tm.cancel_owner(o1, cycle=0) is False
+    assert tm.status("t1") is TransferStatus.CANCEL_REQUESTED
     assert tm._hbm_read._outstanding == 1
-    # after cancel_all nothing is held
-    tm.cancel_all(cycle=1)
+    assert t2.leg_start_cycle == -1
+
+    tm.step(cycle=completion_cycle - 1)
+    assert tm.status("t1") is TransferStatus.CANCEL_REQUESTED
+    assert tm._hbm_read._outstanding == 1
+    assert t2.leg_start_cycle == -1
+
+    # The real accepted-leg completion returns the credit.  The waiting owner
+    # can then issue in that same deterministic completion window.
+    tm.step(cycle=completion_cycle)
+    assert tm.status("t1") is TransferStatus.CANCELLED
+    assert t2.leg_start_cycle == completion_cycle
+    assert tm._hbm_read._outstanding == 1
+
+    assert tm.cancel_all(cycle=completion_cycle) is False
+    assert tm.status("t2") is TransferStatus.CANCEL_REQUESTED
+    tm.confirm_isolation("t2", cycle=completion_cycle)
+    assert tm.cancel_all(cycle=completion_cycle) is True
     assert tm._hbm_read._outstanding == 0
-    assert tm._hbm_write._outstanding == 0
     assert tm.inflight_count == 0
 
-  def test_cancel_all_returns_bank_and_channel_resources(self):
-    """cancel_all returns every bank/channel/credit reservation."""
+  def test_cancel_all_waits_for_accepted_leg_or_confirmed_isolation(self):
     from pipeline_validator.config import HardwareConfig
-    from pipeline_validator.memory.transfer import TransferOp
-    cfg = HardwareConfig().with_overrides(
-      hbm_fixed_latency_cycles=1000, hbm_outstanding_limit=32)
+    from pipeline_validator.memory.transfer import TransferOp, TransferStatus
+
+    cfg = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=4, hbm_outstanding_limit=1)
     tm = self._manager(cfg)
-    o = _task_owner(tile=0)
-    for i in range(3):
-      tm.submit(self._txn(f"t{i}", o, TransferOp.PREFETCH), cycle=0)
+    owner = _task_owner(tile=0)
+    accepted = self._txn("accepted", owner, TransferOp.PREFETCH)
+    waiting = self._txn("waiting", owner, TransferOp.PREFETCH)
+    accepted.src = self._view()
+    accepted.dst = self._view()
+    waiting.src = self._view()
+    waiting.dst = self._view()
+    tm.submit(accepted, cycle=0)
+    tm.submit(waiting, cycle=0)
     tm.step(cycle=0)
-    tm.step(cycle=1)
-    assert tm.inflight_count == 3
-    tm.cancel_all(cycle=1)
+    assert accepted.leg_start_cycle == 0
+    assert waiting.leg_start_cycle == -1
+
+    assert tm.cancel_all(cycle=0) is False
+    assert tm.status("accepted") is TransferStatus.CANCEL_REQUESTED
+    assert tm.status("waiting") is TransferStatus.CANCELLED
+    assert tm._hbm_read._outstanding == 1
+    assert tm.inflight_count == 1
+
+    # Explicit isolation confirmation is the other legal way to release an
+    # accepted leg before its physical completion window.
+    tm.confirm_isolation("accepted", cycle=1)
+    assert tm.cancel_all(cycle=1) is True
+    assert tm.status("accepted") is TransferStatus.CANCELLED
+    assert tm._hbm_read._outstanding == 0
     assert tm.inflight_count == 0
     for stage in tm._all_stages():
       assert stage._outstanding == 0, stage.name
-      assert all(h is None for h in stage._holders), stage.name
-      assert all(b == 0 for b in stage._busy_until), stage.name
+      assert all(holder is None for holder in stage._holders), stage.name
 
-  def test_owner_after_cancel_does_not_block_others(self):
-    """A cancelled owner's bank reservation must not serialize a later
-    transaction on the same bank."""
+  def test_other_owner_waits_for_cancelled_bank_leg_completion(self):
     from pipeline_validator.config import HardwareConfig
     from pipeline_validator.memory.allocator import AllocationHandle, BankSegment
-    from pipeline_validator.memory.transfer import ResolvedMemoryView, TransferOp
-    cfg = HardwareConfig().with_overrides(
-      hbm_fixed_latency_cycles=10)
+    from pipeline_validator.memory.transfer import ResolvedMemoryView, TransferOp, TransferStatus
+
+    cfg = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
     tm = self._manager(cfg)
     o1 = _task_owner(tile=0)
     o2 = _task_owner(tile=1)
     seg = (BankSegment(0, 0, 4096),)
     h = AllocationHandle(
-      allocation_id="l2:0:1", memory_space="l2", owner=o1,
-      base_address=0, size_bytes=4096, alignment=1,
-      bank_segments=seg, generation=0, allocate_cycle=0)
-    view = ResolvedMemoryView(
-      handle=h, offset_bytes=0, size_bytes=4096, address=0,
-      segments=seg)
+      allocation_id="l2:0:1",
+      memory_space="l2",
+      owner=o1,
+      base_address=0,
+      size_bytes=4096,
+      alignment=1,
+      bank_segments=seg,
+      generation=0,
+      allocate_cycle=0,
+    )
+    view = ResolvedMemoryView(handle=h, offset_bytes=0, size_bytes=4096, address=0, segments=seg)
     t1 = self._txn("t1", o1, TransferOp.GLOBAL_STORE)
     t1.src = view
     t1.dst = view
     tm.submit(t1, cycle=0)
     tm.step(cycle=0)
-    # t1 holds l2_read bank 0
+    completion_cycle = t1.leg_completion_cycle
+    assert completion_cycle > 0
     assert tm._l2_read._holders[0] == "t1"
-    tm.cancel_owner(o1, cycle=0)
-    # bank returned: a new transaction issues on bank 0 immediately
+    assert tm.cancel_owner(o1, cycle=0) is False
+    assert tm.status("t1") is TransferStatus.CANCEL_REQUESTED
+
     t2 = self._txn("t2", o2, TransferOp.GLOBAL_STORE)
     t2.src = view
     t2.dst = view
     tm.submit(t2, cycle=0)
-    tm.step(cycle=0)
+    tm.step(cycle=completion_cycle - 1)
+    assert tm._l2_read._holders[0] == "t1"
+    assert t2.leg_start_cycle == -1
+
+    tm.step(cycle=completion_cycle)
+    assert tm.status("t1") is TransferStatus.CANCELLED
     assert tm._l2_read._holders[0] == "t2"
+    assert t2.leg_start_cycle == completion_cycle
+    assert tm.cancel_owner(o2, cycle=completion_cycle) is False
+    tm.confirm_isolation("t2", cycle=completion_cycle)
 
 
 # ---------------------------------------------------------------------------
@@ -581,19 +629,23 @@ class TestNoCPath:
   @staticmethod
   def _manager(cfg, noc):
     from pipeline_validator.memory.transfer import TransferManager
+
     return TransferManager(cfg, full_memory=True, noc=noc)
 
   @staticmethod
   def _txn_on_leg(tm, txn_id, owner, kind, vc_name):
     """Submit a transaction and pin its single leg to the given NoC kind."""
-    from pipeline_validator.memory.transfer import (
-      MemoryTransaction,
-      TransferLeg,
-      TransferOp,
-    )
+    from pipeline_validator.memory.transfer import MemoryTransaction, TransferLeg, TransferOp
+
     txn = MemoryTransaction(
-      transaction_id=txn_id, op=TransferOp.PREFETCH, issuer=owner,
-      src=None, dst=None, bytes_total=64, completion_event=txn_id)
+      transaction_id=txn_id,
+      op=TransferOp.PREFETCH,
+      issuer=owner,
+      src=None,
+      dst=None,
+      bytes_total=64,
+      completion_event=txn_id,
+    )
     tm.submit(txn, 0)
     txn.legs = (TransferLeg(kind, "noc", "l2", 64, vc_name),)
     txn.current_leg = 0
@@ -611,12 +663,11 @@ class TestNoCPath:
     from pipeline_validator.config import HardwareConfig
     from pipeline_validator.memory.noc import NoCRouter, VCId
     from pipeline_validator.memory.transfer import StageWaitReason, TransferLegKind, TransferStatus
+
     cfg = HardwareConfig()
-    noc = NoCRouter(vc_depth=cfg.noc_vc_depth,
-                    router_latency_cycles=cfg.noc_router_latency_cycles)
+    noc = NoCRouter(vc_depth=cfg.noc_vc_depth, router_latency_cycles=cfg.noc_router_latency_cycles)
     tm = self._manager(cfg, noc)
-    txn = self._txn_on_leg(tm, "t1", _task_owner(tile=0),
-                           TransferLegKind.NOC_RESPONSE, "vc1")
+    txn = self._txn_on_leg(tm, "t1", _task_owner(tile=0), TransferLegKind.NOC_RESPONSE, "vc1")
     vc1 = noc.vcs[VCId.VC1_DMA_READ_RSP.value]
     # cycle 0: enqueue one flit/tag, wait NOC_CREDIT
     self._step(tm, noc, 0)
@@ -644,13 +695,12 @@ class TestNoCPath:
     from pipeline_validator.config import HardwareConfig
     from pipeline_validator.memory.noc import NoCRouter, VCId
     from pipeline_validator.memory.transfer import TransferLegKind, TransferStatus
+
     cfg = HardwareConfig().with_overrides(noc_vc_depth=1)
     noc = NoCRouter(vc_depth=1, router_latency_cycles=cfg.noc_router_latency_cycles)
     tm = self._manager(cfg, noc)
-    self._txn_on_leg(tm, "t1", _task_owner(tile=0),
-                     TransferLegKind.NOC_REQUEST, "vc2")
-    self._txn_on_leg(tm, "t2", _task_owner(tile=1),
-                     TransferLegKind.NOC_REQUEST, "vc2")
+    self._txn_on_leg(tm, "t1", _task_owner(tile=0), TransferLegKind.NOC_REQUEST, "vc2")
+    self._txn_on_leg(tm, "t2", _task_owner(tile=1), TransferLegKind.NOC_REQUEST, "vc2")
     vc2 = noc.vcs[VCId.VC2_DMA_WRITE.value]
     for cycle in range(0, 3):
       self._step(tm, noc, cycle)
@@ -671,12 +721,11 @@ class TestNoCPath:
     from pipeline_validator.config import HardwareConfig
     from pipeline_validator.memory.noc import NoCRouter, VCId
     from pipeline_validator.memory.transfer import TransferLegKind
+
     cfg = HardwareConfig()
-    noc = NoCRouter(vc_depth=cfg.noc_vc_depth,
-                    router_latency_cycles=cfg.noc_router_latency_cycles)
+    noc = NoCRouter(vc_depth=cfg.noc_vc_depth, router_latency_cycles=cfg.noc_router_latency_cycles)
     tm = self._manager(cfg, noc)
-    self._txn_on_leg(tm, "t1", _task_owner(tile=0),
-                     TransferLegKind.NOC_RESPONSE, "vc1")
+    self._txn_on_leg(tm, "t1", _task_owner(tile=0), TransferLegKind.NOC_RESPONSE, "vc1")
     self._step(tm, noc, 0)
     assert noc.contains("t1:noc_response")
     tm.cancel_all(cycle=0)
@@ -685,25 +734,54 @@ class TestNoCPath:
     vc1 = noc.vcs[VCId.VC1_DMA_READ_RSP.value]
     assert vc1.credit_available == cfg.noc_vc_depth
 
-  def test_cancel_traversed_flit_returns_credit(self):
+  def test_cancelled_traversed_flit_holds_credit_until_real_completion(self):
     from pipeline_validator.config import HardwareConfig
     from pipeline_validator.memory.noc import NoCRouter, VCId
-    from pipeline_validator.memory.transfer import TransferLegKind
-    cfg = HardwareConfig()
-    noc = NoCRouter(vc_depth=cfg.noc_vc_depth,
-                    router_latency_cycles=cfg.noc_router_latency_cycles)
+    from pipeline_validator.memory.transfer import TransferLegKind, TransferStatus
+
+    cfg = HardwareConfig().with_overrides(noc_vc_depth=1)
+    noc = NoCRouter(vc_depth=1, router_latency_cycles=cfg.noc_router_latency_cycles)
     tm = self._manager(cfg, noc)
-    self._txn_on_leg(tm, "t1", _task_owner(tile=0),
-                     TransferLegKind.NOC_RESPONSE, "vc1")
+    first_owner = _task_owner(tile=0)
+    second_owner = _task_owner(tile=1)
+    self._txn_on_leg(tm, "t1", first_owner, TransferLegKind.NOC_RESPONSE, "vc1")
     self._step(tm, noc, 0)
-    self._step(tm, noc, 1)  # flit traverses, credit consumed
+    self._step(tm, noc, 1)  # the flit traverses and consumes downstream credit
     vc1 = noc.vcs[VCId.VC1_DMA_READ_RSP.value]
-    assert vc1.credit_available == cfg.noc_vc_depth - 1
-    tm.cancel_all(cycle=1)
-    assert vc1.credit_available == cfg.noc_vc_depth
+    assert vc1.credit_available == 0
+    assert tm.cancel_owner(first_owner, cycle=1) is False
+    assert tm.status("t1") is TransferStatus.CANCEL_REQUESTED
+    assert vc1.credit_available == 0
+
+    # A second owner may enqueue, but cannot traverse while the cancelled,
+    # already-accepted leg still owns the only downstream credit.
+    self._txn_on_leg(tm, "t2", second_owner, TransferLegKind.NOC_RESPONSE, "vc1")
+    tm.step(cycle=1)
+    assert noc.contains("t2:noc_response")
+    release_cycle = 1 + cfg.noc_router_latency_cycles
+    for cycle in range(2, release_cycle):
+      self._step(tm, noc, cycle)
+      assert tm.status("t1") is TransferStatus.CANCEL_REQUESTED
+      assert vc1.credit_available == 0
+      assert noc.contains("t2:noc_response")
+
+    self._step(tm, noc, release_cycle)
+    assert tm.status("t1") is TransferStatus.CANCELLED
+    assert vc1.credit_available == 1
+    assert noc.contains("t2:noc_response")
+
+    # The waiting owner traverses only after the credit-return window.
+    self._step(tm, noc, release_cycle + 1)
+    assert not noc.contains("t2:noc_response")
+    assert vc1.credit_available == 0
+    assert tm.cancel_owner(second_owner, cycle=release_cycle + 1) is False
+    assert tm.status("t2") is TransferStatus.CANCEL_REQUESTED
+    tm.confirm_isolation("t2", cycle=release_cycle + 1)
+    assert vc1.credit_available == 1
 
   def test_router_contains_and_cancel(self):
     from pipeline_validator.memory.noc import Flit, NoCRouter
+
     noc = NoCRouter(vc_depth=4)
     noc.send(1, Flit(vc=1, src=0, dst=1, bytes_total=64, tag="a"), cycle=0)
     noc.send(2, Flit(vc=2, src=0, dst=1, bytes_total=64, tag="b"), cycle=0)
@@ -722,24 +800,38 @@ class TestHBMChannelMapping:
     from pipeline_validator.memory import ExternalOwner
     from pipeline_validator.memory.allocator import AllocationHandle, BankSegment
     from pipeline_validator.memory.transfer import ResolvedMemoryView
+
     owner = ExternalOwner("Y")
     segments = (BankSegment(0, address, 64),)
     handle = AllocationHandle(
-      allocation_id=f"global:Y:{address}", memory_space="hbm",
-      owner=owner, base_address=address, size_bytes=64, alignment=64,
-      bank_segments=segments, generation=0, allocate_cycle=0)
+      allocation_id=f"global:Y:{address}",
+      memory_space="hbm",
+      owner=owner,
+      base_address=address,
+      size_bytes=64,
+      alignment=64,
+      bank_segments=segments,
+      generation=0,
+      allocate_cycle=0,
+    )
     return ResolvedMemoryView(
-      handle=handle, offset_bytes=0, size_bytes=64, address=address,
-      segments=segments)
+      handle=handle, offset_bytes=0, size_bytes=64, address=address, segments=segments
+    )
 
   @staticmethod
   def _txn(tm, txn_id: str, address: int, kind, op, owner=None):
     from pipeline_validator.memory.transfer import MemoryTransaction, TransferLeg
+
     view = TestHBMChannelMapping._view(address)
     txn = MemoryTransaction(
-      transaction_id=txn_id, op=op,
+      transaction_id=txn_id,
+      op=op,
       issuer=owner if owner is not None else _task_owner(),
-      src=view, dst=view, bytes_total=64, completion_event=txn_id)
+      src=view,
+      dst=view,
+      bytes_total=64,
+      completion_event=txn_id,
+    )
     tm.submit(txn, cycle=0)
     txn.legs = (TransferLeg(kind, "hbm", "noc", 64, txn_id),)
     txn.current_leg = 0
@@ -756,14 +848,11 @@ class TestHBMChannelMapping:
       TransferManager,
       TransferOp,
     )
-    cfg = HardwareConfig().with_overrides(
-      hbm_channels=2, hbm_burst_bytes=64,
-      hbm_fixed_latency_cycles=100)
+
+    cfg = HardwareConfig().with_overrides(hbm_channels=2, hbm_burst_bytes=64, hbm_fixed_latency_cycles=100)
     tm = TransferManager(cfg, full_memory=True)
-    t0 = self._txn(
-      tm, "t0", 0, TransferLegKind.HBM_READ, TransferOp.PREFETCH)
-    t1 = self._txn(
-      tm, "t1", 128, TransferLegKind.HBM_READ, TransferOp.PREFETCH)
+    t0 = self._txn(tm, "t0", 0, TransferLegKind.HBM_READ, TransferOp.PREFETCH)
+    t1 = self._txn(tm, "t1", 128, TransferLegKind.HBM_READ, TransferOp.PREFETCH)
     tm.step(cycle=0)
     assert tm._hbm_read._holders == ["t0", None]
     assert t0.leg_start_cycle == 0
@@ -775,16 +864,11 @@ class TestHBMChannelMapping:
     in the same cycle and overlap."""
     from pipeline_validator.config import HardwareConfig
     from pipeline_validator.memory.transfer import TransferLegKind, TransferManager, TransferOp
-    cfg = HardwareConfig().with_overrides(
-      hbm_channels=2, hbm_burst_bytes=64,
-      hbm_fixed_latency_cycles=100)
+
+    cfg = HardwareConfig().with_overrides(hbm_channels=2, hbm_burst_bytes=64, hbm_fixed_latency_cycles=100)
     tm = TransferManager(cfg, full_memory=True)
-    t0 = self._txn(
-      tm, "t0", 0, TransferLegKind.HBM_WRITE,
-      TransferOp.GLOBAL_STORE)
-    t1 = self._txn(
-      tm, "t1", 64, TransferLegKind.HBM_WRITE,
-      TransferOp.GLOBAL_STORE)
+    t0 = self._txn(tm, "t0", 0, TransferLegKind.HBM_WRITE, TransferOp.GLOBAL_STORE)
+    t1 = self._txn(tm, "t1", 64, TransferLegKind.HBM_WRITE, TransferOp.GLOBAL_STORE)
     tm.step(cycle=0)
     assert tm._hbm_write._holders == ["t0", "t1"]
     assert t0.leg_start_cycle == 0
@@ -792,37 +876,49 @@ class TestHBMChannelMapping:
     assert t0.leg_completion_cycle == t1.leg_completion_cycle
 
   def test_read_and_write_share_one_global_outstanding_limit(self):
-    """With limit=1, an HBM read blocks an HBM write even when their
-    address-derived channels differ."""
+    """A cancelled accepted read retains the global credit until completion."""
     from pipeline_validator.config import HardwareConfig
     from pipeline_validator.memory.transfer import (
       StageWaitReason,
       TransferLegKind,
       TransferManager,
       TransferOp,
+      TransferStatus,
     )
+
     cfg = HardwareConfig().with_overrides(
-      hbm_channels=2, hbm_burst_bytes=64,
-      hbm_fixed_latency_cycles=100, hbm_outstanding_limit=1)
+      hbm_channels=2, hbm_burst_bytes=64, hbm_fixed_latency_cycles=4, hbm_outstanding_limit=1
+    )
     tm = TransferManager(cfg, full_memory=True)
     read = self._txn(
-      tm, "read", 0, TransferLegKind.HBM_READ, TransferOp.PREFETCH,
-      owner=_task_owner(tile=0))
+      tm, "read", 0, TransferLegKind.HBM_READ, TransferOp.PREFETCH, owner=_task_owner(tile=0)
+    )
     write = self._txn(
-      tm, "write", 64, TransferLegKind.HBM_WRITE,
-      TransferOp.GLOBAL_STORE, owner=_task_owner(tile=1))
+      tm, "write", 64, TransferLegKind.HBM_WRITE, TransferOp.GLOBAL_STORE, owner=_task_owner(tile=1)
+    )
     tm.step(cycle=0)
+    completion_cycle = read.leg_completion_cycle
+    assert completion_cycle > 0
     assert tm._hbm_outstanding_txns == {"read"}
     assert tm._hbm_read._holders == ["read", None]
     assert tm._hbm_write._holders == [None, None]
-    assert read.leg_start_cycle == 0
     assert write.leg_start_cycle == -1
     assert write.wait_reason == StageWaitReason.HBM_OUTSTANDING
-    tm.cancel_owner(read.issuer, cycle=0)
-    assert tm._hbm_outstanding_txns == set()
-    tm.step(cycle=1)
+
+    assert tm.cancel_owner(read.issuer, cycle=0) is False
+    assert tm.status("read") is TransferStatus.CANCEL_REQUESTED
+    assert tm._hbm_outstanding_txns == {"read"}
+    tm.step(cycle=completion_cycle - 1)
+    assert tm._hbm_outstanding_txns == {"read"}
+    assert write.leg_start_cycle == -1
+
+    tm.step(cycle=completion_cycle)
+    assert tm.status("read") is TransferStatus.CANCELLED
     assert tm._hbm_outstanding_txns == {"write"}
     assert tm._hbm_write._holders == [None, "write"]
+    assert write.leg_start_cycle == completion_cycle
+    assert tm.cancel_owner(write.issuer, cycle=completion_cycle) is False
+    tm.confirm_isolation("write", cycle=completion_cycle)
 
 
 # ---------------------------------------------------------------------------
@@ -864,10 +960,7 @@ class TestAdmissionClassification:
     assert plan.kind is AdmissionFailureKind.PERMANENT_CAPACITY
     assert plan.reason == "allocation capacity exceeded"
     # a multi-request bundle whose sum exceeds capacity is also permanent
-    plan = alloc.plan_bundle([
-      _req(_ctx_owner(buf="b1"), 512),
-      _req(_ctx_owner(buf="b2"), 513),
-    ])
+    plan = alloc.plan_bundle([_req(_ctx_owner(buf="b1"), 512), _req(_ctx_owner(buf="b2"), 513)])
     assert isinstance(plan, AdmissionFailure)
     assert plan.kind is AdmissionFailureKind.PERMANENT_CAPACITY
 
@@ -879,13 +972,11 @@ class TestAdmissionClassification:
     # merges its bank back into a 32-byte extent and the retry fits.
     alloc = BankedFreeExtentAllocator("l2", 64, 2)
     for name in ("a", "b"):
-      plan = alloc.plan_bundle([
-        _req(_ctx_owner(gen=1, buf=name), 16, align=32, buf_id=name)])
+      plan = alloc.plan_bundle([_req(_ctx_owner(gen=1, buf=name), 16, align=32, buf_id=name)])
       assert not isinstance(plan, AdmissionFailure)
       alloc.commit(plan, 0)
     assert alloc.snapshot()["free_bytes"] == 32
-    frag_req = [AllocationRequest(
-      "l2", "frag", _ctx_owner(gen=2, buf="frag"), 32, 32)]
+    frag_req = [AllocationRequest("l2", "frag", _ctx_owner(gen=2, buf="frag"), 32, 32)]
     before = self._state(alloc)
     frag = alloc.plan_bundle(frag_req)
     assert isinstance(frag, AdmissionFailure)
@@ -893,8 +984,7 @@ class TestAdmissionClassification:
     assert self._state(alloc) == before
     assert alloc.can_ever_fit_bundle(frag_req)
     # release blocker a: bank 0 merges back into one 32-byte extent
-    handle_a = next(h for h in alloc._live.values()
-                    if h.handle.owner.buffer_id == "a").handle
+    handle_a = next(h for h in alloc._live.values() if h.handle.owner.buffer_id == "a").handle
     assert alloc.request_release(handle_a, handle_a.owner, 1)
     retry = alloc.plan_bundle(frag_req)
     assert not isinstance(retry, AdmissionFailure)
@@ -932,33 +1022,34 @@ class TestDeterministicLRUCache:
     assert snapshot["evictions"] == 1
     assert snapshot["hits"] == 1
 
-  def test_anonymous_token_never_fabricates_residency(self):
+  def test_anonymous_refill_is_rejected_without_fabricating_residency(self):
     cache = DeterministicLRUCache(capacity_bytes=128, line_bytes=64)
     cache.record_hit(None)
     cache.record_miss()
-    cache.refill(None)
+    with pytest.raises(MemoryInvariantError):
+      cache.refill(None)
     snapshot = cache.snapshot()
     assert snapshot["hits"] == 1
     assert snapshot["misses"] == 1
-    assert snapshot["refills"] == 1
+    assert snapshot["refills"] == 0
     assert snapshot["resident_lines"] == 0
     assert snapshot["resident_tokens"] == ()
 
-  def test_reset_clears_metadata_and_statistics(self):
+  def test_reset_clears_residency_and_statistics_but_preserves_configuration(self):
     cache = DeterministicLRUCache(capacity_bytes=64, line_bytes=64)
     cache.record_miss()
     cache.refill("A")
+    assert cache.snapshot()["resident_tokens"] == ("A",)
     cache.reset()
-    assert cache.snapshot() == {
-      "hits": 0,
-      "misses": 0,
-      "refills": 0,
-      "evictions": 0,
-      "resident_lines": 0,
-      "resident_bytes": 0,
-      "capacity_bytes": 64,
-      "resident_tokens": (),
-    }
+    snapshot = cache.snapshot()
+    assert snapshot["hits"] == 0
+    assert snapshot["misses"] == 0
+    assert snapshot["refills"] == 0
+    assert snapshot["evictions"] == 0
+    assert snapshot["resident_lines"] == 0
+    assert snapshot["resident_bytes"] == 0
+    assert snapshot["resident_tokens"] == ()
+    assert snapshot["capacity_bytes"] == 64
 
   def test_cache_metadata_does_not_consume_spm_allocator_capacity(self):
     l1 = BankedFreeExtentAllocator("l1", 1024, 2)
@@ -1024,26 +1115,40 @@ class TestMshrTable:
     with pytest.raises(MemoryInvariantError, match="unknown or completed MSHR token"):
       table.complete(allocation.token)
 
-  def test_reset_clears_entries_callbacks_and_statistics(self):
+  def test_reset_rejects_active_refills_then_clears_completed_state(self):
     table = MshrTable(capacity=1)
     allocation = table.allocate("A")
     assert isinstance(allocation, MshrAllocation)
-    table.wait(allocation.token, lambda: None)
+    callbacks: list[str] = []
+    table.wait(allocation.token, lambda: callbacks.append("ready"))
     assert isinstance(table.allocate("B"), MshrWait)
+    before_reset = table.snapshot()
+
+    with pytest.raises(MemoryInvariantError):
+      table.reset()
+    assert table.snapshot()["active"] == 1
+    assert table.snapshot()["callbacks"] == 1
+    assert table.snapshot()["entries"] == before_reset["entries"]
+
+    ready = table.complete(allocation.token)
+    assert len(ready) == 1
+    ready[0]()
+    assert callbacks == ["ready"]
+    version_after_completion = table.version
     table.reset()
-    assert table.snapshot() == {
-      "active": 0,
-      "merged": 0,
-      "stalls": 0,
-      "callbacks": 0,
-      "capacity": 1,
-      "version": 0,
-    }
+    snapshot = table.snapshot()
+    assert snapshot["active"] == 0
+    assert snapshot["callbacks"] == 0
+    assert snapshot["entries"] == ()
+    assert snapshot["merged"] == 0
+    assert snapshot["stalls"] == 0
+    assert snapshot["capacity"] == 1
+    assert table.version > version_after_completion
 
 
 class TestGatherTransferRoutes:
   @staticmethod
-  def _transaction(transaction_id, op, *, src=None, dst=None, owner=None):
+  def _transaction(transaction_id, op, *, src=None, dst=None, owner=None, bytes_total=64):
     from pipeline_validator.memory.transfer import MemoryTransaction
 
     return MemoryTransaction(
@@ -1052,7 +1157,7 @@ class TestGatherTransferRoutes:
       issuer=_task_owner() if owner is None else owner,
       src=src,
       dst=dst,
-      bytes_total=64,
+      bytes_total=bytes_total,
       completion_event=transaction_id,
       tile_id=0,
     )
@@ -1063,10 +1168,7 @@ class TestGatherTransferRoutes:
     from pipeline_validator.memory.transfer import ResolvedMemoryView
 
     actual_owner = _task_owner() if owner is None else owner
-    segments = (
-      BankSegment(0, 0, 64),
-      BankSegment(1, 64, 64),
-    )
+    segments = (BankSegment(0, 0, 64), BankSegment(1, 64, 64))
     handle = AllocationHandle(
       allocation_id=f"{space}:0:1",
       memory_space=space,
@@ -1079,22 +1181,13 @@ class TestGatherTransferRoutes:
       allocate_cycle=0,
     )
     return ResolvedMemoryView(
-      handle=handle,
-      offset_bytes=0,
-      size_bytes=128,
-      address=0,
-      segments=segments,
-      permissions="r",
+      handle=handle, offset_bytes=0, size_bytes=128, address=0, segments=segments, permissions="r"
     )
 
   @pytest.mark.parametrize("full_memory", [False, True])
   def test_six_gather_routes_have_exact_leg_sequences(self, full_memory):
     from pipeline_validator.config import HardwareConfig
-    from pipeline_validator.memory.transfer import (
-      TransferLegKind,
-      TransferManager,
-      TransferOp,
-    )
+    from pipeline_validator.memory.transfer import TransferLegKind, TransferManager, TransferOp
 
     expected = {
       TransferOp.GATHER_L1_HIT: (TransferLegKind.L1_CACHE_LOOKUP,),
@@ -1105,10 +1198,7 @@ class TestGatherTransferRoutes:
         TransferLegKind.LOCAL_DMA,
         TransferLegKind.L1_CACHE_FILL,
       ),
-      TransferOp.GATHER_MISS_LOOKUP: (
-        TransferLegKind.L1_CACHE_LOOKUP,
-        TransferLegKind.L2_CACHE_LOOKUP,
-      ),
+      TransferOp.GATHER_MISS_LOOKUP: (TransferLegKind.L1_CACHE_LOOKUP, TransferLegKind.L2_CACHE_LOOKUP),
       TransferOp.GATHER_HBM_REFILL: (
         TransferLegKind.HBM_READ,
         TransferLegKind.NOC_RESPONSE,
@@ -1161,25 +1251,20 @@ class TestGatherTransferRoutes:
     owner_a = _task_owner(buf="a")
     owner_b = _task_owner(buf="b")
     initial = allocator.plan_bundle(
-      [
-        _req(owner_a, 32, buf_id="a", space="l1"),
-        _req(owner_b, 32, buf_id="b", space="l1"),
-      ]
+      [_req(owner_a, 32, buf_id="a", space="l1"), _req(owner_b, 32, buf_id="b", space="l1")]
     )
     assert not isinstance(initial, AdmissionFailure)
     handle_a, _handle_b = allocator.commit(initial, cycle=0)
     allocator.request_release(handle_a, owner_a, cycle=1)
 
     destination_owner = _task_owner(buf="destination")
-    fragmented = allocator.plan_bundle(
-      [_req(destination_owner, 96, buf_id="destination", space="l1")]
-    )
+    fragmented = allocator.plan_bundle([_req(destination_owner, 96, buf_id="destination", space="l1")])
     assert not isinstance(fragmented, AdmissionFailure)
     handle = allocator.commit(fragmented, cycle=2)[0]
-    assert [
-      (segment.bank_id, segment.address, segment.size_bytes)
-      for segment in handle.bank_segments
-    ] == [(0, 0, 32), (0, 64, 64)]
+    assert [(segment.bank_id, segment.address, segment.size_bytes) for segment in handle.bank_segments] == [
+      (0, 0, 32),
+      (0, 64, 64),
+    ]
     view = ResolvedMemoryView(
       handle=handle,
       offset_bytes=0,
@@ -1190,73 +1275,96 @@ class TestGatherTransferRoutes:
     sliced = slice_resolved_view(view, 16, 64)
     assert sliced is not None
     assert sliced.address == 16
-    assert [
-      (segment.bank_id, segment.address, segment.size_bytes)
-      for segment in sliced.segments
-    ] == [(0, 16, 16), (0, 64, 48)]
+    assert [(segment.bank_id, segment.address, segment.size_bytes) for segment in sliced.segments] == [
+      (0, 16, 16),
+      (0, 64, 48),
+    ]
 
-  def test_cancel_returns_gather_cache_hbm_noc_and_l1_resources(self):
+  def test_cancel_holds_gather_resources_until_completion_or_isolation(self):
     from pipeline_validator.config import HardwareConfig
     from pipeline_validator.memory.noc import NoCRouter, VCId
-    from pipeline_validator.memory.transfer import TransferManager, TransferOp
+    from pipeline_validator.memory.transfer import TransferManager, TransferOp, TransferStatus
 
-    config = HardwareConfig().with_overrides(
-      hbm_fixed_latency_cycles=1000,
-      hbm_outstanding_limit=1,
-    )
-    noc = NoCRouter(
-      vc_depth=config.noc_vc_depth,
-      router_latency_cycles=config.noc_router_latency_cycles,
-    )
+    config = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=4, hbm_outstanding_limit=1)
+    noc = NoCRouter(vc_depth=config.noc_vc_depth, router_latency_cycles=config.noc_router_latency_cycles)
     manager = TransferManager(config, full_memory=True, noc=noc)
     owner = _task_owner()
 
     lookup = self._transaction("lookup", TransferOp.GATHER_L1_HIT, owner=owner)
     manager.submit(lookup, cycle=0)
     manager.step(cycle=0)
+    lookup_completion = lookup.leg_completion_cycle
+    assert lookup_completion > 0
     assert manager._l1_cache_lookup[0]._holders[0] == "lookup"
-    manager.cancel_owner(owner, cycle=0)
+    assert manager.cancel_owner(owner, cycle=0) is False
+    assert manager.status("lookup") is TransferStatus.CANCEL_REQUESTED
+    assert manager._l1_cache_lookup[0]._holders[0] == "lookup"
+    manager.step(cycle=lookup_completion - 1)
+    assert manager._l1_cache_lookup[0]._holders[0] == "lookup"
+    manager.step(cycle=lookup_completion)
+    assert manager.status("lookup") is TransferStatus.CANCELLED
     assert manager._l1_cache_lookup[0]._holders[0] is None
 
-    hbm = self._transaction(
-      "hbm",
-      TransferOp.GATHER_HBM_REFILL,
-      src=self._view("hbm", owner),
-      owner=owner,
-    )
-    manager.submit(hbm, cycle=1)
-    manager.step(cycle=1)
+    hbm_start = lookup_completion + 1
+    hbm = self._transaction("hbm", TransferOp.GATHER_HBM_REFILL, src=self._view("hbm", owner), owner=owner, bytes_total=128)
+    manager.submit(hbm, cycle=hbm_start)
+    manager.step(cycle=hbm_start)
+    hbm_completion = hbm.leg_completion_cycle
+    assert hbm_completion > hbm_start
     assert manager._hbm_read._outstanding == 1
-    manager.cancel_owner(owner, cycle=1)
+    assert manager.cancel_owner(owner, cycle=hbm_start) is False
+    assert manager.status("hbm") is TransferStatus.CANCEL_REQUESTED
+    assert manager._hbm_read._outstanding == 1
+    manager.step(cycle=hbm_completion - 1)
+    assert manager._hbm_read._outstanding == 1
+    manager.step(cycle=hbm_completion)
+    assert manager.status("hbm") is TransferStatus.CANCELLED
     assert manager._hbm_read._outstanding == 0
 
+    refill_start = hbm_completion + 1
     refill = self._transaction("refill", TransferOp.GATHER_L2_REFILL, owner=owner)
-    manager.submit(refill, cycle=2)
-    manager.step(cycle=2)
-    traversed = noc.step(cycle=3)
-    manager.note_traversed(traversed, cycle=3)
-    manager.step(cycle=3)
+    manager.submit(refill, cycle=refill_start)
+    manager.step(cycle=refill_start)
+    traversal_cycle = refill_start + 1
+    traversed = noc.step(cycle=traversal_cycle)
+    manager.note_traversed(traversed, cycle=traversal_cycle)
+    manager.step(cycle=traversal_cycle)
     vc1 = noc.vcs[VCId.VC1_DMA_READ_RSP.value]
     assert vc1.credit_available == config.noc_vc_depth - 1
-    manager.cancel_owner(owner, cycle=3)
+    assert manager.cancel_owner(owner, cycle=traversal_cycle) is False
+    assert manager.status("refill") is TransferStatus.CANCEL_REQUESTED
+    assert vc1.credit_available == config.noc_vc_depth - 1
+
+    noc_completion = traversal_cycle + config.noc_router_latency_cycles
+    for cycle in range(traversal_cycle + 1, noc_completion):
+      traversed = noc.step(cycle)
+      manager.note_traversed(traversed, cycle)
+      manager.step(cycle)
+      assert manager.status("refill") is TransferStatus.CANCEL_REQUESTED
+      assert vc1.credit_available == config.noc_vc_depth - 1
+    traversed = noc.step(noc_completion)
+    manager.note_traversed(traversed, noc_completion)
+    manager.step(noc_completion)
+    assert manager.status("refill") is TransferStatus.CANCELLED
     assert vc1.credit_available == config.noc_vc_depth
 
+    destination_start = noc_completion + 1
     destination = self._transaction(
-      "destination",
-      TransferOp.GATHER_DEST_WRITE,
-      dst=self._view("l1", owner),
-      owner=owner,
+      "destination", TransferOp.GATHER_DEST_WRITE, dst=self._view("l1", owner), owner=owner, bytes_total=128
     )
-    manager.submit(destination, cycle=4)
-    manager.step(cycle=4)
+    manager.submit(destination, cycle=destination_start)
+    manager.step(cycle=destination_start)
     assert manager._l1_write[0]._holders[0] == "destination"
-    manager.cancel_owner(owner, cycle=4)
+    assert manager.cancel_owner(owner, cycle=destination_start) is False
+    assert manager.status("destination") is TransferStatus.CANCEL_REQUESTED
+    assert manager._l1_write[0]._holders[0] == "destination"
+    manager.confirm_isolation("destination", cycle=destination_start)
+    assert manager.status("destination") is TransferStatus.CANCELLED
 
     snapshot = manager.snapshot()
     assert manager.inflight_count == 0
     assert manager._hbm_read._outstanding == 0
     assert vc1.credit_available == config.noc_vc_depth
     assert all(
-      stage["busy_resources"] == 0 and stage["outstanding"] == 0
-      for stage in snapshot["stages"].values()
+      stage["busy_resources"] == 0 and stage["outstanding"] == 0 for stage in snapshot["stages"].values()
     )

@@ -4,7 +4,9 @@
 builtin.module {
   tile.program @slow(
     %task: !nest.task, %input: !nest.l2_buffer<1x32x32xbf16>,
-    %output: !nest.l2_buffer<1x32x32xbf16>) {
+    %output : !nest.l2_buffer<1x32x32xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 4096> {
     %iv = tile.subview %input task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 32, 32]
       strides = [1, 1, 1] : !nest.l2_view<1x32x32xbf16>
     %ov = tile.subview %output task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 32, 32]
@@ -23,7 +25,9 @@ builtin.module {
   }
   tile.program @fast(
     %task: !nest.task, %input: !nest.l2_buffer<1x32x32xbf16>,
-    %output: !nest.l2_buffer<1x32x32xbf16>) {
+    %output : !nest.l2_buffer<1x32x32xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 4096> {
     %iv = tile.subview %input task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 32, 32]
       strides = [1, 1, 1] : !nest.l2_view<1x32x32xbf16>
     %ov = tile.subview %output task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 32, 32]
@@ -40,7 +44,9 @@ builtin.module {
     tile.signal output_ready(%task)
     tile.return
   }
-  nest.context @branches (%arena: !nest.global_memref<4096xbf16>) placement = 1 {
+  nest.context @branches (%arena: !nest.global_memref<4096xbf16>) placement = 1
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+      logical_tasks = 2, l2_spm_bytes = 16384, requested_contexts_per_tile = 2> {
     %ai = nest.alloc slot = "ai" role = "in" shape = [1, 32, 32] dtype = "bf16" alignment = 256
       : !nest.l2_buffer<1x32x32xbf16>
     %ao = nest.alloc slot = "ao" role = "out" shape = [1, 32, 32] dtype = "bf16" alignment = 256
@@ -59,7 +65,8 @@ builtin.module {
       : !nest.global_view<1024xbf16>
     %tasks = nest.task.range from = 0 to = 1 : !nest.task_range
     %pa = nest.dma.prefetch.async %ha into %ai : !nest.event<"pa">
-    %ga, %ira, %ora = nest.dispatch.tasks.async @slow tasks(%tasks) globals() bindings(%ai, %ao)
+    %ga, %ira, %ora = nest.dispatch.tasks.async @slow l1_mode = 0 tasks(%tasks) globals()
+      bindings(%ai, %ao)
       ins(%ai) outs(%ao)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
@@ -69,7 +76,8 @@ builtin.module {
     nest.release %ai depends_on(%pa, %ira)
     nest.release %ao depends_on(%sa)
     %pb = nest.dma.prefetch.async %hb into %bi : !nest.event<"pb">
-    %gb, %irb, %orb = nest.dispatch.tasks.async @fast tasks(%tasks) globals() bindings(%bi, %bo)
+    %gb, %irb, %orb = nest.dispatch.tasks.async @fast l1_mode = 0 tasks(%tasks) globals()
+      bindings(%bi, %bo)
       ins(%bi) outs(%bo)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>

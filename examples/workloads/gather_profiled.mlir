@@ -3,7 +3,13 @@ builtin.module {
       %task : !nest.task,
       %table : !nest.global_view<8388608xi8>,
       %indices_l2 : !nest.l2_buffer<1024xi32>,
-      %output_l2 : !nest.l2_buffer<1x256xi8>) {
+      %output_l2 : !nest.l2_buffer<1x256xi8>)
+                resource_contract = #tile.resources<allowed_profiles = [1, 2],
+          tile_l1_spm_bytes_per_context = 2048,
+          l1_cache = {required = true, access = "read", bypass = "forbidden", target_bytes = 65536},
+          l2_cache = {
+            required = true, access = "read", bypass = "forbidden", target_bytes = 65536}
+            > {
     %indices_view = tile.subview %indices_l2
         offsets = [0] sizes = [16] strides = [1]
         : !nest.l2_view<16xi32>
@@ -20,7 +26,7 @@ builtin.module {
     tile.signal input_released(%task)
     %gather_done = tile.gather.global.async %table
         indices(%indices_l1) into %gather_dst
-        result_bytes = 256 cache_min_bytes = 16384
+        result_bytes = 256
         cache_target_bytes = 65536 l1_mshr_hint = 16 {
       tile.profiled.access id = "r0" outcome = "L1_HIT"
           bytes = 64 line = "line0"
@@ -44,7 +50,12 @@ builtin.module {
   nest.context @gather_context(
       %table : !nest.global_memref<8388608xi8>,
       %indices : !nest.global_memref<1024xi32>,
-      %output : !nest.global_memref<1x256xi8>) placement = 1 {
+      %output : !nest.global_memref<1x256xi8>) placement = 1
+                resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [1, 2],
+          logical_tasks = 1, l2_spm_bytes = 8192, requested_contexts_per_tile = 1,
+          l2_cache = {
+            required = true, access = "read", bypass = "forbidden", target_bytes = 65536}
+            > {
     %table_view = nest.subview %table offsets = [0] sizes = [8388608]
         strides = [1] : !nest.global_view<8388608xi8>
     %indices_view = nest.subview %indices offsets = [0] sizes = [1024]
@@ -62,7 +73,7 @@ builtin.module {
         : !nest.event<"indices_prefetched">
     %tasks = nest.task.range from = 0 to = 1 : !nest.task_range
     %grid_done, %input_released, %output_ready =
-        nest.dispatch.tasks.async @gather_tile
+        nest.dispatch.tasks.async @gather_tile l1_mode = 1
         tasks(%tasks) globals(%table_view)
         bindings(%indices_l2, %output_l2) ins(%indices_l2) outs(%output_l2)
         signal_policy {

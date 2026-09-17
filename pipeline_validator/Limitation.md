@@ -1,106 +1,150 @@
 # 局限性
 
-## 这套模型模拟了什么、没模拟什么
+## 模型覆盖范围
 
-已模拟能力（V1 scope）：
+当前实现已经覆盖以下合同与运行路径：
 
-- 独立 CPU Device interpreter → message port → Group/Tile 硬件模型；
-- Group 有限 S0/S1/S2 窗口、单登记/单发射、有限扫描与独立完成；
-- Tile 当前指令 eligibility + 公平 RR、Tile-owned L1/context 原子准入；
-- 4 引擎延迟（Roofline）与 launch/wait 重叠；
-- Stream Queue credit/backpressure/EOS；
-- role 完成聚合 -> group task 推进；
-- PMU stall 归因（WAIT_EVENT/WAIT_OPERAND/STREAM_CREDIT/WAIT_L1_BANK/
-  WAIT_L2_BANK/WAIT_NOC_CREDIT/WAIT_DMA_QUEUE/WAIT_HBM_OUTSTANDING/NONE）；
-- credit 不变量每周期校验；
-- PR 2 物理内存模型：HBM 外部 binding、L2/L1 free-extent 分配
-  （owner/generation/pin/对齐/跨 bank segment）、逐腿 transfer route
-  （HBM/Global DMA/NoC/L2/L1 bank/Local DMA）、容量/owner/generation/
-  use-after-release 错误一律 fault、不产生 success event。
-- PR 3 task-bound phase/release protocol：`tile.signal <phase>(%task)`
-  以 logical task 驱动每个 grid 的 `all_tasks` 聚合；显式 event、
-  owner/generation 和 consumer pin 共同门控 role-aware L2 release。
-- CPU pending、硬件 outstanding、Group context/event/L2 admission 分开：
-  WAIT_DEPS 不占 Group/L2；端口接收后，临时 L2 或 event 预算不足
-  可以保留 Group context slot 等待。L2 final-free 与 event reservation
-  回收分别触发有序重试，不能再假定 first action 精确等于 admit+1。
-  非法或空池也无法容纳的 L2 bundle 立即 fault、永不排队。
+- 源 `ModuleOp` 必须显式经过
+  `compiler.compile_program → CompiledProgram → loader.load_program →
+LoadedProgram → Simulator.run`；Simulator 不包含源码 lowering fallback。
+- 编译产物深不可变、可严格 JSON 持久化，并绑定 source/Registry/target/
+  artifact hash、调用点、relocation、source map、依赖证明、Profile 入口/
+  出口与静态资源预算；Loader 只读验证，不重编译或修图。
+- CPU Device interpreter、消息端口、Group S0/S1/S2 ready-action 窗口、
+  Tile UCE eligible-head RR 与独立完成。
+- Root pending metadata 与 Group execution Slot/L2 Arena/event/control 资源
+  分离；待准入 Root 不预占这些硬件资源。
+- Grid Route 有界登记、每 Tile 独立 Task 补位；某 Tile 暂时阻塞不会回滚
+  其他 Tile 已提交的 Task。
+- L2 Root Arena 与 L1 Task Arena 的逐 Bank stripe 预留、padding、owner、
+  allocation/Profile generation、view/pin/inflight 生命周期检查。
+- `nest.release`/`tile.free` 只失效局部 view；仅 owner 安全退休才返还整个
+  Arena。R lease 仅在 Task 安全退休或取消隔离确认后归还。
+- L1/L2 独立 Profile Registry、编译期 SAME/COMPATIBLE 绑定、显式普通
+  await、完整 reconfiguration/maintenance 描述符、全成员
+  Prepare/Commit ACK、唯一 `ProfileController` writer 与分层 generation。
+- HBM→Cache 冲突的编译期范围维护、write-back clean 的真实下游事务、
+  issue/range gate，以及 fault 后显式 recovery。
+- HBM binding、Global DMA、NoC、L2/L1 Bank、Local DMA、MSHR/Cache 和
+  generation-aware cancel-confirm 路径。
+- PMU、Perfetto trace、Profile/member ACK、Arena/view/R lease 与逐 Bank
+  守恒计数；报告直接读取组件 snapshot，不从事件名称反推状态。
 
-有意简化/未模拟（需明确告知用户的边界）：
+以上是 simulator 的可执行合同，不代表 RTL、PPA 或真实芯片规格已经冻结。
 
-- 单 Tile Group：不模拟多 Group 间的 NoC/Collective 竞争（Collective 有
-  1-cycle command/window 模型和 trace event，但 reduce datapath/bandwidth
-  仍未建模）；
-- Group DMA 的 HBM outstanding/NoC credit/L2 bank 竞争按
-  `full_memory` 的独立 stage 建模（同 bank 串行、不同 bank 重叠）；
-  `timing_only`/`runtime` 折叠为单腿延迟，不保留 per-bank 计数；
-- L1 SlotFrame 固定 slot ABI（WORKSPACE/PER_TILE_PROGRAM），bank policy
-  编码未冻结（V1 全部通过）；
-- 引擎流水有限：BOA/EVU/USE 单 job 非流水；MFE 通道化（N 条 load lane +
-  M 条 store lane，每 lane 内串行），lane 间不共享资源仲裁；
-- 无真实 tensor 数值：transfer 的 bytes 是数值参数，payload tracker 只
-  记录 layout/地址元数据（PR 2 起地址来自真实 transaction，不再 CRC 伪造）；
-- residency/cold-warm load 由 `ProgramResidencyManager` metadata 路径
-  管理（program_id/version/hash/epoch）；可选 same_program 执行 epoch
-  是独立门控，只限制 dispatch，不限制其他 DMA。
-- PR 3 聚合只支持 `#nest.aggregate<all_tasks>`；没有 quorum、subset 或
-  其他 aggregation mode；
-- PR 3.5 admission queue 固定 strict FIFO：没有 utilization-first
-  bypass、优先级或抢占；head-of-line blocking 是 V1 明确行为（PMU
-  `l2_admission_queue_peak`/`l2_admission_wait_cycles` 观测，后续策略
-  独立策略实验）；L2 final-free 和独立 event 预算回收是 admission
-  唤醒源；没有跨层 `nexus.await_phase` 或 nest event export；
-- logical task 到 physical tile 仍为 1:1 gang dispatch，静态零任务域
-  明确拒绝（可降为空 context）；未实现逻辑 task stealing/oversubscription；
-- 不实现同 context 内物理 reservation block 的 lease 复用、动态借用
-  或分阶段 admission；现有最后使用点安全 final-free 保留；
-- Group event 预算保守地为整个静态 context 输出事件预留；过大的
-  单 context 明确失败。CPU completion 预算不能推进时报告资源错误，
-  不借无限元数据掩盖。仿真诊断历史不是硬件 event/action 表；
-- 无 RTL 对拍、综合/P&R、实测频率或功耗；clock_mhz 是模型参数。
-- CPU `issue_width` 表示每个模拟周期可执行的 IR 控制指令数；不是实测
-  CPU IPC。真实 CPU/FPGA 异步时钟、PCIe/AXI 传输及 CDC 延迟尚未建模，
-  将来应替换 message port 的时序实现，而不是把 CPU PC 合并进 Group。
-- Gather 仅实现 deterministic profiled V1：不解释真实 index tensor，
-  没有 tagged `AddressProvider`，不报告 address-accurate/value-accurate
-  cache hit rate；没有 Scatter/ScatterReduce/FIFO delivery；
-- PR 5 memory trace lane/counter 已实现：每个 transfer leg 在接受时记录、
-  完成时发射 `X` slice（反映真实 accept/complete，cancel 路径不留虚假预测）；
-  counter 为变化采样（非逐 cycle，change-only 去重）；flow 用 Chrome `s`/`t`/`f`
-  串联同一 transaction 的多腿跨车道。保真边界：collapsed-leg 路线（`timing_only`
-  /`runtime`）每条 txn 只有一条腿，flow 退化为 `s`+`f` 两个事件；Gather 仍为
-  deterministic profiled（不 address-accurate/value-accurate）。车道顺序由
-  `process_sort_index`/`thread_sort_index` 元数据固定（见 README §Profiling）。
+## 有意保留的架构与调度限制
 
-## V2 fidelity 边界（PR 2）
+- **单 Tile Group**：不模拟多 Group 之间的 NoC、全局内存或 Collective
+  竞争。Collective 只有 1-cycle command/window 与 trace，reduce/
+  broadcast datapath、带宽和数值未建模。
+- **固定拓扑与映射**：当前目标是一个四 Tile slice。非空
+  `nest.task.range` 数量必须等于 placement popcount，logical Task 仍按
+  1:1 映射到选中 Tile；没有 task stealing、动态负载均衡或
+  oversubscription。
+- **有限且简单的源码控制流**：公开 Context/Tile Program 是有限单块、
+  直线控制流；没有通用 CFG、循环、动态递归或跨 Context L2 SSA。
+- **FIFO 头约束**：Root 和每 Tile 都只比较 SAME/COMPATIBLE 两类的 FIFO
+  队首；SAME 队首受阻时可由 COMPATIBLE 队首补位，但不会越过同类队首
+  做小对象装箱。没有用户优先级、aging、抢占或迁移已提交 Task。
+- **静态 Arena 布局**：只在编译器能证明 view 生命周期不重叠时复用
+  Slot/offset；L2 复用还需要 release 后有支配它的 Context barrier。
+  Runtime 不压缩碎片、不搬迁 Arena，也不动态借用另一个 owner 的预留。
+- **统一同层模式**：一个 Profile 覆盖该层的全部成员；不支持 per-bank、
+  per-Context 私有 Cache 分区或运行时试档。L1 与 L2 可独立切换，但实际
+  组合必须在编译产物中预先验证。
+- **共享 Cache hint 不是配额**：资源合同的 `target_bytes` 与 Gather 的
+  `cache_target_bytes` 不保留私有容量，也不相加扣 Arena；Cache 容量只由
+  active Profile 决定。
+- **Profile 物理值未冻结**：schema 2 默认 mode、reserved bytes、
+  mapping/cache organization、timeout 是 `simulator_experiment` 建模选择，
+  `由后续规格冻结`。模型不声称 SRAM macro、Tag/ECC 面积、编码或命令总线
+  对应真实器件。
+- **显式入口/恢复**：warm run 当前模式必须等于 compiled entry Profile。
+  Simulator 不自动 reset、切回 mode 或重新规划；调用者必须在静止且已
+  隔离后执行显式 recovery。
+- **有限控制资源是合同的一部分**：Event Table 使用编译证明的 live
+  frontier，不再按所有历史事件计数，但仍受静态容量限制。Grid Route、
+  pending Root、action/inflight/DMA/ACK/Frame Slot 等也都是有限资源；
+  过大的单产物会被编译器或 Loader 拒绝。
 
-- `timing_only`：无 handle/allocation，src/dst 视图为空，单腿折叠延迟。
-- `runtime`：真实 L1/L2 分配与 HBM binding（owner/generation/容量/
-  生命周期检查），但 transfer 折叠为单腿带宽+launch 开销。
-- `full_memory`：在 `runtime` 之上增加逐腿 route（HBM channel/outstanding、
-  NoC VC credit、Global DMA channel、L2/L1 per-bank segment、Local DMA）。
-- 三种模式都必须通过全局 binding/permission/静态 view 验证。
-- Gather 是三种 fidelity 的例外：lookup/MSHR/refill/ordered-write
-  状态机不折叠；`timing_only` 只是不物化 src/dst 地址。`line_token` /
-  `merge_group` 始终是 opaque profile identity，禁止 hash 成伪 bank、
-  cache set 或物理地址。
+## 时序、引擎与互连简化
 
-## V1 输入参数与逻辑地址 IR 限制（PR 1 冻结）
+- `full_memory` 才按独立 stage 模拟 HBM outstanding/channel、Global DMA、
+  NoC VC credit、L2/L1 Bank segment 与 Local DMA；同 Bank 串行、不同 Bank
+  可以重叠。
+- `timing_only`/`runtime` 把普通 transfer 折叠为单腿带宽+launch 延迟，
+  因而不提供逐 Bank 时序结论；但二者仍执行资源合同、Profile/维护命令、
+  gate、generation 和静态预算检查。
+- BOA/EVU/USE 是 Roofline/launch 时序模型，单 job 非流水；MFE 有可配置
+  load/store lane，每 lane 内串行，未建模更多真实端口/仲裁细节。
+- Stream Queue 模拟 credit/backpressure/EOS，但不是 RTL FIFO/CDC 对拍。
+- `clock_mhz` 与 CPU `issue_width` 都是模拟参数，不是实测 Fmax 或 CPU IPC。
+  真实 CPU/FPGA 异步时钟、PCIe/AXI/doorbell 物理链路、CDC、综合、
+  P&R、功耗与热设计均不在模型内。
+- Program residency/cold-warm 只建模 program ID/version/hash/epoch 与
+  fetch/install metadata。可选 `same_program` epoch 只限制 dispatch，
+  不冻结无关 DMA。
 
-- `nest.subview` / `tile.subview` 的 `strides` 必须全 1（语法接受非 1，
-  verify 拒绝）。
-- 无 inline 下标糖（不实现 `%Y[0:4, ...]`），view 必须经显式 subview op。
+## 数值与 Cache 证明边界
+
+- 默认模拟不执行 BOA/EVU/USE tensor 算术；这些 op 的 bytes/ops 只驱动
+  时序与资源模型。
+- Gather 仍由源码 `tile.profiled.access` 显式给出
+  `L1_HIT`/`L2_HIT`/`HBM_MISS`。Cache 容量不会推导命中率，也不会把 hit
+  改写成 miss；`line`/`merge` 在非 oracle 模式是 opaque profile identity。
+- 没有真实 index tensor 求址、通用 `AddressProvider`、Scatter、
+  ScatterReduce 或 FIFO delivery；因此默认 Gather 统计不是实测
+  address-accurate/value-accurate hit rate。
+- 可选 `ByteStore` 只在 `full_memory` 下提供稀疏、逐字节有效性 oracle：
+  host seed 必须落在实际 binding，未初始化读取报错，read leg 完成时捕获
+  bytes，write leg 完成时才提交目的。它能证明真实 copy 路径和显式绑定
+  source range 的 Gather/Cache 维护结果，但不会把 BOA/EVU/USE 升级成
+  tensor 数值模拟。
+- 非 oracle Gather 的 Cache provenance 是 allocation-qualified 的保守
+  whole-view 范围；oracle Gather 必须逐调用
+  `bind_profiled_source(binding_id, request_id, source_offset)`，否则拒绝字节
+  检查。Cache test seed 必须满足 line 对齐、active capacity 与 write
+  policy。
+
+## Fidelity 边界
+
+- `timing_only`：无物理 L1/L2/HBM allocation handle，普通 transfer 单腿；
+  仍验证源码、artifact、binding、Profile 与控制合同。
+- `runtime`：真实 HBM binding、L1/L2 Arena/view、owner/generation/pin/
+  capacity/lifetime；普通 transfer 仍是折叠单腿。
+- `full_memory`：在 `runtime` 上增加逐腿 route、Bank/NoC/DMA/HBM 竞争；
+  只有注入 `ByteStore` 后才能声明真实 byte copy 可见性。
+- 三种 fidelity 都不是 RTL cycle equivalence。跨 fidelity 的周期差异包含
+  抽象层级差异，不能解释成硬件性能误差。
+
+## 源 IR 与地址表达限制
+
+- `nest.subview` / `tile.subview` 的 `strides` 必须全 1；不支持 inline
+  `%Y[...]` 下标糖或 view chain。
 - `nest.context` formal 仅限 `!nest.global_memref`；submit actual 仅限
-  `nexus.program` block arg（不能传 view/切片）。
-- `tile.subview` 只支持单一 `task_dim`（无 `tile.task.id`）；logical task
-  依赖偏移由 runtime 在 `tile.subview task_dim` 维度解析。
-- 无 view 链：`nest.subview` src 必须是 context global formal，
-  `tile.subview` src 必须是 tile.program L2 formal。
-- dispatch actual 仅限整个 `!nest.l2_buffer`（context body 无 L2 view
-  producer）。
-- transfer 字节数从 view/buffer shape 推导；旧 `bytes = N` 语法已删除。
-- 子视图必须连续 row-major（对任一 `sizes[i] > 1` 的维度，所有尾随维度
-  必须满足 `sizes[j] == backing_dims[j]`）；非连续视图被 verifier 拒绝
-  （physical transfer model 只支持单段 byte range）。
-- 输入绑定按名字匹配（program block arg name_hint 为键），无按位置
-  隐式绑定备选路径。
+  `nexus.program` block argument，不能直接传另一个 view。
+- `tile.subview` 只支持一个 `task_dim`；没有公开 `tile.task.id` 算术。
+- dispatch L2 actual 必须是当前 Context 的完整 `nest.alloc` SSA 值。
+- transfer 字节数从 shape/dtype/view 推导，不接受独立 `bytes=N` 覆盖。
+- 物理 transfer 只接受连续 row-major view；非连续切片在验证阶段拒绝。
+- 输入 binding 按名字匹配，没有按位置 fallback。不同外部 binding 的
+  IOVA 区间不能重叠；实际地址可合法 relocation，但不能违反编译时范围、
+  权限和 alias guard。
+- 公开 phase 聚合只支持 `#nest.aggregate<all_tasks>`，没有 quorum/subset。
+  普通 `nexus.await`/`nest.await` 保持局部事件语义，不是隐式全局静默。
+
+## 持久化与复放限制
+
+- 编译 artifact schema 当前为 1、compiler ABI 为 `v0`；硬件 YAML schema
+  为 2，二者不是同一版本号。
+- `.target.yaml` 只保存完整 `HardwareConfig`，不保存 `SimConfig`。独立
+  `--compiled-file` 复放必须另行提供与编译时相同的
+  `context_count`/`device_context_count`、Device pending/completion 以及
+  Group active/pending/action/quota/scan/event/inflight/prefetch/store/
+  dispatch 静态容量。
+- fidelity、trace、max-cycles、seed、时序 knob 与 scheduler policy 不进入
+  static target hash；更改它们可能改变观测周期，但不能改变已编译资源/
+  Profile 语义。
+- trace counter 是 change-only，不是每 cycle 采样；collapsed-leg fidelity
+  的 flow 只有 `s`+`f`。报告中的 Profile/Arena/lease 结论来自 bounded
+  snapshot，完整历史应查看 executable dump 与 Perfetto trace。

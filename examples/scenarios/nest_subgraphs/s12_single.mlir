@@ -169,7 +169,9 @@
 //     }
 builtin.module {
   tile.program @prog_X(
-    %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %task : !nest.task, %i0 : !nest.l2_buffer<4x64x64xbf16>, %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 8192> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -185,7 +187,9 @@ builtin.module {
   }
   tile.program @prog_Q(
     %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %i1: !nest.l2_buffer<4x64x64xbf16>,
-    %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 24576> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -211,7 +215,9 @@ builtin.module {
   }
   tile.program @prog_K(
     %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %i1: !nest.l2_buffer<4x64x64xbf16>,
-    %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 24576> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -237,7 +243,9 @@ builtin.module {
   }
   tile.program @prog_V(
     %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %i1: !nest.l2_buffer<4x64x64xbf16>,
-    %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 24576> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -263,7 +271,9 @@ builtin.module {
   }
   tile.program @prog_QK(
     %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %i1: !nest.l2_buffer<4x64x64xbf16>,
-    %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 24576> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -288,7 +298,9 @@ builtin.module {
     tile.return
   }
   tile.program @prog_SM(
-    %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %task : !nest.task, %i0 : !nest.l2_buffer<4x64x64xbf16>, %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 8192> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -306,7 +318,9 @@ builtin.module {
   }
   tile.program @prog_PV(
     %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %i1: !nest.l2_buffer<4x64x64xbf16>,
-    %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 24576> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -331,7 +345,9 @@ builtin.module {
     tile.return
   }
   tile.program @prog_O(
-    %task: !nest.task, %i0: !nest.l2_buffer<4x64x64xbf16>, %out: !nest.l2_buffer<4x64x64xbf16>) {
+    %task : !nest.task, %i0 : !nest.l2_buffer<4x64x64xbf16>, %out : !nest.l2_buffer<4x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 8192> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -345,7 +361,9 @@ builtin.module {
     tile.signal output_ready(%task)
     tile.return
   }
-  nest.context @ctx_0 (%arena: !nest.global_memref<4194304xbf16>) placement = 15 {
+  nest.context @ctx_0 (%arena: !nest.global_memref<4194304xbf16>) placement = 15
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+      logical_tasks = 32, l2_spm_bytes = 393216, requested_contexts_per_tile = 3> {
     %b_input_X = nest.alloc slot = "input_X" role = "in" shape = [4, 64, 64] dtype = "bf16"
       alignment = 256 : !nest.l2_buffer<4x64x64xbf16>
     %h_input_X = nest.subview %arena offsets = [0] sizes = [16384] strides = [1]
@@ -399,56 +417,64 @@ builtin.module {
     %pref_W_K = nest.dma.prefetch.async %h_W_K into %b_W_K : !nest.event<"pref_W_K">
     %pref_W_V = nest.dma.prefetch.async %h_W_V into %b_W_V : !nest.event<"pref_W_V">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
-    %grid_X, %read_X, %ready_X = nest.dispatch.tasks.async @prog_X context = 0 tasks(%tasks)
+    %grid_X, %read_X, %ready_X = nest.dispatch.tasks.async @prog_X l1_mode = 0 context = 0
+      tasks(%tasks)
       globals() bindings(%b_input_X, %b_X) ins(%b_input_X) outs(%b_X)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
         output_ready = #nest.aggregate<all_tasks>
       } depends_on(%pref_input_X)
       : (!nest.event<"grid_X">, !nest.event<"read_X">, !nest.event<"ready_X">)
-    %grid_Q, %read_Q, %ready_Q = nest.dispatch.tasks.async @prog_Q context = 0 tasks(%tasks)
+    %grid_Q, %read_Q, %ready_Q = nest.dispatch.tasks.async @prog_Q l1_mode = 0 context = 0
+      tasks(%tasks)
       globals() bindings(%b_X, %b_W_Q, %b_Q) ins(%b_X, %b_W_Q) outs(%b_Q)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
         output_ready = #nest.aggregate<all_tasks>
       } depends_on(%ready_X, %pref_W_Q)
       : (!nest.event<"grid_Q">, !nest.event<"read_Q">, !nest.event<"ready_Q">)
-    %grid_K, %read_K, %ready_K = nest.dispatch.tasks.async @prog_K context = 1 tasks(%tasks)
+    %grid_K, %read_K, %ready_K = nest.dispatch.tasks.async @prog_K l1_mode = 0 context = 1
+      tasks(%tasks)
       globals() bindings(%b_X, %b_W_K, %b_K) ins(%b_X, %b_W_K) outs(%b_K)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
         output_ready = #nest.aggregate<all_tasks>
       } depends_on(%ready_X, %pref_W_K)
       : (!nest.event<"grid_K">, !nest.event<"read_K">, !nest.event<"ready_K">)
-    %grid_V, %read_V, %ready_V = nest.dispatch.tasks.async @prog_V context = 2 tasks(%tasks)
+    %grid_V, %read_V, %ready_V = nest.dispatch.tasks.async @prog_V l1_mode = 0 context = 2
+      tasks(%tasks)
       globals() bindings(%b_X, %b_W_V, %b_V) ins(%b_X, %b_W_V) outs(%b_V)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
         output_ready = #nest.aggregate<all_tasks>
       } depends_on(%ready_X, %pref_W_V)
       : (!nest.event<"grid_V">, !nest.event<"read_V">, !nest.event<"ready_V">)
-    %grid_QK, %read_QK, %ready_QK = nest.dispatch.tasks.async @prog_QK context = 0 tasks(%tasks)
+    %grid_QK, %read_QK, %ready_QK = nest.dispatch.tasks.async @prog_QK l1_mode = 0 context = 0
+      tasks(%tasks)
       globals() bindings(%b_Q, %b_K, %b_QK) ins(%b_Q, %b_K) outs(%b_QK)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
         output_ready = #nest.aggregate<all_tasks>
       } depends_on(%ready_Q, %ready_K)
       : (!nest.event<"grid_QK">, !nest.event<"read_QK">, !nest.event<"ready_QK">)
-    %grid_SM, %read_SM, %ready_SM = nest.dispatch.tasks.async @prog_SM context = 1 tasks(%tasks)
+    %grid_SM, %read_SM, %ready_SM = nest.dispatch.tasks.async @prog_SM l1_mode = 0 context = 1
+      tasks(%tasks)
       globals() bindings(%b_QK, %b_SM) ins(%b_QK) outs(%b_SM)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
         output_ready = #nest.aggregate<all_tasks>
       } depends_on(%ready_QK)
       : (!nest.event<"grid_SM">, !nest.event<"read_SM">, !nest.event<"ready_SM">)
-    %grid_PV, %read_PV, %ready_PV = nest.dispatch.tasks.async @prog_PV context = 0 tasks(%tasks)
+    %grid_PV, %read_PV, %ready_PV = nest.dispatch.tasks.async @prog_PV l1_mode = 0 context = 0
+      tasks(%tasks)
       globals() bindings(%b_SM, %b_V, %b_PV) ins(%b_SM, %b_V) outs(%b_PV)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
         output_ready = #nest.aggregate<all_tasks>
       } depends_on(%ready_SM, %ready_V)
       : (!nest.event<"grid_PV">, !nest.event<"read_PV">, !nest.event<"ready_PV">)
-    %grid_O, %read_O, %ready_O = nest.dispatch.tasks.async @prog_O context = 0 tasks(%tasks)
+    %grid_O, %read_O, %ready_O = nest.dispatch.tasks.async @prog_O l1_mode = 0 context = 0
+      tasks(%tasks)
       globals() bindings(%b_PV, %b_O) ins(%b_PV) outs(%b_O)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>

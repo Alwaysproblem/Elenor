@@ -1,15 +1,21 @@
-"""Private execution-layer DTOs for the simulator hot path.
-
-The public workload IR is xDSL/MLIR.  Before simulation, workload IR lowers
-exactly once into these plain Python execution objects so the existing
-cycle-accurate controllers keep their current field accesses and dispatch
-logic.
-"""
+"""Immutable executable DTOs shared by the compiler, Loader and runtime."""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
+
+from .immutable import FrozenMap, FrozenRecord
+from .profiles import (
+  ArenaLayout,
+  ContextResources,
+  MemoryMaintenanceDesc,
+  ProfileReconfigDesc,
+  SourceRef,
+  TileResources,
+)
 
 
 class ExecTileOp(Enum):
@@ -42,6 +48,7 @@ class ExecTileOp(Enum):
   TRAP = "trap"
   SIGNAL_PHASE = "signal.phase"
   FREE_L1 = "free.l1"
+  ALLOC_L1 = "alloc.l1"
 
 
 class ExecGatherOutcome(Enum):
@@ -60,6 +67,9 @@ class ExecGroupActionOp(Enum):
   COLLECTIVE_RUN = "collective.run"
   SIGNAL_EVENT = "signal.event"
   RELEASE_L2 = "release.l2"
+  BIND_L2_VIEW = "bind.l2.view"
+  PROFILE_RECONFIG = "profile.reconfig"
+  MEMORY_MAINTENANCE = "memory.maintenance"
 
 
 class ContextAdmissionStatus(Enum):
@@ -142,7 +152,6 @@ class ExecGatherDesc:
   indices: ExecMemoryView
   destination: ExecMemoryView
   result_bytes: int
-  cache_min_bytes: int
   cache_target_bytes: int
   l1_mshr_hint: int
   accesses: tuple[ExecProfiledAccess, ...]
@@ -251,6 +260,9 @@ class ExecDispatchRequest:
   signal_policy: ExecSignalPolicy
   input_released_event: str
   output_ready_event: str
+  requested_l1_mode: int = 0
+  resolved_l1_mode: int = 0
+  binding_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -265,21 +277,23 @@ class ExecReleaseRequest:
 
 
 # ---------------------------------------------------------------------------
-# Container DTOs (mutable — sequencer rewrites args in place)
+# Immutable program templates; launch relocation creates distinct instances.
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class ExecTileInst:
+@dataclass(frozen=True)
+class ExecTileInst(FrozenRecord):
   op: ExecTileOp
   dst: str | None = None
   args: tuple = ()
   label: str | None = None
   comment: str = ""
+  source_ref: SourceRef | None = None
+  instruction_id: str = ""
 
 
-@dataclass
-class ExecGroupAction:
+@dataclass(frozen=True)
+class ExecGroupAction(FrozenRecord):
   op: ExecGroupActionOp
   args: tuple = ()
   dst: str | None = None
@@ -287,6 +301,8 @@ class ExecGroupAction:
   dependencies: tuple[str, ...] = ()
   reads: tuple[str, ...] = ()
   writes: tuple[str, ...] = ()
+  source_ref: SourceRef | None = None
+  instruction_id: str = ""
 
   @property
   def output_events(self) -> tuple[str, ...]:
@@ -301,8 +317,8 @@ class ExecGroupAction:
     return events
 
 
-@dataclass
-class ExecStreamDesc:
+@dataclass(frozen=True)
+class ExecStreamDesc(FrozenRecord):
   queue_id: int
   depth: int
   producer_mask: int
@@ -312,33 +328,36 @@ class ExecStreamDesc:
   pmu_stream_id: int = 0
 
 
-@dataclass
-class ExecEngineDesc:
+@dataclass(frozen=True)
+class ExecEngineDesc(FrozenRecord):
   name: str
   kind: str
   op: str
-  params: dict = field(default_factory=dict)
+  params: Mapping[str, Any] = field(default_factory=FrozenMap)
   transfer: ExecTransfer | None = None
 
 
-@dataclass
-class ExecTileProgram:
+@dataclass(frozen=True)
+class ExecTileProgram(FrozenRecord):
   name: str
-  insts: list[ExecTileInst] = field(default_factory=list)
-  descriptors: dict[str, ExecEngineDesc] = field(default_factory=dict)
-  labels: dict[str, int] = field(default_factory=dict)
+  insts: tuple[ExecTileInst, ...] = ()
+  descriptors: Mapping[str, ExecEngineDesc] = field(default_factory=FrozenMap)
+  labels: Mapping[str, int] = field(default_factory=FrozenMap)
   program_id: int = 0
   version: int = 1
   program_hash: int = 0
   formals: tuple[ExecTileFormal, ...] = ()
   l1_buffers: tuple[ExecL1Buffer, ...] = ()
+  resource_contract: TileResources | None = None
+  layout: ArenaLayout | None = None
+  text_bytes: int = 0
 
   def label_index(self, label: str) -> int:
     return self.labels[label]
 
 
-@dataclass
-class ExecTileRoleBinding:
+@dataclass(frozen=True)
+class ExecTileRoleBinding(FrozenRecord):
   role_id: int
   tile_mask: int
   tile_program: ExecTileProgram
@@ -352,19 +371,23 @@ class ExecTileRoleBinding:
   write_actuals: tuple[str, ...] = ()
 
 
-@dataclass
-class ExecTileGroupTask:
+@dataclass(frozen=True)
+class ExecTileGroupTask(FrozenRecord):
   name: str
-  actions: list[ExecGroupAction] = field(default_factory=list)
-  streams: list[ExecStreamDesc] = field(default_factory=list)
-  role_bindings: dict[int, ExecTileRoleBinding] = field(default_factory=dict)
+  actions: tuple[ExecGroupAction, ...] = ()
+  streams: tuple[ExecStreamDesc, ...] = ()
+  role_bindings: Mapping[int, ExecTileRoleBinding] = field(default_factory=FrozenMap)
   completion_event: str = "group_task_done"
   global_inputs: tuple[ExecGlobalInput, ...] = ()
   l2_buffers: tuple[ExecL2Buffer, ...] = ()
+  resource_contract: ContextResources | None = None
+  layout: ArenaLayout | None = None
+  binding_id: str = ""
+  event_uses: Mapping[str, int] = field(default_factory=FrozenMap)
 
 
-@dataclass
-class ExecDeviceOp:
+@dataclass(frozen=True)
+class ExecDeviceOp(FrozenRecord):
   """One device-level instruction in a model execution body."""
 
   op: str  # "submit" | "await" | "return"
@@ -372,14 +395,19 @@ class ExecDeviceOp:
   event_tag: str = ""
   actual_inputs: tuple[int, ...] = ()
   dependencies: tuple[str, ...] = ()
+  callsite_id: str = ""
+  binding_id: str = ""
+  command: ProfileReconfigDesc | MemoryMaintenanceDesc | None = None
+  source_ref: SourceRef | None = None
+  instruction_id: str = ""
 
 
-@dataclass
-class ExecModel:
+@dataclass(frozen=True)
+class ExecModel(FrozenRecord):
   """Lowered model: name, per-context tasks, context pin map, body ops."""
 
   name: str
-  tasks: dict[str, ExecTileGroupTask] = field(default_factory=dict)
-  context_pins: dict[str, int | None] = field(default_factory=dict)
-  body: list[ExecDeviceOp] = field(default_factory=list)
+  tasks: Mapping[str, ExecTileGroupTask] = field(default_factory=FrozenMap)
+  context_pins: Mapping[str, int | None] = field(default_factory=FrozenMap)
+  body: tuple[ExecDeviceOp, ...] = ()
   inputs: tuple[ExecGlobalInput, ...] = ()

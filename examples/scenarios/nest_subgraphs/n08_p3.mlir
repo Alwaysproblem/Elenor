@@ -17,7 +17,8 @@
 //         "placement": 7
 //       },
 //       "expected": {
-//         "时序/生命周期 Correctness": "placement=7、task.range=0..3；input/output L2 首维均为 3，aggregate expected/seen=3",
+//"时序/生命周期 Correctness": "placement=7、task.range=0..3；input/output L2 首维均为 3，aggregate
+// expected/seen=3",
 //         "数值": "未建模；engine descriptor 与未初始化的合成输出只用于时序",
 //         "Liveness": "所有已接纳 Context 完成",
 //         "Scheduling Quality": "仅记录实际 service/等待，不声称最优调度"
@@ -60,7 +61,9 @@
 //     }
 builtin.module {
   tile.program @prog_Count3(
-    %task: !nest.task, %i0: !nest.l2_buffer<3x64x64xbf16>, %out: !nest.l2_buffer<3x64x64xbf16>) {
+    %task : !nest.task, %i0 : !nest.l2_buffer<3x64x64xbf16>, %out : !nest.l2_buffer<3x64x64xbf16>)
+            resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        tile_l1_spm_bytes_per_context = 8192> {
     %v0 = tile.subview %i0 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %l0 = tile.alloc shape = [64, 64] dtype = "bf16" alignment = 256 : !tile.l1_buffer<64x64xbf16>
@@ -76,7 +79,9 @@ builtin.module {
     tile.signal output_ready(%task)
     tile.return
   }
-  nest.context @ctx_0 (%arena: !nest.global_memref<4194304xbf16>) placement = 7 {
+  nest.context @ctx_0 (%arena: !nest.global_memref<4194304xbf16>) placement = 7
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+      logical_tasks = 3, l2_spm_bytes = 49152, requested_contexts_per_tile = 1> {
     %b_input = nest.alloc slot = "input" role = "in" shape = [3, 64, 64] dtype = "bf16"
       alignment = 256 : !nest.l2_buffer<3x64x64xbf16>
     %b_output = nest.alloc slot = "output" role = "inout" shape = [3, 64, 64] dtype = "bf16"
@@ -87,7 +92,8 @@ builtin.module {
       : !nest.global_view<12288xbf16>
     %pref_input = nest.dma.prefetch.async %h_input into %b_input : !nest.event<"pref_input">
     %tasks = nest.task.range from = 0 to = 3 : !nest.task_range
-    %grid_Grid3, %read_Grid3, %ready_Grid3 = nest.dispatch.tasks.async @prog_Count3 tasks(%tasks)
+    %grid_Grid3, %read_Grid3, %ready_Grid3 = nest.dispatch.tasks.async @prog_Count3 l1_mode = 0
+      tasks(%tasks)
       globals() bindings(%b_input, %b_output) ins(%b_input) outs(%b_output)
       signal_policy {
         input_released = #nest.aggregate<all_tasks>

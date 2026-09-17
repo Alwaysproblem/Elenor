@@ -13,9 +13,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from itertools import pairwise
 
+from .compiled_program import WorkloadInfo
 from .pmu import StallReason
 from .simulator import SimResult
-from .workloads import Workload
 
 
 @dataclass
@@ -40,6 +40,11 @@ class WorkloadReport:
   resources: dict = field(default_factory=dict)
   makespan: dict = field(default_factory=dict)
   request_timing: dict = field(default_factory=dict)
+  compiled_artifact_hash: str | None = None
+  registry_hash: str | None = None
+  profile: dict = field(default_factory=dict)
+  arenas: dict = field(default_factory=dict)
+  task_leases: dict = field(default_factory=dict)
 
 
 def _ratio(counters: dict, total: int) -> float:
@@ -59,7 +64,7 @@ def _is_record_collection_name(name: str) -> bool:
 
 def _is_collection_mapping(name: str, value: Mapping) -> bool:
   """Identify mapping-valued state collections, not scalar/config maps."""
-  if name.lower() in {"configuration", "config", "counters", "counter", "pmu", "named_cycles"}:
+  if name.lower() in {"configuration", "config", "counters", "counter", "pmu", "named_cycles", "arenas"}:
     return False
   return bool(value) and all(isinstance(item, Mapping) for item in value.values())
 
@@ -266,7 +271,7 @@ def _effective_resources(
   return resources
 
 
-def build_report(wl: Workload, result: SimResult, num_tiles: int = 4) -> WorkloadReport:
+def build_report(wl: WorkloadInfo, result: SimResult, num_tiles: int = 4) -> WorkloadReport:
   pmu = result.pmu
   total = result.cycles or 1
   tile_snapshots = result.group_snapshot.get("tiles", [])
@@ -312,6 +317,21 @@ def build_report(wl: Workload, result: SimResult, num_tiles: int = 4) -> Workloa
     ),
   }
   request_timing = _request_timing_summary(device_raw)
+  profile_raw = result.group_snapshot.get("profile")
+  if not isinstance(profile_raw, Mapping):
+    profile_raw = {}
+  arenas_raw = result.group_snapshot.get("arenas")
+  if not isinstance(arenas_raw, Mapping):
+    arenas_raw = {}
+  task_leases_raw = result.group_snapshot.get("task_leases")
+  if not isinstance(task_leases_raw, Mapping):
+    task_leases_raw = {}
+  compiled_artifact_hash = result.group_snapshot.get("compiled_artifact_hash")
+  if not isinstance(compiled_artifact_hash, str):
+    compiled_artifact_hash = None
+  registry_hash = result.group_snapshot.get("registry_hash")
+  if not isinstance(registry_hash, str):
+    registry_hash = None
 
   return WorkloadReport(
     name=wl.name,
@@ -338,6 +358,11 @@ def build_report(wl: Workload, result: SimResult, num_tiles: int = 4) -> Workloa
     resources=resources,
     makespan=makespan,
     request_timing=request_timing,
+    compiled_artifact_hash=compiled_artifact_hash,
+    registry_hash=registry_hash,
+    profile=_bounded_snapshot(profile_raw, name="profile"),
+    arenas=_bounded_snapshot(arenas_raw, name="arenas"),
+    task_leases=_bounded_snapshot(task_leases_raw, name="task_leases"),
   )
 
 
@@ -371,9 +396,15 @@ def _memory_summary(group_memory: dict | None) -> dict:
   return summary
 
 
-def _run_checks(wl: Workload, result: SimResult, engine_active: dict, total: int) -> list[dict]:
+def _run_checks(wl: WorkloadInfo, result: SimResult, engine_active: dict, total: int) -> list[dict]:
   checks: list[dict] = []
   exp = wl.expected
+
+  def numeric_expectation(key: str) -> float:
+    value = exp[key]
+    if not isinstance(value, (int, float)):
+      raise ValueError(f"workload expectation {key!r} must be numeric")
+    return value
 
   # 1. completion
   checks.append(
@@ -401,7 +432,7 @@ def _run_checks(wl: Workload, result: SimResult, engine_active: dict, total: int
         "check": "boa_active_ratio",
         "expected_min": exp["boa_active_ratio_min"],
         "actual": round(boa_ratio, 3),
-        "pass": boa_ratio >= exp["boa_active_ratio_min"],
+        "pass": boa_ratio >= numeric_expectation("boa_active_ratio_min"),
       }
     )
   if "mfe_active_ratio_min" in exp:
@@ -410,7 +441,7 @@ def _run_checks(wl: Workload, result: SimResult, engine_active: dict, total: int
         "check": "mfe_active_ratio",
         "expected_min": exp["mfe_active_ratio_min"],
         "actual": round(mfe_ratio, 3),
-        "pass": mfe_ratio >= exp["mfe_active_ratio_min"],
+        "pass": mfe_ratio >= numeric_expectation("mfe_active_ratio_min"),
       }
     )
   if "evu_active_ratio_min" in exp:
@@ -419,7 +450,7 @@ def _run_checks(wl: Workload, result: SimResult, engine_active: dict, total: int
         "check": "evu_active_ratio",
         "expected_min": exp["evu_active_ratio_min"],
         "actual": round(evu_ratio, 3),
-        "pass": evu_ratio >= exp["evu_active_ratio_min"],
+        "pass": evu_ratio >= numeric_expectation("evu_active_ratio_min"),
       }
     )
   if "stream_stall_ratio_max" in exp:
@@ -428,7 +459,7 @@ def _run_checks(wl: Workload, result: SimResult, engine_active: dict, total: int
         "check": "stream_stall_ratio",
         "expected_max": exp["stream_stall_ratio_max"],
         "actual": round(stream_stall_ratio, 3),
-        "pass": stream_stall_ratio <= exp["stream_stall_ratio_max"],
+        "pass": stream_stall_ratio <= numeric_expectation("stream_stall_ratio_max"),
       }
     )
   if exp.get("stream_s0_occupancy_seen"):
@@ -587,6 +618,10 @@ def report_to_text(r: WorkloadReport) -> str:
   lines.append(f"  Credit inv OK:   {r.credit_invariant_ok}")
   if r.gather_fidelity is not None:
     lines.append(f"  Gather fidelity: {r.gather_fidelity}")
+  if r.compiled_artifact_hash is not None:
+    lines.append(f"  Compiled artifact: {r.compiled_artifact_hash}")
+  if r.registry_hash is not None:
+    lines.append(f"  Registry:          {r.registry_hash}")
   if r.memory:
     lines.append("  Memory peaks:")
     for key, value in sorted(r.memory.items()):
@@ -597,6 +632,12 @@ def report_to_text(r: WorkloadReport) -> str:
         lines.append(f"    {key:<30}: {value}")
   lines.append("")
   _append_report_section(lines, "Configured/effective resources", r.resources)
+  if r.profile:
+    _append_report_section(lines, "Profile controller", r.profile)
+  if r.arenas:
+    _append_report_section(lines, "Arena pools", r.arenas)
+  if r.task_leases:
+    _append_report_section(lines, "Task leases", r.task_leases)
   if r.scheduler:
     _append_report_section(lines, "Group scheduler", r.scheduler)
   if r.device:
@@ -657,6 +698,8 @@ def report_to_json(r: WorkloadReport) -> str:
       "utilization": r.utilization,
       "credit_invariant_ok": r.credit_invariant_ok,
       "gather_fidelity": r.gather_fidelity,
+      "compiled_artifact_hash": r.compiled_artifact_hash,
+      "registry_hash": r.registry_hash,
       "engine_active": r.engine_active,
       "stall_breakdown": r.stall_breakdown,
       "stream_counters": r.stream_counters,
@@ -667,6 +710,9 @@ def report_to_json(r: WorkloadReport) -> str:
       "resources": r.resources,
       "makespan": r.makespan,
       "request_timing": r.request_timing,
+      "profile": r.profile,
+      "arenas": r.arenas,
+      "task_leases": r.task_leases,
       "checks": r.checks,
     },
     indent=2,

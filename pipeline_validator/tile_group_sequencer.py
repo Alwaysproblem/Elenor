@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import zlib
 from typing import TYPE_CHECKING
 
 from .execution_ir import (
@@ -55,6 +54,7 @@ class TileGroupSequencer:
     self.admission_retry_count = 0
     self.formal_bindings: dict[str, str] = {}
     self._first_action_emitted = False
+    self._dependency_receipts: set[str] = set()
 
   @property
   def queued_count(self) -> int:
@@ -105,6 +105,7 @@ class TileGroupSequencer:
     self.admission_wait_start_cycle = None
     self.admission_retry_count = 0
     self._first_action_emitted = False
+    self._dependency_receipts.clear()
 
   def can_register_action(self) -> bool:
     return (
@@ -122,20 +123,18 @@ class TileGroupSequencer:
     return self.submission_pc, self.task.actions[self.submission_pc]
 
   def dependencies_for(self, action: ExecGroupAction) -> tuple[str, ...]:
-    dependencies = list(action.dependencies)
-    if action.op is ExecGroupActionOp.WAIT_EVENT:
-      dependencies.extend(arg for arg in action.args if isinstance(arg, str))
-    elif action.op is ExecGroupActionOp.RELEASE_L2:
-      request = action.args[0]
-      if isinstance(request, ExecReleaseRequest):
-        dependencies.extend(request.dependency_events)
-    return tuple(dict.fromkeys(dependencies))
+    return action.dependencies
 
   def note_registered(self, record: RegisteredAction) -> None:
     if record.ordinal != self.submission_pc:
       raise RuntimeError("non-sequential Group action registration")
     self._queued_actions[record.ordinal] = record
-    if record.action.op in (ExecGroupActionOp.WAIT_EVENT, ExecGroupActionOp.BARRIER_GROUP):
+    if record.action.op in (
+      ExecGroupActionOp.WAIT_EVENT,
+      ExecGroupActionOp.BARRIER_GROUP,
+      ExecGroupActionOp.PROFILE_RECONFIG,
+      ExecGroupActionOp.MEMORY_MAINTENANCE,
+    ):
       self._registration_fence = record.ordinal
     self.submission_pc += 1
     if self.task is not None and self.submission_pc >= len(self.task.actions):
@@ -172,14 +171,43 @@ class TileGroupSequencer:
     if binding is None:
       raise RuntimeError(f"unknown role_id {request.role_id}")
     program = binding.tile_program
-    fallback = zlib.crc32(program.name.encode()) & 0xFFFFFFFF
-    return (program.program_id or fallback, program.version, program.program_hash or fallback)
+    if program.program_id <= 0 or program.program_hash <= 0 or program.version <= 0:
+      raise ValueError("dispatch requires a compiler-assigned program identity")
+    return (program.program_id, program.version, program.program_hash)
 
   def issue_registered(self, record: RegisteredAction, cycle: int) -> IssueResult:
     """Commit one already-eligible action with no hidden retry queue."""
 
     action = record.action
     try:
+      if action.op in (ExecGroupActionOp.PROFILE_RECONFIG, ExecGroupActionOp.MEMORY_MAINTENANCE):
+        command = action.args[0]
+        if self.task is None:
+          return IssueResult(IssueStatus.FAULT, reason="control operation has no Context")
+        owner = f"{self.task.binding_id}@{self.context_launch_generation}"
+        if (
+          action.op is ExecGroupActionOp.MEMORY_MAINTENANCE
+          and action.instruction_id not in self._dependency_receipts
+        ):
+          self.group.profile_controller.note_dependencies(owner, command.dependencies, cycle)
+          self._dependency_receipts.add(action.instruction_id)
+        if not self.group.profile_controller.submit(command, owner, cycle):
+          return IssueResult(IssueStatus.BACKPRESSURE, reason="configuration controller busy")
+        return IssueResult(
+          IssueStatus.ACCEPTED, asynchronous=True, completion_event=command.command_id, adapter="control"
+        )
+      if action.op in (
+        ExecGroupActionOp.DMA_PREFETCH,
+        ExecGroupActionOp.DMA_STORE,
+        ExecGroupActionOp.BIND_L2_VIEW,
+      ):
+        if self.group.profile_controller.issue_gate_closed("l2"):
+          return IssueResult(IssueStatus.BACKPRESSURE, reason="profile L2 issue gate")
+      if action.op is ExecGroupActionOp.BIND_L2_VIEW:
+        self.group.bind_l2_view(action.args[0], action.args[1], self, cycle)
+        if action.dst is None or not self.notify_event(action.dst, cycle):
+          return IssueResult(IssueStatus.FAULT, reason="L2 bind has no valid completion event")
+        return IssueResult(IssueStatus.ACCEPTED)
       if action.op is ExecGroupActionOp.INIT_STREAM:
         qid, depth, producer_mask, consumer_mask = action.args
         self.group.init_stream(
@@ -218,7 +246,9 @@ class TileGroupSequencer:
         if binding is None:
           return IssueResult(IssueStatus.FAULT, reason=f"unknown role_id {request.role_id}")
         event = action.dst or f"ev_role{request.role_id}"
-        result = self.group.dispatch_role(binding, cycle, request=request, event_id=event, sequencer=self)
+        result = self.group.dispatch_role(
+          binding, cycle, request=request, event_id=event, sequencer=self, source_ref=action.source_ref
+        )
         if not result:
           return result
         self._role_events[request.role_id] = event
@@ -234,6 +264,22 @@ class TileGroupSequencer:
 
       if action.op is ExecGroupActionOp.WAIT_EVENT:
         self.pmu.add_event("tgs_wait_event")
+        if self.task is None:
+          return IssueResult(IssueStatus.FAULT, reason="await has no Context")
+        self.group.profile_controller.note_await(
+          f"{self.task.binding_id}@{self.context_launch_generation}",
+          action.instruction_id,
+          tuple(action.args),
+          cycle,
+        )
+        if self.group.tracer is not None:
+          self.group.tracer.instant(
+            "TileGroup",
+            "Scheduler:Control",
+            "await",
+            cycle,
+            {"instruction_id": action.instruction_id, "events": action.args},
+          )
         return IssueResult(IssueStatus.ACCEPTED)
 
       if action.op is ExecGroupActionOp.BARRIER_GROUP:
@@ -254,6 +300,9 @@ class TileGroupSequencer:
         event = action.args[0]
         if not isinstance(event, str):
           return IssueResult(IssueStatus.FAULT, reason="invalid signal event")
+        if self.task is not None and event == self.task.completion_event:
+          if not self.group.retire_context_arena(self, cycle):
+            return IssueResult(IssueStatus.BACKPRESSURE, reason="root retirement pending")
         if not self.notify_event(event, cycle):
           return IssueResult(IssueStatus.FAULT, reason=f"event {event!r} rejected signal")
         self.pmu.add_event("tgs_signal_event")
@@ -264,6 +313,8 @@ class TileGroupSequencer:
         if not isinstance(request, ExecReleaseRequest):
           return IssueResult(IssueStatus.FAULT, reason="invalid L2 release request")
         self.group.release_l2(request, sequencer=self, cycle=cycle)
+        if action.dst is not None and not self.notify_event(action.dst, cycle):
+          return IssueResult(IssueStatus.FAULT, reason="L2 release completion rejected")
         self.pmu.add_event("tgs_release_l2")
         return IssueResult(IssueStatus.ACCEPTED)
     except (MemoryInvariantError, ValueError, RuntimeError) as exc:

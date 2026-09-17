@@ -17,7 +17,7 @@
 //         "placement": 1
 //       },
 //       "expected": {
-//         "时序/生命周期 Correctness": "count0 使用合法空 Context；没有 task.range、dispatch、phase waiter 或伪 participant",
+//"时序/生命周期 Correctness": "count0 使用合法空 Context；没有 task.range、dispatch、phase waiter 或伪 participant",
 //         "数值": "未建模；engine descriptor 与未初始化的合成输出只用于时序",
 //         "Liveness": "所有已接纳 Context 完成",
 //         "Scheduling Quality": "仅记录实际 service/等待，不声称最优调度"
@@ -29,7 +29,9 @@
 //       "node_programs": {}
 //     }
 builtin.module {
-  nest.context @ctx_0 (%arena: !nest.global_memref<4194304xbf16>) placement = 1 {
+  nest.context @ctx_0 (%arena: !nest.global_memref<4194304xbf16>) placement = 1
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+      logical_tasks = 0, l2_spm_bytes = 0, requested_contexts_per_tile = 1> {
     nest.return
   }
   nexus.program @run (%arena: !nest.global_memref<4194304xbf16>) {
