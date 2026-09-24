@@ -1,4 +1,5 @@
 # NEST/HSTI SRAM Bank Profile V1
+
 ## 调度器、Runtime 与 IR 资源合同设计 Proposal
 
 | 项目         | 内容                                                                       |
@@ -336,7 +337,6 @@ V1 中 `nest.release` 不意味着其他 Context 可以立即借走整个预留�
 Tile Program 通过 L1 Cache → L2 Cache 路径访问 HBM 时，合同不能只写“需要 L1 Cache”而忽略 L2。程序的环境约束必须明确哪一层要求非零 Cache、哪些层允许 Bypass。
 
 本版不自动推导新的 Bypass 实现。目标没有声明某种路径时，Loader 必须拒绝，而不是假设关闭该层 Cache 仍能工作。
-
 
 ---
 
@@ -698,7 +698,6 @@ Capacity Admission 本身不能证明整个 Fabric 无死锁。NoC/LSU/Cache 的
 
 取消后未完成的输出标记无效，后继不发射。V1 不承诺恢复取消时的中间 SRAM 状态。
 
-
 ---
 
 ## 14. IR 资源合同与阶段操作
@@ -1042,7 +1041,6 @@ Backend 原语可以由固件轮询、MMIO + Interrupt 或 RTL 状态机实现�
 诊断至少包含：Plan/Phase/Context、目标 Domain/Pool、当前/目标 Profile、Generation、等待资源、持有者列表或可定位的 Lease ID、尚未完成的请求类型。
 
 等待是正常状态，错误是无法继续遵守合同；两者不能使用同一个无区别的“Not Ready”日志掩盖。
-
 
 ---
 

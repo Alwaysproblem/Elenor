@@ -1,7 +1,7 @@
 # NEST / HSTI：Dual-Mode L1 SRAM 与 Multi-Context 在线资源调度设计
 
-> **状态**：当前对话阶段推荐设计  
-> **目标**：解决 `MatMul / regular context` 与 `Gather / irregular context` 在同一 Tile 上采用 multi-context 并发时，对 L1 SRAM 容量、Bank 模式、带宽和 Context admission 的冲突问题。  
+> **状态**：当前对话阶段推荐设计
+> **目标**：解决 `MatMul / regular context` 与 `Gather / irregular context` 在同一 Tile 上采用 multi-context 并发时，对 L1 SRAM 容量、Bank 模式、带宽和 Context admission 的冲突问题。
 > **核心原则**：编译器负责“每个 Context 需要什么资源”，运行时/L2 负责“当前哪些 Context 能同时 resident”。
 
 ---
@@ -159,8 +159,8 @@ Bank15  [ SPM | CACHE ]
 
 推荐称为：
 
-> **Dual-Purpose L1 Bank**  
-> 或  
+> **Dual-Purpose L1 Bank**
+> 或
 > **Reconfigurable L1 Bank**
 
 而不是“两套 SRAM”。
@@ -1249,7 +1249,7 @@ M0:
 
 但建议：
 
-> V1 先只做 Context completion release。  
+> V1 先只做 Context completion release。
 > V2 再加入 intra-context resource release event。
 
 ---
@@ -2285,4 +2285,3 @@ Admission interface
 ## 最终架构一句话
 
 > **NEST Tile 使用全 Bank SPM/Cache 双用途 L1 SRAM；Compiler 为每个 Context 提供资源合同与多个执行 profile；L2 在 Context 完成事件上采用 bounded lookahead 的在线多资源 packing 维持最多 4 个 sliding resident contexts，从而在不预测动态完成顺序、不迁移 live SRAM 数据的前提下，实现 MatMul、Gather 等 regular/irregular Context 的高效共驻与资源复用。**
-

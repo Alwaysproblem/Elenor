@@ -26,7 +26,7 @@
 ## R3
 
 > 状态更新于 2026-09-13，基于 ready-action 改造后的代码逐条核对（全量 342 tests 通过、CLI 实测）。
-> 每条含：原始意图（想做的事）→ 当前状态 → 剩余工作。编号沿用原列表（无 4 号项）。
+> 每条含：原始意图（想做的事）→ 当前状态 → 剩余工作。编号沿用原列表。
 
 1. **IR 对 nest.context 的资源显式配置与管理**
    - 想做：像 reference.mlir 那样在 nest.context 上声明编译器生成的资源合同（`#nest.context_resources<logical_tasks / l2_scratchpad_bytes / tile_l1_bytes_per_context / requested_contexts_per_tile>`、execution_model、epoch_model），供 admission 直接消费，而不是把 context 当普通 tile、资源需求靠推导。
@@ -39,27 +39,26 @@
      - L2 ✅：bundle 三态 admission（INVALID/PERMANENT 立即 fault、TEMPORARY 入 FIFO ticket 且等待零持有）；重试仅由 release final-free 通知触发（pool_version + capacity_change_cycle 双去重，无忙轮询）；event_table 容量不足走同一机制。
      - L1 ❌：TEMPORARY 容量不足在调度器层返回 BACKPRESSURE、action 留在候选表被逐周期重扫描，但这只是调度器行为，不是等待队列——IR_SPEC §4.2.1 明确 "does not change eager admission or add an L1 wait queue: software must order a capacity-dependent dispatch after the relevant free"，即合同仍是 eager admission + 编译器负责排序；cache/scratchpad 模式比较也没有（cache 是 fidelity 层 metadata-only，不参与 admission 决策）。
    - 剩余工作（若推进）：L1 版 WAIT_CAPACITY + tile.free 通知驱动的重试（对齐 L2 的 PR3.5 模式），以及编译器内存模式元数据进 admission；或显式决策维持现合同（编译器静态排序解决），把本项 L1 部分标记为"不进运行时"。
-   comments：
-    不必要，而且当前这种不对称是合理的设计，不是欠账。 理由五条：
+     comments：
+     不必要，而且当前这种不对称是合理的设计，不是欠账。 理由五条：
+   1. 粒度和等待时长不匹配。 L2 的 release 驱动 ticket 服务的是 context 级准入——粗粒度、等待长（等别的 context 整个跑完）、等待者少。L1 背压是 dispatch 级——等待时长由 resident 程序的 engine job 决定（几十到几千 cycle），同时等待者被 dispatch_capacity=8 / 候选表 16 上限约束。规模小一个量级。
+   2. 重试延迟可量化且是噪声。 扫描 cursor 每周期推进 scan_width=4，候选表内每条记录约每 len/scan_width ≈ 4 cycle 被重访一次。容量归还（terminal cleanup / tile.free）后，被阻塞的 dispatch 最多多等 ~4 cycle 才重试成功——相对数百上千 cycle 的等待本身，收益空间接近零。L2 则不同：ticket 唤醒保证
+      release 后下一周期就能 admit，对 context 级长等待这 1 cycle 差异虽也小，但 L2 的动机更多在“不做无谓重试”的合同清洁性。
+   3. FIFO ticket 会和 ready-action 语义打架。 L2 严格 FIFO 合法，因为 context 准入本来就是串行决策点（一个 context 整体进或整体等）。dispatch 现在是 s1/s2 乱序发射——若给 L1 等待加严格 FIFO ticket，等于在 dispatch 之间重新引入队头阻塞（N04 讨论过的那类 HOL），要么丢掉 ready-action 收益、要么再设计 bypass 规则。扫描重探测天然满足“阻塞自己、不阻塞别人 + RR 公平”。
+   4. 唤醒源异构，挂钩成本大于收益。 L2 只有一个唤醒源：release_l2 的 final-free（单一通知点 + pool_version 去重，干净）。L1 容量回来有多条路：每 tile 的 tile.free（高频、per-buffer）、grid terminal cleanup、跨 placement 多个 tile 的分配器状态变化。要做成通知驱动需要 per-tile pool version +
+      多源挂钩 + 调度器唤醒路径——为一个 ~4 cycle 的延迟优化复制整套 PR3.5 机制，不值。
+   5. 真正的解在上游，不在运行时。 L1 footprint 静态已知，L1 等待本就该被编译器消灭掉大部分：IR_SPEC §4.2.1 的合同（容量依赖的 dispatch 排在相关 free 之后）+ R3-1 的 resource_contract（声明 per-context L1 envelope，load 期就能静态检查峰值并发 footprint 是否超 tile_l1_bytes）。先做 R3-1 把 L1
+      等待变成编译期知识，比给运行时兜底路径加精密等待机制的 ROI 高得多。
+   6. 唤醒源异构，挂钩成本大于收益。 L2 只有一个唤醒源：release_l2 的 final-free（单一通知点 + pool_version 去重，干净）。L1 容量回来有多条路：每 tile 的 tile.free（高频、per-buffer）、grid terminal cleanup、跨 placement 多个 tile 的分配器状态变化。要做成通知驱动需要 per-tile pool version +
+      多源挂钩 + 调度器唤醒路径——为一个 ~4 cycle 的延迟优化复制整套 PR3.5 机制，不值。
+   7. 真正的解在上游，不在运行时。 L1 footprint 静态已知，L1 等待本就该被编译器消灭掉大部分：IR_SPEC §4.2.1 的合同（容量依赖的 dispatch 排在相关 free 之后）+ R3-1 的 resource_contract（声明 per-context L1 envelope，load 期就能静态检查峰值并发 footprint 是否超 tile_l1_bytes）。先做 R3-1 把 L1
+      等待变成编译期知识，比给运行时兜底路径加精密等待机制的 ROI 高得多。
 
-    1. 粒度和等待时长不匹配。 L2 的 release 驱动 ticket 服务的是 context 级准入——粗粒度、等待长（等别的 context 整个跑完）、等待者少。L1 背压是 dispatch 级——等待时长由 resident 程序的 engine job 决定（几十到几千 cycle），同时等待者被 dispatch_capacity=8 / 候选表 16 上限约束。规模小一个量级。
-    2. 重试延迟可量化且是噪声。 扫描 cursor 每周期推进 scan_width=4，候选表内每条记录约每 len/scan_width ≈ 4 cycle 被重访一次。容量归还（terminal cleanup / tile.free）后，被阻塞的 dispatch 最多多等 ~4 cycle 才重试成功——相对数百上千 cycle 的等待本身，收益空间接近零。L2 则不同：ticket 唤醒保证
-    release 后下一周期就能 admit，对 context 级长等待这 1 cycle 差异虽也小，但 L2 的动机更多在“不做无谓重试”的合同清洁性。
-    3. FIFO ticket 会和 ready-action 语义打架。 L2 严格 FIFO 合法，因为 context 准入本来就是串行决策点（一个 context 整体进或整体等）。dispatch 现在是 s1/s2 乱序发射——若给 L1 等待加严格 FIFO ticket，等于在 dispatch 之间重新引入队头阻塞（N04 讨论过的那类 HOL），要么丢掉 ready-action 收益、要么再设计 bypass 规则。扫描重探测天然满足“阻塞自己、不阻塞别人 + RR 公平”。
-    4. 唤醒源异构，挂钩成本大于收益。 L2 只有一个唤醒源：release_l2 的 final-free（单一通知点 + pool_version 去重，干净）。L1 容量回来有多条路：每 tile 的 tile.free（高频、per-buffer）、grid terminal cleanup、跨 placement 多个 tile 的分配器状态变化。要做成通知驱动需要 per-tile pool version +
-    多源挂钩 + 调度器唤醒路径——为一个 ~4 cycle 的延迟优化复制整套 PR3.5 机制，不值。
-    5. 真正的解在上游，不在运行时。 L1 footprint 静态已知，L1 等待本就该被编译器消灭掉大部分：IR_SPEC §4.2.1 的合同（容量依赖的 dispatch 排在相关 free 之后）+ R3-1 的 resource_contract（声明 per-context L1 envelope，load 期就能静态检查峰值并发 footprint 是否超 tile_l1_bytes）。先做 R3-1 把 L1
-    等待变成编译期知识，比给运行时兜底路径加精密等待机制的 ROI 高得多。
-    6. 唤醒源异构，挂钩成本大于收益。 L2 只有一个唤醒源：release_l2 的 final-free（单一通知点 + pool_version 去重，干净）。L1 容量回来有多条路：每 tile 的 tile.free（高频、per-buffer）、grid terminal cleanup、跨 placement 多个 tile 的分配器状态变化。要做成通知驱动需要 per-tile pool version +
-    多源挂钩 + 调度器唤醒路径——为一个 ~4 cycle 的延迟优化复制整套 PR3.5 机制，不值。
-    7. 真正的解在上游，不在运行时。 L1 footprint 静态已知，L1 等待本就该被编译器消灭掉大部分：IR_SPEC §4.2.1 的合同（容量依赖的 dispatch 排在相关 free 之后）+ R3-1 的 resource_contract（声明 per-context L1 envelope，load 期就能静态检查峰值并发 footprint 是否超 tile_l1_bytes）。先做 R3-1 把 L1
-    等待变成编译期知识，比给运行时兜底路径加精密等待机制的 ROI 高得多。
-
-    什么时候值得重访这个决定（建议写进 TODO 备注而不是现在做）：
-    - trace 里实测 release→issue 间隔显著大于扫描周期（比如候选表常年满 16 条、group_action_backpressure 占比高）；
-    - dispatch 并发规模大幅增长（action_capacity 扩到几十上百）；
-    - 出现需要严格 FIFO 准入次序的确定性合同；
-    - 若真要做，最小版本是 per-tile pool_version 门控重试（复用 L2 的去重思想、跳过明显无变化的周期），而不是全套 FIFO ticket。
+   什么时候值得重访这个决定（建议写进 TODO 备注而不是现在做）：
+   - trace 里实测 release→issue 间隔显著大于扫描周期（比如候选表常年满 16 条、group_action_backpressure 占比高）；
+   - dispatch 并发规模大幅增长（action_capacity 扩到几十上百）；
+   - 出现需要严格 FIFO 准入次序的确定性合同；
+   - 若真要做，最小版本是 per-tile pool_version 门控重试（复用 L2 的去重思想、跳过明显无变化的周期），而不是全套 FIFO ticket。
 
 3. **load/store 拆分为 L2↔L1 与 L1↔Register 两类**
    - 想做：当前 `tile.load.async` / `tile.store.async` 只有 L2↔L1 语义（简化设计）；后续增加 L1↔Register 一类 load/store，更好模拟真实硬件行为。
@@ -78,14 +77,49 @@
      - ✅ 单 context 内 buffer 跨 dispatch 复用（shared_A 测试：B 写 → D 读 → 最后读者释放）。
      - ❌ 显式共享分配合同（跨 context）：每个 context 的 L2 bundle 仍独占（`ContextBufferOwner(context, generation, slot)`），IR 无共享 alloc/引用语法——多个 context 用同一份 weight 仍需各自 alloc + 各自 prefetch，重复 IO 未消除；admission 无引用计数，释放无"最后使用者"合同。
    - 剩余工作：IR 共享分配/引用语法 + L2 admission 扩成引用计数（共享不重复计容量）+ 释放合同（最后使用者释放，需扩 release preflight）。
-   comments：
+     comments：
    - 分支复用和独立任务复用，不总能自然转化成局部 fusion, 如下图这种，A的结果就需要被同时供给 B 和 C，难以在局部 fusion 中消除重复IO。
-    ```
-          → B → ...
-    A → X
-          → C → ...
-    ```
+   ```
+         → B → ...
+   A → X
+         → C → ...
+   ```
 
+6. **L2 buffer 粒度释放（sub-arena extent 提前归还），恢复 release 驱动的提前准入**
+   - 想做（2026-09-22 用户拍板，为原始初衷）：单笔 `nest.release` 释放即把该 buffer 的 striped extent 归还 L2 free-map 并推进 pool_version，使 WAIT_CAPACITY 的后续 context 在前一个 context 的 input_released/release 当拍就 FIFO 重试准入、提前启动 load，而不是等前一个 context 整体退休。l2-admission-wait 的预期行为（B 在 A 仍算 pow 期间准入并开始 load）靠此恢复。
+   - 现状诊断（2026-09-22 trace + 代码核实）：当前为整 Arena 原子预留/释放。`ArenaPool.invalidate_view` 明确不还 extent（arena.py:353-359，"never return parent arena extents"；arena.py:840 "Deliberately no free-map or pool-version mutation"）；pool_version 仅在 commit_arena/retire_arena/reconfigure +1（arena.py:275/491/542）；port 重试门为 `(admission_version, slot_version)`（group_port `_admit_pending` + tile_group.py:1756 `admission_version` 首项即 pool_version）；`_l2_capacity_change_cycle` 只在 `retire_context_arena` 设置（tile_group.py:1318）。实证：l2-admission-wait 两档 trace 中 ctx_b cycle 1 进 WAIT_CAPACITY 后零重试，直到 ctx_a 完成同拍（runtime 17977 / full_memory 22052）才准入。
+   - 合同冲突点：IR_SPEC §940-943（L2 复用需 release + dominating Context barrier，否则保守存活至 Context 结束）需修订；`execution_ir.py:80` 的 "release-driven capacity change" 表述需与新语义对齐。
+   - 改动面预估：ArenaPool 支持 buffer 粒度 extent commit/free（striped 布局下各 buffer extent 天然不相交，可行性较好）+ pool_version/容量通知点下移；`release_l2` 现有 preflight（pin/inflight/依赖/ordinal 检查）可复用；**重写 test_runtime.py:3140 test_t09_t10_t14**（当前断言 `active_cycle >= ctx_a completion`、`active_peak == 1`，语义将反转）；更新 l2_admission_wait.mlir 文件头与 execution_ir.py:80；全量回归 + 该场景两档 trace 验证（预期 ctx_b 在 a_input 释放当拍准入、load 与 A 的 pow overlap）。
+   - [TODO] 需要增加 mlir 的 example，对 memory profile 变化的时候, 就不以将下一个的 op 的 load 提前到当前 context 的 release 当拍，而是在当前的 context 跑完了也就是 HBM store 完成之后 profile 切换完成后再进行 load。
+   - 风险与代价（2026-09-22 更新）：
+     1. **正确性：释放后的滞后访问**。现模型下 extent 在 run 内永不回收，退休时有全量 drain 屏障（routes/leases/jobs 全零），天然免疫"释放后仍有慢访问"。buffer 级归还后，quiescence 证据只剩 release preflight 的 pin/inflight 计数——需审计所有可能滞后触碰该 extent 的路径（cache dirty line 延迟写回、MSHR drain、profile/maintenance 命令、其它 transaction 名下的在飞 prefetch 腿），漏一条就是新占用者 B 的数据被写坏。
+     2. **正确性：A 的回绑（release 即 forfeiture）**。A 的 Arena 布局编译期固定，若 A 后续 view（同 context 内 offset 复用）绑入已归还、且已被 B 占用的 extent → 跨 context 数据损坏。合同必须明确 released extent 对 A 永久 forfeited，编译器/verifier 保证 released 区域之后无任何 bind；当前 resources.py 的 L2 复用窗口以 retirement fence 为界，需重新推导。
+     3. **原子性与记账**：Arena 出现"部分释放"新状态——`l2_reserved_bytes`/live bytes/per-bank 占用、report 的 arenas 段、PMU 计数都要改按 extent 粒度记账；cancel/reset 的 drain 路径须防 double-free；`arena_lifetime` trace 语义不再是"容量占用窗口"，需重定义。
+     4. **碎片与等待分类**：逐 buffer 归还的 striped extent 可能与剩余空闲 extent 拼不出 B 的 striped 几何——字节够但放不下，B 继续等；`can_ever_fit` 的 TEMPORARY/PERMANENT 判定需重审，避免"永远放不进却反复重试"。
+     5. **静态合同削弱**：IR_SPEC §940-943 的 dominating barrier 是编译期可验证的复用安全证明；移除后安全证明下沉为运行时动态检查（pin/inflight），编译期可验证性变弱；profile reconfig 的 quiescence 证明（按 arena 粒度 owner 假设）同样要重审。
+     6. **回归面**：`test_t09_t10_t14` 语义反转重写；凡含 `nest.release` 的场景两档时序全变（136 corpus 场景 + 全部 trace artifacts 需重生成）；port 重试频次随 pool_version 变化频率上升，需确认 FIFO 队头阻塞行为不变。
+     7. **与 R3-5 耦合**：共享 L2 的引用计数与 buffer 级 extent 归还都操作 free-map，必须协同设计（共享 buffer 被一方 release 时，extent 归还受 refcount 门控）。
+     8. **收益预期管理**：R3-6 只救"L2 容量阻塞"的流水线（l2-admission-wait 类）。matmul-pow-free-slot 的 pow 是 device slot 阻塞、matmul17 的 pow 是数据依赖 + HBM 往返阻塞——R3-6 对这两条 example 的 overlap 无直接帮助。实施前应在真实 workload 上量化 L2 容量等待占比，再决定优先级。
+
+
+## example
+
+- 当前 matmul17_pow_tail_overlap 里面中 tile program pow 中， 并不是只有一个 pow，当前是两个 pow 串行， trace 显示它们依次被调度执行。
+- 当前 l2-admission-wait 这个后面的 load 行为并没有和 前一个 的 pow 进行 overlap ，理论上 input release 过后下一个可以立即开始加载，而不必等待前一个 pow 完全结束。
+  - 2026-09-22 诊断：调度/依赖均正确，根因是整 Arena 粒度预留释放（见 R3-6）。已拍板走 R3-6 的 buffer 粒度释放方案，待实施。
+- 当前 matmul_pow_free_slot 并没有连起来起来
+  - 2026-09-22 诊断：调度无 bug（first-free-slot 两档一致，pow 均在 matmul 完成 +1 拍接管 slot）。不 overlap 主因是 HBM 整腿单通道（transfer.py:1096-1104，`(addr//64)%8`）+ 该场景地址全 64KB 对齐塌缩到 Ch:0。run.sh 地址已错开（总周期 45088→33496，gap 6216→2611），但 C store 512KB 等距步距使 4 笔 store 结构性锁同通道，彻底恢复 overlap 需 per-burst 通道条纹——**是否实施待定**。matmul17-pow-tail-overlap 同根因（另叠加 pow 消费路径绕 HBM、无 L2 直通）。
+- [TODO] 需要增加 mlir 的 example，对 memory profile 变化的时候, 就不以将下一个的 op 的 load 提前到当前 context 的 release 当拍，而是在当前的 context 跑完了也就是 HBM store 完成之后 profile 切换完成后再进行 load。
+- 需要增加大型 reduceSum 或者 reduceMax 这类算子的 例子，大概思路是 reduce tile 之后 在 L2 上进行聚合
+
+## 需要调研的问题
+
+- 当前的 context wait，只负责自己的 context wait。理论上如果 profile 切换的时候，理论上 profile 之间切换的时候也需要一个 await，需要详细地考虑当前的 await 是不是阻塞所有的 context，还是只管自己的 context 的 await。然后需要将多个 context await，就是这种 context 之间的 await，交给 device 去做。这个 idea 需要什么，需要详细地去做论证。（**注释：IR 上我决定不允许 一个 context 有多个 profile phase 来切换 memory的 profile**）
+- 这个 await 理论上应该是由编译器去做，但是呢，编译器并不知道实际 runtime 的调度模型，所以说这个 await 需要在什么时候加，理论上应该是取决于 runtime 才对。当然这个的话后续也需要详细地去讨论和调研。如果是由编译器加，如何该去加，在什么状态下去加这个 await。因为理论上来说，编译器是只知道 allow profile，但是它是不知道整个的这个具体的调度信息的。
+- 还有一个问题理论上 matmul 在所有的 tile context 打满的时候 不一定 占满 整个SPM 所以 SPM = 100 的时候其实可能存在部分空闲，所有并不是所有的 matmul 就是 SPM = 100 就性能最好，但是 编译器是不知道调度信息的，编译器怎么知道什么时候 SPM 不能占满呢？也是就是说假设有 17 个 matmul 的 context 和一个 gather， 编译器不知道调度信息，那么就有可能说：
+  - 编译器没法判断 SPM 不是 100的时候 可能没办法跑满 16 个， 还是不满的时候就可以跑满 16 个。
+  - 编译器不知道是不是 这 16 个 matmul context 能够同时跑
+  - 编译器无法准确预测 SPM 的实际占用情况
 
 ## 未来需要考虑的问题暂时先不考虑
 
@@ -115,8 +149,7 @@ BOA 这类计算单元的 register file 装载需要硬件级流水设计。理�
 
 后续需要做自动切分（auto partition）：按"易于 fusion + 计算占比 > I/O 占比"的规则切分子图，再交给调度。注意：group 级已默认启用 ready-action（S1，独立分支可越过慢等待），fusion 的相对收益结构可能与早期 trace 观察时不同，制定 partition 规则前应基于新调度器重新测量。
 
-
-----
+---
 
 1. 每次 profile 切换都必须进行完整的等待，插入等待这一工作由编译器来做，但是这部分需要在 IR 中显示声明
-2. 
+2.

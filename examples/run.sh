@@ -87,7 +87,6 @@ case "$name" in
       --input-binding table=0x200000:8388608:r \
       --input-binding indices=0xA00000:4096:r \
       --input-binding output=0xB00000:256:w \
-      --sim-override fidelity=full_memory \
       --max-cycles 200000 \
       "$@"
     ;;
@@ -100,7 +99,6 @@ case "$name" in
       --input-binding table=0x200000:8388608:r \
       --input-binding indices=0xA00000:4096:r \
       --input-binding output=0xB00000:32768:w \
-      --sim-override fidelity=full_memory \
       --max-cycles 200000 \
       "$@"
     ;;
@@ -113,7 +111,6 @@ case "$name" in
       --input-binding table=0x200000:8388608:r \
       --input-binding indices=0xA00000:4096:r \
       --input-binding output=0xB00000:32768:w \
-      --sim-override fidelity=full_memory \
       --max-cycles 200000 \
       "$@"
     ;;
@@ -133,7 +130,6 @@ case "$name" in
       --input-binding rhs1=0x170000:65536:r \
       --input-binding indices1=0x190000:256:r \
       --input-binding output1=0xD00000:131072:w \
-      --sim-override fidelity=full_memory \
       --max-cycles 500000 \
       "$@"
     ;;
@@ -147,7 +143,6 @@ case "$name" in
       --input-binding A=0x100000:262144:r \
       --input-binding B=0x150000:65536:r \
       --input-binding C=0x200000:2097152:w \
-      --sim-override fidelity=full_memory \
       --max-cycles 500000 \
       "$@"
     ;;
@@ -163,7 +158,6 @@ case "$name" in
       --input-binding C=0x200000:1048576:w \
       --input-binding Y0=0x400000:262144:rw \
       --input-binding Y1=0x440000:262144:rw \
-      --sim-override fidelity=full_memory \
       --max-cycles 500000 \
       "$@"
     ;;
@@ -179,7 +173,6 @@ case "$name" in
       --input-binding C=0x200000:2097152:w \
       --input-binding Y0=0x400000:262144:rw \
       --input-binding Y1=0x440000:262144:rw \
-      --sim-override fidelity=full_memory \
       --max-cycles 500000 \
       "$@"
     ;;
@@ -193,7 +186,6 @@ case "$name" in
       --input-binding A=0x100000:262144:r \
       --input-binding B=0x150000:65536:r \
       --input-binding C=0x200000:2097152:rw \
-      --sim-override fidelity=full_memory \
       --max-cycles 500000 \
       "$@"
     ;;
@@ -207,7 +199,6 @@ case "$name" in
       --input-binding A=0x100000:655360:r \
       --input-binding B=0x1A0000:32768:r \
       --input-binding C=0x200000:2621440:rw \
-      --sim-override fidelity=full_memory \
       --max-cycles 500000 \
       "$@"
     ;;
@@ -227,7 +218,6 @@ case "$name" in
       --input-binding rhs1=0x170000:65536:r \
       --input-binding indices1=0x190000:256:r \
       --input-binding output1=0xD00000:131072:w \
-      --sim-override fidelity=full_memory \
       --max-cycles 500000 \
       "$@"
     ;;
@@ -270,7 +260,6 @@ case "$name" in
       --ir-file "$ROOT_DIR/examples/scenarios/l2_admission_wait.mlir" \
       --hw-config "$ROOT_DIR/examples/configs/profile_l2_256k.yaml" \
       --hw-override num_dma_channels=2 \
-      --sim-override fidelity=full_memory \
       --hw-override hbm_fixed_latency_cycles=10 \
       --context-mode 2 \
       --device-context-mode 2 \
@@ -306,7 +295,6 @@ case "$name" in
     fi
     nest_args=(
       --ir-file "$model_path"
-      --sim-override fidelity=full_memory
       --hw-override num_dma_channels=2
       --hw-override hbm_fixed_latency_cycles=10
       --context-mode 4

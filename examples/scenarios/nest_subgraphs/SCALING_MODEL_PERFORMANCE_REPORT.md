@@ -8,19 +8,19 @@
 
 ## 1. 总览
 
-| 类别          |    数量 |    完成 | fault | verify-reject |
-| ------------- | ------: | ------: | ----: | ------------: |
-| NEST 子图          |     112 |     108 |     2 |             2 |
-| 真实 workload      |      13 |      13 |     0 |             0 |
-| Protocol scenario  |       4 |       4 |     0 |             0 |
-| **合计**           | **129** | **125** | **2** |         **2** |
+| 类别              |    数量 |    完成 | fault | verify-reject |
+| ----------------- | ------: | ------: | ----: | ------------: |
+| NEST 子图         |     112 |     108 |     2 |             2 |
+| 真实 workload     |      13 |      13 |     0 |             0 |
+| Protocol scenario |       4 |       4 |     0 |             0 |
+| **合计**          | **129** | **125** | **2** |         **2** |
 
-| 全局指标                      | 值                                                             |
-| ----------------------------- | -------------------------------------------------------------- |
+| 全局指标 | 值  |
+| -------- | --- |
 
-| trace 提取错误                | 0（125 份与独立提取器逐字段一致）                              |
-| group_ordering_stall 非零     | **0**——S1 默认下全部 125 case 无 head-order 挡住 eligible 动作 |
-| backpressure 非零（NEST）     | 12 cases——UCE pin 争用 / 细粒度依赖密集                        |
+| trace 提取错误 | 0（125 份与独立提取器逐字段一致） |
+| group_ordering_stall 非零 | **0**——S1 默认下全部 125 case 无 head-order 挡住 eligible 动作 |
+| backpressure 非零（NEST） | 12 cases——UCE pin 争用 / 细粒度依赖密集 |
 | backpressure 非零（workload/protocol） | **0**——真实负载与 protocol 的 context 配置无 pin 争用 |
 
 ## 2. NEST 子图：按映射类型聚合
@@ -58,23 +58,24 @@
 
 不跨 workload 比原始周期（shape/bytes 不同）。用 compute_active/cycles 判断计算-IO 主导关系，用 MFE load/store service 判断 IO 瓶颈。
 
-| workload                  |  cycles | compute |     ratio |    BOA |    EVU |  HBM | MFE load svc | MFE store svc | UCE issue | ctx_switch | ord_stall | bkpr |
-| ------------------------- | ------: | ------: | --------: | -----: | -----: | ---: | -----------: | ------------: | --------: | ---------: | --------: | ---: |
-| gather                    |   1,197 |       0 |      0.0% |      0 |      0 |    2 |           18 |            39 |        11 |          0 |         0 |    0 |
-| gather_matmul             |  15,579 |   1,028 |      6.6% |  1,028 |      0 |    4 |        3,750 |         3,706 |        17 |          0 |         0 |    0 |
-| matmul_gather_add         |  15,402 |   1,035 |      6.7% |  1,028 |      7 |    4 |        3,750 |         3,706 |        19 |          0 |         0 |    0 |
-| matmul_2048x512_boa256    | 166,051 |  65,664 | **39.5%** | 65,664 |      0 |   12 |      119,424 |       297,165 |       304 |        105 |         0 |    0 |
-| gather_matmul_4t_2ctx     |  66,728 |   8,224 |     12.3% |  8,224 |      0 |    8 |       30,000 |        57,640 |       136 |         14 |         0 |    0 |
-| matmul_gather_add_4t_2ctx |  66,742 |   8,280 |     12.4% |  8,224 |     56 |    8 |       30,000 |        57,644 |       152 |         14 |         0 |    0 |
-| matmul_pow_parallel       | 147,124 |  49,264 |     33.5% | 32,832 | 16,432 |   10 |      119,264 |       222,047 |       272 |         77 |         0 |    0 |
-| matmul_pow_free_slot      | 225,025 |  82,096 |     36.5% | 65,664 | 16,432 |   16 |      178,976 |       466,897 |       424 |        129 |         0 |    0 |
-| matmul_pow_data_dep       | 368,954 | 131,248 |     35.6% | 65,664 | 65,584 |   16 |      324,384 |       502,127 |       424 |        143 |         0 |    0 |
-| matmul17_pow_tail_overlap | 366,205 | 147,664 | **40.3%** | 82,080 | 65,584 |   19 |      343,044 |       540,196 |       473 |        147 |         0 |    0 |
-| pow_dual_context          |  55,157 |   8,216 |     14.9% |      0 |  8,216 |    4 |       29,776 |        64,272 |        72 |         12 |         0 |    0 |
-| pow_dual_ctx_mixed_shapes |  87,786 |   8,216 |      9.4% |      0 |  8,216 |    4 |       40,528 |       104,764 |        72 |         12 |         0 |    0 |
-| pow_sequential_contexts   |  81,136 |   8,216 |     10.1% |      0 |  8,216 |    4 |       29,776 |        29,776 |        72 |          0 |         0 |    0 |
+| workload                  |  cycles | compute |     ratio |    BOA |    EVU | HBM | MFE load svc | MFE store svc | UCE issue | ctx_switch | ord_stall | bkpr |
+| ------------------------- | ------: | ------: | --------: | -----: | -----: | --: | -----------: | ------------: | --------: | ---------: | --------: | ---: |
+| gather                    |   1,197 |       0 |      0.0% |      0 |      0 |   2 |           18 |            39 |        11 |          0 |         0 |    0 |
+| gather_matmul             |  15,579 |   1,028 |      6.6% |  1,028 |      0 |   4 |        3,750 |         3,706 |        17 |          0 |         0 |    0 |
+| matmul_gather_add         |  15,402 |   1,035 |      6.7% |  1,028 |      7 |   4 |        3,750 |         3,706 |        19 |          0 |         0 |    0 |
+| matmul_2048x512_boa256    | 166,051 |  65,664 | **39.5%** | 65,664 |      0 |  12 |      119,424 |       297,165 |       304 |        105 |         0 |    0 |
+| gather_matmul_4t_2ctx     |  66,728 |   8,224 |     12.3% |  8,224 |      0 |   8 |       30,000 |        57,640 |       136 |         14 |         0 |    0 |
+| matmul_gather_add_4t_2ctx |  66,742 |   8,280 |     12.4% |  8,224 |     56 |   8 |       30,000 |        57,644 |       152 |         14 |         0 |    0 |
+| matmul_pow_parallel       | 147,124 |  49,264 |     33.5% | 32,832 | 16,432 |  10 |      119,264 |       222,047 |       272 |         77 |         0 |    0 |
+| matmul_pow_free_slot      | 225,025 |  82,096 |     36.5% | 65,664 | 16,432 |  16 |      178,976 |       466,897 |       424 |        129 |         0 |    0 |
+| matmul_pow_data_dep       | 368,954 | 131,248 |     35.6% | 65,664 | 65,584 |  16 |      324,384 |       502,127 |       424 |        143 |         0 |    0 |
+| matmul17_pow_tail_overlap | 366,205 | 147,664 | **40.3%** | 82,080 | 65,584 |  19 |      343,044 |       540,196 |       473 |        147 |         0 |    0 |
+| pow_dual_context          |  55,157 |   8,216 |     14.9% |      0 |  8,216 |   4 |       29,776 |        64,272 |        72 |         12 |         0 |    0 |
+| pow_dual_ctx_mixed_shapes |  87,786 |   8,216 |      9.4% |      0 |  8,216 |   4 |       40,528 |       104,764 |        72 |         12 |         0 |    0 |
+| pow_sequential_contexts   |  81,136 |   8,216 |     10.1% |      0 |  8,216 |   4 |       29,776 |        29,776 |        72 |          0 |         0 |    0 |
 
 **关键观察**：
+
 - **group_ordering_stall = 0 / backpressure = 0**：13 个真实 workload 全部无 ready-action head-order 阻塞、无 pin 争用——调度器在真实负载下行为干净。
 - **计算占比分层**：
   - 计算主导（≥35%）：matmul_2048x512（39.5%）、matmul17_pow_tail（40.3%）、matmul_pow 系列（33-37%）——大 GEMM + pow 组合，BOA 计算量大。
@@ -87,12 +88,12 @@
 
 4 份 protocol scenario 不是性能 benchmark，而是验证调度器在边界条件下的**正确性与可观察性**：
 
-| scenario | cycles | 验证目标 | 结果 |
- | --- | ---: | --- | --- |
- | ready-action-branch | 17,339 | S1 下独立分支越过慢等待；S0 下不能（配对对照） | ✅ S1=17,339 vs S0=18,326（−5.4%），独立 prefetch 在慢 store 完成前发射 |
- | device-dependency-submit | 13,250 | CPU submit 依赖（WAIT_DEPS）不占硬件额度；独立 B 不被 C→A 依赖挡住 | ✅ C cycle 1 submit 但 cycle 5,050 才 admit；B cycle 2 已 admit |
- | l2-admission-wait | 29,051 | L2 容量不足 WAIT_CAPACITY → FIFO ticket → release 驱动重试 | ✅ release 驱动唤醒保留，cycle 29,051 完成 |
- | sequential-release-counterexample | 74,444 | 顺序 release 反例：store 排空期间 context 不提前释放 | ✅ Store 完成前不 context_done，当前完成合同正确 |
+| scenario                          | cycles | 验证目标                                                           | 结果                                                                    |
+| --------------------------------- | -----: | ------------------------------------------------------------------ | ----------------------------------------------------------------------- |
+| ready-action-branch               | 17,339 | S1 下独立分支越过慢等待；S0 下不能（配对对照）                     | ✅ S1=17,339 vs S0=18,326（−5.4%），独立 prefetch 在慢 store 完成前发射 |
+| device-dependency-submit          | 13,250 | CPU submit 依赖（WAIT_DEPS）不占硬件额度；独立 B 不被 C→A 依赖挡住 | ✅ C cycle 1 submit 但 cycle 5,050 才 admit；B cycle 2 已 admit         |
+| l2-admission-wait                 | 29,051 | L2 容量不足 WAIT_CAPACITY → FIFO ticket → release 驱动重试         | ✅ release 驱动唤醒保留，cycle 29,051 完成                              |
+| sequential-release-counterexample | 74,444 | 顺序 release 反例：store 排空期间 context 不提前释放               | ✅ Store 完成前不 context_done，当前完成合同正确                        |
 
 全部 4 份 group_ordering_stall=0、backpressure=0——协议边界行为干净。
 
@@ -112,19 +113,19 @@
 
 ### 5.2 不适合（当前模型表现差）
 
-| 特征                                 | NEST 证据                                           | workload 证据                               | 原因                                                                     |
-| ------------------------------------ | --------------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------ |
-| **I/O 主导（计算占比 <10%）**        | N01（0.19%）、s11_n3_100（0.50%）、s09_large（~1%） | gather（0%）、gather_matmul（6.6%）         | 周期被 HBM bandwidth / Store 排空决定，调度器无法加速搬运                |
-| **跨 context 切分（node）**          | 平均 +23-60% 开销                                   | —（workload 无同拓扑 node 对照）            | 每个 context 边引入 HBM prefetch+store 往返；HBM 字节翻倍                |
-| **粗粒度跨 context 事件门（stage）** | S08 stage 比 single 慢 27%                          | —                                           | context_done 携带无关组尾（§8.3 不足二未解决）                           |
-| **UCE pin 争用**                     | s02_same_pin 75,766 vs 59,027（+28.4%）；backpressure 20,540 cycles | —（workload 无 pin 争用） | 共享 pin0 把 4 个物理 context 压成 1 个有效吞吐；修复在编译器 pin 分配策略 |
-| **Store 排空长尾**                   | N01 Store 占 99.8% 周期                             | matmul_pow_data_dep store 502K cycles       | device slot 在 Store 期间保留（§8.5 P3 未实施）                          |
-| **单资源热点**                       | §8.6：104/104 HBM 只用 channel0                     | —（workload 未开 --memory-trace 细查 bank） | 模型限制（transfer.py 单通道 + allocator bank0 first-fit），非调度器 bug |
+| 特征                                 | NEST 证据                                                           | workload 证据                               | 原因                                                                       |
+| ------------------------------------ | ------------------------------------------------------------------- | ------------------------------------------- | -------------------------------------------------------------------------- |
+| **I/O 主导（计算占比 <10%）**        | N01（0.19%）、s11_n3_100（0.50%）、s09_large（~1%）                 | gather（0%）、gather_matmul（6.6%）         | 周期被 HBM bandwidth / Store 排空决定，调度器无法加速搬运                  |
+| **跨 context 切分（node）**          | 平均 +23-60% 开销                                                   | —（workload 无同拓扑 node 对照）            | 每个 context 边引入 HBM prefetch+store 往返；HBM 字节翻倍                  |
+| **粗粒度跨 context 事件门（stage）** | S08 stage 比 single 慢 27%                                          | —                                           | context_done 携带无关组尾（§8.3 不足二未解决）                             |
+| **UCE pin 争用**                     | s02_same_pin 75,766 vs 59,027（+28.4%）；backpressure 20,540 cycles | —（workload 无 pin 争用）                   | 共享 pin0 把 4 个物理 context 压成 1 个有效吞吐；修复在编译器 pin 分配策略 |
+| **Store 排空长尾**                   | N01 Store 占 99.8% 周期                                             | matmul_pow_data_dep store 502K cycles       | device slot 在 Store 期间保留（§8.5 P3 未实施）                            |
+| **单资源热点**                       | §8.6：104/104 HBM 只用 channel0                                     | —（workload 未开 --memory-trace 细查 bank） | 模型限制（transfer.py 单通道 + allocator bank0 first-fit），非调度器 bug   |
 
 ## 6. 按模型类型的适用性总结
 
-| 模型类型                        | 代表 example                | 适合？                          | 关键判断                                                                                                                      |
-| ------------------------------- | --------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| 模型类型                        | 代表 example                | 适合？                           | 关键判断                                                                                                                      |
+| ------------------------------- | --------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
 | **Dense GEMM 链**               | S01 / matmul_2048x512       | ✅ 适合                          | 计算主导；single 最优；4 context x placement15 x 4 task 的 2048x512 matmul 166K cycles，compute 39.5%                         |
 | **Gather / 随机访存**           | gather / gather_matmul      | ⚠️ 有限                          | Gather 本质 IO 主导（compute 0-6.6%）；调度器无法加速随机访存延迟；Gather 的 L1 cache/MSHR 建模是独立瓶颈                     |
 | **GEMM + Gather 混合**          | matmul_gather_add / 4t_2ctx | ⚠️ 谨慎                          | 多 tile 多 context 下 compute 12%，IO 仍占大头；4tiles_2ctx 的 ctx_switch=14 说明跨 context 开销可见                          |
@@ -133,7 +134,7 @@
 | **GEMM + pow 尾块重叠**         | matmul17_pow_tail_overlap   | ✅ 适合                          | 17 个 tile context（4×placement15 + 1×placement1 尾块）；尾块独占 tile0 时 pow 提前占用其余资源；compute 40.3% 全 corpus 最高 |
 | **slot 复用 / free-slot 调度**  | matmul_pow_free_slot / T04  | ✅ 适合                          | 首个 matmul 提前结束释放 slot 给 pow；device slot 复用有效                                                                    |
 | **多独立链并行**                | S02 / pow_dual_context      | ✅ 适合                          | 独立链各自推进；pow_dual 14.9% compute                                                                                        |
-| **顺序提交对照**                | pow_sequential_contexts     | —（反例）                       | 顺序提交下 store=load（无重叠）；作为并发提交的对照组                                                                         |
+| **顺序提交对照**                | pow_sequential_contexts     | —（反例）                        | 顺序提交下 store=load（无重叠）；作为并发提交的对照组                                                                         |
 | **Fan-out / 广播**              | S03                         | ✅ 适合                          | L2 内共享高效；input-only 早释放有效                                                                                          |
 | **Fan-in / Join**               | S04                         | ✅ 适合                          | 正确等待全部前驱                                                                                                              |
 | **残差 / skip connection**      | S05                         | ✅ 适合                          | identity skip 不复制数据                                                                                                      |
