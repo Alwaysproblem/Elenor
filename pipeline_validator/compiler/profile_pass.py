@@ -499,6 +499,8 @@ def bind_profiles(
   awaited: dict[str, str] = {}
   submitted: set[str] = set()
   previous_accesses: list[tuple[str, tuple[_GlobalAccess, ...]]] = []
+  l2_epoch = 0
+  submit_l2_epochs: dict[str, tuple[int, int]] = {}
 
   def wait_events(events, trigger: ExecDeviceOp, reason: str) -> None:
     ref = _generated(trigger.source_ref, "profile_boundary_pass", reason)
@@ -512,6 +514,7 @@ def bind_profiles(
       active.pop(event, None)
 
   def reconfigure(level: str, old: int, new: int, trigger: ExecDeviceOp) -> None:
+    nonlocal l2_epoch
     if old == new:
       return
     frontier = tuple(history[level])
@@ -535,6 +538,8 @@ def bind_profiles(
     output.append(
       ExecDeviceOp("profile_reconfig", command=command, source_ref=ref, instruction_id=command.command_id)
     )
+    if level == "l2":
+      l2_epoch += 1
     history[level].clear()
 
   for source_op in entry.body:
@@ -604,6 +609,13 @@ def bind_profiles(
       producers = [event for event, old in active.items() if _has_l1(tasks[old.binding_id])]
       wait_events(producers, submit, "acquire exclusive L1 root interval")
     reconfigure("l2", current.l2_mode, target_l2, submit)
+    for shared_input in bound.shared_inputs:
+      producer_epoch = submit_l2_epochs.get(shared_input.producer_binding_id)
+      if producer_epoch != (target_l2, l2_epoch):
+        raise ValueError(
+          f"shared input in Context {bound.name!r} crosses its producer's L2 profile epoch"
+        )
+    submit_l2_epochs[submit.binding_id] = (target_l2, l2_epoch)
     reconfigure("l1", current.l1_mode, target_l1, submit)
     tasks[submit.binding_id] = bound
     bindings[submit.binding_id] = binding

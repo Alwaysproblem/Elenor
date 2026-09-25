@@ -256,6 +256,14 @@ whole Arena, including padding. A generated `BIND_L2_VIEW` action binds this
 buffer's valid-byte segments at its compiled lifetime start; the source op is
 not a standalone dynamic allocation.
 
+`sharing` is optional and defaults to `private`; its only other value is
+`readonly`. A readonly allocation is local producer storage until it is
+published once with `nest.publish`; publication seals the initialized bytes and
+creates no additional allocation. A consumer obtains its typed readonly import
+with `nexus.shared.ref` on a producer submit result and passes that reference as
+a context actual. Imported views are aliases, not entries in the consumer's
+`ArenaLayout` or private L2 reservation.
+
 ### 3.2 `nest.subview`
 
 ```mlir
@@ -386,39 +394,72 @@ Collective engine op (reduce/broadcast/multicast). Produces one event.
 nest.release %buf depends_on(%reader_inrel, %prefetch_ev, %store_ev)
 ```
 
-Invalidates the Context-owned L2 buffer view after its required closure. For
-**every** allocation role, the dependency SSA set is exactly
+Invalidates the Context-owned L2 view after its required closure. Local
+`nest.alloc` defaults to `sharing="private"`; an allocation may opt into
+`sharing="readonly"` only when it is exported through exactly one
+`nest.publish`:
+
+```mlir
+%published = nest.publish %weight depends_on(%prefetched) : !nest.event<"published">
+%shared = nexus.shared.ref %producer_done slot = "W" : !nest.l2_buffer<64x64xbf16>
+```
+
+`nest.publish` seals the initialized backing after the producer's last access.
+Its direct dependencies cover every prefetch and Store completion, reader
+`input_released` and writer `output_ready` for that buffer; publication
+requires full-view initialization. A full-buffer prefetch establishes this
+by destination coverage and equal byte count even if its HBM source view has
+a different shape. A published backing is immutable. Producer release revokes
+only its own view, not any declared reader claim. `nexus.shared.ref` identifies
+one producer submit instance and
+export slot; it creates no physical allocation. Imported `!nest.l2_buffer`
+formals are read-only, follow all HBM global formals, and must match each
+submit actual's shape and dtype exactly.
+
+For a local private allocation, the dependency SSA set is exactly
 `R(buffer) ∪ P(buffer) ∪ S(buffer)`:
 
 - `R`: `input_released` of every distinct dispatch that actually reads it.
 - `P`: every prefetch completion into this allocation.
 - `S`: every HBM Store completion from this allocation, not just the last.
 
-No duplicate dependencies, `grid_done` substitutions, or reader
-`output_ready` substitutions are allowed. Canonical order is readers by
-dispatch ordinal, prefetches in source order, then Stores in source order.
+An exported readonly allocation additionally depends on its publish event.
+An imported readonly view requires its `input_released` and every Store
+completion that reads it as a source. No duplicate dependencies,
+`grid_done` substitutions, or reader `output_ready` substitutions are allowed.
+Examples list readers by dispatch ordinal, then prefetches and Stores in
+source order. Verification treats dependencies as a set; lowering preserves
+author order and appends inferred bind/hazard dependencies without duplicates.
 An input buffer with no asynchronous use may have an empty dependency set.
-Role `"in"` forbids Tile writes; `"out"`/`"inout"` require a real Tile
-writer and at least one HBM Store.
+Private role `"in"` forbids Tile writes; private `"out"`/`"inout"` still require
+a real Tile writer and at least one HBM Store. A published readonly
+`"out"`/`"inout"` export may instead feed
+readers directly without an intermediate HBM Store.
 
-Every allocation has exactly one release before `nest.return`; no binding,
-prefetch, Store, or other buffer use may appear after it. Runtime preflights
-events, owner, role, Arena/allocation/Profile generations, reader/writer
-phases, remaining pins, and in-flight transactions before mutation. Failed
-preflight cannot partially sweep writers.
+Every local allocation has exactly one release before `nest.return`; no
+binding, prefetch, Store, or other buffer use may appear after it. Runtime
+preflights events, owner, role, Arena/allocation/Profile generations,
+reader/writer phases, remaining pins, and in-flight transactions before
+mutation. Failed preflight cannot partially sweep writers. Every imported
+formal is released exactly once; use after release, duplicate release,
+wrong producer/slot, or a writable use is rejected.
 
-A successful L2 release is a **permanent forfeiture** for this invocation: the
-owner view is invalidated and the owner loses all access rights. The release
-itself only revokes the logical view. Once every private reference to the
-buffer's physical backing is gone and the backing's pins and accepted
-transactions have drained safely, the unique backing finalizer returns the
-buffer's complete stripe-rounded padded span (not just the valid bytes) to the
-same L2 free map; the pool version moves only at that physical final-free.
-`nest.barrier` never re-grants a forfeited owner's rights and never re-binds a
-released L2 address. Same-profile root admission may be woken by that real
-final-free; a different L2 profile still waits for the full root completion
-frontier. The L1 Task Arena contract is unchanged: `tile.free`/view release
-never returns L1 extents, and only Task Arena retirement does.
+A successful L2 release is a **permanent forfeiture** for this invocation:
+the owner view is invalidated and the owner loses all access rights. A shared
+physical backing remains allocated while any producer ownership, `DECLARED`
+or `BOUND` reader claim, borrower view, pin, or accepted transfer remains.
+Claims are keyed by consumer submit binding and local formal and transition
+`DECLARED → BOUND → RELEASED`; only fault/reset cleanup may cancel a claim.
+Once producer ownership is revoked, all claims are terminal, all views are
+released, and pins/in-flight transactions have drained safely, the unique
+backing finalizer returns its complete stripe-rounded padded span (not just
+valid bytes) to the same L2 free map. The pool version moves only at that
+physical final-free. `nest.barrier` never re-grants a forfeited owner's
+rights or re-binds a released L2 address. Same-profile root admission may be
+woken by that real final-free; a different L2 profile still waits for the
+full root completion frontier. The L1 Task Arena contract is unchanged:
+`tile.free`/view release never returns L1 extents, and only Task Arena
+retirement does.
 
 ### 3.9 `nest.await`
 
@@ -772,12 +813,12 @@ compile_program(
 ) -> CompiledProgram
 ```
 
-The result has compiled schema 1 and compiler ABI `v0`. It contains canonical
+The result has compiled schema 2 and compiler ABI `v1`. It contains canonical
 `source_ir`/`source_hash`, embedded `ProfileRegistry`/`registry_hash`, static
 `target_hash`, `artifact_hash`, `"standalone"|"model"` entry kind, immutable
 entry/prefix, call bindings, explicit relocations, instruction source map,
 dependency proofs, entry/exit Profile states, static effects/resource budgets,
-binding guards, and `WorkloadInfo`.
+binding guards, shared readonly-import claims, and `WorkloadInfo`.
 
 All executable dataclasses are frozen; sequences are tuples and mappings are
 deep immutable. Program IDs are positive deterministic first-appearance IDs.
@@ -817,28 +858,29 @@ writes back into the shared template or guesses relocations from event names.
 
 ### 6.3 Source operation mapping
 
-| Source operation                       | Immutable executable operation                                                 |
-| -------------------------------------- | ------------------------------------------------------------------------------ |
-| `nest.alloc`                           | `BIND_L2_VIEW` with compiled buffer/layout index and internal completion event |
-| `nest.subview`                         | immutable `ExecMemoryView`                                                     |
-| `nest.task.range`                      | immutable `ExecTaskDomain`                                                     |
-| `nest.dma.prefetch.async`              | `DMA_PREFETCH` + `ExecTransfer`                                                |
-| `nest.dma.store.async`                 | `DMA_STORE` + `ExecTransfer`                                                   |
-| `nest.dispatch.tasks.async`            | `DISPATCH_ROLE` + `ExecDispatchRequest`                                        |
-| `nest.collective.async`                | `COLLECTIVE_RUN`                                                               |
-| `nest.release`                         | `RELEASE_L2` + structured `ExecReleaseRequest`                                 |
-| `nest.await`                           | one `WAIT_EVENT` per operand                                                   |
-| `nest.barrier`                         | `BARRIER_GROUP`                                                                |
-| `nest.return`                          | `SIGNAL_EVENT`                                                                 |
-| `tile.alloc`                           | `ALLOC_L1` with compiled buffer/layout index                                   |
-| `tile.free`                            | `FREE_L1`                                                                      |
-| `tile.load.async` / `tile.store.async` | `LAUNCH_MFE` + `ExecTransfer`                                                  |
-| `tile.gather.global.async`             | `LAUNCH_GATHER` + immutable `ExecGatherDesc`                                   |
-| `tile.pow.async` / `tile.evu.async`    | `LAUNCH_EVU`                                                                   |
-| `tile.boa.async`                       | `LAUNCH_BOA`                                                                   |
-| `tile.await`                           | `WAIT` or `WAITALL` over the original Tile events                              |
-| `tile.signal`                          | `SIGNAL_PHASE`                                                                 |
-| `tile.return`                          | `RET`                                                                          |
+| Source operation                       | Immutable executable operation                                |
+| -------------------------------------- | ------------------------------------------------------------- |
+| `nest.alloc` / `nest.publish`          | `BIND_L2_VIEW` / `PUBLISH_L2` with internal completion events |
+| `nexus.shared.ref`                     | submit-time claim metadata; imported formal `BIND_L2_IMPORT`  |
+| `nest.subview`                         | immutable `ExecMemoryView`                                    |
+| `nest.task.range`                      | immutable `ExecTaskDomain`                                    |
+| `nest.dma.prefetch.async`              | `DMA_PREFETCH` + `ExecTransfer`                               |
+| `nest.dma.store.async`                 | `DMA_STORE` + `ExecTransfer`                                  |
+| `nest.dispatch.tasks.async`            | `DISPATCH_ROLE` + `ExecDispatchRequest`                       |
+| `nest.collective.async`                | `COLLECTIVE_RUN`                                              |
+| `nest.release`                         | `RELEASE_L2` + structured `ExecReleaseRequest`                |
+| `nest.await`                           | one `WAIT_EVENT` per operand                                  |
+| `nest.barrier`                         | `BARRIER_GROUP`                                               |
+| `nest.return`                          | `SIGNAL_EVENT`                                                |
+| `tile.alloc`                           | `ALLOC_L1` with compiled buffer/layout index                  |
+| `tile.free`                            | `FREE_L1`                                                     |
+| `tile.load.async` / `tile.store.async` | `LAUNCH_MFE` + `ExecTransfer`                                 |
+| `tile.gather.global.async`             | `LAUNCH_GATHER` + immutable `ExecGatherDesc`                  |
+| `tile.pow.async` / `tile.evu.async`    | `LAUNCH_EVU`                                                  |
+| `tile.boa.async`                       | `LAUNCH_BOA`                                                  |
+| `tile.await`                           | `WAIT` or `WAITALL` over the original Tile events             |
+| `tile.signal`                          | `SIGNAL_PHASE`                                                |
+| `tile.return`                          | `RET`                                                         |
 
 WAIT/WAITALL mechanically preserve the named events. Release dependencies,
 access effects, dispatch phases, requested/resolved modes, and binding identity
@@ -901,9 +943,14 @@ For each active L2 Profile, ready roots have independent SAME and COMPATIBLE
 FIFO heads. SAME is attempted first; if its head cannot fully commit, the
 COMPATIBLE head may fill, but no request may bypass the head of its own
 category. Full root admission atomically commits a vacant/pinned Group slot,
-L2 Arena, event/control budget, and launch state. A failed read-only plan has
-zero resource side effects. Empty-pool impossible requests are permanent
-errors, not waiters.
+private L2 Arena, imported readonly views/claims, event/control budget, and
+launch state. A shared import aliases the producer's backing and adds no
+physical reservation. Lowering adds the producer-submit completion dependency
+to each consuming submit, so reader admission occurs only after producer
+completion and publish; runtime adds no shared-readiness wait queue. Failed
+admission leaves arenas, claims, views, and pool version unchanged. Dormant
+claim-manifest entries are metadata, not live capacity or profile-quiescence
+resources. Empty-pool impossible requests are permanent errors, not waiters.
 
 ### 7.3 Grid Route and per-Tile Task admission
 
@@ -940,26 +987,54 @@ valid bytes and carry both allocation and Profile generations. Local
 finishes later; it never changes the free map by itself. Repeated, stale,
 wrong-owner, or out-of-generation operations are invariant failures.
 
-**L2 physical extent lifecycle.** Each Context-local L2 buffer is compiled to
-an independent, non-overlapping stripe-rounded padded span; the compiler never
-re-binds a released L2 region, and the independent executable verifier rejects
-any layout whose padded spans overlap or whose spans plus slack do not conserve
-every bank of the reservation. The Arena reservation is committed once as exact
-per-bank units: one unit set per buffer backing (the complete padded span,
-including tail padding) plus owner-arena slack units for everything else. Slack
-stays held by the root until root retirement. When the last private reference
-to a backing is revoked and its pins and accepted transactions have drained
-safely, a unique finalizer returns exactly that backing's committed units to
-the L2 free map; repeated or partial returns are invariant failures. Only
-`retire_arena` returns the remaining slack/residual — it never double-frees an
-already-released backing.
+**L2 physical extent and readonly-sharing lifecycle.** Each local L2
+allocation has an independent, non-overlapping stripe-rounded padded span; the
+compiler never re-binds a released L2 region. The independent executable
+verifier rejects layouts whose padded spans overlap or whose spans plus slack
+do not conserve every bank of the reservation. The Arena reservation is
+committed once as exact per-bank units: one unit set per physical backing
+(including tail padding) plus owner-arena slack. Aliased reader views never
+increase physical capacity. Each run has a finite claim manifest keyed by
+producer submit binding/slot and consumer submit binding/local slot; each
+materialized claim transitions `DECLARED → BOUND → RELEASED`, with
+`CANCELLED` reserved for fault/reset cleanup.
+
+`nest.publish` seals a fully initialized readonly export after its final
+producer access. Producer release revokes only the producer view; unsubmitted
+and capacity-waiting reader claims keep the published bytes. Reader admission
+creates its logical view without changing the free map or pool version. The
+origin Arena may retire while a backing remains held by readers, so snapshots
+report origin-retired backings separately rather than counting them as live
+root Arenas. `arena_reserved_bytes`/`allocated_bytes` count live padded
+backings plus held Arena slack. `physical_live_backing_bytes` counts each live
+backing's padded units once and excludes slack. `live_view_bytes` counts each
+live backing's logical bytes once, so it remains nonzero while a published
+backing is retained by a DECLARED claim. Aliases do not increase it.
+`logical_live_view_bytes` separately sums live view bytes and may count
+aliases. Per bank, `allocated_bytes + free_bytes == user_spm_per_bank`.
+
+The backing is final-freed exactly once only after producer ownership is
+revoked, every claim is `RELEASED` or safely `CANCELLED`, all producer and
+borrower views are released, and pins/in-flight accepted transfers are zero.
+The finalizer returns the full padded units and notifies the ordinary
+release-driven capacity retry; it never fabricates free space on closure
+failure. Claims, backings, views, pins, and transfers are run-scoped and cannot
+cross Group/L2 Profile epochs.
+
+For a capacity-blocked same-profile FIFO head, an optimistic first-fit proof
+retains only materialized live backings with claims owned by the head, a later
+same-class request, or a submit that cannot precede the head's completion
+(including a device `await` frontier). If the head still cannot fit per bank,
+admission faults as `PERMANENT_CAPACITY`; otherwise it waits for capacity or
+aligned contiguous space without skipping a same-class head. Borrowing and
+non-final alias release do not advance the physical pool version.
 
 **L1 keeps the original contract.** A Task Arena retires after all views,
 Frame state, accesses, transactions, and the Task terminal event are safe; L1
 `tile.free`/view release never returns extents to the free map. L1-only
-reconfiguration operates on separate L1 pools and cannot mutate a parent L2
-handle or generation. A root L2 Arena retires after every Route/Task, required
-HBM output, remaining view, pin, transfer, and lease closes; only then can
+reconfiguration uses only L1 pools and does not wait for or mutate shared L2
+backings. A root L2 Arena retires after every Route/Task, required HBM output,
+remaining local view, pin, transfer, and lease closes; only then can
 `context_done` publish. No runtime optimization invents overlap at either
 level.
 
@@ -986,6 +1061,16 @@ and shadow mode/generation. The controller publishes the new mode and
 increments only that layer's generation after every matching Prepare and
 Commit ACK. Missing, duplicate, stale-generation, unknown-member, or failed
 ACKs cannot open the gate.
+
+An L2 Profile change additionally requires the complete compiled root
+completion frontier for the old L2 epoch and a quiescent L2 backing/claim/view
+ledger. A retired origin Arena is insufficient while a shared backing,
+materialized pending/active claim, alias pin, or accepted transfer remains.
+Publish, `input_released`, and an extent-free event are not substitutes for
+the frontier. Source compilation and independent loading reject readers
+assigned to a different L2 Profile epoch instead of waiting for a future
+submit. An L1-only Profile change checks only its L1 domain and leaves shared
+L2 backing state untouched.
 
 A `MemoryMaintenanceDesc` executes exactly:
 
@@ -1085,9 +1170,20 @@ repeat the static simulation capacities listed in §10 with matching
 
 Trace includes `profile_command`, each `profile_step`, member request/ACK,
 ordinary awaits, source references, Arena reserve/retire, view invalidation,
-Task lease acquire/release, requested/resolved L1 mode and generation, and
-per-bank reserved/live/padding/system-reserved/Cache/free counters. The
-artifact's `call_bindings` records requested/resolved L2 modes; Profile
-snapshots expose active modes/generations. Reports include bounded
-`profile`/`arenas`/`task_leases` snapshots plus `compiled_artifact_hash` and
-`registry_hash`.
+extent final-free, Task lease acquire/release, requested/resolved L1 mode and
+generation, and change-only counters sourced from post-mutation ArenaPool
+snapshots. Pool counters distinguish unique `live_backings`,
+`pending_shared_claims`, `active_shared_references`, `live_view_bytes` (logical
+bytes per live backing, deduplicated), and `logical_live_view_bytes` (the sum
+of live logical alias views). `physical_live_backing_bytes` counts padded
+backing units only and excludes slack; current `arena_reserved_bytes` includes
+backings plus held Arena slack. Padding, system-reserved, Cache, and free
+bytes are reported separately.
+Aliased views count once toward physical reservation; per-bank
+`allocated_bytes + free_bytes == user_spm_capacity_per_bank`. Reports include
+backing/claim rows (including origin-retired backings) and protocol-live L2
+byte totals deduplicated by backing identity. A zero-leak check covers
+backings, claims, views, pins, and in-flight references. Bounded
+`profile`/`arenas`/`task_leases` snapshots include `compiled_artifact_hash` and
+`registry_hash`; `call_bindings` records requested/resolved L2 modes while
+Profile snapshots expose active modes/generations.

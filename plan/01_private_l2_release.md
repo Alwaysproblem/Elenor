@@ -2,7 +2,7 @@
 
 本文件是原计划的**批次 I 执行清单**：实现私有 L2 的非重叠布局、buffer 粒度物理释放，以及 transaction、异常清理、占用记账和 trace 闭环。它是计划，不表示下面的新 API 或行为已经存在。
 
-- [原始联合计划](../L2_显式共享_PLAN.md)：本批次覆盖第一、二步、第五步中 transaction hooks 与 private cancel/reset、以及第八步的物理占用和 extent trace；基线与验收以其“验证方案”为准。
+- [原始联合计划](../design/proposal/L2_显式共享_PLAN.md)：本批次覆盖第一、二步、第五步中 transaction hooks 与 private cancel/reset、以及第八步的物理占用和 extent trace；基线与验收以其“验证方案”为准。
 - [批次 II：显式只读 L2 共享与生命周期](02_explicit_l2_sharing.md)：在本批次的 backing/final-free 生命周期上增加跨 context claims；本批次不得提前实现或假定 shared claim 已闭合。
 - [批次 III：场景与端到端验收](03_scenarios_and_acceptance.md)：执行全 CLI 双档场景、端到端 trace 审计和全量回归。
 - `plan/README.md` 由父任务维护；本文件不改写该入口。

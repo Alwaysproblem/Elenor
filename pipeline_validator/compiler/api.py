@@ -123,6 +123,8 @@ def _relocations(entry: ExecModel | ExecTileGroupTask) -> tuple[Relocation, ...]
         result.append(Relocation(binding_id, "group", ordinal, "args", "event_tuple"))
       elif action.op is ExecGroupActionOp.RELEASE_L2:
         result.append(Relocation(binding_id, "group", ordinal, "args", "release_events"))
+      elif action.op is ExecGroupActionOp.PUBLISH_L2:
+        result.append(Relocation(binding_id, "group", ordinal, "args", "publish_events"))
       elif action.op is ExecGroupActionOp.PROFILE_RECONFIG:
         result.append(Relocation(binding_id, "group", ordinal, "args", "profile_frontier"))
       elif action.op is ExecGroupActionOp.MEMORY_MAINTENANCE:
@@ -338,8 +340,8 @@ def compile_program(
   from ..execution_verifier import target_fingerprint, verify_compiled_program
 
   program = CompiledProgram(
-    1,
-    "v0",
+    2,
+    "v1",
     source_hash,
     source_ir,
     registry,

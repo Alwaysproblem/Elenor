@@ -1022,6 +1022,12 @@ class ProfileController:
     snapshot = pool.snapshot()
     if snapshot["live_arenas"] or snapshot["live_views"]:
       raise MemoryInvariantError("member ArenaPool is not quiescent")
+    if level == "l2" and (
+      snapshot["live_backings"]
+      or snapshot["pending_shared_claims"]
+      or snapshot["active_shared_references"]
+    ):
+      raise MemoryInvariantError("member ArenaPool retains live L2 backings or shared claims")
     if snapshot["pin_count"] or snapshot["inflight_count"]:
       raise MemoryInvariantError("member ArenaPool retains references")
     if not 0 <= bank_id < pool.banks:
@@ -1043,6 +1049,7 @@ class ProfileController:
     routes = self._require_attr(group, "_grid_routes")
     leases = self._require_attr(group, "_task_leases")
     arenas = self._require_attr(group, "_l2_arenas")
+    l2_snapshot = self._pool("l2", 0).snapshot() if level == "l2" else {}
     participating_routes: list[object] = []
     for route in routes.values():
       sequencer = self._require_attr(route, "sequencer")
@@ -1069,6 +1076,13 @@ class ProfileController:
       # Every TaskIdentity lease denotes a committed L1 Arena/Frame.
       "task_leases": len(leases),
       "l2_arenas": 0 if level == "l1" else len(arenas),
+      # Materialized shared state survives origin-arena retirement and must
+      # participate in L2 profile closure. Dormant manifest metadata does not.
+      "live_backings": l2_snapshot["live_backings"] if level == "l2" else 0,
+      "pending_shared_claims": l2_snapshot["pending_shared_claims"] if level == "l2" else 0,
+      "active_shared_references": l2_snapshot["active_shared_references"] if level == "l2" else 0,
+      "l2_pin_count": l2_snapshot["pin_count"] if level == "l2" else 0,
+      "l2_inflight_count": l2_snapshot["inflight_count"] if level == "l2" else 0,
     }
 
   def _level_quiescent(self, level: str) -> bool:
@@ -1077,7 +1091,17 @@ class ProfileController:
       if ledger["pending_roots"] or ledger["routes"] or ledger["task_leases"]:
         return False
     else:
-      if ledger["pending_roots"] or ledger["routes"] or ledger["task_leases"] or ledger["l2_arenas"]:
+      if (
+        ledger["pending_roots"]
+        or ledger["routes"]
+        or ledger["task_leases"]
+        or ledger["l2_arenas"]
+        or ledger["live_backings"]
+        or ledger["pending_shared_claims"]
+        or ledger["active_shared_references"]
+        or ledger["l2_pin_count"]
+        or ledger["l2_inflight_count"]
+      ):
         return False
     levels = ("l1",) if level == "l1" else ("l1", "l2")
     transfer_closure = self._transfer_manager().closure_snapshot(levels)

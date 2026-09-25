@@ -2,7 +2,7 @@
 
 > 本文是 `L2_显式共享_PLAN.md` 第六步第 4–7 条、第七步和第八步第 3–5 条的可执行计划；仅规定实施顺序、可运行场景和验收证据，不代表拟议语法已经实现。共享语法与 runtime 合同实现前，文中的 `sharing`、`nest.publish`、`nexus.shared.ref` 示例均不可解析、不可运行。
 >
-> 相关计划：批次 I [私有 L2 提前释放](./01_private_l2_release.md)、批次 II [显式只读 L2 共享与生命周期](./02_explicit_l2_sharing.md)、[原始联合计划](../L2_显式共享_PLAN.md)。计划目录总览由 `plan/README.md` 维护。
+> 相关计划：批次 I [私有 L2 提前释放](./01_private_l2_release.md)、批次 II [显式只读 L2 共享与生命周期](./02_explicit_l2_sharing.md)、[原始联合计划](../design/proposal/L2_显式共享_PLAN.md)。计划目录总览由 `plan/README.md` 维护。
 
 ## 0. 开始条件与不可变边界
 

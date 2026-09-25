@@ -121,10 +121,13 @@ LoadedProgram → Simulator.run`；Simulator 不包含源码 lowering fallback�
 
 - `nest.subview` / `tile.subview` 的 `strides` 必须全 1；不支持 inline
   `%Y[...]` 下标糖或 view chain。
-- `nest.context` formal 仅限 `!nest.global_memref`；submit actual 仅限
-  `nexus.program` block argument，不能直接传另一个 view。
-- `tile.subview` 只支持一个 `task_dim`；没有公开 `tile.task.id` 算术。
-- dispatch L2 actual 必须是当前 Context 的完整 `nest.alloc` SSA 值。
+- `nest.context` 形参仅允许零个或多个 `!nest.global_memref`，后接零个或
+  多个只读 `!nest.l2_buffer` 导入；submit actual 必须保持同样顺序，且
+  每项 shape 和 dtype 都必须精确匹配。
+- `nexus.program` 外部输入仍只能是 HBM global memref；导入的 L2 形参只
+  能通过 context submit 传给 tile program。
+- dispatch 的 L2 actual 必须是完整的本地 `nest.alloc` 或只读导入形参；
+  subview 仍要求 unit strides，且只支持一个 `task_dim`。
 - transfer 字节数从 shape/dtype/view 推导，不接受独立 `bytes=N` 覆盖。
 - 物理 transfer 只接受连续 row-major view；非连续切片在验证阶段拒绝。
 - 输入 binding 按名字匹配，没有按位置 fallback。不同外部 binding 的
@@ -133,10 +136,17 @@ LoadedProgram → Simulator.run`；Simulator 不包含源码 lowering fallback�
 - 公开 phase 聚合只支持 `#nest.aggregate<all_tasks>`，没有 quorum/subset。
   普通 `nexus.await`/`nest.await` 保持局部事件语义，不是隐式全局静默。
 
+- L2 共享必须显式声明 allocation `sharing="readonly"`，并在完整初始化
+  后恰好执行一次 producer `nest.publish`。共享引用锚定 producer submit
+  实例与 export slot；所有 reader 必须处于同一 Group/L2 Profile epoch。
+  发布后数据不可变，consumer 形参只读，每个导入必须恰好 release 一次。
+  不支持动态 Gather Cache 重设计、可写 alias 或跨 Profile 共享 backing。
+
 ## 持久化与复放限制
 
-- 编译 artifact schema 当前为 1、compiler ABI 为 `v0`；硬件 YAML schema
-  为 2，二者不是同一版本号。
+- 编译 artifact schema 当前为 2、compiler ABI 为 `v1`；旧 schema 1 / ABI
+  `v0` 产物被拒绝，必须从 source 重编译。硬件 YAML schema 为 2，二者
+  不是同一版本号。
 - `.target.yaml` 只保存完整 `HardwareConfig`，不保存 `SimConfig`。独立
   `--compiled-file` 复放必须另行提供与编译时相同的
   `context_count`/`device_context_count`、Device pending/completion 以及

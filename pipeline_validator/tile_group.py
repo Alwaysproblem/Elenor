@@ -20,8 +20,12 @@ from .execution_ir import (
   ContextAdmissionStatus,
   ExecDispatchRequest,
   ExecGroupActionOp,
+  ExecL2Buffer,
   ExecMemoryView,
+  ExecModel,
+  ExecPublishRequest,
   ExecReleaseRequest,
+  ExecSharedInput,
   ExecSignalPolicy,
   ExecStreamDesc,
   ExecTileGroupTask,
@@ -304,8 +308,17 @@ class TileGroup:
     self._l2_handles: dict[tuple[int, str], AllocationHandle] = {}  # (gen, slot) -> handle
     # PR 3: launch generation -> {buffer_slot -> alloc role}
     self._l2_roles: dict[int, dict[str, str]] = {}
+    self._l2_sharing: dict[int, dict[str, str]] = {}
+    self._l2_published: set[tuple[int, str]] = set()
+    self._l2_released: set[tuple[int, str]] = set()
+    self._l2_manifest: dict[tuple[str, str], tuple[tuple[str, str], ...]] = {}
+    self._l2_claim_export: dict[tuple[str, str], tuple[str, str]] = {}
+    self._l2_export_buffers: dict[tuple[str, str], ExecL2Buffer] = {}
+    self._l2_backing_by_export: dict[tuple[str, str], str] = {}
+    self._l2_submit_successors: dict[str, frozenset[str]] = {}
     # Protocol-valid L2 objects, distinct from allocated/reserved capacity.
     self._protocol_live_l2: set[tuple[int, str]] = set()
+    self._protocol_live_backing_bytes: dict[str, int] = {}
     self._l2_reserved_bytes = 0
     self._l2_live_bytes = 0
     self._l2_reserved_bytes_peak = 0
@@ -352,26 +365,23 @@ class TileGroup:
     reaches the physical backing record.  Any failure rolls back every
     registration performed here so a rejected transaction holds nothing.
     """
-    views = (transaction.src, transaction.dst)
     handles: list[AllocationHandle] = []
     seen: set[str] = set()
+    for view, permission in ((transaction.src, "r"), (transaction.dst, "w")):
+      if view is None or view.handle.memory_space != "l2":
+        continue
+      self.l2_sram.assert_access(view.handle, permission)
+      if view.handle.allocation_id not in seen:
+        seen.add(view.handle.allocation_id)
+        handles.append(view.handle)
+    registered: list[AllocationHandle] = []
     try:
-      for view in views:
-        if view is None or view.handle.memory_space != "l2":
-          continue
-        handle = view.handle
-        if handle.allocation_id in seen:
-          continue
-        seen.add(handle.allocation_id)
+      for handle in handles:
         self.l2_sram.begin_inflight(handle, transaction.transaction_id)
-        handles.append(handle)
+        registered.append(handle)
     except Exception:
-      # Partial acquisition must not leak earlier references.
-      self._rollback_l2_references(handles, transaction.transaction_id, cycle)
+      self._rollback_l2_references(registered, transaction.transaction_id, cycle)
       raise
-    if len(handles) != len(seen):
-      self._rollback_l2_references(handles, transaction.transaction_id, cycle)
-      raise MemoryInvariantError("L2 reference acquisition saw duplicate endpoint identities")
 
   def _rollback_l2_references(
     self, handles: list[AllocationHandle], transaction_id: str, cycle: int
@@ -429,6 +439,8 @@ class TileGroup:
           return False
         allocator = self.tiles[pool].l1_allocator if handle.memory_space == "l1" else self.l2_sram
         allocator.assert_live(handle)
+        if handle.memory_space == "l2":
+          self.l2_sram.assert_access(handle, "r" if phase.startswith("source_") else "w")
         if handle.profile_generation != identities[(handle.memory_space, pool)]:
           return False
     except (MemoryInvariantError, KeyError, IndexError):
@@ -485,50 +497,40 @@ class TileGroup:
     drained = 0
     for event in self.l2_sram.drain_l2_backing_release_events():
       drained += event["padded_bytes"]
+      self._l2_live_bytes -= self._protocol_live_backing_bytes.pop(event["backing_id"], 0)
       self._l2_reserved_bytes -= event["padded_bytes"]
       self._l2_capacity_change_cycle = event["release_cycle"]
       self._record_l2_occupancy(event["release_cycle"])
     return drained
 
-  def assert_private_l2_closed(self) -> str | None:
-    """Success-exit private closure proof (plan/01 §4.3).
-
-    Returns a concrete violation description, or ``None`` when no live
-    private backing, slack, view, pin or accepted transaction remains and
-    the free map conserves every bank of the user SPM interval.
-    """
+  def assert_l2_closed(self) -> None:
+    """Prove terminal physical, logical and transfer closure for this run."""
     snapshot = self.l2_sram.snapshot()
     if (
       snapshot["live_backings"]
       or snapshot["live_arenas"]
       or snapshot["live_views"]
       or snapshot["arena_reserved_bytes"]
+      or snapshot["pending_shared_claims"]
+      or snapshot["active_shared_references"]
+      or snapshot["pending_release"]
+      or snapshot["pin_count"]
+      or snapshot["inflight_count"]
+      or self.transfer_manager.outstanding_transactions
     ):
-      return (
-        f"live L2 objects remain: backings={snapshot['live_backings']}"
-        f" {self.l2_sram.live_backing_ids()} arenas={snapshot['live_arenas']}"
-        f" views={snapshot['live_views']} reserved_bytes={snapshot['arena_reserved_bytes']}"
-      )
-    if snapshot["pending_release"] or snapshot["pin_count"] or snapshot["inflight_count"]:
-      return (
-        f"L2 references remain: pending={snapshot['pending_release']}"
-        f" pins={snapshot['pin_count']} inflight={snapshot['inflight_count']}"
-      )
-    outstanding = self.transfer_manager.outstanding_transactions
-    if outstanding:
-      return f"accepted transfers remain unacknowledged: {sorted(outstanding)[:8]}"
+      raise MemoryInvariantError(f"live L2 objects remain: {'; '.join(self.unclosed_l2_objects())}")
     profile = self.l2_sram.profile
     for bank in snapshot["per_bank_occupancy"]:
       if bank["allocated_bytes"] + bank["free_bytes"] != profile.user_spm_per_bank:
-        return (
+        raise MemoryInvariantError(
           f"bank {bank['bank_id']} conservation failed:"
           f" {bank['allocated_bytes']} allocated + {bank['free_bytes']} free"
           f" != {profile.user_spm_per_bank} user SPM bytes"
         )
-    return None
+    self.l2_sram.close_l2_claims()
 
   def unclosed_l2_objects(self) -> list[str]:
-    """Concrete IDs of every reachable, unisolated private L2 object."""
+    """Concrete IDs of each retained backing, claim, view, pin and transfer."""
     details: list[str] = []
     snapshot = self.l2_sram.snapshot()
     if snapshot["live_backings"]:
@@ -548,6 +550,9 @@ class TileGroup:
       details.append(f"unacknowledged={sorted(outstanding)[:8]}")
     if snapshot["live_backings"]:
       details.append(f"live_backing_ids={self.l2_sram.live_backing_ids()}")
+    for claim in self.l2_sram.claim_snapshot():
+      if claim["state"] in ("DECLARED", "BOUND"):
+        details.append(f"claim={claim['claim_id']}:{claim['state']}:{claim['backing_id']}")
     return details
 
   def poison(self, reason: str) -> None:
@@ -678,7 +683,8 @@ class TileGroup:
       offset = self._view_offset_bytes(view, logical_task_id=0)
       segs = self.l2_sram.resolve_segments(handle, offset, view.bytes)
       return ResolvedMemoryView(
-        handle=handle, offset_bytes=offset, size_bytes=view.bytes, address=segs[0].address, segments=segs
+        handle=handle, offset_bytes=offset, size_bytes=view.bytes,
+        permissions=self.l2_sram.permissions(handle), address=segs[0].address, segments=segs
       )
     # l1 views are resolved per-tile in dispatch admission
     return None
@@ -717,6 +723,23 @@ class TileGroup:
     handle = self.l2_sram.bind_view(arena, buffer_id, cycle)
     self._l2_handles[(sequencer.context_launch_generation, buffer_id)] = handle
 
+  def bind_l2_import(self, slot: str, index: int, sequencer: TileGroupSequencer) -> None:
+    """Check the borrower handle installed at admission, without acquiring it twice."""
+    task = sequencer.task
+    if task is None or not 0 <= index < len(task.shared_inputs):
+      raise MemoryInvariantError("L2 import bind index is out of range")
+    shared = task.shared_inputs[index]
+    if shared.slot != slot:
+      raise MemoryInvariantError("L2 import bind differs from compiled shared input")
+    gen = sequencer.context_launch_generation
+    handle = self._l2_handles.get((gen, slot))
+    if handle is None or handle.backing_id != self._l2_backing_by_export.get(
+      (shared.producer_binding_id, shared.producer_slot)
+    ):
+      raise MemoryInvariantError("L2 import bind lacks its admitted backing")
+    self.l2_sram.assert_live(handle, ContextBufferOwner(sequencer.context_name, gen, slot))
+    self.l2_sram.assert_access(handle, "r")
+
   @staticmethod
   def _l2_admission_fault_reason(
     outcome: L2AdmissionOutcome, fallback: str = "context admission fault"
@@ -728,24 +751,47 @@ class TileGroup:
       return f"L2 capacity fault: {failure.reason}"
     return failure.reason
 
-  def release_l2(self, request: ExecReleaseRequest, sequencer: TileGroupSequencer, cycle: int) -> bool:
-    """Release one context-owned L2 buffer after a read-only preflight.
-
-    Dependencies and declared reader/writer phases are checked in every
-    fidelity.  Runtime/full-memory additionally verify and release the
-    physical allocation; timing-only deliberately has no physical handles.
-    No logical lifetime, pin, or allocator state changes until the complete
-    preflight succeeds.
-    """
+  def publish_l2(self, request: ExecPublishRequest, sequencer: TileGroupSequencer, cycle: int) -> bool:
+    """Seal a producer view only after its local reader/writer accesses drain."""
     gen = sequencer.context_launch_generation
     slot = request.buffer_slot
+    if self._l2_sharing.get(gen, {}).get(slot) != "readonly":
+      raise MemoryInvariantError(f"publish requires a local readonly export '{slot}'")
+    if (gen, slot) in self._l2_published:
+      raise MemoryInvariantError(f"duplicate publish of slot '{slot}'")
+    role = self._l2_roles.get(gen, {}).get(slot)
+    if role is None:
+      raise MemoryInvariantError(f"publish references missing producer slot '{slot}'")
+    handle = self._l2_handles.get((gen, slot))
+    if handle is None:
+      raise MemoryInvariantError(f"publish references unbound producer slot '{slot}'")
+    self.l2_sram.assert_access(handle, "w")
+    release_like = ExecReleaseRequest(
+      slot, role, request.reader_dispatch_ordinals, request.writer_dispatch_ordinals,
+      request.dependency_events,
+    )
+    return self._close_l2_access(release_like, sequencer, cycle, publish=True)
+
+  def release_l2(self, request: ExecReleaseRequest, sequencer: TileGroupSequencer, cycle: int) -> bool:
+    """Forfeit exactly one owner's view after a complete read-only access preflight."""
+    return self._close_l2_access(request, sequencer, cycle, publish=False)
+
+  def _close_l2_access(
+    self, request: ExecReleaseRequest, sequencer: TileGroupSequencer, cycle: int, *, publish: bool
+  ) -> bool:
+    """Use the same pinned-access and transfer preflight for publish and release."""
+    gen = sequencer.context_launch_generation
+    slot = request.buffer_slot
+    action_name = "publish" if publish else "release"
     launch = self._live_launches.get((sequencer.context_name, sequencer.device_slot, gen))
     if launch is not sequencer:
-      raise MemoryInvariantError(f"release references inactive or foreign launch generation {gen}")
+      raise MemoryInvariantError(f"{action_name} references inactive or foreign launch generation {gen}")
     roles = self._l2_roles.get(gen)
     if roles is None or slot not in roles:
+      if not publish and (gen, slot) in self._l2_released:
+        raise MemoryInvariantError(f"double release of L2 slot '{slot}'")
       raise MemoryInvariantError(
-        f"release references unknown or released L2 buffer '{slot}' in launch generation {gen}"
+        f"{action_name} references unknown or released L2 buffer '{slot}' in launch generation {gen}"
       )
     declared_role = roles[slot]
     if declared_role != request.buffer_role:
@@ -753,6 +799,9 @@ class TileGroup:
         f"release role mismatch on slot '{slot}':"
         f" alloc '{declared_role}' != request '{request.buffer_role}'"
       )
+    if not publish and self._l2_sharing.get(gen, {}).get(slot) == "readonly":
+      if (gen, slot) not in self._l2_published:
+        raise MemoryInvariantError(f"release of readonly export '{slot}' precedes publish")
 
     handle: AllocationHandle | None = None
     handle = self._l2_handles.get((gen, slot))
@@ -831,6 +880,10 @@ class TileGroup:
               )
             writer_pins.append((grid, task_id, slot_pins, pin))
 
+      if publish:
+        self.l2_sram.check_publish_l2(
+          handle, allowed_pins=tuple(pin.consumer_id for _, _, _, pin in writer_pins)
+        )
       if self.transfer_manager.has_inflight_access(handle):
         raise MemoryInvariantError(f"release of slot '{slot}' has an in-flight transfer")
       if self.l2_sram.has_inflight_references(handle):
@@ -850,17 +903,19 @@ class TileGroup:
       if not task_pins:
         self._grid_l2_pins.pop(grid)
 
+    if publish:
+      self.l2_sram.publish_l2(handle, cycle)
+      self._l2_published.add((gen, slot))
+      return True
     if handle is not None:
       expected_owner = ContextBufferOwner(sequencer.context_name, gen, slot)
       freed = self.l2_sram.invalidate_view(handle, expected_owner, cycle)
       if not freed:
         raise MemoryInvariantError(f"release of slot '{slot}' left pinned consumers")
-      if (gen, slot) in self._protocol_live_l2:
-        self._l2_live_bytes -= handle.size_bytes
-      self._record_l2_occupancy(cycle)
       self._sync_l2_pool_mirror(cycle)
 
     roles.pop(slot)
+    self._l2_released.add((gen, slot))
     self._protocol_live_l2.discard((gen, slot))
     return True
 
@@ -918,6 +973,7 @@ class TileGroup:
         handle = self._l2_handles.get((grid.launch_generation, slot))
         if handle is None:
           raise MemoryInvariantError(f"missing or stale accessed L2 actual '{slot}'")
+        self.l2_sram.assert_access(handle, "w" if slot in writes else "r")
         consumer_id = (
           f"{grid.context_name}:s{grid.device_slot}"
           f":g{grid.launch_generation}:d{grid.dispatch_ordinal}"
@@ -1024,22 +1080,21 @@ class TileGroup:
     self._retiring_tasks.clear()
     for key, handle in tuple(self._l2_handles.items()):
       if not self.l2_sram.is_released(handle):
-        if not self.l2_sram.invalidate_view(handle, handle.owner, cycle):
+        if not self.l2_sram.cancel_l2_view(handle, handle.owner, cycle):
           return False
       del self._l2_handles[key]
-    # Every view above is invalidated: protocol-live bytes are gone before the
-    # physical final-free drops reserved bytes.
-    self._l2_live_bytes = 0
     self._protocol_live_l2.clear()
+    self.l2_sram.cancel_all_l2_claims(cycle)
     self._sync_l2_pool_mirror(cycle)
     self._record_l2_occupancy(cycle)
     for generation, arena in tuple(self._l2_arenas.items()):
-      held = self.l2_sram.arena_held_bytes(arena)
+      held_before = self.l2_sram.snapshot()["arena_reserved_bytes"]
       if not self.l2_sram.retire_arena(arena, cycle):
         return False
       residual = self._sync_l2_pool_mirror(cycle)
+      held_after = self.l2_sram.snapshot()["arena_reserved_bytes"]
       del self._l2_arenas[generation]
-      self._l2_reserved_bytes -= held - residual
+      self._l2_reserved_bytes -= held_before - held_after - residual
     self._record_l2_occupancy(cycle)
     self._txn_sequencer.clear()
     self.scheduler.abort_inflight(cycle)
@@ -1056,6 +1111,7 @@ class TileGroup:
     for tile in self.tiles:
       tile.reset()
     self.transfer_manager.acknowledge_all_terminals(cycle)
+    self.assert_l2_closed()
     return True
 
   def schedule_collective(
@@ -1438,7 +1494,9 @@ class TileGroup:
         self._protocol_live_l2.add(key)
         handle = self._l2_handles.get(key)
         if handle is not None and not self.l2_sram.is_released(handle):
-          new_live_bytes += handle.size_bytes
+          if handle.backing_id not in self._protocol_live_backing_bytes:
+            self._protocol_live_backing_bytes[handle.backing_id] = handle.size_bytes
+            new_live_bytes += handle.size_bytes
     if new_live_bytes:
       self._l2_live_bytes += new_live_bytes
       self._record_l2_occupancy(cycle)
@@ -1467,13 +1525,15 @@ class TileGroup:
     arena = self._l2_arenas.get(generation)
     if arena is None:
       return True
-    held = self.l2_sram.arena_held_bytes(arena)
+    held_before = self.l2_sram.snapshot()["arena_reserved_bytes"]
     if not self.l2_sram.retire_arena(arena, cycle):
       return False
     residual = self._sync_l2_pool_mirror(cycle)
+    held_after = self.l2_sram.snapshot()["arena_reserved_bytes"]
     del self._l2_arenas[generation]
-    self._l2_reserved_bytes -= held - residual
-    self._l2_capacity_change_cycle = cycle
+    self._l2_reserved_bytes -= held_before - held_after - residual
+    if held_after != held_before:
+      self._l2_capacity_change_cycle = cycle
     self._record_l2_occupancy(cycle)
     return True
 
@@ -1844,6 +1904,56 @@ class TileGroup:
       self.pmu.add_cycle("payload_layout_faults", self.payload.layout_fault_count)
       self.payload.layout_fault_count = 0
 
+  def _build_l2_manifest(self, program: CompiledProgram) -> None:
+    """Close shared claims over the actual, specialized model submit callsites."""
+    self._l2_manifest.clear()
+    self._l2_claim_export.clear()
+    self._l2_export_buffers.clear()
+    self._l2_backing_by_export.clear()
+    self._l2_submit_successors.clear()
+    if program.entry_kind != "model":
+      return
+    model = program.entry
+    assert isinstance(model, ExecModel)
+    event_bindings = {op.event_tag: op.binding_id for op in model.body if op.op == "submit"}
+    successors: dict[str, set[str]] = {binding_id: set() for binding_id in model.tasks}
+    awaited: set[str] = set()
+    for op in model.body:
+      if op.op == "await":
+        awaited.add(op.event_tag)
+      elif op.op == "submit":
+        for dependency in op.dependencies:
+          upstream = event_bindings.get(dependency)
+          if upstream is not None:
+            successors[upstream].add(op.binding_id)
+        for dependency in awaited:
+          upstream = event_bindings.get(dependency)
+          if upstream is not None:
+            successors[upstream].add(op.binding_id)
+    for _ in range(len(successors)):
+      for direct in successors.values():
+        for consumer in tuple(direct):
+          direct.update(successors.get(consumer, ()))
+    self._l2_submit_successors = {
+      key: frozenset(value) for key, value in successors.items()
+    }
+    for binding_id, task in model.tasks.items():
+      for buffer in task.l2_buffers:
+        if buffer.sharing == "readonly":
+          self._l2_export_buffers[(binding_id, buffer.slot)] = buffer
+    pending: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for binding_id, task in model.tasks.items():
+      for shared in task.shared_inputs:
+        claim_id = (binding_id, shared.slot)
+        export = (shared.producer_binding_id, shared.producer_slot)
+        if claim_id in self._l2_claim_export:
+          raise MemoryInvariantError(f"duplicate L2 shared claim {claim_id}")
+        if export not in self._l2_export_buffers:
+          raise MemoryInvariantError(f"L2 shared claim {claim_id} has no producer export {export}")
+        self._l2_claim_export[claim_id] = export
+        pending.setdefault(export, []).append(claim_id)
+    self._l2_manifest = {key: tuple(value) for key, value in pending.items()}
+
   # ---- lifecycle ------------------------------------------------------
 
   def begin_launch(self, program, bindings) -> None:
@@ -1857,8 +1967,13 @@ class TileGroup:
       or self._l2_arenas
       or self._pending_root_requests
       or self.transfer_manager.inflight_count
+      or self.l2_sram.snapshot()["live_backings"]
+      or self.l2_sram.snapshot()["pending_shared_claims"]
+      or self.l2_sram.snapshot()["active_shared_references"]
     ):
       raise MemoryInvariantError("previous launch has not retired")
+    self.l2_sram.close_l2_claims()
+    self._build_l2_manifest(program)
     self.loaded_program = program
     self.run_generation += 1
     self.l2_sram.run_generation = self.run_generation
@@ -1870,11 +1985,15 @@ class TileGroup:
     self._grid_l2_pins.clear()
     self._live_launches.clear()
     self._l2_roles.clear()
+    self._l2_sharing.clear()
+    self._l2_published.clear()
+    self._l2_released.clear()
     self._role_trace.clear()
     self._role_l1_handles.clear()
     self._role_done_tiles.clear()
     self._role_event_tile_mask.clear()
     self._protocol_live_l2.clear()
+    self._protocol_live_backing_bytes.clear()
     self._l2_handles.clear()
     self._pending_context_admissions.clear()
     self._pending_activations.clear()
@@ -1925,6 +2044,23 @@ class TileGroup:
       self.profile_controller.issue_gate_closed("l2"),
     )
 
+  def retained_shared_blocks_admission(
+    self, task: ExecTileGroupTask, later_bindings: tuple[str, ...]
+  ) -> bool:
+    """Pure optimistic proof that FIFO-head private layout cannot fit retained backings."""
+    if task.layout is None:
+      raise MemoryInvariantError("retained L2 capacity proof requires a layout")
+    blockers = {task.binding_id, *later_bindings}
+    blockers.update(self._l2_submit_successors.get(task.binding_id, ()))
+    retained: list[str] = []
+    for backing_id in self._l2_backing_by_export.values():
+      if any(
+        claim_id[0] in blockers and state in ("DECLARED", "BOUND")
+        for claim_id, state in self.l2_sram.backing_claims(backing_id)
+      ):
+        retained.append(backing_id)
+    return not self.l2_sram.can_fit_with_retained(task.layout, tuple(retained))
+
   def try_admit_context_task(
     self,
     task: ExecTileGroupTask,
@@ -1954,6 +2090,23 @@ class TileGroup:
       return None
     launch_id = self._next_launch_id
     owner = RootInvocation(context_name or task.name, launch_id)
+    imports: list[tuple[ExecSharedInput, str, ContextBufferOwner]] = []
+    for shared in task.shared_inputs:
+      claim_id = (task.binding_id, shared.slot)
+      export_key = (shared.producer_binding_id, shared.producer_slot)
+      if self._l2_claim_export.get(claim_id) != export_key:
+        raise MemoryInvariantError(f"unknown or duplicate L2 shared claim {claim_id}")
+      producer = self._l2_export_buffers.get(export_key)
+      if producer is None or (
+        shared.dims, shared.dtype, shared.element_bytes, shared.bytes
+      ) != (producer.dims, producer.dtype, producer.element_bytes, producer.bytes):
+        raise MemoryInvariantError(f"L2 shared input {shared.slot!r} shape/dtype differs from export")
+      backing_id = self._l2_backing_by_export.get(export_key)
+      if backing_id is None:
+        raise MemoryInvariantError(f"L2 shared input {shared.slot!r} has no committed producer backing")
+      borrower = ContextBufferOwner(owner.context_name, launch_id, shared.slot)
+      self.l2_sram.check_borrow_l2_view(backing_id, borrower, claim_id)
+      imports.append((shared, backing_id, borrower))
     plan = self.l2_sram.plan_arena(owner, task.layout)
     if isinstance(plan, AdmissionFailure):
       if plan.kind is AdmissionFailureKind.TEMPORARY_CAPACITY:
@@ -1974,15 +2127,35 @@ class TileGroup:
       return None
     if result.status is IssueStatus.FAULT:
       raise ValueError(result.reason)
+    claims_by_slot = {
+      buffer.slot: self._l2_manifest.get((task.binding_id, buffer.slot), ())
+      for buffer in task.l2_buffers if buffer.sharing == "readonly"
+    }
     try:
-      arena = self.l2_sram.commit_arena(plan, cycle)
+      arena = self.l2_sram.commit_arena(plan, cycle, claims_by_slot=claims_by_slot)
+      borrowed = {
+        shared.slot: self.l2_sram.borrow_l2_view(
+          backing_id, borrower, (task.binding_id, shared.slot), cycle
+        )
+        for shared, backing_id, borrower in imports
+      }
     except (ValueError, MemoryInvariantError):
       self.scheduler.cancel_context_events(ticket.sequencer)
       raise
     self._next_launch_id += 1
     self._l2_arenas[launch_id] = arena
     self._l2_reserved_bytes += arena.reserved_bytes
-    self._l2_roles[launch_id] = {buffer.slot: buffer.role for buffer in task.l2_buffers}
+    self._l2_roles[launch_id] = {
+      **{buffer.slot: buffer.role for buffer in task.l2_buffers},
+      **{shared.slot: "in" for shared in task.shared_inputs},
+    }
+    self._l2_sharing[launch_id] = {buffer.slot: buffer.sharing for buffer in task.l2_buffers}
+    for buffer in task.l2_buffers:
+      if buffer.sharing == "readonly":
+        self._l2_backing_by_export[(task.binding_id, buffer.slot)] = self.l2_sram.l2_backing_id(
+          arena, buffer.slot
+        )
+    self._l2_handles.update({(launch_id, slot): handle for slot, handle in borrowed.items()})
     self._record_l2_occupancy(cycle)
     self.profile_controller.bind_owner_inputs(
       f"{task.binding_id}@{launch_id}",

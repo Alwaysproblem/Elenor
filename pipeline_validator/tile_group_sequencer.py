@@ -9,6 +9,7 @@ from .execution_ir import (
   ExecDispatchRequest,
   ExecGroupAction,
   ExecGroupActionOp,
+  ExecPublishRequest,
   ExecReleaseRequest,
   ExecStreamDesc,
   ExecTileGroupTask,
@@ -200,6 +201,8 @@ class TileGroupSequencer:
         ExecGroupActionOp.DMA_PREFETCH,
         ExecGroupActionOp.DMA_STORE,
         ExecGroupActionOp.BIND_L2_VIEW,
+        ExecGroupActionOp.BIND_L2_IMPORT,
+        ExecGroupActionOp.PUBLISH_L2,
       ):
         if self.group.profile_controller.issue_gate_closed("l2"):
           return IssueResult(IssueStatus.BACKPRESSURE, reason="profile L2 issue gate")
@@ -207,6 +210,11 @@ class TileGroupSequencer:
         self.group.bind_l2_view(action.args[0], action.args[1], self, cycle)
         if action.dst is None or not self.notify_event(action.dst, cycle):
           return IssueResult(IssueStatus.FAULT, reason="L2 bind has no valid completion event")
+        return IssueResult(IssueStatus.ACCEPTED)
+      if action.op is ExecGroupActionOp.BIND_L2_IMPORT:
+        self.group.bind_l2_import(action.args[0], action.args[1], self)
+        if action.dst is None or not self.notify_event(action.dst, cycle):
+          return IssueResult(IssueStatus.FAULT, reason="L2 import bind has no valid completion event")
         return IssueResult(IssueStatus.ACCEPTED)
       if action.op is ExecGroupActionOp.INIT_STREAM:
         qid, depth, producer_mask, consumer_mask = action.args
@@ -308,6 +316,15 @@ class TileGroupSequencer:
         self.pmu.add_event("tgs_signal_event")
         return IssueResult(IssueStatus.ACCEPTED)
 
+      if action.op is ExecGroupActionOp.PUBLISH_L2:
+        request = action.args[0]
+        if not isinstance(request, ExecPublishRequest):
+          return IssueResult(IssueStatus.FAULT, reason="invalid L2 publish request")
+        self.group.publish_l2(request, sequencer=self, cycle=cycle)
+        if action.dst is None or not self.notify_event(action.dst, cycle):
+          return IssueResult(IssueStatus.FAULT, reason="L2 publish completion rejected")
+        self.pmu.add_event("tgs_publish_l2")
+        return IssueResult(IssueStatus.ACCEPTED)
       if action.op is ExecGroupActionOp.RELEASE_L2:
         request = action.args[0]
         if not isinstance(request, ExecReleaseRequest):

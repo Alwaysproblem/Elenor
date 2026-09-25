@@ -30,7 +30,9 @@ from .execution_ir import (
   ExecL2Buffer,
   ExecMemoryView,
   ExecModel,
+  ExecPublishRequest,
   ExecReleaseRequest,
+  ExecSharedInput,
   ExecStreamDesc,
   ExecTileGroupTask,
   ExecTileOp,
@@ -572,8 +574,10 @@ def _verify_buffer(buffer: ExecL1Buffer | ExecL2Buffer, where: str) -> None:
   if buffer.bytes != _product(buffer.dims) * buffer.element_bytes:
     _fail(f"{where}.bytes does not match shape")
   _uint(buffer.alignment, f"{where}.alignment", positive=True)
-  if isinstance(buffer, ExecL2Buffer) and buffer.role not in ("in", "out", "inout"):
-    _fail(f"{where} has invalid L2 role")
+  if isinstance(buffer, ExecL2Buffer) and (
+    buffer.role not in ("in", "out", "inout") or buffer.sharing not in ("private", "readonly")
+  ):
+    _fail(f"{where} has invalid L2 role or sharing mode")
 
 
 def _verify_cache_requirement(
@@ -853,6 +857,98 @@ def _binding_effects(
     view = _verify_view(global_map[index], f"{where}.global_actual", spaces={"global"})
     global_reads.append((view, effects.gather_levels))
   return reads, writes, tuple(global_reads)
+def _rectangles_cover_shape(
+  rectangles: Sequence[tuple[tuple[int, int], ...]], dims: tuple[int, ...]
+) -> bool:
+  if not rectangles:
+    return False
+  unique = tuple(dict.fromkeys(rectangles))
+  for rectangle in unique:
+    if len(rectangle) != len(dims) or any(
+      start < 0 or end <= start or end > dim
+      for (start, end), dim in zip(rectangle, dims)
+    ):
+      return False
+
+  def covered(boxes: tuple[tuple[tuple[int, int], ...], ...], axis: int) -> int:
+    if axis == len(dims):
+      return 1 if boxes else 0
+    edges = {0, dims[axis]}
+    for box in boxes:
+      edges.update(box[axis])
+    ordered_edges = sorted(edges)
+    total = 0
+    for start, end in pairwise(ordered_edges):
+      if start == end:
+        continue
+      active = tuple(box for box in boxes if box[axis][0] <= start and box[axis][1] >= end)
+      total += (end - start) * covered(active, axis + 1)
+    return total
+
+  return covered(unique, 0) == math.prod(dims)
+
+
+def _writer_rectangles(
+  binding: ExecTileRoleBinding, effects: _ProgramEffects, slot: str, where: str
+) -> tuple[tuple[tuple[int, int], ...], ...]:
+  program = binding.tile_program
+  l2_slots = dict(
+    zip(
+      (i for i, formal in enumerate(program.formals) if formal.space == "l2"), binding.actuals
+    )
+  )
+  domain = binding.task_domain
+  if domain is None:
+    _fail(f"{where} writer has no execution range")
+  rectangles: list[tuple[tuple[int, int], ...]] = []
+  launched = {
+    inst.args[0]
+    for inst in program.insts
+    if inst.op
+    in (
+      ExecTileOp.LAUNCH_MFE,
+      ExecTileOp.LAUNCH_GATHER,
+      ExecTileOp.LAUNCH_EVU,
+      ExecTileOp.LAUNCH_BOA,
+    )
+  }
+  for descriptor_name in launched:
+    for view, writing in effects.descriptor_views[descriptor_name]:
+      if not writing or view.space != "l2":
+        continue
+      formal_index = _formal_index(view, f"{where}.{descriptor_name}")
+      if l2_slots.get(formal_index) != slot:
+        continue
+      rectangle = []
+      for axis, (offset, size) in enumerate(zip(view.offsets, view.dims)):
+        if view.task_dim == axis:
+          start = offset + domain.from_task
+          end = offset + domain.to_task - 1 + size
+        else:
+          start = offset
+          end = offset + size
+        rectangle.append((start, end))
+      rectangles.append(tuple(rectangle))
+  return tuple(rectangles)
+
+
+def _padded_l2_bytes_per_bank(task: ExecTileGroupTask, slot: str, where: str) -> int:
+  if task.layout is None:
+    _fail(f"{where} has no local L2 layout")
+  allocation = next((item for item in task.layout.buffer_layouts if item.buffer_id == slot), None)
+  buffer = next((item for item in task.l2_buffers if item.slot == slot), None)
+  if (
+    allocation is None
+    or buffer is None
+    or allocation.logical_bytes != buffer.bytes
+    or allocation.banks != len(task.layout.per_bank_bytes)
+  ):
+    _fail(f"{where} has no matching L2 layout for shared slot {slot!r}")
+  round_bytes = allocation.stripe_bytes * allocation.banks
+  padded_bytes = -(-allocation.logical_bytes // round_bytes) * round_bytes
+  if round_bytes > _UINT64_MAX or padded_bytes > _UINT64_MAX:
+    _fail(f"{where} shared L2 padded span exceeds uint64")
+  return padded_bytes // allocation.banks
 
 
 def _event_ancestors(
@@ -1021,6 +1117,40 @@ def _verify_task(
       _fail(f"{where} has an invalid or duplicate L2 buffer")
     _verify_buffer(buffer, f"{where}.l2_buffers[{index}]")
     buffers[buffer.slot] = buffer
+  imports: dict[str, ExecSharedInput] = {}
+  imported_backings: set[tuple[str, str]] = set()
+  for index, shared in enumerate(task.shared_inputs):
+    if not isinstance(shared, ExecSharedInput) or shared.slot in imports or shared.slot in buffers:
+      _fail(f"{where}.shared_inputs[{index}] is invalid or duplicates an L2 formal")
+    _nonempty(shared.slot, f"{where}.shared_inputs[{index}].slot")
+    _nonempty(shared.producer_binding_id, f"{where}.shared_inputs[{index}].producer_binding_id")
+    _nonempty(shared.producer_slot, f"{where}.shared_inputs[{index}].producer_slot")
+    if (
+      not shared.dims
+      or any(type(dim) is not int or dim <= 0 for dim in shared.dims)
+      or shared.dtype not in _DTYPE_BYTES
+      or shared.element_bytes != _DTYPE_BYTES[shared.dtype]
+      or shared.bytes != _product(shared.dims) * shared.element_bytes
+    ):
+      _fail(f"{where}.shared_inputs[{index}] has inconsistent shape or dtype")
+    backing = (shared.producer_binding_id, shared.producer_slot)
+    if backing in imported_backings:
+      _fail(f"{where} imports one producer backing more than once")
+    imported_backings.add(backing)
+    imports[shared.slot] = shared
+  buffer_roles = {slot: buffer.role for slot, buffer in buffers.items()}
+  buffer_roles.update(dict.fromkeys(imports, "in"))
+  buffer_shapes = {
+    slot: (buffer.dims, buffer.dtype, buffer.element_bytes, buffer.bytes)
+    for slot, buffer in buffers.items()
+  }
+  buffer_shapes.update(
+    {
+      slot: (shared.dims, shared.dtype, shared.element_bytes, shared.bytes)
+      for slot, shared in imports.items()
+    }
+  )
+  all_slots = set(buffer_shapes)
   layout = _verify_layout(task.layout, f"{where}.layout", profile, buffers)
   if layout.reserved_bytes > contract.l2_spm_bytes:
     _fail(f"{where} L2 layout exceeds its declared resource contract")
@@ -1075,9 +1205,12 @@ def _verify_task(
     if len(binding.actuals) != len(l2_formals) or len(binding.global_actuals) != len(global_formals):
       _fail(f"{where}.role_bindings[{role_id}] actual arity differs from program formals")
     for formal, slot in zip(l2_formals, binding.actuals):
-      actual_buffer = buffers.get(slot)
-      if actual_buffer is None or actual_buffer.dims != formal.dims or actual_buffer.dtype != formal.dtype:
+      actual_shape = buffer_shapes.get(slot)
+      if actual_shape is None or actual_shape[0] != formal.dims or actual_shape[1] != formal.dtype:
         _fail(f"{where}.role_bindings[{role_id}] has incompatible L2 actual")
+    import_actuals = [slot for slot in binding.actuals if slot in imports]
+    if len(import_actuals) != len(set(import_actuals)):
+      _fail(f"{where}.role_bindings[{role_id}] aliases one shared backing through multiple formals")
     for formal, view in zip(global_formals, binding.global_actuals):
       _verify_view(view, f"{where}.role_bindings[{role_id}].global_actual", spaces={"global"})
       if view.dims != formal.dims or view.dtype != formal.dtype:
@@ -1101,9 +1234,21 @@ def _verify_task(
         binding.tile_program, contract, registry.profile("l2", l2_mode), f"{where}.role_bindings[{role_id}]"
       )
     role_reads, role_writes, _ = _binding_effects(binding, effects, f"{where}.role_bindings[{role_id}]")
-    if any(slot not in buffers for slot in (*binding.actuals, *role_reads, *role_writes)):
+    for views in effects.descriptor_views.values():
+      for view, _writing in views:
+        if view.space != "l2" or view.task_dim is None:
+          continue
+        domain = binding.task_domain
+        if domain is None or view.offsets[view.task_dim] + domain.to_task - 1 + view.dims[view.task_dim] > (
+          view.backing_dims[view.task_dim]
+        ):
+          _fail(f"{where}.role_bindings[{role_id}] task view exceeds its L2 formal")
+    valid_slots = set(buffer_shapes)
+    if any(slot not in valid_slots for slot in (*binding.actuals, *role_reads, *role_writes)):
       _fail(f"{where}.role_bindings[{role_id}] references an unknown L2 buffer")
-    if any(buffers[slot].role == "in" for slot in role_writes):
+    if set(role_writes) & set(imports):
+      _fail(f"{where}.role_bindings[{role_id}] writes through a readonly shared import")
+    if any(buffer_roles[slot] == "in" for slot in role_writes):
       _fail(f"{where}.role_bindings[{role_id}] writes a role=in L2 buffer")
     role_bindings[role_id] = (binding, effects)
 
@@ -1127,7 +1272,7 @@ def _verify_task(
     for state in call.permitted_profiles
   ):
     _fail(f"{where} call binding widens a source resource contract")
-  l2_live: dict[str, BufferLayout] = {}
+  l2_live: dict[str, BufferLayout | None] = {}
   bound: set[str] = set()
   released: set[str] = set()
   bind_events: dict[str, str] = {}
@@ -1135,9 +1280,13 @@ def _verify_task(
   maintenance: list[tuple[int, MemoryMaintenanceDesc]] = []
   semantic_effects: list[tuple[tuple[str, ...], tuple[str, ...], str, str]] = []
   dispatch_by_ordinal: dict[int, tuple[tuple[str, ...], tuple[str, ...], ExecDispatchRequest]] = {}
-  prefetch_events: dict[str, list[str]] = {slot: [] for slot in buffers}
+  prefetch_events: dict[str, list[str]] = {slot: [] for slot in buffer_shapes}
+  store_events: dict[str, list[str]] = {slot: [] for slot in buffer_shapes}
+  full_prefetch: set[str] = set()
+  published: set[str] = set()
+  publish_events: dict[str, str] = {}
+  import_bind_count = 0
   profile_frontier: list[str] = []
-  store_events: dict[str, list[str]] = {slot: [] for slot in buffers}
   current_l1 = call.entry_l1_mode
   saw_l1_reconfig = False
 
@@ -1161,7 +1310,27 @@ def _verify_task(
     write_done = action.dst or ""
     action_accesses: list[_Access] = []
 
-    if action.op is ExecGroupActionOp.BIND_L2_VIEW:
+    if action.op is ExecGroupActionOp.BIND_L2_IMPORT:
+      if (
+        index != import_bind_count
+        or import_bind_count >= len(task.shared_inputs)
+        or len(action.args) != 2
+        or action.args[1] != import_bind_count
+        or action.args[0] != task.shared_inputs[import_bind_count].slot
+        or not action.dst
+        or action.dependencies
+        or action.reads
+        or action.writes
+      ):
+        _fail(f"{action_where} has an invalid or misplaced shared import bind")
+      slot = action.args[0]
+      if slot in bound:
+        _fail(f"{action_where} binds shared import {slot!r} more than once")
+      bound.add(slot)
+      bind_events[slot] = action.dst
+      l2_live[slot] = None
+      import_bind_count += 1
+    elif action.op is ExecGroupActionOp.BIND_L2_VIEW:
       if len(action.args) != 2 or not isinstance(action.args[0], str) or type(action.args[1]) is not int:
         _fail(f"{action_where} BIND_L2_VIEW requires (buffer_id, layout_index)")
       buffer_id, layout_index = action.args
@@ -1189,18 +1358,36 @@ def _verify_task(
       if action.op is ExecGroupActionOp.DMA_PREFETCH:
         if transfer.src.space != "global" or transfer.dst.space != "l2":
           _fail(f"{action_where} prefetch must copy global to L2")
-        writes = (transfer.dst.base,)
-        if writes[0] not in l2_live:
+        slot = transfer.dst.base
+        if slot not in buffers or slot in published:
+          _fail(f"{action_where} prefetch targets an absent, imported, or published L2 view")
+        dims, dtype, _element_bytes, _buffer_bytes = buffer_shapes[slot]
+        if transfer.dst.backing_dims != dims or transfer.dst.dtype != dtype:
+          _fail(f"{action_where} prefetch destination disagrees with its L2 buffer")
+        writes = (slot,)
+        if slot not in l2_live:
           _fail(f"{action_where} writes an unbound or released L2 view")
-        prefetch_events[writes[0]].append(dma_done)
+        prefetch_events[slot].append(dma_done)
+        if (
+          transfer.dst.dims == dims
+          and transfer.dst.offsets == (0,) * len(dims)
+          and transfer.dst.task_dim is None
+        ):
+          full_prefetch.add(slot)
         action_accesses.append(_global_access(transfer.src, input_index, False, dma_done, index))
       else:
         if transfer.src.space != "l2" or transfer.dst.space != "global":
           _fail(f"{action_where} store must copy L2 to global")
-        reads = (transfer.src.base,)
-        if reads[0] not in l2_live:
+        slot = transfer.src.base
+        if slot not in buffer_shapes or slot in published:
+          _fail(f"{action_where} store reads an absent or already published L2 view")
+        dims, dtype, _element_bytes, _buffer_bytes = buffer_shapes[slot]
+        if transfer.src.backing_dims != dims or transfer.src.dtype != dtype:
+          _fail(f"{action_where} store source disagrees with its L2 buffer")
+        reads = (slot,)
+        if slot not in l2_live:
           _fail(f"{action_where} reads an unbound or released L2 view")
-        store_events[reads[0]].append(dma_done)
+        store_events[slot].append(dma_done)
         writeback_levels = frozenset(
           level
           for level, mode in (("l1", current_l1), ("l2", call.resolved_l2_mode))
@@ -1231,6 +1418,8 @@ def _verify_task(
       reads, writes, global_reads = _binding_effects(binding, effects, action_where)
       if any(slot not in l2_live for slot in (*reads, *writes)):
         _fail(f"{action_where} accesses an unbound or released L2 view")
+      if {*reads, *writes} & published:
+        _fail(f"{action_where} accesses an exported buffer after publish")
       grid_done = action.dst
       if (
         not grid_done
@@ -1292,28 +1481,94 @@ def _verify_task(
       if tuple(desc.dependencies) != action.dependencies or desc.source_ref != action.source_ref:
         _fail(f"{action_where} action and maintenance descriptor disagree")
       maintenance.append((index, desc))
-    elif action.op is ExecGroupActionOp.RELEASE_L2:
-      if len(action.args) != 1 or not isinstance(action.args[0], ExecReleaseRequest):
-        _fail(f"{action_where} has invalid release request")
-      release_request = action.args[0]
-      if release_request.buffer_slot not in buffers or release_request.buffer_slot not in l2_live:
-        _fail(f"{action_where} releases an absent or already released L2 view")
-      if release_request.buffer_role != buffers[release_request.buffer_slot].role:
-        _fail(f"{action_where} release role disagrees with allocation")
-      if release_request.dependency_events != action.dependencies:
-        _fail(f"{action_where} release and action dependencies disagree")
+    elif action.op is ExecGroupActionOp.PUBLISH_L2:
+      if len(action.args) != 1 or not isinstance(action.args[0], ExecPublishRequest):
+        _fail(f"{action_where} has invalid publish request")
+      publish_request = action.args[0]
+      slot = publish_request.buffer_slot
+      publish_buffer = buffers.get(slot)
+      if (
+        publish_buffer is None
+        or slot not in l2_live
+        or slot in published
+        or publish_buffer.sharing != "readonly"
+      ):
+        _fail(f"{action_where} publishes an absent, private, released, or already published buffer")
       readers = tuple(
         sorted(
           ordinal
           for ordinal, (read_slots, _, _) in dispatch_by_ordinal.items()
-          if release_request.buffer_slot in read_slots
+          if slot in read_slots
         )
       )
       writers = tuple(
         sorted(
           ordinal
           for ordinal, (_, write_slots, _) in dispatch_by_ordinal.items()
-          if release_request.buffer_slot in write_slots
+          if slot in write_slots
+        )
+      )
+      if (
+        publish_request.reader_dispatch_ordinals != readers
+        or publish_request.writer_dispatch_ordinals != writers
+      ):
+        _fail(f"{action_where} publish dispatch summary disagrees with descriptors")
+      if publish_request.dependency_events != action.dependencies:
+        _fail(f"{action_where} publish and action dependencies disagree")
+      required = [
+        bind_events[slot],
+        *prefetch_events[slot],
+        *store_events[slot],
+      ]
+      required.extend(dispatch_by_ordinal[item][2].input_released_event for item in readers)
+      required.extend(dispatch_by_ordinal[item][2].output_ready_event for item in writers)
+      if set(action.dependencies) != set(required):
+        _fail(f"{action_where} publish dependencies do not exactly close initialization and accesses")
+      if any(not event or not _ordered(event, action.dependencies, ancestors) for event in required):
+        _fail(f"{action_where} does not retire every real buffer access before publish")
+      rectangles = tuple(
+        rectangle
+        for ordinal in writers
+        for binding, effects in (role_bindings[dispatch_by_ordinal[ordinal][2].role_id],)
+        for rectangle in _writer_rectangles(binding, effects, slot, action_where)
+      )
+      if slot not in full_prefetch and not _rectangles_cover_shape(rectangles, publish_buffer.dims):
+        _fail(f"{action_where} publishes a buffer without complete initialization")
+      if not action.dst:
+        _fail(f"{action_where} publish lacks its completion event")
+      if action.reads or action.writes != (slot,):
+        _fail(f"{action_where} publish must seal exactly its target L2 buffer")
+      writes = (slot,)
+      published.add(slot)
+      publish_events[slot] = action.dst
+    elif action.op is ExecGroupActionOp.RELEASE_L2:
+      if len(action.args) != 1 or not isinstance(action.args[0], ExecReleaseRequest):
+        _fail(f"{action_where} has invalid release request")
+      release_request = action.args[0]
+      slot = release_request.buffer_slot
+      if slot not in buffer_shapes or slot not in l2_live:
+        _fail(f"{action_where} releases an absent or already released L2 view")
+      if release_request.buffer_role != buffer_roles[slot]:
+        _fail(f"{action_where} release role disagrees with its L2 view")
+      if release_request.dependency_events != action.dependencies:
+        _fail(f"{action_where} release and action dependencies disagree")
+      if slot in buffers:
+        if buffers[slot].sharing == "readonly" and slot not in published:
+          _fail(f"{action_where} releases a readonly export before publish")
+        if buffers[slot].sharing == "private" and slot in published:
+          _fail(f"{action_where} releases a private buffer after publish")
+      readers = tuple(
+        sorted(
+          ordinal
+          for ordinal, (read_slots, _, _) in dispatch_by_ordinal.items()
+          if slot in read_slots
+        )
+      )
+      writers = tuple(
+        sorted(
+          ordinal
+          for ordinal, (_, write_slots, _) in dispatch_by_ordinal.items()
+          if slot in write_slots
         )
       )
       if (
@@ -1324,20 +1579,27 @@ def _verify_task(
       release_done = action.dst
       if not release_done:
         _fail(f"{action_where} release lacks its internal completion event")
-      required = [
-        bind_events[release_request.buffer_slot],
-        *prefetch_events[release_request.buffer_slot],
-        *store_events[release_request.buffer_slot],
-      ]
+      required = [bind_events[slot], *prefetch_events[slot], *store_events[slot]]
       required.extend(dispatch_by_ordinal[item][2].input_released_event for item in readers)
-      if any(not _ordered(event, action.dependencies, ancestors) for event in required):
+      if slot in publish_events:
+        required.append(publish_events[slot])
+      if any(not event or not _ordered(event, action.dependencies, ancestors) for event in required):
         _fail(f"{action_where} does not retire every real buffer access")
-      if writers and not store_events[release_request.buffer_slot]:
-        _fail(f"{action_where} releases written output without an HBM store")
-      if buffers[release_request.buffer_slot].role == "in" and writers:
+      if slot in imports and writers:
+        _fail(f"{action_where} releases a shared import that was written")
+      if slot in buffers and buffer_roles[slot] in ("out", "inout") and not writers:
+        _fail(f"{action_where} releases output without a writer")
+      if (
+        slot in buffers
+        and buffers[slot].sharing == "private"
+        and writers
+        and not store_events[slot]
+      ):
+        _fail(f"{action_where} releases written private output without an HBM store")
+      if buffer_roles[slot] == "in" and writers:
         _fail(f"{action_where} role=in buffer has a writer")
-      l2_live.pop(release_request.buffer_slot)
-      released.add(release_request.buffer_slot)
+      l2_live.pop(slot)
+      released.add(slot)
     elif action.op is ExecGroupActionOp.BARRIER_GROUP:
       if action.args:
         _fail(f"{action_where} barrier takes no arguments")
@@ -1411,8 +1673,11 @@ def _verify_task(
     _fail(f"{where} exits with an L1 mode different from its call binding")
   if call.requires_l1_exclusive != saw_l1_reconfig:
     _fail(f"{where} cross-root L1 exclusivity metadata is incomplete")
-  if bound != set(buffers) or released != set(buffers) or l2_live:
+  if import_bind_count != len(imports) or bound != all_slots or released != all_slots or l2_live:
     _fail(f"{where} L2 view lifetime is incomplete")
+  exports = {slot for slot, buffer in buffers.items() if buffer.sharing == "readonly"}
+  if published != exports:
+    _fail(f"{where} readonly allocations do not have exactly one publish")
   if not task.actions or task.actions[-1].op is not ExecGroupActionOp.SIGNAL_EVENT:
     _fail(f"{where} lacks a terminal completion signal")
   if task.actions[-1].args != (task.completion_event,):
@@ -1424,7 +1689,7 @@ def _verify_task(
   _verify_global_hazards(accesses, task.actions, ancestors, maintenance, alias_indices)
   _verify_task_budget(task, call, registry, sim, where)
   uses_l1 = bool(dispatch_by_ordinal)
-  uses_l2 = bool(buffers or any(reads or writes for reads, writes, _, _ in semantic_effects))
+  uses_l2 = bool(buffers or imports or any(reads or writes for reads, writes, _, _ in semantic_effects))
   return _TaskSummary(task, tuple(accesses), uses_l1, uses_l2)
 
 
@@ -1952,12 +2217,116 @@ def _entry_tasks(
   _fail("entry_kind must be 'standalone' or 'model'")
 
 
+def _verify_shared_relationships(
+  program: CompiledProgram, tasks: Mapping[str, ExecTileGroupTask]
+) -> None:
+  if not isinstance(program.entry, ExecModel):
+    if any(task.shared_inputs for task in tasks.values()):
+      _fail("shared L2 imports require a specialized model executable")
+    return
+
+  submissions: dict[str, tuple[str, int, frozenset[str]]] = {}
+  device_ancestors: dict[str, frozenset[str]] = {}
+  l2_epoch = 0
+  for op in (*program.entry_prefix, *program.entry.body):
+    if op.op == "profile_reconfig":
+      if isinstance(op.command, ProfileReconfigDesc) and op.command.level == "l2":
+        l2_epoch += 1
+    elif op.op == "submit":
+      ancestry = _event_ancestors(op.dependencies, device_ancestors)
+      device_ancestors[op.event_tag] = ancestry
+      submissions[op.binding_id] = (op.event_tag, l2_epoch, ancestry)
+
+  for binding_id, task in tasks.items():
+    if not task.shared_inputs:
+      continue
+    consumer_submission = submissions.get(binding_id)
+    if consumer_submission is None:
+      _fail(f"shared consumer binding {binding_id!r} is not submitted")
+    _consumer_event, consumer_epoch, consumer_ancestors = consumer_submission
+    consumer_call = program.call_bindings[binding_id]
+    backing_spans: dict[tuple[str, str], tuple[int, int]] = {}
+    for shared in task.shared_inputs:
+      if shared.producer_binding_id == binding_id:
+        _fail(f"shared input {shared.slot!r} refers to its own consumer binding")
+      producer_task = tasks.get(shared.producer_binding_id)
+      producer_call = program.call_bindings.get(shared.producer_binding_id)
+      producer_submission = submissions.get(shared.producer_binding_id)
+      if producer_task is None or producer_call is None or producer_submission is None:
+        _fail(f"shared input {shared.slot!r} names an unknown producer binding")
+      producer_event, producer_epoch, _producer_ancestors = producer_submission
+      exports = {
+        buffer.slot: buffer for buffer in producer_task.l2_buffers if buffer.sharing == "readonly"
+      }
+      producer_buffer = exports.get(shared.producer_slot)
+      if producer_buffer is None:
+        _fail(f"shared input {shared.slot!r} names an unpublished producer slot")
+      if (
+        (shared.dims, shared.dtype, shared.element_bytes, shared.bytes)
+        != (
+          producer_buffer.dims,
+          producer_buffer.dtype,
+          producer_buffer.element_bytes,
+          producer_buffer.bytes,
+        )
+      ):
+        _fail(f"shared input {shared.slot!r} shape or dtype differs from its producer")
+      if (
+        producer_epoch != consumer_epoch
+        or producer_call.resolved_l2_mode != consumer_call.resolved_l2_mode
+      ):
+        _fail(f"shared input {shared.slot!r} crosses an L2 profile epoch")
+      if producer_event not in consumer_ancestors:
+        _fail(f"shared input {shared.slot!r} lacks producer completion dependency ancestry")
+      if producer_task.layout is None:
+        _fail(f"shared producer {shared.producer_binding_id!r} has no L2 layout")
+      key = (shared.producer_binding_id, shared.producer_slot)
+      allocation = next(
+        (
+          item
+          for item in producer_task.layout.buffer_layouts
+          if item.buffer_id == shared.producer_slot
+        ),
+        None,
+      )
+      if allocation is None:
+        _fail(f"shared producer layout omits slot {shared.producer_slot!r}")
+      backing_spans.setdefault(
+        key,
+        (
+          _padded_l2_bytes_per_bank(
+            producer_task, shared.producer_slot, f"producer {shared.producer_binding_id!r}"
+          ),
+          allocation.banks,
+        ),
+      )
+
+    if task.layout is None or not task.layout.per_bank_bytes:
+      _fail(f"shared consumer {binding_id!r} has no local L2 reservation geometry")
+    own_per_bank = task.layout.per_bank_bytes[0]
+    if task.resource_contract is None:
+      _fail(f"shared consumer {binding_id!r} has no resource contract")
+    for mode in task.resource_contract.allowed_profiles:
+      profile = program.registry.profile("l2", mode)
+      if len(task.layout.per_bank_bytes) != profile.banks:
+        _fail(f"shared consumer {binding_id!r} L2 bank geometry differs in profile {mode}")
+      if any(banks != profile.banks for _, banks in backing_spans.values()):
+        _fail(f"shared consumer {binding_id!r} shared backing bank geometry differs in profile {mode}")
+      shared_per_bank = sum(span for span, _banks in backing_spans.values())
+      if shared_per_bank > _UINT64_MAX:
+        _fail(f"shared consumer {binding_id!r} shared L2 demand exceeds uint64")
+      if shared_per_bank + own_per_bank > profile.user_spm_per_bank:
+        _fail(
+          f"shared consumer {binding_id!r} exceeds per-bank L2 capacity in profile {mode}"
+        )
+
+
 def verify_compiled_program(program: CompiledProgram, hw: HardwareConfig, sim: SimConfig) -> None:
   """Verify package integrity and executable semantics without graph mutation."""
   if not isinstance(program, CompiledProgram):
     _fail("expected CompiledProgram")
-  if type(program.schema_version) is not int or program.schema_version != 1 or program.compiler_abi != "v0":
-    _fail("unsupported schema version or compiler ABI")
+  if type(program.schema_version) is not int or program.schema_version != 2 or program.compiler_abi != "v1":
+    _fail("unsupported compiled schema or compiler ABI; recompile from source")
   if not _is_frozen(program):
     _fail("compiled artifact is not deeply immutable")
   for name in ("source_hash", "registry_hash", "target_hash", "artifact_hash"):
@@ -2065,6 +2434,7 @@ def verify_compiled_program(program: CompiledProgram, hw: HardwareConfig, sim: S
   _verify_relocations(program, tasks)
   _verify_source_map(program, tasks)
   _verify_device_control(program, tasks, summaries, inputs)
+  _verify_shared_relationships(program, tasks)
   _verify_binding_guards(program, summaries, inputs)
 
 
@@ -2095,6 +2465,7 @@ def _expected_relocations(task: ExecTileGroupTask) -> set[tuple[object, ...]]:
       ExecGroupActionOp.SIGNAL_EVENT: "event_tuple",
       ExecGroupActionOp.DISPATCH_ROLE: "dispatch_events",
       ExecGroupActionOp.RELEASE_L2: "release_events",
+      ExecGroupActionOp.PUBLISH_L2: "publish_events",
       ExecGroupActionOp.PROFILE_RECONFIG: "profile_frontier",
       ExecGroupActionOp.MEMORY_MAINTENANCE: "maintenance_dependencies",
       ExecGroupActionOp.INIT_STREAM: "queue",
@@ -2178,6 +2549,7 @@ def _verify_relocations(program: CompiledProgram, tasks: Mapping[str, ExecTileGr
       ("group", "args", "event_tuple"),
       ("group", "args", "dispatch_events"),
       ("group", "args", "release_events"),
+      ("group", "args", "publish_events"),
       ("group", "args", "profile_frontier"),
       ("group", "args", "maintenance_dependencies"),
       ("group", "args", "queue"),
@@ -2193,6 +2565,7 @@ def _verify_relocations(program: CompiledProgram, tasks: Mapping[str, ExecTileGr
         "event_tuple": {ExecGroupActionOp.WAIT_EVENT, ExecGroupActionOp.SIGNAL_EVENT},
         "dispatch_events": {ExecGroupActionOp.DISPATCH_ROLE},
         "release_events": {ExecGroupActionOp.RELEASE_L2},
+        "publish_events": {ExecGroupActionOp.PUBLISH_L2},
         "profile_frontier": {ExecGroupActionOp.PROFILE_RECONFIG},
         "maintenance_dependencies": {ExecGroupActionOp.MEMORY_MAINTENANCE},
       }
@@ -2239,8 +2612,12 @@ def _verify_relocations(program: CompiledProgram, tasks: Mapping[str, ExecTileGr
       _fail(f"relocations[{index}] has unsupported relocation form")
   expected = set().union(*(_expected_relocations(task) for task in tasks.values()))
   missing = expected - seen
-  if missing:
-    _fail(f"relocation table omits {len(missing)} mutable executable fields")
+  unexpected = seen - expected
+  if missing or unexpected:
+    _fail(
+      "relocation table differs from mutable executable fields "
+      f"({len(missing)} missing, {len(unexpected)} unexpected)"
+    )
 
 
 def _verify_source_map(program: CompiledProgram, tasks: Mapping[str, ExecTileGroupTask]) -> None:

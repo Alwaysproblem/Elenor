@@ -617,9 +617,92 @@ def prepare_resources(
       "l1_modes": tuple(sorted(child_modes)),
       "l2_modes": tuple(contract.allowed_profiles),
     }
+  _prove_shared_l2_capacity(prepared, registry)
   if isinstance(entry, ExecModel):
     return replace(entry, tasks=prepared), budgets, effects
   return prepared[entry.binding_id], budgets, effects
+
+
+def _prove_shared_l2_capacity(
+  tasks: Mapping[str, ExecTileGroupTask], registry: ProfileRegistry
+) -> None:
+  """Prove each reader's local reservation plus shared padded spans fit per bank."""
+  for consumer in tasks.values():
+    if not consumer.shared_inputs:
+      continue
+    consumer_contract = consumer.resource_contract
+    consumer_layout = consumer.layout
+    if not isinstance(consumer_contract, ContextResources) or not isinstance(
+      consumer_layout, ArenaLayout
+    ):
+      raise ValueError(f"Context {consumer.name!r} has incomplete shared L2 resource metadata")
+
+    imported: dict[tuple[str, str], tuple[ExecTileGroupTask, BufferLayout]] = {}
+    for shared_input in consumer.shared_inputs:
+      key = (shared_input.producer_binding_id, shared_input.producer_slot)
+      producer = tasks.get(shared_input.producer_binding_id)
+      if producer is None:
+        raise ValueError(
+          f"shared input references unknown producer {shared_input.producer_binding_id!r}"
+        )
+      producer_contract = producer.resource_contract
+      producer_layout = producer.layout
+      if not isinstance(producer_contract, ContextResources) or not isinstance(
+        producer_layout, ArenaLayout
+      ):
+        raise ValueError(f"shared producer {producer.name!r} has incomplete L2 resource metadata")
+      producer_buffer = next(
+        (
+          buffer
+          for buffer in producer.l2_buffers
+          if buffer.slot == shared_input.producer_slot and buffer.sharing == "readonly"
+        ),
+        None,
+      )
+      if producer_buffer is None or (
+        producer_buffer.dims,
+        producer_buffer.dtype,
+        producer_buffer.element_bytes,
+        producer_buffer.bytes,
+      ) != (
+        shared_input.dims,
+        shared_input.dtype,
+        shared_input.element_bytes,
+        shared_input.bytes,
+      ):
+        raise ValueError("shared input descriptor does not match its readonly producer buffer")
+      allocation = next(
+        (item for item in producer_layout.buffer_layouts if item.buffer_id == shared_input.producer_slot),
+        None,
+      )
+      if allocation is None or allocation.logical_bytes != producer_buffer.bytes:
+        raise ValueError(f"shared producer layout omits slot {shared_input.producer_slot!r}")
+      imported.setdefault(key, (producer, allocation))
+
+    for mode in consumer_contract.allowed_profiles:
+      profile = registry.profile("l2", mode)
+      if len(consumer_layout.per_bank_bytes) != profile.banks:
+        raise ValueError("consumer L2 layout bank count differs from its shared profile")
+      shared_per_bank = 0
+      for _producer, allocation in imported.values():
+        if allocation.banks != profile.banks:
+          raise ValueError("shared producer and consumer profile have different L2 bank counts")
+        round_bytes = uint64(
+          allocation.stripe_bytes * allocation.banks, "shared producer stripe round", positive=True
+        )
+        padded_bytes = uint64(
+          ((allocation.logical_bytes + round_bytes - 1) // round_bytes) * round_bytes,
+          "shared producer padded span",
+        )
+        shared_per_bank += padded_bytes // allocation.banks
+      for bank, local_bytes in enumerate(consumer_layout.per_bank_bytes):
+        demand = uint64(local_bytes + shared_per_bank, "shared plus local L2 bank demand")
+        if profile.system_reserved_spm_per_bank + demand > profile.spm_bytes_per_bank:
+          raise ValueError(
+            f"permanent capacity: Context {consumer.name!r} L2 bank {bank} needs {demand} "
+            f"bytes for its local arena and shared inputs under mode {mode}, "
+            f"but only {profile.user_spm_per_bank} user bytes are available"
+          )
 
 
 def finalize_event_resources(

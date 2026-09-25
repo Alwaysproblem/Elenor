@@ -11,6 +11,7 @@ from .device import CpuDeviceController
 from .execution_ir import ExecDeviceOp, ExecModel, ExecTileGroupTask, GlobalBinding
 from .immutable import canonical_value
 from .loader import load_program
+from .memory.allocator import MemoryInvariantError
 from .pmu import PMUCounter
 from .runtime.group_port import GroupPortAdapter
 from .tile_group import TileGroup
@@ -136,7 +137,15 @@ class Simulator:
     trace_tile = self.sim.trace_tile
 
     while self.cycle < self.sim.max_cycles:
-      done = self.group.step(self.cycle)
+      try:
+        done = self.group.step(self.cycle)
+      except (MemoryInvariantError, RuntimeError) as exc:
+        if not self.group.reset_domain.is_active:
+          raise
+        detail = f"{exc}; {'; '.join(self.group.unclosed_l2_objects())}"
+        self.group.poison(f"isolation failed: {detail}")
+        reason = f"faulted: {fault_reason}; poisoned: {detail}"
+        break
       if self.sim.trace and (trace_tile is None or trace_tile):
         snap = self.group.snapshot()
         self._trace.append({"cycle": self.cycle, **snap})
@@ -160,17 +169,15 @@ class Simulator:
         continue
 
       if done:
-        if fault_reason is None:
-          violation = self.group.assert_private_l2_closed()
-          if violation is None:
-            completed = True
-            reason = "group task complete"
-            break
-          # plan/01 §4.3: the standalone success exit proves the same
-          # private closure; a leak becomes a group-visible fault that
-          # must drain before the run reports failure.
-          fault_reason = f"private L2 closure violation: {violation}"
+        try:
+          self.group.assert_l2_closed()
+        except MemoryInvariantError as exc:
+          fault_reason = f"L2 closure violation: {exc}"
           self._ensure_fault_drain(fault_reason, self.cycle)
+        else:
+          completed = True
+          reason = "group task complete"
+          break
         if self.group.reset_domain.is_done:
           completed = False
           reason = f"faulted: {fault_reason}"
@@ -179,18 +186,25 @@ class Simulator:
         continue
       self.cycle += 1
     else:
-      reason = f"cycle cap {self.sim.max_cycles} reached"
+      reason = fault_reason or f"cycle cap {self.sim.max_cycles} reached"
       # plan/01 §4.4: run the bounded post-cap isolation drain to DONE.
       if fault_reason is None:
         fault_reason = reason
       self._ensure_fault_drain(fault_reason, self.cycle)
       deadline = self.cycle + self.hw.memory_target.profile_command_timeout_cycles
+      isolation_error = ""
       while self.group.reset_domain.is_active and self.cycle < deadline:
-        self.group.step(self.cycle)
+        try:
+          self.group.step(self.cycle)
+        except (MemoryInvariantError, RuntimeError) as exc:
+          isolation_error = str(exc)
+          break
         self.cycle += 1
       if not self.group.reset_domain.is_done:
         detail = "; ".join(self.group.unclosed_l2_objects()) or "reset drain did not reach DONE"
-        self.group.poison(f"cycle cap {self.sim.max_cycles} isolation failed: {detail}")
+        if isolation_error:
+          detail = f"{isolation_error}; {detail}"
+        self.group.poison(f"isolation failed: {detail}")
         reason = f"{reason}; poisoned: {detail}"
       completed = False
 
@@ -251,7 +265,16 @@ class Simulator:
       #   CPU submit/dependency phase -> one Group cycle -> CPU completion
       #   harvest.  A completion from this Group step wakes deps next cycle.
       controller.step(self.cycle)
-      self.group.step(self.cycle)
+      try:
+        self.group.step(self.cycle)
+      except (MemoryInvariantError, RuntimeError) as exc:
+        if not self.group.reset_domain.is_active:
+          raise
+        detail = f"{exc}; {'; '.join(self.group.unclosed_l2_objects())}"
+        self.group.poison(f"isolation failed: {detail}")
+        controller._enter_fault(detail, self.cycle)
+        reason = f"faulted: {controller.fault_reason}; poisoned: {detail}"
+        break
       if self.sim.trace and (trace_tile is None or trace_tile):
         self._trace.append({"cycle": self.cycle, **self.group.snapshot()})
       controller.harvest_completions(self.cycle)
@@ -275,22 +298,23 @@ class Simulator:
         continue
 
       if controller.succeeded:
-        violation = self.group.assert_private_l2_closed()
-        if violation is None:
-          completed = True
-          reason = "model complete"
-          break
-        # plan/01 §4.3: a leak is a controller-visible fault.  Drain the
-        # reset domain before reporting; success never bypasses the proof.
-        leak_reason = f"private L2 closure violation: {violation}"
-        controller._enter_fault(leak_reason, self.cycle)
-        controller.note_fault_drain_started(self.cycle)
-        self._ensure_fault_drain(leak_reason, self.cycle)
-        self.cycle += 1
-        continue
+        try:
+          self.group.assert_l2_closed()
+        except MemoryInvariantError as exc:
+          # A terminal leak must enter the controller fault path and advance
+          # reset/drain before this run can report failure.
+          leak_reason = f"L2 closure violation: {exc}"
+          controller._enter_fault(leak_reason, self.cycle)
+          controller.note_fault_drain_started(self.cycle)
+          self._ensure_fault_drain(leak_reason, self.cycle)
+          self.cycle += 1
+          continue
+        completed = True
+        reason = "model complete"
+        break
       self.cycle += 1
     else:
-      reason = f"cycle cap {self.sim.max_cycles} reached"
+      reason = controller.fault_reason or f"cycle cap {self.sim.max_cycles} reached"
       # plan/01 §4.4: the cap alone is not an isolation proof.  Enter a
       # controller-visible fault and run a bounded post-cap drain to DONE.
       cap_reason = controller.fault_reason or reason
@@ -298,14 +322,21 @@ class Simulator:
       controller.note_fault_drain_started(self.cycle)
       self._ensure_fault_drain(cap_reason, self.cycle)
       deadline = self.cycle + self.hw.memory_target.profile_command_timeout_cycles
+      isolation_error = ""
       while self.group.reset_domain.is_active and self.cycle < deadline:
-        controller.step(self.cycle)
-        self.group.step(self.cycle)
-        controller.harvest_completions(self.cycle)
+        try:
+          controller.step(self.cycle)
+          self.group.step(self.cycle)
+          controller.harvest_completions(self.cycle)
+        except (MemoryInvariantError, RuntimeError) as exc:
+          isolation_error = str(exc)
+          break
         self.cycle += 1
       if not self.group.reset_domain.is_done:
         detail = "; ".join(self.group.unclosed_l2_objects()) or "reset drain did not reach DONE"
-        self.group.poison(f"cycle cap {self.sim.max_cycles} isolation failed: {detail}")
+        if isolation_error:
+          detail = f"{isolation_error}; {detail}"
+        self.group.poison(f"isolation failed: {detail}")
         reason = f"{reason}; poisoned: {detail}"
       completed = False
 

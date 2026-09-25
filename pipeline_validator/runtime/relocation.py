@@ -54,7 +54,7 @@ def relocate_task(
             ),
           ),
         )
-      elif field == "args" and kind == "release_events":
+      elif field == "args" and kind in ("release_events", "publish_events"):
         request = action.args[0]
         action = replace(
           action,

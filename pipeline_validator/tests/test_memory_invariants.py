@@ -1560,3 +1560,238 @@ class TestAcceptedNotIssuedPrefetch:
     after = pool.snapshot()
     assert after["live_backings"] == 0
     assert after["free_bytes"] == after["user_spm_capacity_bytes"]
+
+
+class TestExplicitL2PoolClaims:
+  @staticmethod
+  def _pool(*, trace: bool = False):
+    from pipeline_validator.config import HardwareConfig
+    from pipeline_validator.memory.arena import ArenaPool
+    from pipeline_validator.profiles import build_registry
+
+    hw = HardwareConfig()
+    tracer = None
+    if trace:
+      from pipeline_validator.trace import MemoryTrace, Tracer
+
+      tracer = Tracer(hw)
+      memory_trace = MemoryTrace(tracer)
+    else:
+      memory_trace = None
+    profile = build_registry(hw).profile("l2", 0)
+    return ArenaPool(profile, trace=memory_trace), profile, tracer
+
+  @staticmethod
+  def _layout(pool, buffer_bytes: int = 4096):
+    from pipeline_validator.compiler.resources import conservative_arena_bytes, layout_buffers
+    from pipeline_validator.execution_ir import ExecL2Buffer
+
+    buffer = ExecL2Buffer("weight", (buffer_bytes,), "i8", "inout", 1, 64, buffer_bytes)
+    reserved = conservative_arena_bytes([(buffer.bytes, buffer.alignment)], pool.profile)
+    layout = layout_buffers((buffer,), pool.profile, reserved, lifetimes=None, slot_capacity=1)
+    return buffer, layout
+
+  def test_claim_validation_failure_preserves_plan_pool_version_and_trace(self):
+    from pipeline_validator.memory import AdmissionFailure
+    from pipeline_validator.memory.arena import RootInvocation
+
+    pool, _profile, tracer = self._pool(trace=True)
+    _buffer, layout = self._layout(pool)
+    plan = pool.plan_arena(RootInvocation("producer", 0), layout)
+    assert not isinstance(plan, AdmissionFailure)
+    before = pool.snapshot()
+    trace_before = tracer.to_chrome_json()
+
+    with pytest.raises(MemoryInvariantError, match="unknown arena buffer"):
+      pool.commit_arena(plan, 1, claims_by_slot={"missing": (("reader", "weight"),)})
+
+    assert pool.snapshot() == before
+    assert pool.pool_version == before["pool_version"]
+    assert tracer.to_chrome_json() == trace_before
+
+    arena = pool.commit_arena(plan, 1)
+    view = pool.bind_view(arena, "weight", 2)
+    assert pool.invalidate_view(view, view.owner, 3)
+    assert pool.retire_arena(arena, 4)
+
+  def test_published_claim_survives_origin_retirement_until_last_alias_ack(self):
+    from pipeline_validator.compiler.resources import layout_buffers
+    from pipeline_validator.memory import AdmissionFailure
+    from pipeline_validator.memory.arena import RootInvocation
+
+    pool, _profile, _tracer = self._pool()
+    _buffer, layout = self._layout(pool)
+    claim_id = ("reader-submit-1", "weight")
+    producer_plan = pool.plan_arena(RootInvocation("producer", 0), layout)
+    assert not isinstance(producer_plan, AdmissionFailure)
+    producer_arena = pool.commit_arena(
+      producer_plan, 0, claims_by_slot={"weight": (claim_id,)}
+    )
+    producer = pool.bind_view(producer_arena, "weight", 1)
+    backing_id = producer.backing_id
+    initial = pool.snapshot()
+    assert initial["pending_shared_claims"] == 1
+    assert initial["active_shared_references"] == 0
+    assert not pool.can_borrow_l2_view(
+      backing_id, ContextBufferOwner("reader", 7, "weight"), claim_id
+    )
+    assert pool.snapshot() == initial
+
+    assert pool.permissions(producer) == "rw"
+    pool.assert_access(producer, "w")
+    pool.pin(producer, "writer:0")
+    before_publish_check = pool.snapshot()
+    with pytest.raises(MemoryInvariantError, match="unexpected active pins"):
+      pool.check_publish_l2(producer)
+    assert pool.snapshot() == before_publish_check
+    pool.check_publish_l2(producer, allowed_pins=("writer:0",))
+    assert pool.snapshot() == before_publish_check
+    assert not pool.unpin(producer, "writer:0", 2)
+    pool.publish_l2(producer, 2)
+    assert pool.permissions(producer) == "r"
+    with pytest.raises(MemoryInvariantError, match="read-only"):
+      pool.assert_access(producer, "w")
+    assert pool.can_borrow_l2_view(
+      backing_id, ContextBufferOwner("reader", 7, "weight"), claim_id
+    )
+
+    assert pool.invalidate_view(producer, producer.owner, 3)
+    committed_version = pool.pool_version
+    assert pool.retire_arena(producer_arena, 4)
+    origin_retired = pool.snapshot()
+    assert pool.pool_version == committed_version
+    assert origin_retired["live_arenas"] == 0
+    assert origin_retired["live_backings"] == 1
+    assert origin_retired["origin_retired_backings"][0]["backing_id"] == backing_id
+    assert origin_retired["arena_reserved_bytes"] == producer_arena.reserved_bytes
+    assert pool.arena_held_bytes(producer_arena) == 0
+
+    reader_owner = RootInvocation("reader", 7)
+    reader_layout = layout_buffers((), pool.profile, 0, lifetimes=None, slot_capacity=1)
+    reader_plan = pool.plan_arena(reader_owner, reader_layout)
+    assert not isinstance(reader_plan, AdmissionFailure)
+    reader_arena = pool.commit_arena(reader_plan, 5)
+    assert pool.pool_version == committed_version
+    reader = pool.borrow_l2_view(
+      backing_id, ContextBufferOwner("reader", 7, "weight"), claim_id, 6
+    )
+    assert reader.allocation_id != producer.allocation_id
+    assert reader.backing_id == producer.backing_id
+    assert reader.generation == producer.generation
+    assert reader.profile_generation == producer.profile_generation
+    assert reader.bank_segments == producer.bank_segments
+    assert pool.pool_version == committed_version
+    active = pool.snapshot()
+    assert active["live_backings"] == 1
+    assert active["pending_shared_claims"] == 0
+    assert active["active_shared_references"] == 1
+    assert active["arena_reserved_bytes"] == initial["arena_reserved_bytes"]
+    assert active["live_view_bytes"] == producer.size_bytes
+    assert active["logical_live_view_bytes"] == reader.size_bytes
+    for bank in active["per_bank_occupancy"]:
+      assert bank["allocated_bytes"] + bank["free_bytes"] == pool.profile.user_spm_per_bank
+
+    pool.begin_inflight(reader, "reader:transfer")
+    assert not pool.has_inflight_references(producer)
+    assert pool.has_inflight_references(reader)
+    assert not pool.invalidate_view(reader, reader.owner, 7)
+    assert pool.permissions(reader) == "r"
+    before_denied_write = pool.snapshot()
+    with pytest.raises(MemoryInvariantError, match="read-only"):
+      pool.assert_access(reader, "w")
+    assert pool.snapshot() == before_denied_write
+    assert pool.end_inflight(reader, "reader:transfer", 8)
+
+    released = pool.snapshot()
+    assert released["live_backings"] == 0
+    assert released["pending_shared_claims"] == 0
+    assert released["active_shared_references"] == 0
+    assert released["arena_reserved_bytes"] == 0
+    assert released["free_bytes"] == released["user_spm_capacity_bytes"]
+    assert released["pool_version"] == committed_version + 1
+    assert pool.backing_claims(backing_id) == ()
+    assert pool.claim_snapshot()[0]["state"] == "RELEASED"
+    assert len(pool.drain_l2_backing_release_events()) == 1
+
+    before_double_release = pool.snapshot()
+    with pytest.raises(MemoryInvariantError, match="double release"):
+      pool.invalidate_view(reader, reader.owner, 9)
+    assert pool.snapshot() == before_double_release
+    assert pool.retire_arena(reader_arena, 10)
+    assert pool.pool_version == before_double_release["pool_version"]
+    pool.close_l2_claims()
+    assert pool.claim_snapshot() == ()
+
+  def test_retained_capacity_query_uses_physical_spans_without_mutation(self):
+    from pipeline_validator.compiler.resources import layout_buffers
+    from pipeline_validator.memory import AdmissionFailure
+    from pipeline_validator.memory.arena import RootInvocation
+
+    pool, profile, _tracer = self._pool()
+    _buffer, layout = self._layout(pool)
+    claim_id = ("reader-submit", "weight")
+    plan = pool.plan_arena(RootInvocation("producer", 0), layout)
+    assert not isinstance(plan, AdmissionFailure)
+    arena = pool.commit_arena(plan, 0, claims_by_slot={"weight": (claim_id,)})
+    producer = pool.bind_view(arena, "weight", 1)
+    pool.publish_l2(producer, 2)
+    backing_id = producer.backing_id
+
+    full_layout = layout_buffers(
+      (), profile, profile.user_spm_bytes, lifetimes=None, slot_capacity=1
+    )
+    before = pool.snapshot()
+    assert pool.can_fit_with_retained(full_layout, ())
+    assert not pool.can_fit_with_retained(full_layout, (backing_id,))
+    assert pool.snapshot() == before
+
+    assert pool.invalidate_view(producer, producer.owner, 3)
+    assert pool.cancel_l2_claim(backing_id, claim_id, 4)
+    after_cancel = pool.snapshot()
+    assert not pool.cancel_l2_claim(backing_id, claim_id, 5)
+    assert pool.snapshot() == after_cancel
+    assert pool.retire_arena(arena, 5)
+    pool.close_l2_claims()
+
+  def test_fault_cancelled_bound_alias_is_idempotent_but_public_release_is_strict(self):
+    from pipeline_validator.compiler.resources import layout_buffers
+    from pipeline_validator.memory import AdmissionFailure
+    from pipeline_validator.memory.arena import RootInvocation
+
+    pool, _profile, _tracer = self._pool()
+    _buffer, layout = self._layout(pool)
+    claim_id = ("reader-submit", "weight")
+    producer_plan = pool.plan_arena(RootInvocation("producer", 0), layout)
+    assert not isinstance(producer_plan, AdmissionFailure)
+    producer_arena = pool.commit_arena(
+      producer_plan, 0, claims_by_slot={"weight": (claim_id,)}
+    )
+    producer = pool.bind_view(producer_arena, "weight", 1)
+    pool.publish_l2(producer, 2)
+
+    reader_owner = RootInvocation("reader", 7)
+    reader_layout = layout_buffers((), pool.profile, 0, lifetimes=None, slot_capacity=1)
+    reader_plan = pool.plan_arena(reader_owner, reader_layout)
+    assert not isinstance(reader_plan, AdmissionFailure)
+    reader_arena = pool.commit_arena(reader_plan, 3)
+    reader = pool.borrow_l2_view(
+      producer.backing_id, ContextBufferOwner("reader", 7, "weight"), claim_id, 4
+    )
+    assert pool.invalidate_view(producer, producer.owner, 5)
+    assert pool.retire_arena(producer_arena, 6)
+    assert pool.snapshot()["active_shared_references"] == 1
+
+    assert pool.cancel_l2_view(reader, reader.owner, 7)
+    cancelled = pool.snapshot()
+    assert cancelled["live_backings"] == 0
+    assert cancelled["active_shared_references"] == 0
+    assert pool.claim_snapshot()[0]["state"] == "CANCELLED"
+    assert len(pool.drain_l2_backing_release_events()) == 1
+    assert not pool.cancel_l2_view(reader, reader.owner, 8)
+    assert pool.snapshot() == cancelled
+    with pytest.raises(MemoryInvariantError, match="double release"):
+      pool.invalidate_view(reader, reader.owner, 9)
+    assert pool.snapshot() == cancelled
+
+    assert pool.retire_arena(reader_arena, 10)
+    pool.close_l2_claims()

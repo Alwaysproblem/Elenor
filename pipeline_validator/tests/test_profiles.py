@@ -15,12 +15,15 @@ from pipeline_validator.immutable import digest
 from pipeline_validator.memory import AdmissionFailure, AdmissionFailureKind, MemoryInvariantError
 from pipeline_validator.memory.allocator import ContextBufferOwner
 from pipeline_validator.memory.arena import WAIT_CAPACITY, WAIT_FRAGMENTATION, ArenaPool, RootInvocation
+from pipeline_validator.tile_group import TileGroup
 from pipeline_validator.profiles import (
   ArenaLayout,
   MemoryProfile,
   ProfileBytes,
   ProfileLevelSource,
+  ProfileReconfigDesc,
   ProfileSourceConfig,
+  SourceRef,
   build_registry,
   parse_memory_target,
   validate_allowed,
@@ -357,6 +360,128 @@ class TestL2BackingLifecycle:
     # The physical final-free is immediately visible to a fresh plan.
     retried = pool.plan_arena(RootInvocation("b", 0), layout)
     assert not isinstance(retried, AdmissionFailure)
+
+class TestSharedL2ProfileClosure:
+  def test_l1_profile_completes_but_l2_waits_for_shared_backing_release(self):
+    hw = HardwareConfig()
+    group = TileGroup(hw, fidelity="runtime")
+    controller = group.profile_controller
+    cycle = 0
+    while not controller.initialized:
+      controller.step(cycle)
+      cycle += 1
+      assert cycle < 10000
+    group.run_generation = 1
+    controller.begin_run(1)
+    group.transfer_manager.begin_run(1)
+    assert controller._level_quiescent("l1")
+    assert controller._level_quiescent("l2")
+
+    pool = group.l2_sram
+    buffer = TestL2BackingLifecycle()._buffer("W", 64)
+    reserved = conservative_arena_bytes([(buffer.bytes, buffer.alignment)], pool.profile)
+    layout = layout_buffers((buffer,), pool.profile, reserved, lifetimes=None, slot_capacity=1)
+    producer_owner = RootInvocation("producer", 0)
+    plan = pool.plan_arena(producer_owner, layout)
+    assert not isinstance(plan, AdmissionFailure)
+    producer_arena = pool.commit_arena(
+      plan,
+      cycle,
+      claims_by_slot={"W": (("reader-binding", "weight"),)},
+    )
+    producer = pool.bind_view(producer_arena, "W", cycle + 1)
+    pool.publish_l2(producer, cycle + 2)
+    assert pool.invalidate_view(producer, producer.owner, cycle + 3)
+    assert pool.retire_arena(producer_arena, cycle + 4)
+    cycle += 5
+
+    held = pool.snapshot()
+    assert held["live_arenas"] == 0
+    assert held["live_backings"] == 1
+    assert held["pending_shared_claims"] == 1
+    assert held["active_shared_references"] == 0
+    assert held["physical_live_backing_bytes"] > 0
+    assert held["live_view_bytes"] == buffer.bytes
+
+    reader_owner = RootInvocation("reader", 0)
+    empty_layout = _empty_layout(pool.profile, 0)
+    reader_plan = pool.plan_arena(reader_owner, empty_layout)
+    assert not isinstance(reader_plan, AdmissionFailure)
+    reader_arena = pool.commit_arena(reader_plan, cycle)
+    borrower_owner = ContextBufferOwner("reader", 0, "weight")
+    borrower = pool.borrow_l2_view(
+      producer.backing_id,
+      borrower_owner,
+      ("reader-binding", "weight"),
+      cycle + 1,
+    )
+    cycle += 2
+    bound = pool.snapshot()
+    assert bound["pending_shared_claims"] == 0
+    assert bound["active_shared_references"] == 1
+    assert controller._level_quiescent("l1")
+    assert not controller._level_quiescent("l2")
+
+    def command(command_id: str, level: str, target: int) -> ProfileReconfigDesc:
+      target_profile = group.registry.profile(level, target)
+      return ProfileReconfigDesc(
+        command_id=command_id,
+        level=level,
+        expected_mode=controller.active_modes[level],
+        target_mode=target,
+        registry_hash=group.registry.registry_hash,
+        wait_instruction_ids=(),
+        frontier=(),
+        affected_domains=(level,),
+        member_ids=target_profile.member_ids,
+        exclusive_binding_id="",
+        source_ref=SourceRef("<test>", command_id, 0, "profile.reconfig"),
+      )
+
+    def run_to_terminal(command_id: str, start_cycle: int) -> int:
+      for current in range(start_cycle, start_cycle + 10000):
+        group.step(current)
+        if controller.status(command_id) in ("completed", "faulted", "cancelled"):
+          return current + 1
+      raise AssertionError(f"profile command {command_id!r} did not terminate")
+
+    l1_command = command("shared-l1-switch", "l1", 1)
+    assert controller.submit(l1_command, "device@1", cycle)
+    cycle = run_to_terminal(l1_command.command_id, cycle)
+    assert controller.status(l1_command.command_id) == "completed"
+    assert controller.active_modes["l1"] == 1
+    assert pool.snapshot()["live_backings"] == 1
+    assert pool.snapshot()["active_shared_references"] == 1
+
+    l2_command = command("shared-l2-switch", "l2", 1)
+    assert controller.submit(l2_command, "device@1", cycle)
+    current = cycle
+    for current in range(cycle, cycle + 1000):
+      group.step(current)
+      current += 1
+      if controller.snapshot()["commands"][l2_command.command_id]["step"] == "DRAIN_REFERENCES":
+        break
+    assert controller.snapshot()["commands"][l2_command.command_id]["step"] == "DRAIN_REFERENCES"
+    for _ in range(16):
+      group.step(current)
+      current += 1
+      assert controller.snapshot()["commands"][l2_command.command_id]["step"] == "DRAIN_REFERENCES"
+      assert controller.active_modes["l2"] == 0
+
+    assert pool.invalidate_view(borrower, borrower_owner, current)
+    assert pool.retire_arena(reader_arena, current + 1)
+    pool.close_l2_claims()
+    cycle = current + 2
+    closed = pool.snapshot()
+    assert closed["live_backings"] == 0
+    assert closed["pending_shared_claims"] == 0
+    assert closed["active_shared_references"] == 0
+    assert closed["arena_reserved_bytes"] == 0
+
+    cycle = run_to_terminal(l2_command.command_id, cycle)
+    assert controller.status(l2_command.command_id) == "completed"
+    assert controller.active_modes["l2"] == 1
+    assert pool.profile.mode == 1
 
 
 class TestCommitArenaAtomicity:

@@ -34,7 +34,7 @@ class WorkloadReport:
   credit_invariant_ok: bool
   num_tiles: int = 4
   gather_fidelity: str | None = None
-  memory: dict = field(default_factory=dict)  # PR 5 peak reconciliation
+  memory: dict = field(default_factory=dict)  # peak and physical backing accounting
   scheduler: dict = field(default_factory=dict)
   device: dict = field(default_factory=dict)
   resources: dict = field(default_factory=dict)
@@ -352,7 +352,11 @@ def build_report(wl: WorkloadInfo, result: SimResult, num_tiles: int = 4) -> Wor
       if pmu.events.get("gather_requests", 0) > 0
       else None
     ),
-    memory=(_memory_summary(result.group_snapshot.get("memory")) if result.memory_trace else {}),
+    memory=(
+      _memory_summary(result.group_snapshot.get("memory"), scheduler_raw, arenas_raw)
+      if result.memory_trace
+      else {}
+    ),
     scheduler=scheduler,
     device=device,
     resources=resources,
@@ -366,12 +370,11 @@ def build_report(wl: WorkloadInfo, result: SimResult, num_tiles: int = 4) -> Wor
   )
 
 
-def _memory_summary(group_memory: dict | None) -> dict:
-  """Extract memory peak reconciliation values from the group snapshot.
+def _memory_summary(group_memory: dict | None, scheduler: Mapping, arenas: Mapping) -> dict:
+  """Extract peak and physical-backing values from owner snapshots.
 
-  Values are None (and the corresponding key omitted) when the run
-  used a fidelity without memory accounting - the report never
-  reconstructs memory state from trace events.
+  The report never reconstructs memory state from trace events or sums logical
+  aliases to estimate physical capacity.
   """
   if not group_memory:
     return {}
@@ -393,6 +396,23 @@ def _memory_summary(group_memory: dict | None) -> dict:
   hbm = group_memory.get("hbm") or {}
   if hbm.get("used_bytes") is not None:
     summary["hbm_used_bytes"] = hbm["used_bytes"]
+  arena_l2 = arenas.get("l2")
+  l2_pool: Mapping = arena_l2 if isinstance(arena_l2, Mapping) else l2
+  if l2_pool.get("physical_live_backing_bytes") is not None:
+    summary["l2_physical_live_backing_bytes"] = l2_pool["physical_live_backing_bytes"]
+  if l2_pool.get("live_backings") is not None:
+    summary["l2_live_backings"] = l2_pool["live_backings"]
+  if l2_pool.get("pending_shared_claims") is not None:
+    summary["l2_pending_shared_claims"] = l2_pool["pending_shared_claims"]
+  if l2_pool.get("active_shared_references") is not None:
+    summary["l2_active_shared_references"] = l2_pool["active_shared_references"]
+  if l2_pool.get("live_view_bytes") is not None:
+    summary["l2_live_view_bytes"] = l2_pool["live_view_bytes"]
+  if l2_pool.get("logical_live_view_bytes") is not None:
+    summary["l2_logical_live_view_bytes"] = l2_pool["logical_live_view_bytes"]
+  protocol_live_bytes = scheduler.get("live_l2_bytes")
+  if isinstance(protocol_live_bytes, int) and not isinstance(protocol_live_bytes, bool):
+    summary["l2_protocol_live_bytes"] = protocol_live_bytes
   return summary
 
 
@@ -517,6 +537,49 @@ def _run_checks(wl: WorkloadInfo, result: SimResult, engine_active: dict, total:
         "pass": ok,
       }
     )
+  snapshot = result.group_snapshot
+  arena_snapshot = snapshot.get("arenas")
+  arena_zero_leak: bool | None = None
+  if isinstance(arena_snapshot, Mapping) and isinstance(arena_snapshot.get("l2"), Mapping):
+    l2_fields = (
+      "live_arenas",
+      "live_views",
+      "live_backings",
+      "pending_shared_claims",
+      "active_shared_references",
+      "pin_count",
+      "inflight_count",
+      "pending_release",
+      "arena_reserved_bytes",
+      "physical_live_backing_bytes",
+    )
+    l1_fields = (
+      "live_arenas",
+      "live_views",
+      "pin_count",
+      "inflight_count",
+      "pending_release",
+      "arena_reserved_bytes",
+    )
+    l2_pool = arena_snapshot["l2"]
+    l2_state = {key: l2_pool.get(key) for key in l2_fields}
+    l1_state = {
+      tile_id: {key: pool.get(key) for key in l1_fields}
+      for tile_id, pool in (arena_snapshot.get("l1") or {}).items()
+      if isinstance(pool, Mapping)
+    }
+    arena_zero_leak = all(value == 0 for value in l2_state.values()) and all(
+      all(value == 0 for value in pool_state.values()) for pool_state in l1_state.values()
+    )
+    checks.append(
+      {
+        "check": "arena_zero_leak",
+        "expected": True,
+        "actual": {"l2": l2_state, "l1": l1_state},
+        "pass": arena_zero_leak,
+      }
+    )
+
   gather_requests = result.pmu.events.get("gather_requests", 0)
   if gather_requests > 0:
     l1_hits = result.pmu.events.get("gather_l1_hits", 0)
@@ -561,6 +624,7 @@ def _run_checks(wl: WorkloadInfo, result: SimResult, engine_active: dict, total:
         allocator.get("live_allocations", 0) == 0 and allocator.get("pending_release", 0) == 0
         for allocator in l1_allocators
       )
+      and arena_zero_leak is not False
     )
     checks.append({"check": "gather_zero_leak", "expected": True, "actual": zero_leak, "pass": zero_leak})
   return checks

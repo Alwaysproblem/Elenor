@@ -310,6 +310,28 @@ class GroupPortAdapter(DevicePort):
       return "fault"
     if sequencer is None:
       assert self.group.last_admission_wait is not None
+      if self.group.last_admission_wait in (
+        AdmissionWaitReason.CAPACITY, AdmissionWaitReason.FRAGMENTATION
+      ):
+        queue = self._category_queues[category]
+        later_bindings = tuple(
+          self._pending[request_id].request.task.binding_id
+          for request_id in queue
+          if request_id in self._pending and request_id != record.request.request_id
+        )
+        try:
+          impossible = self.group.retained_shared_blocks_admission(
+            record.request.task, later_bindings
+          )
+        except (RuntimeError, ValueError, MemoryInvariantError) as exc:
+          self._fail_pending(record, str(exc), cycle, completions)
+          return "fault"
+        if impossible:
+          self._fail_pending(
+            record, "L2 capacity fault: retained shared extents prevent FIFO-head admission",
+            cycle, completions,
+          )
+          return "fault"
       self._note_wait(record, self.group.last_admission_wait, cycle)
       return "blocked"
 

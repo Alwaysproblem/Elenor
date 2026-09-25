@@ -111,6 +111,40 @@ def _all_tasks(program):
   return tuple(program.entry.tasks.values())
 
 
+def _compile_shared_program(*, allow_mode2: bool = False):
+  from pipeline_validator.tests.test_l2_sharing_source import SHARED_IR
+
+  source = SHARED_IR.replace(
+    "nexus.program @run(\n      %W : !nest.global_memref<4xi8>) {",
+    "nexus.program @run(\n"
+    "      %W : !nest.global_memref<4xi8>,\n"
+    "      %OUT : !nest.global_memref<4xi8>) {",
+    1,
+  ).replace("@reader(%W, %shared_w)", "@reader(%OUT, %shared_w)", 1)
+  source = source.replace(
+    '        : !nexus.event<"reader_done">\n    nexus.return',
+    '        : !nexus.event<"reader_done">\n'
+    "    nexus.await %loaded\n"
+    "    nexus.await %reader_done\n"
+    "    nexus.return",
+    1,
+  )
+  source = source.replace("l2_spm_bytes = 4", "l2_spm_bytes = 1024")
+  source = source.replace(
+    "tile_l1_spm_bytes_per_context = 4", "tile_l1_spm_bytes_per_context = 1024"
+  )
+  if allow_mode2:
+    source = source.replace("allowed_profiles = [0]", "allowed_profiles = [0, 2]")
+  hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
+  sim = SimConfig(max_cycles=200000)
+  artifact = compile_program(parse_workload_ir(source), hw, sim)
+  bindings = {
+    "W": GlobalBinding("W", 0x100000, 4, "r"),
+    "OUT": GlobalBinding("OUT", 0x200000, 4, "w"),
+  }
+  return hw, sim, artifact, bindings
+
+
 class TestExplicitCompileLoadReplay:
   def test_cb08_source_run_is_rejected_but_serialized_artifact_replays(self):
     hw, sim, workload, artifact = _compile_pow()
@@ -119,6 +153,14 @@ class TestExplicitCompileLoadReplay:
       simulator.run(workload.module)
 
     text = serialize_compiled_program(artifact)
+    assert artifact.schema_version == 2
+    assert artifact.compiler_abi == "v1"
+    for schema_version, compiler_abi in ((1, "v0"), (2, "v0"), (1, "v1")):
+      legacy = json.loads(text)
+      legacy["schema_version"] = schema_version
+      legacy["compiler_abi"] = compiler_abi
+      with pytest.raises(ValueError, match="recompile.*source"):
+        parse_compiled_program(json.dumps(legacy))
     replay = parse_compiled_program(text)
     loaded = load_program(replay, hw, sim, actual_bindings=POW_BINDINGS)
     result = simulator.run(loaded)
@@ -653,3 +695,233 @@ class TestL2NoRebindLayout:
     )
     assert spans[0][1] <= spans[1][0]
     assert layout.buffer_layouts[1].arena_offset >= layout.buffer_layouts[0].arena_offset
+
+
+class TestIndependentSharedArtifactVerification:
+  def test_shared_artifact_round_trips_codec_and_loads(self):
+    hw, sim, artifact, bindings = _compile_shared_program()
+    text = serialize_compiled_program(artifact)
+    replay = parse_compiled_program(text)
+
+    loaded = load_program(replay, hw, sim, actual_bindings=bindings)
+
+    assert loaded.compiled.schema_version == 2
+    assert loaded.compiled.compiler_abi == "v1"
+    assert serialize_compiled_program(loaded.compiled) == text
+
+
+  def test_publish_dependency_events_have_a_required_relocation(self):
+    hw, sim, artifact, bindings = _compile_shared_program()
+    publish_relocations = [item for item in artifact.relocations if item.kind == "publish_events"]
+    assert len(publish_relocations) == 1
+    corrupted = seal_program(
+      replace(
+        artifact,
+        relocations=tuple(item for item in artifact.relocations if item.kind != "publish_events"),
+      )
+    )
+
+    assert corrupted.artifact_hash != artifact.artifact_hash
+    with pytest.raises(ValueError, match="relocation table differs"):
+      load_program(corrupted, hw, sim, actual_bindings=bindings)
+
+  @pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+      ({"producer_binding_id": "missing"}, "unknown producer binding"),
+      ({"producer_slot": "missing"}, "unpublished producer slot"),
+      ({"dims": (2,), "bytes": 2}, "incompatible L2 actual"),
+      ({"dtype": "f16", "element_bytes": 2, "bytes": 8}, "incompatible L2 actual"),
+    ],
+  )
+  def test_shared_identity_shape_and_dtype_tampering_is_semantically_rejected(
+    self, changes, message
+  ):
+    hw, sim, artifact, bindings = _compile_shared_program()
+    reader = next(task for task in _all_tasks(artifact) if task.name == "reader")
+    shared = replace(reader.shared_inputs[0], **changes)
+    corrupted = _replace_task(artifact, replace(reader, shared_inputs=(shared,)))
+
+    assert corrupted.artifact_hash != artifact.artifact_hash
+    with pytest.raises(ValueError, match=message):
+      load_program(corrupted, hw, sim, actual_bindings=bindings)
+
+  def test_shared_backing_counts_against_reader_per_bank_capacity(self):
+    hw, sim, artifact, bindings = _compile_shared_program()
+    profile = artifact.registry.profile("l2", 0)
+    reader = next(task for task in _all_tasks(artifact) if task.name == "reader")
+    local_layout = layout_buffers((), profile, profile.user_spm_bytes, slot_capacity=1)
+    contract = replace(reader.resource_contract, l2_spm_bytes=profile.user_spm_bytes)
+    corrupted = _replace_task(
+      artifact, replace(reader, layout=local_layout, resource_contract=contract)
+    )
+
+    assert corrupted.artifact_hash != artifact.artifact_hash
+    with pytest.raises(ValueError, match="exceeds per-bank L2 capacity"):
+      load_program(corrupted, hw, sim, actual_bindings=bindings)
+
+
+  def test_publish_requires_complete_prefetch_initialization_after_rehash(self):
+    from pipeline_validator.execution_ir import ExecGroupActionOp
+
+    hw, sim, artifact, bindings = _compile_shared_program()
+    producer = next(task for task in _all_tasks(artifact) if task.name == "loader")
+    actions = list(producer.actions)
+    prefetch_index = next(
+      index for index, action in enumerate(actions) if action.op is ExecGroupActionOp.DMA_PREFETCH
+    )
+    prefetch = actions[prefetch_index]
+    transfer = prefetch.args[1]
+    partial_src = replace(transfer.src, dims=(2,), bytes=2)
+    partial_dst = replace(transfer.dst, dims=(2,), bytes=2)
+    actions[prefetch_index] = replace(
+      prefetch,
+      args=(prefetch.args[0], replace(transfer, src=partial_src, dst=partial_dst, bytes=2)),
+    )
+    corrupted = _replace_task(artifact, replace(producer, actions=tuple(actions)))
+
+    assert corrupted.artifact_hash != artifact.artifact_hash
+    with pytest.raises(ValueError, match="complete initialization"):
+      load_program(corrupted, hw, sim, actual_bindings=bindings)
+
+  def test_publish_dependencies_are_recomputed_from_real_accesses(self):
+    from pipeline_validator.execution_ir import ExecGroupActionOp
+
+    hw, sim, artifact, bindings = _compile_shared_program()
+    producer = next(task for task in _all_tasks(artifact) if task.name == "loader")
+    prefetch = next(
+      action for action in producer.actions if action.op is ExecGroupActionOp.DMA_PREFETCH
+    )
+    actions = list(producer.actions)
+    publish_index = next(
+      index for index, action in enumerate(actions) if action.op is ExecGroupActionOp.PUBLISH_L2
+    )
+    publish = actions[publish_index]
+    dependencies = tuple(event for event in publish.dependencies if event != prefetch.dst)
+    request = replace(publish.args[0], dependency_events=dependencies)
+    actions[publish_index] = replace(publish, dependencies=dependencies, args=(request,))
+    corrupted = _replace_task(artifact, replace(producer, actions=tuple(actions)))
+
+    assert corrupted.artifact_hash != artifact.artifact_hash
+    with pytest.raises(ValueError, match="publish dependencies do not exactly close initialization"):
+      load_program(corrupted, hw, sim, actual_bindings=bindings)
+
+  def test_import_write_is_rejected_from_tile_descriptors_not_permissions(self):
+    from pipeline_validator.compiled_program import program_digest
+    from pipeline_validator.execution_ir import ExecTileOp
+
+    hw, sim, artifact, bindings = _compile_shared_program()
+    reader = next(task for task in _all_tasks(artifact) if task.name == "reader")
+    role_id, role = next(iter(reader.role_bindings.items()))
+    program = role.tile_program
+    descriptor_name, descriptor = next(
+      (name, item) for name, item in program.descriptors.items() if item.op == "load"
+    )
+    transfer = descriptor.transfer
+    assert transfer is not None
+    imported_destination = replace(transfer.src, base="formal:1")
+    forged_transfer = replace(transfer, src=transfer.dst, dst=imported_destination)
+    descriptors = dict(program.descriptors)
+    descriptors[descriptor_name] = replace(descriptor, op="store", transfer=forged_transfer)
+    instructions = tuple(
+      replace(instruction, args=("output_ready", 0))
+      if instruction.op is ExecTileOp.SIGNAL_PHASE and instruction.args[0] == "input_released"
+      else instruction
+      for instruction in program.insts
+    )
+    unhashed = replace(program, descriptors=descriptors, insts=instructions)
+    forged_program = replace(unhashed, program_hash=program_digest(unhashed))
+    roles = dict(reader.role_bindings)
+    roles[role_id] = replace(
+      role, tile_program=forged_program, read_actuals=(), write_actuals=("weight",)
+    )
+    corrupted = _replace_task(artifact, replace(reader, role_bindings=roles))
+
+    assert corrupted.artifact_hash != artifact.artifact_hash
+    with pytest.raises(ValueError, match="writes through a readonly shared import"):
+      load_program(corrupted, hw, sim, actual_bindings=bindings)
+
+  def test_consumer_must_retain_producer_completion_dependency_ancestry(self):
+    hw, sim, artifact, bindings = _compile_shared_program()
+    assert isinstance(artifact.entry, ExecModel)
+    reader_submit = next(op for op in artifact.entry.body if op.op == "submit" and op.ctx_name == "reader")
+    body = tuple(
+      replace(op, dependencies=()) if op is reader_submit else op for op in artifact.entry.body
+    )
+    corrupted = seal_program(replace(artifact, entry=replace(artifact.entry, body=body)))
+
+    assert corrupted.artifact_hash != artifact.artifact_hash
+    with pytest.raises(ValueError, match="producer completion dependency ancestry"):
+      load_program(corrupted, hw, sim, actual_bindings=bindings)
+
+  def test_shared_reference_cannot_cross_an_l2_profile_epoch(self):
+    from pipeline_validator.compiler.api import _source_map
+    from pipeline_validator.execution_ir import ExecDeviceOp
+    from pipeline_validator.profiles import ProfileState
+
+    hw, sim, artifact, bindings = _compile_shared_program(allow_mode2=True)
+    assert isinstance(artifact.entry, ExecModel)
+    profile_artifact = compile_program(parse_workload_ir(COMPATIBLE_IR), hw, sim)
+    switch_template = next(
+      op.command
+      for op in (*profile_artifact.entry_prefix, *profile_artifact.entry.body)
+      if op.op == "profile_reconfig" and op.command.level == "l2"
+    )
+    producer_submit = next(
+      op for op in artifact.entry.body if op.op == "submit" and op.ctx_name == "loader"
+    )
+    reader_submit = next(
+      op for op in artifact.entry.body if op.op == "submit" and op.ctx_name == "reader"
+    )
+    wait_id = f"{producer_submit.instruction_id}:epoch_test_wait"
+    command_id = f"{producer_submit.instruction_id}:epoch_test_switch"
+    command = replace(
+      switch_template,
+      command_id=command_id,
+      expected_mode=0,
+      target_mode=2,
+      registry_hash=artifact.registry_hash,
+      wait_instruction_ids=(wait_id,),
+      frontier=(producer_submit.event_tag,),
+      member_ids=artifact.registry.profile("l2", 2).member_ids,
+    )
+    wait = ExecDeviceOp(
+      "await",
+      event_tag=producer_submit.event_tag,
+      source_ref=command.source_ref,
+      instruction_id=wait_id,
+    )
+    switch = ExecDeviceOp(
+      "profile_reconfig",
+      command=command,
+      source_ref=command.source_ref,
+      instruction_id=command_id,
+    )
+    body = []
+    for op in artifact.entry.body:
+      if op.op == "await" and op.event_tag == producer_submit.event_tag:
+        continue
+      body.append(op)
+      if op is producer_submit:
+        body.extend((wait, switch))
+    entry = replace(artifact.entry, body=tuple(body))
+    calls = dict(artifact.call_bindings)
+    reader_call = calls[reader_submit.binding_id]
+    calls[reader_submit.binding_id] = replace(
+      reader_call,
+      resolved_l2_mode=2,
+      permitted_profiles=tuple(ProfileState(state.l1_mode, 2) for state in reader_call.permitted_profiles),
+    )
+    corrupted = seal_program(
+      replace(
+        artifact,
+        entry=entry,
+        call_bindings=calls,
+        exit_profiles=ProfileState(artifact.exit_profiles.l1_mode, 2),
+        source_map=_source_map(entry, artifact.entry_prefix),
+      )
+    )
+    assert corrupted.artifact_hash != artifact.artifact_hash
+
+    with pytest.raises(ValueError, match="crosses an L2 profile epoch"):
+      load_program(corrupted, hw, sim, actual_bindings=bindings)

@@ -32,6 +32,7 @@ from .dialects.elenor import (
   NestGlobalMemref,
   NestGlobalView,
   NestL2View,
+  NestPublishOp,
   NestSubviewOp,
   NestTask,
   NestTaskRangeOp,
@@ -39,6 +40,7 @@ from .dialects.elenor import (
   NexusEvent,
   NexusProgramOp,
   NexusReturnOp,
+  NexusSharedRefOp,
   NexusSubmitContextOp,
   TileEvent,
   TileGatherOp,
@@ -180,7 +182,8 @@ def _verify_dispatch_contract(
   op: NestDispatchOp,
   programs: dict[str, TileProgramDefOp],
   program_accesses: dict[str, tuple[frozenset[int], frozenset[int]]],
-  context_allocs: set[SSAValue],
+  context_buffers: set[SSAValue],
+  context_shared_imports: set[SSAValue],
   placement: int,
 ) -> None:
   if op.context_id is not None and int(op.context_id.value.data) < 0:
@@ -228,10 +231,10 @@ def _verify_dispatch_contract(
       f" but tile.program declares {len(l2_formals)} l2 formals"
     )
   for i, (actual, (_, formal)) in enumerate(zip(bindings_list, l2_formals)):
-    if actual not in context_allocs:
+    if actual not in context_buffers:
       raise VerifyException(
         f"dispatch bindings actual {i} for '@{prog_sym}'"
-        " must be a nest.alloc result from the current nest.context"
+        " must be a local allocation or readonly import from the current nest.context"
       )
     if not isinstance(actual.type, NestBuffer) or _shape_key(actual.type) != _shape_key(formal.type):
       raise VerifyException(
@@ -251,6 +254,8 @@ def _verify_dispatch_contract(
   actual_by_formal = {formal_pos: actual for (formal_pos, _), actual in zip(l2_formals, bindings_list)}
   expected_ins = {actual_by_formal[formal_pos] for formal_pos in read_formals}
   expected_outs = {actual_by_formal[formal_pos] for formal_pos in write_formals}
+  if any(actual in context_shared_imports for actual in expected_outs):
+    raise VerifyException(f"dispatch '@{prog_sym}' may not write a readonly L2 import")
   if set(ins_list) != expected_ins:
     raise VerifyException(
       f"dispatch ins for '@{prog_sym}' must exactly declare the buffers read by the tile program"
@@ -459,7 +464,7 @@ def verify_workload_ir(module: ModuleOp) -> NestContextOp | NexusProgramOp:
     if len(contexts) > 1:
       raise VerifyException("expected exactly one nest.context")
     program_accesses = {name: _verify_program(prog) for name, prog in programs.items()}
-    _verify_context(context, programs, program_accesses)
+    _verify_context(context, programs, program_accesses, allow_shared_imports=False)
     return context
 
   # Model path: exactly one nexus.program + at least one nest.context
@@ -470,7 +475,7 @@ def verify_workload_ir(module: ModuleOp) -> NestContextOp | NexusProgramOp:
   program = nexus_programs[0]
   program_accesses = {name: _verify_program(prog) for name, prog in programs.items()}
   for ctx in contexts.values():
-    _verify_context(ctx, programs, program_accesses)
+    _verify_context(ctx, programs, program_accesses, allow_shared_imports=True)
   _verify_nexus_program(program, contexts, programs)
   return program
 
@@ -479,6 +484,8 @@ def _verify_context(
   context: NestContextOp,
   programs: dict[str, TileProgramDefOp],
   program_accesses: dict[str, tuple[frozenset[int], frozenset[int]]],
+  *,
+  allow_shared_imports: bool,
 ) -> None:
   if not isinstance(context.resource_contract, NestContextResourcesAttr):
     raise VerifyException(
@@ -503,21 +510,47 @@ def _verify_context(
     NestPrefetchOp,
     NestReleaseOp,
     NestReturnOp,
+    NestTaskRangeOp,
   )
 
   ctx_block = context.body.block
-  # Rule 2: context formals must be !nest.global_memref
+  context_imports: set[SSAValue] = set()
+  import_names: set[str] = set()
+  seen_import = False
   for i, arg in enumerate(ctx_block.args):
-    if not isinstance(arg.type, NestGlobalMemref):
-      raise VerifyException(
-        f"nest.context '@{context.sym_name.data}' formal {i} must be !nest.global_memref"
-      )
+    if isinstance(arg.type, NestGlobalMemref):
+      if seen_import:
+        raise VerifyException(
+          f"nest.context '@{context.sym_name.data}' global formal {i} may not follow an L2 import"
+        )
+      continue
+    if isinstance(arg.type, NestBuffer):
+      seen_import = True
+      if not allow_shared_imports:
+        raise VerifyException("readonly L2 context formals require a nexus.program model")
+      name = (arg.name_hint or "").strip()
+      if not name:
+        raise VerifyException(
+          f"nest.context '@{context.sym_name.data}' L2 import formal {i} must have a non-empty name"
+        )
+      if name in import_names:
+        raise VerifyException(
+          f"nest.context '@{context.sym_name.data}' has duplicate L2 import formal name '{name}'"
+        )
+      import_names.add(name)
+      context_imports.add(arg)
+      continue
+    raise VerifyException(
+      f"nest.context '@{context.sym_name.data}' formal {i} must be !nest.global_memref"
+      " or a readonly !nest.l2_buffer import"
+    )
 
   body = _body_ops(context)
   context_allocs: set[SSAValue] = {op.result for op in body if isinstance(op, NestAllocOp)}
+  context_buffers = context_allocs | context_imports
   seen_events: set[str] = set()
   defined_events: set[SSAValue] = set()
-  seen_buffers: set[str] = set()
+  seen_buffers: set[str] = set(import_names)
   logical_tasks = 0
 
   for op in body:
@@ -525,8 +558,10 @@ def _verify_context(
       slot = op.slot.data
       if op.role.data not in ("in", "out", "inout"):
         raise VerifyException(f'nest.alloc slot \'{slot}\' role must be "in", "out" or "inout"')
+      if op.sharing.data not in ("private", "readonly"):
+        raise VerifyException(f"nest.alloc slot '{slot}' sharing must be 'private' or 'readonly'")
       if slot in seen_buffers:
-        raise VerifyException(f"duplicate L2 buffer slot '{slot}'")
+        raise VerifyException(f"duplicate L2 buffer slot or import name '{slot}'")
       seen_buffers.add(slot)
       continue
 
@@ -539,9 +574,7 @@ def _verify_context(
       _verify_context_subview(op, ctx_block)
       continue
 
-    # Single-result async ops: prefetch, store, collective
-    if isinstance(op, (NestPrefetchOp, NestDMAStoreOp, NestCollectiveOp)):
-      # Rule 9: transfer byte equality (prefetch/store only)
+    if isinstance(op, (NestPrefetchOp, NestDMAStoreOp, NestCollectiveOp, NestPublishOp)):
       if isinstance(op, (NestPrefetchOp, NestDMAStoreOp)):
         _assert_transfer_bytes_equal(op.src.type, op.dst.type, op.name)
       tag = op.result.type.tag.data
@@ -560,40 +593,35 @@ def _verify_context(
       if not isinstance(task_op, NestTaskRangeOp):
         raise VerifyException("dispatch tasks operand must be a nest.task.range result")
       logical_tasks += task_op.num_tasks
-      _verify_dispatch_contract(op, programs, program_accesses, context_allocs, placement)
-      # phase tags (input_released / output_ready) are optional (empty = no phase)
-      for r in op.results:
-        if not isinstance(r.type, NestEvent):
+      _verify_dispatch_contract(
+        op, programs, program_accesses, context_buffers, context_imports, placement
+      )
+      for result in op.results:
+        if not isinstance(result.type, NestEvent):
           continue
-        tag = r.type.tag.data
+        tag = result.type.tag.data
         if not tag:
           continue
         if tag in seen_events:
           raise VerifyException(f"duplicate event tag '{tag}'")
         seen_events.add(tag)
-      for dep in op.depends_on:
-        if not isinstance(dep.type, NestEvent):
-          continue
-        dep_tag = dep.type.tag.data
-        if dep not in defined_events:
-          raise VerifyException(f"dispatch depends_on references undefined event '{dep_tag}'")
+      for dependency in op.depends_on:
+        dependency_tag = cast(NestEvent, dependency.type).tag.data
+        if dependency not in defined_events:
+          raise VerifyException(f"dispatch depends_on references undefined event '{dependency_tag}'")
       defined_events.update(op.results)
       continue
 
     if isinstance(op, NestReleaseOp):
-      for dep in op.depends_on:
-        if not isinstance(dep.type, NestEvent):
-          continue
-        dep_tag = dep.type.tag.data
-        if dep not in defined_events:
-          raise VerifyException(f"nest.release depends_on references undefined event '{dep_tag}'")
+      for dependency in op.depends_on:
+        dependency_tag = cast(NestEvent, dependency.type).tag.data
+        if dependency not in defined_events:
+          raise VerifyException(f"nest.release depends_on references undefined event '{dependency_tag}'")
       continue
 
     if isinstance(op, NestAwaitOp):
       for operand in op.events:
-        if not isinstance(operand.type, NestEvent):
-          continue
-        tag = operand.type.tag.data
+        tag = cast(NestEvent, operand.type).tag.data
         if operand not in defined_events:
           raise VerifyException(f"nest.await references undefined event '{tag}'")
       continue
@@ -603,7 +631,7 @@ def _verify_context(
 
     raise VerifyException(f"unexpected nest context body op '{op.name}'")
 
-  _verify_release_graph(body)
+  _verify_release_graph(body, ctx_block.args, programs)
   if logical_tasks != context_resources.logical_tasks:
     raise VerifyException(
       f"nest.context '@{context.sym_name.data}' resource_contract logical_tasks"
@@ -616,8 +644,73 @@ def _program_signal_phases(prog: TileProgramDefOp) -> frozenset[str]:
   return frozenset(op.phase.data for op in _body_ops(prog) if isinstance(op, TileSignalOp))
 
 
-def _verify_release_graph(body: list) -> None:
-  """Verify context-owned buffer use, Store, and release dependencies."""
+def _dispatch_write_intervals(
+  dispatch: NestDispatchOp,
+  buffer: SSAValue,
+  programs: dict[str, TileProgramDefOp],
+) -> list[tuple[int, int]]:
+  """Return the byte intervals actually written to ``buffer`` by one dispatch."""
+  from .dialects.elenor import TileStoreOp
+
+  program = programs[dispatch.program.data]
+  block = program.body.block
+  l2_formals = [
+    (index, arg)
+    for index, arg in enumerate(block.args)
+    if index and isinstance(arg.type, NestBuffer)
+  ]
+  bindings = list(dispatch.bindings)
+  task_range = dispatch.tasks.owner
+  assert isinstance(task_range, NestTaskRangeOp)
+  task_ids = range(int(task_range.from_task.value.data), int(task_range.to_task.value.data))
+  intervals: list[tuple[int, int]] = []
+  for (formal_index, formal), actual in zip(l2_formals, bindings):
+    if actual is not buffer:
+      continue
+    formal_type = cast(NestBuffer, formal.type)
+    dims = _int_list(formal_type.dims)
+    dtype = formal_type.dtype.data
+    element_bytes = DTYPE_BYTES[dtype]
+    for op in _body_ops(program):
+      if not isinstance(op, TileStoreOp):
+        continue
+      view = op.dst.owner
+      if not isinstance(view, TileSubviewOp) or _formal_index(view.src, block) != formal_index:
+        continue
+      offsets = _int_list(view.offsets)
+      sizes = _int_list(view.sizes)
+      if view.task_dim is None:
+        start = _view_offset_bytes(offsets, dims, element_bytes)
+        intervals.append((start, start + _view_bytes(sizes, dtype)))
+        continue
+      task_dim = int(view.task_dim.value.data)
+      for task_id in task_ids:
+        task_offsets = list(offsets)
+        task_offsets[task_dim] += task_id
+        start = _view_offset_bytes(task_offsets, dims, element_bytes)
+        intervals.append((start, start + _view_bytes(sizes, dtype)))
+  return intervals
+
+
+def _covers_full_buffer(intervals: Sequence[tuple[int, int]], byte_count: int) -> bool:
+  cursor = 0
+  for start, end in sorted(intervals):
+    if start < 0 or end > byte_count:
+      return False
+    if start > cursor:
+      return False
+    cursor = max(cursor, end)
+    if cursor >= byte_count:
+      return True
+  return byte_count == 0
+
+
+def _verify_release_graph(
+  body: list,
+  context_args: Sequence[SSAValue],
+  programs: dict[str, TileProgramDefOp],
+) -> None:
+  """Verify local and imported L2 view closure, publication and release dependencies."""
   from .dialects.elenor import (
     NestAllocOp,
     NestDispatchOp,
@@ -627,10 +720,12 @@ def _verify_release_graph(body: list) -> None:
     NestReturnOp,
   )
 
-  allocs: dict = {}
-  releases: dict = {}
-  stores: dict = {}
-  prefetches: dict = {}
+  allocs: dict[SSAValue, NestAllocOp] = {}
+  imports = {arg for arg in context_args if isinstance(arg.type, NestBuffer)}
+  releases: dict[SSAValue, list[tuple[int, NestReleaseOp]]] = {}
+  stores: dict[SSAValue, list[tuple[int, NestDMAStoreOp]]] = {}
+  prefetches: dict[SSAValue, list[tuple[int, NestPrefetchOp]]] = {}
+  publishes: dict[SSAValue, list[tuple[int, NestPublishOp]]] = {}
   dispatches: list[tuple[int, NestDispatchOp]] = []
   return_index = next((idx for idx, op in enumerate(body) if isinstance(op, NestReturnOp)), len(body))
   for idx, op in enumerate(body):
@@ -642,12 +737,18 @@ def _verify_release_graph(body: list) -> None:
       stores.setdefault(op.src, []).append((idx, op))
     elif isinstance(op, NestPrefetchOp):
       prefetches.setdefault(op.dst, []).append((idx, op))
+    elif isinstance(op, NestPublishOp):
+      publishes.setdefault(op.buffer, []).append((idx, op))
     elif isinstance(op, NestDispatchOp):
       dispatches.append((idx, op))
 
+  tracked_buffers = set(allocs) | imports
   for buffer, alloc in allocs.items():
     slot = alloc.slot.data
     role = alloc.role.data
+    sharing = alloc.sharing.data
+    if sharing not in ("private", "readonly"):
+      raise VerifyException(f"nest.alloc slot '{slot}' sharing must be 'private' or 'readonly'")
     rels = releases.get(buffer, [])
     if len(rels) != 1:
       raise VerifyException(
@@ -668,18 +769,17 @@ def _verify_release_graph(body: list) -> None:
     ]
     buffer_prefetches = prefetches.get(buffer, [])
     buffer_stores = stores.get(buffer, [])
-
+    buffer_publishes = publishes.get(buffer, [])
     if role == "in" and writers:
       raise VerifyException(f"nest.alloc input slot '{slot}' may not be written by a tile dispatch")
-    if role in ("out", "inout"):
-      if not writers:
-        raise VerifyException(
-          f"nest.release of slot '{slot}' (role '{role}') requires at least one actual tile writer"
-        )
-      if not buffer_stores:
-        raise VerifyException(
-          f"nest.release of slot '{slot}' (role '{role}') requires at least one nest.dma.store.async"
-        )
+    if role in ("out", "inout") and not writers:
+      raise VerifyException(
+        f"nest.release of slot '{slot}' (role '{role}') requires at least one actual tile writer"
+      )
+    if role in ("out", "inout") and sharing == "private" and not buffer_stores:
+      raise VerifyException(
+        f"nest.release of slot '{slot}' (role '{role}') requires at least one nest.dma.store.async"
+      )
 
     for store_idx, store in buffer_stores:
       prior_writer_events = [
@@ -690,7 +790,6 @@ def _verify_release_graph(body: list) -> None:
           f"store of slot '{slot}' must depend on every previously defined"
           " actual writer output_ready result"
         )
-
     if buffer_stores:
       last_store = buffer_stores[-1][1]
       writer_events = [dispatch.output_ready for _, dispatch in writers]
@@ -699,22 +798,111 @@ def _verify_release_graph(body: list) -> None:
           f"final store of slot '{slot}' must depend on every actual writer output_ready result"
         )
 
+    expected_publish_deps = [
+      *(prefetch.result for _, prefetch in buffer_prefetches),
+      *(store.result for _, store in buffer_stores),
+      *(dispatch.input_released for _, dispatch in readers),
+      *(dispatch.output_ready for _, dispatch in writers),
+    ]
+    if sharing == "private":
+      if buffer_publishes:
+        raise VerifyException(f"private L2 slot '{slot}' may not be published")
+      publish_event = None
+    else:
+      if len(buffer_publishes) != 1:
+        raise VerifyException(f"readonly L2 slot '{slot}' requires exactly one nest.publish")
+      publish_idx, publish = buffer_publishes[0]
+      publish_event = publish.result
+      if not publish.result.type.tag.data:
+        raise VerifyException(f"nest.publish of readonly L2 slot '{slot}' requires a non-empty event tag")
+      deps = list(publish.depends_on)
+      if len(set(deps)) != len(deps) or set(deps) != set(expected_publish_deps):
+        raise VerifyException(
+          f"nest.publish of readonly L2 slot '{slot}' must depend on exactly all"
+          " prefetch/store completions, reader input_released, and writer output_ready events"
+        )
+      if buffer_prefetches:
+        # Prefetch targets the complete alloc result, and the transfer verifier
+        # proves equal bytes even when its HBM view has different dimensions.
+        initialized = True
+      else:
+        intervals = [
+          interval
+          for _, writer in writers
+          for interval in _dispatch_write_intervals(writer, buffer, programs)
+        ]
+        initialized = _covers_full_buffer(intervals, _shape_bytes(buffer.type))
+      if not initialized:
+        raise VerifyException(
+          f"readonly L2 slot '{slot}' must be fully initialized by a complete prefetch or tile writer"
+        )
+      for later_op in body[publish_idx + 1 :]:
+        if isinstance(later_op, NestReleaseOp) and later_op.buffer is buffer:
+          continue
+        if any(operand is buffer for operand in later_op.operands):
+          raise VerifyException(
+            f"readonly L2 slot '{slot}' may not be accessed after nest.publish"
+          )
+
     expected_release_deps = [
       *(dispatch.input_released for _, dispatch in readers),
       *(prefetch.result for _, prefetch in buffer_prefetches),
       *(store.result for _, store in buffer_stores),
+      *([] if publish_event is None else [publish_event]),
     ]
     deps = list(rel.depends_on)
     if len(set(deps)) != len(deps) or set(deps) != set(expected_release_deps):
       raise VerifyException(
-        f"nest.release of slot '{slot}' must depend on exactly all reader"
-        " input_released, prefetch, and store completion events"
+        f"nest.release of slot '{slot}' must depend on exactly all reader input_released,"
+        " prefetch, store, and required publish completion events"
+      )
+
+  for buffer in imports:
+    name = (buffer.name_hint or "import").strip()
+    rels = releases.get(buffer, [])
+    if len(rels) != 1:
+      raise VerifyException(f"readonly L2 import '{name}' requires exactly one nest.release")
+    rel_idx, rel = rels[0]
+    if rel_idx >= return_index:
+      raise VerifyException(f"nest.release of readonly L2 import '{name}' must appear before nest.return")
+    for later_op in body[rel_idx + 1 :]:
+      if any(operand is buffer for operand in later_op.operands):
+        raise VerifyException(f"nest.release of readonly L2 import '{name}' must follow every use")
+    if prefetches.get(buffer):
+      raise VerifyException(f"readonly L2 import '{name}' may not be a prefetch destination")
+    if publishes.get(buffer):
+      raise VerifyException(f"readonly L2 import '{name}' may not be published or re-exported")
+    import_readers = [
+      dispatch for _, dispatch in dispatches if any(actual is buffer for actual in dispatch.ins)
+    ]
+    if any(any(actual is buffer for actual in dispatch.outs) for _, dispatch in dispatches):
+      raise VerifyException(f"readonly L2 import '{name}' may not be a dispatch write destination")
+    buffer_stores = stores.get(buffer, [])
+    expected = [
+      *(dispatch.input_released for dispatch in import_readers),
+      *(store.result for _, store in buffer_stores),
+    ]
+    deps = list(rel.depends_on)
+    if len(set(deps)) != len(deps) or set(deps) != set(expected):
+      raise VerifyException(
+        f"nest.release of readonly L2 import '{name}' must depend on exactly all"
+        " reader input_released and store completion events"
       )
 
   for buffer in releases:
+    if buffer not in tracked_buffers:
+      raise VerifyException(
+        "nest.release operand must be a local nest.alloc result or readonly context import"
+      )
+  for buffer in publishes:
     if buffer not in allocs:
-      raise VerifyException("nest.release operand must be a nest.alloc result from the same context")
-
+      raise VerifyException("nest.publish operand must be a local nest.alloc result")
+  for buffer in stores:
+    if buffer not in tracked_buffers:
+      raise VerifyException("nest.dma.store.async source must be a local L2 allocation or readonly import")
+  for buffer in prefetches:
+    if buffer not in allocs:
+      raise VerifyException("nest.dma.prefetch.async destination must be a local nest.alloc result")
 
 def _program_subviews_of_formal(prog: TileProgramDefOp, formal_pos: int) -> list:
   """Return all TileSubviewOp ops in prog whose src is block.args[formal_pos]."""
@@ -955,15 +1143,71 @@ def _body_ops(op) -> list:
   return list(region.blocks[0].ops)
 
 
+def effective_submit_dependencies(submit: NexusSubmitContextOp) -> tuple[SSAValue, ...]:
+  """Return explicit dependencies plus producer completions for shared actuals.
+
+  Keeping this source-level closure in one helper makes hazard verification
+  and compiler lowering agree about the dependencies a submit actually has.
+  """
+  dependencies = list(submit.depends_on)
+  seen = set(dependencies)
+  for actual in submit.actuals:
+    owner = actual.owner
+    if isinstance(owner, NexusSharedRefOp) and owner.producer not in seen:
+      dependencies.append(owner.producer)
+      seen.add(owner.producer)
+  return tuple(dependencies)
+
+
+def _verify_shared_l2_epochs(
+  body: list,
+  contexts: dict[str, NestContextOp],
+  consumer_producers: Sequence[tuple[NexusSubmitContextOp, NexusSubmitContextOp]],
+) -> None:
+  """Prove shared submit pairs remain inside one L2 profile generation."""
+  contracts = {
+    name: _resource_contract(
+      context.resource_contract, f"nest.context '@{name}' resource_contract"
+    )
+    for name, context in contexts.items()
+  }
+  possible_modes = {
+    mode
+    for contract in contracts.values()
+    for mode in (*contract.allowed_profiles, contract.l2_mode)
+  }
+  initial_modes = set(possible_modes)
+  initial_modes.add(max(possible_modes, default=-1) + 1)
+  for initial_mode in initial_modes:
+    current_mode = initial_mode
+    epoch = 0
+    submit_epochs: dict[NexusSubmitContextOp, tuple[int, int]] = {}
+    for op in body:
+      if not isinstance(op, NexusSubmitContextOp):
+        continue
+      contract = contracts[op.context_sym.data]
+      resolved_mode = current_mode if current_mode in contract.allowed_profiles else contract.l2_mode
+      if resolved_mode != current_mode:
+        epoch += 1
+      current_mode = resolved_mode
+      submit_epochs[op] = (current_mode, epoch)
+    for consumer, producer in consumer_producers:
+      if submit_epochs[consumer] != submit_epochs[producer]:
+        raise VerifyException(
+          "nexus.shared.ref consumer crosses the producer's L2 profile epoch"
+        )
+
+
 def _verify_nexus_program(
   program: NexusProgramOp, contexts: dict[str, NestContextOp], programs: dict[str, TileProgramDefOp]
 ) -> None:
+  from .dialects.elenor import NestAllocOp
+
   body = _body_ops(program)
   if not body or not isinstance(body[-1], NexusReturnOp):
     raise VerifyException("nexus.program body must end with nexus.return")
 
   block = program.body.block
-  # Rule 1: each block arg must be !nest.global_memref and have a non-empty name
   for i, arg in enumerate(block.args):
     if not isinstance(arg.type, NestGlobalMemref):
       raise VerifyException(f"nexus.program input {i} must be !nest.global_memref")
@@ -974,44 +1218,108 @@ def _verify_nexus_program(
 
   seen_events: set[str] = set()
   defined_events: set[SSAValue] = set()
+  shared_refs: dict[SSAValue, NexusSubmitContextOp] = {}
+  consumer_producers: list[tuple[NexusSubmitContextOp, NexusSubmitContextOp]] = []
 
   for op in body:
     if isinstance(op, NexusSubmitContextOp):
       ctx_sym = op.context_sym.data
       if ctx_sym not in contexts:
         raise VerifyException(f"submit_context references unknown nest.context '@{ctx_sym}'")
-      tag = op.result.type.tag.data
+      tag = cast(NexusEvent, op.result.type).tag.data
       if not tag:
         raise VerifyException("submit_context event tag must be non-empty")
       if tag in seen_events:
         raise VerifyException(f"duplicate event tag '{tag}'")
       seen_events.add(tag)
       for dependency in op.depends_on:
-        assert isinstance(dependency.type, NexusEvent)
         if dependency not in defined_events:
+          dependency_tag = cast(NexusEvent, dependency.type).tag.data
           raise VerifyException(
-            f"submit_context depends_on references undefined event '{dependency.type.tag.data}'"
+            f"submit_context depends_on references undefined event '{dependency_tag}'"
           )
       if len(set(op.depends_on)) != len(op.depends_on):
         raise VerifyException("submit_context depends_on events must be unique")
-      defined_events.add(op.result)
-      # Rule 3: submit↔context signature
-      formal_types = [a.type for a in contexts[ctx_sym].body.block.args]
-      if len(op.actuals) != len(formal_types):
+
+      context = contexts[ctx_sym]
+      formal_args = list(context.body.block.args)
+      if len(op.actuals) != len(formal_args):
         raise VerifyException(
           f"submit_context '@{ctx_sym}' passes {len(op.actuals)} actuals"
-          f" but nest.context '@{ctx_sym}' declares {len(formal_types)} formals"
+          f" but nest.context '@{ctx_sym}' declares {len(formal_args)} formals"
         )
-      for i, (actual, formal) in enumerate(zip(op.actuals, formal_types)):
-        if _shape_key(actual.type) != _shape_key(formal):
+      imported_backings: set[tuple[NexusSubmitContextOp, str]] = set()
+      for i, (actual, formal) in enumerate(zip(op.actuals, formal_args)):
+        if isinstance(formal.type, NestGlobalMemref):
+          if (
+            not isinstance(actual.type, NestGlobalMemref)
+            or _shape_key(actual.type) != _shape_key(formal.type)
+            or _formal_index(actual, block) is None
+          ):
+            raise VerifyException(
+              f"submit_context actual {i} must be a matching nexus.program HBM input"
+            )
+          continue
+        if not isinstance(formal.type, NestBuffer):
+          raise VerifyException(f"nest.context '@{ctx_sym}' formal {i} has an unsupported type")
+        if not isinstance(actual.type, NestBuffer) or _shape_key(actual.type) != _shape_key(formal.type):
           raise VerifyException(
-            f"submit_context actual {i} type does not match nest.context '@{ctx_sym}' formal {i}"
+            f"submit_context shared actual {i} type does not exactly match"
+            f" nest.context '@{ctx_sym}' formal {i}"
           )
+        ref = actual.owner
+        if not isinstance(ref, NexusSharedRefOp) or actual not in shared_refs:
+          raise VerifyException(
+            f"submit_context L2 actual {i} must be a nexus.shared.ref to a published readonly slot"
+          )
+        producer = shared_refs[actual]
+        slot = ref.slot.data
+        backing = (producer, slot)
+        if backing in imported_backings:
+          raise VerifyException(
+            f"submit_context '@{ctx_sym}' may not import the same producer slot more than once"
+          )
+        imported_backings.add(backing)
+        consumer_producers.append((op, producer))
+      defined_events.add(op.result)
+      continue
+
+    if isinstance(op, NexusSharedRefOp):
+      if not op.slot.data.strip():
+        raise VerifyException("nexus.shared.ref slot must be non-empty")
+      if op.producer not in defined_events:
+        raise VerifyException("nexus.shared.ref references an unknown or forward producer submit")
+      referenced_producer = op.producer.owner
+      if (
+        not isinstance(referenced_producer, NexusSubmitContextOp)
+        or referenced_producer.result is not op.producer
+      ):
+        raise VerifyException("nexus.shared.ref producer must be a nexus.submit_context.async result")
+      producer_context = contexts[referenced_producer.context_sym.data]
+      matches = [
+        candidate
+        for candidate in _body_ops(producer_context)
+        if isinstance(candidate, NestAllocOp) and candidate.slot.data == op.slot.data
+      ]
+      if not matches:
+        raise VerifyException(
+          f"nexus.shared.ref references unknown producer slot '{op.slot.data}'"
+        )
+      export = matches[0]
+      if export.sharing.data != "readonly":
+        raise VerifyException(
+          f"nexus.shared.ref producer slot '{op.slot.data}' must be a readonly published export"
+        )
+      if _shape_key(op.result.type) != _shape_key(export.result.type):
+        raise VerifyException(
+          f"nexus.shared.ref type does not match producer slot '{op.slot.data}' shape and dtype"
+        )
+      shared_refs[op.result] = referenced_producer
       continue
 
     if isinstance(op, NexusAwaitOp):
       for operand in op.events:
-        tag = operand.type.tag.data  # type: ignore[attr-defined]
+        tag = cast(NexusEvent, operand.type).tag.data
         if operand not in defined_events:
           raise VerifyException(f"nexus.await references undefined event '{tag}'")
       continue
@@ -1021,6 +1329,7 @@ def _verify_nexus_program(
 
     raise VerifyException(f"unexpected nexus.program body op '{op.name}'")
 
+  _verify_shared_l2_epochs(body, contexts, consumer_producers)
   _verify_device_memory_dependencies(body, contexts, programs)
 
 
@@ -1068,7 +1377,7 @@ def _verify_device_memory_dependencies(
         awaited.update(ancestors[event])
     elif isinstance(op, NexusSubmitContextOp):
       ordered = set(awaited)
-      for event in op.depends_on:
+      for event in effective_submit_dependencies(op):
         ordered.add(event)
         ordered.update(ancestors[event])
       actuals = list(op.actuals)

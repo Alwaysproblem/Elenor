@@ -152,6 +152,7 @@ class Relocation:
       ("group", "args", "dispatch_events"),
       ("group", "args", "event_tuple"),
       ("group", "args", "release_events"),
+      ("group", "args", "publish_events"),
       ("group", "args", "profile_frontier"),
       ("group", "args", "maintenance_dependencies"),
       ("task", "completion_event", "event"),
@@ -265,6 +266,8 @@ _CLASSES = (
   execution.ExecSignalPolicy,
   execution.ExecDispatchRequest,
   execution.ExecReleaseRequest,
+  execution.ExecSharedInput,
+  execution.ExecPublishRequest,
   execution.ExecTileInst,
   execution.ExecGroupAction,
   execution.ExecStreamDesc,
@@ -392,6 +395,8 @@ def _validate_buffer(buffer: object, name: str) -> None:
     _text(buffer.slot, f"{name}.slot")
     if buffer.role not in ("in", "out", "inout"):
       raise ValueError(f"{name}.role is invalid")
+    if buffer.sharing not in ("private", "readonly"):
+      raise ValueError(f"{name}.sharing is invalid")
   else:
     raise ValueError(f"{name} is not a buffer")
   dims = _shape(buffer.dims, f"{name}.dims")
@@ -528,6 +533,8 @@ def _validate_group_action(action: execution.ExecGroupAction, name: str) -> None
     expected, candidate = execution.ExecDispatchRequest, args[0] if len(args) == 1 else None
   elif action.op is execution.ExecGroupActionOp.RELEASE_L2:
     expected, candidate = execution.ExecReleaseRequest, args[0] if len(args) == 1 else None
+  elif action.op is execution.ExecGroupActionOp.PUBLISH_L2:
+    expected, candidate = execution.ExecPublishRequest, args[0] if len(args) == 1 else None
   elif action.op is execution.ExecGroupActionOp.PROFILE_RECONFIG:
     expected, candidate = profiles.ProfileReconfigDesc, args[0] if len(args) == 1 else None
   elif action.op is execution.ExecGroupActionOp.MEMORY_MAINTENANCE:
@@ -537,6 +544,12 @@ def _validate_group_action(action: execution.ExecGroupAction, name: str) -> None
       raise ValueError(f"{name} has invalid bind arguments")
     _text(args[0], f"{name}.buffer_id")
     _uint(args[1], f"{name}.layout_index")
+    return
+  elif action.op is execution.ExecGroupActionOp.BIND_L2_IMPORT:
+    if len(args) != 2 or type(args[1]) is not int or args[1] < 0:
+      raise ValueError(f"{name} has invalid import bind arguments")
+    _text(args[0], f"{name}.slot")
+    _uint(args[1], f"{name}.shared_input_index")
     return
   elif action.op in (execution.ExecGroupActionOp.WAIT_EVENT, execution.ExecGroupActionOp.SIGNAL_EVENT):
     if len(args) != 1:
@@ -660,6 +673,31 @@ def _validate_executable_value(value: object, name: str) -> None:
     _uint(value.resolved_l1_mode, f"{name}.resolved_l1_mode")
     _text(value.binding_id, f"{name}.binding_id")
     return
+  if _is_exact_type(value, execution.ExecSharedInput):
+    _text(value.slot, f"{name}.slot")
+    dims = _shape(value.dims, f"{name}.dims")
+    if value.dtype not in _DTYPE_BYTES:
+      raise ValueError(f"{name}.dtype is invalid")
+    _uint(value.element_bytes, f"{name}.element_bytes", positive=True)
+    _uint(value.bytes, f"{name}.bytes", positive=True)
+    if (
+      value.element_bytes != _DTYPE_BYTES[value.dtype]
+      or math.prod(dims) * value.element_bytes != value.bytes
+    ):
+      raise ValueError(f"{name} does not conserve its shape and dtype")
+    _text(value.producer_binding_id, f"{name}.producer_binding_id")
+    _text(value.producer_slot, f"{name}.producer_slot")
+    return
+  if _is_exact_type(value, execution.ExecPublishRequest):
+    _text(value.buffer_slot, f"{name}.buffer_slot")
+    for field_name in ("reader_dispatch_ordinals", "writer_dispatch_ordinals"):
+      ordinals = _tuple(getattr(value, field_name), f"{name}.{field_name}")
+      if len(ordinals) != len(set(ordinals)):
+        raise ValueError(f"{name}.{field_name} contains duplicates")
+      for index, ordinal in enumerate(ordinals):
+        _uint(ordinal, f"{name}.{field_name}[{index}]")
+    _strings(value.dependency_events, f"{name}.dependency_events", unique=True)
+    return
   if _is_exact_type(value, execution.ExecReleaseRequest):
     _text(value.buffer_slot, f"{name}.buffer_slot")
     if value.buffer_role not in ("in", "out", "inout"):
@@ -775,6 +813,9 @@ def _validate_executable_value(value: object, name: str) -> None:
     for event, count in value.event_uses.items():
       _text(event, f"{name}.event_uses event")
       _uint(count, f"{name}.event_uses[{event!r}]")
+    _typed_tuple(value.shared_inputs, execution.ExecSharedInput, f"{name}.shared_inputs")
+    for index, item in enumerate(value.shared_inputs):
+      _validate_executable_value(item, f"{name}.shared_inputs[{index}]")
     return
   if _is_exact_type(value, execution.ExecDeviceOp):
     if value.op not in ("submit", "await", "return", "profile_reconfig", "memory_maintenance"):
@@ -823,8 +864,8 @@ def _validate_executable_value(value: object, name: str) -> None:
 
 
 def _validate_compiled_program_value(program: CompiledProgram, *, allow_unsealed: bool) -> None:
-  if type(program.schema_version) is not int or program.schema_version != 1 or program.compiler_abi != "v0":
-    raise ValueError("unsupported compiled schema or ABI")
+  if type(program.schema_version) is not int or program.schema_version != 2 or program.compiler_abi != "v1":
+    raise ValueError("unsupported compiled schema or ABI; recompile the source with this compiler")
   _text(program.source_ir, "source_ir")
   _digest_text(program.source_hash, "source_hash")
   if digest(program.source_ir) != program.source_hash:
@@ -1014,7 +1055,14 @@ def parse_compiled_program(text: str) -> CompiledProgram:
   if type(text) is not str:
     raise ValueError("compiled artifact must be JSON text")
   try:
-    program = _decode(json.loads(text, object_pairs_hook=_unique_object, parse_constant=_reject_constant))
+    encoded = json.loads(text, object_pairs_hook=_unique_object, parse_constant=_reject_constant)
+    if (
+      isinstance(encoded, dict)
+      and encoded.get("$type") == "CompiledProgram"
+      and (encoded.get("schema_version") != 2 or encoded.get("compiler_abi") != "v1")
+    ):
+      raise ValueError("unsupported compiled schema or ABI; recompile from source")
+    program = _decode(encoded)
   except (TypeError, KeyError, OverflowError, RecursionError) as exc:
     raise ValueError("invalid compiled artifact") from exc
   if type(program) is not CompiledProgram:

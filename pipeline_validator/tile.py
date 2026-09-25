@@ -1238,6 +1238,7 @@ class TileUCE:
       handle=handle,
       offset_bytes=offset_bytes,
       size_bytes=view.bytes,
+      permissions=resolver.permissions(handle) if view.space == "l2" else "rw",
       address=segments[0].address,
       segments=segments,
     )

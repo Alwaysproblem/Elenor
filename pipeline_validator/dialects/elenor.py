@@ -785,7 +785,7 @@ def _set_arg_names(block: Block, arg_names: Sequence[str]) -> None:
 
 NestActionLike: TypeAlias = (  # noqa: UP040
   "NestAllocOp | NestTaskRangeOp | NestSubviewOp | NestPrefetchOp"
-  " | NestDMAStoreOp | NestDispatchOp | NestCollectiveOp | NestReleaseOp"
+  " | NestDMAStoreOp | NestDispatchOp | NestCollectiveOp | NestPublishOp | NestReleaseOp"
   " | NestAwaitOp | NestBarrierOp | NestReturnOp"
 )
 TileActionLike: TypeAlias = (  # noqa: UP040
@@ -794,7 +794,7 @@ TileActionLike: TypeAlias = (  # noqa: UP040
   " | TileSignalOp | TileReturnOp"
 )
 NexusActionLike: TypeAlias = (  # noqa: UP040
-  "NexusSubmitContextOp | NexusAwaitOp | NexusReturnOp"
+  "NexusSubmitContextOp | NexusSharedRefOp | NexusAwaitOp | NexusReturnOp"
 )
 
 
@@ -805,11 +805,9 @@ NexusActionLike: TypeAlias = (  # noqa: UP040
 
 @irdl_op_definition
 class NestContextOp(IRDLOperation):
-  """``nest.context @name(%Y : !nest.global_memref<...>) placement = M ... { ... }``.
+  """One tile-group context with HBM globals followed by readonly L2 imports.
 
-  One tile-group context.  Entry block args are the context's global
-  formals (HBM inputs); the body dispatches tile programs by symbol
-  reference.
+  The body allocates context-owned L2 buffers and dispatches tile programs.
   """
 
   name = "nest.context"
@@ -958,29 +956,37 @@ class TileProgramDefOp(IRDLOperation):
 
 @irdl_op_definition
 class NestAllocOp(IRDLOperation):
-  """``%b = nest.alloc slot = "s" role = "inout" shape = [..] dtype = "bf16" : !nest.l2_buffer<..>``.
-
-  Context-owned L2 buffer (reference.mlir section 1).  ``slot`` is the
-  runtime L2 object id; bytes derive from shape x dtype.
-  """
+  """Context-owned L2 buffer; ``sharing`` is private by default or readonly."""
 
   name = "nest.alloc"
 
   slot = prop_def(StringAttr)
   role = prop_def(StringAttr)
+  sharing = prop_def(StringAttr)
   shape = prop_def(ArrayAttr)
   dtype = prop_def(StringAttr)
   alignment = opt_prop_def(IntegerAttr)
 
   result = result_def(NestBuffer)
 
-  def __init__(self, slot: str, role: str, shape: Sequence[int], dtype: str, alignment: int | None = None):
+  def __init__(
+    self,
+    slot: str,
+    role: str,
+    shape: Sequence[int],
+    dtype: str,
+    alignment: int | None = None,
+    sharing: str = "private",
+  ):
+    if sharing not in ("private", "readonly"):
+      raise ValueError("nest.alloc sharing must be 'private' or 'readonly'")
     super().__init__(
       result_types=[NestBuffer.of(shape, dtype)],
       properties=_props(
         {
           "slot": StringAttr(slot),
           "role": StringAttr(role),
+          "sharing": StringAttr(sharing),
           "shape": ArrayAttr([_index_attr(d) for d in shape]),
           "dtype": StringAttr(dtype),
           "alignment": None if alignment is None else _index_attr(alignment),
@@ -992,6 +998,8 @@ class NestAllocOp(IRDLOperation):
   def print(self, printer: Printer) -> None:
     _print_str_kw(printer, "slot", self.slot.data)
     _print_str_kw(printer, "role", self.role.data)
+    if self.sharing.data != "private":
+      _print_str_kw(printer, "sharing", self.sharing.data)
     _print_int_list_kw(printer, "shape", _int_list(self.shape))
     _print_str_kw(printer, "dtype", self.dtype.data)
     if self.alignment is not None:
@@ -1002,6 +1010,9 @@ class NestAllocOp(IRDLOperation):
   def parse(cls, parser: Parser) -> Self:
     slot = _parse_str_kw(parser, "slot")
     role = _parse_str_kw(parser, "role")
+    sharing = _parse_opt_str_kw(parser, "sharing") or "private"
+    if sharing not in ("private", "readonly"):
+      parser.raise_error("nest.alloc sharing must be 'private' or 'readonly'")
     shape = _parse_int_list_kw(parser, "shape")
     dtype = _parse_str_kw(parser, "dtype")
     alignment = _parse_opt_int_kw(parser, "alignment")
@@ -1009,7 +1020,7 @@ class NestAllocOp(IRDLOperation):
     buf_dims = _int_list(buffer_type.dims)
     if buf_dims != shape or buffer_type.dtype.data != dtype:
       parser.raise_error("nest.alloc shape/dtype and !nest.l2_buffer type must match")
-    return cls(slot, role, shape, dtype, alignment=alignment)
+    return cls(slot, role, shape, dtype, alignment=alignment, sharing=sharing)
 
 
 @irdl_op_definition
@@ -1407,6 +1418,38 @@ class NestCollectiveOp(_NestAsyncOp):
 
 
 @irdl_op_definition
+class NestPublishOp(IRDLOperation):
+  """Seal a local readonly L2 allocation and produce its publish event."""
+
+  name = "nest.publish"
+
+  buffer = operand_def(NestBuffer)
+  depends_on = var_operand_def(NestEvent)
+  result = result_def(NestEvent)
+
+  def __init__(self, buffer, tag: str, depends_on: Sequence = ()):
+    super().__init__(
+      result_types=[NestEvent(StringAttr(tag))],
+      operands=[[buffer], list(depends_on)],
+    )
+    self.result.name_hint = tag
+
+  def print(self, printer: Printer) -> None:
+    printer.print_string(" ")
+    printer.print_operand(self.buffer)
+    _print_depends_on(printer, self.depends_on)
+    _print_event_type(printer, self.result.type)
+
+  @classmethod
+  def parse(cls, parser: Parser) -> Self:
+    buffer = parser.parse_operand()
+    depends_on = _parse_depends_on(parser)
+    event_type = _parse_event_type(parser, NestEvent)
+    tag = event_type.tag.data  # type: ignore[attr-defined]
+    return cls(buffer, tag, depends_on=depends_on)
+
+
+@irdl_op_definition
 class NestReleaseOp(IRDLOperation):
   """``nest.release %buf depends_on(%e)`` - reclaim the context-owned buffer."""
 
@@ -1542,15 +1585,15 @@ class NexusProgramOp(IRDLOperation):
 class NexusSubmitContextOp(IRDLOperation):
   """``%e = nexus.submit_context.async @ctx(%Y) : !nexus.event<"tag">``
 
-  Submits a ``nest.context`` for execution, passing global-input actuals
-  that bind positionally to the context's formals.  Zero-actual form
-  ``@ctx : ...`` is accepted for legacy modules without global inputs.
+  Submits a ``nest.context`` with global-input and readonly L2 actuals in
+  formal order.  Zero-actual form ``@ctx : ...`` remains valid when there
+  are no context formals.
   """
 
   name = "nexus.submit_context.async"
   irdl_options = (AttrSizedOperandSegments(),)
   context_sym = prop_def(StringAttr)
-  actuals = var_operand_def(NestGlobalMemref)
+  actuals = var_operand_def(Attribute)
   depends_on = var_operand_def(NexusEvent)
   result = result_def(NexusEvent)
 
@@ -1589,6 +1632,38 @@ class NexusSubmitContextOp(IRDLOperation):
     event_type = _parse_event_type(parser, NexusEvent)
     tag = event_type.tag.data  # type: ignore[attr-defined]
     return cls(context_sym, tag, actuals=actuals, depends_on=depends_on)
+
+
+@irdl_op_definition
+class NexusSharedRefOp(IRDLOperation):
+  """Capability to a readonly slot produced by one submit callsite."""
+
+  name = "nexus.shared.ref"
+
+  producer = operand_def(NexusEvent)
+  slot = prop_def(StringAttr)
+  result = result_def(NestBuffer)
+
+  def __init__(self, producer, slot: str, buffer_type: NestBuffer):
+    super().__init__(
+      result_types=[buffer_type],
+      properties=_props({"slot": StringAttr(slot)}),
+      operands=[[producer]],
+    )
+    self.result.name_hint = f"{slot}_shared"
+
+  def print(self, printer: Printer) -> None:
+    printer.print_string(" ")
+    printer.print_operand(self.producer)
+    _print_str_kw(printer, "slot", self.slot.data)
+    _print_event_type(printer, self.result.type)
+
+  @classmethod
+  def parse(cls, parser: Parser) -> Self:
+    producer = parser.parse_operand()
+    slot = _parse_str_kw(parser, "slot")
+    buffer_type = _parse_event_type(parser, NestBuffer)
+    return cls(producer, slot, cast(NestBuffer, buffer_type))
 
 
 @irdl_op_definition
@@ -2195,6 +2270,7 @@ operations: list[type[Operation]] = [
   NestDMAStoreOp,
   NestDispatchOp,
   NestCollectiveOp,
+  NestPublishOp,
   NestReleaseOp,
   NestAwaitOp,
   NestBarrierOp,
@@ -2215,6 +2291,7 @@ operations: list[type[Operation]] = [
   TileReturnOp,
   NexusProgramOp,
   NexusSubmitContextOp,
+  NexusSharedRefOp,
   NexusAwaitOp,
   NexusReturnOp,
 ]
@@ -2258,6 +2335,7 @@ __all__ = [
   "NestGlobalView",
   "NestL2View",
   "NestPrefetchOp",
+  "NestPublishOp",
   "NestReleaseOp",
   "NestReturnOp",
   "NestSubviewOp",
@@ -2268,6 +2346,7 @@ __all__ = [
   "NexusEvent",
   "NexusProgramOp",
   "NexusReturnOp",
+  "NexusSharedRefOp",
   "NexusSubmitContextOp",
   "TaskRange",
   "TileActionLike",

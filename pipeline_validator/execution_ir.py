@@ -68,6 +68,8 @@ class ExecGroupActionOp(Enum):
   SIGNAL_EVENT = "signal.event"
   RELEASE_L2 = "release.l2"
   BIND_L2_VIEW = "bind.l2.view"
+  PUBLISH_L2 = "publish.l2"
+  BIND_L2_IMPORT = "bind.l2.import"
   PROFILE_RECONFIG = "profile.reconfig"
   MEMORY_MAINTENANCE = "memory.maintenance"
 
@@ -177,6 +179,20 @@ class ExecL2Buffer:
   element_bytes: int  # dtype byte width, materialized at lowering
   alignment: int  # 1 when source op omits alignment
   bytes: int
+  sharing: str = "private"
+
+
+@dataclass(frozen=True)
+class ExecSharedInput:
+  """One consumer binding to an exported producer L2 buffer."""
+
+  slot: str
+  dims: tuple[int, ...]
+  dtype: str
+  element_bytes: int
+  bytes: int
+  producer_binding_id: str
+  producer_slot: str
 
 
 @dataclass(frozen=True)
@@ -271,6 +287,16 @@ class ExecReleaseRequest:
 
   buffer_slot: str
   buffer_role: str
+  reader_dispatch_ordinals: tuple[int, ...]
+  writer_dispatch_ordinals: tuple[int, ...]
+  dependency_events: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ExecPublishRequest:
+  """Structured PUBLISH_L2 request with verified reader/writer ordinals."""
+
+  buffer_slot: str
   reader_dispatch_ordinals: tuple[int, ...]
   writer_dispatch_ordinals: tuple[int, ...]
   dependency_events: tuple[str, ...]
@@ -384,6 +410,7 @@ class ExecTileGroupTask(FrozenRecord):
   layout: ArenaLayout | None = None
   binding_id: str = ""
   event_uses: Mapping[str, int] = field(default_factory=FrozenMap)
+  shared_inputs: tuple[ExecSharedInput, ...] = ()
 
 
 @dataclass(frozen=True)

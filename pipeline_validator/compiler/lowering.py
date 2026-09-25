@@ -27,6 +27,7 @@ from ..dialects.elenor import (
   NestGlobalView,
   NestL2View,
   NestPrefetchOp,
+  NestPublishOp,
   NestReleaseOp,
   NestReturnOp,
   NestSubviewOp,
@@ -35,6 +36,7 @@ from ..dialects.elenor import (
   NexusEvent,
   NexusProgramOp,
   NexusReturnOp,
+  NexusSharedRefOp,
   NexusSubmitContextOp,
   TileAllocOp,
   TileAwaitOp,
@@ -67,7 +69,9 @@ from ..execution_ir import (
   ExecMemoryView,
   ExecModel,
   ExecProfiledAccess,
+  ExecPublishRequest,
   ExecReleaseRequest,
+  ExecSharedInput,
   ExecSignalPolicy,
   ExecTaskDomain,
   ExecTileFormal,
@@ -79,7 +83,13 @@ from ..execution_ir import (
   ExecTransfer,
 )
 from ..profiles import SourceRef
-from ..workload_ir import _body_ops, _view_bytes, _view_offset_bytes, verify_workload_ir
+from ..workload_ir import (
+  _body_ops,
+  _view_bytes,
+  _view_offset_bytes,
+  effective_submit_dependencies,
+  verify_workload_ir,
+)
 
 
 def _ref(source_name: str, symbol: str, index: int, op) -> SourceRef:
@@ -112,26 +122,81 @@ def lower_model_ir(module, *, source_name: str) -> ExecModel:
   program_args = list(program.body.block.args)
   inputs = tuple(_global_input(arg, index) for index, arg in enumerate(program_args))
   contexts = {op.sym_name.data: op for op in module.body.block.ops if isinstance(op, NestContextOp)}
+  model_ops = tuple(_body_ops(program))
+  symbol = program.sym_name.data
+  binding_ids = {
+    op: f"call:{symbol}:{index}:{_event_tag(op.result.type)}"
+    for index, op in enumerate(model_ops)
+    if isinstance(op, NexusSubmitContextOp)
+  }
   tasks: dict[str, ExecTileGroupTask] = {}
   pins: dict[str, int | None] = {}
   body: list[ExecDeviceOp] = []
-  symbol = program.sym_name.data
-  for index, body_op in enumerate(_body_ops(program)):
+  for index, body_op in enumerate(model_ops):
     source = _ref(source_name, symbol, index, body_op)
     if isinstance(body_op, NexusSubmitContextOp):
       context_name = body_op.context_sym.data
       context = contexts.get(context_name)
       if context is None:
         raise VerifyException(f"submit references unknown Context '@{context_name}'")
-      actual_indices = tuple(_block_arg_index(actual, program_args) for actual in body_op.actuals)
-      binding_id = f"call:{symbol}:{index}:{_event_tag(body_op.result.type)}"
+      context_args = tuple(context.body.block.args)
+      global_formals = tuple(arg for arg in context_args if isinstance(arg.type, NestGlobalMemref))
+      import_formals = tuple(arg for arg in context_args if isinstance(arg.type, NestBuffer))
+      global_actuals = tuple(
+        actual for actual in body_op.actuals if isinstance(actual.type, NestGlobalMemref)
+      )
+      shared_actuals = tuple(actual for actual in body_op.actuals if isinstance(actual.type, NestBuffer))
+      if len(global_actuals) != len(global_formals) or len(shared_actuals) != len(import_formals):
+        raise VerifyException(f"submit '@{context_name}' actuals do not match global/shared formals")
+      actual_indices = tuple(_block_arg_index(actual, program_args) for actual in global_actuals)
       aliases = {
-        formal.name: inputs[actual].name
-        for formal, actual in zip(
-          tuple(_global_input(arg, pos) for pos, arg in enumerate(context.body.block.args)), actual_indices
-        )
+        _global_input(formal, formal_index).name: inputs[actual_index].name
+        for formal_index, (formal, actual_index) in enumerate(zip(global_formals, actual_indices))
       }
-      task = _lower_context(module, context, source_name, binding_id, aliases)
+      shared_inputs: list[ExecSharedInput] = []
+      for formal, actual in zip(import_formals, shared_actuals):
+        reference = actual.owner
+        if not isinstance(reference, NexusSharedRefOp):
+          raise VerifyException("shared Context actual must come from nexus.shared.ref")
+        producer_submit = reference.producer.owner
+        if not isinstance(producer_submit, NexusSubmitContextOp):
+          raise VerifyException("shared reference producer must be a submit_context call site")
+        producer_binding_id = binding_ids.get(producer_submit)
+        if producer_binding_id is None:
+          raise VerifyException("shared reference producer submit is not in this model")
+        producer_context = contexts.get(producer_submit.context_sym.data)
+        if producer_context is None:
+          raise VerifyException("shared reference producer Context is unknown")
+        producer_slot = reference.slot.data
+        producer_buffer = next(
+          (
+            op
+            for op in _body_ops(producer_context)
+            if isinstance(op, NestAllocOp) and op.slot.data == producer_slot
+          ),
+          None,
+        )
+        if producer_buffer is None or producer_buffer.sharing.data != "readonly":
+          raise VerifyException("shared reference does not name a readonly producer allocation")
+        dims, dtype = _dims_dtype(formal.type)
+        producer_dims, producer_dtype = _dims_dtype(producer_buffer.result.type)
+        if (dims, dtype) != (producer_dims, producer_dtype):
+          raise VerifyException("shared reference shape/dtype differs from producer allocation")
+        shared_inputs.append(
+          ExecSharedInput(
+            formal.name_hint or "",
+            dims,
+            dtype,
+            DTYPE_BYTES[dtype],
+            _view_bytes(dims, dtype),
+            producer_binding_id,
+            producer_slot,
+          )
+        )
+      binding_id = binding_ids[body_op]
+      task = _lower_context(
+        module, context, source_name, binding_id, aliases, tuple(shared_inputs)
+      )
       tasks[binding_id] = task
       pins[binding_id] = None if context.context_id is None else int(context.context_id.value.data)
       body.append(
@@ -140,13 +205,17 @@ def lower_model_ir(module, *, source_name: str) -> ExecModel:
           ctx_name=context_name,
           event_tag=_event_tag(body_op.result.type),
           actual_inputs=actual_indices,
-          dependencies=tuple(_event_tag(dep.type) for dep in body_op.depends_on),
+          dependencies=tuple(
+            _event_tag(dep.type) for dep in effective_submit_dependencies(body_op)
+          ),
           callsite_id=f"{symbol}:call:{index}",
           binding_id=binding_id,
           source_ref=source,
           instruction_id=_iid(binding_id, "device", index, "submit"),
         )
       )
+    elif isinstance(body_op, NexusSharedRefOp):
+      continue
     elif isinstance(body_op, NexusAwaitOp):
       for operand_index, event in enumerate(body_op.events):
         body.append(
@@ -172,24 +241,69 @@ def _lower_context(
   source_name: str,
   binding_id: str,
   global_aliases: Mapping[str, str] | None = None,
+  shared_inputs: tuple[ExecSharedInput, ...] = (),
 ) -> ExecTileGroupTask:
   programs = {
     op.sym_name.data: _lower_program(op, source_name, binding_id)
     for op in module.body.block.ops
     if isinstance(op, TileProgramDefOp)
   }
-  context_args = list(context.body.block.args)
-  global_inputs = tuple(_global_input(arg, index) for index, arg in enumerate(context_args))
-  formal_names: dict[SSAValue, str] = {arg: item.name for arg, item in zip(context_args, global_inputs)}
+  context_args = tuple(context.body.block.args)
+  global_args = tuple(arg for arg in context_args if isinstance(arg.type, NestGlobalMemref))
+  import_args = tuple(arg for arg in context_args if isinstance(arg.type, NestBuffer))
+  if len(import_args) != len(shared_inputs):
+    raise VerifyException("shared input metadata does not match Context L2 formals")
+  global_inputs = tuple(_global_input(arg, index) for index, arg in enumerate(global_args))
+  formal_names: dict[SSAValue, str] = {
+    arg: item.name for arg, item in zip(global_args, global_inputs)
+  }
   formal_dims: dict[SSAValue, tuple[int, ...]] = {
-    arg: item.dims for arg, item in zip(context_args, global_inputs)
+    arg: item.dims for arg, item in zip(global_args, global_inputs)
   }
   objects: dict[SSAValue, ExecMemoryView | ExecL2Buffer] = {}
   task_domains: dict[SSAValue, ExecTaskDomain] = {}
   l2_buffers: list[ExecL2Buffer] = []
   bind_events: dict[str, str] = {}
   layout_indices: dict[str, int] = {}
+  import_indices: dict[str, int] = {}
   actions: list[ExecGroupAction] = []
+  for shared_index, (formal, shared_input) in enumerate(zip(import_args, shared_inputs)):
+    dims, dtype = _dims_dtype(formal.type)
+    slot = formal.name_hint or ""
+    if (
+      shared_input.slot != slot
+      or shared_input.dims != dims
+      or shared_input.dtype != dtype
+      or shared_input.element_bytes != DTYPE_BYTES[dtype]
+      or shared_input.bytes != _view_bytes(dims, dtype)
+    ):
+      raise VerifyException("shared input metadata differs from its Context formal")
+    descriptor = ExecL2Buffer(
+      slot, dims, dtype, "in", DTYPE_BYTES[dtype], 1, _view_bytes(dims, dtype)
+    )
+    objects[formal] = descriptor
+    bind_source = SourceRef(
+      source_name,
+      context.sym_name.data,
+      shared_index,
+      "nest.context.import",
+      "shared_l2_lowering",
+      f"bind imported readonly L2 formal {slot!r}",
+    )
+    bind_event = f"__{binding_id}:l2.import.bind:{shared_index}"
+    if slot in bind_events:
+      raise VerifyException(f"duplicate L2 bind slot {slot!r}")
+    bind_events[slot] = bind_event
+    import_indices[slot] = shared_index
+    actions.append(
+      ExecGroupAction(
+        ExecGroupActionOp.BIND_L2_IMPORT,
+        args=(slot, shared_index),
+        dst=bind_event,
+        source_ref=bind_source,
+        instruction_id=_iid(binding_id, "group", shared_index, "bind_l2_import"),
+      )
+    )
   body_ops = tuple(_body_ops(context))
   dispatch_ordinals: dict[NestDispatchOp, int] = {}
   ins_consumers: dict[SSAValue, list[int]] = {}
@@ -219,6 +333,7 @@ def _lower_context(
         DTYPE_BYTES[dtype],
         alignment,
         _view_bytes(dims, dtype),
+        body_op.sharing.data,
       )
       layout_index = len(l2_buffers)
       l2_buffers.append(buffer)
@@ -340,6 +455,26 @@ def _lower_context(
           instruction_id=_iid(binding_id, "group", index, "dispatch"),
         )
       )
+    elif isinstance(body_op, NestPublishOp):
+      buffer = _l2_buffer(objects, body_op.buffer, body_op.name)
+      explicit = tuple(_event_tag(dep.type) for dep in body_op.depends_on)
+      publish_request = ExecPublishRequest(
+        buffer.slot,
+        tuple(sorted(set(ins_consumers.get(body_op.buffer, ())))),
+        tuple(sorted(set(outs_producers.get(body_op.buffer, ())))),
+        explicit,
+      )
+      actions.append(
+        ExecGroupAction(
+          ExecGroupActionOp.PUBLISH_L2,
+          args=(publish_request,),
+          dst=_event_tag(body_op.result.type),
+          dependencies=tuple(dict.fromkeys((*explicit, bind_events[buffer.slot]))),
+          writes=(buffer.slot,),
+          source_ref=source,
+          instruction_id=_iid(binding_id, "group", index, "publish_l2"),
+        )
+      )
     elif isinstance(body_op, NestReleaseOp):
       buffer = _l2_buffer(objects, body_op.buffer, body_op.name)
       explicit = tuple(_event_tag(dep.type) for dep in body_op.depends_on)
@@ -350,11 +485,16 @@ def _lower_context(
         tuple(sorted(set(outs_producers.get(body_op.buffer, ())))),
         explicit,
       )
+      release_event = (
+        f"__{binding_id}:l2.release:{layout_indices[buffer.slot]}"
+        if buffer.slot in layout_indices
+        else f"__{binding_id}:l2.import.release:{import_indices[buffer.slot]}"
+      )
       actions.append(
         ExecGroupAction(
           ExecGroupActionOp.RELEASE_L2,
           args=(release_request,),
-          dst=f"__{binding_id}:l2.release:{layout_indices[buffer.slot]}",
+          dst=release_event,
           dependencies=tuple(dict.fromkeys((*explicit, bind_events[buffer.slot]))),
           source_ref=source,
           instruction_id=_iid(binding_id, "group", index, "release_l2"),
@@ -404,6 +544,7 @@ def _lower_context(
     context.resource_contract.to_contract(),
     None,
     binding_id,
+    shared_inputs=shared_inputs,
   )
 
 
@@ -430,6 +571,12 @@ def _maximal_event_frontier(
   )
 
 
+def _append_unique_dependency(event: str, dependencies: list[str], seen: set[str]) -> None:
+  if event not in seen:
+    seen.add(event)
+    dependencies.append(event)
+
+
 def normalize_action_dependencies(
   actions: Sequence[ExecGroupAction],
   role_bindings: Mapping[int, ExecTileRoleBinding],
@@ -452,25 +599,29 @@ def normalize_action_dependencies(
   aliases = global_aliases or {}
   output: list[ExecGroupAction] = []
   for original in actions:
-    dependencies = set(original.dependencies)
+    dependencies = list(dict.fromkeys(original.dependencies))
     if original.op is ExecGroupActionOp.WAIT_EVENT:
-      dependencies = set(original.args)
+      dependencies = list(dict.fromkeys(original.args))
+    dependency_set = set(dependencies)
+
     for slot in (*original.reads, *original.writes):
       if slot in last_writer:
-        dependencies.add(last_writer[slot])
+        _append_unique_dependency(last_writer[slot], dependencies, dependency_set)
     for slot in original.writes:
-      dependencies.update(readers.get(slot, ()))
+      for event in sorted(readers.get(slot, ())):
+        _append_unique_dependency(event, dependencies, dependency_set)
     if original.op is ExecGroupActionOp.RELEASE_L2:
       slot = original.args[0].buffer_slot
       if slot in last_writer:
-        dependencies.add(last_writer[slot])
-      dependencies.update(readers.get(slot, ()))
+        _append_unique_dependency(last_writer[slot], dependencies, dependency_set)
+      for event in sorted(readers.get(slot, ())):
+        _append_unique_dependency(event, dependencies, dependency_set)
     if original.op in (ExecGroupActionOp.BARRIER_GROUP, ExecGroupActionOp.SIGNAL_EVENT):
       # These source operations have no dependency operands.  Any incoming
       # edges are from an earlier normalization pass and must be recomputed
       # after generated maintenance/profile fences change the frontier.
-      dependencies = set(outstanding)
-
+      dependencies = sorted(outstanding)
+      dependency_set = set(dependencies)
     accesses: list[tuple[ExecMemoryView, bool]] = []
     if original.op in (ExecGroupActionOp.DMA_PREFETCH, ExecGroupActionOp.DMA_STORE):
       transfer = original.args[1]
@@ -492,23 +643,23 @@ def normalize_action_dependencies(
       end = start + view.bytes
       for prior_name, prior_start, prior_end, prior_write, event in global_accesses:
         if name == prior_name and start < prior_end and prior_start < end and (writing or prior_write):
-          dependencies.add(event)
+          _append_unique_dependency(event, dependencies, dependency_set)
       if not original.dst:
         raise VerifyException(f"global access '{original.instruction_id}' has no completion event")
       global_accesses.append((name, start, end, writing, original.dst))
 
-    if not dependencies <= produced:
-      missing = sorted(dependencies - produced)
+    if not dependency_set <= produced:
+      missing = sorted(dependency_set - produced)
       raise VerifyException(
         f"action '{original.instruction_id}' depends on unbound producer events: {missing}"
       )
-    deps = tuple(sorted(dependencies))
+    deps = tuple(dependencies)
     if original.op in (ExecGroupActionOp.PROFILE_RECONFIG, ExecGroupActionOp.MEMORY_MAINTENANCE):
       # Typed control descriptors carry the same ordered frontier and Loader
       # verifies byte-for-byte agreement with the action.
       deps = tuple(original.dependencies)
     args = original.args
-    if original.op is ExecGroupActionOp.RELEASE_L2:
+    if original.op in (ExecGroupActionOp.RELEASE_L2, ExecGroupActionOp.PUBLISH_L2):
       args = (replace(original.args[0], dependency_events=deps),)
     action = replace(original, args=args, dependencies=deps)
     output.append(action)

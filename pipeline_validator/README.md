@@ -58,12 +58,13 @@ result = Simulator(hw, sim).run(loaded)
 
 `CompiledProgram` is deeply immutable and contains the canonical source,
 Registry, target/artifact hashes, frozen executable, call bindings,
-relocations, source map, dependency proofs, entry/exit Profiles, resource
-budgets, binding guards, and workload metadata. The compiled package format
-currently has `schema_version=1` and `compiler_abi="v0"`; this is distinct
-from hardware YAML schema 2. Parsing uses an explicit type/opcode allowlist
-and rejects unknown fields/types, duplicate JSON keys, non-finite numbers,
-unknown versions, and a mismatched artifact hash.
+relocations, source map, dependency proofs, readonly import references, entry/exit
+Profiles, resource budgets, binding guards, and workload metadata. The compiled
+package format currently has `schema_version=2` and `compiler_abi="v1"`; this is
+distinct from hardware YAML schema 2. Schema 1 / ABI `v0` artifacts are
+rejected and must be rebuilt from source. Parsing uses an explicit type/opcode
+allowlist and rejects unknown fields/types, duplicate JSON keys, non-finite
+numbers, unknown versions, and a mismatched artifact hash.
 
 `load_program` does not import or invoke the compiler. It verifies artifact
 integrity and executable semantics, matches the embedded Registry/static
@@ -455,10 +456,19 @@ Profile/control observability includes:
   and generation in the Profile snapshot.
 
 Memory lifetime observability includes `arena_reserve`, `arena_retire`,
-`buffer_view_invalidate`, `task_lease_acquire`, and `task_lease_release`,
-along with per-pool/per-bank reserved, live-view, padding, system-reserved,
-Cache, and free bytes. Reports expose bounded `profile`, `arenas`, and
-`task_leases` snapshots plus `compiled_artifact_hash` and `registry_hash`.
+`buffer_view_invalidate`, `l2_extent_release`, `task_lease_acquire`, and
+`task_lease_release`. Pool snapshots and post-mutation counters include
+backing/claim/reference counts, live bytes, reservation, padding,
+system-reserved, Cache, and free bytes. For L2, `live_view_bytes` counts
+logical valid bytes once per live backing; `logical_live_view_bytes` sums
+logical live views and can count aliases. `physical_live_backing_bytes` counts
+unique padded backing units and excludes slack, while `arena_reserved_bytes`
+includes backing units plus held slack. Readonly aliases share one immutable
+L2 backing; reports retain origin-retired backing and claim rows without
+counting aliases as additional physical reservation. Protocol-live L2 byte
+totals are deduplicated by backing identity. Reports expose bounded
+`profile`, `arenas`, and `task_leases` snapshots plus `compiled_artifact_hash`
+and `registry_hash`.
 
 Every executable instruction has an `instruction_id` and `SourceRef`
 (`source_name`, symbol, body-op index, op name). Compiler-generated controls

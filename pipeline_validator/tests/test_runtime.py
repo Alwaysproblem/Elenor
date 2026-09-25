@@ -70,7 +70,7 @@ from pipeline_validator.execution_ir import (
   TaskIdentity,
 )
 from pipeline_validator.loader import load_program
-from pipeline_validator.memory import L2SRAM, AdmissionFailure, NoCRouter, PayloadTracker
+from pipeline_validator.memory import L2SRAM, AdmissionFailure, MemoryInvariantError, NoCRouter, PayloadTracker
 from pipeline_validator.memory.arena import ArenaPool, RootInvocation
 from pipeline_validator.profiles import CacheRequirement, ContextResources, TileResources, build_registry
 from pipeline_validator.runtime import EventStatus, EventTable, FaultCode, FaultRing
@@ -3583,7 +3583,7 @@ class TestCycleCapDrain:
     assert "poisoned" not in result.reason
     assert group.poisoned_reason is None
     assert group.reset_domain.is_done
-    assert group.assert_private_l2_closed() is None
+    group.assert_l2_closed()
     snapshot = group.l2_sram.snapshot()
     assert snapshot["live_backings"] == 0
     assert snapshot["arena_reserved_bytes"] == 0
@@ -3636,23 +3636,23 @@ class TestSuccessExitClosure:
     module = load_workload_ir(root / "examples/scenarios/l2_admission_wait.mlir")
     group = simulator.group
     first = {"pending": True}
-    original = group.assert_private_l2_closed
+    original = group.assert_l2_closed
 
     def injecting_closed():
       if first["pending"]:
         first["pending"] = False
-        return "injected leak: backing l2:p0:arena:1:backing:1:a_input"
-      return original()
+        raise MemoryInvariantError("injected leak: backing l2:p0:arena:1:backing:1:a_input")
+      original()
 
-    monkeypatch.setattr(group, "assert_private_l2_closed", injecting_closed)
+    monkeypatch.setattr(group, "assert_l2_closed", injecting_closed)
     result = run_source(simulator, module, self.BINDINGS)
     assert not result.completed
-    assert "private L2 closure violation" in result.reason
+    assert "L2 closure violation" in result.reason
     assert "injected leak" in result.reason
     # The drain ran to DONE and the real state is clean afterwards.
     assert group.reset_domain.is_done
     assert group.poisoned_reason is None
-    assert original() is None
+    original()
 
 
 class TestL2ProfileSwitchOrdering:
