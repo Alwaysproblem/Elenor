@@ -18,7 +18,10 @@
 //   - device_submit_wait > 0（pow 的 submit 确实阻塞等 slot）；
 //   - pow context 的启动时间 ≈ 第一个/第二个 matmul context 的完成时间，
 //     早于最后一个 matmul context 的完成时间（提前调度）；
-//   - EVU:pow 与 BOA:matmul 时间窗重叠。
+//   - pow context 与仍在运行的 matmul context 并发（context 级窗口重叠）；
+//     EVU:pow 与 BOA:matmul 的引擎泳道窗重叠仅在 runtime 档成立 ——
+//     full_memory 档 HBM 单通道争用会把 pow 首个 EVU 推迟到全部 BOA
+//     结束之后（fidelity 差异，非调度缺陷）。
 //
 // 运行：bash examples/run.sh matmul-pow-free-slot
 builtin.module {
@@ -86,39 +89,28 @@ builtin.module {
     tile.return
   }
 
-  // ---- pow tile program：每 task 2 个 128x128 chunk，load → pow → store x2 ----
-  tile.program @pow_y_pair_128(
+  // ---- pow tile program：每 task 一个连续切片（2 x 128x128），
+  // ---- load → pow → store 单趟完成；不做软件流水，延迟由硬件调度掩盖 ----
+  tile.program @pow_y_128(
       %task : !nest.task,
       %y_l2 : !nest.l2_buffer<4x2x128x128xbf16>)
                 resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
-          tile_l1_spm_bytes_per_context = 32768> {
-    %y0 = tile.subview %y_l2 task = %task task_dim = 0
-        offsets = [0, 0, 0, 0] sizes = [1, 1, 128, 128] strides = [1, 1, 1, 1]
-        : !nest.l2_view<1x1x128x128xbf16>
-    %y1 = tile.subview %y_l2 task = %task task_dim = 0
-        offsets = [0, 1, 0, 0] sizes = [1, 1, 128, 128] strides = [1, 1, 1, 1]
-        : !nest.l2_view<1x1x128x128xbf16>
-    %l1 = tile.alloc shape = [128, 128] dtype = "bf16"
-        alignment = 256 : !tile.l1_buffer<128x128xbf16>
-    %y0_loaded = tile.load.async %y0 into %l1
-        : !tile.event<"y0_loaded">
-    tile.await %y0_loaded
-    %y0_pow = tile.pow.async bytes = 32768 exponent = 2 pow_ops = 65536
-        : !tile.event<"y0_pow">
-    tile.await %y0_pow
-    %y0_stored = tile.store.async %l1 into %y0
-        : !tile.event<"y0_stored">
-    tile.await %y0_stored
-    %y1_loaded = tile.load.async %y1 into %l1
-        : !tile.event<"y1_loaded">
-    tile.await %y1_loaded
+          tile_l1_spm_bytes_per_context = 65536> {
+    %y = tile.subview %y_l2 task = %task task_dim = 0
+        offsets = [0, 0, 0, 0] sizes = [1, 2, 128, 128] strides = [1, 1, 1, 1]
+        : !nest.l2_view<1x2x128x128xbf16>
+    %l1 = tile.alloc shape = [2, 128, 128] dtype = "bf16"
+        alignment = 256 : !tile.l1_buffer<2x128x128xbf16>
+    %y_loaded = tile.load.async %y into %l1
+        : !tile.event<"y_loaded">
+    tile.await %y_loaded
     tile.signal input_released(%task)
-    %y1_pow = tile.pow.async bytes = 32768 exponent = 2 pow_ops = 65536
-        : !tile.event<"y1_pow">
-    tile.await %y1_pow
-    %y1_stored = tile.store.async %l1 into %y1
-        : !tile.event<"y1_stored">
-    tile.await %y1_stored
+    %y_pow = tile.pow.async bytes = 65536 exponent = 2 pow_ops = 131072
+        : !tile.event<"y_pow">
+    tile.await %y_pow
+    %y_stored = tile.store.async %l1 into %y
+        : !tile.event<"y_stored">
+    tile.await %y_stored
     tile.signal output_ready(%task)
     tile.return
   }
@@ -345,7 +337,7 @@ builtin.module {
         : !nest.event<"mpf_pow_y0_prefetched">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
     %grid_done, %input_released, %output_ready =
-        nest.dispatch.tasks.async @pow_y_pair_128 l1_mode = 0
+        nest.dispatch.tasks.async @pow_y_128 l1_mode = 0
         tasks(%tasks) globals()
         bindings(%y_l2) ins(%y_l2) outs(%y_l2)
         signal_policy {
@@ -378,7 +370,7 @@ builtin.module {
         : !nest.event<"mpf_pow_y1_prefetched">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
     %grid_done, %input_released, %output_ready =
-        nest.dispatch.tasks.async @pow_y_pair_128 l1_mode = 0
+        nest.dispatch.tasks.async @pow_y_128 l1_mode = 0
         tasks(%tasks) globals()
         bindings(%y_l2) ins(%y_l2) outs(%y_l2)
         signal_policy {

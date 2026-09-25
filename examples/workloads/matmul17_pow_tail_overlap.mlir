@@ -16,7 +16,8 @@
 // pow（data 依赖，消费 matmul 输出 C 的前 16 块）：
 //   - @pow_np_lo 消费 C 块 0..7（生产者 @mm_b0 + @mm_b1），
 //     @pow_np_hi 消费 C 块 8..15（生产者 @mm_b2 + @mm_b3）；
-//   - 各 placement = 15、4 task、每 task 2 个 256x256 chunk；
+//   - 各 placement = 15、4 task，每 task 一个 2x256x256 连续切片
+//     （load → pow → store 单趟、不做软件流水）；
 //   - 4 个满 placement context（含 C 写回）先于尾 context 完成：当
 //     @pow_np_lo 启动时，@mm_tail 仍在 tile 0 的 UCE context 4 上算
 //     剩余块 —— 此时 tile 0 的其余 UCE context 与 tile 1..3 全部空闲，
@@ -25,8 +26,10 @@
 // 验证点（trace）：
 //   - 5 个 matmul context 从 t=0 并发在飞；@mm_tail 的所有 engine 活动
 //     只出现在 Tile0（placement = 1），其余 context 铺满 Tile0..3；
-//   - @pow_np_lo 的 EVU:pow 时间窗与 @mm_tail 的运行窗口重叠
-//     （tail 未结束时 pow 已提前运行）；
+//   - pow 不等 @mm_tail：admit = 生产者完成 + 2 cycle，早于 @mm_tail
+//     完成时间（tail 未结束 pow 已提前运行，context 级窗口重叠）；
+//     EVU:pow 引擎窗与 @mm_tail 的 BOA 泳道在 full_memory 档不重叠
+//     （1MB prefetch 单通道搬运拖后首个 EVU），runtime 档下重叠；
 //   - pow 的首个活动晚于其生产者（@mm_b0/@mm_b1 等）完成时间
 //     （data 依赖正确，不提前读 C）。
 //
@@ -247,39 +250,30 @@ builtin.module {
     tile.return
   }
 
-  // ---- pow tile program：每 task 2 个 256x256 chunk，load → pow → store x2 ----
-  tile.program @pow_np_pair_256(
+  // ---- pow tile program：每 task 一个连续切片（2 x 256x256），
+  // ---- load → pow → store 单趟完成；不做软件流水，延迟由硬件调度掩盖。
+  // ---- l2 视图 [4,2,256,256] 按 (task, chunk) 展平 8 个 256x256 块，
+  // ---- chunk k 对应全局线性块 k，每 task 取连续 2 块、恰好覆盖半区。
+  tile.program @pow_np_256(
       %task : !nest.task,
-      %c_l2 : !nest.l2_buffer<2x4x256x256xbf16>)
+      %c_l2 : !nest.l2_buffer<4x2x256x256xbf16>)
                 resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
-          tile_l1_spm_bytes_per_context = 131072> {
-    %np0 = tile.subview %c_l2 task = %task task_dim = 1
-        offsets = [0, 0, 0, 0] sizes = [1, 1, 256, 256] strides = [1, 1, 1, 1]
-        : !nest.l2_view<1x1x256x256xbf16>
-    %np1 = tile.subview %c_l2 task = %task task_dim = 1
-        offsets = [1, 0, 0, 0] sizes = [1, 1, 256, 256] strides = [1, 1, 1, 1]
-        : !nest.l2_view<1x1x256x256xbf16>
-    %l1 = tile.alloc shape = [256, 256] dtype = "bf16"
-        alignment = 256 : !tile.l1_buffer<256x256xbf16>
-    %np0_loaded = tile.load.async %np0 into %l1
-        : !tile.event<"np0_loaded">
-    tile.await %np0_loaded
-    %np0_pow = tile.pow.async bytes = 131072 exponent = 2 pow_ops = 262144
-        : !tile.event<"np0_pow">
-    tile.await %np0_pow
-    %np0_stored = tile.store.async %l1 into %np0
-        : !tile.event<"np0_stored">
-    tile.await %np0_stored
-    %np1_loaded = tile.load.async %np1 into %l1
-        : !tile.event<"np1_loaded">
-    tile.await %np1_loaded
+          tile_l1_spm_bytes_per_context = 262144> {
+    %c_tile = tile.subview %c_l2 task = %task task_dim = 0
+        offsets = [0, 0, 0, 0] sizes = [1, 2, 256, 256] strides = [1, 1, 1, 1]
+        : !nest.l2_view<1x2x256x256xbf16>
+    %l1 = tile.alloc shape = [2, 256, 256] dtype = "bf16"
+        alignment = 256 : !tile.l1_buffer<2x256x256xbf16>
+    %c_loaded = tile.load.async %c_tile into %l1
+        : !tile.event<"c_loaded">
+    tile.await %c_loaded
     tile.signal input_released(%task)
-    %np1_pow = tile.pow.async bytes = 131072 exponent = 2 pow_ops = 262144
-        : !tile.event<"np1_pow">
-    tile.await %np1_pow
-    %np1_stored = tile.store.async %l1 into %np1
-        : !tile.event<"np1_stored">
-    tile.await %np1_stored
+    %c_pow = tile.pow.async bytes = 262144 exponent = 2 pow_ops = 524288
+        : !tile.event<"c_pow">
+    tile.await %c_pow
+    %c_stored = tile.store.async %l1 into %c_tile
+        : !tile.event<"c_stored">
+    tile.await %c_stored
     tile.signal output_ready(%task)
     tile.return
   }
@@ -557,13 +551,13 @@ builtin.module {
         offsets = [0, 0, 0] sizes = [8, 256, 256] strides = [1, 1, 1]
         : !nest.global_view<8x256x256xbf16>
     %c_l2 = nest.alloc slot = "m17_pow_lo" role = "inout"
-        shape = [2, 4, 256, 256] dtype = "bf16" alignment = 256
-        : !nest.l2_buffer<2x4x256x256xbf16>
+        shape = [4, 2, 256, 256] dtype = "bf16" alignment = 256
+        : !nest.l2_buffer<4x2x256x256xbf16>
     %c_prefetched = nest.dma.prefetch.async %c_blk into %c_l2
         : !nest.event<"m17_pow_lo_prefetched">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
     %grid_done, %input_released, %output_ready =
-        nest.dispatch.tasks.async @pow_np_pair_256 l1_mode = 0 context = 0
+        nest.dispatch.tasks.async @pow_np_256 l1_mode = 0 context = 0
         tasks(%tasks) globals()
         bindings(%c_l2) ins(%c_l2) outs(%c_l2)
         signal_policy {
@@ -590,13 +584,13 @@ builtin.module {
         offsets = [8, 0, 0] sizes = [8, 256, 256] strides = [1, 1, 1]
         : !nest.global_view<8x256x256xbf16>
     %c_l2 = nest.alloc slot = "m17_pow_hi" role = "inout"
-        shape = [2, 4, 256, 256] dtype = "bf16" alignment = 256
-        : !nest.l2_buffer<2x4x256x256xbf16>
+        shape = [4, 2, 256, 256] dtype = "bf16" alignment = 256
+        : !nest.l2_buffer<4x2x256x256xbf16>
     %c_prefetched = nest.dma.prefetch.async %c_blk into %c_l2
         : !nest.event<"m17_pow_hi_prefetched">
     %tasks = nest.task.range from = 0 to = 4 : !nest.task_range
     %grid_done, %input_released, %output_ready =
-        nest.dispatch.tasks.async @pow_np_pair_256 l1_mode = 0 context = 1
+        nest.dispatch.tasks.async @pow_np_256 l1_mode = 0 context = 1
         tasks(%tasks) globals()
         bindings(%c_l2) ins(%c_l2) outs(%c_l2)
         signal_policy {
