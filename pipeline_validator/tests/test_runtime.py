@@ -3040,6 +3040,100 @@ class TestL2AccessRelease:
     assert group.credit_invariants_hold()
     assert sim.tracer is not None
     sim.tracer.assert_well_formed()
+    group.reset()
+    self._assert_runtime_zero_leak(group)
+
+  def test_release_preflight_rejects_unacknowledged_reference_without_mutation(self, monkeypatch):
+    """plan/01 §2.4/§3.4: a DONE-but-unacknowledged transfer keeps its ledger
+    reference; the release preflight must consult the physical ledger and
+    fail before any mutation (the manager query alone misses it)."""
+    from pipeline_validator.memory.allocator import MemoryInvariantError
+    from pipeline_validator.memory.transfer import TransferStatus
+
+    hw = HardwareConfig().with_overrides(num_dma_channels=2, hbm_fixed_latency_cycles=10)
+    sim = Simulator(
+      hw,
+      SimConfig(
+        fidelity="full_memory",
+        context_count=4,
+        device_context_count=1,
+        memory_trace=True,
+        max_cycles=200000,
+      ),
+      enable_tracer=True,
+    )
+    artifact = prepare_group_source(
+      sim.group, self._make_inflight_prefetch_module(), self._BINDINGS, sim=sim.sim
+    )
+    assert isinstance(artifact.entry, ExecTileGroupTask)
+    task = artifact.entry
+    group = sim.group
+    group.load_task(task, input_bindings=self._BINDINGS)
+    seq = group.sequencer
+    request = next(
+      action.args[0]
+      for action in seq.task.actions
+      if action.op == ExecGroupActionOp.RELEASE_L2 and action.args[0].buffer_slot == "prefetch_input"
+    )
+    second_prefetch = next(
+      event for event in request.dependency_events if event.endswith("input_prefetch_2")
+    )
+    monkeypatch.setattr(group.transfer_manager, "acknowledge", lambda transaction_id, cycle: None)
+    handle = None
+    transaction = None
+    for cycle in range(200000):
+      group.step(cycle)
+      handle = group._l2_handles.get((seq.context_launch_generation, "prefetch_input"))
+      transaction = next(
+        (
+          candidate
+          for candidate in group.transfer_manager._transactions.values()
+          if candidate.completion_event == second_prefetch
+        ),
+        None,
+      )
+      if transaction is not None and transaction.status is TransferStatus.DONE:
+        break
+    assert handle is not None and transaction is not None
+    assert transaction.status is TransferStatus.DONE
+    # The manager query classifies DONE as finished; only the physical
+    # ledger still sees the reference.
+    assert not group.transfer_manager.has_inflight_access(handle)
+    view = group.l2_sram._views[handle.allocation_id]
+    inflight_before = set(view.inflight)
+    assert inflight_before
+    pins_before = self._pin_fingerprint(group, handle)
+    snapshot_before = group.l2_sram.snapshot()
+    with pytest.raises(MemoryInvariantError, match="unacknowledged transfer reference"):
+      group.release_l2(request, sequencer=seq, cycle=cycle + 1)
+    # Zero mutation: pins, ledger, view and free map all untouched.
+    assert self._pin_fingerprint(group, handle) == pins_before
+    assert set(group.l2_sram._views[handle.allocation_id].inflight) == inflight_before
+    assert not group.l2_sram.is_released(handle)
+    assert group.l2_sram.snapshot() == snapshot_before
+    # Mirror divergence between the view and backing ledgers is an
+    # invariant fault: blocking on either side independently.
+    saved_ledger = set(view.inflight)
+    view.inflight.clear()
+    try:
+      with pytest.raises(MemoryInvariantError, match="ledgers disagree"):
+        group.l2_sram.has_inflight_references(handle)
+    finally:
+      view.inflight.update(saved_ledger)
+    # Dropping the ledger references the way the acknowledgement hook would
+    # (pool-level end_inflight) re-permits the release.  Owner jobs keep
+    # ownership of their own acknowledgements; none are issued manually.
+    monkeypatch.undo()
+    for txn_id in sorted(inflight_before):
+      group.l2_sram.end_inflight(handle, txn_id, cycle + 2)
+    assert not group.l2_sram.has_inflight_references(handle)
+    live_before = group.l2_sram.snapshot()["live_backings"]
+    assert group.release_l2(request, sequencer=seq, cycle=cycle + 3)
+    assert group.l2_sram.snapshot()["live_backings"] == live_before - 1
+    # The sequencer's own release action now faults on the forfeited view;
+    # drain that to a clean, well-formed stop.
+    fault_drain_and_reset(group)
+    self._assert_runtime_zero_leak(group)
 
   def test_inflight_query_uses_status_and_handle_generation(self):
     from dataclasses import replace
@@ -3136,47 +3230,104 @@ class TestRootArenaAdmission:
     "B_IN": GlobalBinding("B_IN", 0x300000, 131072, "rw"),
   }
 
-  def test_t09_t10_t14_pending_root_owns_no_slot_or_arena_until_prior_root_retires(self):
+  @pytest.mark.parametrize("fidelity", ["runtime", "full_memory"])
+  def test_pending_root_admits_on_input_extent_release(self, fidelity):
+    """R3-6: B's root admission waits for A's input backing physical release.
+
+    plan/01 §6.4: the same capacity contract holds in both fidelities.  While
+    pending, B holds no device slot, no L2 arena/backing and no partial
+    event reserve; A's a_input ``l2_extent_release`` is the exact cycle of
+    B's port admission and strictly precedes A's context completion.  B's
+    real HBM→L2 prefetch transaction overlaps A's ``EVU:pow`` execution.
+    """
     root = Path(__file__).resolve().parents[2]
     hw = HardwareConfig.from_yaml(root / "examples/configs/profile_l2_256k.yaml").with_overrides(
       num_dma_channels=2, hbm_fixed_latency_cycles=10
     )
     sim_config = SimConfig(
-      fidelity="full_memory", device_context_count=2, memory_trace=True, max_cycles=200000
+      fidelity=fidelity, device_context_count=2, memory_trace=True, max_cycles=200000
     )
     simulator = Simulator(hw, sim_config, enable_tracer=True)
     module = load_workload_ir(root / "examples/scenarios/l2_admission_wait.mlir")
     result = run_source(simulator, module, self.BINDINGS)
     assert result.completed, result.reason
 
-    records = {record["context"]: record for record in result.device_snapshot["launch_records"]}
     ports = {record["context"]: record for record in result.device_snapshot["port"]["request_records"]}
-    a, b = records["ctx_a"], records["ctx_b"]
-    assert b["submit_cycle"] < a["completion_cycle"]
-    assert b["admission_cycle"] < a["completion_cycle"]
-    assert b["admission_cycle"] <= ports["ctx_b"]["active_cycle"]
-    assert ports["ctx_b"]["active_cycle"] >= ports["ctx_a"]["completion_cycle"]
+    records = {record["context"]: record for record in result.device_snapshot["launch_records"]}
+    port_a, port_b = ports["ctx_a"], ports["ctx_b"]
+    assert port_b["submit_cycle"] < port_a["completion_cycle"]
     assert result.device_snapshot["port"]["pending_peak"] >= 1
-    assert result.device_snapshot["port"]["active_peak"] == 1
+    assert result.device_snapshot["port"]["active_peak"] == 2
 
     events = json.loads(result.tracer.to_chrome_json())["traceEvents"]
-    l2_invalidations = [
+    to_cycle = lambda event: round(event["ts"] * 1000.0 / hw.cycle_ns())
+    releases = [
       event
       for event in events
-      if event.get("name") == "buffer_view_invalidate"
-      and event.get("args", {}).get("buffer_id") in {"a_input", "a_output"}
+      if event.get("name") == "l2_extent_release"
+      and event.get("args", {}).get("buffer_id") == "a_input"
     ]
-    l2_retires = [
-      event
+    assert len(releases) == 1
+    release_args = releases[0]["args"]
+    release_cycle = release_args["release_cycle"]
+    assert release_args["run_generation"] == simulator.group.run_generation == 1
+    assert release_args["padded_bytes"] == 131072
+    assert release_args["pool_version"] >= 1
+    assert release_args["per_bank_segments"]
+    assert all(segment["size_bytes"] > 0 for segment in release_args["per_bank_segments"])
+
+    # B's port admission is exactly the input extent release cycle, strictly
+    # before A's completion; the device launch record agrees.
+    assert port_b["active_cycle"] == release_cycle
+    assert release_cycle < port_a["completion_cycle"]
+    assert records["ctx_b"]["active_cycle"] == release_cycle
+    assert records["ctx_b"]["admission_cycle"] <= release_cycle
+
+    # While pending, B never reserved an L2 arena: every ctx_a-reserve
+    # precedes the release and every ctx_b-reserve follows it.
+    reserves = [
+      (event.get("args", {}).get("context_name"), to_cycle(event))
+      for event in events
+      if event.get("name") == "arena_reserve" and event.get("args", {}).get("space") == "l2"
+    ]
+    assert reserves
+    assert all(cycle < release_cycle for context, cycle in reserves if context == "ctx_a")
+    assert all(cycle >= release_cycle for context, cycle in reserves if context == "ctx_b")
+
+    # A's whole-Arena retirement stays a distinct, later event: buffer
+    # release must not be masked as an Arena capacity return.
+    a_retires = [
+      to_cycle(event)
       for event in events
       if event.get("name") == "arena_retire"
       and event.get("args", {}).get("space") == "l2"
       and event.get("args", {}).get("context_name") == "ctx_a"
     ]
-    assert l2_invalidations and l2_retires
-    to_cycle = lambda event: round(event["ts"] * 1000.0 / hw.cycle_ns())
-    assert min(to_cycle(event) for event in l2_invalidations) < ports["ctx_b"]["active_cycle"]
-    assert max(to_cycle(event) for event in l2_retires) <= ports["ctx_b"]["active_cycle"]
+    assert a_retires and min(a_retires) > release_cycle
+
+    # Real transfer evidence: B's HBM→L2 prefetch transaction (first leg to
+    # last leg) overlaps A's EVU:pow execution window by a positive number
+    # of cycles, while A's output store and context are still unfinished.
+    pow_spans = [
+      (to_cycle(event), to_cycle(event) + max(round(event["dur"]), 1))
+      for event in events
+      if event.get("cat") == "EVU" and event.get("ph") == "X" and event.get("name") == "EVU:pow"
+    ]
+    assert pow_spans
+    prefetch_legs = [
+      (to_cycle(event), to_cycle(event) + max(round(event["dur"]), 1))
+      for event in events
+      if event.get("ph") == "X"
+      and str(event.get("args", {}).get("transaction_id", "")).endswith("ev_pref_b")
+    ]
+    assert prefetch_legs
+    first_leg = min(start for start, _ in prefetch_legs)
+    last_leg = max(end for _, end in prefetch_legs)
+    overlap = sum(
+      max(0, min(pow_end, last_leg) - max(pow_start, first_leg)) for pow_start, pow_end in pow_spans
+    )
+    assert overlap > 0
+    assert last_leg < port_a["completion_cycle"]
     assert result.group_snapshot["memory"]["l2"]["live_arenas"] == 0
     assert result.group_snapshot["task_leases"]["active"] == 0
 
@@ -3340,3 +3491,165 @@ class TestTileFreeRuntime:
     )
     self.assert_empty(simulator.group)
     assert result.credit_invariant_ok
+
+
+class TestCycleCapPoison:
+  """plan/01 §4.4/§6.6: the post-cap drain itself can fail and poison."""
+
+  BINDINGS: ClassVar[dict[str, GlobalBinding]] = {
+    "A_IN": GlobalBinding("A_IN", 0x100000, 131072, "rw"),
+    "A_OUT": GlobalBinding("A_OUT", 0x200000, 131072, "rw"),
+    "B_IN": GlobalBinding("B_IN", 0x300000, 131072, "rw"),
+  }
+
+  def test_unisolatable_state_after_cap_poisons_group_and_rejects_reuse(self):
+    from dataclasses import replace as dc_replace
+
+    from pipeline_validator.memory.allocator import MemoryInvariantError
+
+    root = Path(__file__).resolve().parents[2]
+    hw = HardwareConfig.from_yaml(root / "examples/configs/profile_l2_256k.yaml").with_overrides(
+      num_dma_channels=2, hbm_fixed_latency_cycles=10
+    )
+    hw = dc_replace(hw, memory_target=dc_replace(hw.memory_target, profile_command_timeout_cycles=500))
+    sim_config = SimConfig(
+      fidelity="full_memory", device_context_count=2, memory_trace=True, max_cycles=60
+    )
+    simulator = Simulator(hw, sim_config, enable_tracer=True)
+    module = load_workload_ir(root / "examples/scenarios/l2_admission_wait.mlir")
+    group = simulator.group
+    original_step = group.transfer_manager.step
+
+    def stalled_step(cycle):
+      # Run normally up to the cap so transfers are real, issued work; then
+      # freeze every leg so the drain can neither confirm isolation nor
+      # acknowledge the held references.
+      if cycle < 60:
+        return original_step(cycle)
+      return []
+
+    group.transfer_manager.step = stalled_step
+    result = run_source(simulator, module, self.BINDINGS)
+    assert not result.completed
+    assert "poisoned" in result.reason, result.reason
+    assert group.poisoned_reason is not None
+
+    snapshot = group.l2_sram.snapshot()
+    # Unsafe physical state is retained, never returned to the free map, and
+    # the poison reason names the concrete backing IDs (plan/01 §4.4).
+    assert snapshot["live_backings"] >= 1
+    assert snapshot["arena_reserved_bytes"] > 0
+    assert snapshot["free_bytes"] < (
+      snapshot["user_spm_capacity_bytes"] - snapshot["system_reserved_bytes"]
+    )
+    backing_ids = group.l2_sram.live_backing_ids()
+    assert backing_ids
+    assert all(backing_id in result.reason for backing_id in backing_ids)
+
+    # Poisoned groups reject a new launch outright...
+    with pytest.raises(MemoryInvariantError, match="poisoned"):
+      group.begin_launch(None, None)
+    # ...and an explicit reset is refused while the drain never completed.
+    assert not group.reset_domain.is_done
+    with pytest.raises(MemoryInvariantError, match="explicit reset requires"):
+      group.reset()
+
+
+class TestCycleCapDrain:
+  """plan/01 §6.6: a low cap still drains to DONE without poison."""
+
+  BINDINGS: ClassVar[dict[str, GlobalBinding]] = {
+    "A_IN": GlobalBinding("A_IN", 0x100000, 131072, "rw"),
+    "A_OUT": GlobalBinding("A_OUT", 0x200000, 131072, "rw"),
+    "B_IN": GlobalBinding("B_IN", 0x300000, 131072, "rw"),
+  }
+
+  def test_low_cycle_cap_drains_to_done_and_stays_clean(self):
+    root = Path(__file__).resolve().parents[2]
+    hw = HardwareConfig.from_yaml(root / "examples/configs/profile_l2_256k.yaml").with_overrides(
+      num_dma_channels=2, hbm_fixed_latency_cycles=10
+    )
+    sim_config = SimConfig(
+      fidelity="full_memory", device_context_count=2, memory_trace=True, max_cycles=60
+    )
+    simulator = Simulator(hw, sim_config, enable_tracer=True)
+    module = load_workload_ir(root / "examples/scenarios/l2_admission_wait.mlir")
+    result = run_source(simulator, module, self.BINDINGS)
+    group = simulator.group
+    # The cap is a failure, never a fabricated success; the extra drain ran
+    # the reset domain to DONE and the private L2 closed zero-leak.
+    assert not result.completed
+    assert "cycle cap 60 reached" in result.reason
+    assert "poisoned" not in result.reason
+    assert group.poisoned_reason is None
+    assert group.reset_domain.is_done
+    assert group.assert_private_l2_closed() is None
+    snapshot = group.l2_sram.snapshot()
+    assert snapshot["live_backings"] == 0
+    assert snapshot["arena_reserved_bytes"] == 0
+
+  def test_explicit_reset_recovers_a_marked_group_after_safe_drain(self):
+    """plan/01 §4.4/§6.6: only an explicit quiescent reset clears poison.
+
+    The drain in this scenario reaches DONE and the physical state is clean,
+    so recovery must be possible; the marker stands in for a poison flag the
+    un-isolatable path would have set (that path itself is covered by
+    TestCycleCapPoison).
+    """
+    root = Path(__file__).resolve().parents[2]
+    hw = HardwareConfig.from_yaml(root / "examples/configs/profile_l2_256k.yaml").with_overrides(
+      num_dma_channels=2, hbm_fixed_latency_cycles=10
+    )
+    sim_config = SimConfig(
+      fidelity="full_memory", device_context_count=2, memory_trace=True, max_cycles=60
+    )
+    simulator = Simulator(hw, sim_config, enable_tracer=True)
+    module = load_workload_ir(root / "examples/scenarios/l2_admission_wait.mlir")
+    result = run_source(simulator, module, self.BINDINGS)
+    group = simulator.group
+    assert not result.completed and group.reset_domain.is_done
+    assert group.poisoned_reason is None
+    group.poison("synthetic marker for recovery path")
+    group.reset()
+    assert group.poisoned_reason is None
+
+
+class TestSuccessExitClosure:
+  """plan/01 §4.3: a leak at the success exit becomes a controller-visible
+  fault that drains before the run reports failure."""
+
+  BINDINGS: ClassVar[dict[str, GlobalBinding]] = {
+    "A_IN": GlobalBinding("A_IN", 0x100000, 131072, "rw"),
+    "A_OUT": GlobalBinding("A_OUT", 0x200000, 131072, "rw"),
+    "B_IN": GlobalBinding("B_IN", 0x300000, 131072, "rw"),
+  }
+
+  def test_closure_violation_faults_drains_and_reports_failure(self, monkeypatch):
+    root = Path(__file__).resolve().parents[2]
+    hw = HardwareConfig.from_yaml(root / "examples/configs/profile_l2_256k.yaml").with_overrides(
+      num_dma_channels=2, hbm_fixed_latency_cycles=10
+    )
+    sim_config = SimConfig(
+      fidelity="full_memory", device_context_count=2, memory_trace=True, max_cycles=200000
+    )
+    simulator = Simulator(hw, sim_config, enable_tracer=True)
+    module = load_workload_ir(root / "examples/scenarios/l2_admission_wait.mlir")
+    group = simulator.group
+    first = {"pending": True}
+    original = group.assert_private_l2_closed
+
+    def injecting_closed():
+      if first["pending"]:
+        first["pending"] = False
+        return "injected leak: backing l2:p0:arena:1:backing:1:a_input"
+      return original()
+
+    monkeypatch.setattr(group, "assert_private_l2_closed", injecting_closed)
+    result = run_source(simulator, module, self.BINDINGS)
+    assert not result.completed
+    assert "private L2 closure violation" in result.reason
+    assert "injected leak" in result.reason
+    # The drain ran to DONE and the real state is clean afterwards.
+    assert group.reset_domain.is_done
+    assert group.poisoned_reason is None
+    assert original() is None

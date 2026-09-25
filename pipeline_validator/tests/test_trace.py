@@ -480,3 +480,108 @@ class TestAdmissionLanes:
     assert aggregates, "no phase_aggregate instant"
     for e in aggregates:
       assert "expected" in e["args"] and "seen" in e["args"]
+
+
+class TestL2ExtentReleaseTrace:
+  """plan/01 §5/§6.6: physical final-free events carry post-mutation state."""
+
+  @staticmethod
+  def _pool_with_trace():
+    from pipeline_validator.memory.arena import ArenaPool
+    from pipeline_validator.profiles import MemoryProfile
+    from pipeline_validator.trace import MemoryTrace
+
+    profile = MemoryProfile(
+      level="l2",
+      mode=0,
+      bank_bytes=512,
+      banks=2,
+      pools=1,
+      spm_bytes_per_bank=512,
+      cache_bytes_per_bank=0,
+      system_reserved_spm_per_bank=0,
+      alignment=64,
+      spm_mapping_id="striped_arena_v0",
+      cache_org_id="profiled_lru_v0",
+      cache_write_policy="read_only",
+      maintenance_caps=("invalidate_range", "bypass"),
+    )
+    tracer = Tracer(HardwareConfig())
+    pool = ArenaPool(profile, trace=MemoryTrace(tracer))
+    return pool, tracer
+
+  def test_release_instant_matches_post_mutation_counters(self):
+    from pipeline_validator.compiler.resources import conservative_arena_bytes, layout_buffers
+    from pipeline_validator.execution_ir import ExecL2Buffer
+    from pipeline_validator.memory import AdmissionFailure
+    from pipeline_validator.memory.arena import RootInvocation
+
+    pool, tracer = self._pool_with_trace()
+    buffer = ExecL2Buffer("buf", (100,), "i8", "inout", 1, 64, 100)
+    reserved = conservative_arena_bytes([(buffer.bytes, buffer.alignment)], pool.profile)
+    layout = layout_buffers((buffer,), pool.profile, reserved, lifetimes=None, slot_capacity=1)
+    plan = pool.plan_arena(RootInvocation("ctx_a", 3), layout)
+    assert not isinstance(plan, AdmissionFailure)
+    arena = pool.commit_arena(plan, 5)
+    view = pool.bind_view(arena, "buf", 6)
+    assert pool.invalidate_view(view, view.owner, 10)
+    assert pool.retire_arena(arena, 12)
+
+    events = json.loads(tracer.to_chrome_json())["traceEvents"]
+    releases = [event for event in events if event.get("name") == "l2_extent_release"]
+    assert len(releases) == 1
+    args = releases[0]["args"]
+    cycle = args["release_cycle"]
+    assert cycle == 10
+    # Owner/run identity: releases are attributable across invocations.
+    assert args["context_name"] == "ctx_a"
+    assert args["launch_generation"] == 3
+    assert args["allocation_generation"] == 1
+    assert args["run_generation"] == 0  # standalone pool: no TileGroup launch
+
+    # The logical invalidation instant carries the backing identity and its
+    # pre-free physical state (plan/01 §5).
+    invalidations = [
+      event
+      for event in events
+      if event.get("name") == "buffer_view_invalidate"
+      and event.get("args", {}).get("buffer_id") == "buf"
+    ]
+    assert len(invalidations) == 1
+    invalidate_args = invalidations[0]["args"]
+    assert invalidate_args["backing_id"] == args["backing_id"]
+    assert invalidate_args["backing_state"] == "live"
+
+    def counter_at(name: str, at_cycle: int):
+      samples = [
+        event
+        for event in events
+        if event.get("ph") == "C"
+        and event.get("name") == name
+        and round(event["ts"] * 1000.0) == at_cycle
+      ]
+      assert samples, f"missing counter {name} at cycle {at_cycle}"
+      return samples[-1]["args"][name]
+
+    # The instant carries the same-cycle post-mutation counter values.
+    assert counter_at("l2_arena_reserved_bytes", cycle) == args["pool_reserved_bytes"]
+    assert counter_at("l2_free_bytes", cycle) == args["pool_free_bytes"]
+    assert args["pool_live_backings"] == 0
+    # Physical conservation holds at the mutation point.
+    profile_capacity = pool.profile.user_spm_bytes
+    assert args["pool_reserved_bytes"] + args["pool_free_bytes"] == profile_capacity
+
+    # The backing lifetime slice spans exactly commit -> final-free.
+    lifetimes = [event for event in events if event.get("name") == "l2_backing_lifetime"]
+    assert len(lifetimes) == 1
+    lifetime = lifetimes[0]
+    assert round(lifetime["ts"] * 1000.0) == 5
+    assert round(lifetime["ts"] * 1000.0) + round(lifetime["dur"] * 1000.0) == 10
+
+    # The Arena retirement remains a distinct later event with its own slice.
+    retires = [
+      event
+      for event in events
+      if event.get("name") == "arena_retire" and event.get("ph") == "i"
+    ]
+    assert len(retires) == 1 and round(retires[0]["ts"] * 1000.0) == 12

@@ -79,6 +79,7 @@
    - 剩余工作：IR 共享分配/引用语法 + L2 admission 扩成引用计数（共享不重复计容量）+ 释放合同（最后使用者释放，需扩 release preflight）。
      comments：
    - 分支复用和独立任务复用，不总能自然转化成局部 fusion, 如下图这种，A的结果就需要被同时供给 B 和 C，难以在局部 fusion 中消除重复IO。
+
    ```
          → B → ...
    A → X
@@ -87,9 +88,10 @@
 
 6. **L2 buffer 粒度释放（sub-arena extent 提前归还），恢复 release 驱动的提前准入**
    - 想做（2026-09-22 用户拍板，为原始初衷）：单笔 `nest.release` 释放即把该 buffer 的 striped extent 归还 L2 free-map 并推进 pool_version，使 WAIT_CAPACITY 的后续 context 在前一个 context 的 input_released/release 当拍就 FIFO 重试准入、提前启动 load，而不是等前一个 context 整体退休。l2-admission-wait 的预期行为（B 在 A 仍算 pow 期间准入并开始 load）靠此恢复。
-   - 现状诊断（2026-09-22 trace + 代码核实）：当前为整 Arena 原子预留/释放。`ArenaPool.invalidate_view` 明确不还 extent（arena.py:353-359，"never return parent arena extents"；arena.py:840 "Deliberately no free-map or pool-version mutation"）；pool_version 仅在 commit_arena/retire_arena/reconfigure +1（arena.py:275/491/542）；port 重试门为 `(admission_version, slot_version)`（group_port `_admit_pending` + tile_group.py:1756 `admission_version` 首项即 pool_version）；`_l2_capacity_change_cycle` 只在 `retire_context_arena` 设置（tile_group.py:1318）。实证：l2-admission-wait 两档 trace 中 ctx_b cycle 1 进 WAIT_CAPACITY 后零重试，直到 ctx_a 完成同拍（runtime 17977 / full_memory 22052）才准入。
-   - 合同冲突点：IR_SPEC §940-943（L2 复用需 release + dominating Context barrier，否则保守存活至 Context 结束）需修订；`execution_ir.py:80` 的 "release-driven capacity change" 表述需与新语义对齐。
-   - 改动面预估：ArenaPool 支持 buffer 粒度 extent commit/free（striped 布局下各 buffer extent 天然不相交，可行性较好）+ pool_version/容量通知点下移；`release_l2` 现有 preflight（pin/inflight/依赖/ordinal 检查）可复用；**重写 test_runtime.py:3140 test_t09_t10_t14**（当前断言 `active_cycle >= ctx_a completion`、`active_peak == 1`，语义将反转）；更新 l2_admission_wait.mlir 文件头与 execution_ir.py:80；全量回归 + 该场景两档 trace 验证（预期 ctx_b 在 a_input 释放当拍准入、load 与 A 的 pow overlap）。
+   - ✅ **批次 I 已完成（2026-09-25，plan/01_private_l2_release.md）**：L2 编译期 no-rebind 不重叠 padded 布局；唯一 finalizer `_try_release_l2_backing` 在最后一个私有引用（view forfeit / pin / accepted transaction）安全排空后原子归还整 stripe-rounded backing span 并推进 pool_version；WAIT_CAPACITY 同类队头由 admission_version 当拍唤醒。`nest.release` 即永久 forfeit，`nest.barrier` 不恢复权限；L1 合同不变；profile 切换仍等完整 root frontier。证据：`test_runtime.py::TestRootArenaAdmission::test_pending_root_admits_on_input_extent_release` 两档通过（ctx_b port `active_cycle == a_input l2_extent_release release_cycle`：runtime 804 / full_memory 3522，早于 ctx_a completion 17977 / 22052，prefetch×pow overlap >0）；全量回归 393 passed（含台账/泄漏/恢复负例测试）；smoke 见 `examples/artifacts/l2-sharing-release/20260925T012727Z/private-smoke/`（含 acceptance-summary.json）。批次 II（跨 context 只读共享 claims）挂接同一 finalizer，尚未实施。
+   - 历史诊断（2026-09-22，实施前背景，行号对应旧代码）：当时为整 Arena 原子预留/释放——invalidate_view 不还 extent、pool_version 仅 commit/retire/reconfigure 推进、port 重试门 `(admission_version, slot_version)`、`_l2_capacity_change_cycle` 仅在 retire_context_arena 设置；实证 ctx_b 进 WAIT_CAPACITY 后零重试直到 ctx_a 完成同拍（runtime 17977 / full_memory 22052）。
+   - ~~合同冲突点（2026-09-22）~~：已于 2026-09-25 解决——IR_SPEC §3.8/§8 改写为 L2 forfeiture 合同，execution_ir 表述随实现同步。
+   - ~~改动面预估（2026-09-22）~~：已全部落地——exact-unit commit/free、pool_version 下移 final-free、release preflight 复用、test_t09_t10_t14 重写为两档参数化的 `test_pending_root_admits_on_input_extent_release`、l2_admission_wait.mlir 文件头更新、全量回归 + 两档 trace 验证完成。
    - [TODO] 需要增加 mlir 的 example，对 memory profile 变化的时候, 就不以将下一个的 op 的 load 提前到当前 context 的 release 当拍，而是在当前的 context 跑完了也就是 HBM store 完成之后 profile 切换完成后再进行 load。
    - 风险与代价（2026-09-22 更新）：
      1. **正确性：释放后的滞后访问**。现模型下 extent 在 run 内永不回收，退休时有全量 drain 屏障（routes/leases/jobs 全零），天然免疫"释放后仍有慢访问"。buffer 级归还后，quiescence 证据只剩 release preflight 的 pin/inflight 计数——需审计所有可能滞后触碰该 extent 的路径（cache dirty line 延迟写回、MSHR drain、profile/maintenance 命令、其它 transaction 名下的在飞 prefetch 腿），漏一条就是新占用者 B 的数据被写坏。
@@ -101,12 +103,12 @@
      7. **与 R3-5 耦合**：共享 L2 的引用计数与 buffer 级 extent 归还都操作 free-map，必须协同设计（共享 buffer 被一方 release 时，extent 归还受 refcount 门控）。
      8. **收益预期管理**：R3-6 只救"L2 容量阻塞"的流水线（l2-admission-wait 类）。matmul-pow-free-slot 的 pow 是 device slot 阻塞、matmul17 的 pow 是数据依赖 + HBM 往返阻塞——R3-6 对这两条 example 的 overlap 无直接帮助。实施前应在真实 workload 上量化 L2 容量等待占比，再决定优先级。
 
-
 ## example
 
 - 当前 matmul17_pow_tail_overlap 里面中 tile program pow 中， 并不是只有一个 pow，当前是两个 pow 串行， trace 显示它们依次被调度执行。
 - 当前 l2-admission-wait 这个后面的 load 行为并没有和 前一个 的 pow 进行 overlap ，理论上 input release 过后下一个可以立即开始加载，而不必等待前一个 pow 完全结束。
-  - 2026-09-22 诊断：调度/依赖均正确，根因是整 Arena 粒度预留释放（见 R3-6）。已拍板走 R3-6 的 buffer 粒度释放方案，待实施。
+  - 2026-09-22 诊断：调度/依赖均正确，根因是整 Arena 粒度预留释放（见 R3-6）。已拍板走 R3-6 的 buffer 粒度释放方案。
+  - 2026-09-25 已实施（plan/01_private_l2_release.md 批次 I）：L2 编译期 no-rebind 不重叠布局 + buffer 粒度 padded backing 物理释放 + accepted transaction 引用台账 + fault/cap drain/poison 闭环。l2-admission-wait 在 runtime/full_memory 两档均验证 ctx_b port `active_cycle == a_input l2_extent_release release_cycle`（runtime 804 / full_memory 3522），严格早于 ctx_a completion（17977 / 22052），B 的真实 HBM→L2 prefetch 与 A 的 `EVU:pow` 窗口相交（>0 cycle）。证据：`examples/artifacts/l2-sharing-release/20260925T012727Z/`（baseline、phase1-matrix、gate4-probe、private-smoke）。
 - 当前 matmul_pow_free_slot 并没有连起来起来
   - 2026-09-22 诊断：调度无 bug（first-free-slot 两档一致，pow 均在 matmul 完成 +1 拍接管 slot）。不 overlap 主因是 HBM 整腿单通道（transfer.py:1096-1104，`(addr//64)%8`）+ 该场景地址全 64KB 对齐塌缩到 Ch:0。run.sh 地址已错开（总周期 45088→33496，gap 6216→2611），但 C store 512KB 等距步距使 4 笔 store 结构性锁同通道，彻底恢复 overlap 需 per-burst 通道条纹——**是否实施待定**。matmul17-pow-tail-overlap 同根因（另叠加 pow 消费路径绕 HBM、无 L2 直通）。
 - [TODO] 需要增加 mlir 的 example，对 memory profile 变化的时候, 就不以将下一个的 op 的 load 提前到当前 context 的 release 当拍，而是在当前的 context 跑完了也就是 HBM store 完成之后 profile 切换完成后再进行 load。

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import FrozenInstanceError, replace
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -13,9 +14,11 @@ from pipeline_validator.compiled_program import (
   serialize_compiled_program,
 )
 from pipeline_validator.compiler import compile_program
+from pipeline_validator.compiler.resources import conservative_arena_bytes, layout_buffers
 from pipeline_validator.config import HardwareConfig, SimConfig
 from pipeline_validator.execution_ir import ExecGroupActionOp, ExecModel, ExecTileGroupTask, GlobalBinding
 from pipeline_validator.loader import load_program
+from pipeline_validator.profiles import build_registry
 from pipeline_validator.simulator import Simulator
 from pipeline_validator.workload_ir import parse_workload_ir, print_workload_ir
 from pipeline_validator.workloads import PowWorkload
@@ -596,3 +599,57 @@ class TestLoaderDefenses:
     )
     with pytest.raises(ValueError, match="dirty-cache clean"):
       load_program(corrupted, hw, sim)
+
+
+class TestL2NoRebindLayout:
+  """plan/01 §1: every local L2 buffer owns a permanent, disjoint span."""
+
+  def test_compiled_workload_layouts_are_pairwise_disjoint_and_conserved(self):
+    from pipeline_validator.execution_verifier import _verify_l2_no_rebind_layout
+
+    hw = HardwareConfig().with_overrides(num_dma_channels=2, hbm_fixed_latency_cycles=10)
+    sim = SimConfig(max_cycles=200000, context_count=4)
+    module = parse_workload_ir((ROOT / "examples/workloads/matmul_pow_data_dep.mlir").read_text())
+    artifact = compile_program(module, hw, sim)
+    assert isinstance(artifact.entry, ExecModel)
+    checked = 0
+    for task in artifact.entry.tasks.values():
+      layout = task.layout
+      assert layout is not None
+      if len(layout.buffer_layouts) < 2:
+        continue
+      round_bytes = layout.stripe_bytes * len(layout.per_bank_bytes)
+      spans = []
+      for item in layout.buffer_layouts:
+        padded = -(-item.logical_bytes // round_bytes) * round_bytes
+        spans.append((item.arena_offset, item.arena_offset + padded))
+      spans.sort()
+      for (_, left_end), (right_start, _) in pairwise(spans):
+        assert right_start >= left_end, "compiled L2 padded spans overlap"
+      high_water = max(end for _, end in spans)
+      assert layout.reserved_bytes >= high_water
+      _verify_l2_no_rebind_layout(layout, "test")
+      checked += 1
+    assert checked >= 1
+
+  def test_no_rebind_layout_ignores_release_ordering(self):
+    """Removing L2 alias reuse: a released buffer's span is never handed to a
+    later bind, so layout spans stay disjoint for any action order."""
+    from pipeline_validator.execution_ir import ExecL2Buffer
+
+    hw = HardwareConfig()
+    registry = build_registry(hw)
+    profile = registry.profile("l2", 0)
+    buffers = (
+      ExecL2Buffer("a_input", (1024,), "i8", "in", 1, 64, 1024),
+      ExecL2Buffer("b_late", (1024,), "i8", "inout", 1, 64, 1024),
+    )
+    reserved = conservative_arena_bytes([(b.bytes, b.alignment) for b in buffers], profile)
+    # lifetimes would previously allow b_late to reuse a_input's released
+    # region; the no-rebind layout ignores lifetimes entirely.
+    layout = layout_buffers(buffers, profile, reserved, lifetimes=None, slot_capacity=2)
+    spans = sorted(
+      (item.arena_offset, item.arena_offset + item.logical_bytes) for item in layout.buffer_layouts
+    )
+    assert spans[0][1] <= spans[1][0]
+    assert layout.buffer_layouts[1].arena_offset >= layout.buffer_layouts[0].arena_offset

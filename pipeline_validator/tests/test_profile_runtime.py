@@ -5,10 +5,10 @@ from dataclasses import replace
 import pytest
 
 from pipeline_validator.compiler import compile_program
-from pipeline_validator.compiler.resources import layout_buffers
+from pipeline_validator.compiler.resources import conservative_arena_bytes, layout_buffers
 from pipeline_validator.config import HardwareConfig, SimConfig
 from pipeline_validator.device import DeviceControlRequest
-from pipeline_validator.execution_ir import GlobalBinding
+from pipeline_validator.execution_ir import ExecL2Buffer, GlobalBinding
 from pipeline_validator.loader import load_program
 from pipeline_validator.memory import (
   AdmissionFailure,
@@ -21,6 +21,7 @@ from pipeline_validator.memory import (
   TransferOp,
   TransferStatus,
 )
+from pipeline_validator.memory.allocator import ContextBufferOwner
 from pipeline_validator.memory.arena import ArenaPool, RootInvocation
 from pipeline_validator.memory.byte_store import ByteStore
 from pipeline_validator.profiles import (
@@ -367,7 +368,7 @@ class TestByteOracle:
           "late", identity=identity, provenance=provenance, data=refill.captured_data, profile_generation=1
         )
         table.complete(token.token, generation=1)
-        group.transfer_manager.acknowledge(refill.transaction_id)
+        group.transfer_manager.acknowledge(refill.transaction_id, current)
         retired = True
       if controller.status(switch.command_id) == "completed":
         break
@@ -480,7 +481,26 @@ class TestByteOracle:
       return generation["value"] == 0
 
     noc = NoCRouter(vc_depth=hw.noc_vc_depth, router_latency_cycles=hw.noc_router_latency_cycles)
-    manager = TransferManager(hw, full_memory=True, noc=noc, byte_store=oracle, generation_validator=valid)
+
+    def acquire(transaction, cycle):
+      for view in (transaction.src, transaction.dst):
+        if view is not None and view.handle.memory_space == "l2":
+          pool.begin_inflight(view.handle, transaction.transaction_id)
+
+    def release(transaction, cycle):
+      for view in (transaction.src, transaction.dst):
+        if view is not None and view.handle.memory_space == "l2":
+          pool.end_inflight(view.handle, transaction.transaction_id, cycle)
+
+    manager = TransferManager(
+      hw,
+      full_memory=True,
+      noc=noc,
+      byte_store=oracle,
+      generation_validator=valid,
+      reference_acquire=acquire,
+      reference_release=release,
+    )
     manager.configure_profile_generations({("l2", 0): 0})
     manager.begin_run(1)
     transaction = MemoryTransaction(
@@ -505,6 +525,22 @@ class TestByteOracle:
         break
     assert transaction.status is TransferStatus.FAULTED
     assert oracle.read_view(dst_view) == old
+
+    # plan/01 §6.3: a FAULTED-but-unacknowledged transaction keeps the
+    # backing referenced; terminal acknowledgement releases the reference
+    # and the padded capacity returns.
+    committed_free = pool.snapshot()["free_bytes"]
+    assert not pool.invalidate_view(dst_handle, dst_handle.owner, 900)
+    held = pool.snapshot()
+    assert held["live_backings"] == 1
+    assert held["free_bytes"] == committed_free
+    assert held["pin_count"] == 0
+    assert held["inflight_count"] == 1
+    manager.acknowledge("old-return", 950)
+    after = pool.snapshot()
+    assert after["live_backings"] == 0
+    assert after["arena_reserved_bytes"] == 0
+    assert after["free_bytes"] == after["user_spm_capacity_bytes"]
 
   def test_t25_range_maintenance_invalidates_stale_cache_bytes_before_consumer(self):
     oracle = ByteStore()
@@ -1053,7 +1089,7 @@ class TestProfileBoundaryBytes:
           saw_blocked_commit = True
       if refill.status is TransferStatus.DONE and not acknowledged:
         acknowledged = True
-        group.transfer_manager.acknowledge(refill.transaction_id)
+        group.transfer_manager.acknowledge(refill.transaction_id, current)
       if controller.status(switch.command_id) == "completed":
         assert refill.status is TransferStatus.DONE
         break
@@ -1331,3 +1367,176 @@ class TestPerTileBackfill:
     assert backfill_first_acquire >= filler_first_release
     assert backfill_tiles == {0, 1, 2, 3}
     assert not simulator.group._task_leases and not simulator.group._grid_routes
+
+
+class TestL2TransactionReferences:
+  """plan/01 §3/§6.3: owner-side reference acquisition is atomic."""
+
+  def test_partial_acquisition_failure_rolls_back_earlier_references(self):
+    from dataclasses import replace as dc_replace
+
+    from pipeline_validator.memory.allocator import MemoryInvariantError
+    from pipeline_validator.memory.transfer import MemoryTransaction, ResolvedMemoryView, TransferOp
+
+    _hw, group, cycle = _new_group()
+    buffers = (
+      ExecL2Buffer("buf_a", (64,), "i8", "inout", 1, 64, 64),
+      ExecL2Buffer("buf_b", (64,), "i8", "inout", 1, 64, 64),
+    )
+    reserved = conservative_arena_bytes([(b.bytes, b.alignment) for b in buffers], group.l2_sram.profile)
+    layout = layout_buffers(buffers, group.l2_sram.profile, reserved, lifetimes=None, slot_capacity=2)
+    from pipeline_validator.memory.arena import RootInvocation
+
+    plan = group.l2_sram.plan_arena(RootInvocation("ctx", 0), layout)
+    assert not isinstance(plan, AdmissionFailure)
+    arena = group.l2_sram.commit_arena(plan, cycle)
+    view_a = group.l2_sram.bind_view(arena, "buf_a", cycle)
+    view_b = group.l2_sram.bind_view(arena, "buf_b", cycle)
+
+    def resolved(handle):
+      return ResolvedMemoryView(
+        handle=handle,
+        offset_bytes=0,
+        size_bytes=handle.size_bytes,
+        address=handle.base_address,
+        segments=handle.bank_segments,
+      )
+
+    stale = dc_replace(
+      view_b,
+      allocation_id="l2:missing:stale",
+      generation=view_b.generation + 77,
+    )
+    # Healthy endpoint first, stale second: the hook must roll back the
+    # first registration when the second acquisition raises.
+    transaction = MemoryTransaction(
+      transaction_id="txn:partial",
+      op=TransferOp.PREFETCH,
+      issuer=ContextBufferOwner("ctx", 0, "buf_a"),
+      src=resolved(view_a),
+      dst=resolved(stale),
+      bytes_total=view_a.size_bytes,
+      completion_event="e",
+    )
+    before = group.l2_sram.snapshot()
+    with pytest.raises(MemoryInvariantError):
+      group._acquire_l2_transaction_references(transaction, cycle)
+    after = group.l2_sram.snapshot()
+    # The first endpoint's registration was rolled back: no inflight
+    # reference, no backing freed, no free-map mutation.
+    assert group.l2_sram._views[view_a.allocation_id].inflight == set()
+    assert after["live_backings"] == before["live_backings"] == 2
+    assert after["free_bytes"] == before["free_bytes"]
+    assert after["pool_version"] == before["pool_version"]
+    # The healthy path still registers both endpoints exactly once.
+    healthy = dc_replace(transaction, transaction_id="txn:healthy", dst=resolved(view_b))
+    group._acquire_l2_transaction_references(healthy, cycle)
+    assert group.l2_sram._views[view_a.allocation_id].inflight == {"txn:healthy"}
+    assert group.l2_sram._views[view_b.allocation_id].inflight == {"txn:healthy"}
+    group._release_l2_transaction_references(healthy, cycle)
+    assert group.l2_sram._views[view_a.allocation_id].inflight == set()
+    assert group.l2_sram._views[view_b.allocation_id].inflight == set()
+
+
+class TestL2TransactionEndpointDuplication:
+  """plan/01 §6.3: deduplicated endpoints and cross-issuer references.
+
+  One physical handle referenced by two distinct issuers keeps the backing
+  held until BOTH references are released; duplicate endpoints within one
+  transaction count once; a stale duplicate identity rolls back cleanly.
+  """
+
+  def test_same_handle_as_src_and_dst_registers_and_releases_once(self):
+    from dataclasses import replace as dc_replace
+
+    from pipeline_validator.memory.allocator import ContextBufferOwner, MemoryInvariantError
+    from pipeline_validator.memory.arena import RootInvocation
+    from pipeline_validator.memory.transfer import MemoryTransaction, ResolvedMemoryView, TransferOp
+
+    _hw, group, cycle = _new_group()
+    buffer = ExecL2Buffer("buf", (64,), "i8", "inout", 1, 64, 64)
+    reserved = conservative_arena_bytes([(buffer.bytes, buffer.alignment)], group.l2_sram.profile)
+    layout = layout_buffers((buffer,), group.l2_sram.profile, reserved, lifetimes=None, slot_capacity=1)
+    plan = group.l2_sram.plan_arena(RootInvocation("ctx", 0), layout)
+    assert not isinstance(plan, AdmissionFailure)
+    arena = group.l2_sram.commit_arena(plan, cycle)
+    view = group.l2_sram.bind_view(arena, "buf", cycle)
+
+    def resolved(handle):
+      return ResolvedMemoryView(
+        handle=handle,
+        offset_bytes=0,
+        size_bytes=handle.size_bytes,
+        address=handle.base_address,
+        segments=handle.bank_segments,
+      )
+
+    owner = ContextBufferOwner("ctx", 0, "buf")
+    txn = MemoryTransaction(
+      transaction_id="txn:dup",
+      op=TransferOp.PREFETCH,
+      issuer=owner,
+      src=resolved(view),
+      dst=resolved(view),
+      bytes_total=view.size_bytes,
+      completion_event="e",
+    )
+    group._acquire_l2_transaction_references(txn, cycle)
+    assert group.l2_sram._views[view.allocation_id].inflight == {"txn:dup"}
+    assert group.l2_sram.snapshot()["inflight_count"] == 1
+    group._release_l2_transaction_references(txn, cycle)
+    assert group.l2_sram._views[view.allocation_id].inflight == set()
+
+    # A stale duplicate identity after a first reference is rejected and
+    # leaves the first registration untouched.
+    stale = dc_replace(view, allocation_id="l2:missing:stale", generation=view.generation + 9)
+    two_handles = MemoryTransaction(
+      transaction_id="txn:two",
+      op=TransferOp.PREFETCH,
+      issuer=owner,
+      src=resolved(view),
+      dst=resolved(stale),
+      bytes_total=view.size_bytes,
+      completion_event="e2",
+    )
+    group._acquire_l2_transaction_references(txn, cycle)
+    with pytest.raises(MemoryInvariantError):
+      group._acquire_l2_transaction_references(two_handles, cycle)
+    assert group.l2_sram._views[view.allocation_id].inflight == {"txn:dup"}
+    group._release_l2_transaction_references(txn, cycle)
+    assert group.l2_sram._views[view.allocation_id].inflight == set()
+
+    # Cross-issuer: two distinct issuers share one private handle; the
+    # backing stays held until BOTH references are independently released.
+    issuer_a = ContextBufferOwner("issuer_a", 0, "buf")
+    issuer_b = ContextBufferOwner("issuer_b", 0, "buf")
+    txn_a = MemoryTransaction(
+      transaction_id="txn:a",
+      op=TransferOp.PREFETCH,
+      issuer=issuer_a,
+      src=resolved(view),
+      dst=resolved(view),
+      bytes_total=view.size_bytes,
+      completion_event="ea",
+    )
+    txn_b = MemoryTransaction(
+      transaction_id="txn:b",
+      op=TransferOp.PREFETCH,
+      issuer=issuer_b,
+      src=resolved(view),
+      dst=resolved(view),
+      bytes_total=view.size_bytes,
+      completion_event="eb",
+    )
+    group._acquire_l2_transaction_references(txn_a, cycle)
+    group._acquire_l2_transaction_references(txn_b, cycle)
+    assert group.l2_sram._views[view.allocation_id].inflight == {"txn:a", "txn:b"}
+    group._release_l2_transaction_references(txn_a, cycle)
+    assert group.l2_sram._views[view.allocation_id].inflight == {"txn:b"}
+    assert group.l2_sram.snapshot()["live_backings"] == 1
+    group._release_l2_transaction_references(txn_b, cycle)
+    assert group.l2_sram._views[view.allocation_id].inflight == set()
+    # References only block release; the owner's invalidation is what frees.
+    assert group.l2_sram.snapshot()["live_backings"] == 1
+    assert group.l2_sram.invalidate_view(view, view.owner, cycle)
+    assert group.l2_sram.snapshot()["live_backings"] == 0

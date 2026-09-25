@@ -352,6 +352,40 @@ def _verify_layout(
   return layout
 
 
+def _verify_l2_no_rebind_layout(layout: ArenaLayout, where: str) -> None:
+  """Independent no-rebind L2 contract, recomputed from the frozen DTO.
+
+  Every buffer owns a whole-stripe-rounded padded span: per-bank spans stay
+  inside the reservation, are aligned, pairwise disjoint, and never exceed
+  the reservation.  Every unallocated byte is root-held arena slack; the
+  exact spans-plus-slack tiling is committed at runtime (pool tests) and a
+  static over-reservation is bounded by the resource contract check.
+  Reuse-era layouts whose spans overlap are rejected here regardless of any
+  source-side acceptance.
+  """
+  banks = len(layout.per_bank_bytes)
+  round_bytes = layout.stripe_bytes * banks
+  spans: list[tuple[int, int, str]] = []
+  total_padded = 0
+  for item in layout.buffer_layouts:
+    padded = -(-item.logical_bytes // round_bytes) * round_bytes
+    start = item.arena_offset // banks
+    per_bank = padded // banks
+    if start + per_bank > layout.per_bank_bytes[0]:
+      _fail(f"{where} buffer {item.buffer_id!r} padded span escapes its per-bank reservation")
+    spans.append((start, start + per_bank, item.buffer_id))
+    total_padded += padded
+  spans.sort()
+  for (_left_start, left_end, left_id), (right_start, _right_end, right_id) in pairwise(spans):
+    if right_start < left_end:
+      _fail(f"{where} buffers {left_id!r} and {right_id!r} have overlapping padded L2 spans")
+  # Spans are disjoint and bounded, so every unallocated byte between or
+  # after them is root-held arena slack (plan/01 §2.2: buffer units plus
+  # slack units exactly tile the reservation).
+  if total_padded > layout.reserved_bytes:
+    _fail(f"{where} padded L2 spans exceed the Arena reservation")
+
+
 def _segments_overlap(left: BufferLayout, right: BufferLayout) -> bool:
   for left_bank, left_start, left_size in left.segments():
     for right_bank, right_start, right_size in right.segments():
@@ -990,6 +1024,7 @@ def _verify_task(
   layout = _verify_layout(task.layout, f"{where}.layout", profile, buffers)
   if layout.reserved_bytes > contract.l2_spm_bytes:
     _fail(f"{where} L2 layout exceeds its declared resource contract")
+  _verify_l2_no_rebind_layout(layout, f"{where}.layout")
 
   streams: dict[int, ExecStreamDesc] = {}
   for index, stream in enumerate(task.streams):
@@ -1096,7 +1131,6 @@ def _verify_task(
   bound: set[str] = set()
   released: set[str] = set()
   bind_events: dict[str, str] = {}
-  retired_layouts: list[tuple[BufferLayout, str]] = []
   accesses: list[_Access] = []
   maintenance: list[tuple[int, MemoryMaintenanceDesc]] = []
   semantic_effects: list[tuple[tuple[str, ...], tuple[str, ...], str, str]] = []
@@ -1142,12 +1176,6 @@ def _verify_task(
       item = layout.buffer_layouts[layout_index]
       if item.buffer_id != buffer_id:
         _fail(f"{action_where} layout index does not match buffer")
-      for other in l2_live.values():
-        if _segments_overlap(item, other):
-          _fail(f"{action_where} overlaps a live L2 view")
-      for retired, retired_event in retired_layouts:
-        if _segments_overlap(item, retired) and not _ordered(retired_event, action.dependencies, ancestors):
-          _fail(f"{action_where} reuses L2 storage before the prior view retires")
       bound.add(buffer_id)
       bind_events[buffer_id] = bind_done
       l2_live[buffer_id] = item
@@ -1308,7 +1336,7 @@ def _verify_task(
         _fail(f"{action_where} releases written output without an HBM store")
       if buffers[release_request.buffer_slot].role == "in" and writers:
         _fail(f"{action_where} role=in buffer has a writer")
-      retired_layouts.append((l2_live.pop(release_request.buffer_slot), release_done))
+      l2_live.pop(release_request.buffer_slot)
       released.add(release_request.buffer_slot)
     elif action.op is ExecGroupActionOp.BARRIER_GROUP:
       if action.args:

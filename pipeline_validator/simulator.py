@@ -160,12 +160,39 @@ class Simulator:
         continue
 
       if done:
-        completed = True
-        reason = "group task complete"
-        break
+        if fault_reason is None:
+          violation = self.group.assert_private_l2_closed()
+          if violation is None:
+            completed = True
+            reason = "group task complete"
+            break
+          # plan/01 §4.3: the standalone success exit proves the same
+          # private closure; a leak becomes a group-visible fault that
+          # must drain before the run reports failure.
+          fault_reason = f"private L2 closure violation: {violation}"
+          self._ensure_fault_drain(fault_reason, self.cycle)
+        if self.group.reset_domain.is_done:
+          completed = False
+          reason = f"faulted: {fault_reason}"
+          break
+        self.cycle += 1
+        continue
       self.cycle += 1
     else:
       reason = f"cycle cap {self.sim.max_cycles} reached"
+      # plan/01 §4.4: run the bounded post-cap isolation drain to DONE.
+      if fault_reason is None:
+        fault_reason = reason
+      self._ensure_fault_drain(fault_reason, self.cycle)
+      deadline = self.cycle + self.hw.memory_target.profile_command_timeout_cycles
+      while self.group.reset_domain.is_active and self.cycle < deadline:
+        self.group.step(self.cycle)
+        self.cycle += 1
+      if not self.group.reset_domain.is_done:
+        detail = "; ".join(self.group.unclosed_l2_objects()) or "reset drain did not reach DONE"
+        self.group.poison(f"cycle cap {self.sim.max_cycles} isolation failed: {detail}")
+        reason = f"{reason}; poisoned: {detail}"
+      completed = False
 
     return SimResult(
       cycles=self.cycle,
@@ -248,12 +275,39 @@ class Simulator:
         continue
 
       if controller.succeeded:
-        completed = True
-        reason = "model complete"
-        break
+        violation = self.group.assert_private_l2_closed()
+        if violation is None:
+          completed = True
+          reason = "model complete"
+          break
+        # plan/01 §4.3: a leak is a controller-visible fault.  Drain the
+        # reset domain before reporting; success never bypasses the proof.
+        leak_reason = f"private L2 closure violation: {violation}"
+        controller._enter_fault(leak_reason, self.cycle)
+        controller.note_fault_drain_started(self.cycle)
+        self._ensure_fault_drain(leak_reason, self.cycle)
+        self.cycle += 1
+        continue
       self.cycle += 1
     else:
       reason = f"cycle cap {self.sim.max_cycles} reached"
+      # plan/01 §4.4: the cap alone is not an isolation proof.  Enter a
+      # controller-visible fault and run a bounded post-cap drain to DONE.
+      cap_reason = controller.fault_reason or reason
+      controller._enter_fault(cap_reason, self.cycle)
+      controller.note_fault_drain_started(self.cycle)
+      self._ensure_fault_drain(cap_reason, self.cycle)
+      deadline = self.cycle + self.hw.memory_target.profile_command_timeout_cycles
+      while self.group.reset_domain.is_active and self.cycle < deadline:
+        controller.step(self.cycle)
+        self.group.step(self.cycle)
+        controller.harvest_completions(self.cycle)
+        self.cycle += 1
+      if not self.group.reset_domain.is_done:
+        detail = "; ".join(self.group.unclosed_l2_objects()) or "reset drain did not reach DONE"
+        self.group.poison(f"cycle cap {self.sim.max_cycles} isolation failed: {detail}")
+        reason = f"{reason}; poisoned: {detail}"
+      completed = False
 
     pmu = PMUCounter()
     pmu.merge(controller.pmu)

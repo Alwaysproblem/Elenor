@@ -2481,3 +2481,218 @@ class TestTileFree:
           "    tile.await %gather_done", f"    tile.free %{buffer}\n    tile.await %gather_done", 1
         )
       )
+
+
+class TestIndependentL2NoRebindVerifier:
+  """plan/01 §1/§6.1: the independent executable verifier rejects reuse-era
+  or tampered L2 layouts from the frozen DTO alone."""
+
+  @staticmethod
+  def _compile_two_buffer_task():
+    from pathlib import Path
+
+    from pipeline_validator.execution_ir import ExecModel
+
+    root = Path(__file__).resolve().parents[2]
+    hw = HardwareConfig().with_overrides(num_dma_channels=2, hbm_fixed_latency_cycles=10)
+    sim = SimConfig(max_cycles=200000, context_count=4)
+    module = parse_workload_ir((root / "examples/workloads/matmul_pow_data_dep.mlir").read_text())
+    artifact = compile_program(module, hw, sim)
+    assert isinstance(artifact.entry, ExecModel)
+    binding_id, task = next(
+      (key, task) for key, task in artifact.entry.tasks.items() if len(task.layout.buffer_layouts) >= 2
+    )
+    return artifact, hw, sim, binding_id, task
+
+  @staticmethod
+  def _reseal_with_layout(artifact, task, mutate):
+    from dataclasses import replace
+
+    from pipeline_validator.compiled_program import seal_program
+    from pipeline_validator.immutable import digest
+
+    base = replace(task.layout, layout_hash="")
+    tampered = mutate(base)
+    relaid = replace(tampered, layout_hash=digest(tampered))
+    model = replace(
+      artifact.entry, tasks={**artifact.entry.tasks, task.binding_id: replace(task, layout=relaid)}
+    )
+    return seal_program(replace(artifact, entry=model)), relaid
+
+  def test_overlap_tampered_layout_rejected(self):
+    from dataclasses import replace
+
+    artifact, hw, sim, _binding_id, task = self._compile_two_buffer_task()
+
+    def mutate(layout):
+
+      items = list(layout.buffer_layouts)
+      items[1] = replace(items[1], arena_offset=items[0].arena_offset)
+      return replace(layout, buffer_layouts=tuple(items))
+
+    corrupted, _ = self._reseal_with_layout(artifact, task, mutate)
+    with pytest.raises(ValueError, match="overlapping padded L2 spans"):
+      load_program(corrupted, hw, sim)
+
+  def test_padded_span_escape_and_overlap_unit(self):
+    """Unit: padded spans that escape their bank or overlap are rejected."""
+    from dataclasses import replace
+
+    from pipeline_validator.execution_verifier import _verify_l2_no_rebind_layout
+    from pipeline_validator.immutable import digest
+    from pipeline_validator.profiles import ArenaLayout, BufferLayout
+
+    # banks=2, stripe=64, per_bank=256, reserved=512 (whole stripe rounds).
+    a = BufferLayout("a", 100, 0, 0, 64, 2, "in")  # padded span [0, 64) per bank
+    base = ArenaLayout(64, 64, 512, (256, 256), (a,), "")
+
+    def sealed(**changes):
+      candidate = replace(base, **changes)
+      return replace(candidate, layout_hash=digest(candidate))
+
+    _verify_l2_no_rebind_layout(sealed(), "x")
+    fitting = BufferLayout("b", 100, 1, 384, 64, 2, "inout")  # span [192, 256)
+    # Leading gap [64,192) is legal arena slack between disjoint spans.
+    _verify_l2_no_rebind_layout(sealed(buffer_layouts=(a, fitting)), "x")
+    # A padded span that escapes one bank would force bank 0's real segments
+    # to escape too, so ArenaLayout construction rejects it first; the
+    # verifier's bound check stays as defense-in-depth for mutated objects.
+    overlapped = BufferLayout("d", 100, 1, 0, 64, 2, "inout")
+    with pytest.raises(ValueError, match="overlapping padded L2 spans"):
+      _verify_l2_no_rebind_layout(sealed(buffer_layouts=(a, overlapped)), "x")
+
+  def test_double_release_rejected(self):
+    from dataclasses import replace
+
+    from pipeline_validator.compiled_program import seal_program
+    from pipeline_validator.execution_ir import ExecGroupActionOp
+
+    artifact, hw, sim, _binding_id, task = self._compile_two_buffer_task()
+    last_release_index = max(
+      index for index, action in enumerate(task.actions) if action.op is ExecGroupActionOp.RELEASE_L2
+    )
+    release = task.actions[last_release_index]
+    forged = replace(
+      release,
+      dst=f"{release.dst}:forged",
+      instruction_id=f"{task.binding_id}:group:forged_release",
+    )
+    actions = (*task.actions[:last_release_index + 1], forged, *task.actions[last_release_index + 1 :])
+    rebound = replace(task, actions=actions)
+    model = replace(artifact.entry, tasks={**artifact.entry.tasks, task.binding_id: rebound})
+    corrupted = seal_program(replace(artifact, entry=model))
+    with pytest.raises(ValueError, match="already released L2 view"):
+      load_program(corrupted, hw, sim)
+
+  def test_duplicate_bind_rejected(self):
+    from dataclasses import replace
+
+    from pipeline_validator.compiled_program import seal_program
+    from pipeline_validator.execution_ir import ExecGroupActionOp
+
+    artifact, hw, sim, _binding_id, task = self._compile_two_buffer_task()
+    first_bind = next(action for action in task.actions if action.op is ExecGroupActionOp.BIND_L2_VIEW)
+    forged = replace(
+      first_bind,
+      dst=f"{first_bind.dst}:forged",
+      instruction_id=f"{task.binding_id}:group:forged_bind",
+    )
+    actions = (*task.actions, forged)
+    rebound = replace(task, actions=actions)
+    model = replace(artifact.entry, tasks={**artifact.entry.tasks, task.binding_id: rebound})
+    corrupted = seal_program(replace(artifact, entry=model))
+    with pytest.raises(ValueError):
+      load_program(corrupted, hw, sim)
+
+
+class TestIndependentL2LifetimeTamper:
+  """plan/01 §6.1: wrong boundary and missing bind/release artifact cases."""
+
+  @staticmethod
+  def _compile_two_buffer_task():
+    from pathlib import Path
+
+    from pipeline_validator.execution_ir import ExecModel
+
+    root = Path(__file__).resolve().parents[2]
+    hw = HardwareConfig().with_overrides(num_dma_channels=2, hbm_fixed_latency_cycles=10)
+    sim = SimConfig(max_cycles=200000, context_count=4)
+    module = parse_workload_ir((root / "examples/workloads/matmul_pow_data_dep.mlir").read_text())
+    artifact = compile_program(module, hw, sim)
+    assert isinstance(artifact.entry, ExecModel)
+    binding_id, task = next(
+      (key, task) for key, task in artifact.entry.tasks.items() if len(task.layout.buffer_layouts) >= 2
+    )
+    return artifact, hw, sim, binding_id, task
+
+  @staticmethod
+  def _reseal(artifact, task):
+    from dataclasses import replace
+
+    from pipeline_validator.compiled_program import seal_program
+
+    model = replace(artifact.entry, tasks={**artifact.entry.tasks, task.binding_id: task})
+    return seal_program(replace(artifact, entry=model))
+
+  def test_wrong_boundary_layout_rejected_at_artifact_boundary(self):
+    """A padded span crossing its bank reservation cannot construct a valid
+    ArenaLayout; the independent boundary rejection fires before the
+    verifier's own span checks."""
+    from dataclasses import replace
+
+    from pipeline_validator.immutable import digest
+
+    artifact, _hw, _sim, _binding_id, task = self._compile_two_buffer_task()
+    base = replace(task.layout, layout_hash="")
+    round_bytes = base.stripe_bytes * len(base.per_bank_bytes)
+    escaped_offset = (base.reserved_bytes // round_bytes - 1) * round_bytes
+    items = list(base.buffer_layouts)
+    items[-1] = replace(items[-1], arena_offset=escaped_offset)
+    with pytest.raises(ValueError, match="escapes its reservation"):
+      tampered = replace(base, buffer_layouts=tuple(items))
+      replace(tampered, layout_hash=digest(tampered))
+      self._reseal(artifact, replace(task, layout=tampered))
+
+  @staticmethod
+  def _prune_action(task, index):
+    """Drop one action and its produced event from all downstream
+    dependencies so the lifetime checks (not dependency wiring) fire."""
+    from dataclasses import replace
+
+
+    dropped = task.actions[index]
+    actions = []
+    for position, action in enumerate(task.actions):
+      if position == index:
+        continue
+      if dropped.dst and dropped.dst in action.dependencies:
+        action = replace(
+          action,
+          dependencies=tuple(event for event in action.dependencies if event != dropped.dst),
+        )
+      actions.append(action)
+    return replace(task, actions=tuple(actions))
+
+  def test_missing_bind_rejected(self):
+    from pipeline_validator.execution_ir import ExecGroupActionOp
+
+    artifact, hw, sim, _binding_id, task = self._compile_two_buffer_task()
+    first_bind_index = next(
+      index for index, action in enumerate(task.actions) if action.op is ExecGroupActionOp.BIND_L2_VIEW
+    )
+    pruned = self._prune_action(task, first_bind_index)
+    corrupted = self._reseal(artifact, pruned)
+    with pytest.raises(ValueError, match="unbound or released L2 view"):
+      load_program(corrupted, hw, sim)
+
+  def test_missing_release_rejected(self):
+    from pipeline_validator.execution_ir import ExecGroupActionOp
+
+    artifact, hw, sim, _binding_id, task = self._compile_two_buffer_task()
+    last_release_index = max(
+      index for index, action in enumerate(task.actions) if action.op is ExecGroupActionOp.RELEASE_L2
+    )
+    pruned = self._prune_action(task, last_release_index)
+    corrupted = self._reseal(artifact, pruned)
+    with pytest.raises(ValueError, match="L2 view lifetime is incomplete"):
+      load_program(corrupted, hw, sim)

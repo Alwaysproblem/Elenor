@@ -1368,3 +1368,195 @@ class TestGatherTransferRoutes:
     assert all(
       stage["busy_resources"] == 0 and stage["outstanding"] == 0 for stage in snapshot["stages"].values()
     )
+
+
+class TestTransferReferenceHooks:
+  """plan/01 §3/§6.3: submit-level acquisition failure faults the accepted
+  transaction and never releases a reference it does not hold."""
+
+  @staticmethod
+  def _physical_view(allocation_id: str):
+    from pipeline_validator.memory.allocator import AllocationHandle, BankSegment
+    from pipeline_validator.memory.transfer import ResolvedMemoryView
+
+    seg = (BankSegment(0, 0, 4096),)
+    handle = AllocationHandle(
+      allocation_id=allocation_id,
+      memory_space="l2",
+      owner=_ctx_owner(),
+      base_address=0,
+      size_bytes=4096,
+      alignment=1,
+      bank_segments=seg,
+      generation=0,
+      allocate_cycle=0,
+      backing_id=f"{allocation_id}:backing",
+    )
+    return ResolvedMemoryView(handle=handle, offset_bytes=0, size_bytes=4096, address=0, segments=seg)
+
+  def test_acquire_failure_faults_transaction_without_release(self):
+    from pipeline_validator.config import HardwareConfig
+    from pipeline_validator.memory.transfer import (
+      MemoryTransaction,
+      TransferManager,
+      TransferOp,
+      TransferStatus,
+    )
+
+    acquired: list[str] = []
+    released: list[str] = []
+
+    def acquire(txn, cycle):
+      acquired.append(txn.transaction_id)
+      raise MemoryInvariantError("second endpoint went stale after rollback")
+
+    def release(txn, cycle):
+      released.append(txn.transaction_id)
+
+    tm = TransferManager(
+      HardwareConfig(), full_memory=True, reference_acquire=acquire, reference_release=release
+    )
+    txn = MemoryTransaction(
+      transaction_id="t1",
+      op=TransferOp.PREFETCH,
+      issuer=_task_owner(tile=0),
+      src=self._physical_view("l2:a"),
+      dst=self._physical_view("l2:b"),
+      bytes_total=4096,
+      completion_event="e",
+    )
+    tm.submit(txn, cycle=0)
+    assert tm.status("t1") is TransferStatus.FAULTED
+    assert txn.reference_acquired is False
+    assert acquired == ["t1"]
+    assert released == []
+    # Terminal acknowledgement of the failed acquisition releases nothing.
+    tm.acknowledge("t1", cycle=5)
+    assert released == []
+    assert tm.outstanding_transactions == ()
+
+
+class TestAcceptedNotIssuedPrefetch:
+  """plan/01 §6.3: an accepted-but-not-issued prefetch through the real
+  submit path holds its physical backing until a terminal acknowledgement."""
+
+  @staticmethod
+  def _pool_with_manager():
+    from dataclasses import replace
+
+    from pipeline_validator.config import HardwareConfig
+    from pipeline_validator.memory.arena import ArenaPool
+    from pipeline_validator.memory.transfer import TransferManager
+    from pipeline_validator.profiles import build_registry
+
+    profile = replace(
+      build_registry(HardwareConfig()).profile("l2", 0),
+    )
+    pool = ArenaPool(profile)
+    acquired: list[str] = []
+    released: list[str] = []
+
+    def acquire(txn, cycle):
+      acquired.append(txn.transaction_id)
+      for view in (txn.src, txn.dst):
+        if view is not None and view.handle.memory_space == "l2" and view.handle.backing_id:
+          pool.begin_inflight(view.handle, txn.transaction_id)
+
+    def release(txn, cycle):
+      released.append(txn.transaction_id)
+      for view in (txn.src, txn.dst):
+        if view is not None and view.handle.memory_space == "l2" and view.handle.backing_id:
+          if not pool.is_released(view.handle):
+            pool.end_inflight(view.handle, txn.transaction_id, cycle)
+
+    manager = TransferManager(
+      HardwareConfig(),
+      full_memory=True,
+      reference_acquire=acquire,
+      reference_release=release,
+      generation_validator=lambda transaction, phase: True,
+    )
+    manager.configure_profile_generations({("l2", 0): 0})
+    manager.begin_run(1)
+    return pool, manager, acquired, released
+
+  def test_not_issued_prefetch_holds_backing_until_cancel_and_ack(self):
+    from pipeline_validator.compiler.resources import conservative_arena_bytes, layout_buffers
+    from pipeline_validator.execution_ir import ExecL2Buffer
+    from pipeline_validator.memory import AdmissionFailure
+    from pipeline_validator.memory.allocator import AllocationHandle, BankSegment, ExternalOwner
+    from pipeline_validator.memory.arena import RootInvocation
+    from pipeline_validator.memory.transfer import (
+      MemoryTransaction,
+      ResolvedMemoryView,
+      TransferOp,
+      TransferStatus,
+    )
+
+    pool, manager, acquired, released = self._pool_with_manager()
+    buffer = ExecL2Buffer("buf", (4096,), "i8", "in", 1, 64, 4096)
+    reserved = conservative_arena_bytes([(buffer.bytes, buffer.alignment)], pool.profile)
+    layout = layout_buffers((buffer,), pool.profile, reserved, lifetimes=None, slot_capacity=1)
+    plan = pool.plan_arena(RootInvocation("ctx", 0), layout)
+    assert not isinstance(plan, AdmissionFailure)
+    arena = pool.commit_arena(plan, 0)
+    view = pool.bind_view(arena, "buf", 0)
+    committed_free = pool.snapshot()["free_bytes"]
+
+    seg = (BankSegment(0, 0, view.size_bytes),)
+    hbm_handle = AllocationHandle(
+      allocation_id="hbm:src",
+      memory_space="hbm",
+      owner=ExternalOwner("src"),
+      base_address=0x100000,
+      size_bytes=view.size_bytes,
+      alignment=1,
+      bank_segments=seg,
+      generation=0,
+      allocate_cycle=0,
+    )
+    src_view = ResolvedMemoryView(
+      handle=hbm_handle, offset_bytes=0, size_bytes=view.size_bytes,
+      address=0x100000, segments=seg,
+    )
+    dst_view = ResolvedMemoryView(
+      handle=view, offset_bytes=0, size_bytes=view.size_bytes,
+      address=view.base_address, segments=view.bank_segments,
+    )
+    transaction = MemoryTransaction(
+      transaction_id="prefetch:held",
+      op=TransferOp.PREFETCH,
+      issuer=view.owner,
+      src=src_view,
+      dst=dst_view,
+      bytes_total=view.size_bytes,
+      completion_event="held_done",
+      run_generation=1,
+      profile_generations=(("l2", 0, 0),),
+    )
+    manager.submit(transaction, 0)
+    # Accepted but never issued: no leg has started, the ledger holds the
+    # backing, and the owner's invalidation can only stay pending.
+    assert transaction.leg_start_cycle == -1
+    assert acquired == ["prefetch:held"]
+    assert not pool.invalidate_view(view, view.owner, 1)
+    held = pool.snapshot()
+    assert held["live_backings"] == 1
+    assert held["free_bytes"] == committed_free
+
+    # A never-issued leg cancels synchronously; the reference survives until
+    # the terminal acknowledgement.
+    assert manager.cancel_all(2) is True
+    assert transaction.status is TransferStatus.CANCELLED
+    still_held = pool.snapshot()
+    assert still_held["live_backings"] == 1
+    assert still_held["free_bytes"] == committed_free
+
+    manager.acknowledge("prefetch:held", 3)
+    assert released == ["prefetch:held"]
+    # The pending invalidation completed with the reference drop: the full
+    # padded span is back and the view is released.
+    assert pool.is_released(view)
+    after = pool.snapshot()
+    assert after["live_backings"] == 0
+    assert after["free_bytes"] == after["user_spm_capacity_bytes"]

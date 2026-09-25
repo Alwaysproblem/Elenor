@@ -695,7 +695,7 @@ class MFEEngine(Engine):
       status = self.transfer_manager.status(transfer_job.transaction.transaction_id)
       if status not in (TransferStatus.CANCELLED, TransferStatus.FAULTED):
         continue
-      self.transfer_manager.acknowledge(transfer_job.transaction.transaction_id)
+      self.transfer_manager.acknowledge(transfer_job.transaction.transaction_id, cycle)
       lane.running = None
       retired += 1
 
@@ -733,7 +733,7 @@ class MFEEngine(Engine):
       if not has_cancel and not inactive_orphan and not cancelled_orphan:
         continue
       for transaction_id in transaction_ids:
-        self.transfer_manager.acknowledge(transaction_id)
+        self.transfer_manager.acknowledge(transaction_id, cycle)
       for token in l1_tokens:
         if self.l1_mshr.is_active(token):
           self.l1_mshr.cancel(token)
@@ -768,10 +768,10 @@ class MFEEngine(Engine):
       return status
     return None
 
-  def _acknowledge_request_transaction(self, request: _MFEGatherRequest) -> None:
+  def _acknowledge_request_transaction(self, request: _MFEGatherRequest, cycle: int) -> None:
     if request.transaction_id is None or self.transfer_manager is None:
       return
-    self.transfer_manager.acknowledge(request.transaction_id)
+    self.transfer_manager.acknowledge(request.transaction_id, cycle)
     request.transaction_id = None
 
   def _note_merge(self, request: _MFEGatherRequest) -> None:
@@ -915,7 +915,7 @@ class MFEEngine(Engine):
       # Data comes from the completed source-read leg, never a fresh HBM
       # read after the timing event.
       request.line_data = self.transfer_manager.captured_data(request.transaction_id)
-    self._acknowledge_request_transaction(request)
+    self._acknowledge_request_transaction(request, cycle)
     token = request.access.line_token
     if state == "LOOKUP":
       if request.access.outcome is ExecGatherOutcome.L1_HIT:
@@ -1015,7 +1015,7 @@ class MFEEngine(Engine):
         raise MemoryInvariantError(f"Gather destination write reached {status.value}")
       if status is TransferStatus.DONE:
         request = job.requests[job.next_write_ordinal]
-        self.transfer_manager.acknowledge(job.write_transaction_id)
+        self.transfer_manager.acknowledge(job.write_transaction_id, cycle)
         request.transaction_id = None
         if self.tracer is not None:
           self.tracer.instant(
@@ -1115,7 +1115,7 @@ class MFEEngine(Engine):
         )
       )
       if job.transaction is not None and self.transfer_manager is not None:
-        self.transfer_manager.acknowledge(job.transaction.transaction_id)
+        self.transfer_manager.acknowledge(job.transaction.transaction_id, cycle)
       lane.running = None
       if start_queued:
         self._start_lane(lane, cycle)

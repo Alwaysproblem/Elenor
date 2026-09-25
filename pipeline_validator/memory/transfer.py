@@ -225,6 +225,12 @@ class MemoryTransaction:
   cancel_requested_cycle: int = -1
   isolation_confirmed_cycle: int = -1
   fault_reason: str = ""
+  # True only after the owner-side L2 reference hook registered every
+  # endpoint view/backing for this accepted transaction.  Acknowledgement
+  # releases references exactly when this flag is set, so a rejected or
+  # failed-acquisition transaction can never release a reference it does
+  # not hold.
+  reference_acquired: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +425,8 @@ class TransferManager:
     byte_store=None,
     generation_validator: Callable[[MemoryTransaction, str], bool] | None = None,
     tombstone_capacity: int | None = None,
+    reference_acquire: Callable[[MemoryTransaction, int], None] | None = None,
+    reference_release: Callable[[MemoryTransaction, int], None] | None = None,
   ):
     self.cfg = cfg
     self.full_memory = full_memory
@@ -426,6 +434,10 @@ class TransferManager:
     self.trace = trace  # MemoryTrace sink; None disables event emission
     self.byte_store = byte_store
     self.generation_validator = generation_validator
+    if (reference_acquire is None) != (reference_release is None):
+      raise ValueError("transfer reference hooks must be configured together")
+    self.reference_acquire = reference_acquire
+    self.reference_release = reference_release
     default_tombstones = cfg.hbm_outstanding_limit + 4 * cfg.noc_vc_depth
     self.tombstone_capacity = default_tombstones if tombstone_capacity is None else tombstone_capacity
     if self.tombstone_capacity <= 0:
@@ -695,6 +707,11 @@ class TransferManager:
     return max(0, self.tombstone_capacity - len(self._transactions))
 
   @property
+  def outstanding_transactions(self) -> tuple[str, ...]:
+    """IDs of accepted transactions not yet acknowledged (leak inventory)."""
+    return tuple(self._transactions)
+
+  @property
   def can_accept_new(self) -> bool:
     retained = sum(
       txn.status in (TransferStatus.CANCELLED, TransferStatus.FAULTED)
@@ -764,9 +781,37 @@ class TransferManager:
     if not transaction.legs:
       self._fault_transaction(transaction, "transfer route is empty", cycle)
       return
+    if self._has_l2_endpoint(transaction):
+      if self.reference_acquire is None:
+        raise MemoryInvariantError(
+          f"transfer {transaction.transaction_id} holds a physical L2 endpoint"
+          " but no reference_acquire hook is configured"
+        )
+      # One atomic registration for every deduplicated L2 src/dst view and
+      # its backing, before any transport issue.  A hook failure rolls back
+      # its own partial registration; the accepted-but-unissued transaction
+      # is faulted and never releases a reference it did not acquire.
+      try:
+        self.reference_acquire(transaction, cycle)
+      except Exception as exc:
+        self._fault_transaction(transaction, f"L2 reference acquisition failed: {exc}", cycle)
+        return
+      transaction.reference_acquired = True
     transaction.status = TransferStatus.RUNNING
     transaction.current_leg = 0
     transaction.leg_start_cycle = -1
+
+  @staticmethod
+  def _has_l2_endpoint(transaction: MemoryTransaction) -> bool:
+    """True when an endpoint view is bound to a physical L2 backing.
+
+    Synthetic unit-test views carry an L2 memory space but no backing
+    identity; only physically bound views require owner reference hooks.
+    """
+    for view in (transaction.src, transaction.dst):
+      if view is not None and view.handle.memory_space == "l2" and view.handle.backing_id:
+        return True
+    return False
 
   def _collapsed_leg(self, txn: MemoryTransaction) -> tuple[TransferLeg, ...]:
     """One collapsed leg (existing bandwidth + launch overhead) per route.
@@ -1428,15 +1473,30 @@ class TransferManager:
       raise MemoryInvariantError("transfer bytes are not yet visible")
     return txn.captured_data
 
-  def acknowledge(self, transaction_id: str) -> None:
+  def acknowledge(self, transaction_id: str, cycle: int) -> None:
+    """Acknowledge a confirmed terminal transaction.
+
+    The caller acknowledges only after its own byte/owner post-processing;
+    the owner-side reference hook releases every L2 view/backing reference
+    here, before the manager record is removed.  Accepted faulted or
+    cancelled transactions keep their references until this same terminal
+    acknowledgement.
+    """
     txn = self._transactions.get(transaction_id)
     if txn is None:
       raise MemoryInvariantError("unknown transfer acknowledgement")
     if txn.status not in (TransferStatus.DONE, TransferStatus.CANCELLED, TransferStatus.FAULTED):
       raise MemoryInvariantError("cannot acknowledge a non-terminal transfer")
+    if txn.reference_acquired:
+      if self.reference_release is None:
+        raise MemoryInvariantError(
+          f"transfer {transaction_id} holds acquired references but no release hook"
+        )
+      self.reference_release(txn, cycle)
+      txn.reference_acquired = False
     self._transactions.pop(transaction_id)
 
-  def acknowledge_all_terminals(self) -> int:
+  def acknowledge_all_terminals(self, cycle: int) -> int:
     """Acknowledge every confirmed terminal transaction after owner cleanup."""
     transaction_ids = tuple(
       transaction_id
@@ -1444,7 +1504,7 @@ class TransferManager:
       if txn.status in (TransferStatus.DONE, TransferStatus.CANCELLED, TransferStatus.FAULTED)
     )
     for transaction_id in transaction_ids:
-      self.acknowledge(transaction_id)
+      self.acknowledge(transaction_id, cycle)
     return len(transaction_ids)
 
   def _cancel_txn_resources(self, txn: MemoryTransaction) -> None:

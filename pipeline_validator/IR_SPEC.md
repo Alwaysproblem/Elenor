@@ -405,10 +405,20 @@ Every allocation has exactly one release before `nest.return`; no binding,
 prefetch, Store, or other buffer use may appear after it. Runtime preflights
 events, owner, role, Arena/allocation/Profile generations, reader/writer
 phases, remaining pins, and in-flight transactions before mutation. Failed
-preflight cannot partially sweep writers. A successful release invalidates
-only this L2 view. It does not change the Arena free map, return root capacity,
-or wake another root; only safe root-Arena retirement does so after the whole
-Context closes.
+preflight cannot partially sweep writers.
+
+A successful L2 release is a **permanent forfeiture** for this invocation: the
+owner view is invalidated and the owner loses all access rights. The release
+itself only revokes the logical view. Once every private reference to the
+buffer's physical backing is gone and the backing's pins and accepted
+transactions have drained safely, the unique backing finalizer returns the
+buffer's complete stripe-rounded padded span (not just the valid bytes) to the
+same L2 free map; the pool version moves only at that physical final-free.
+`nest.barrier` never re-grants a forfeited owner's rights and never re-binds a
+released L2 address. Same-profile root admission may be woken by that real
+final-free; a different L2 profile still waits for the full root completion
+frontier. The L1 Task Arena contract is unchanged: `tile.free`/view release
+never returns L1 extents, and only Task Arena retirement does.
 
 ### 3.9 `nest.await`
 
@@ -927,20 +937,31 @@ including padding.
 `bind_view` creates an `AllocationHandle` whose segments contain only logical
 valid bytes and carry both allocation and Profile generations. Local
 `invalidate_view` returns `False` while pins/in-flight users remain and
-finishes later; it never changes the free map. Repeated, stale, wrong-owner, or
-out-of-generation operations are invariant failures.
+finishes later; it never changes the free map by itself. Repeated, stale,
+wrong-owner, or out-of-generation operations are invariant failures.
 
-Only `retire_arena` returns extents. A Task Arena retires after all views,
-Frame state, accesses, transactions, and the Task terminal event are safe. A
-root Arena retires after every Route/Task, required HBM output, view, pin,
-transfer, and lease closes; only then can `context_done` publish. L1-only
+**L2 physical extent lifecycle.** Each Context-local L2 buffer is compiled to
+an independent, non-overlapping stripe-rounded padded span; the compiler never
+re-binds a released L2 region, and the independent executable verifier rejects
+any layout whose padded spans overlap or whose spans plus slack do not conserve
+every bank of the reservation. The Arena reservation is committed once as exact
+per-bank units: one unit set per buffer backing (the complete padded span,
+including tail padding) plus owner-arena slack units for everything else. Slack
+stays held by the root until root retirement. When the last private reference
+to a backing is revoked and its pins and accepted transactions have drained
+safely, a unique finalizer returns exactly that backing's committed units to
+the L2 free map; repeated or partial returns are invariant failures. Only
+`retire_arena` returns the remaining slack/residual — it never double-frees an
+already-released backing.
+
+**L1 keeps the original contract.** A Task Arena retires after all views,
+Frame state, accesses, transactions, and the Task terminal event are safe; L1
+`tile.free`/view release never returns extents to the free map. L1-only
 reconfiguration operates on separate L1 pools and cannot mutate a parent L2
-handle or generation.
-
-The compiler may reuse a Tile Slot/offset only for a proven non-overlapping
-view lifetime. L2 reuse additionally requires a release followed by a
-dominating Context barrier; otherwise the old region remains conservatively
-live through Context end. No runtime optimization invents overlap.
+handle or generation. A root L2 Arena retires after every Route/Task, required
+HBM output, remaining view, pin, transfer, and lease closes; only then can
+`context_done` publish. No runtime optimization invents overlap at either
+level.
 
 ## 9. Profile Controller, Maintenance, Cancellation, and Recovery
 

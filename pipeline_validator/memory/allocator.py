@@ -126,6 +126,8 @@ class AllocationHandle:
   allocate_cycle: int
   arena_id: str = ""
   profile_generation: int = 0
+  # Physical backing identity (L2 only; empty for L1/HBM logical views).
+  backing_id: str = ""
 
   @property
   def end_address(self) -> int:

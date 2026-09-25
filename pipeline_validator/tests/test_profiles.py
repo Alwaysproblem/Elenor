@@ -4,12 +4,17 @@ from dataclasses import replace
 
 import pytest
 
-from pipeline_validator.compiler.resources import check_layout_capacity, layout_buffers
+from pipeline_validator.compiler.resources import (
+  check_layout_capacity,
+  conservative_arena_bytes,
+  layout_buffers,
+)
 from pipeline_validator.config import HardwareConfig
-from pipeline_validator.execution_ir import GridInstanceId, TaskIdentity
+from pipeline_validator.execution_ir import ExecL2Buffer, GridInstanceId, TaskIdentity
 from pipeline_validator.immutable import digest
 from pipeline_validator.memory import AdmissionFailure, AdmissionFailureKind, MemoryInvariantError
-from pipeline_validator.memory.arena import WAIT_FRAGMENTATION, ArenaPool, RootInvocation
+from pipeline_validator.memory.allocator import ContextBufferOwner
+from pipeline_validator.memory.arena import WAIT_CAPACITY, WAIT_FRAGMENTATION, ArenaPool, RootInvocation
 from pipeline_validator.profiles import (
   ArenaLayout,
   MemoryProfile,
@@ -184,3 +189,233 @@ class TestStaticResourceBudgets:
     assert after["free_bytes"] == before["free_bytes"]
     assert after["live_views"] == 0
     assert pool.retire_arena(arena, 2)
+
+
+class TestL2BackingLifecycle:
+  """plan/01 §2/§6.2: physical padded backings, exact units, early free."""
+
+  def _pool(self, banks: int = 2, bank_bytes: int = 512) -> ArenaPool:
+    return ArenaPool(_profile(banks=banks, bank_bytes=bank_bytes))
+
+  @staticmethod
+  def _buffer(slot: str, logical: int) -> ExecL2Buffer:
+    return ExecL2Buffer(slot, (logical,), "i8", "inout", 1, 64, logical)
+
+  def _committed(self, pool: ArenaPool, buffers: tuple[ExecL2Buffer, ...], cycle: int):
+    reserved = conservative_arena_bytes(
+      [(buffer.bytes, buffer.alignment) for buffer in buffers], pool.profile
+    )
+    layout = layout_buffers(buffers, pool.profile, reserved, lifetimes=None, slot_capacity=len(buffers))
+    owner = RootInvocation("ctx", 0)
+    plan = pool.plan_arena(owner, layout)
+    assert not isinstance(plan, AdmissionFailure)
+    return pool.commit_arena(plan, cycle), owner
+
+  def test_tail_padding_returns_with_its_backing_not_its_valid_bytes(self):
+
+    pool = self._pool()
+    # 100 logical bytes pad to a full 128-byte-per-bank stripe round.
+    empty_free = pool.snapshot()["free_bytes"]
+    arena, _owner = self._committed(pool, (self._buffer("buf", 100),), 0)
+    view = pool.bind_view(arena, "buf", 1)
+    assert view.backing_id
+    assert pool.invalidate_view(view, ContextBufferOwner("ctx", 0, "buf"), 2)
+    after = pool.snapshot()
+    # The complete padded span (including tail padding) returned to the map.
+    assert after["free_bytes"] == empty_free
+    assert after["live_backings"] == 0
+    assert after["arena_reserved_bytes"] == 0
+    assert after["pool_version"] > 1
+
+  def test_slack_is_root_held_until_retirement_and_backing_free_never_touches_it(self):
+    pool = self._pool()
+    # Reserve one extra stripe round beyond the buffers: an internal gap plus
+    # tail slack that only root retirement may return.
+    buffers = (self._buffer("buf", 64),)
+    padded_total = 128
+    reserved = conservative_arena_bytes(
+      [(buffer.bytes, buffer.alignment) for buffer in buffers], pool.profile
+    ) + 128
+    layout = layout_buffers(buffers, pool.profile, reserved, lifetimes=None, slot_capacity=1)
+    owner = RootInvocation("ctx", 0)
+    plan = pool.plan_arena(owner, layout)
+    assert not isinstance(plan, AdmissionFailure)
+    arena = pool.commit_arena(plan, 0)
+    assert arena.reserved_bytes == reserved == padded_total + 128
+    view = pool.bind_view(arena, "buf", 1)
+    assert pool.invalidate_view(view, view.owner, 2)
+    held = pool.snapshot()
+    assert held["arena_reserved_bytes"] == 128  # slack only
+    assert held["free_bytes"] == held["user_spm_capacity_bytes"] - held["system_reserved_bytes"] - 128
+    assert pool.retire_arena(arena, 3)
+    after = pool.snapshot()
+    assert after["arena_reserved_bytes"] == 0
+    assert after["free_bytes"] == after["user_spm_capacity_bytes"] - after["system_reserved_bytes"]
+
+  def test_released_extent_is_reallocatable_at_original_capacity(self):
+    pool = self._pool()
+    full = _empty_layout(pool.profile, pool.profile.user_spm_per_bank)
+    plan = pool.plan_arena(RootInvocation("a", 0), full)
+    assert not isinstance(plan, AdmissionFailure)
+    arena = pool.commit_arena(plan, 0)
+    buffers = tuple(self._buffer(f"buf{index}", 128) for index in range(2))
+    reserved = conservative_arena_bytes(
+      [(buffer.bytes, buffer.alignment) for buffer in buffers], pool.profile
+    )
+    layout = layout_buffers(buffers, pool.profile, reserved, lifetimes=None, slot_capacity=2)
+    owner = RootInvocation("b", 0)
+    nested_plan = pool.plan_arena(owner, layout)
+    assert isinstance(nested_plan, AdmissionFailure)
+    assert nested_plan.kind is AdmissionFailureKind.TEMPORARY_CAPACITY
+    assert nested_plan.reason.startswith(WAIT_CAPACITY)
+    before = pool.snapshot()
+    assert pool.retire_arena(arena, 1)
+    after = pool.snapshot()
+    assert after["free_bytes"] > before["free_bytes"]
+    retried = pool.plan_arena(owner, layout)
+    assert not isinstance(retried, AdmissionFailure)
+
+  def test_double_release_rebind_and_wrong_owner_are_rejected_without_side_effects(self):
+    pool = self._pool()
+    arena, _owner = self._committed(pool, (self._buffer("buf", 64),), 0)
+    view = pool.bind_view(arena, "buf", 1)
+    with pytest.raises(MemoryInvariantError, match="wrong-owner release"):
+      pool.invalidate_view(view, ContextBufferOwner("other", 0, "buf"), 2)
+    assert pool.snapshot()["live_backings"] == 1
+    assert pool.invalidate_view(view, view.owner, 2)
+    before = pool.snapshot()
+    with pytest.raises(MemoryInvariantError, match="double release"):
+      pool.invalidate_view(view, view.owner, 3)
+    with pytest.raises(MemoryInvariantError, match="already bound"):
+      pool.bind_view(arena, "buf", 3)
+    assert pool.snapshot() == before
+
+  def test_pending_view_keeps_backing_until_last_pin_drains(self):
+    pool = self._pool()
+    arena, _owner = self._committed(pool, (self._buffer("buf", 64),), 0)
+    committed_free = pool.snapshot()["free_bytes"]
+    view = pool.bind_view(arena, "buf", 1)
+    pool.pin(view, "consumer:0")
+    assert not pool.invalidate_view(view, view.owner, 2)
+    held = pool.snapshot()
+    assert held["live_backings"] == 1
+    assert held["free_bytes"] == committed_free
+    assert pool.unpin(view, "consumer:0", 3)
+    after = pool.snapshot()
+    assert after["live_backings"] == 0
+    assert after["free_bytes"] == held["user_spm_capacity_bytes"] - after["system_reserved_bytes"]
+
+  def test_pending_inflight_reference_releases_only_at_end_inflight(self):
+    pool = self._pool()
+    arena, _owner = self._committed(pool, (self._buffer("buf", 64),), 0)
+    view = pool.bind_view(arena, "buf", 1)
+    # A transfer accepted before the release keeps the backing pending.
+    pool.begin_inflight(view, "txn:1")
+    assert not pool.invalidate_view(view, view.owner, 2)
+    held = pool.snapshot()
+    assert held["live_backings"] == 1
+    assert pool.end_inflight(view, "txn:1", 3)
+    after = pool.snapshot()
+    assert after["live_backings"] == 0
+    assert after["pool_version"] == held["pool_version"] + 1
+
+  def test_exact_units_tile_reserve_and_conserve_bytes(self):
+    pool = self._pool()
+    buffers = (self._buffer("buf_a", 100), self._buffer("buf_b", 64))
+    arena, _owner = self._committed(pool, buffers, 0)
+    snapshot = pool.snapshot()
+    for bank in snapshot["per_bank_occupancy"]:
+      assert bank["allocated_bytes"] + bank["free_bytes"] == pool.profile.user_spm_per_bank
+      assert bank["padding_bytes"] >= 0
+    # The pool physically holds the whole reserve: padded spans + slack.
+    round_bytes = arena.layout.stripe_bytes * pool.profile.banks
+    expected_padded = sum(-(-buffer.bytes // round_bytes) * round_bytes for buffer in buffers)
+    assert snapshot["arena_reserved_bytes"] == arena.reserved_bytes
+    assert arena.reserved_bytes >= expected_padded
+    for slot in ("buf_a", "buf_b"):
+      view = pool.bind_view(arena, slot, 1)
+      assert pool.invalidate_view(view, view.owner, 2)
+    after = pool.snapshot()
+    assert after["arena_reserved_bytes"] == arena.reserved_bytes - expected_padded
+    for bank in after["per_bank_occupancy"]:
+      assert bank["allocated_bytes"] + bank["free_bytes"] == pool.profile.user_spm_per_bank
+
+  def test_release_backing_frees_capacity_for_wait_capacity_head_same_cycle(self):
+    pool = self._pool()
+    big = self._buffer("buf_a", 768)
+    reserved = conservative_arena_bytes([(big.bytes, big.alignment)], pool.profile)
+    layout = layout_buffers((big,), pool.profile, reserved, lifetimes=None, slot_capacity=1)
+    first = pool.plan_arena(RootInvocation("a", 0), layout)
+    assert not isinstance(first, AdmissionFailure)
+    arena = pool.commit_arena(first, 0)
+    view = pool.bind_view(arena, "buf_a", 1)
+    # A second root of the same total size cannot fit while buf_a is held.
+    second = pool.plan_arena(RootInvocation("b", 0), layout)
+    assert isinstance(second, AdmissionFailure)
+    assert second.reason.startswith(WAIT_CAPACITY)
+    assert pool.invalidate_view(view, view.owner, 2)
+    # The physical final-free is immediately visible to a fresh plan.
+    retried = pool.plan_arena(RootInvocation("b", 0), layout)
+    assert not isinstance(retried, AdmissionFailure)
+
+
+class TestCommitArenaAtomicity:
+  """plan/01 §2.2: commit_arena validates before any pool mutation."""
+
+  def test_overlapping_layout_commit_fails_without_pool_mutation(self):
+    from dataclasses import replace
+
+    from pipeline_validator.immutable import digest
+    from pipeline_validator.profiles import BufferLayout
+
+    pool = TestL2BackingLifecycle()._pool()
+    buffer = TestL2BackingLifecycle()._buffer("buf", 64)
+    reserved = conservative_arena_bytes([(buffer.bytes, buffer.alignment)], pool.profile)
+    layout = layout_buffers((buffer,), pool.profile, reserved, lifetimes=None, slot_capacity=1)
+    # Forge a second buffer whose padded span overlaps the first; both are
+    # individually constructible and hash-consistent.
+    empty = replace(layout, layout_hash="")
+    overlapped = BufferLayout(
+      "ghost", empty.buffer_layouts[0].logical_bytes, 1,
+      empty.buffer_layouts[0].arena_offset, empty.stripe_bytes, len(empty.per_bank_bytes), "inout",
+    )
+    candidate = replace(empty, buffer_layouts=(*empty.buffer_layouts, overlapped))
+    forged = replace(candidate, layout_hash=digest(candidate))
+    before = pool.snapshot()
+    plan = pool.plan_arena(RootInvocation("ctx", 0), forged)
+    assert not isinstance(plan, AdmissionFailure)
+    with pytest.raises(MemoryInvariantError, match="overlap inside one bank"):
+      pool.commit_arena(plan, 0)
+    after = pool.snapshot()
+    assert after == before
+    # The pool still admits a valid arena afterwards.
+    valid = pool.plan_arena(RootInvocation("ctx", 0), layout)
+    assert not isinstance(valid, AdmissionFailure)
+    handle = pool.commit_arena(valid, 1)
+    assert pool.snapshot()["live_arenas"] == 1
+    assert pool.retire_arena(handle, 2)
+
+  def test_l1_and_zero_reserve_commits_register_their_arena_record(self):
+    from pipeline_validator.execution_ir import ExecL1Buffer
+
+    l1_profile = _profile(level="l1", banks=2, bank_bytes=512)
+    l1_pool = ArenaPool(l1_profile, pool_id=0, tile_id=0)
+    spec = ExecL1Buffer("tmp", (64,), "i8", 1, 64, 64)
+    l1_layout = layout_buffers((spec,), l1_profile, 128, lifetimes={"tmp": (0, 1)})
+    owner = TaskIdentity(GridInstanceId("ctx", 0, 0, 0), 0)
+    l1_plan = l1_pool.plan_arena(owner, l1_layout)
+    assert not isinstance(l1_plan, AdmissionFailure)
+    l1_handle = l1_pool.commit_arena(l1_plan, 0)
+    assert l1_pool._arenas[l1_handle.arena_id].handle is l1_handle
+    assert l1_pool._owner_arenas[owner] == l1_handle.arena_id
+
+    l2_pool = TestL2BackingLifecycle()._pool()
+    empty_layout = _empty_layout(l2_pool.profile, 0)
+    plan = l2_pool.plan_arena(RootInvocation("empty", 0), empty_layout)
+    assert not isinstance(plan, AdmissionFailure)
+    handle = l2_pool.commit_arena(plan, 1)
+    assert handle.reserved_bytes == 0
+    assert l2_pool._arenas[handle.arena_id].handle is handle
+    assert l2_pool._owner_arenas[RootInvocation("empty", 0)] == handle.arena_id
+    assert l2_pool.snapshot()["zero_byte_arenas"] == 1
+    assert l2_pool.retire_arena(handle, 2)

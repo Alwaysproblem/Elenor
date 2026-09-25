@@ -1298,11 +1298,11 @@ class ProfileController:
     for request_id, (cache, transaction_id) in tuple(record.clean_transactions.items()):
       status = manager.status(transaction_id)
       if status is TransferStatus.DONE:
-        manager.acknowledge(transaction_id)
+        manager.acknowledge(transaction_id, cycle)
         cache.complete_clean(request_id, success=True)
         del record.clean_transactions[request_id]
       elif status in (TransferStatus.FAULTED, TransferStatus.CANCELLED):
-        manager.acknowledge(transaction_id)
+        manager.acknowledge(transaction_id, cycle)
         cache.complete_clean(request_id, success=False)
         del record.clean_transactions[request_id]
         self._fault(record, cycle, f"cache clean transfer {status.value}")
@@ -1374,7 +1374,7 @@ class ProfileController:
     for request_id, (cache, transaction_id) in tuple(record.clean_transactions.items()):
       status = manager.status(transaction_id)
       if status in (TransferStatus.DONE, TransferStatus.CANCELLED, TransferStatus.FAULTED):
-        manager.acknowledge(transaction_id)
+        manager.acknowledge(transaction_id, cycle)
         cache.complete_clean(request_id, success=status is TransferStatus.DONE)
         del record.clean_transactions[request_id]
 

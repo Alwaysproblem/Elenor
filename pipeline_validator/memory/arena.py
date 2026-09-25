@@ -9,10 +9,11 @@ returns those extents.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import pairwise
 from typing import TYPE_CHECKING, TypeAlias
 
 from ..execution_ir import TaskIdentity
-from ..profiles import ArenaLayout, MemoryProfile
+from ..profiles import ArenaLayout, BufferLayout, MemoryProfile
 from .allocator import (
   AdmissionFailure,
   AdmissionFailureKind,
@@ -104,6 +105,54 @@ class _ArenaState:
   RETIRED = "retired"
 
 
+class _BackingState:
+  LIVE = "live"
+  RELEASED = "released"
+
+
+@dataclass
+class _L2BackingRecord:
+  """One physical L2 padded backing (plan/01 §2.1).
+
+  A backing is the unit of physical capacity: it owns the buffer's complete
+  stripe-rounded padded units inside one arena reserve.  The private phase
+  has exactly one owner reference and at most one bound view; shared claims
+  belong to a later batch and must attach to this same record.
+  """
+
+  backing_id: str
+  arena_id: str
+  owner: RootInvocation
+  buffer_id: str
+  units: tuple[BankSegment, ...]
+  padded_bytes: int
+  profile_generation: int
+  allocation_generation: int
+  state: str = _BackingState.LIVE
+  view_allocation_id: str | None = None
+  pins: set[str] = field(default_factory=set)
+  inflight: set[str] = field(default_factory=set)
+  commit_cycle: int = 0
+  release_cycle: int | None = None
+
+  def snapshot(self) -> dict:
+    return {
+      "backing_id": self.backing_id,
+      "arena_id": self.arena_id,
+      "buffer_id": self.buffer_id,
+      "padded_bytes": self.padded_bytes,
+      "state": self.state,
+      "profile_generation": self.profile_generation,
+      "allocation_generation": self.allocation_generation,
+      "context_name": self.owner.context_name,
+      "launch_generation": self.owner.launch_generation,
+      "pin_count": len(self.pins),
+      "inflight_count": len(self.inflight),
+      "commit_cycle": self.commit_cycle,
+      "release_cycle": self.release_cycle,
+    }
+
+
 @dataclass
 class _ViewRecord:
   handle: AllocationHandle
@@ -120,6 +169,9 @@ class _ArenaRecord:
   retire_cycle: int = -1
   task_metadata: tuple[str, int] | None = None
   views: dict[str, str] = field(default_factory=dict)
+  # L2 only: exact committed units per physical backing plus root-held slack.
+  backings: dict[str, _L2BackingRecord] = field(default_factory=dict)
+  slack_units: tuple[BankSegment, ...] = ()
 
 
 class ArenaPool:
@@ -169,6 +221,13 @@ class ArenaPool:
     self._view_counter = 0
     self._arenas: dict[str, _ArenaRecord] = {}
     self._views: dict[str, _ViewRecord] = {}
+    self._backings: dict[str, _L2BackingRecord] = {}
+    self._backing_counter = 0
+    # Set by the owning TileGroup at begin_launch; stamped onto physical
+    # final-free events for cross-invocation correlation.
+    self.run_generation = 0
+    # Physical final-free events drained by the TileGroup occupancy mirror.
+    self._backing_release_events: list[dict] = []
     self._owner_arenas: dict[ArenaOwner, str] = {}
     self._arena_reserved_bytes = 0
     self._peak_arena_reserved_bytes = 0
@@ -266,9 +325,73 @@ class ArenaPool:
       allocate_cycle=cycle,
     )
     if plan.reserve:
-      self._extents.commit_exact(plan.extent_pool_version, plan.reserve, cycle)
+      if self.memory_space == "l2":
+        round_bytes = plan.layout.stripe_bytes * self.banks
+        reserve_by_bank = {segment.bank_id: segment for segment in plan.reserve}
+        buffer_padded: list[tuple[BufferLayout, int]] = []
+        used_ranges: dict[int, list[tuple[int, int]]] = {bank: [] for bank in reserve_by_bank}
+        for buffer_layout in plan.layout.buffer_layouts:
+          padded = -(-buffer_layout.logical_bytes // round_bytes) * round_bytes
+          buffer_padded.append((buffer_layout, padded))
+          for segment in self._buffer_units(handle, buffer_layout, padded):
+            local_start = self._local_start(segment)
+            used_ranges[segment.bank_id].append((local_start, local_start + segment.size_bytes))
+        slack: list[BankSegment] = []
+        for bank_id, segment in reserve_by_bank.items():
+          local_base = self._local_start(segment)
+          cursor = local_base
+          for start, end in sorted(used_ranges[bank_id]):
+            if start > cursor:
+              slack.append(
+                BankSegment(
+                  bank_id=bank_id,
+                  address=segment.address + (cursor - local_base),
+                  size_bytes=start - cursor,
+                )
+              )
+            cursor = max(cursor, end)
+          if cursor < local_base + segment.size_bytes:
+            slack.append(
+              BankSegment(
+                bank_id=bank_id,
+                address=segment.address + (cursor - local_base),
+                size_bytes=local_base + segment.size_bytes - cursor,
+              )
+            )
+        units = tuple(
+          unit
+          for buffer_layout, padded in buffer_padded
+          for unit in self._buffer_units(handle, buffer_layout, padded)
+        ) + tuple(slack)
+        self._assert_units_tile_reserve(units, plan.reserve)
+        if not isinstance(plan.owner, RootInvocation):
+          raise MemoryInvariantError("L2 backing owner must be a RootInvocation")
+        # Validation complete: single atomic allocator mutation, then the
+        # pool registers the arena, its slack and its backing records.
+        self._extents.commit_exact(plan.extent_pool_version, units, cycle)
+        record = self._arenas[arena_id] = _ArenaRecord(handle=handle)
+        record.slack_units = tuple(slack)
+        for buffer_layout, padded in buffer_padded:
+          self._backing_counter += 1
+          backing = _L2BackingRecord(
+            backing_id=f"{arena_id}:backing:{self._backing_counter}:{buffer_layout.buffer_id}",
+            arena_id=arena_id,
+            owner=plan.owner,
+            buffer_id=buffer_layout.buffer_id,
+            units=self._buffer_units(handle, buffer_layout, padded),
+            padded_bytes=padded,
+            profile_generation=self.profile_generation,
+            allocation_generation=allocation_generation,
+            commit_cycle=cycle,
+          )
+          record.backings[buffer_layout.buffer_id] = backing
+          self._backings[backing.backing_id] = backing
+      else:
+        self._extents.commit_exact(plan.extent_pool_version, plan.reserve, cycle)
+        self._arenas[arena_id] = _ArenaRecord(handle=handle)
+    else:
+      self._arenas[arena_id] = _ArenaRecord(handle=handle)
     self._allocation_generation = allocation_generation
-    self._arenas[arena_id] = _ArenaRecord(handle=handle)
     self._owner_arenas[plan.owner] = arena_id
     self._arena_reserved_bytes += handle.reserved_bytes
     self._peak_arena_reserved_bytes = max(self._peak_arena_reserved_bytes, self._arena_reserved_bytes)
@@ -323,6 +446,18 @@ class ArenaPool:
     self._assert_no_live_view_overlap(valid_segments)
     owner = self._buffer_owner(arena_record, buffer_id)
 
+    backing_record: _L2BackingRecord | None = None
+    backing_id = ""
+    if self.memory_space == "l2":
+      backing_record = arena_record.backings.get(buffer_id)
+      if backing_record is None:
+        raise MemoryInvariantError(f"arena buffer {buffer_id!r} has no committed L2 backing")
+      if backing_record.state != _BackingState.LIVE:
+        raise MemoryInvariantError(f"arena buffer {buffer_id!r} backing is already released")
+      if backing_record.view_allocation_id is not None:
+        raise MemoryInvariantError(f"arena buffer {buffer_id!r} backing is already bound")
+      backing_id = backing_record.backing_id
+
     self._view_counter += 1
     allocation_id = f"{arena.arena_id}:view:{self._view_counter}:{buffer_id}"
     if valid_segments:
@@ -343,20 +478,25 @@ class ArenaPool:
       allocate_cycle=cycle,
       arena_id=arena.arena_id,
       profile_generation=arena.profile_generation,
+      backing_id=backing_id,
     )
     self._views[allocation_id] = _ViewRecord(handle=handle)
     arena_record.views[buffer_id] = allocation_id
+    if backing_record is not None:
+      backing_record.view_allocation_id = allocation_id
     self._peak_live_view_bytes = max(self._peak_live_view_bytes, self._live_view_bytes())
     self._emit_trace(cycle)
     return handle
 
   def invalidate_view(self, view: AllocationHandle, owner: MemoryOwner, cycle: int) -> bool:
-    """Invalidate a local view; never return parent arena extents.
+    """Invalidate a local view and revoke its owner reference.
 
     ``False`` records a pending invalidation while pins or in-flight users
     remain.  The final ``unpin``/``end_inflight`` completes only the local
-    invalidation.  A separate successful :meth:`retire_arena` is the sole path
-    that returns reserve to the global free map.
+    invalidation.  For an L2 view this is a permanent forfeiture: when the
+    backing's last reference drains, the unique backing finalizer returns the
+    backing's complete padded units to the L2 free map.  L1 views never
+    return extents; only Task Arena retirement does.
     """
     record = self._view_record(view)
     if record.state == _ViewState.INVALIDATED:
@@ -369,6 +509,7 @@ class ArenaPool:
       self._emit_trace(cycle)
       return False
     self._finalize_view(record, cycle)
+    self._release_backing_for(view, cycle)
     return True
 
   def assert_live(self, handle: AllocationHandle, owner: MemoryOwner | None = None) -> None:
@@ -387,6 +528,7 @@ class ArenaPool:
     if consumer_id in record.pins:
       raise MemoryInvariantError("duplicate allocation pin")
     record.pins.add(consumer_id)
+    self._backing_reference(handle, consumer_id, pin=True, add=True)
 
   def unpin(self, handle: AllocationHandle, consumer_id: str, cycle: int) -> bool:
     record = self._view_record(handle)
@@ -395,8 +537,10 @@ class ArenaPool:
     if consumer_id not in record.pins:
       raise MemoryInvariantError("unknown allocation pin")
     record.pins.remove(consumer_id)
+    self._backing_reference(handle, consumer_id, pin=True, add=False)
     if record.state == _ViewState.INVALIDATE_PENDING and not record.pins and not record.inflight:
       self._finalize_view(record, cycle)
+      self._release_backing_for(handle, cycle)
       return True
     self._emit_trace(cycle)
     return False
@@ -411,6 +555,7 @@ class ArenaPool:
     if transaction_id in record.inflight:
       raise MemoryInvariantError("duplicate in-flight allocation reference")
     record.inflight.add(transaction_id)
+    self._backing_reference(handle, transaction_id, pin=False, add=True)
 
   def end_inflight(self, handle: AllocationHandle, transaction_id: str, cycle: int) -> bool:
     """Finish one accepted transaction and possibly complete invalidation."""
@@ -420,11 +565,33 @@ class ArenaPool:
     if transaction_id not in record.inflight:
       raise MemoryInvariantError("unknown in-flight allocation reference")
     record.inflight.remove(transaction_id)
+    self._backing_reference(handle, transaction_id, pin=False, add=False)
     if record.state == _ViewState.INVALIDATE_PENDING and not record.pins and not record.inflight:
       self._finalize_view(record, cycle)
+      self._release_backing_for(handle, cycle)
       return True
     self._emit_trace(cycle)
     return False
+
+  def _backing_reference(
+    self, handle: AllocationHandle, reference: str, *, pin: bool, add: bool
+  ) -> None:
+    """Mirror a view reference onto its physical backing record."""
+    if not handle.backing_id:
+      return
+    backing = self._backings.get(handle.backing_id)
+    if backing is None:
+      raise MemoryInvariantError("view references an unknown physical backing")
+    targets = backing.pins if pin else backing.inflight
+    if add:
+      targets.add(reference)
+    else:
+      targets.discard(reference)
+
+  def _release_backing_for(self, handle: AllocationHandle, cycle: int) -> bool:
+    if not handle.backing_id:
+      return False
+    return self._try_release_l2_backing(handle.backing_id, cycle)
 
   def resolve_segments(
     self, handle: AllocationHandle, offset_bytes: int, size_bytes: int
@@ -478,16 +645,40 @@ class ArenaPool:
         return False
       if view_record.pins or view_record.inflight:
         raise MemoryInvariantError("invalidated arena view retains references")
-    if arena.reserved_bytes > self._arena_reserved_bytes:
-      raise MemoryInvariantError("arena reserved-byte accounting underflow")
+    released_backings = sum(
+      backing.padded_bytes
+      for backing in record.backings.values()
+      if backing.state == _BackingState.RELEASED
+    )
+    if arena.reserved_bytes - released_backings > self._arena_reserved_bytes:
+      raise MemoryInvariantError(
+        "arena reserved-byte accounting underflow"
+        f" (arena_reserved={arena.reserved_bytes} released_backings={released_backings}"
+        f" pool_held={self._arena_reserved_bytes} arenas={len(self._arenas)})"
+      )
     for segment in arena.reserve:
       self._local_start(segment)
     if arena.reserve:
-      self._extents.release_exact(self._extents.pool_version, arena.reserve, cycle)
+      if self.memory_space == "l2":
+        for backing in record.backings.values():
+          if backing.state == _BackingState.LIVE and not self._try_release_l2_backing(
+            backing.backing_id, cycle
+          ):
+            raise MemoryInvariantError(
+              f"arena retirement could not free residual backing '{backing.buffer_id}'"
+            )
+        held = self.arena_held_bytes(arena)
+        if held != sum(segment.size_bytes for segment in record.slack_units):
+          raise MemoryInvariantError("arena retirement held bytes disagree with slack units")
+        if record.slack_units:
+          self._extents.release_exact(self._extents.pool_version, record.slack_units, cycle)
+          self._arena_reserved_bytes -= held
+      else:
+        self._extents.release_exact(self._extents.pool_version, arena.reserve, cycle)
+        self._arena_reserved_bytes -= arena.reserved_bytes
     record.state = _ArenaState.RETIRED
     record.retire_cycle = cycle
     self._owner_arenas.pop(arena.owner, None)
-    self._arena_reserved_bytes -= arena.reserved_bytes
     self._pool_version += 1
     self._emit_trace(cycle)
     if self._trace is not None:
@@ -538,30 +729,165 @@ class ArenaPool:
     # checks; allocation_generation remains monotonic, preventing ABA reuse.
     self._arenas.clear()
     self._views.clear()
+    self._backings.clear()
     self._owner_arenas.clear()
     self._pool_version += 1
     self._emit_trace(cycle)
 
+  # -- L2 physical backing lifecycle ------------------------------------
+
+  def _buffer_units(
+    self, handle: ArenaHandle, buffer_layout: BufferLayout, padded_bytes: int
+  ) -> tuple[BankSegment, ...]:
+    """Exact per-bank padded units of one buffer inside its arena reserve."""
+    span_per_bank = padded_bytes // self.banks
+    if span_per_bank * self.banks != padded_bytes:
+      raise MemoryInvariantError("padded backing span does not split evenly across banks")
+    reserve_by_bank = {segment.bank_id: segment for segment in handle.reserve}
+    result: list[BankSegment] = []
+    offset = buffer_layout.arena_offset // self.banks
+    for bank_id in range(self.banks):
+      reserve = reserve_by_bank.get(bank_id)
+      if reserve is None or span_per_bank == 0:
+        if span_per_bank:
+          raise MemoryInvariantError("backing unit has no reserve on its bank")
+        continue
+      self._local_start(reserve)
+      if offset + span_per_bank > reserve.size_bytes:
+        raise MemoryInvariantError("backing unit escapes its arena reserve")
+      result.append(
+        BankSegment(bank_id=bank_id, address=reserve.address + offset, size_bytes=span_per_bank)
+      )
+    return tuple(result)
+
+  def _assert_units_tile_reserve(
+    self, units: tuple[BankSegment, ...], reserve: tuple[BankSegment, ...]
+  ) -> None:
+    """Units must exactly tile the reserve: aligned, bounded, no overlap/gap."""
+    per_bank: dict[int, list[tuple[int, int]]] = {}
+    for segment in units:
+      local_start = self._local_start(segment)
+      per_bank.setdefault(segment.bank_id, []).append((local_start, local_start + segment.size_bytes))
+    reserve_by_bank = {segment.bank_id: segment for segment in reserve}
+    for bank_id, reserve_segment in reserve_by_bank.items():
+      base = self._local_start(reserve_segment)
+      spans = sorted(per_bank.get(bank_id, []))
+      for (_start, end), (next_start, _next_end) in pairwise(spans):
+        if next_start < end:
+          raise MemoryInvariantError("exact L2 units overlap inside one bank")
+        if next_start != end:
+          raise MemoryInvariantError("exact L2 units leave a gap inside one bank")
+      if not spans or spans[0][0] != base or spans[-1][1] != base + reserve_segment.size_bytes:
+        raise MemoryInvariantError("exact L2 units do not tile their bank reserve")
+    if sum(segment.size_bytes for segment in units) != sum(
+      segment.size_bytes for segment in reserve
+    ):
+      raise MemoryInvariantError("exact L2 units do not conserve the arena reservation")
+
+  def has_inflight_references(self, handle: AllocationHandle) -> bool:
+    """Physical reference ledger: accepted transactions still hold this view.
+
+    Checks BOTH the view record and its physical backing record, and
+    invariant-checks that the mirrored sets agree.  Unlike
+    ``TransferManager.has_inflight_access`` (which classifies only
+    non-terminal transactions), this sees DONE/CANCELLED transfers that are
+    terminal but not yet acknowledged — exactly the references only an
+    acknowledgement can drop.
+    """
+    record = self._view_record(handle)
+    backing = self._backings.get(handle.backing_id) if handle.backing_id else None
+    if backing is not None and backing.view_allocation_id != handle.allocation_id:
+      raise MemoryInvariantError("view and backing records disagree on binding")
+    if backing is not None and record.inflight != backing.inflight:
+      # Private phase: the two ledgers are exact mirrors of one physical
+      # reference set.  Any divergence is an invariant fault.
+      raise MemoryInvariantError("view and backing inflight ledgers disagree")
+    return bool(record.inflight) or (backing is not None and bool(backing.inflight))
+
+  def live_backing_ids(self) -> list[str]:
+    """Concrete IDs of every physically held backing (leak reporting)."""
+    return sorted(
+      backing_id
+      for backing_id, backing in self._backings.items()
+      if backing.state == _BackingState.LIVE
+    )
+
+  def _try_release_l2_backing(self, backing_id: str, cycle: int) -> bool:
+    """Unique private backing final-free (plan/01 §2.5).
+
+    Returns the backing's complete padded units to the L2 free map only when
+    every private reference is revoked and no pin or accepted transaction
+    remains.  Any other state keeps the backing and the free map untouched.
+    """
+    backing = self._backings.get(backing_id)
+    if backing is None or backing.state != _BackingState.LIVE:
+      return False
+    if backing.pins or backing.inflight:
+      return False
+    if backing.view_allocation_id is not None:
+      view = self._views.get(backing.view_allocation_id)
+      if view is None or view.state != _ViewState.INVALIDATED:
+        return False
+    self._extents.release_exact(self._extents.pool_version, backing.units, cycle)
+    backing.state = _BackingState.RELEASED
+    backing.release_cycle = cycle
+    self._arena_reserved_bytes -= backing.padded_bytes
+    self._pool_version += 1
+    self._emit_trace(cycle)
+    event = {
+      **backing.snapshot(),
+      "run_generation": self.run_generation,
+      "pool_version": self._pool_version,
+      "extent_pool_version": self._extents.pool_version,
+      "per_bank_segments": [
+        {"bank_id": segment.bank_id, "address": segment.address, "size_bytes": segment.size_bytes}
+        for segment in backing.units
+      ],
+    }
+    self._backing_release_events.append(event)
+    if self._trace is not None:
+      self._trace.l2_extent_release(self.tile_id, backing, self.snapshot(), event, cycle)
+    return True
+
+  def drain_l2_backing_release_events(self) -> list[dict]:
+    """Return and clear physical final-free events for the occupancy mirror."""
+    if not self._backing_release_events:
+      return []
+    events = self._backing_release_events
+    self._backing_release_events = []
+    return events
+
+  def arena_held_bytes(self, arena: ArenaHandle) -> int:
+    """Bytes of the arena reservation still physically held by this root."""
+    record = self._arena_record(arena)
+    released = sum(
+      backing.padded_bytes
+      for backing in record.backings.values()
+      if backing.state == _BackingState.RELEASED
+    )
+    return arena.reserved_bytes - released
+
   # -- deterministic observability -------------------------------------
 
   def snapshot(self) -> dict:
-    """Return deterministic pool, arena, view and per-bank counters."""
+    """Return deterministic pool, arena, backing, view and per-bank counters.
+
+    ``reserved/allocated`` count physically held bytes: unique live padded
+    backings plus root-held arena slack.  ``live_view_bytes`` separately
+    reports valid logical view bytes.  Per bank,
+    ``allocated_bytes + free_bytes == user_spm_per_bank`` always holds.
+    """
     profile = self.profile
     reserved_by_bank = [0] * self.banks
-    padding_by_bank = [0] * self.banks
     live_by_bank = [0] * self.banks
     live_arena_records = [record for record in self._arenas.values() if record.state != _ArenaState.RETIRED]
     for arena_record in live_arena_records:
-      reserve_by_bank = {segment.bank_id: segment for segment in arena_record.handle.reserve}
-      for bank_id, reserve in reserve_by_bank.items():
-        reserved_by_bank[bank_id] += reserve.size_bytes
-        static_ranges: list[tuple[int, int]] = []
-        for layout in arena_record.handle.layout.buffer_layouts:
-          for layout_bank, offset, size in layout.segments():
-            if layout_bank == bank_id and size:
-              static_ranges.append((offset, offset + size))
-        static_bytes = self._union_size(static_ranges)
-        padding_by_bank[bank_id] += reserve.size_bytes - static_bytes
+      held_units: list[BankSegment] = list(arena_record.slack_units)
+      for backing in arena_record.backings.values():
+        if backing.state == _BackingState.LIVE:
+          held_units.extend(backing.units)
+      for segment in held_units:
+        reserved_by_bank[segment.bank_id] += segment.size_bytes
       for allocation_id in arena_record.views.values():
         view_record = self._views[allocation_id]
         if view_record.state == _ViewState.INVALIDATED:
@@ -587,7 +913,7 @@ class ArenaPool:
           "arena_reserved_bytes": reserved_by_bank[bank_id],
           "allocated_bytes": reserved_by_bank[bank_id],
           "live_view_bytes": live_by_bank[bank_id],
-          "padding_bytes": padding_by_bank[bank_id],
+          "padding_bytes": reserved_by_bank[bank_id] - live_by_bank[bank_id],
           "free_bytes": free_bytes,
           "largest_free_extent": largest_extent,
         }
@@ -600,11 +926,15 @@ class ArenaPool:
         "arena_id": record.handle.arena_id,
         "owner": repr(record.handle.owner),
         "state": record.state,
-        "reserved_bytes": record.handle.reserved_bytes,
+        "reserved_bytes": self.arena_held_bytes(record.handle),
+        "initial_reserved_bytes": record.handle.reserved_bytes,
         "task_metadata": record.task_metadata,
         "live_views": sum(
           self._views[allocation_id].state != _ViewState.INVALIDATED
           for allocation_id in record.views.values()
+        ),
+        "live_backings": sum(
+          backing.state == _BackingState.LIVE for backing in record.backings.values()
         ),
       }
       for record in sorted(self._arenas.values(), key=lambda item: item.handle.arena_id)
@@ -631,7 +961,10 @@ class ArenaPool:
       "peak_allocated_bytes": self._peak_arena_reserved_bytes,
       "live_view_bytes": self._live_view_bytes(),
       "peak_live_view_bytes": self._peak_live_view_bytes,
-      "padding_bytes": sum(padding_by_bank),
+      "padding_bytes": sum(reserved_by_bank[bank] - live_by_bank[bank] for bank in range(self.banks)),
+      "live_backings": sum(
+        backing.state == _BackingState.LIVE for backing in self._backings.values()
+      ),
       "live_arenas": len(live_arena_records),
       "live_allocations": len(live_arena_records),
       "zero_byte_arenas": sum(record.handle.reserved_bytes == 0 for record in live_arena_records),
@@ -837,32 +1170,21 @@ class ArenaPool:
       raise MemoryInvariantError("double release")
     record.state = _ViewState.INVALIDATED
     record.invalidate_cycle = cycle
-    # Deliberately no free-map or pool-version mutation here.
+    # Deliberately no free-map or pool-version mutation here; the L2 backing
+    # finalizer (when its last reference drains) is the only free-map writer.
+    backing = (
+      self._backings.get(record.handle.backing_id) if record.handle.backing_id else None
+    )
     self._emit_trace(cycle)
     if self._trace is not None:
       self._trace.buffer_view_invalidate(
-        self.memory_space, self.tile_id, record.handle, self.snapshot(), cycle
+        self.memory_space, self.tile_id, record.handle, self.snapshot(), cycle, backing=backing
       )
 
   def _live_view_bytes(self) -> int:
     return sum(
       record.handle.size_bytes for record in self._views.values() if record.state != _ViewState.INVALIDATED
     )
-
-  @staticmethod
-  def _union_size(ranges: list[tuple[int, int]]) -> int:
-    if not ranges:
-      return 0
-    ordered = sorted(ranges)
-    start, end = ordered[0]
-    total = 0
-    for next_start, next_end in ordered[1:]:
-      if next_start <= end:
-        end = max(end, next_end)
-      else:
-        total += end - start
-        start, end = next_start, next_end
-    return total + end - start
 
   def _emit_trace(self, cycle: int) -> None:
     if self._trace is None:

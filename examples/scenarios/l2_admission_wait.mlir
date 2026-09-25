@@ -23,10 +23,13 @@
 //
 // NOTE: the admission wait only triggers when L2 capacity is exactly
 // exhausted. The required --hw-config examples/configs/profile_l2_256k.yaml
-// (user L2 = 262144 B = 2 x 131072; physical = 327680 B) and
-// --sim-override fidelity=full_memory are load-bearing; with a larger
-// default L2 or runtime-only fidelity, both contexts admit immediately
-// and run concurrently without any wait.
+// (user L2 = 262144 B = 2 x 131072) is load-bearing; with a larger default
+// L2 both contexts admit immediately and run concurrently without any wait.
+// The release-driven contract above is fidelity-independent: the exact
+// same-cycle wakeup (B's port active_cycle == a_input l2_extent_release
+// cycle, B's prefetch overlapping A's EVU:pow) is regression-proven in BOTH
+// runtime and full_memory fidelities
+// (pipeline_validator/tests/test_runtime.py::TestRootArenaAdmission).
 builtin.module {
   tile.program @prog_a(
     %task: !nest.task, %in_buf: !nest.l2_buffer<4x128x128xbf16>,

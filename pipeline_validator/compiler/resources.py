@@ -131,6 +131,14 @@ def layout_buffers(
     raise ValueError(
       f"resource contract {reserved_bytes} does not cover {high_water} bytes of layout and padding"
     )
+  if lifetimes is None:
+    # No-rebind layout: distinct buffers must own disjoint padded spans.
+    for index, left in enumerate(layouts):
+      for right in layouts[index + 1 :]:
+        if _segments_overlap(left, right):
+          raise ValueError(
+            f"no-rebind layout overlaps padded spans of {left.buffer_id!r} and {right.buffer_id!r}"
+          )
   per_bank = tuple(reserved_bytes // profile.banks for _ in range(profile.banks))
   layout = ArenaLayout(stripe, stripe, reserved_bytes, per_bank, tuple(layouts), "")
   layout = replace(layout, layout_hash=digest(layout))
@@ -305,36 +313,6 @@ def _tile_lifetimes(program: ExecTileProgram) -> dict[str, tuple[int, int]]:
   return {name: (starts[name], ends.get(name, len(program.insts))) for name in expected}
 
 
-def _l2_lifetimes(task: ExecTileGroupTask) -> dict[str, tuple[int, int]]:
-  """Retirement-based L2 liveness.
-
-  A released L2 view is only reusable after a retirement fence (``nest.barrier``
-  → BARRIER_GROUP) has dominated its release.  Without that proof the view
-  stays live to the end of the Context so the striped layout never overlaps
-  two regions a ready-action scheduler could overtake.
-  """
-  starts: dict[str, int] = {}
-  releases: dict[str, int] = {}
-  barriers: list[int] = []
-  for index, action in enumerate(task.actions):
-    if action.op is ExecGroupActionOp.BIND_L2_VIEW:
-      starts[action.args[0]] = index
-    elif action.op is ExecGroupActionOp.RELEASE_L2:
-      releases[action.args[0].buffer_slot] = index
-    elif action.op is ExecGroupActionOp.BARRIER_GROUP:
-      barriers.append(index)
-  expected = {buffer.slot for buffer in task.l2_buffers}
-  if set(starts) != expected or set(releases) != expected:
-    raise ValueError(f"Context {task.name!r} has incomplete L2 allocation lifetimes")
-  lifetimes: dict[str, tuple[int, int]] = {}
-  for slot in expected:
-    release = releases[slot]
-    retire = next((barrier for barrier in barriers if barrier > release), None)
-    end = retire + 1 if retire is not None else len(task.actions)
-    lifetimes[slot] = (starts[slot], end)
-  return lifetimes
-
-
 def _segments_overlap(left: BufferLayout, right: BufferLayout) -> bool:
   for left_bank, left_start, left_size in left.segments():
     for right_bank, right_start, right_size in right.segments():
@@ -345,50 +323,6 @@ def _segments_overlap(left: BufferLayout, right: BufferLayout) -> bool:
       ):
         return True
   return False
-
-
-def _l2_reuse_pairs(
-  layout: ArenaLayout, lifetimes: Mapping[str, tuple[int, int]]
-) -> dict[str, tuple[str, ...]]:
-  items = list(layout.buffer_layouts)
-  pairs: dict[str, tuple[str, ...]] = {}
-  for current in items:
-    start = lifetimes[current.buffer_id][0]
-    prior_slots: list[str] = []
-    for prior in items:
-      if prior.buffer_id == current.buffer_id:
-        break
-      if lifetimes[prior.buffer_id][1] <= start and _segments_overlap(prior, current):
-        prior_slots.append(prior.buffer_id)
-    if prior_slots:
-      pairs[current.buffer_id] = tuple(prior_slots)
-  return pairs
-
-
-def _apply_l2_reuse(
-  task: ExecTileGroupTask, layout: ArenaLayout, lifetimes: Mapping[str, tuple[int, int]]
-) -> ExecTileGroupTask:
-  """Bind every reused region to the exact prior release completion events."""
-  pairs = _l2_reuse_pairs(layout, lifetimes)
-  if not pairs:
-    return task
-  release_events: dict[str, str] = {}
-  for action in task.actions:
-    if action.op is ExecGroupActionOp.RELEASE_L2:
-      if not action.dst:
-        raise ValueError("L2 release lacks a retirement completion event")
-      release_events[action.args[0].buffer_slot] = action.dst
-  actions: list = []
-  for action in task.actions:
-    if action.op is ExecGroupActionOp.BIND_L2_VIEW:
-      prior_slots = pairs.get(action.args[0])
-      if prior_slots:
-        dependencies = [release_events[slot] for slot in prior_slots if release_events.get(slot)]
-        if len(dependencies) != len(prior_slots):
-          raise ValueError(f"reused L2 region {action.args[0]!r} has no prior release event")
-        action = replace(action, dependencies=tuple(sorted({*action.dependencies, *dependencies})))
-    actions.append(action)
-  return replace(task, actions=tuple(actions))
 
 
 def _prepare_program(
@@ -581,14 +515,31 @@ def prepare_resources(
         f"Context {task.name!r} declares logical_tasks={contract.logical_tasks}, "
         f"executable dispatches use {logical_tasks}"
       )
-    l2_lifetimes = _l2_lifetimes(task)
+    # L2 layout is permanently no-rebind: every local buffer owns an
+    # independent, non-overlapping stripe-rounded padded span for the whole
+    # Context.  When that raises the high-water above the source resource
+    # declaration, the executable contract is corrected to the existing
+    # conservative no-reuse result before the normal per-profile validation.
+    conservative_bytes = [
+      (buffer.bytes, buffer.alignment) for buffer in task.l2_buffers
+    ]
+    required_reserved = max(
+      (
+        conservative_arena_bytes(conservative_bytes, registry.profile("l2", mode))
+        for mode in contract.allowed_profiles
+      ),
+      default=0,
+    )
+    if required_reserved > contract.l2_spm_bytes:
+      contract = replace(contract, l2_spm_bytes=required_reserved)
+      task = replace(task, resource_contract=contract)
     l2_layout = allowed_layouts(
       task.l2_buffers,
       registry,
       "l2",
       contract.allowed_profiles,
       contract.l2_spm_bytes,
-      lifetimes=l2_lifetimes,
+      lifetimes=None,
       slot_capacity=max(1, len(task.l2_buffers)),
     )
     for l2_mode in contract.allowed_profiles:
@@ -599,7 +550,6 @@ def prepare_resources(
         bypass_needed=False,
         required_needed=False,
       )
-    task = _apply_l2_reuse(task, l2_layout, l2_lifetimes)
     program_cache: dict[int, ExecTileProgram] = {}
     roles: dict[int, ExecTileRoleBinding] = {}
     envelopes: dict[int, list[int]] = {}

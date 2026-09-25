@@ -243,6 +243,8 @@ class TileGroup:
       trace=self.memory_trace,
       byte_store=byte_store,
       generation_validator=self.validate_transaction_generation,
+      reference_acquire=self._acquire_l2_transaction_references,
+      reference_release=self._release_l2_transaction_references,
     )
     l2_profile = self.registry.profile("l2", cfg.memory_target.l2.reset_mode)
     self.l2_cache = DeterministicLRUCache(
@@ -312,6 +314,9 @@ class TileGroup:
     self._pending_context_admissions: deque[_PendingContextAdmission] = deque()
     self._pending_activations: list[_PendingContextAdmission] = []
     self._l2_capacity_change_cycle: int | None = None
+    # Set only when post-cap/fault isolation cannot be proven; cleared solely
+    # by an explicit quiescent reset() (plan/01 §4.4).
+    self.poisoned_reason: str | None = None
     self._last_retried_pool_version: int = -1
     self._last_retried_capacity_change_cycle: int = -1
     self._last_retried_event_version: int = self.event_table.version
@@ -339,6 +344,56 @@ class TileGroup:
       byte_store.register_cache("l2", 0, self.l2_cache)
       for tile in self.tiles:
         byte_store.register_cache("l1", tile.tile_id, tile.l1_cache)
+
+  def _acquire_l2_transaction_references(self, transaction, cycle: int) -> None:
+    """Atomically register one accepted transaction per L2 endpoint view.
+
+    Deduplicates views by allocation identity; each registration also
+    reaches the physical backing record.  Any failure rolls back every
+    registration performed here so a rejected transaction holds nothing.
+    """
+    views = (transaction.src, transaction.dst)
+    handles: list[AllocationHandle] = []
+    seen: set[str] = set()
+    try:
+      for view in views:
+        if view is None or view.handle.memory_space != "l2":
+          continue
+        handle = view.handle
+        if handle.allocation_id in seen:
+          continue
+        seen.add(handle.allocation_id)
+        self.l2_sram.begin_inflight(handle, transaction.transaction_id)
+        handles.append(handle)
+    except Exception:
+      # Partial acquisition must not leak earlier references.
+      self._rollback_l2_references(handles, transaction.transaction_id, cycle)
+      raise
+    if len(handles) != len(seen):
+      self._rollback_l2_references(handles, transaction.transaction_id, cycle)
+      raise MemoryInvariantError("L2 reference acquisition saw duplicate endpoint identities")
+
+  def _rollback_l2_references(
+    self, handles: list[AllocationHandle], transaction_id: str, cycle: int
+  ) -> None:
+    for handle in handles:
+      if not self.l2_sram.is_released(handle):
+        self.l2_sram.end_inflight(handle, transaction_id, cycle)
+    self._sync_l2_pool_mirror(cycle)
+
+  def _release_l2_transaction_references(self, transaction, cycle: int) -> None:
+    """Release every L2 view reference at terminal acknowledgement."""
+    seen: set[str] = set()
+    for view in (transaction.src, transaction.dst):
+      if view is None or view.handle.memory_space != "l2":
+        continue
+      handle = view.handle
+      if handle.allocation_id in seen:
+        continue
+      seen.add(handle.allocation_id)
+      if not self.l2_sram.is_released(handle):
+        self.l2_sram.end_inflight(handle, transaction.transaction_id, cycle)
+    self._sync_l2_pool_mirror(cycle)
 
   def validate_transaction_generation(self, transaction, phase: str) -> bool:
     """Check the actual touching domains and only the endpoint used in this leg."""
@@ -419,6 +474,85 @@ class TileGroup:
     self.tracer.counter_if_changed(
       "TileGroup", "group_l2_live_bytes", cycle, self._l2_live_bytes, "bytes", thread="Scheduler:L2"
     )
+
+  def _sync_l2_pool_mirror(self, cycle: int) -> int:
+    """Apply physical backing final-free events to occupancy accounting.
+
+    Each event is a real L2 free-map mutation: reserved bytes drop by the
+    backing's padded bytes and the capacity-change cycle moves to the release
+    cycle so same-profile FIFO admission retries see the new pool version.
+    """
+    drained = 0
+    for event in self.l2_sram.drain_l2_backing_release_events():
+      drained += event["padded_bytes"]
+      self._l2_reserved_bytes -= event["padded_bytes"]
+      self._l2_capacity_change_cycle = event["release_cycle"]
+      self._record_l2_occupancy(event["release_cycle"])
+    return drained
+
+  def assert_private_l2_closed(self) -> str | None:
+    """Success-exit private closure proof (plan/01 §4.3).
+
+    Returns a concrete violation description, or ``None`` when no live
+    private backing, slack, view, pin or accepted transaction remains and
+    the free map conserves every bank of the user SPM interval.
+    """
+    snapshot = self.l2_sram.snapshot()
+    if (
+      snapshot["live_backings"]
+      or snapshot["live_arenas"]
+      or snapshot["live_views"]
+      or snapshot["arena_reserved_bytes"]
+    ):
+      return (
+        f"live L2 objects remain: backings={snapshot['live_backings']}"
+        f" {self.l2_sram.live_backing_ids()} arenas={snapshot['live_arenas']}"
+        f" views={snapshot['live_views']} reserved_bytes={snapshot['arena_reserved_bytes']}"
+      )
+    if snapshot["pending_release"] or snapshot["pin_count"] or snapshot["inflight_count"]:
+      return (
+        f"L2 references remain: pending={snapshot['pending_release']}"
+        f" pins={snapshot['pin_count']} inflight={snapshot['inflight_count']}"
+      )
+    outstanding = self.transfer_manager.outstanding_transactions
+    if outstanding:
+      return f"accepted transfers remain unacknowledged: {sorted(outstanding)[:8]}"
+    profile = self.l2_sram.profile
+    for bank in snapshot["per_bank_occupancy"]:
+      if bank["allocated_bytes"] + bank["free_bytes"] != profile.user_spm_per_bank:
+        return (
+          f"bank {bank['bank_id']} conservation failed:"
+          f" {bank['allocated_bytes']} allocated + {bank['free_bytes']} free"
+          f" != {profile.user_spm_per_bank} user SPM bytes"
+        )
+    return None
+
+  def unclosed_l2_objects(self) -> list[str]:
+    """Concrete IDs of every reachable, unisolated private L2 object."""
+    details: list[str] = []
+    snapshot = self.l2_sram.snapshot()
+    if snapshot["live_backings"]:
+      details.append(f"live_backings={snapshot['live_backings']}")
+    if snapshot["live_arenas"]:
+      details.append(f"live_arenas={snapshot['live_arenas']}")
+    if snapshot["live_views"]:
+      details.append(f"live_views={snapshot['live_views']}")
+    if snapshot["arena_reserved_bytes"]:
+      details.append(f"reserved_bytes={snapshot['arena_reserved_bytes']}")
+    if snapshot["pin_count"]:
+      details.append(f"pins={snapshot['pin_count']}")
+    if snapshot["inflight_count"]:
+      details.append(f"inflight={snapshot['inflight_count']}")
+    outstanding = self.transfer_manager.outstanding_transactions
+    if outstanding:
+      details.append(f"unacknowledged={sorted(outstanding)[:8]}")
+    if snapshot["live_backings"]:
+      details.append(f"live_backing_ids={self.l2_sram.live_backing_ids()}")
+    return details
+
+  def poison(self, reason: str) -> None:
+    """Mark this TileGroup unusable for further launches (plan/01 §4.4)."""
+    self.poisoned_reason = reason
 
   @staticmethod
   def _group_transfer_trace_direction(op: TransferOp) -> str:
@@ -699,6 +833,13 @@ class TileGroup:
 
       if self.transfer_manager.has_inflight_access(handle):
         raise MemoryInvariantError(f"release of slot '{slot}' has an in-flight transfer")
+      if self.l2_sram.has_inflight_references(handle):
+        # Physical reference ledger: a terminal-but-unacknowledged transfer
+        # still holds this view and only an acknowledgement can drop it.
+        # Raising here keeps the whole release read-only (plan/01 §2.4).
+        raise MemoryInvariantError(
+          f"release of slot '{slot}' is blocked by an unacknowledged transfer reference"
+        )
 
     for grid, task_id, slot_pins, pin in writer_pins:
       self.l2_sram.unpin(pin.handle, pin.consumer_id, cycle)
@@ -717,6 +858,7 @@ class TileGroup:
       if (gen, slot) in self._protocol_live_l2:
         self._l2_live_bytes -= handle.size_bytes
       self._record_l2_occupancy(cycle)
+      self._sync_l2_pool_mirror(cycle)
 
     roles.pop(slot)
     self._protocol_live_l2.discard((gen, slot))
@@ -850,6 +992,12 @@ class TileGroup:
       or self.transfer_manager.cancellation_pending
     ):
       return False
+    # plan/01 §4.1: terminal transfers release their view/backing references
+    # at acknowledgement BEFORE view invalidation; the reverse order deadlocks
+    # release-pending views on references only an ack can drop.  The drain
+    # gate above plus engine accepted_count==0 guarantee no owner job will
+    # re-acknowledge these records.
+    self.transfer_manager.acknowledge_all_terminals(cycle)
     self._unwind_grid_l2_pins(cycle)
     for route in tuple(self._grid_routes.values()):
       for tile_id, admission in tuple(route.admissions.items()):
@@ -879,12 +1027,19 @@ class TileGroup:
         if not self.l2_sram.invalidate_view(handle, handle.owner, cycle):
           return False
       del self._l2_handles[key]
+    # Every view above is invalidated: protocol-live bytes are gone before the
+    # physical final-free drops reserved bytes.
+    self._l2_live_bytes = 0
+    self._protocol_live_l2.clear()
+    self._sync_l2_pool_mirror(cycle)
+    self._record_l2_occupancy(cycle)
     for generation, arena in tuple(self._l2_arenas.items()):
+      held = self.l2_sram.arena_held_bytes(arena)
       if not self.l2_sram.retire_arena(arena, cycle):
         return False
+      residual = self._sync_l2_pool_mirror(cycle)
       del self._l2_arenas[generation]
-      self._l2_reserved_bytes -= arena.reserved_bytes
-    self._l2_live_bytes = 0
+      self._l2_reserved_bytes -= held - residual
     self._record_l2_occupancy(cycle)
     self._txn_sequencer.clear()
     self.scheduler.abort_inflight(cycle)
@@ -900,7 +1055,7 @@ class TileGroup:
     self._l2_roles.clear()
     for tile in self.tiles:
       tile.reset()
-    self.transfer_manager.acknowledge_all_terminals()
+    self.transfer_manager.acknowledge_all_terminals(cycle)
     return True
 
   def schedule_collective(
@@ -1136,6 +1291,7 @@ class TileGroup:
       self.l2_sram.unpin(pin.handle, pin.consumer_id, cycle)
     if not grid_pins:
       self._grid_l2_pins.pop(task.grid)
+    self._sync_l2_pool_mirror(cycle)
 
   def _trace_task_lease(
     self, event: str, route: _GridRoute, task: TaskIdentity, tile_id: int, cycle: int
@@ -1311,10 +1467,12 @@ class TileGroup:
     arena = self._l2_arenas.get(generation)
     if arena is None:
       return True
+    held = self.l2_sram.arena_held_bytes(arena)
     if not self.l2_sram.retire_arena(arena, cycle):
       return False
+    residual = self._sync_l2_pool_mirror(cycle)
     del self._l2_arenas[generation]
-    self._l2_reserved_bytes -= arena.reserved_bytes
+    self._l2_reserved_bytes -= held - residual
     self._l2_capacity_change_cycle = cycle
     self._record_l2_occupancy(cycle)
     return True
@@ -1391,7 +1549,7 @@ class TileGroup:
           },
           category=category,
         )
-      self.transfer_manager.acknowledge(txn.transaction_id)
+      self.transfer_manager.acknowledge(txn.transaction_id, cycle)
 
   def _step_collectives(self, cycle: int) -> None:
     tr = self.tracer
@@ -1690,6 +1848,8 @@ class TileGroup:
 
   def begin_launch(self, program, bindings) -> None:
     """Clear retired launch bookkeeping; never reset profiles, Cache or residency."""
+    if self.poisoned_reason is not None:
+      raise MemoryInvariantError(f"TileGroup is poisoned and rejects new launches: {self.poisoned_reason}")
     if (
       self._active_sequencers
       or self._grid_routes
@@ -1701,6 +1861,7 @@ class TileGroup:
       raise MemoryInvariantError("previous launch has not retired")
     self.loaded_program = program
     self.run_generation += 1
+    self.l2_sram.run_generation = self.run_generation
     self.profile_controller.begin_run(self.run_generation)
     self.transfer_manager.begin_run(self.run_generation)
     self.scheduler.reset()
@@ -1775,6 +1936,10 @@ class TileGroup:
     cycle: int = 0,
   ) -> TileGroupSequencer | None:
     """Commit Slot-independent root resources only when the entire plan fits."""
+    if self.poisoned_reason is not None:
+      raise MemoryInvariantError(
+        f"TileGroup is poisoned and rejects context admission: {self.poisoned_reason}"
+      )
     self.last_admission_wait = None
     if self.loaded_program is None or task.layout is None:
       raise ValueError("Group requires a loaded compiled Context")
@@ -1872,6 +2037,11 @@ class TileGroup:
       or self._pending_root_requests
     ):
       raise MemoryInvariantError("explicit reset requires retired or isolated work")
+    if self.reset_domain.is_active:
+      raise MemoryInvariantError("explicit reset requires a completed reset drain")
+    residual = self.unclosed_l2_objects()
+    if residual:
+      raise MemoryInvariantError(f"explicit reset requires physical L2 safety, found {residual}")
     cycle = self._last_step_cycle + 1
     self.profile_controller.recover(cycle)
     deadline = cycle + self.cfg.memory_target.profile_command_timeout_cycles
@@ -1887,6 +2057,7 @@ class TileGroup:
     self.program_table.invalidate_group()
     self.reset_domain.reset()
     self.fault_ring.reset()
+    self.poisoned_reason = None
     self._last_step_cycle = cycle
 
   # ---- inspection -----------------------------------------------------

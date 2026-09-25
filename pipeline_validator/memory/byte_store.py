@@ -78,6 +78,10 @@ class ByteStore:
     if handle.memory_space == "hbm":
       return "hbm"
     profile_generation = getattr(handle, "profile_generation", None)
+    if handle.memory_space == "l2":
+      # Physical identity: producer bytes stay readable through view ownership
+      # changes because the domain keys on the backing, not the logical view.
+      return f"l2:{handle.backing_id}:{handle.generation}:{profile_generation}"
     return f"{handle.memory_space}:{handle.allocation_id}:{handle.generation}:{profile_generation}"
 
   def _write(self, domain: str, address: int, data: bytes) -> None:

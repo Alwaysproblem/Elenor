@@ -717,6 +717,7 @@ class MemoryTrace:
       "allocation_id": handle.allocation_id,
       "owner_kind": type(owner).__name__,
       "buffer_id": getattr(owner, "buffer_id", getattr(owner, "binding_name", "")),
+      "backing_id": getattr(handle, "backing_id", ""),
       "generation": handle.generation,
       "base_address": handle.base_address,
       "size_bytes": handle.size_bytes,
@@ -982,18 +983,48 @@ class MemoryTrace:
     self._pool_snapshot(space, tile_id, snapshot, cycle)
 
   def buffer_view_invalidate(
-    self, space: str, tile_id: int | None, view, snapshot: dict, cycle: int
+    self, space: str, tile_id: int | None, view, snapshot: dict, cycle: int, backing=None
   ) -> None:
-    """Record final view invalidation without implying Arena capacity release."""
+    """Record final view invalidation without implying Arena capacity release.
+
+    ``backing`` (an ``_L2BackingRecord`` or None) carries the view's physical
+    backing ID and its current lifecycle state (plan/01 §5).
+    """
     track = self._space_lane(space, tile_id)[0]
+    args = self._view_args(view, snapshot)
+    if backing is not None:
+      args["backing_id"] = backing.backing_id
+      args["backing_state"] = backing.state
+      args["backing_pinned"] = len(backing.pins)
+      args["backing_inflight"] = len(backing.inflight)
     self.tracer.instant(
       track,
       f"Memory:{space.upper()} Arena",
       "buffer_view_invalidate",
       cycle,
-      self._view_args(view, snapshot),
+      args,
     )
     self._pool_snapshot(space, tile_id, snapshot, cycle)
+
+  def l2_extent_release(
+    self, tile_id: int | None, backing, snapshot: dict, event: dict, cycle: int
+  ) -> None:
+    """Record one real physical backing final-free with post-mutation state."""
+    track = self._space_lane("l2", tile_id)[0]
+    thread = "Memory:L2 Arena"
+    args = {
+      **event,
+      "pool_id": snapshot.get("pool_id"),
+      "tile_id": snapshot.get("tile_id"),
+      "pool_reserved_bytes": snapshot.get("arena_reserved_bytes"),
+      "pool_free_bytes": snapshot.get("free_bytes"),
+      "pool_live_backings": snapshot.get("live_backings"),
+    }
+    self.tracer.instant(track, thread, "l2_extent_release", cycle, args)
+    self.tracer.complete(
+      track, thread, "l2_backing_lifetime", backing.commit_cycle, cycle, dict(args)
+    )
+    self._pool_snapshot("l2", tile_id, snapshot, cycle)
 
   # -- profile controller protocol -------------------------------------
 
