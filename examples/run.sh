@@ -57,6 +57,8 @@ Protocol scenarios:
   sequential-release-counterexample
                                  scenarios/sequential_release_counterexample.mlir
   profile-reconfiguration         scenarios/profile_reconfiguration.mlir
+  l2-profile-switch-load-ordering
+                                 scenarios/l2_profile_switch_load_ordering.mlir
 EOF
   printf '\nNEST subgraphs (timing/lifetime, not tensor numerics):\n'
   local model stem
@@ -358,6 +360,21 @@ case "$name" in
       --device-context-mode 1 \
       --hw-override hbm_fixed_latency_cycles=10 \
       --max-cycles 500000 \
+      "$@"
+    ;;
+
+  l2-profile-switch-load-ordering)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/scenarios/l2_profile_switch_load_ordering.mlir" \
+      --hw-config "$ROOT_DIR/examples/configs/profile_l2_switch.yaml" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --context-mode 2 \
+      --device-context-mode 2 \
+      --input-binding A_IN=0x100000:131072:r \
+      --input-binding A_OUT=0x200000:131072:rw \
+      --input-binding B_IN=0x300000:131072:r \
+      --max-cycles 300000 \
       "$@"
     ;;
   file)

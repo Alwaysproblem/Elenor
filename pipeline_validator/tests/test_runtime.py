@@ -3653,3 +3653,112 @@ class TestSuccessExitClosure:
     assert group.reset_domain.is_done
     assert group.poisoned_reason is None
     assert original() is None
+
+
+class TestL2ProfileSwitchOrdering:
+  """plan TODO / batch-III seed: a cross-profile successor's first load is
+  NOT pulled forward to the predecessor's early input release; it waits for
+  the completed L2 profile switch whose frontier is the predecessor's HBM
+  store and completion (demonstrated with NO source-level await)."""
+
+  BINDINGS: ClassVar[dict[str, GlobalBinding]] = {
+    "A_IN": GlobalBinding("A_IN", 0x100000, 131072, "r"),
+    "A_OUT": GlobalBinding("A_OUT", 0x200000, 131072, "rw"),
+    "B_IN": GlobalBinding("B_IN", 0x300000, 131072, "r"),
+  }
+
+  @pytest.mark.parametrize("fidelity", ["runtime", "full_memory"])
+  def test_cross_profile_load_waits_for_switch_not_release(self, fidelity):
+    root = Path(__file__).resolve().parents[2]
+    hw = HardwareConfig.from_yaml(root / "examples/configs/profile_l2_switch.yaml").with_overrides(
+      num_dma_channels=2, hbm_fixed_latency_cycles=10
+    )
+    sim_config = SimConfig(
+      fidelity=fidelity, device_context_count=2, memory_trace=True, max_cycles=300000
+    )
+    simulator = Simulator(hw, sim_config, enable_tracer=True)
+    module = load_workload_ir(root / "examples/scenarios/l2_profile_switch_load_ordering.mlir")
+    result = run_source(simulator, module, self.BINDINGS)
+    assert result.completed, result.reason
+
+    ports = {record["context"]: record for record in result.device_snapshot["port"]["request_records"]}
+    trace = json.loads(result.tracer.to_chrome_json())["traceEvents"]
+    to_cycle = lambda event: round(event["ts"] * 1000.0 / hw.cycle_ns())
+
+    releases = [
+      event
+      for event in trace
+      if event.get("name") == "l2_extent_release"
+      and event.get("args", {}).get("buffer_id") == "a_input"
+    ]
+    assert len(releases) == 1
+    release_cycle = releases[0]["args"]["release_cycle"]
+
+    # A's HBM store completion: last leg of the global_store transaction.
+    store_legs = [
+      (to_cycle(event), to_cycle(event) + max(round(event["dur"] * 1000.0), 1))
+      for event in trace
+      if event.get("ph") == "X" and event.get("args", {}).get("op") == "global_store"
+    ]
+    assert store_legs
+    store_done = max(end for _, end in store_legs)
+
+    # The compiler-generated L2 0->1 switch: args carry real cycles.
+    switches = [
+      event
+      for event in trace
+      if event.get("name") == "profile_command"
+      and event.get("args", {}).get("level") == "l2"
+      and event.get("args", {}).get("status") == "completed"
+      and event.get("ph") == "X"
+    ]
+    assert switches, "no completed L2 profile command in trace"
+    switch = max(switches, key=lambda event: event["args"]["completed_cycle"])
+    switch_start = switch["args"]["accepted_cycle"]
+    switch_end = switch["args"]["completed_cycle"]
+    assert switch_end > switch_start
+
+    prefetch_legs = [
+      to_cycle(event)
+      for event in trace
+      if event.get("ph") == "X"
+      and str(event.get("args", {}).get("transaction_id", "")).endswith("ev_pref_b")
+    ]
+    assert prefetch_legs
+    first_prefetch = min(prefetch_legs)
+    # B's first L2->L1 tile load after its prefetch.
+    tile_loads = [
+      to_cycle(event)
+      for event in trace
+      if event.get("ph") == "X"
+      and event.get("args", {}).get("op") == "tile_load"
+      and to_cycle(event) >= first_prefetch
+    ]
+    assert tile_loads
+    tile_load = min(tile_loads)
+
+    completion = ports["ctx_a"]["completion_cycle"]
+    admit = ports["ctx_b"]["active_cycle"]
+    # The full requested chain, in cycles:
+    #   release < store_done <= A_done <= switch_start < switch_end
+    #   <= B_admit < prefetch <= B tile_load
+    assert release_cycle < store_done
+    assert store_done <= completion
+    assert completion <= switch_start
+    assert switch_start < switch_end
+    assert switch_end <= admit
+    assert admit < first_prefetch
+    assert first_prefetch <= tile_load
+
+    # ctx_b held no L2 arena before the switch completed.
+    b_reserves = [
+      to_cycle(event)
+      for event in trace
+      if event.get("name") == "arena_reserve"
+      and event.get("args", {}).get("space") == "l2"
+      and event.get("args", {}).get("context_name") == "ctx_b"
+    ]
+    assert b_reserves and min(b_reserves) >= switch_end
+
+    # The pool actually ended on the new profile.
+    assert result.group_snapshot["arenas"]["l2"]["profile_mode"] == 1

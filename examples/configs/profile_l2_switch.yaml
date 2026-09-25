@@ -1,0 +1,24 @@
+# Two-mode L2 target for l2-profile-switch-load-ordering.
+# L1 inherits bundled defaults.  L2 has 16 banks x 32768 B physical
+# (group_sram 524288 B), 2048 B/Bank system reserved:
+#   mode0: SPM 32768 B/Bank, no cache   -> user 30720 B/Bank (491520 B total)
+#   mode1: SPM 24576 B/Bank, cache 8192 -> user 22528 B/Bank (360448 B total)
+# ctx_a (mode0) fits its 2 x 131072 B buffers; ctx_b (mode1) fits 131072 B.
+schema_version: 2
+memory:
+  target:
+    profile_command_timeout_cycles: 2000000
+    l2:
+      system_reserved_spm_per_bank: 2048
+      reset_mode: 0
+      spm_mapping_id: striped_arena_v0
+      cache_org_id: profiled_lru_v0
+      cache_write_policy: read_only
+      maintenance_caps: [invalidate_range, clean_invalidate_all, bypass]
+  profile_source:
+    l2:
+      modes:
+        0: { spm_bytes_per_bank: 32768, cache_bytes_per_bank: 0 }
+        1: { spm_bytes_per_bank: 24576, cache_bytes_per_bank: 8192 }
+  group_sram:
+    capacity_bytes: 524288
