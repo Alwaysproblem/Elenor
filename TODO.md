@@ -27,47 +27,47 @@
 > 每条含：原始意图（想做的事）→ 当前状态 → 剩余工作。编号沿用原列表。
 > 2026-09-25 复核：基于批次 I/II/III 落地后的代码（全量 444 tests、pre-commit、4 focused 场景 × 双档 + 动态 corpus 270 run 全过）。
 
-
-
 14. **IR 对 nest.context 的资源显式配置与管理**
-   - 想做：像 reference.mlir 那样在 nest.context 上声明编译器生成的资源合同（`#nest.context_resources<logical_tasks / l2_scratchpad_bytes / tile_l1_bytes_per_context / requested_contexts_per_tile>`、execution_model、epoch_model），供 admission 直接消费，而不是把 context 当普通 tile、资源需求靠推导。
-   - 状态：❌ 未开始。当前 `NestContextOp` 只有 `placement / context(pin) / completion_event`；L2 需求从 `nest.alloc` 列表求和推导（`try_admit_l2_buffers`），无 context 级声明包络、无 per-context L1 envelope、无 requested_contexts_per_tile；epoch_policy 只是仿真配置（`GroupSchedulerConfig`），不在 IR。
-   - 剩余工作：定义 `resource_contract` 属性 + verifier 一致性检查（声明值 vs 推导值）+ admission 改为消费声明包络（可在 load 期做静态拒绝，早于运行时 fault）。
-   - ✅ 2026-09-25 标注：已完成（上方 ❌ 为 2026-09-13 旧状态）。`#nest.context_resources<placement / l2_mode / allowed_profiles / logical_tasks / l2_spm_bytes / requested_contexts_per_tile>` 已在 IR 声明并由 verifier 与 admission 直接消费，超包络在编译/load 期静态拒绝（`workload_ir.py::_resource_contract`、`execution_verifier.py`、`try_admit_context_task`）；epoch_policy 仍留在 `GroupSchedulerConfig`，未进 IR。
+
+- 想做：像 reference.mlir 那样在 nest.context 上声明编译器生成的资源合同（`#nest.context_resources<logical_tasks / l2_scratchpad_bytes / tile_l1_bytes_per_context / requested_contexts_per_tile>`、execution_model、epoch_model），供 admission 直接消费，而不是把 context 当普通 tile、资源需求靠推导。
+- 状态：❌ 未开始。当前 `NestContextOp` 只有 `placement / context(pin) / completion_event`；L2 需求从 `nest.alloc` 列表求和推导（`try_admit_l2_buffers`），无 context 级声明包络、无 per-context L1 envelope、无 requested_contexts_per_tile；epoch_policy 只是仿真配置（`GroupSchedulerConfig`），不在 IR。
+- 剩余工作：定义 `resource_contract` 属性 + verifier 一致性检查（声明值 vs 推导值）+ admission 改为消费声明包络（可在 load 期做静态拒绝，早于运行时 fault）。
+- ✅ 2026-09-25 标注：已完成（上方 ❌ 为 2026-09-13 旧状态）。`#nest.context_resources<placement / l2_mode / allowed_profiles / logical_tasks / l2_spm_bytes / requested_contexts_per_tile>` 已在 IR 声明并由 verifier 与 admission 直接消费，超包络在编译/load 期静态拒绝（`workload_ir.py::_resource_contract`、`execution_verifier.py`、`try_admit_context_task`）；epoch_policy 仍留在 `GroupSchedulerConfig`，未进 IR。
 
 15. **内存不足时的等待与 release 驱动重试**
-   - 想做：L2/L1 容量不足时下一个 context 等待而非直接失败；不能每 cycle 盲重试，要依据编译器给出的内存信息（大小、cache/scratchpad 模式）判定，只在有 release 时才重试。
-   - 状态：⚠️ L2 已完成，L1 未完成（合同上明确没有 L1 等待队列）。
-     - L2 ✅：bundle 三态 admission（INVALID/PERMANENT 立即 fault、TEMPORARY 入 FIFO ticket 且等待零持有）；重试仅由 release final-free 通知触发（pool_version + capacity_change_cycle 双去重，无忙轮询）；event_table 容量不足走同一机制。
-     - L1 ❌：TEMPORARY 容量不足在调度器层返回 BACKPRESSURE、action 留在候选表被逐周期重扫描，但这只是调度器行为，不是等待队列——IR_SPEC §4.2.1 明确 "does not change eager admission or add an L1 wait queue: software must order a capacity-dependent dispatch after the relevant free"，即合同仍是 eager admission + 编译器负责排序；cache/scratchpad 模式比较也没有（cache 是 fidelity 层 metadata-only，不参与 admission 决策）。
-   - 剩余工作（若推进）：L1 版 WAIT_CAPACITY + tile.free 通知驱动的重试（对齐 L2 的 PR3.5 模式），以及编译器内存模式元数据进 admission；或显式决策维持现合同（编译器静态排序解决），把本项 L1 部分标记为"不进运行时"。
-     comments：
-     不必要，而且当前这种不对称是合理的设计，不是欠账。 理由五条：
-   1. 粒度和等待时长不匹配。 L2 的 release 驱动 ticket 服务的是 context 级准入——粗粒度、等待长（等别的 context 整个跑完）、等待者少。L1 背压是 dispatch 级——等待时长由 resident 程序的 engine job 决定（几十到几千 cycle），同时等待者被 dispatch_capacity=8 / 候选表 16 上限约束。规模小一个量级。
-   2. 重试延迟可量化且是噪声。 扫描 cursor 每周期推进 scan_width=4，候选表内每条记录约每 len/scan_width ≈ 4 cycle 被重访一次。容量归还（terminal cleanup / tile.free）后，被阻塞的 dispatch 最多多等 ~4 cycle 才重试成功——相对数百上千 cycle 的等待本身，收益空间接近零。L2 则不同：ticket 唤醒保证
-      release 后下一周期就能 admit，对 context 级长等待这 1 cycle 差异虽也小，但 L2 的动机更多在“不做无谓重试”的合同清洁性。
-   3. FIFO ticket 会和 ready-action 语义打架。 L2 严格 FIFO 合法，因为 context 准入本来就是串行决策点（一个 context 整体进或整体等）。dispatch 现在是 s1/s2 乱序发射——若给 L1 等待加严格 FIFO ticket，等于在 dispatch 之间重新引入队头阻塞（N04 讨论过的那类 HOL），要么丢掉 ready-action 收益、要么再设计 bypass 规则。扫描重探测天然满足“阻塞自己、不阻塞别人 + RR 公平”。
-   4. 唤醒源异构，挂钩成本大于收益。 L2 只有一个唤醒源：release_l2 的 final-free（单一通知点 + pool_version 去重，干净）。L1 容量回来有多条路：每 tile 的 tile.free（高频、per-buffer）、grid terminal cleanup、跨 placement 多个 tile 的分配器状态变化。要做成通知驱动需要 per-tile pool version +
-      多源挂钩 + 调度器唤醒路径——为一个 ~4 cycle 的延迟优化复制整套 PR3.5 机制，不值。
-   5. 真正的解在上游，不在运行时。 L1 footprint 静态已知，L1 等待本就该被编译器消灭掉大部分：IR_SPEC §4.2.1 的合同（容量依赖的 dispatch 排在相关 free 之后）+ R3-1 的 resource_contract（声明 per-context L1 envelope，load 期就能静态检查峰值并发 footprint 是否超 tile_l1_bytes）。先做 R3-1 把 L1
-      等待变成编译期知识，比给运行时兜底路径加精密等待机制的 ROI 高得多。
-   6. 唤醒源异构，挂钩成本大于收益。 L2 只有一个唤醒源：release_l2 的 final-free（单一通知点 + pool_version 去重，干净）。L1 容量回来有多条路：每 tile 的 tile.free（高频、per-buffer）、grid terminal cleanup、跨 placement 多个 tile 的分配器状态变化。要做成通知驱动需要 per-tile pool version +
-      多源挂钩 + 调度器唤醒路径——为一个 ~4 cycle 的延迟优化复制整套 PR3.5 机制，不值。
-   7. 真正的解在上游，不在运行时。 L1 footprint 静态已知，L1 等待本就该被编译器消灭掉大部分：IR_SPEC §4.2.1 的合同（容量依赖的 dispatch 排在相关 free 之后）+ R3-1 的 resource_contract（声明 per-context L1 envelope，load 期就能静态检查峰值并发 footprint 是否超 tile_l1_bytes）。先做 R3-1 把 L1
-      等待变成编译期知识，比给运行时兜底路径加精密等待机制的 ROI 高得多。
 
-   什么时候值得重访这个决定（建议写进 TODO 备注而不是现在做）：
-   - trace 里实测 release→issue 间隔显著大于扫描周期（比如候选表常年满 16 条、group_action_backpressure 占比高）；
-   - dispatch 并发规模大幅增长（action_capacity 扩到几十上百）；
-   - 出现需要严格 FIFO 准入次序的确定性合同；
-   - 若真要做，最小版本是 per-tile pool_version 门控重试（复用 L2 的去重思想、跳过明显无变化的周期），而不是全套 FIFO ticket。
+- 想做：L2/L1 容量不足时下一个 context 等待而非直接失败；不能每 cycle 盲重试，要依据编译器给出的内存信息（大小、cache/scratchpad 模式）判定，只在有 release 时才重试。
+- 状态：⚠️ L2 已完成，L1 未完成（合同上明确没有 L1 等待队列）。
+  - L2 ✅：bundle 三态 admission（INVALID/PERMANENT 立即 fault、TEMPORARY 入 FIFO ticket 且等待零持有）；重试仅由 release final-free 通知触发（pool_version + capacity_change_cycle 双去重，无忙轮询）；event_table 容量不足走同一机制。
+  - L1 ❌：TEMPORARY 容量不足在调度器层返回 BACKPRESSURE、action 留在候选表被逐周期重扫描，但这只是调度器行为，不是等待队列——IR_SPEC §4.2.1 明确 "does not change eager admission or add an L1 wait queue: software must order a capacity-dependent dispatch after the relevant free"，即合同仍是 eager admission + 编译器负责排序；cache/scratchpad 模式比较也没有（cache 是 fidelity 层 metadata-only，不参与 admission 决策）。
+- 剩余工作（若推进）：L1 版 WAIT_CAPACITY + tile.free 通知驱动的重试（对齐 L2 的 PR3.5 模式），以及编译器内存模式元数据进 admission；或显式决策维持现合同（编译器静态排序解决），把本项 L1 部分标记为"不进运行时"。
+  comments：
+  不必要，而且当前这种不对称是合理的设计，不是欠账。 理由五条：
 
+1.  粒度和等待时长不匹配。 L2 的 release 驱动 ticket 服务的是 context 级准入——粗粒度、等待长（等别的 context 整个跑完）、等待者少。L1 背压是 dispatch 级——等待时长由 resident 程序的 engine job 决定（几十到几千 cycle），同时等待者被 dispatch_capacity=8 / 候选表 16 上限约束。规模小一个量级。
+2.  重试延迟可量化且是噪声。 扫描 cursor 每周期推进 scan_width=4，候选表内每条记录约每 len/scan_width ≈ 4 cycle 被重访一次。容量归还（terminal cleanup / tile.free）后，被阻塞的 dispatch 最多多等 ~4 cycle 才重试成功——相对数百上千 cycle 的等待本身，收益空间接近零。L2 则不同：ticket 唤醒保证
+    release 后下一周期就能 admit，对 context 级长等待这 1 cycle 差异虽也小，但 L2 的动机更多在“不做无谓重试”的合同清洁性。
+3.  FIFO ticket 会和 ready-action 语义打架。 L2 严格 FIFO 合法，因为 context 准入本来就是串行决策点（一个 context 整体进或整体等）。dispatch 现在是 s1/s2 乱序发射——若给 L1 等待加严格 FIFO ticket，等于在 dispatch 之间重新引入队头阻塞（N04 讨论过的那类 HOL），要么丢掉 ready-action 收益、要么再设计 bypass 规则。扫描重探测天然满足“阻塞自己、不阻塞别人 + RR 公平”。
+4.  唤醒源异构，挂钩成本大于收益。 L2 只有一个唤醒源：release_l2 的 final-free（单一通知点 + pool_version 去重，干净）。L1 容量回来有多条路：每 tile 的 tile.free（高频、per-buffer）、grid terminal cleanup、跨 placement 多个 tile 的分配器状态变化。要做成通知驱动需要 per-tile pool version +
+    多源挂钩 + 调度器唤醒路径——为一个 ~4 cycle 的延迟优化复制整套 PR3.5 机制，不值。
+5.  真正的解在上游，不在运行时。 L1 footprint 静态已知，L1 等待本就该被编译器消灭掉大部分：IR_SPEC §4.2.1 的合同（容量依赖的 dispatch 排在相关 free 之后）+ R3-1 的 resource_contract（声明 per-context L1 envelope，load 期就能静态检查峰值并发 footprint 是否超 tile_l1_bytes）。先做 R3-1 把 L1
+    等待变成编译期知识，比给运行时兜底路径加精密等待机制的 ROI 高得多。
+6.  唤醒源异构，挂钩成本大于收益。 L2 只有一个唤醒源：release_l2 的 final-free（单一通知点 + pool_version 去重，干净）。L1 容量回来有多条路：每 tile 的 tile.free（高频、per-buffer）、grid terminal cleanup、跨 placement 多个 tile 的分配器状态变化。要做成通知驱动需要 per-tile pool version +
+    多源挂钩 + 调度器唤醒路径——为一个 ~4 cycle 的延迟优化复制整套 PR3.5 机制，不值。
+7.  真正的解在上游，不在运行时。 L1 footprint 静态已知，L1 等待本就该被编译器消灭掉大部分：IR_SPEC §4.2.1 的合同（容量依赖的 dispatch 排在相关 free 之后）+ R3-1 的 resource_contract（声明 per-context L1 envelope，load 期就能静态检查峰值并发 footprint 是否超 tile_l1_bytes）。先做 R3-1 把 L1
+    等待变成编译期知识，比给运行时兜底路径加精密等待机制的 ROI 高得多。
+
+什么时候值得重访这个决定（建议写进 TODO 备注而不是现在做）：
+
+- trace 里实测 release→issue 间隔显著大于扫描周期（比如候选表常年满 16 条、group_action_backpressure 占比高）；
+- dispatch 并发规模大幅增长（action_capacity 扩到几十上百）；
+- 出现需要严格 FIFO 准入次序的确定性合同；
+- 若真要做，最小版本是 per-tile pool_version 门控重试（复用 L2 的去重思想、跳过明显无变化的周期），而不是全套 FIFO ticket。
 
 4. **bank 模式进 IR**
    - 想做：硬件上一个 bank 支持多种模式，需要暴露给编译器做优化。
    - 状态：❌ 未开始（IR 侧）。仿真内部已有 bank 建模：`BankedFreeExtentAllocator` 的 bank/alignment profile 参与 `can_ever_fit_bundle` 永久性判定；但 IR 无任何 bank 属性，编译器不可见、不可指定。
    - 剩余工作：`nest.alloc` / `tile.alloc` 增加 bank 模式属性 + verifier 校验 + allocator 按模式放置/对齐。
-
 
 5. **L2 shared memory（多 tile 共享 weight，减少重复 memory IO）**
    - 想做：在 L2 开 shared memory 概念，允许多个 tile 共享一份 memory，共享 weight 放 L2 中，减少重复 prefetch 的 memory IO 占用。第一版默认私有分配，显式允许只读共享；跨 context 中间结果传递作为受控能力，而不是默认任意共享读写。
@@ -119,11 +119,11 @@
 1. 每次 profile 切换都必须进行完整的等待，插入等待这一工作由编译器来做，但是这部分需要在 IR 中显示声明
    - ✅ 2026-09-25 标注：已完成。IR 以 `l2_mode / allowed_profiles` 显式声明，编译器 `bind_profiles` 自动生成完整 root completion frontier 的 device await + L2 ProfileReconfigDesc（源码不手写 await）；切走再切回同 mode 视为新 generation，共享 backing 必须同 epoch。证据：`examples/scenarios/l2_profile_switch_load_ordering.mlir`、`examples/scenarios/l2_admission_profile_switch.mlir` 及 `plan/03` 批次 III 验收。
 
+- 需要查看 L1 的 memory 是否需要 类似于 context-local 的管理，也就是说需要检查 L1 的buffer是不是也是 必须 store 才可以释放，还是可以直接复用。
+
 ## R3
 
 ## example
-
-- 需要增加大型 reduceSum 或者 reduceMax 这类算子的 例子，大概思路是 reduce tile 之后 在 L2 上进行聚合
 
 ## 需要调研的问题 （2026-09-25：第 1、2 条已由实现闭环 ✅ ｜ 第 3 条编译器无法预知调度/SPM 占用 ❌ 仍开放）
 
@@ -171,3 +171,7 @@ BOA 这类计算单元的 register file 装载需要硬件级流水设计。理�
 - 想做：当前 `tile.load.async` / `tile.store.async` 只有 L2↔L1 语义（简化设计）；后续增加 L1↔Register 一类 load/store，更好模拟真实硬件行为。
 - 状态：❌ 未开始。方言无任何 register 级 op；BOA/EVU 描述符直接引用 L1 buffer，无寄存器级传输。
 - 剩余工作：新 op（如 tile.rload.async / tile.rstore.async）+ 引擎描述符操作数模型改动 + 寄存器端口/带宽性能模型。依赖"未来问题"清单里 BOA register file load 的硬件 pipeline 结论。
+
+### 7. 后续版本可能需要考虑在 L2 group 级别进行从 collection 和 简单的 reduction 操作，以提升数据复用率和整体性能。
+
+### 8. L2 group 级别的 SRAM 需要虚拟内存地址映射来防止碎片化
