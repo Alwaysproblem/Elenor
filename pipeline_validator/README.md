@@ -411,6 +411,7 @@ Other current controls remain orthogonal to the source/artifact mode:
 | `--device-context-mode N`                        | CPU outstanding Group-launch limit                                          |
 | `--max-cycles N`                                 | execution cycle cap                                                         |
 | `--json` / `--report PATH`                       | choose report encoding/destination                                          |
+| `--detailed`                                     | include the six verbose detail sections in the text report                  |
 | `--trace-json`, `--trace-html`, `--memory-trace` | select trace outputs/detail                                                 |
 
 `--compile-only`, `--compiled-output`, and `--profile-bytes` are source-mode
@@ -443,6 +444,29 @@ the static target fingerprint.
 `--trace-json` emits Perfetto/Chrome trace JSON; `--trace-html` emits the
 standalone viewer. `--memory-trace` additionally records per-leg memory
 traffic, capacity counters, and report memory peaks.
+
+`--detailed` only affects the text report: without it the text output omits
+the verbose `Configured/effective resources`, `Profile controller`,
+`Arena pools`, `Group scheduler`, `CPU device controller`, and `CPU request
+timing` sections. Report content is unchanged by `--detailed` — the JSON
+report retains the detail fields, and trace content still depends on which
+trace options (`--trace-json`, `--memory-trace`, ...) you enable.
+
+Profile initialization completes before workload cycle zero. `Simulator.run`
+excludes the pre-run `profile_initialize` / `profile_initialized` markers and
+`INITIALIZE` member request/ACK events from the workload trace, so their
+separate clock cannot appear to overlap workload DMA. Cycle-zero capacity
+baselines, prior workload records in a reused Tracer, and all in-run Profile
+reconfiguration events are retained.
+With unchanged bindings, warm runs reuse the existing HBM handles. Their
+`hbm_bind` records and allocated/free-byte samples remain in the accumulated
+trace, together with the original L1/L2 pool and bank capacity baselines;
+unchanged state does not require a new bind or duplicate counter sample.
+
+JSON `ts` is in microseconds and maps directly to the workload cycles in
+reports and `accepted_cycle` / `completion_cycle` arguments, with no startup
+offset: `ts = cycle * hw.cycle_ns() / 1000`. Initialization is likewise
+excluded from report workload cycles.
 
 Profile/control observability includes:
 

@@ -663,7 +663,14 @@ def _append_report_section(lines: list[str], title: str, value: Mapping) -> None
   lines.append("")
 
 
-def report_to_text(r: WorkloadReport) -> str:
+def report_to_text(r: WorkloadReport, *, detailed: bool = False) -> str:
+  """Render the text report.
+
+  ``detailed=False`` (the default) omits the verbose configuration sections
+  (resources, profile controller, arena pools, group scheduler, CPU device
+  controller, CPU request timing); pass ``detailed=True`` to include them.
+  JSON reports and traces are unaffected.
+  """
   lines = []
   lines.append("=" * 72)
   lines.append(f"Workload: {r.name}")
@@ -695,19 +702,21 @@ def report_to_text(r: WorkloadReport) -> str:
       else:
         lines.append(f"    {key:<30}: {value}")
   lines.append("")
-  _append_report_section(lines, "Configured/effective resources", r.resources)
-  if r.profile:
-    _append_report_section(lines, "Profile controller", r.profile)
-  if r.arenas:
-    _append_report_section(lines, "Arena pools", r.arenas)
+  if detailed:
+    _append_report_section(lines, "Configured/effective resources", r.resources)
+    if r.profile:
+      _append_report_section(lines, "Profile controller", r.profile)
+    if r.arenas:
+      _append_report_section(lines, "Arena pools", r.arenas)
   if r.task_leases:
     _append_report_section(lines, "Task leases", r.task_leases)
-  if r.scheduler:
-    _append_report_section(lines, "Group scheduler", r.scheduler)
-  if r.device:
-    _append_report_section(lines, "CPU device controller", r.device)
-  if r.request_timing:
-    _append_report_section(lines, "CPU request timing", r.request_timing)
+  if detailed:
+    if r.scheduler:
+      _append_report_section(lines, "Group scheduler", r.scheduler)
+    if r.device:
+      _append_report_section(lines, "CPU device controller", r.device)
+    if r.request_timing:
+      _append_report_section(lines, "CPU request timing", r.request_timing)
   lines.append("  Engine active cycles:")
   for eng, c in r.engine_active.items():
     lines.append(f"    {eng:<4}: {c:>8}  ({c / max(r.cycles * r.num_tiles, 1):.1%})")

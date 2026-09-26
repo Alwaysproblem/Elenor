@@ -289,6 +289,14 @@ def main(argv=None) -> int:
     "--print-ir", action="store_true", help="print author source IR and exit without compilation"
   )
   parser.add_argument("--json", action="store_true", help="emit JSON instead of text")
+  parser.add_argument(
+    "--detailed",
+    action="store_true",
+    help=(
+      "include the verbose resource/profile/scheduler/device sections in the text report; "
+      "without it the text output omits them (JSON reports and traces are unaffected)"
+    ),
+  )
   parser.add_argument("--report", default=None, help="write report to this path (default: stdout)")
   args = parser.parse_args(argv)
 
@@ -456,7 +464,7 @@ def main(argv=None) -> int:
         return 1
 
   text = (
-    "\n".join(report_to_text(report) for report in outputs)
+    "\n".join(report_to_text(report, detailed=args.detailed) for report in outputs)
     if not args.json
     else json.dumps([json.loads(report_to_json(report)) for report in outputs], indent=2)
   )
