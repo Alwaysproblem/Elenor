@@ -956,7 +956,7 @@ class TileProgramDefOp(IRDLOperation):
 
 @irdl_op_definition
 class NestAllocOp(IRDLOperation):
-  """Context-owned L2 buffer; ``sharing`` is private by default or readonly."""
+  """Context-owned L2 buffer with private, readonly, or context-local sharing."""
 
   name = "nest.alloc"
 
@@ -978,8 +978,8 @@ class NestAllocOp(IRDLOperation):
     alignment: int | None = None,
     sharing: str = "private",
   ):
-    if sharing not in ("private", "readonly"):
-      raise ValueError("nest.alloc sharing must be 'private' or 'readonly'")
+    if sharing not in ("private", "readonly", "context-local"):
+      raise ValueError("nest.alloc sharing must be 'private', 'readonly' or 'context-local'")
     super().__init__(
       result_types=[NestBuffer.of(shape, dtype)],
       properties=_props(
@@ -1011,8 +1011,8 @@ class NestAllocOp(IRDLOperation):
     slot = _parse_str_kw(parser, "slot")
     role = _parse_str_kw(parser, "role")
     sharing = _parse_opt_str_kw(parser, "sharing") or "private"
-    if sharing not in ("private", "readonly"):
-      parser.raise_error("nest.alloc sharing must be 'private' or 'readonly'")
+    if sharing not in ("private", "readonly", "context-local"):
+      parser.raise_error("nest.alloc sharing must be 'private', 'readonly' or 'context-local'")
     shape = _parse_int_list_kw(parser, "shape")
     dtype = _parse_str_kw(parser, "dtype")
     alignment = _parse_opt_int_kw(parser, "alignment")

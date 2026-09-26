@@ -161,17 +161,20 @@ LoadedProgram → Simulator.run`；Simulator 不包含源码 lowering fallback�
 - 公开 phase 聚合只支持 `#nest.aggregate<all_tasks>`，没有 quorum/subset。
   普通 `nexus.await`/`nest.await` 保持局部事件语义，不是隐式全局静默。
 
-- L2 共享必须显式声明 allocation `sharing="readonly"`，并在完整初始化
-  后恰好执行一次 producer `nest.publish`。共享引用锚定 producer submit
-  实例与 export slot；所有 reader 必须处于同一 Group/L2 Profile epoch。
-  发布后数据不可变，consumer 形参只读，每个导入必须恰好 release 一次。
-  不支持动态 Gather Cache 重设计、可写 alias 或跨 Profile 共享 backing。
+- 同一 `nest.context` 执行实例内的多个 Tile task 可通过显式声明的
+  `sharing="context-local"` allocation 读写共享 L2 backing；仍由所属 context
+  显式 release，不提供锁、原子性或重叠写入的线程安全保证，也不能跨 context
+  导出。跨 context 的 L2 共享只能用 `sharing="readonly"`：完整初始化后
+  恰好执行一次 producer `nest.publish`，共享引用锚定 producer submit
+  实例与 export slot；reader 必须在同一 Group/L2 Profile epoch。
+  发布后不可变，consumer 形参只读，每个导入恰好 release 一次。
+  不支持动态 Gather Cache 重设计、跨 context 可写 alias 或跨 Profile 共享 backing。
 
 ## 持久化与复放限制
 
-- 编译 artifact schema 当前为 2、compiler ABI 为 `v1`；旧 schema 1 / ABI
-  `v0` 产物被拒绝，必须从 source 重编译。硬件 YAML schema 为 2，二者
-  不是同一版本号。
+- 编译 artifact schema 当前为 2、compiler ABI 为 `v2`；旧 schema 1 / ABI
+  `v0`、`v1` 产物被拒绝，必须从 source 重编译。硬件 YAML schema 为 2，
+  二者不是同一版本号。
 - `.target.yaml` 只保存完整 `HardwareConfig`，不保存 `SimConfig`。独立
   `--compiled-file` 复放必须另行提供与编译时相同的
   `context_count`/`device_context_count`、Device pending/completion 以及

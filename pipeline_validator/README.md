@@ -60,8 +60,8 @@ result = Simulator(hw, sim).run(loaded)
 Registry, target/artifact hashes, frozen executable, call bindings,
 relocations, source map, dependency proofs, readonly import references, entry/exit
 Profiles, resource budgets, binding guards, and workload metadata. The compiled
-package format currently has `schema_version=2` and `compiler_abi="v1"`; this is
-distinct from hardware YAML schema 2. Schema 1 / ABI `v0` artifacts are
+package format currently has `schema_version=2` and `compiler_abi="v2"`; this is
+distinct from hardware YAML schema 2. Schema 1 and ABI `v0`/`v1` artifacts are
 rejected and must be rebuilt from source. Parsing uses an explicit type/opcode
 allowlist and rejects unknown fields/types, duplicate JSON keys, non-finite
 numbers, unknown versions, and a mismatched artifact hash.

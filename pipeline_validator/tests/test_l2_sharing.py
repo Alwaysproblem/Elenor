@@ -8,11 +8,13 @@ from dataclasses import replace
 import pytest
 from xdsl.utils.exceptions import VerifyException
 
+from pipeline_validator.compiled_program import parse_compiled_program, serialize_compiled_program
 from pipeline_validator.compiler import compile_program
 from pipeline_validator.config import GroupSchedulerConfig, HardwareConfig, SimConfig
 from pipeline_validator.execution_ir import ExecModel, GlobalBinding
 from pipeline_validator.loader import load_program
 from pipeline_validator.memory.byte_store import ByteStore
+from pipeline_validator.tests.test_l2_sharing_source import CONTEXT_LOCAL_IR
 from pipeline_validator.profiles import ProfileBytes, ProfileLevelSource
 from pipeline_validator.simulator import Simulator
 from pipeline_validator.workload_ir import parse_workload_ir, print_workload_ir
@@ -712,3 +714,39 @@ def test_readonly_import_cannot_become_dispatch_destination():
   bad = sharing_source().replace("ins(%weight) outs(%result)", "ins() outs(%weight, %result)")
   with pytest.raises(VerifyException, match=r"(?i)read|writ|import|readonly|binding"):
     parse_workload_ir(bad)
+
+
+def test_context_local_tasks_mutate_one_backing_and_release_it() -> None:
+  hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10, num_dma_channels=2)
+  sim = SimConfig(fidelity="full_memory", context_count=1, max_cycles=200000, memory_trace=True)
+  rows = [
+    bytes((r * 53 + (i // 4096) * 17 + i % 251) % 256 for i in range(8192))
+    for r in range(4)
+  ]
+  source = b"".join(rows)
+  expected = b"".join(row[4096:] + row[:4096] for row in rows)
+  assert expected != source
+  oracle = ByteStore()
+  oracle.seed_hbm(0x100000, source)
+  oracle.seed_hbm(0x200000, bytes(32768))
+  bindings = {
+    "SOURCE": GlobalBinding("SOURCE", 0x100000, 32768, "r"),
+    "OUT": GlobalBinding("OUT", 0x200000, 32768, "w"),
+  }
+  artifact = compile_program(
+    parse_workload_ir(print_workload_ir(parse_workload_ir(CONTEXT_LOCAL_IR))), hw, sim
+  )
+  replayed = parse_compiled_program(serialize_compiled_program(artifact))
+  result = Simulator(hw, sim, enable_tracer=True, byte_store=oracle).run(
+    load_program(replayed, hw, sim, actual_bindings=bindings)
+  )
+  assert result.completed, result.reason
+  assert oracle.read_hbm(0x200000, 32768) == expected
+  l2 = result.group_snapshot["arenas"]["l2"]
+  for key in (
+    "live_backings",
+    "arena_reserved_bytes",
+    "pending_shared_claims",
+    "active_shared_references",
+  ):
+    assert l2[key] == 0

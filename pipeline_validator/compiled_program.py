@@ -395,7 +395,7 @@ def _validate_buffer(buffer: object, name: str) -> None:
     _text(buffer.slot, f"{name}.slot")
     if buffer.role not in ("in", "out", "inout"):
       raise ValueError(f"{name}.role is invalid")
-    if buffer.sharing not in ("private", "readonly"):
+    if buffer.sharing not in ("private", "readonly", "context-local"):
       raise ValueError(f"{name}.sharing is invalid")
   else:
     raise ValueError(f"{name} is not a buffer")
@@ -864,7 +864,7 @@ def _validate_executable_value(value: object, name: str) -> None:
 
 
 def _validate_compiled_program_value(program: CompiledProgram, *, allow_unsealed: bool) -> None:
-  if type(program.schema_version) is not int or program.schema_version != 2 or program.compiler_abi != "v1":
+  if type(program.schema_version) is not int or program.schema_version != 2 or program.compiler_abi != "v2":
     raise ValueError("unsupported compiled schema or ABI; recompile the source with this compiler")
   _text(program.source_ir, "source_ir")
   _digest_text(program.source_hash, "source_hash")
@@ -1059,7 +1059,7 @@ def parse_compiled_program(text: str) -> CompiledProgram:
     if (
       isinstance(encoded, dict)
       and encoded.get("$type") == "CompiledProgram"
-      and (encoded.get("schema_version") != 2 or encoded.get("compiler_abi") != "v1")
+      and (encoded.get("schema_version") != 2 or encoded.get("compiler_abi") != "v2")
     ):
       raise ValueError("unsupported compiled schema or ABI; recompile from source")
     program = _decode(encoded)

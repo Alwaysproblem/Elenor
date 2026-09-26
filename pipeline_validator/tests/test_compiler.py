@@ -154,8 +154,8 @@ class TestExplicitCompileLoadReplay:
 
     text = serialize_compiled_program(artifact)
     assert artifact.schema_version == 2
-    assert artifact.compiler_abi == "v1"
-    for schema_version, compiler_abi in ((1, "v0"), (2, "v0"), (1, "v1")):
+    assert artifact.compiler_abi == "v2"
+    for schema_version, compiler_abi in ((1, "v0"), (2, "v0"), (1, "v1"), (2, "v1")):
       legacy = json.loads(text)
       legacy["schema_version"] = schema_version
       legacy["compiler_abi"] = compiler_abi
@@ -706,7 +706,7 @@ class TestIndependentSharedArtifactVerification:
     loaded = load_program(replay, hw, sim, actual_bindings=bindings)
 
     assert loaded.compiled.schema_version == 2
-    assert loaded.compiled.compiler_abi == "v1"
+    assert loaded.compiled.compiler_abi == "v2"
     assert serialize_compiled_program(loaded.compiled) == text
 
 
@@ -925,3 +925,72 @@ class TestIndependentSharedArtifactVerification:
 
     with pytest.raises(ValueError, match="crosses an L2 profile epoch"):
       load_program(corrupted, hw, sim, actual_bindings=bindings)
+
+
+def test_context_local_release_must_cover_writer_even_without_reader_or_store() -> None:
+  from pipeline_validator.tests.test_l2_sharing_source import CONTEXT_LOCAL_WRITER_ONLY_IR
+
+  hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10, num_dma_channels=2)
+  sim = SimConfig(context_count=1, max_cycles=200000)
+  artifact = compile_program(parse_workload_ir(CONTEXT_LOCAL_WRITER_ONLY_IR), hw, sim)
+  bindings = {"SOURCE": GlobalBinding("SOURCE", 0x100000, 32768, "r")}
+  load_program(artifact, hw, sim, actual_bindings=bindings)
+  task = _all_tasks(artifact)[0]
+  actions = list(task.actions)
+  writer = next(
+    action for action in actions if action.op is ExecGroupActionOp.DISPATCH_ROLE
+  )
+  release_index = next(
+    index for index, action in enumerate(actions)
+    if action.op is ExecGroupActionOp.RELEASE_L2 and action.args[0].buffer_slot == "scratch"
+  )
+  release = actions[release_index]
+  dependencies = tuple(event for event in release.dependencies if event != writer.args[0].output_ready_event)
+  assert len(dependencies) + 1 == len(release.dependencies)
+  request = replace(release.args[0], dependency_events=dependencies)
+  actions[release_index] = replace(release, dependencies=dependencies, args=(request,))
+  corrupted = _replace_task(artifact, replace(task, actions=tuple(actions)))
+  with pytest.raises(ValueError, match="does not retire every real buffer access"):
+    load_program(corrupted, hw, sim, actual_bindings=bindings)
+
+
+def test_context_local_final_store_must_cover_writers_after_resealed_reorder() -> None:
+  from pipeline_validator.tests.test_l2_sharing_source import CONTEXT_LOCAL_IR
+
+  source = CONTEXT_LOCAL_IR.replace(
+    "    nest.release %scratch depends_on(%ready_produce, %read_mutate, %ready_mutate, %read_scratch)",
+    "    %saved = nest.dma.store.async %scratch into %output"
+    " depends_on(%ready_produce, %ready_mutate)\n"
+    '        : !nest.event<"saved">\n'
+    "    nest.release %scratch"
+    " depends_on(%ready_produce, %read_mutate, %ready_mutate, %read_scratch, %saved)",
+    1,
+  )
+  hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10, num_dma_channels=2)
+  sim = SimConfig(context_count=1, max_cycles=200000)
+  artifact = compile_program(parse_workload_ir(source), hw, sim)
+  bindings = {
+    "SOURCE": GlobalBinding("SOURCE", 0x100000, 32768, "r"),
+    "OUT": GlobalBinding("OUT", 0x200000, 32768, "w"),
+  }
+  load_program(artifact, hw, sim, actual_bindings=bindings)
+  task = _all_tasks(artifact)[0]
+  actions = list(task.actions)
+  store_index = next(
+    index for index, action in enumerate(actions)
+    if action.op is ExecGroupActionOp.DMA_STORE and action.args[1].src.base == "scratch"
+  )
+  store = actions.pop(store_index)
+  store = replace(
+    store, dependencies=tuple(event for event in store.dependencies if event != "ready_mutate")
+  )
+  mutate_index = next(
+    index for index, action in enumerate(actions)
+    if action.op is ExecGroupActionOp.DISPATCH_ROLE and action.args[0].dispatch_ordinal == 1
+  )
+  mutate = actions[mutate_index]
+  actions[mutate_index] = replace(mutate, dependencies=(*mutate.dependencies, store.dst))
+  actions.insert(mutate_index, store)
+  corrupted = _replace_task(artifact, replace(task, actions=tuple(actions)))
+  with pytest.raises(ValueError, match="final store does not cover every actual writer"):
+    load_program(corrupted, hw, sim, actual_bindings=bindings)

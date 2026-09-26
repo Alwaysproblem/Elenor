@@ -773,7 +773,7 @@ class TileGroup:
     return self._close_l2_access(release_like, sequencer, cycle, publish=True)
 
   def release_l2(self, request: ExecReleaseRequest, sequencer: TileGroupSequencer, cycle: int) -> bool:
-    """Forfeit exactly one owner's view after a complete read-only access preflight."""
+    """Forfeit exactly one owner's view after a complete read/write access preflight."""
     return self._close_l2_access(request, sequencer, cycle, publish=False)
 
   def _close_l2_access(

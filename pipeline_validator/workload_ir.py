@@ -558,8 +558,10 @@ def _verify_context(
       slot = op.slot.data
       if op.role.data not in ("in", "out", "inout"):
         raise VerifyException(f'nest.alloc slot \'{slot}\' role must be "in", "out" or "inout"')
-      if op.sharing.data not in ("private", "readonly"):
-        raise VerifyException(f"nest.alloc slot '{slot}' sharing must be 'private' or 'readonly'")
+      if op.sharing.data not in ("private", "readonly", "context-local"):
+        raise VerifyException(
+          f"nest.alloc slot '{slot}' sharing must be 'private', 'readonly' or 'context-local'"
+        )
       if slot in seen_buffers:
         raise VerifyException(f"duplicate L2 buffer slot or import name '{slot}'")
       seen_buffers.add(slot)
@@ -747,8 +749,10 @@ def _verify_release_graph(
     slot = alloc.slot.data
     role = alloc.role.data
     sharing = alloc.sharing.data
-    if sharing not in ("private", "readonly"):
-      raise VerifyException(f"nest.alloc slot '{slot}' sharing must be 'private' or 'readonly'")
+    if sharing not in ("private", "readonly", "context-local"):
+      raise VerifyException(
+        f"nest.alloc slot '{slot}' sharing must be 'private', 'readonly' or 'context-local'"
+      )
     rels = releases.get(buffer, [])
     if len(rels) != 1:
       raise VerifyException(
@@ -804,9 +808,9 @@ def _verify_release_graph(
       *(dispatch.input_released for _, dispatch in readers),
       *(dispatch.output_ready for _, dispatch in writers),
     ]
-    if sharing == "private":
+    if sharing != "readonly":
       if buffer_publishes:
-        raise VerifyException(f"private L2 slot '{slot}' may not be published")
+        raise VerifyException(f"{sharing} L2 slot '{slot}' may not be published")
       publish_event = None
     else:
       if len(buffer_publishes) != 1:
@@ -846,12 +850,18 @@ def _verify_release_graph(
 
     expected_release_deps = [
       *(dispatch.input_released for _, dispatch in readers),
+      *(dispatch.output_ready for _, dispatch in writers if sharing == "context-local"),
       *(prefetch.result for _, prefetch in buffer_prefetches),
       *(store.result for _, store in buffer_stores),
       *([] if publish_event is None else [publish_event]),
     ]
     deps = list(rel.depends_on)
     if len(set(deps)) != len(deps) or set(deps) != set(expected_release_deps):
+      if sharing == "context-local":
+        raise VerifyException(
+          f"nest.release of context-local slot '{slot}' must depend on exactly all reader"
+          " input_released, writer output_ready, prefetch, and store completion events"
+        )
       raise VerifyException(
         f"nest.release of slot '{slot}' must depend on exactly all reader input_released,"
         " prefetch, store, and required publish completion events"

@@ -575,7 +575,8 @@ def _verify_buffer(buffer: ExecL1Buffer | ExecL2Buffer, where: str) -> None:
     _fail(f"{where}.bytes does not match shape")
   _uint(buffer.alignment, f"{where}.alignment", positive=True)
   if isinstance(buffer, ExecL2Buffer) and (
-    buffer.role not in ("in", "out", "inout") or buffer.sharing not in ("private", "readonly")
+    buffer.role not in ("in", "out", "inout")
+    or buffer.sharing not in ("private", "readonly", "context-local")
   ):
     _fail(f"{where} has invalid L2 role or sharing mode")
 
@@ -1579,8 +1580,19 @@ def _verify_task(
       release_done = action.dst
       if not release_done:
         _fail(f"{action_where} release lacks its internal completion event")
+      if store_events[slot] and any(
+        not _ordered(
+          dispatch_by_ordinal[item][2].output_ready_event,
+          (store_events[slot][-1],),
+          ancestors,
+        )
+        for item in writers
+      ):
+        _fail(f"{action_where} final store does not cover every actual writer")
       required = [bind_events[slot], *prefetch_events[slot], *store_events[slot]]
       required.extend(dispatch_by_ordinal[item][2].input_released_event for item in readers)
+      if slot in buffers and buffers[slot].sharing == "context-local":
+        required.extend(dispatch_by_ordinal[item][2].output_ready_event for item in writers)
       if slot in publish_events:
         required.append(publish_events[slot])
       if any(not event or not _ordered(event, action.dependencies, ancestors) for event in required):
@@ -2325,7 +2337,7 @@ def verify_compiled_program(program: CompiledProgram, hw: HardwareConfig, sim: S
   """Verify package integrity and executable semantics without graph mutation."""
   if not isinstance(program, CompiledProgram):
     _fail("expected CompiledProgram")
-  if type(program.schema_version) is not int or program.schema_version != 2 or program.compiler_abi != "v1":
+  if type(program.schema_version) is not int or program.schema_version != 2 or program.compiler_abi != "v2":
     _fail("unsupported compiled schema or compiler ABI; recompile from source")
   if not _is_frozen(program):
     _fail("compiled artifact is not deeply immutable")

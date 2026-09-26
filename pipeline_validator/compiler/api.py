@@ -341,7 +341,7 @@ def compile_program(
 
   program = CompiledProgram(
     2,
-    "v1",
+    "v2",
     source_hash,
     source_ir,
     registry,

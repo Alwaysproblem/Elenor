@@ -256,11 +256,19 @@ whole Arena, including padding. A generated `BIND_L2_VIEW` action binds this
 buffer's valid-byte segments at its compiled lifetime start; the source op is
 not a standalone dynamic allocation.
 
-`sharing` is optional and defaults to `private`; its only other value is
-`readonly`. A readonly allocation is local producer storage until it is
-published once with `nest.publish`; publication seals the initialized bytes and
-creates no additional allocation. A consumer obtains its typed readonly import
-with `nexus.shared.ref` on a producer submit result and passes that reference as
+`sharing` is optional and defaults to `private`; the other values are
+`readonly` and `context-local`. A context-local allocation is writable local
+storage owned by one execution instance of `nest.context`, not by a Tile UCE
+context index. Multiple Tile tasks in that instance may read/write it according
+to its `role`; sharing adds no atomicity, locks, or overlapping-write safety.
+It cannot be published or passed to another context as a `nexus.shared.ref`.
+Unlike a private output, a written context-local output needs no HBM Store.
+Neither uninitialized reads nor zero initialization are guaranteed.
+
+A readonly allocation is local producer storage until it is published once
+with `nest.publish`; publication seals the initialized bytes and creates no
+additional allocation. A consumer obtains its typed readonly import with
+`nexus.shared.ref` on a producer submit result and passes that reference as
 a context actual. Imported views are aliases, not entries in the consumer's
 `ArenaLayout` or private L2 reservation.
 
@@ -395,9 +403,9 @@ nest.release %buf depends_on(%reader_inrel, %prefetch_ev, %store_ev)
 ```
 
 Invalidates the Context-owned L2 view after its required closure. Local
-`nest.alloc` defaults to `sharing="private"`; an allocation may opt into
-`sharing="readonly"` only when it is exported through exactly one
-`nest.publish`:
+`nest.alloc` defaults to `sharing="private"`; `sharing="context-local"` permits
+mutable handoff among Tile tasks of the same context invocation without export.
+`sharing="readonly"` exports through exactly one `nest.publish`:
 
 ```mlir
 %published = nest.publish %weight depends_on(%prefetched) : !nest.event<"published">
@@ -423,6 +431,15 @@ For a local private allocation, the dependency SSA set is exactly
 - `P`: every prefetch completion into this allocation.
 - `S`: every HBM Store completion from this allocation, not just the last.
 
+For a context-local allocation it is exactly `R(buffer) ∪ W(buffer) ∪ P(buffer)
+∪ S(buffer)`, where `W` is the `output_ready` of every actual writer dispatch.
+If an HBM Store is present, every Store must depend directly on all earlier
+writers, and the final Store must depend directly on every actual writer;
+otherwise the Store is not a valid final output. A context-local buffer does
+not require any HBM Store or publish to be released.
+Cross-dispatch RAW/WAR/WAW dependencies are inferred by lowering; concurrent
+overlapping task writes inside a dispatch are not synchronized.
+
 An exported readonly allocation additionally depends on its publish event.
 An imported readonly view requires its `input_released` and every Store
 completion that reads it as a source. No duplicate dependencies,
@@ -431,10 +448,9 @@ Examples list readers by dispatch ordinal, then prefetches and Stores in
 source order. Verification treats dependencies as a set; lowering preserves
 author order and appends inferred bind/hazard dependencies without duplicates.
 An input buffer with no asynchronous use may have an empty dependency set.
-Private role `"in"` forbids Tile writes; private `"out"`/`"inout"` still require
-a real Tile writer and at least one HBM Store. A published readonly
-`"out"`/`"inout"` export may instead feed
-readers directly without an intermediate HBM Store.
+Role `"in"` forbids Tile writes in every sharing mode. `"out"`/`"inout"` require
+a real Tile writer; private outputs additionally require at least one HBM Store.
+A published readonly `"out"`/`"inout"` export may instead feed readers directly.
 
 Every local allocation has exactly one release before `nest.return`; no
 binding, prefetch, Store, or other buffer use may appear after it. Runtime
@@ -813,7 +829,7 @@ compile_program(
 ) -> CompiledProgram
 ```
 
-The result has compiled schema 2 and compiler ABI `v1`. It contains canonical
+The result has compiled schema 2 and compiler ABI `v2`. It contains canonical
 `source_ir`/`source_hash`, embedded `ProfileRegistry`/`registry_hash`, static
 `target_hash`, `artifact_hash`, `"standalone"|"model"` entry kind, immutable
 entry/prefix, call bindings, explicit relocations, instruction source map,
@@ -987,7 +1003,7 @@ valid bytes and carry both allocation and Profile generations. Local
 finishes later; it never changes the free map by itself. Repeated, stale,
 wrong-owner, or out-of-generation operations are invariant failures.
 
-**L2 physical extent and readonly-sharing lifecycle.** Each local L2
+**L2 physical extent and sharing lifecycle.** Each local L2
 allocation has an independent, non-overlapping stripe-rounded padded span; the
 compiler never re-binds a released L2 region. The independent executable
 verifier rejects layouts whose padded spans overlap or whose spans plus slack
@@ -998,6 +1014,11 @@ increase physical capacity. Each run has a finite claim manifest keyed by
 producer submit binding/slot and consumer submit binding/local slot; each
 materialized claim transitions `DECLARED → BOUND → RELEASED`, with
 `CANCELLED` reserved for fault/reset cleanup.
+
+Context-local backings stay owned by their one context invocation and never
+create reader claims or borrowed views. Their mutable owner view follows the
+ordinary pin/transaction preflight and unique physical final-free on release;
+no other context may retain the backing.
 
 `nest.publish` seals a fully initialized readonly export after its final
 producer access. Producer release revokes only the producer view; unsubmitted
