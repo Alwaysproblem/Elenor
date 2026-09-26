@@ -108,6 +108,10 @@ class Simulator:
       controller.active_modes["l1"] != expected.l1_mode or controller.active_modes["l2"] != expected.l2_mode
     ):
       raise ValueError("actual entry profile differs from compiled entry; explicit recovery required")
+    # Profile initialization uses a pre-run clock, not workload cycles. Keep
+    # capacity baselines and earlier workload history, but exclude that clock.
+    if self.tracer is not None:
+      self.tracer.discard_profile_initialization()
     self.group.begin_launch(compiled, bindings)
     self.cycle = 0
     self._trace.clear()

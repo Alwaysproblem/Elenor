@@ -56,6 +56,160 @@ def _thread_meta(events: list[dict], pid: int) -> dict[str, int]:
 POW_BINDINGS = {"Y": GlobalBinding("Y", 0x100000, 524288, "rw")}
 
 
+class TestRunTimeline:
+  def test_workload_trace_excludes_initialization_without_changing_cycles(self):
+    from pipeline_validator.tests.test_profile_runtime import COPY_IR
+    from pipeline_validator.workload_ir import parse_workload_ir
+
+    hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10, clock_mhz=800)
+    config = SimConfig(fidelity="full_memory", max_cycles=10000, memory_trace=True)
+    bindings = {
+      "src": GlobalBinding("src", 0x100000, 64, "r"),
+      "dst": GlobalBinding("dst", 0x200000, 64, "w"),
+    }
+    artifact = compile_program(parse_workload_ir(COPY_IR), hw, config)
+    loaded = load_program(artifact, hw, config, actual_bindings=bindings)
+    simulator = Simulator(hw, config, enable_tracer=True)
+    initial_l1_free = simulator.group.tiles[0].l1_allocator.snapshot()["free_bytes"]
+    result = simulator.run(loaded)
+    untraced = Simulator(hw, config).run(loaded)
+    assert result.completed and untraced.completed
+    assert result.cycles == untraced.cycles
+    events = _events_of(simulator)
+    assert not any(
+      event["name"] in ("profile_initialize", "profile_initialized")
+      or event.get("args", {}).get("stage") == "INITIALIZE"
+      for event in events
+    )
+    capacity_baselines = [
+      event for event in events if event["name"] == "l1_free_bytes" and event["ts"] == 0
+    ]
+    assert len(capacity_baselines) == hw.num_tiles
+    assert all(event["args"]["l1_free_bytes"] == initial_l1_free for event in capacity_baselines)
+    assert simulator.tracer is not None
+    legs = [event for event in events if "accepted_cycle" in event.get("args", {})]
+    assert legs
+    for event in legs:
+      args = event["args"]
+      start = simulator.tracer.cycle_to_us(args["accepted_cycle"])
+      end = simulator.tracer.cycle_to_us(args["completion_cycle"])
+      assert event["ts"] == pytest.approx(start)
+      assert event["dur"] == pytest.approx(max(end - start, 0.001))
+    simulator.tracer.assert_well_formed()
+
+  def test_warm_run_retains_capacity_baselines_and_persistent_hbm_bindings(self):
+    from pipeline_validator.tests.test_profile_runtime import COPY_IR
+    from pipeline_validator.workload_ir import parse_workload_ir
+
+    hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
+    config = SimConfig(fidelity="full_memory", max_cycles=10000, memory_trace=True)
+    bindings = {
+      "src": GlobalBinding("src", 0x100000, 64, "r"),
+      "dst": GlobalBinding("dst", 0x200000, 64, "w"),
+    }
+    artifact = compile_program(parse_workload_ir(COPY_IR), hw, config)
+    loaded = load_program(artifact, hw, config, actual_bindings=bindings)
+    simulator = Simulator(hw, config, enable_tracer=True)
+    pools = [("l2", "TileGroup", simulator.group.l2_sram)]
+    pools.extend(("l1", f"Tile{tile.tile_id}", tile.l1_allocator) for tile in simulator.group.tiles)
+    expected_free = {}
+    for space, track, pool in pools:
+      snapshot = pool.snapshot()
+      expected_free[(track, f"Memory:{space.upper()} State", f"{space}_free_bytes")] = snapshot[
+        "free_bytes"
+      ]
+      for bank in snapshot["per_bank_occupancy"]:
+        expected_free[(track, f"{space.upper()} Bank:{bank['bank_id']}", f"{space}_bank_free_bytes")] = (
+          bank["free_bytes"]
+        )
+
+    cold = simulator.run(loaded)
+    assert cold.completed, cold.reason
+    hbm = simulator.group.hbm
+    persistent_bindings = {name: hbm.get_handle(name) for name in bindings}
+    warm = simulator.run(loaded)
+    assert warm.completed, warm.reason
+    assert {name: hbm.get_handle(name) for name in bindings} == persistent_bindings
+    assert hbm.used_bytes() == sum(binding.size_bytes for binding in bindings.values())
+
+    events = _events_of(simulator)
+    tracks = {
+      event["pid"]: event["args"]["name"] for event in events if event["name"] == "process_name"
+    }
+    threads = {
+      (event["pid"], event["tid"]): event["args"]["name"]
+      for event in events
+      if event["name"] == "thread_name"
+    }
+    first_samples = {}
+    for event in events:
+      if event["ph"] == "C" and event["ts"] == 0:
+        key = (tracks[event["pid"]], threads[(event["pid"], event["tid"])], event["name"])
+        first_samples.setdefault(key, event["args"][event["name"]])
+    assert {key: first_samples[key] for key in expected_free} == expected_free
+
+    recorded_bindings = {
+      event["args"]["binding"]: (event["args"]["allocation_id"], event["args"]["generation"])
+      for event in events
+      if event["name"] == "hbm_bind"
+    }
+    expected_bindings = {}
+    for name, handle in persistent_bindings.items():
+      assert handle is not None
+      expected_bindings[name] = (handle.allocation_id, handle.generation)
+    assert recorded_bindings == expected_bindings
+    for name, value in (
+      ("hbm_allocated_bytes", hbm.used_bytes()),
+      ("hbm_free_bytes", hbm.size_bytes - hbm.used_bytes()),
+    ):
+      samples = [event for event in events if event["name"] == name]
+      assert samples[-1]["ts"] == 0
+      assert samples[-1]["args"][name] == value
+    assert simulator.tracer is not None
+    simulator.tracer.assert_well_formed()
+
+  def test_profile_switch_finishes_before_next_input_load(self, tmp_path):
+    repo = Path(__file__).resolve().parents[2]
+    trace_path = tmp_path / "profile-switch.json"
+    proc = subprocess.run(
+      [
+        "bash",
+        str(repo / "examples/run.sh"),
+        "l2-admission-profile-switch",
+        "--sim-override",
+        "fidelity=full_memory",
+        "--memory-trace",
+        "--trace-json",
+        str(trace_path),
+      ],
+      capture_output=True,
+      text=True,
+      cwd=repo,
+      timeout=300,
+    )
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    events = json.loads(trace_path.read_text())["traceEvents"]
+    assert not any(event.get("args", {}).get("stage") == "INITIALIZE" for event in events)
+    command = next(
+      event
+      for event in events
+      if event["name"] == "profile_command" and event["args"]["level"] == "l2"
+    )
+    assert command["args"]["status"] == "completed"
+    end = command["ts"] + command["dur"]
+    assert end == pytest.approx(command["args"]["completed_cycle"] / 1000)
+    inputs = sorted(
+      (event for event in events if event.get("cat") == "HBM → L2 Input"),
+      key=lambda event: event["ts"],
+    )
+    assert len(inputs) == 3
+    assert max(event["ts"] + event["dur"] for event in inputs[:2]) <= command["ts"]
+    assert end <= inputs[2]["ts"]
+    members = [event for event in events if event.get("cat") == "Profile:Member"]
+    assert {event["args"]["stage"] for event in members} == {"PREPARE", "COMMIT"}
+    assert all(command["ts"] <= event["ts"] <= end for event in members)
+
+
 class TestSortMetadata:
   def test_sort_metadata_orders_lanes(self):
     """Every process/thread carries sort metadata; Device < TileGroup <

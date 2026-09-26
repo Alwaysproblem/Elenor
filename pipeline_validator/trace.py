@@ -194,6 +194,20 @@ class Tracer:
   # (track, effective thread, counter name) -> last sampled value
   _last_counter: dict[tuple[str, str, str], float] = field(default_factory=dict)
 
+  def discard_profile_initialization(self) -> None:
+    """Exclude the pre-run profile clock, retaining capacity baselines and history."""
+    self._events[:] = [
+      event
+      for event in self._events
+      if not (
+        event["name"] in ("profile_initialize", "profile_initialized")
+        or (
+          event["name"] in _PROFILE_MEMBER_EVENTS
+          and event.get("args", {}).get("stage") == "INITIALIZE"
+        )
+      )
+    ]
+
   # ---- helpers ---------------------------------------------------------
 
   def cycle_to_us(self, cycle: int) -> float:
@@ -306,6 +320,10 @@ class Tracer:
 
     ``thread`` selects the lane the counter renders on; when omitted
     the counter name itself is the thread name (legacy behavior).
+    ``unit`` is accepted for call-site compatibility but is deliberately
+    not serialized: Perfetto's JSON importer requires every counter
+    arg to be numeric and records any string arg (e.g. ``unit``) as
+    ``json_parser_failure`` even though the value row still lands.
     """
     eff_thread = thread if thread is not None else name
     pid = self._pid(track)
@@ -317,7 +335,7 @@ class Tracer:
         "pid": pid,
         "tid": tid,
         "ts": self.cycle_to_us(cycle),
-        "args": {name: value, "unit": unit} if unit else {name: value},
+        "args": {name: value},
       }
     )
 
@@ -454,7 +472,7 @@ class Tracer:
       if ph == "C":
         name = ev.get("name", "")
         cargs = ev.get("args", {})
-        extra = set(cargs) - {name, "unit"}
+        extra = set(cargs) - {name}
         if extra:
           errors.append(f"counter '{name}' has extra args {sorted(extra)}")
         if name not in cargs:

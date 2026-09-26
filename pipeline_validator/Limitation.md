@@ -85,6 +85,31 @@ LoadedProgram → Simulator.run`；Simulator 不包含源码 lowering fallback�
   fetch/install metadata。可选 `same_program` epoch 只限制 dispatch，
   不冻结无关 DMA。
 
+## Trace 的初始化可观测性限制
+
+- 默认通过 `Simulator.run` 导出的 workload trace 不包含 pre-run Profile
+  初始化过程，不是从设备初始化开始的完整生命周期时间轴。初始化在
+  workload cycle 0 之前完成，其耗时也不计入 report 的 workload cycles。
+- 底层 Tracer 仍会生成初始化事件，但 `Simulator.run` 在初始化完成、
+  workload 启动前调用 `discard_profile_initialization()`，移除
+  `profile_initialize`、`profile_initialized`，以及
+  `stage == "INITIALIZE"` 的 member request/ACK。因此正常导出的
+  JSON/HTML trace 默认看不到这些初始化事件。
+- 该处理是**省略初始化阶段，而不是修正初始化事件的时间戳**。过滤条件
+  是事件类型和 stage，不判断事件是否 overlap；运行中的
+  `profile_command`、`profile_step` 和 `PREPARE`/`COMMIT` member
+  事件不会因 overlap 被删除。
+- Cycle-0 容量基线、复用 Tracer 时的历史 workload 记录及持久 HBM
+  binding/counter 均保留；不清空整个 Tracer，也不平移 workload 时间戳，
+  以保持 trace 时间与 report、`accepted_cycle`/`completion_cycle` 对应。
+- 这一范围适合分析 workload 执行，但**不能从当前导出的 trace 中检查
+  初始 Profile 设置的耗时及其与第一笔 DMA 的完整先后关系**。初始化
+  overlap 消失只说明初始化事件已被排除，不是完整启动时间轴已正确
+  呈现的证明；实际先初始化、再启动 workload 的顺序由执行代码保证。
+- 当前没有独立 startup trace、保留初始化事件的导出开关或独立 epoch
+  导出机制。若需完整生命周期可观测性，必须显式补充这些能力，并明确
+  初始化时钟与 workload cycle 的对应关系，不能仅靠隐藏事件代替。
+
 ## 数值与 Cache 证明边界
 
 - 默认模拟不执行 BOA/EVU/USE tensor 算术；这些 op 的 bytes/ops 只驱动
@@ -157,4 +182,5 @@ LoadedProgram → Simulator.run`；Simulator 不包含源码 lowering fallback�
   Profile 语义。
 - trace counter 是 change-only，不是每 cycle 采样；collapsed-leg fidelity
   的 flow 只有 `s`+`f`。报告中的 Profile/Arena/lease 结论来自 bounded
-  snapshot，完整历史应查看 executable dump 与 Perfetto trace。
+  snapshot；workload 的编译控制序列与执行历史应结合 executable dump
+  和 Perfetto trace 查看，但不包含上述被省略的 pre-run Profile 初始化事件。
