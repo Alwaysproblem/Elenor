@@ -59,6 +59,20 @@ Protocol scenarios:
   profile-reconfiguration         scenarios/profile_reconfiguration.mlir
   l2-profile-switch-load-ordering
                                  scenarios/l2_profile_switch_load_ordering.mlir
+  l2-admission-profile-switch    scenarios/l2_admission_profile_switch.mlir
+                                 (A mode0 完整 store/pow 后，compiler 自动等
+                                 完整 root completion frontier 再切 L2
+                                 mode1，B 在切档命令完成后才准许/加载)
+  l2-shared-weight               scenarios/l2_shared_weight.mlir
+                                 (loader 一次 HBM->L2 prefetch W 并 publish,
+                                 两个 reader 各 4 tile 从同一 backing 读,
+                                 共享只 8192 B; 私有对照为 l2-private-weight)
+  l2-shared-fanout               scenarios/l2_shared_fanout.mlir
+                                 (A 用 tile.load/store 在 L2 造 X 并 publish,
+                                 无 X 的 HBM binding; B/C 借用同一 backing)
+  l2-private-weight              scenarios/l2_private_weight.mlir
+                                 (对照: 两个 reader 各自私有 prefetch W,
+                                 HBM->L2 流量 16384 B vs 共享 8192 B)
 EOF
   printf '\nNEST subgraphs (timing/lifetime, not tensor numerics):\n'
   local model stem
@@ -363,6 +377,62 @@ case "$name" in
       "$@"
     ;;
 
+  l2-admission-profile-switch)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/scenarios/l2_admission_profile_switch.mlir" \
+      --hw-config "$ROOT_DIR/examples/configs/profile_l2_256k_switch.yaml" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --context-mode 2 \
+      --device-context-mode 2 \
+      --input-binding A_IN=0x100000:131072:rw \
+      --input-binding A_OUT=0x200000:131072:rw \
+      --input-binding B_IN=0x300000:131072:rw \
+      --max-cycles 500000 \
+      "$@"
+    ;;
+  l2-shared-weight)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/scenarios/l2_shared_weight.mlir" \
+      --hw-config "$ROOT_DIR/examples/configs/profile_l2_256k.yaml" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --context-mode 2 \
+      --device-context-mode 2 \
+      --input-binding W=0x100000:8192:r \
+      --input-binding B_OUT=0x200000:32768:w \
+      --input-binding C_OUT=0x300000:32768:w \
+      --max-cycles 500000 \
+      "$@"
+    ;;
+  l2-shared-fanout)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/scenarios/l2_shared_fanout.mlir" \
+      --hw-config "$ROOT_DIR/examples/configs/profile_l2_256k.yaml" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --context-mode 2 \
+      --device-context-mode 2 \
+      --input-binding A_IN=0x100000:8192:r \
+      --input-binding B_OUT=0x200000:32768:w \
+      --input-binding C_OUT=0x300000:32768:w \
+      --max-cycles 500000 \
+      "$@"
+    ;;
+  l2-private-weight)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/scenarios/l2_private_weight.mlir" \
+      --hw-config "$ROOT_DIR/examples/configs/profile_l2_256k.yaml" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --context-mode 2 \
+      --device-context-mode 2 \
+      --input-binding W=0x100000:8192:r \
+      --input-binding B_OUT=0x200000:32768:w \
+      --input-binding C_OUT=0x300000:32768:w \
+      --max-cycles 500000 \
+      "$@"
+    ;;
   l2-profile-switch-load-ordering)
     set -- \
       --ir-file "$ROOT_DIR/examples/scenarios/l2_profile_switch_load_ordering.mlir" \

@@ -1,5 +1,7 @@
 # 批次 III：场景与端到端验收
 
+> **状态（2026-09-25）：已完成。** 四个 focused 场景 × 双 fidelity、`run.sh list` 动态 corpus 全量双档、Perfetto/JSON/独立 extractor 交叉审计、字节与生命周期断言、全量 pytest 与 pre-commit 均通过。证据与命令清单：[`examples/artifacts/l2-sharing-release/20260925T135828Z/batch_III/acceptance-summary.json`](../examples/artifacts/l2-sharing-release/20260925T135828Z/batch_III/acceptance-summary.json)。下文保留原始计划文本。
+
 > 本文是 `L2_显式共享_PLAN.md` 第六步第 4–7 条、第七步和第八步第 3–5 条的可执行计划；仅规定实施顺序、可运行场景和验收证据，不代表拟议语法已经实现。共享语法与 runtime 合同实现前，文中的 `sharing`、`nest.publish`、`nexus.shared.ref` 示例均不可解析、不可运行。
 >
 > 相关计划：批次 I [私有 L2 提前释放](./01_private_l2_release.md)、批次 II [显式只读 L2 共享与生命周期](./02_explicit_l2_sharing.md)、[原始联合计划](../design/proposal/L2_显式共享_PLAN.md)。计划目录总览由 `plan/README.md` 维护。
@@ -10,10 +12,10 @@
 
 开始前逐项确认：
 
-- [ ] 批次 I 已证明 L2 私有 buffer 的 padded、stripe-rounded span 永久 forfeiture；同一 backing 的物理记账和 final-free 唯一；accepted transfer 引用直到真实 terminal acknowledgement 才排空；fault/reset、cancel、late access 不会提前归还或 double-free；真实同 profile 容量释放可唤醒 FIFO 队头。
-- [ ] 批次 II 已证明封闭的 shared claim manifest、producer completion readiness、只读 view、最后安全 borrower final-free、producer root 可先退休而 backing 可存活、跨 L2 profile epoch 被拒绝；fault/reset 安全 drain 和 run 间闭合也已通过。
-- [ ] 两批的 `IR_SPEC.md` 行为合同与本批 profile-switch/shared fixtures 使用的语法一致；实现未改变 HBM striping、L1 Task Arena/tile.free 合同、device-slot/context 配置语义。
-- [ ] 已按批次 I 的先决要求取得真实 workload 容量等待 baseline；不在本批伪造或补写测量值，也不把缺少直接收益的 workload 改成优先级决策。此前已报告的旧 `l2-admission-wait` 失败作为已知基线，不为确认而重跑；本批只运行前两批安全门完成后的 fresh acceptance。
+- [x] 批次 I 已证明 L2 私有 buffer 的 padded、stripe-rounded span 永久 forfeiture；同一 backing 的物理记账和 final-free 唯一；accepted transfer 引用直到真实 terminal acknowledgement 才排空；fault/reset、cancel、late access 不会提前归还或 double-free；真实同 profile 容量释放可唤醒 FIFO 队头。
+- [x] 批次 II 已证明封闭的 shared claim manifest、producer completion readiness、只读 view、最后安全 borrower final-free、producer root 可先退休而 backing 可存活、跨 L2 profile epoch 被拒绝；fault/reset 安全 drain 和 run 间闭合也已通过。
+- [x] 两批的 `IR_SPEC.md` 行为合同与本批 profile-switch/shared fixtures 使用的语法一致；实现未改变 HBM striping、L1 Task Arena/tile.free 合同、device-slot/context 配置语义。
+- [x] 已按批次 I 的先决要求取得真实 workload 容量等待 baseline（`examples/artifacts/l2-sharing-release/20260925T012727Z/baseline/`，26 runs 全部零容量等待）；不在本批伪造或补写测量值，也不把缺少直接收益的 workload 改成优先级决策。此前已报告的旧 `l2-admission-wait` 失败作为已知基线，不为确认而重跑；本批只运行前两批安全门完成后的 fresh acceptance（run-id `20260925T135828Z`）。
 
 本批保持以下边界：L2 默认 private；共享只读、限同一 model invocation / Tile Group / L2 profile generation；消费者以 producer context 成功完成作为 readiness；L1-only profile change 不销毁 L2 sharing；L2 切走再切回相同 mode 仍是新 generation；不改 HBM striping、L1 复用和设备槽位；不增加隐式 spill/reload 或任意 shared read-write。即使 trace 结果良好，也不得声称本次恢复了 `matmul-pow-free-slot` 或 `matmul17-pow-tail-overlap` 的引擎重叠。
 
@@ -278,10 +280,10 @@ conda run -n elenor-validator python -m pytest pipeline_validator/tests/ -v
 
 ### 4.3 收尾
 
-- [ ] 删除 throwaway runner 临时文件、临时 SQL 输出、解析缓存；保留可复核的 run-id 输入 hashes、命令清单、reports、traces、stats、SQL/JSON cross-audit 和 summary。
-- [ ] 不删除已有 artifacts、用户数据或 sibling 文件；本批只应修改/新增本计划所列场景/config/runner入口、规范/注释及所需验收代码，范围外改动先停止并协调。
-- [ ] 从 fresh run 确认 focused 场景、dynamic corpus、per-bank capacity、parser完整性、output bytes、last-reader final-free、profile fence、所有测试与 pre-commit 均符合合同；任何重跑使用新的 run-id 和输入 hash。
-- [ ] 更新 `plan/README.md` 的依赖/链接；该文件由父任务所有者维护，不在本批子计划中抢改。
+- [x] 删除 throwaway runner 临时文件、临时 SQL 输出、解析缓存；保留可复核的 run-id 输入 hashes、命令清单、reports、traces、stats、SQL/JSON cross-audit 和 summary。（runner/audit 脚本按 §2.1 保留在 run-id 目录内作为审计证据；`__pycache__` 已清除）
+- [x] 不删除已有 artifacts、用户数据或 sibling 文件；本批只应修改/新增本计划所列场景/config/runner入口、规范/注释及所需验收代码，范围外改动先停止并协调。
+- [x] 从 fresh run 确认 focused 场景、dynamic corpus、per-bank capacity、parser完整性、output bytes、last-reader final-free、profile fence、所有测试与 pre-commit 均符合合同；任何重跑使用新的 run-id 和输入 hash。（unit-arg counter 修复后以新 run-id `20260925T135828Z` 全量重跑）
+- [x] 更新 `plan/README.md` 的依赖/链接；该文件由父任务所有者维护，不在本批子计划中抢改。
 
 ## 5. 批次 III 完成标准
 

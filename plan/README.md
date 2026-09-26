@@ -1,6 +1,6 @@
 # L2 显式共享与提前释放：分批执行索引
 
-本目录把 [`L2_显式共享_PLAN.md`](../design/proposal/L2_显式共享_PLAN.md) 拆为三个**可验收的实施批次**。原计划是语义、边界条件和验证目标的依据；若实施时发现源码与计划不符，先核实源码并同步修订相关批次，不通过省略安全检查求通过。批次 I/II 的实现和验证已完成；批次 III 的独立 CLI 场景与 Perfetto/全量 corpus 验收仍待执行。
+本目录把 [`L2_显式共享_PLAN.md`](../design/proposal/L2_显式共享_PLAN.md) 拆为三个**可验收的实施批次**。原计划是语义、边界条件和验证目标的依据；若实施时发现源码与计划不符，先核实源码并同步修订相关批次，不通过省略安全检查求通过。**批次 I/II/III 的实现和验收均已完成**（III 的 run-id `20260925T135828Z`：4 focused × 双 fidelity、动态 corpus 135 入口 × 双档、270 份 trace 交叉审计、444 tests、pre-commit 全过）。
 
 | 批次                | 执行文件                                        | 对应原计划                                                                                     | 完成门槛                                                                                                                                                     |
 | ------------------- | ----------------------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -11,7 +11,9 @@
 
 批次 II 的 in-process ByteStore、runtime/full_memory trace、编译产物、
 命令及 SHA-256 证据见
-`examples/artifacts/l2-sharing-release/20260925T131034Z/batch-II/`。
+`examples/artifacts/l2-sharing-release/20260925T131034Z/batch-II/`；
+批次 III 的 CLI focused/corpus、Perfetto 交叉审计与验收 summary 见
+`examples/artifacts/l2-sharing-release/20260925T135828Z/batch_III/`。
 `sharing`、`nest.publish`、`nexus.shared.ref` 已由当前 parser 支持；各计划中的草图
 不是批次 III 的完整可运行场景。
 

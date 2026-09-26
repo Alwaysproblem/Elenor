@@ -23,17 +23,19 @@
 12. 当前的 nexus.program 需要采用 depends 机制来明确各个 tile program 之间的依赖关系，确保使用 ready-action 策略而不是wait这种策略来进行触发。
 13. 需要询问 当前 next.context 的运行是不是 ready action 这种模式。
 
-## R3
-
 > 状态更新于 2026-09-13，基于 ready-action 改造后的代码逐条核对（全量 342 tests 通过、CLI 实测）。
 > 每条含：原始意图（想做的事）→ 当前状态 → 剩余工作。编号沿用原列表。
+> 2026-09-25 复核：基于批次 I/II/III 落地后的代码（全量 444 tests、pre-commit、4 focused 场景 × 双档 + 动态 corpus 270 run 全过）。
 
-1. **IR 对 nest.context 的资源显式配置与管理**
+
+
+14. **IR 对 nest.context 的资源显式配置与管理**
    - 想做：像 reference.mlir 那样在 nest.context 上声明编译器生成的资源合同（`#nest.context_resources<logical_tasks / l2_scratchpad_bytes / tile_l1_bytes_per_context / requested_contexts_per_tile>`、execution_model、epoch_model），供 admission 直接消费，而不是把 context 当普通 tile、资源需求靠推导。
    - 状态：❌ 未开始。当前 `NestContextOp` 只有 `placement / context(pin) / completion_event`；L2 需求从 `nest.alloc` 列表求和推导（`try_admit_l2_buffers`），无 context 级声明包络、无 per-context L1 envelope、无 requested_contexts_per_tile；epoch_policy 只是仿真配置（`GroupSchedulerConfig`），不在 IR。
    - 剩余工作：定义 `resource_contract` 属性 + verifier 一致性检查（声明值 vs 推导值）+ admission 改为消费声明包络（可在 load 期做静态拒绝，早于运行时 fault）。
+   - ✅ 2026-09-25 标注：已完成（上方 ❌ 为 2026-09-13 旧状态）。`#nest.context_resources<placement / l2_mode / allowed_profiles / logical_tasks / l2_spm_bytes / requested_contexts_per_tile>` 已在 IR 声明并由 verifier 与 admission 直接消费，超包络在编译/load 期静态拒绝（`workload_ir.py::_resource_contract`、`execution_verifier.py`、`try_admit_context_task`）；epoch_policy 仍留在 `GroupSchedulerConfig`，未进 IR。
 
-2. **内存不足时的等待与 release 驱动重试**
+15. **内存不足时的等待与 release 驱动重试**
    - 想做：L2/L1 容量不足时下一个 context 等待而非直接失败；不能每 cycle 盲重试，要依据编译器给出的内存信息（大小、cache/scratchpad 模式）判定，只在有 release 时才重试。
    - 状态：⚠️ L2 已完成，L1 未完成（合同上明确没有 L1 等待队列）。
      - L2 ✅：bundle 三态 admission（INVALID/PERMANENT 立即 fault、TEMPORARY 入 FIFO ticket 且等待零持有）；重试仅由 release final-free 通知触发（pool_version + capacity_change_cycle 双去重，无忙轮询）；event_table 容量不足走同一机制。
@@ -60,15 +62,12 @@
    - 出现需要严格 FIFO 准入次序的确定性合同；
    - 若真要做，最小版本是 per-tile pool_version 门控重试（复用 L2 的去重思想、跳过明显无变化的周期），而不是全套 FIFO ticket。
 
-3. **load/store 拆分为 L2↔L1 与 L1↔Register 两类**
-   - 想做：当前 `tile.load.async` / `tile.store.async` 只有 L2↔L1 语义（简化设计）；后续增加 L1↔Register 一类 load/store，更好模拟真实硬件行为。
-   - 状态：❌ 未开始。方言无任何 register 级 op；BOA/EVU 描述符直接引用 L1 buffer，无寄存器级传输。
-   - 剩余工作：新 op（如 tile.rload.async / tile.rstore.async）+ 引擎描述符操作数模型改动 + 寄存器端口/带宽性能模型。依赖"未来问题"清单里 BOA register file load 的硬件 pipeline 结论。
 
 4. **bank 模式进 IR**
    - 想做：硬件上一个 bank 支持多种模式，需要暴露给编译器做优化。
    - 状态：❌ 未开始（IR 侧）。仿真内部已有 bank 建模：`BankedFreeExtentAllocator` 的 bank/alignment profile 参与 `can_ever_fit_bundle` 永久性判定；但 IR 无任何 bank 属性，编译器不可见、不可指定。
    - 剩余工作：`nest.alloc` / `tile.alloc` 增加 bank 模式属性 + verifier 校验 + allocator 按模式放置/对齐。
+
 
 5. **L2 shared memory（多 tile 共享 weight，减少重复 memory IO）**
    - 想做：在 L2 开 shared memory 概念，允许多个 tile 共享一份 memory，共享 weight 放 L2 中，减少重复 prefetch 的 memory IO 占用。第一版默认私有分配，显式允许只读共享；跨 context 中间结果传递作为受控能力，而不是默认任意共享读写。
@@ -77,6 +76,7 @@
      - ✅ 单 context 内 buffer 跨 dispatch 复用（shared_A 测试：B 写 → D 读 → 最后读者释放）。
      - ❌ 显式共享分配合同（跨 context）：每个 context 的 L2 bundle 仍独占（`ContextBufferOwner(context, generation, slot)`），IR 无共享 alloc/引用语法——多个 context 用同一份 weight 仍需各自 alloc + 各自 prefetch，重复 IO 未消除；admission 无引用计数，释放无"最后使用者"合同。
    - 剩余工作：IR 共享分配/引用语法 + L2 admission 扩成引用计数（共享不重复计容量）+ 释放合同（最后使用者释放，需扩 release preflight）。
+   - ✅ 2026-09-25 标注：剩余工作已全部完成（plan/02_explicit_l2_sharing.md 批次 II，同日场景验收见 plan/03）。IR 新增 `nest.alloc sharing="readonly"`、`nest.publish`、`nexus.shared.ref`；admission 以 run-scoped claim（DECLARED→BOUND→RELEASED/CANCELLED）推导引用，共享不重复计物理容量；最后安全 borrower release 唯一 final-free，producer release/retirement 不释放仍被 claim 持有的 backing。证据：`pipeline_validator/tests/test_l2_sharing.py`、`tests/test_l2_sharing_source.py`、`tests/test_compiler.py::TestIndependentSharedArtifactVerification`、`tests/test_memory_invariants.py`（claim 台账/原子性/保留容量），批次 II 实测 `examples/artifacts/l2-sharing-release/20260925T131034Z/batch-II/`（W 8192 B vs 私有 16384 B、延迟 C 后唯一 physical free）。
      comments：
    - 分支复用和独立任务复用，不总能自然转化成局部 fusion, 如下图这种，A的结果就需要被同时供给 B 和 C，难以在局部 fusion 中消除重复IO。
 
@@ -95,6 +95,7 @@
    - [x] 需要增加 mlir 的 example，对 memory profile 变化的时候, 就不以将下一个的 op 的 load 提前到当前 context 的 release 当拍，而是在当前的 context 跑完了也就是 HBM store 完成之后 profile 切换完成后再进行 load。
      - ✅ 2026-09-25 已完成：`examples/scenarios/l2_profile_switch_load_ordering.mlir`（配置 `examples/configs/profile_l2_switch.yaml`，L2 mode0 全 SPM → mode1 带 cache）。ctx_b 连续提交、无源级 await——顺序完全由编译器生成的 L2 profile command（frontier = done_a）保证。两档 trace 完整链条 `release < store_done <= A_done <= switch_start < switch_end <= B_admit < prefetch <= tile_load` 成立（runtime：804 < 17975 <= 17977 <= 17979 < 18052 <= 18054 < 18058；full：3522 < 22050 <= 22052 <= 22054 < 22127 <= 22129 < 22133）。回归：`test_runtime.py::TestL2ProfileSwitchOrdering` 两档通过。
    - 风险与代价（2026-09-22 更新；批次 I 实施时已逐条闭环——滞后访问由引用台账+drain 覆盖、forfeiture 由 no-rebind 布局保证、记账按 backing 粒度、碎片分类保持 WAIT_CAPACITY/WAIT_FRAGMENTATION、回归面全量 395 passed、R3-5 耦合留待批次 II 同一 finalizer）：
+   - ✅ 2026-09-25 标注：①批次 II（跨 context 只读共享 claims 挂接同一 finalizer）已完成，见 R3-5 的标注；②风险第 8 条的量化已完成——改代码前 13 个真实 workload × 双档共 26 run 的容量等待为 0（`examples/artifacts/l2-sharing-release/20260925T012727Z/baseline/root_wait_metrics.json`），与预期一致：R3-6 收益集中在 l2-admission-wait 类容量阻塞场景，不声称恢复 matmul-pow-free-slot / matmul17-pow-tail-overlap 的 overlap；③批次 III 场景与端到端验收已完成（4 focused × 双档 + 动态 corpus 270 run + 270 trace 交叉审计，`examples/artifacts/l2-sharing-release/20260925T135828Z/batch_III/acceptance-summary.json`，全量回归 444 passed）。
      1. **正确性：释放后的滞后访问**。现模型下 extent 在 run 内永不回收，退休时有全量 drain 屏障（routes/leases/jobs 全零），天然免疫"释放后仍有慢访问"。buffer 级归还后，quiescence 证据只剩 release preflight 的 pin/inflight 计数——需审计所有可能滞后触碰该 extent 的路径（cache dirty line 延迟写回、MSHR drain、profile/maintenance 命令、其它 transaction 名下的在飞 prefetch 腿），漏一条就是新占用者 B 的数据被写坏。
      2. **正确性：A 的回绑（release 即 forfeiture）**。A 的 Arena 布局编译期固定，若 A 后续 view（同 context 内 offset 复用）绑入已归还、且已被 B 占用的 extent → 跨 context 数据损坏。合同必须明确 released extent 对 A 永久 forfeited，编译器/verifier 保证 released 区域之后无任何 bind；当前 resources.py 的 L2 复用窗口以 retirement fence 为界，需重新推导。
      3. **原子性与记账**：Arena 出现"部分释放"新状态——`l2_reserved_bytes`/live bytes/per-bank 占用、report 的 arenas 段、PMU 计数都要改按 extent 粒度记账；cancel/reset 的 drain 路径须防 double-free；`arena_lifetime` trace 语义不再是"容量占用窗口"，需重定义。
@@ -104,22 +105,32 @@
      7. **与 R3-5 耦合**：共享 L2 的引用计数与 buffer 级 extent 归还都操作 free-map，必须协同设计（共享 buffer 被一方 release 时，extent 归还受 refcount 门控）。
      8. **收益预期管理**：R3-6 只救"L2 容量阻塞"的流水线（l2-admission-wait 类）。matmul-pow-free-slot 的 pow 是 device slot 阻塞、matmul17 的 pow 是数据依赖 + HBM 往返阻塞——R3-6 对这两条 example 的 overlap 无直接帮助。实施前应在真实 workload 上量化 L2 容量等待占比，再决定优先级。
 
-## example
-
 - 当前 matmul17_pow_tail_overlap 里面中 tile program pow 中， 并不是只有一个 pow，当前是两个 pow 串行， trace 显示它们依次被调度执行。
+  - ✅ 2026-09-25 标注：现状已变——文件现为 @pow_np_lo（C 块 0..7）/ @pow_np_hi（C 块 8..15）两个数据并行 halves，各配独立生产者，不再是一先一后串行；此条作为旧观察保留。
 - 当前 l2-admission-wait 这个后面的 load 行为并没有和 前一个 的 pow 进行 overlap ，理论上 input release 过后下一个可以立即开始加载，而不必等待前一个 pow 完全结束。
   - 2026-09-22 诊断：调度/依赖均正确，根因是整 Arena 粒度预留释放（见 R3-6）。已拍板走 R3-6 的 buffer 粒度释放方案。
   - 2026-09-25 已实施（plan/01_private_l2_release.md 批次 I）：L2 编译期 no-rebind 不重叠布局 + buffer 粒度 padded backing 物理释放 + accepted transaction 引用台账 + fault/cap drain/poison 闭环。l2-admission-wait 在 runtime/full_memory 两档均验证 ctx_b port `active_cycle == a_input l2_extent_release release_cycle`（runtime 804 / full_memory 3522），严格早于 ctx_a completion（17977 / 22052），B 的真实 HBM→L2 prefetch 与 A 的 `EVU:pow` 窗口相交（>0 cycle）。证据：`examples/artifacts/l2-sharing-release/20260925T012727Z/`（baseline、phase1-matrix、gate4-probe、private-smoke）。
 - 当前 matmul_pow_free_slot 并没有连起来起来
   - 2026-09-22 诊断：调度无 bug（first-free-slot 两档一致，pow 均在 matmul 完成 +1 拍接管 slot）。不 overlap 主因是 HBM 整腿单通道（transfer.py:1096-1104，`(addr//64)%8`）+ 该场景地址全 64KB 对齐塌缩到 Ch:0。run.sh 地址已错开（总周期 45088→33496，gap 6216→2611），但 C store 512KB 等距步距使 4 笔 store 结构性锁同通道，彻底恢复 overlap 需 per-burst 通道条纹——**是否实施待定**。matmul17-pow-tail-overlap 同根因（另叠加 pow 消费路径绕 HBM、无 L2 直通）。
+  - ✅ 2026-09-25 标注：per-burst 通道条纹已实施——transfer.py 现按 `(address // hbm_burst_bytes) % hbm_channels` 选通道（transfer.py:1148），不再整腿单通道。实测 runtime 总周期 22222（旧基线：地址错开前 45088、错开后 33496），completed=True。matmul17 的“pow 消费路径绕 HBM、无 L2 直通”子项仍未改。
 - [x] 需要增加 mlir 的 example，对 memory profile 变化的时候, 就不以将下一个的 op 的 load 提前到当前 context 的 release 当拍，而是在当前的 context 跑完了也就是 HBM store 完成之后 profile 切换完成后再进行 load。
   - ✅ 2026-09-25 已完成：`examples/scenarios/l2_profile_switch_load_ordering.mlir`（配置 `examples/configs/profile_l2_switch.yaml`，L2 mode0 全 SPM → mode1 带 cache）。ctx_b 连续提交、无源级 await——顺序完全由编译器生成的 L2 profile command（frontier = done_a）保证。两档 trace 完整链条 `release < store_done <= A_done <= switch_start < switch_end <= B_admit < prefetch <= tile_load` 成立（runtime：804 < 17975 <= 17977 <= 17979 < 18052 <= 18054 < 18058；full：3522 < 22050 <= 22052 <= 22054 < 22127 <= 22129 < 22133）。回归：`test_runtime.py::TestL2ProfileSwitchOrdering` 两档通过。
+
+1. 每次 profile 切换都必须进行完整的等待，插入等待这一工作由编译器来做，但是这部分需要在 IR 中显示声明
+   - ✅ 2026-09-25 标注：已完成。IR 以 `l2_mode / allowed_profiles` 显式声明，编译器 `bind_profiles` 自动生成完整 root completion frontier 的 device await + L2 ProfileReconfigDesc（源码不手写 await）；切走再切回同 mode 视为新 generation，共享 backing 必须同 epoch。证据：`examples/scenarios/l2_profile_switch_load_ordering.mlir`、`examples/scenarios/l2_admission_profile_switch.mlir` 及 `plan/03` 批次 III 验收。
+
+## R3
+
+## example
+
 - 需要增加大型 reduceSum 或者 reduceMax 这类算子的 例子，大概思路是 reduce tile 之后 在 L2 上进行聚合
 
-## 需要调研的问题
+## 需要调研的问题 （2026-09-25：第 1、2 条已由实现闭环 ✅ ｜ 第 3 条编译器无法预知调度/SPM 占用 ❌ 仍开放）
 
 - 当前的 context wait，只负责自己的 context wait。理论上如果 profile 切换的时候，理论上 profile 之间切换的时候也需要一个 await，需要详细地考虑当前的 await 是不是阻塞所有的 context，还是只管自己的 context 的 await。然后需要将多个 context await，就是这种 context 之间的 await，交给 device 去做。这个 idea 需要什么，需要详细地去做论证。（**注释：IR 上我决定不允许 一个 context 有多个 profile phase 来切换 memory的 profile**）
+  - ✅ 2026-09-25 标注：已按“交给 device”落地——编译器 `bind_profiles` 生成普通 device await + ProfileReconfigDesc，frontier 为完整 root completion history；context 内不允许多个 profile phase（IR 合同，见 plan/03 §0 边界）。证据：`examples/scenarios/l2_admission_profile_switch.mlir` 两档因果链验收。
 - 这个 await 理论上应该是由编译器去做，但是呢，编译器并不知道实际 runtime 的调度模型，所以说这个 await 需要在什么时候加，理论上应该是取决于 runtime 才对。当然这个的话后续也需要详细地去讨论和调研。如果是由编译器加，如何该去加，在什么状态下去加这个 await。因为理论上来说，编译器是只知道 allow profile，但是它是不知道整个的这个具体的调度信息的。
+  - ✅ 2026-09-25 标注：已裁决并由实现验证——编译器只依据静态 `allowed_profiles` 变化点插入 await/reconfig，等待对象是“完整 root completion history”（调度不可知也安全）；运行时仅在 profile 命令完成/OPEN_ISSUE 后才开放下一档 admission（issue gate），不做调度预测。证据：plan/02 §H、plan/03 切档因果链两档通过。
 - 还有一个问题理论上 matmul 在所有的 tile context 打满的时候 不一定 占满 整个SPM 所以 SPM = 100 的时候其实可能存在部分空闲，所有并不是所有的 matmul 就是 SPM = 100 就性能最好，但是 编译器是不知道调度信息的，编译器怎么知道什么时候 SPM 不能占满呢？也是就是说假设有 17 个 matmul 的 context 和一个 gather， 编译器不知道调度信息，那么就有可能说：
   - 编译器没法判断 SPM 不是 100的时候 可能没办法跑满 16 个， 还是不满的时候就可以跑满 16 个。
   - 编译器不知道是不是 这 16 个 matmul context 能够同时跑
@@ -153,7 +164,10 @@ BOA 这类计算单元的 register file 装载需要硬件级流水设计。理�
 
 后续需要做自动切分（auto partition）：按"易于 fusion + 计算占比 > I/O 占比"的规则切分子图，再交给调度。注意：group 级已默认启用 ready-action（S1，独立分支可越过慢等待），fusion 的相对收益结构可能与早期 trace 观察时不同，制定 partition 规则前应基于新调度器重新测量。
 
----
+### 5. 真正的底层 ISA 的设计与实现
 
-1. 每次 profile 切换都必须进行完整的等待，插入等待这一工作由编译器来做，但是这部分需要在 IR 中显示声明
-2.
+### 6. load/store 拆分为 L2↔L1 与 L1↔Register 两类
+
+- 想做：当前 `tile.load.async` / `tile.store.async` 只有 L2↔L1 语义（简化设计）；后续增加 L1↔Register 一类 load/store，更好模拟真实硬件行为。
+- 状态：❌ 未开始。方言无任何 register 级 op；BOA/EVU 描述符直接引用 L1 buffer，无寄存器级传输。
+- 剩余工作：新 op（如 tile.rload.async / tile.rstore.async）+ 引擎描述符操作数模型改动 + 寄存器端口/带宽性能模型。依赖"未来问题"清单里 BOA register file load 的硬件 pipeline 结论。
