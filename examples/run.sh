@@ -49,6 +49,35 @@ Runnable workloads:
    pow-dual-context               workloads/pow_dual_context.mlir
    pow-dual-context-mixed-shapes  workloads/pow_dual_context_mixed_shapes.mlir
    pow-sequential-contexts        workloads/pow_sequential_contexts.mlir
+  reduce-sum-single-context       workloads/reduce_sum_ktiled_single_context.mlir
+                                 (256x4096 bf16 Reduce-Sum，单 context：1 个
+                                 dispatch 4 task，8x64KiB chunk 双缓冲 +
+                                 f32 acc；时间模型，无数值执行)
+  reduce-sum-splitk-multicontext  workloads/reduce_sum_splitk_multicontext.mlir
+                                 (256x16384 bf16 Reduce-Sum，split-K 跨
+                                 context：8 producer context + HBM 部分和
+                                 combine)
+  reduce-sum-multiuce             workloads/reduce_sum_multiuce.mlir
+                                 (512x4096 bf16 Reduce-Sum，UCE supertile x
+                                 task 行块两级 M 分工，全 tile 4 UCE context
+                                 并发；--context-mode 4)
+  reduce-sum-gpu-tree             workloads/reduce_sum_gpu_tree.mlir
+                                 (256x4096 bf16 Reduce-Sum，GPU reduce-tree：
+                                 4 个 leaf dispatch 按 K 配对分区 + 两级
+                                 合并树；--context-mode 4)
+  reduce-sum-splitk-multiuce      workloads/reduce_sum_splitk_multiuce.mlir
+                                 (256x4096 bf16 Reduce-Sum，全 tile 4 UCE
+                                 context 沿 reduce axis 切分（k_step 配对）
+                                 + context-local L2 扁平合并；--context-mode 4)
+  matmul-splitk-pipeline          workloads/matmul_splitk_pipeline.mlir
+                                 (256x256x512 matmul，reduce-K tiling 三级
+                                 流水：4 个 split-K leaf + scratch 合并
+                                 dispatch；--context-mode 4)
+  matmul-splitk-multicontext-pipeline
+                                 workloads/matmul_splitk_multicontext_pipeline.mlir
+                                 (512x512x512 matmul，M/N 2x2 四 context，
+                                 每个 context 的 split-K partial 在 L2 本地合并；
+                                 --context-mode 4 --device-context-mode 4)
 
 Protocol scenarios:
   ready-action-branch           scenarios/ready_action_branch.mlir
@@ -269,6 +298,89 @@ case "$name" in
       --input-binding Y1=0x200000:131072:rw \
       --hw-override hbm_fixed_latency_cycles=10 \
       --max-cycles 200000 \
+      "$@"
+    ;;
+  reduce-sum-single-context)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/reduce_sum_ktiled_single_context.mlir" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --input-binding X=0x100000:2097152:r \
+      --input-binding Y=0x1100000:1024:w \
+      --max-cycles 500000 \
+      "$@"
+    ;;
+  reduce-sum-splitk-multicontext)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/reduce_sum_splitk_multicontext.mlir" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --context-mode 4 \
+      --device-context-mode 4 \
+      --input-binding X=0x100000:8388608:r \
+      --input-binding Y_part=0x1000000:8192:rw \
+      --input-binding Y=0x1100000:1024:w \
+      --max-cycles 500000 \
+      "$@"
+    ;;
+  reduce-sum-multiuce)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/reduce_sum_multiuce.mlir" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --context-mode 4 \
+      --input-binding X=0x100000:4194304:r \
+      --input-binding Y=0x1100000:2048:w \
+      --max-cycles 500000 \
+      "$@"
+    ;;
+  reduce-sum-gpu-tree)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/reduce_sum_gpu_tree.mlir" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --context-mode 4 \
+      --input-binding X=0x100000:2097152:r \
+      --input-binding Y=0x1100000:1024:w \
+      --input-binding S=0x1200000:8192:rw \
+      --max-cycles 500000 \
+      "$@"
+    ;;
+  reduce-sum-splitk-multiuce)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/reduce_sum_splitk_multiuce.mlir" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --context-mode 4 \
+      --input-binding X=0x100000:2097152:r \
+      --input-binding Y=0x1100000:1024:w \
+      --max-cycles 500000 \
+      "$@"
+    ;;
+  matmul-splitk-pipeline)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/matmul_splitk_pipeline.mlir" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --context-mode 4 \
+      --input-binding A=0x100000:262144:r \
+      --input-binding B=0x1000000:262144:r \
+      --input-binding S=0x1400000:1048576:rw \
+      --input-binding C=0x1800000:262144:w \
+      --max-cycles 500000 \
+      "$@"
+    ;;
+  matmul-splitk-multicontext-pipeline)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/matmul_splitk_multicontext_pipeline.mlir" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --context-mode 4 \
+      --device-context-mode 4 \
+      --input-binding A=0x100000:524288:r \
+      --input-binding B=0x200000:524288:r \
+      --input-binding C=0x300000:1048576:w \
+      --max-cycles 500000 \
       "$@"
     ;;
   l2-admission-wait)
