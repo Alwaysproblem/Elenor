@@ -19,7 +19,8 @@
 // 时间模型：tile.boa.async / tile.evu.async 不携带数值 operand；accumulate
 // 只表示循环携带依赖，不能据此证明矩阵乘法的数值正确性。
 // trace / report 可检查：128 BOA (4 context x 4 leaf x 4 task x 2 K tile)、
-// 64 EVU (4 context x 4 task x 4 add)、8 次 A/B prefetch、4 次最终 C store。
+// 96 EVU (4 context x 4 task x 2 半区 x 3 add，combine 双缓冲流水)、
+// 8 次 A/B prefetch、4 次最终 C store。
 // 运行：bash examples/run.sh matmul-splitk-multicontext-pipeline
 builtin.module {
 
@@ -252,6 +253,11 @@ builtin.module {
   }
 
   // ---- combine：4 份 K-quarter partial 逐元素相加 -> 最终 C ----
+  // software pipeline：[64,256] 按行分成两个 [32,256] 半区。q0 半区直接 load
+  // 进 acc 半区（省去原顺序版的 copy add），q1/q2/q3 的 L2→L1 load 与前一个
+  // EVU add 重叠；s0/s1 两个 32 KiB scratch 交替承载相邻 load，半区 b 的
+  // 首个 load 提前到半区 a 流水期间发出。4 个缓冲合计 4 x 32 KiB =
+  // 131072 B，L1 contract 与 allowed_profiles 保持不变。
   tile.program @mm_sk_add(
       %task : !nest.task,
       %q0_l2 : !nest.l2_buffer<4x64x256xf32>,
@@ -261,45 +267,79 @@ builtin.module {
       %y_l2 : !nest.l2_buffer<4x64x256xf32>)
                 resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
           tile_l1_spm_bytes_per_context = 131072> {
-    %q0_v = tile.subview %q0_l2 task = %task task_dim = 0
-        offsets = [0, 0, 0] sizes = [1, 64, 256] strides = [1, 1, 1]
-        : !nest.l2_view<1x64x256xf32>
-    %q1_v = tile.subview %q1_l2 task = %task task_dim = 0
-        offsets = [0, 0, 0] sizes = [1, 64, 256] strides = [1, 1, 1]
-        : !nest.l2_view<1x64x256xf32>
-    %q2_v = tile.subview %q2_l2 task = %task task_dim = 0
-        offsets = [0, 0, 0] sizes = [1, 64, 256] strides = [1, 1, 1]
-        : !nest.l2_view<1x64x256xf32>
-    %q3_v = tile.subview %q3_l2 task = %task task_dim = 0
-        offsets = [0, 0, 0] sizes = [1, 64, 256] strides = [1, 1, 1]
-        : !nest.l2_view<1x64x256xf32>
-    %y_v = tile.subview %y_l2 task = %task task_dim = 0
-        offsets = [0, 0, 0] sizes = [1, 64, 256] strides = [1, 1, 1]
-        : !nest.l2_view<1x64x256xf32>
-    %qabuf0 = tile.alloc shape = [64, 256] dtype = "f32"
-        alignment = 256 : !tile.l1_buffer<64x256xf32>
-    %acc = tile.alloc shape = [64, 256] dtype = "f32"
-        alignment = 256 : !tile.l1_buffer<64x256xf32>
-    // 顺序累加：acc = q0；acc += q1；acc += q2；acc += q3（单一 scratch buffer）。
-    %qa = tile.load.async %q0_v into %qabuf0 : !tile.event<"qa">
-    tile.await %qa
-    %cc0 = tile.evu.async "add" ops = 16384 : !tile.event<"cc0">
-    tile.await %cc0
-    %qb = tile.load.async %q1_v into %qabuf0 : !tile.event<"qb">
-    tile.await %qb
-    %cc1 = tile.evu.async "add" ops = 32768 : !tile.event<"cc1">
-    tile.await %cc1
-    %qc = tile.load.async %q2_v into %qabuf0 : !tile.event<"qc">
-    tile.await %qc
-    %cc2 = tile.evu.async "add" ops = 32768 : !tile.event<"cc2">
-    tile.await %cc2
-    %qd = tile.load.async %q3_v into %qabuf0 : !tile.event<"qd">
-    tile.await %qd
+    // 半区 a = 行 0..31，半区 b = 行 32..63。
+    %q0a_v = tile.subview %q0_l2 task = %task task_dim = 0
+        offsets = [0, 0, 0] sizes = [1, 32, 256] strides = [1, 1, 1]
+        : !nest.l2_view<1x32x256xf32>
+    %q0b_v = tile.subview %q0_l2 task = %task task_dim = 0
+        offsets = [0, 32, 0] sizes = [1, 32, 256] strides = [1, 1, 1]
+        : !nest.l2_view<1x32x256xf32>
+    %q1a_v = tile.subview %q1_l2 task = %task task_dim = 0
+        offsets = [0, 0, 0] sizes = [1, 32, 256] strides = [1, 1, 1]
+        : !nest.l2_view<1x32x256xf32>
+    %q1b_v = tile.subview %q1_l2 task = %task task_dim = 0
+        offsets = [0, 32, 0] sizes = [1, 32, 256] strides = [1, 1, 1]
+        : !nest.l2_view<1x32x256xf32>
+    %q2a_v = tile.subview %q2_l2 task = %task task_dim = 0
+        offsets = [0, 0, 0] sizes = [1, 32, 256] strides = [1, 1, 1]
+        : !nest.l2_view<1x32x256xf32>
+    %q2b_v = tile.subview %q2_l2 task = %task task_dim = 0
+        offsets = [0, 32, 0] sizes = [1, 32, 256] strides = [1, 1, 1]
+        : !nest.l2_view<1x32x256xf32>
+    %q3a_v = tile.subview %q3_l2 task = %task task_dim = 0
+        offsets = [0, 0, 0] sizes = [1, 32, 256] strides = [1, 1, 1]
+        : !nest.l2_view<1x32x256xf32>
+    %q3b_v = tile.subview %q3_l2 task = %task task_dim = 0
+        offsets = [0, 32, 0] sizes = [1, 32, 256] strides = [1, 1, 1]
+        : !nest.l2_view<1x32x256xf32>
+    %ya_v = tile.subview %y_l2 task = %task task_dim = 0
+        offsets = [0, 0, 0] sizes = [1, 32, 256] strides = [1, 1, 1]
+        : !nest.l2_view<1x32x256xf32>
+    %yb_v = tile.subview %y_l2 task = %task task_dim = 0
+        offsets = [0, 32, 0] sizes = [1, 32, 256] strides = [1, 1, 1]
+        : !nest.l2_view<1x32x256xf32>
+    %acc0 = tile.alloc shape = [32, 256] dtype = "f32"
+        alignment = 256 : !tile.l1_buffer<32x256xf32>
+    %acc1 = tile.alloc shape = [32, 256] dtype = "f32"
+        alignment = 256 : !tile.l1_buffer<32x256xf32>
+    %s0 = tile.alloc shape = [32, 256] dtype = "f32"
+        alignment = 256 : !tile.l1_buffer<32x256xf32>
+    %s1 = tile.alloc shape = [32, 256] dtype = "f32"
+        alignment = 256 : !tile.l1_buffer<32x256xf32>
+    // ---- 半区 a：acc0 = q0a（直接 load），再依次 += q1a/q2a/q3a ----
+    %la0 = tile.load.async %q0a_v into %acc0 : !tile.event<"sk_la0">
+    %la1 = tile.load.async %q1a_v into %s0 : !tile.event<"sk_la1">
+    tile.await %la0, %la1
+    %ca0 = tile.evu.async "add" ops = 16384 : !tile.event<"sk_ca0">
+    %la2 = tile.load.async %q2a_v into %s1 : !tile.event<"sk_la2">
+    %lb0 = tile.load.async %q0b_v into %acc1 : !tile.event<"sk_lb0">
+    tile.await %ca0
+    tile.await %la2
+    %ca1 = tile.evu.async "add" ops = 16384 : !tile.event<"sk_ca1">
+    %la3 = tile.load.async %q3a_v into %s0 : !tile.event<"sk_la3">
+    tile.await %ca1
+    tile.await %la3
+    %ca2 = tile.evu.async "add" ops = 16384 : !tile.event<"sk_ca2">
+    tile.await %ca2
+    %ys0 = tile.store.async %acc0 into %ya_v : !tile.event<"sk_ys0">
+    // ---- 半区 b：复用 s0/s1；q0b 已在半区 a 流水期间提前 load ----
+    tile.await %lb0
+    %lb1 = tile.load.async %q1b_v into %s0 : !tile.event<"sk_lb1">
+    tile.await %lb1
+    %cb0 = tile.evu.async "add" ops = 16384 : !tile.event<"sk_cb0">
+    %lb2 = tile.load.async %q2b_v into %s1 : !tile.event<"sk_lb2">
+    tile.await %cb0
+    tile.await %lb2
+    %cb1 = tile.evu.async "add" ops = 16384 : !tile.event<"sk_cb1">
+    %lb3 = tile.load.async %q3b_v into %s0 : !tile.event<"sk_lb3">
+    tile.await %cb1
+    tile.await %lb3
+    // 最后一次真实 load 完成后才 input_released。
     tile.signal input_released(%task)
-    %cc3 = tile.evu.async "add" ops = 32768 : !tile.event<"cc3">
-    tile.await %cc3
-    %y_stored = tile.store.async %acc into %y_v : !tile.event<"y_stored">
-    tile.await %y_stored
+    %cb2 = tile.evu.async "add" ops = 16384 : !tile.event<"sk_cb2">
+    tile.await %cb2
+    %ys1 = tile.store.async %acc1 into %yb_v : !tile.event<"sk_ys1">
+    tile.await %ys0, %ys1
     tile.signal output_ready(%task)
     tile.return
   }
@@ -394,7 +434,7 @@ builtin.module {
            !nest.event<"mm_sk_m0n0_ready_3">)
     // 同 context 直读四份 partial；不写回 HBM 中转。
     %grid_c, %read_c, %ready_c =
-        nest.dispatch.tasks.async @mm_sk_add l1_mode = 0 context = 0
+        nest.dispatch.tasks.async @mm_sk_add l1_mode = 0
         tasks(%tasks) globals()
         bindings(%p0_l2, %p1_l2, %p2_l2, %p3_l2, %y_l2)
         ins(%p0_l2, %p1_l2, %p2_l2, %p3_l2) outs(%y_l2)
@@ -511,7 +551,7 @@ builtin.module {
            !nest.event<"mm_sk_m0n1_ready_3">)
     // 同 context 直读四份 partial；不写回 HBM 中转。
     %grid_c, %read_c, %ready_c =
-        nest.dispatch.tasks.async @mm_sk_add l1_mode = 0 context = 0
+        nest.dispatch.tasks.async @mm_sk_add l1_mode = 0
         tasks(%tasks) globals()
         bindings(%p0_l2, %p1_l2, %p2_l2, %p3_l2, %y_l2)
         ins(%p0_l2, %p1_l2, %p2_l2, %p3_l2) outs(%y_l2)
@@ -628,7 +668,7 @@ builtin.module {
            !nest.event<"mm_sk_m1n0_ready_3">)
     // 同 context 直读四份 partial；不写回 HBM 中转。
     %grid_c, %read_c, %ready_c =
-        nest.dispatch.tasks.async @mm_sk_add l1_mode = 0 context = 0
+        nest.dispatch.tasks.async @mm_sk_add l1_mode = 0
         tasks(%tasks) globals()
         bindings(%p0_l2, %p1_l2, %p2_l2, %p3_l2, %y_l2)
         ins(%p0_l2, %p1_l2, %p2_l2, %p3_l2) outs(%y_l2)
@@ -745,7 +785,7 @@ builtin.module {
            !nest.event<"mm_sk_m1n1_ready_3">)
     // 同 context 直读四份 partial；不写回 HBM 中转。
     %grid_c, %read_c, %ready_c =
-        nest.dispatch.tasks.async @mm_sk_add l1_mode = 0 context = 0
+        nest.dispatch.tasks.async @mm_sk_add l1_mode = 0
         tasks(%tasks) globals()
         bindings(%p0_l2, %p1_l2, %p2_l2, %p3_l2, %y_l2)
         ins(%p0_l2, %p1_l2, %p2_l2, %p3_l2) outs(%y_l2)

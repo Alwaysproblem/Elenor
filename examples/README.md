@@ -192,7 +192,10 @@ bash examples/run.sh matmul-splitk-pipeline --trace-json /tmp/mm.json --json
 每个 context 的 4 个 task 沿 M 再分成 4 个 64 行块；4 个 leaf 各处理
 两个 K=64 tile，在 f32 L1 acc 中累加。combine 在本 context 直接读取
 4 份 `sharing = "context-local"` L2 partial，写回自己负责的 C 象限；
-与原例的 HBM scratch 中转不同，A/B 输入在每个 context 独立 prefetch。
+combine 按 32 行半区做双缓冲 software pipeline：q0 半区直接 load 进
+acc 半区，q1/q2/q3 的 L2→L1 load 与前一个 EVU add 重叠，L1 contract
+仍为 131072 B（4 x 32 KiB 缓冲）。与原例的 HBM scratch 中转不同，
+A/B 输入在每个 context 独立 prefetch。
 每 context L2 contract 1,835,008 B，4 个 context 合计 7 MiB。
 该示例仍是时间模型，不检查 tensor 数值结果。
 
