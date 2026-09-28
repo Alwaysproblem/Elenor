@@ -78,25 +78,29 @@ IR.
 - `device.py` interprets the compiled `nexus.program`, manages dependency-ready
   pending descriptors, explicit awaits, and bounded outstanding/completion
   credits.
-- `runtime/group_port.py` is the message/control adapter. Accepted root requests
-  initially consume only bounded pending metadata; Group slots, L2 Arena,
-  event/control resources, and execution ownership are committed atomically
-  later.
-- `group_scheduler.py` implements the finite S0/S1/S2 ready-action window:
-  one REGISTER plus one ISSUE per cycle, bounded scan, per-Context quota, and
-  independent completion.
-- `tile_group.py` registers a bounded Grid Route, then lets each Tile admit at
-  most one eligible Task per Tick. One blocked Tile does not roll back Tasks
-  already committed on other Tiles.
-- `tile.py` owns exact physical UCE contexts, eligible-head round robin,
-  L1 Arena/Frame planning, and atomic per-Task commit.
+- `runtime/group_port.py` adapts messages: a CPU-accepted root first consumes
+  bounded pending metadata, not a Group slot or L2 Arena. Full root admission
+  later commits slot, Arena, event/control budget, and ownership.
+- `tile_group_sequencer.py` owns each root's registration cursor, fence, and
+  completion; the shared `group_scheduler.py` polls completion/control, issues
+  at most one action, then registers at most one per cycle. S0 considers only
+  each Context's oldest action, S1 may pass PENDING dependencies within
+  `scan_width`; S2 currently runs the same implementation as S1.
+- `tile_group.py` registers a bounded Grid Route, then each Tile admits at
+  most one Task per Tick. One blocked Tile does not undo committed work on
+  another Tile; failed preparation can abort/roll back before exposure.
+- `tile.py` owns exact simulated UCE context pins, L1 Arena/Frame planning,
+  and eligible-head round-robin single-instruction issue. Engine queue
+  credit, streams, and event waits may block one head without blocking all.
 
-`--device-context-mode N` limits hardware-admitted CPU requests;
-`device.pending_capacity` separately bounds dependency-waiting metadata.
-`--context-mode N` is the exact physical Tile UCE context count. Optional
-`nest.context context=N` pins a Group execution slot; dispatch `context=N`
-pins the same UCE context index on every selected Tile. Neither is a physical
-Tile ID.
+`--device-context-mode N` is the CPU-delivered outstanding-request limit,
+not the Group execution-slot capacity (`group.active_context_capacity`, default
+8). The CPU may mark a request ACTIVE before its actual Group `active_cycle`.
+`--context-mode N` selects exactly N UCE execution contexts per Tile
+(simulation default 1, supported 1..8); silicon count is not frozen.
+Optional `nest.context context=N` pins a Group execution slot; dispatch
+`context=N` pins that UCE index on every selected Tile. A Frame Slot,
+resident program slot, and ABI isolation `context_id` are different resources.
 
 Root admission keeps independent SAME and COMPATIBLE FIFO heads for the active
 L2 Profile. SAME is tried first; if its head cannot fully commit, the
@@ -104,6 +108,23 @@ COMPATIBLE head may fill the target without skipping within either category.
 Task admission applies the same comparison to the active L1 Profile per Tile.
 Profile-incompatible work is not a runtime candidate: the compiler must emit a
 complete transition beforehand.
+
+Group admission FIFO and registration/issue round robin are distinct
+arbitration layers; neither guarantees global starvation freedom. A
+`nest.await` fences later registration **within that Context**, and a
+`nest.barrier` waits that Context's earlier actions, not all roots.
+`note_completion` reclaims credits even when the action table is full.
+
+Representative runnable comparisons: [Tile-SPMD matmul](../examples/workloads/matmul_2048x512x64_boa256x256x32.mlir),
+[K-chunk double buffering](../examples/workloads/reduce_sum_ktiled_single_context.mlir),
+[S0/S1 branch](../examples/scenarios/ready_action_branch.mlir),
+[context-local split-K](../examples/workloads/matmul_splitk_multicontext_pipeline.mlir),
+[shared](../examples/scenarios/l2_shared_weight.mlir) versus
+[private weight](../examples/scenarios/l2_private_weight.mlir), and
+[Profile transition](../examples/scenarios/profile_reconfiguration.mlir).
+Use [`examples/run.sh`](../examples/run.sh) for actual bindings/configuration;
+see [architecture §20](../design/ELENOR_Architecture_Design_v1.md) for the
+full method/condition matrix.
 
 ## Source IR and mandatory resource contracts
 
@@ -248,12 +269,30 @@ visible through a buffer view.
 - A zero-byte owner still has an explicit Arena/control/lease record even
   though it reserves no SRAM extent.
 
+L1 can statically assign a later `tile.alloc` the same Slot/offset when the
+compiler proves an earlier `tile.free` ended its lifetime; runtime merely
+rebinds that frozen layout, never searches a free map. L2 is permanently
+no-rebind within a root Arena: every local buffer keeps its own whole-stripe
+padded span even after release and a Context barrier. If this raises the
+high-water mark above source `l2_spm_bytes`, compilation raises the _executable_
+reservation and rechecks every allowed Profile, without lowering R or
+deleting modes. Freeing dead scratch does not require a Store; values needed
+after Task retirement require the relevant Store completion.
+
 `requested_contexts_per_tile` is the R lease bound for
 `(parent binding, launch generation, tile)`. The lease is acquired only on
 successful Task commit and is returned only at safe Task retirement or
 confirmed cancellation. `tile.free`, `input_released`, `output_ready`, and a
 cancel request do not return R early. A Grid cannot complete while any selected
 Tile is pending admission, active, or retiring.
+
+The Grid's `input_released` covers its selected Tasks' L2 input reads;
+`output_ready` covers L1→L2 output writes; done waits all Tasks' safe
+retirement. Neither direction signal implies HBM visibility or Arena
+retirement. The current aggregate is only `#nest.aggregate<all_tasks>`.
+`private` L2 is the default, `context-local` supports same-root leaf/partial/
+combine without HBM scratch, and `readonly` uses publish/shared.ref/claim
+across roots within the same Group/L2 epoch.
 
 Temporary capacity, fragmentation, Slot, controller, and R-limit waits are
 reported separately. A pure plan has no side effects; permanently impossible
@@ -401,12 +440,12 @@ python -m pipeline_validator --ir-file path/to/workload.mlir --print-ir
 Other current controls remain orthogonal to the source/artifact mode:
 
 | Option                                           | Meaning                                                                     |
-| ------------------------------------------------ | --------------------------------------------------------------------------- | --- | -------------------------------------------- |
+| ------------------------------------------------ | --------------------------------------------------------------------------- |
 | `-l`, `--list`                                   | list built-in workloads                                                     |
 | `-w NAME` / `-a`                                 | compile/run one or all built-ins (`-a` cannot use one explicit output path) |
 | `--hw-config PATH` / `--hw-override KEY=VALUE`   | select or override `HardwareConfig`                                         |
 | `--sim-override KEY=VALUE`                       | override `SimConfig`, including nested `device.*`/`group.*` capacities      |
-| `--group-policy s0                               | s1                                                                          | s2` | select the runtime Group ready-action policy |
+| `--group-policy s0/s1/s2`                        | select the runtime Group ready-action policy; S2 currently matches S1       |
 | `--context-mode N`                               | exact Tile UCE contexts per Tile                                            |
 | `--device-context-mode N`                        | CPU outstanding Group-launch limit                                          |
 | `--max-cycles N`                                 | execution cycle cap                                                         |
@@ -467,6 +506,13 @@ JSON `ts` is in microseconds and maps directly to the workload cycles in
 reports and `accepted_cycle` / `completion_cycle` arguments, with no startup
 offset: `ts = cycle * hw.cycle_ns() / 1000`. Initialization is likewise
 excluded from report workload cycles.
+
+UCE context `ACCEPT`/`READY`/wait states with positive duration are complete
+slices; same-cycle transitions are instant markers, never zero-duration
+begin/end pairs. On Task termination, the current state closes and
+`DONE:<program>` or `FAULT:<program>` is an instant marker on the same lane.
+Use Task/root completion records for retirement timing; a terminal marker
+does not reserve a UCE interval.
 
 Profile/control observability includes:
 

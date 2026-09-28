@@ -168,6 +168,37 @@ class TestRunTimeline:
     assert simulator.tracer is not None
     simulator.tracer.assert_well_formed()
 
+  def test_uce_terminal_events_do_not_create_zero_duration_state_slices(self):
+    hw = HardwareConfig()
+    sim = Simulator(hw, SimConfig(fidelity="full_memory", max_cycles=200000), enable_tracer=True)
+    workload = PowWorkload(hw=hw)
+    result = run_source(sim, workload.module, POW_BINDINGS, workload_info=workload.info)
+    assert result.completed, result.reason
+    warm = run_source(sim, workload.module, POW_BINDINGS, workload_info=workload.info)
+    assert warm.completed, warm.reason
+
+    events = _events_of(sim)
+    terminal = [event for event in events if event["name"].startswith(("DONE:", "FAULT:"))]
+    assert terminal
+    assert all(event["ph"] == "i" for event in terminal)
+    threads = {
+      (event["pid"], event["tid"])
+      for event in events
+      if event["name"] == "thread_name" and event["args"]["name"].startswith("UCE CTX")
+    }
+    for pid, tid in threads:
+      open_slices: list[tuple[str, float]] = []
+      for event in events:
+        if (event["pid"], event["tid"]) != (pid, tid):
+          continue
+        if event["ph"] == "B":
+          open_slices.append((event["name"], event["ts"]))
+        elif event["ph"] == "E":
+          assert open_slices
+          name, start = open_slices.pop()
+          assert name == event["name"] and event["ts"] > start
+      assert not open_slices
+
   def test_profile_switch_finishes_before_next_input_load(self, tmp_path):
     repo = Path(__file__).resolve().parents[2]
     trace_path = tmp_path / "profile-switch.json"

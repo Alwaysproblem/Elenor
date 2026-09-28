@@ -34,6 +34,28 @@ bash examples/run.sh gather-matmul \
 input bindings、context 数量、memory fidelity 和必要的硬件 override。未知示例名会明确失败，
 不会选择默认模型。
 
+## 调度方法与代表实例
+
+这些收益是满足依赖、队列 credit、带宽与资源准入时的调度机会，不是固定加速比。
+运行绑定与配置以 [`run.sh`](run.sh) 为准；`nexus`（CPU）→ `nest`（Context/L2）
+→ `tile`（Task/L1/引擎）不是 GPU thread/warp 模型。
+
+| 方法                        | 代表输入                                                                                                                                                                                                  | 条件与优势                                                                                                                           |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| 分层 Tile-SPMD、静态 tiling | [`matmul-2048x512-boa256`](workloads/matmul_2048x512x64_boa256x256x32.mlir)、[`reduce-sum-multiuce`](workloads/reduce_sum_multiuce.mlir)                                                                  | Context 分超块，Grid Task 按 placement 映射 Tile，Tile Program 内展开 K chunk；复用模板，减少逐 Tile 控制描述。                      |
+| 显式异步流水                | [`reduce-sum-single-context`](workloads/reduce_sum_ktiled_single_context.mlir)、[`matmul-splitk-pipeline`](workloads/matmul_splitk_pipeline.mlir)                                                         | HBM→L2 prefetch、L2→L1 双缓冲和常驻累加器分别有依赖；独立 buffer、credit、带宽允许时才可重叠。                                       |
+| 异构引擎互补                | [`matmul-pow-parallel`](workloads/matmul_pow_parallel.mlir)、[`ready-action-branch`](scenarios/ready_action_branch.mlir)                                                                                  | 独立 Context 或分支可以用 BOA/EVU；Context 生命周期重叠与引擎区间重叠是不同证据。                                                    |
+| 有限资源补位                | [`matmul-pow-free-slot`](workloads/matmul_pow_free_slot.mlir)                                                                                                                                             | 无数据依赖的 pow 不必等全部 matmul；本例先受 CPU outstanding 限额阻塞，之后仍需 Group/Tile 准入。                                    |
+| 只等待真实生产者            | [`matmul-pow-data-dep`](workloads/matmul_pow_data_dep.mlir)、[`device-dependency-submit`](scenarios/device_dependency_submit.mlir)                                                                        | 消费者等生产者完成，不等无关 root；源码显式 await 与 submit `depends_on` 分开。                                                      |
+| 尾部利用                    | [`matmul17-pow-tail-overlap`](workloads/matmul17_pow_tail_overlap.mlir)                                                                                                                                   | `placement=1` 尾 Task 只占 Tile0 相应 UCE context；其他 Task 可在满足 pin/资源条件时继续，无迁移、抢占或 task stealing。             |
+| 有界 ready-action           | [`ready-action-branch`](scenarios/ready_action_branch.mlir)                                                                                                                                               | S0 只考虑各 Context 队首；S1 可在有限扫描窗口跳过 PENDING 依赖，均受 await/barrier、配额和 credit 限制。                             |
+| Context 内 L2 交接          | [`matmul-splitk-multicontext-pipeline`](workloads/matmul_splitk_multicontext_pipeline.mlir)、[`reduce-sum-splitk-multiuce`](workloads/reduce_sum_splitk_multiuce.mlir)                                    | leaf→partial→combine 用 `sharing="context-local"`，省去 partial HBM 中转；占用 L2 Arena，不跨 Context 导出。                         |
+| 跨 Context 只读共享         | [`l2-shared-weight`](scenarios/l2_shared_weight.mlir)、[`l2-private-weight`](scenarios/l2_private_weight.mlir)、[`l2-shared-fanout`](scenarios/l2_shared_fanout.mlir)                                     | publish/shared.ref/claim 复用 backing、减少重复 HBM→L2 prefetch；每 Tile 的 L2→L1 load 仍存在，producer 退休不等于最后 reader 释放。 |
+| 资源合同与 Profile          | [`l2-admission-wait`](scenarios/l2_admission_wait.mlir)、[`profile-reconfiguration`](scenarios/profile_reconfiguration.mlir)、[`l2-admission-profile-switch`](scenarios/l2_admission_profile_switch.mlir) | 静态证明与实际准入区分容量、碎片、槽位、控制资源、R lease；兼容补位不切档，真实切档有等待、维护、ACK。                               |
+
+[`gather-matmul`](workloads/gather_matmul.mlir) 的 Gather→BOA 命中结果由源码
+`tile.profiled.access` 指定，不是根据 Cache 容量计算出的硬件命中率。
+
 ## 可运行 workload
 
 | 名称                                  | 编辑文件                                             | 主要路径                                                                                         |
@@ -83,10 +105,9 @@ bash examples/run.sh matmul-gather-add-4tiles-2contexts \
 - **M/N tiling 在不同 context 下完成**：context 网格 2x2（`@mm_m0n0`..`@mm_m1n1`，
   m_sup/n_sup 超块），每个 context 的 `task.range 0..4` 沿 M 把超块切成 4x256 行。
 - **全部 `placement = 15`**：每个 context 的 4-task grid 铺满全组 4 tiles；
-  device slot pin（`nest.context context = 0..3`）与 UCE context pin
-  （dispatch `context = 0..3`）一一对应，每 tile 用 4 个 UCE context 分别承载
-  4 个 slot 的 task（`--context-mode 4`，超出 V1.x 每 tile 2 context 上限，
-  作为 what-if 探索）。
+  Group execution slot pin（`nest.context context = 0..3`）与 UCE context pin
+  （dispatch `context = 0..3`）分别约束不同层级；本例 `--context-mode 4`
+  是验证配置，硅片 context 数由 PPA 冻结。
 - **block-packed 全局布局**：`A[2,4,2,256,32]`/`B[2,2,32,256]`/`C[2,2,4,256,256]`
   把 tiling 维全放前导维，所有 subview/DMA 都是连续 row-major 区间。
 
@@ -147,13 +168,15 @@ bash examples/run.sh reduce-sum-splitk-multiuce --trace-json /tmp/rs5.json --jso
 
 - **三级结构**：第 1 级 HBM→L2 一次整块 prefetch；第 2 级 L2→L1 双缓冲 load（下一 k_sub 的
   load 与当前 BOA compute 重叠）；第 3 级 BOA 在 L1 逐步 `accumulate` 进常驻 f32 C acc。
-- **`matmul-splitk-pipeline`**（C[256,256] = A[256,512]×B[512,256]）：
+- **`matmul-splitk-pipeline`**（A[256,512] × B[512,256] → C[256,256]）：
   reduce axis split-K——4 个 leaf dispatch（4 task，UCE pin 0..3，
   `--context-mode 4`）各规约 K quarter {2d, 2d+1}（每 task 2 个
   k_sub×64 的 BOA accumulate），partial 经 HBM scratch `S` 写回，
   combine dispatch 从 scratch prefetch 读回 4 份并顺序累加出
-  C[256,256]。leaf L1 contract 147,456 B、combine 131,072 B、
-  L2 contract 2,883,584 B。
+  C[256,256]。leaf L1 contract 147456 B、combine **131072 B**（两个
+  `[64,256]xf32` buffer 各 65536 B）；L2 contract 2883584 B。
+  multicontext 变体的 combine contract 也是 131072 B。原输入文件头的
+  196608 B 说法与实际 `tile.resources` / 编译产物不一致，不作为合同。
 
 - **数值边界**：validator 为时间模型，`tile.boa.async`/`tile.evu.async`
   无 operand、不执行数值运算，`accumulate` 仅为意图标注；输入 bf16、
@@ -191,21 +214,20 @@ bash examples/run.sh matmul-pow-data-dep       --trace-json /tmp/ex3.json
 bash examples/run.sh matmul17-pow-tail-overlap --trace-json /tmp/ex4.json
 ```
 
-| 示例                        | 结构                                                                                                                                                                                                                                | 验证点（实测）                                                                                                                                                                                         |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `matmul-pow-parallel`       | M=1024 半边 matmul（2 context）+ 独立 Y 上的 pow（2 context），全部 placement=15、4 slot 从 t=0 并发 submit                                                                                                                         | EVU:pow 与 BOA:matmul 时间窗重叠（实测 overlap ≈ 3.7 µs，16 BOA + 16 EVU 事件）                                                                                                                        |
-| `matmul-pow-free-slot`      | 完整 4-context matmul 先占满 4 个 device slot，2 个 pow context（不 pin slot）紧随 submit；pow 输入是独立 Y，无 data 依赖                                                                                                           | pow 的 submit 阻塞（`device_submit_wait`），在**第一个** matmul context 完成释放 slot 时立即被接管（实测 106 µs，早于最后一个 matmul 的 163 µs），并与仍在运行的 matmul context 并发                   |
-| `matmul-pow-data-dep`       | 同 4-context matmul，但 pow 的输入是 matmul 写回 HBM 的 C（`:rw` binding）；`@pow_np_c0` 只 await 生产 C[m0] 半边的两个 context，`@pow_np_c1` 只等 m1 行                                                                            | pow 绝不早于生产者启动（实测 c0 在 117 µs = m0 行完成时刻），但不等无关工作（c0 与仍在跑的 m1 行 matmul 重叠）——依赖感知、不过度串行                                                                   |
-| `matmul17-pow-tail-overlap` | M=5120 → 20 块：4 x placement=15 context（16 个 tile context，块 0..15）+ 1 x placement=1 尾 context（第 17 个 tile context，单 task 串行算剩余 4 块）；2 个 pow context 消费前 16 块（`--context-mode 5 --device-context-mode 5`） | 5 个 matmul context 从 t=0 分开并发调度；尾 context 的 BOA 只落 Tile0；pow 不等尾 context，在尾 context 仍在跑（0..221 µs）时用其余空闲 tile context 提前运行（pow EVU 188..271 µs，实测重叠 18.4 µs） |
+| 示例                        | 结构                                                                                                                             | 验证中的相对次序条件                                                                                                                       |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `matmul-pow-parallel`       | 2 个 matmul + 2 个独立 Y 的 pow Context，连续 submit、末尾统一 await；默认 `DeviceConfig.issue_width=1`，不在同一 cycle 全部提交 | 检查 Context 生命周期；BOA/EVU 引擎区间是否重叠须读取本次 trace。                                                                          |
+| `matmul-pow-free-slot`      | 4 个 matmul 后连续提交 2 个无数据依赖的 pow；首先占满 CPU outstanding 额度，不是必然占满 Group 物理槽位                          | 看 `device_outstanding_full` 及 request 的 `active_cycle`/`completion_cycle`；Group 准入另看 `device_admission_wait` 和 port wait reason。 |
+| `matmul-pow-data-dep`       | pow 读取 matmul 写回 C；`@pow_np_c0` 只依赖 m0 行两个生产者、`@pow_np_c1` 只依赖 m1 行两个生产者                                 | 消费者准入不早于各自生产者完成，不必等无关行结束。                                                                                         |
+| `matmul17-pow-tail-overlap` | 4 × `placement=15` 加 1 × `placement=1` 的尾 Context；两份 pow 消费前 16 块                                                      | 尾部只占 Tile0 相应 UCE context；pow 可在尾 Context 尚未完成时准入，不保证所有 fidelity 下 EVU/BOA 引擎窗重叠。                            |
 
 设计说明：
 
 - ex2/ex3 是同一拓扑的对照组：pow 输入从独立 Y 换成 matmul 输出 C 后，启动
   约束从"slot 空闲"变成"生产者完成"。
-- ex4 的 17 个 tile context 不是 16 的倍数：4 个满 placement context（4 task 各）
-  - 1 个 placement=1 context（1 task，task 内串行展开剩余块）。尾 context 只占
-    tile 0 的 1 个 UCE context，其余 15 个 tile context 空闲时被 placement=15 的
-    pow 立即复用。
+- ex4 的 17 个 tile Task：4 个满 placement Context（各 4 task）加 1 个
+  placement=1 的尾 Task；尾 Task 只占 Tile0 的 1 个 UCE context。其他 Task
+  仍须满足 pin、资源与依赖条件才能补位，并非立即抢占。
 - pow 的 tile program 每 task 处理 2 个 chunk（load → pow → store × 2），
   L1 buffer 顺序复用；`input_released` 在最后一次输入 load 之后发出。
 
@@ -221,10 +243,18 @@ final L1 buffer
 
 ## 协议场景
 
-| 名称                                | 编辑文件                                           | 主要路径                                         |
-| ----------------------------------- | -------------------------------------------------- | ------------------------------------------------ |
-| `l2-admission-wait`                 | `scenarios/l2_admission_wait.mlir`                 | 精确 L2 容量下的 admission wait / release wakeup |
-| `sequential-release-counterexample` | `scenarios/sequential_release_counterexample.mlir` | 中间 await 导致严格串行的反例                    |
+| 名称                                | 编辑文件                                           | 主要路径                |
+| ----------------------------------- | -------------------------------------------------- | ----------------------- |
+| `ready-action-branch`               | `scenarios/ready_action_branch.mlir`               | S0/S1 有界扫描对照      |
+| `device-dependency-submit`          | `scenarios/device_dependency_submit.mlir`          | 跨 root 提交依赖        |
+| `l2-admission-wait`                 | `scenarios/l2_admission_wait.mlir`                 | L2 容量准入等待         |
+| `sequential-release-counterexample` | `scenarios/sequential_release_counterexample.mlir` | 显式等待造成串行        |
+| `profile-reconfiguration`           | `scenarios/profile_reconfiguration.mlir`           | Profile 配置事务        |
+| `l2-profile-switch-load-ordering`   | `scenarios/l2_profile_switch_load_ordering.mlir`   | L2 切档与首笔 load 顺序 |
+| `l2-admission-profile-switch`       | `scenarios/l2_admission_profile_switch.mlir`       | L2 准入与切档           |
+| `l2-shared-weight`                  | `scenarios/l2_shared_weight.mlir`                  | readonly 权重复用       |
+| `l2-shared-fanout`                  | `scenarios/l2_shared_fanout.mlir`                  | L2 产出后的只读 fanout  |
+| `l2-private-weight`                 | `scenarios/l2_private_weight.mlir`                 | 私有 prefetch 对照      |
 
 运行：
 
@@ -264,29 +294,25 @@ bash examples/run.sh file /tmp/my_gather.mlir \
 8. 每个 Buffer 恰好 release 一次，依赖精确列齐全部 reader.input_released、
    prefetch completion、Store completion；所有 role 一致，不得省略并行搬运。
    纯读 pin 按真实访问解除，不按 alloc.role；readwrite 必须独立满足读写两阶段。
-9. Tile L1 scratch 可在最后一次实际使用完成后 `tile.free %buffer`，无需等整个程序
-   返回。必须 await 使用该 buffer 的 load/store/Gather，以及此前未完成的
-   BOA/EVU/Pow；不能 free 后再访问，也不能用它释放 Context L2/global memory。
-   `gather_profiled.mlir` 在 Gather 完成后释放 indices，在 Tile Store 完成后释放结果。
-   未显式 free 的 L1 仍由 terminal/reset 回收；`tile.alloc` 仍在 dispatch 时统一分配，
-   因而同一程序后面的 alloc 不会因前面的 free 自动变成动态分配。
+9. Tile L1 scratch 可在最后一次实际使用完成后 `tile.free %buffer`，无需等
+   Task 退休；必须 await 使用该 buffer 的 load/store/Gather 和不透明引擎事件。
+   此操作使 view 失效，不返还 owner Arena 容量或 R lease；后续 `tile.alloc`
+   只按编译期 lifetime 选定的 slot/offset 再绑定，不进行运行期空闲池搜索。
+   只有需要跨 Task 持久化的结果才须完成 store。
 
-`tile.free` 的 [真实复用证据](artifacts/tile_free/run-20260911-final/verification.json)
-使用16 KiB L1、每个 buffer 8 KiB：full_memory 在2.244 µs释放，
-2.247 µs由另一 dispatch 复用同一地址，原程序11.870 µs才返回；
-replacement allocation 保持到17.871 µs才回收。runtime 同样通过。
-不加 free 的同配置对照因 L1 admission 容量不足失败；未改变 eager allocation 模型。
+以下 [2026-09-11 历史 tile.free 审计](artifacts/tile_free/run-20260911-final/verification.json)
+仅对应当时的输入、合同和模型，不代表当前 corpus 的容量、生命周期或验收。
 
 当前 `tile.boa.async` 和 `tile.evu.async` 是 timing descriptor，没有显式 L1
 operand/result。组合示例沿用 Pow 的隐式 L1 原地约定：`%matmul_dst` 作为最终工作
 buffer，并在最后一个 engine event 完成后显式 Store。该路径是 output lifecycle /
 timing accurate，不是 tensor value accurate。
 
-## 全量 MLIR 的 free 审查
+## 全量 MLIR 的 free 历史审查（2026-09-12）
 
-本轮逐份审查了仓库中的 **132 份 `.mlir`**，包括 `.vscode` 历史样例和
-`reference.mlir`，不是只检查 `run.sh` 的入口。128 份当前方言输入共有
-581 个 Tile Program、1,116 个 L1 allocation 声明；历史 reference 另有1个。
+以下数量和产物仅对应当时的输入快照，不是当前 corpus 规模或本次同步验收。
+当时逐份审查 132 份 `.mlir`，其中 128 份当前方言输入有 581 个 Tile Program、
+1116 个 L1 allocation 声明；历史 reference 另有 1 个。
 
 | 文件结论                 | 数量 | 处理                                                   |
 | ------------------------ | ---: | ------------------------------------------------------ |
@@ -315,13 +341,9 @@ timing accurate，不是 tensor value accurate。
 在前后两次 verify 中均保持原有范围错误，其余126份通过。除新增 free 外的源码
 字节保持不变；历史 trace/hash 只对应各自当时的输入，不作为本次修改后的证据。
 
-实跑239次：两种 fidelity 各108 completed、2个预期 verifier 拒绝、2个预期容量
-fault，另15个 workload/protocol 入口全部完成；235份 trace 结构检查通过。
-L1 allocations 按 `(allocation_id, generation)` 与 release 精确配对，完成的运行
-最终占用为零。当前 trace 不提供完整的方向性 transfer allocation identity，
-因此不按地址区间猜测所有访存归属，也不宣称仅凭 trace 已证明每次 transfer 的
-last-use；异步 free 安全性同时由本轮 SSA 审查和实际 runtime preflight 检查。
-完整测试套件331项通过，输入与模拟器源码的执行前后指纹一致。
+该次历史记录实跑239次：两种 fidelity 各108 completed、2个预期 verifier 拒绝、
+2个预期容量 fault，另15个 workload/protocol 入口全部完成；235份 trace
+结构检查通过。旧 trace/hash 只对应当时的输入和模型，不作为当前运行的证据。
 
 ## Fixtures 与 artifacts
 

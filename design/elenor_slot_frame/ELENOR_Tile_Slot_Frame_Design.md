@@ -2,7 +2,7 @@
 
 ## 1. 定位、目标和 First Silicon cutline
 
-Tile Slot Frame 是 ELENOR Tile L1 SRAM 的二进制 binding contract。它把 Tile Program 和 descriptor 中的逻辑 slot 引用绑定到可变的 L1 base、size、layout、权限、bank placement 和生命周期，避免把固定物理地址永久绑定到算子语义。
+Tile Slot Frame 描述 Tile Program 对 Task-owned L1 Arena 的静态绑定视图。软件编译产物中的 Frame Slot 是 buffer 的绑定索引；它不是独立的分配器、跨 Task 池或 SRAM 配额。编译器给每个逻辑 buffer 预先计算 Slot/offset，运行时仅按该布局绑定/失效 view，并在 Task 安全退休时归还整个 L1 Arena。
 
 核心原则：
 
@@ -10,34 +10,32 @@ Tile Slot Frame 是 ELENOR Tile L1 SRAM 的二进制 binding contract。它把 T
 固定 slot ABI + 可变 Tile Frame
 ```
 
-硬件执行 command、descriptor 和 Tile Program；slot frame 只描述 L1 memory binding。它不解释高层 graph，不替代 compiler memory planner，也不提供全局 cache coherency。
+当前源合同以 immutable CompiledProgram 中的 ArenaLayout、Task owner、allocation/Profile generation 和逐条 view 生命周期为准；本文件的 C descriptor、寄存器与 Tile Frame binary ABI 均是尚未冻结的硬件 v0 草案，不表示当前芯片或硬件 ABI 已实现。
 
 First Silicon cutline：
 
-| 能力           | First Silicon V1                                           | V1.x / V2 保留                                                                    |
-| -------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| slot 数量      | 16 个固定 slot                                             | 可扩展 slot table、dynamic allocation                                             |
-| 权限           | read、write、accumulate、persistent、bank_pinned           | fine-grained engine mask、capability token                                        |
-| 生命周期       | per-command、per-tile-program、per-role、resident          | per-window owner tag、pre-provisioned multi-buffer reuse、preemption save/restore |
-| patch          | tile_id/group_id/slot offset auto-patch                    | complex affine patch、late binding optimizer                                      |
-| coherency      | descriptor cache invalidate、program text running 禁 patch | hardware descriptor coherence                                                     |
-| bank placement | compiler/runtime hint + hardware check                     | automatic bank remap                                                              |
+| 能力       | 当前 validator 软件合同                                                                    | 后续硬件规格草案                                              |
+| ---------- | ------------------------------------------------------------------------------------------ | ------------------------------------------------------------- |
+| Frame Slot | Tile Program ArenaLayout 中的静态 buffer 绑定索引；slot 容量来自 target 配置               | 固定物理 slot table、字段编码、表项数量由硬件 ABI/PPA 冻结    |
+| owner      | 每个逻辑 Task (`TaskIdentity`) 拥有一个 L1 Arena；root `Context` 单独拥有 L2 Arena         | window/role/resident owner-tag 组织仍待定义                   |
+| 生命周期   | `tile.alloc` 绑定预计算 layout；`tile.free` 失效 view；安全 Task 退休归还 Arena 与 R lease | preemption、save/restore、硬件动态分配不属于当前模型          |
+| reuse      | 编译器证明 L1 view lifetime 不重叠时静态复用同一 Slot/offset；运行时不搜索空闲区           | 多 buffer/window 的物理实现由后续规格决定                     |
+| Profile    | 全 Tile 的 L1 统一使用该层活动 Profile；L1 与 Group L2 Profile 独立                        | bank mask、物理地址映射和可编程重分区由 SRAM profile 冻结     |
+| binary ABI | 软件产物为独立的 schema 2 / compiler ABI v2 `CompiledProgram`                              | 本文 `*_v0_t` C layout 不是该产物 codec，也不是已冻结硬件 ABI |
 
 ## 2. 职责、非职责和 ownership
 
 ### 2.1 ownership matrix
 
-| 对象 / 动作                        | owner                           | 说明                                                                |
-| ---------------------------------- | ------------------------------- | ------------------------------------------------------------------- |
-| slot role、layout、alignment       | Compiler                        | package build 时由 kernel library ABI 和 memory planner 决定        |
-| context base、IOVA、residency      | Runtime / firmware              | load package、bind context、warm launch patch                       |
-| frame bind                         | Tile UCE                        | launch Tile Program 前绑定 frame，检查版本和权限                    |
-| window buffer owner / hazard check | Tile UCE + Slot Frame shadow    | V1 window id 固定 0；V1.x 才比较多个 active window 的读写 slot mask |
-| tile_id/group_id/slot offset patch | Tile UCE auto-patch             | per tile launch 时生成 effective address                            |
-| page list / segment offset patch   | MFE                             | 数据相关动态地址由 MFE 管理                                         |
-| state slot / checkpoint pointer    | USE / Tile UCE                  | USE 拥有 state 生命周期，UCE 发起控制                               |
-| descriptor cache invalidate        | Runtime / firmware + Tile UCE   | warm patch 后确保 UCE 看到新 descriptor                             |
-| slot violation fault               | Tile UCE / DMA / engine wrapper | 记录 command id、program id、tile id、slot id                       |
+| 对象 / 动作                                          | owner                              | 当前合同                                                                                                   |
+| ---------------------------------------------------- | ---------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| 静态 buffer lifetime、ArenaLayout、Frame Slot/offset | Compiler；独立 verifier 复算并验证 | 编译器从 Tile Program 的 `tile.alloc` / `tile.free` 得出可复用 lifetime；不可变布局随 CompiledProgram 封存 |
+| L1 Arena reservation                                 | TaskIdentity / Tile ArenaPool      | 每个已准入 Task 拥有完整、带 padding 的 L1 Arena；Reservation 随 Profile/allocation generation 标记        |
+| Frame prepare/bind 与已编译 Slot view                | Tile UCE / SlotFrame               | Task admission 准备 Arena Frame；Tile Program 执行 `tile.alloc` 时绑定已编译 Slot，不能改选 Slot/offset    |
+| 单 view release                                      | Tile UCE / ArenaPool               | `tile.free` 只失效 view；等待该 Task 安全退休后才归还整个 Arena 和 R lease                                 |
+| Group L2 buffers/backings/claims                     | root Context / Group ArenaPool     | 属于独立 L2 所有权；Frame Slot 不分配 L2，也不因 L1 view free 回收 L2                                      |
+| L1/L2 Profile 事务                                   | Group 的唯一 ProfileController     | 分层同层统一配置；L1-only 切换不重置活跃 L2 Arena                                                          |
+| 可选 binding/generation 校验                         | SlotFrame / runtime                | 检查 owner、Arena、allocation/Profile generation；不把软件 artifact 字段解释为硬件 binary ABI              |
 
 ### 2.2 非职责
 
@@ -48,26 +46,20 @@ First Silicon cutline：
 
 ## 3. 微架构和状态机
 
-### 3.1 L1 SRAM layout
+### 3.1 L1 Arena 与 Frame Slot
 
 ```text
-Tile L1 SRAM
-├── Program Region       # tile.text
-├── Descriptor Region    # tile.desc
-├── Const Region         # tile.const
-├── Event/Status Region  # tile.event
-├── Slot 0: A / input
-├── Slot 1: B / input
-├── Slot 2: C / accumulator
-├── Slot 3: workspace
-├── Slot 4: metadata / page list / shape info
-├── Slot 5: state / checkpoint
-└── Slot 6..15: kernel-specific binding
+每 Tile 的 L1 ArenaPool
+  └── TaskIdentity-owned Arena（完整 per-bank reserve + stripe padding）
+        └── ArenaLayout: buffer_id -> 逻辑字节、Frame Slot、静态 offset、lifetime
+              └── SlotFrame: 当前已绑定的有效 view 与 owner/generation
 ```
 
-推荐 2 MB / Tile 的起始 profile：Program/Descriptor/Event 128 KB，BOA operand 512 KB，BOA accumulator 384 KB，EVU vector 256 KB，MFE stream 384 KB，USE state 128 KB，DMA staging/shared 256 KB。具体分区由 SRAM profile 冻结。
+Compiler 按活动 L1 Profile 的 bank geometry 产生确定的 striped ArenaLayout。Arena reservation 按每个 bank 校验；Frame Slot 是 view 绑定索引，不等同于 Arena、UCE execution context 或 ABI 隔离域 `context_id`。硬件 SRAM 容量、内部 region 划分和 frame table 实现仍未冻结。
 
-### 3.2 frame bind 状态机
+逻辑字节数、padding 和 owner reservation 是不同量：view 只暴露声明的 logical bytes；每个物理段按 stripe/bank geometry 对齐，Arena 预留编译布局所需的全部容量。相邻 Task 不能因某一个 view `free` 而取得该 Arena 的余量。
+
+### 3.2 physical frame-bind state proposal
 
 ```text
 FRAME_IDLE
@@ -87,7 +79,9 @@ VALIDATE_ABI / VALIDATE_SLOT_TABLE / CHECK_OVERLAP_ALIGNMENT / CHECK_BANK_POLICY
 
 `INSTALL_SHADOW` 后，Tile UCE、Tile DMA、MFE tile port、BOA、EVU、USE wrapper 都只访问 shadow copy，避免运行中 descriptor memory 被软件修改影响正在执行的 tile。
 
-### 3.3 descriptor patch 状态机
+软件绑定还要求 `SlotFrame.prepare` 对照已提交 Task Arena 与封存 layout，随后 `bind` 激活 Frame generation。`ALLOC_L1` 只能绑定该 layout 预先选定的 Slot/offset；generation、owner 或 Slot 不匹配时拒绝。上述是 validator 的对象边界，不定义物理 shadow table 的总线或原子更新电路。
+
+### 3.3 physical descriptor-patch state proposal
 
 ```text
 PATCH_IDLE
@@ -112,22 +106,20 @@ READ_FRAME_SHADOW / COMPUTE_EFFECTIVE_ADDR / CHECK_PERMISSION
 - warm launch 可 patch descriptor data，但必须先 invalidate/flush descriptor cache。
 - program text 在 running 状态下不可 patch；违反时产生 invalid descriptor fault。
 
-### 3.4 slot 生命周期状态机
+### 3.4 Task L1 view 生命周期与 Arena 退休
 
 ```text
-UNBOUND -> BOUND -> IN_USE -> PRODUCED -> CONSUMED -> REUSABLE -> UNBOUND
-                         \-> RESIDENT_VALID -> RESIDENT_DIRTY
-FAULTED -> RESET_CLEAN
+编译期 layout：buffer lifetime -> 固定 Frame Slot / Arena offset
+Task admission：完整 L1 Arena reservation -> Frame prepare -> R lease commit
+Tile Program：ALLOC_L1 -> LIVE VIEW -> FREE_L1 / invalidated
+             （若 lifetime 已静态分隔，后继 ALLOC_L1 可重绑同一 Slot/offset）
+安全 Task retirement：剩余 view invalidated -> pins/inflight 收敛
+                      -> 整个 L1 Arena 与 R lease 归还
 ```
 
-生命周期语义：
+`tile.free` 只撤销局部访问权；它不返回物理 extent、不释放 Task Arena、不归还 R lease。只有编译器从指令 lifetime 证明不重叠的 L1 buffers，才可预先安排相同的 Slot/offset；之后的 `ALLOC_L1` 是按冻结布局重新绑定，不是运行时动态放置或空闲表搜索。`tile.free` 前，相关异步访问和 opaque engine events 必须已等待；死 scratch 无须 Store，Task 结束后仍需保留的数据须先完成 `tile.store.async`。
 
-- per-command：单个 engine task 的 input/output/workspace；event 完成后可释放。
-- per-tile-program：Tile Program 内多个 engine 复用；Tile Program 结束后释放。
-- per-role：role 间缓存或 partial result；Tile Group Sequencer / Stream Queue 管理可见性。
-- resident：program、const、hot descriptor、USE state cache；只有 firmware/runtime 或 checkpoint path 可替换。
-
-Sliding window 语义只允许复用 **预先声明的** ping-pong / multi-buffer slot set。Slot Frame V1 不做硬件动态分配；`window_size>1` 时，UCE 使用 frame shadow 中的 lifetime、owner、role、flags 和 active window 的 read/write mask 判定 slot 是否可复用。
+L2 生命周期不适用此复用规则。root Context 拥有独立 L2 Arena；当前 L2 布局永久 no-rebind，每个本地 buffer 保留自己的完整 stripe-round padded span，即使 `nest.release` 后也不在同一 Arena 内复用。L1 Frame 不管理 readonly backing、shared claim 或 L2 pin。
 
 ## 4. 接口、descriptor、寄存器和协议
 
@@ -186,7 +178,10 @@ typedef struct {
     uint32_t flags;
     elenor_tile_slot_v0_t slots[ELENOR_TILE_SLOT_COUNT];
 } elenor_tile_frame_v0_t;
+
 ```
+
+本文 C struct 是独立的硬件 Frame/slot ABI v0 草案，字段、宽度、地址编码均未冻结。当前编译产物 schema 2 / compiler ABI v2 保存不可变 ArenaLayout；Loader 独立验证后只绑定调用点提供的实际 memory bindings，不把此 C struct 当作 JSON codec、硬件 binary ABI 或运行时布局搜索请求。
 
 ### 4.2 address template 和 patch record
 
@@ -236,6 +231,8 @@ effective_addr = template.base_addr
 
 `ADDR_PAGE_LIST` 和 segment offset 由 MFE 管理；UCE 不把 MFE 数据相关动态访问抢过来。
 
+当前执行合同只使用编译期确定的连续 striped layout 与 Slot/offset 绑定；`BASE_TILE_2D`、多维 affine patch 和 page-list 等条目保留为硬件 descriptor v0 设计空间，不表示模型实现了任意 shape 重解释或 DMA stride。Tile UCE 不接管 MFE 的 page/segment 动态地址。
+
 ### 4.3 寄存器草案
 
 | 寄存器                          | 说明                                                           |
@@ -251,79 +248,72 @@ effective_addr = template.base_addr
 
 ## 5. 数据流、控制流和时序路径
 
-### 5.1 cold launch
-
-1. Host Runtime 上传 package、descriptor、frame table、program。
-2. Device Runtime 校验 ABI version 和 context。
-3. Tile Group Sequencer dispatch prepared tile task。
-4. Tile UCE 加载 Tile Program，fetch frame descriptor。
-5. Tile UCE validate slot table：范围、重叠、对齐、权限、bank policy。
-6. UCE install shadow，执行 descriptor template auto-patch。
-7. UCE launch DMA/BOA/EVU/MFE/USE；engine wrapper 只使用 patched descriptor 和 frame shadow。
-8. completion event 或 fault record 返回。
-
-### 5.2 warm launch
-
-Warm launch 不 reload program，只 patch descriptor、context、shape metadata：
+### 5.1 当前软件执行与 Frame bind
 
 ```text
-Runtime patch descriptor -> descriptor cache invalidate/flush
-Device Runtime issue group task
-Tile UCE bind existing program + new frame generation
-Tile UCE patch descriptor shadow
-Tile Program run
+source xDSL ModuleOp
+  -> compile_program：计算 Task L1 ArenaLayout、Frame Slot/offset 与 lifetime
+  -> 封存 schema 2 / compiler ABI v2 CompiledProgram
+  -> independent verifier + load_program：只读校验并绑定实际调用点
+  -> Simulator.run：root 完整 L2 准入 -> Grid Route -> 每 Tile Task admission
+  -> Task L1 Arena reservation / Frame prepare
+  -> UCE Frame bind -> 按 Tile Program 执行 ALLOC_L1 / FREE_L1
+  -> 所有 view、pin、inflight 与 Task lease 收敛后整块 Task Arena 退休
 ```
 
-若 frame generation 与 descriptor template generation 不匹配，必须 fault；不得使用旧 slot binding 继续运行。
+编译器会检查允许的 L1 Profile 与 `requested_contexts_per_tile=R` 包络；运行时按冻结 layout 做实际 Task 准入。一次 Tile 阻塞不撤销其他 Tile 已提交的 Task。Frame Slot 的存在不证明特定物理 bank/NoC 布局已经实现。
+
+### 5.2 bind generation 与硬件 warm-patch 草案
+
+运行时 Frame 绑定到已提交 Task Arena，并受其 owner、allocation generation 和 L1 Profile generation 约束。程序内 `ALLOC_L1` 只能 materialize layout 中指定的 view；`FREE_L1` 只失效该 view。Frame/Tile Program 退休后，新的 Task 取得新的 owner-scoped Arena 生命周期。
+
+旧式 package warm-launch 对 frame table/descriptor 的 patch、cache invalidate/flush 与物理地址自动 patch 仍是硬件 v0 草案，不是当前 `load_program` 主路径：Loader 不调用 compiler、不补依赖、不重选 Profile 或改变 layout。实际 source module 不因执行而改写；新运行使用新编译/加载的 immutable executable 和显式 binding。
 
 ### 5.3 ordering / coherency 规则
 
-- Slot Frame shadow 是 Tile Program 执行期间的唯一权威视图。
-- frame descriptor memory 可被 runtime 修改，但修改对 active frame 不生效，直到下一次 bind。
-- descriptor patch commit 是 launch engine 的前置条件。
-- running program text 不允许 patch；resident const 若需替换，必须先 drain tile program。
-- DMA 写 output slot 后，consumer engine 需要 event/fence；Stream Queue token 只排序 token，不替代 L1 memory fence。
-- accumulator slot 只能被 BOA/EVU accumulate path 或明确 storeback path 修改；普通 DMA 覆盖需要显式 flag，否则 fault。
-- USE state slot 的 checkpoint/restore 由 USE 生命周期控制，UCE 发起；DMA 不能绕过 checkpoint path 写 state。
-- 若 UCE V1.x 开启 `window_size>1`，slot owner handoff 必须按 `event_id + sequence`、fence 和 stream release 判定；不得因 window entry 退出 decode 就提前释放 buffer。
-- read-only const slot 可被多个 window alias；任何 writable alias、WAR/RAW/WAW hazard 必须由 UCE/engine wrapper stall 或 fault。
+- 当前 SlotFrame 是已绑定 Task Arena layout 的访问视图；owner、Arena ID、allocation generation、Profile generation 和 Frame state 必须匹配后才能读写。
+- `tile.free` 只失效指定 L1 view；pending async access、opaque compute event 和引用收敛前不能 free。死 scratch 不要求 Store；要跨 Task 持续使用的值必须在 Task 退休前完成对应 Store。
+- 同一 Task 内仅允许编译 lifetime 已证明不重叠的 view 静态复用 Slot/offset；不同 Task 之间通过整个 Arena 的安全退休自动回收，不存在跨 Task view free 即返还配额。
+- L2 `nest.release` 与 L1 `tile.free` 是不同 owner/view 合同；前者不改变 L2 no-rebind span，也不由 Frame 管理。
+- Profile 配置与数据可见性是分离合同。普通 event/fence 约束 producer/consumer；Profile 切换由显式完整配置事务执行，普通 await 或 Frame bind 不是维护事务。
+- 硬件 program text 正在执行时不得 patch 的规则属于未来 binary/descriptor 实现要求，不改变当前只读 executable 主路径。
 
-### 5.4 bank placement
+### 5.4 bank geometry 与物理 placement 草案
 
-`bank_policy` 描述编译器/runtime 对 bank 的约束：
+`bank_policy`、mask 编码、硬件地址映射与 Conflict 旁路仍是待冻结物理 ABI。当前软件用目标 Registry 中每层统一的 bank geometry、SPM/cache bytes、system reservation 与 alignment 构造静态 striped layout，并在编译/独立 verifier 中逐 bank 验证 Arena 预算；它不模拟任意自动 bank remap。
 
-| policy            | 语义                                                            |
-| ----------------- | --------------------------------------------------------------- |
-| `DEFAULT`         | 硬件按 base address 映射 bank                                   |
-| `PINNED_MASK`     | slot 只使用指定 bank mask，mask 编码由 SRAM profile 冻结        |
-| `INTERLEAVE`      | 连续 cache line / SRAM row 跨 bank 交织                         |
-| `NO_HOT_CONFLICT` | 不与 program/descriptor/event 或 accumulator hot path 共享 bank |
+| policy            | 硬件 v0 设计意图（尚未冻结）                          |
+| ----------------- | ----------------------------------------------------- |
+| `DEFAULT`         | 按物理地址/目标 geometry 映射 bank                    |
+| `PINNED_MASK`     | 限定 bank mask；mask 编码与可行性由 SRAM profile 冻结 |
+| `INTERLEAVE`      | 连续数据跨 bank 交织                                  |
+| `NO_HOT_CONFLICT` | 尽量避开热点，但作为性能 hint 时不得改变正确性        |
 
-硬件必须检查无法满足的 pinned policy 并 fault 或降级为明确可观测状态；不得静默忽略影响 correctness 的权限/重叠规则。性能 hint 可降级，但 PMU 必须记录。
+Layout 中的 bank 几何是软件容量合同，不等于实物仲裁器、bank conflict 率或地址映射已通过 RTL 验证。
 
 ## 6. 配置、PPA、性能模型和 PMU
 
 ### 6.1 capacity assumptions
 
-| 配置     | L1 / Tile | slot count |   banks | Program/Desc/Event | 备注                    |
-| -------- | --------: | ---------: | ------: | -----------------: | ----------------------- |
-| Edge     |      1 MB |         16 | 至少 16 |       64 到 128 KB | 小模型 / 小 batch       |
-| Balanced |      2 MB |         16 | 至少 16 |             128 KB | 推荐 First Silicon 起点 |
-| High End |      4 MB |   16 或 32 |      32 |      128 到 256 KB | bank policy 更关键      |
+| 对象            | 当前模型合同                                                                              | 物理规格状态                                               |
+| --------------- | ----------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| logical bytes   | 每个 L1 view 仅暴露源声明字节数                                                           | Frame entry 字段宽度未冻结                                 |
+| padding / Arena | per-bank striped layout；整 stripe-round reserve 纳入 Task Arena                          | stripe、alignment 与 bank mapping 由目标 SRAM profile 冻结 |
+| Frame Slot      | buffer 的静态绑定索引；Slot 数校验使用 target `frame_slot_capacity`                       | 实际 table 深度/面积未冻结                                 |
+| L1 Profile      | 同一 Tile Group 中所有 Tile 统一；mode 明确 `spm_bytes_per_bank` / `cache_bytes_per_bank` | 硅片容量、频率、组织仍未冻结                               |
+| owner/reclaim   | 一个 Task 拥有一个 Arena；全部 Task views/pins/inflight 收敛后退休                        | 实物 owner-tag 与回收电路待规格冻结                        |
 
-slot table shadow 面积约为 `slot_count * sizeof(slot_entry)` 加校验逻辑；相对 1 到 4 MB L1 很小。bank conflict、alignment checker 和 patch datapath 的时序成本需要由 PPA exploration 冻结。
+每 Bank 准入容量应从活动 Profile 的 SPM 与系统预留计算；仅比较 aggregate free bytes 不能证明跨 bank 合法。Frame Slot 数、UCE execution context 数、Group execution slot、program-resident slot 和 ABI `context_id` 不得统称为同一种 slot/context。
 
 ### 6.2 bandwidth model
 
-Slot Frame 不产生带宽，但决定 L1 访问冲突：
+Frame Slot 本身不提供带宽。软件模型按有限 per-bank Arena/Transfer stages 计容量等待和 bank wait；公式
 
 ```text
-BW_eff(slot_i) = BW_bank_peak(bank_policy_i) * (1 - conflict_rate_i)
+BW_eff ~= BW_peak * (1 - conflict_rate)
 ```
 
-Compiler/runtime 应避免以下峰值重叠：BOA A/B operand burst、BOA accumulator RMW、MFE stream write、Tile DMA load/store、EVU gather replay、UCE descriptor fetch。
-
-Sliding window profile 会提高同时活跃 slot set 数量。V1.x 只能通过 compiler/runtime 预留多 buffer 来吸收该压力；若 `window_size` 增大导致 bank conflict 或 slot hazard stall 上升，PMU 应分别归因到 `l1_bank_conflict_by_slot` 与 UCE `slot_hazard_stall`，不能把两者合并。
+只作为物理性能估算形式，不是当前芯片实测值、compiler 的运行时 occupancy 预测或固定加速保证。当前模拟配置的 L1/L2 Profile 分层独立，但每层所有成员使用统一活动 mode；Profile 切换带完整 frontier、issue gate、maintenance 与成员 ACK。
 
 ### 6.3 PMU / error hooks
 
@@ -343,7 +333,11 @@ Sliding window profile 会提高同时活跃 slot set 数量。V1.x 只能通过
 
 Fault record 必须包含：command id、program id、frame id、generation、tile id、slot id、patch id、fault code、offending address、required permission、actual flags。
 
+当前 validator PMU / snapshot 观测的是绑定与资源合同的模型数据，例如 `frame_bind`、`l1_frame_fault`、memory wait、Arena/view/pin/inflight/lease 与各 Profile generation；其名称和统计范围不是上表硬件寄存器编号。按组件/域归因；并发 stall 类别不可直接相加为一个全局 stall cycle。硬件 counter id、快照与 fault-record 格式仍为 v0 草案。
+
 ## 7. RTL/软件实现建议
+
+以下是物理 Slot Frame RTL/software integration 建议，不是当前 simulator 中已经存在的硬件实现；软件可执行语义以 §3.1/§3.4 的 Arena/Frame 生命周期为准。
 
 - Slot table validate 使用独立 combinational checker + registered result，不要把所有 slot overlap 比较压在 launch critical path；可多周期 bind。
 - Shadow table 使用双 buffer：active shadow 与 next shadow，bind commit 原子切换 generation。
@@ -358,43 +352,42 @@ Fault record 必须包含：command id、program id、frame id、generation、ti
 
 ### 8.1 SVA / formal checks
 
+以下 Slot/permission/descriptor 的 SVA 项是未来硬件 v0 验收建议；当前软件验收范围见 §8.2 的 Arena/layout/owner 检查，不能据此声称 RTL 已通过。
+
 - Slot range：`base + size <= l1_bytes`，加法不得溢出。
-- Slot overlap：除明确允许 alias 的只读 const case 外，两个 writable slot 不得重叠。
-- TensorView / MFE view descriptor 可以在一个 backing slot 上创建多个逻辑 view，但这不放宽 writable alias 规则；V1 只允许只读 alias，或由显式 release/barrier 分隔的 phase-disjoint handoff alias。
-- Permission：write request 必须命中 WRITE；accumulate request 必须命中 ACCUMULATE；execute request 必须命中 EXECUTE。
+- 同时存活的 L1 view 不能重叠；仅当编译器证明 lifetime 不相交时，才能为其预先安排相同 Slot/offset。当前合同没有通用别名例外。
+- Lifetime reuse：仅对编译器证明前一 L1 view 在后续 `ALLOC_L1` 前已 `FREE_L1` 的布局复用同一 Slot/offset；运行时绑定不得搜索新位置。
 - Generation：engine launch 使用的 descriptor generation 必须等于 active frame generation。
 - Patch atomicity：patch commit 前 engine launch 不得看到部分写入 descriptor。
 - Running text immutable：active program text slot 不允许 write/patch。
 - Bank policy：BANK_PINNED slot 的 request bank 必须在 mask 内。
-- Window hazard：V1 `window_id` 恒为 0；V1.x 下多个 active window 对同一 writable slot 的 alias、WAR/RAW/WAW 必须被 admission checker 拦截。
-- Reset clean：tile reset 后 active frame invalid 或 generation 递增，旧 descriptor handle 不可继续使用。
+- Task isolation / generation：新 Task 不能使用旧 Task 的 Frame owner、allocation generation 或 Profile generation；Task retirement 前必须等待 view、pin、inflight 和 R lease 收敛。
 
 ### 8.2 测试矩阵
 
-| 测试                       | 目的                  | 验收                                      |
-| -------------------------- | --------------------- | ----------------------------------------- |
-| frame ABI version mismatch | descriptor validation | invalid descriptor fault                  |
-| slot overlap random        | range checker         | writable overlap 全部被拦截               |
-| accumulator protection     | 权限                  | DMA 普通写 accumulator fault              |
-| warm launch patch          | descriptor coherency  | invalidate 后读取新 descriptor            |
-| generation mismatch        | stale descriptor      | launch 被拒绝并记录 fault                 |
-| bank pinned stress         | bank policy           | PMU 能按 slot 记录 conflict               |
-| reset during active frame  | reset semantics       | 旧 handle 无效，credit/event 不污染新 run |
+| 测试                         | 目的                             | 验收                                                                     |
+| ---------------------------- | -------------------------------- | ------------------------------------------------------------------------ |
+| Layout lifetime reuse        | 编译期静态 L1 复用               | 不重叠 lifetime 可复用预先计算的 Slot/offset；重叠 lifetime 不可重叠放置 |
+| Frame binding mismatch       | owner / layout / generation 校验 | 错误 Task Arena 或 generation 拒绝绑定                                   |
+| `tile.free` with live access | view invalidation safety         | 未完成访问/event 时不得失效该 view                                       |
+| Task retirement              | whole-Arena ownership            | 所有 view/pin/inflight 收敛后归还 Arena 与 R lease                       |
+| L1/L2 Profile split          | 配置隔离                         | L1-only reconfigure 不重置 L2 Arena/Profile                              |
+| Hardware v0 warm patch       | descriptor coherency proposal    | 仅作为未来 RTL 验收；不作为当前 loader 路径证明                          |
+| Reset during active Task     | reset generation isolation       | 未确认 drain/isolation 前不复用旧 Task Arena                             |
+
+当前软件模型验证适用于编译、独立 verifier、load 与 Simulator 行为；上表中硬件 patch、slot table RTL、bank-mask 与物理 timing/PPA 仍需独立 RTL/SVA 验收。
 
 Bring-up：先 frame bind checker formal，再 Tile DMA slot access，再 BOA GEMM slot A/B/C binding，再 Stream Queue payload slot，再 MFE metadata/page-list slot。
 
 ### 8.3 跨模块 contract checklist
 
-- Binary struct / protocol：tile frame、slot entry、address template、patch record、frame 寄存器均有 v0 草案。
-- State machine：frame bind、descriptor patch、slot lifecycle、reset generation invalidation 必须有 transition coverage。
-- Capacity / bandwidth / area：slot count、L1 profile、bank 数量、patch datapath 和 checker 面积分开记录；未冻结容量由 SRAM profile 冻结，checker 时序由 PPA exploration 冻结。
-- NoC VC behavior：Slot Frame 本身不发 bulk packet；slot violation、patch fault、descriptor fault 必须通过 VC0/event fault path 可见；slot 指向的 DMA/stream payload 按 Memory / NoC VC contract 使用 VC1/VC2。
-- Credit / EOS / error / reset：Slot Frame 不拥有 stream credit/EOS，但 payload slot 必须支持 EOS/error token 引用；tile reset 后旧 frame generation、token handle 和 descriptor patch 失效。
-- Patch ownership：Compiler 冻结静态 shape/layout，Runtime/firmware patch context/residency，Tile UCE patch tile/group/slot offset，MFE patch page/segment，USE 管理 state slot。
-- Ordering / coherency：active shadow 是唯一权威视图；warm patch 必须 invalidate descriptor cache；engine launch 只能使用 patch commit 后的 descriptor。
-- Sliding window：若启用 `window_size>1`，Slot Frame 只提供 pre-provisioned multi-buffer binding 和 owner metadata；dynamic allocation、eviction 或 compaction 不属于 Slot Frame V1。
-- SVA / formal：range、overlap、permission、generation、patch atomicity、running text immutable、bank pinned check 必须覆盖。
-- PMU / error hooks：slot fault、patch fault、descriptor invalidate 和 per-slot bank conflict 必须带 frame id、slot id、patch id。
+- Software artifact：schema 2 / compiler ABI v2 的 ArenaLayout 与真实 bindings 经独立只读 verifier 校验；它不是 `tile_frame_v0_t`。
+- Lifetime / reclaim：L1 lifetime 复用仅为编译期静态 Slot/offset 复用；`tile.free` 失效 view，完整 Task Arena 与 R lease 在安全退休/取消隔离后归还。
+- L2 boundary：root Context 拥有 L2 Arena；L2 no-rebind、readonly backing/claim 与 pin 由 Group L2 owner 管理，不归 SlotFrame。
+- Capacity / Profile：logical bytes、padding、Frame Slot、L1 Arena 和 per-level Profile 独立报告；物理容量与 slot count 不因软件配置冻结。
+- Binary / registers：本文 C struct、register、address-template 均为独立硬件 v0 草案，字段宽度和物理接口由后续规格冻结。
+- Verification：当前编译/loader/runtime 检查不替代 frame-table RTL、SVA、CDC/RDC 或器件 bank-conflict 测量。
+- PMU / error hooks：模型 snapshot 与硬件 PMU 名称分开；fault 必须携带可定位的 owner、generation 与 view 信息，精确 hardware encoding 待定。
 
 ## 9. 风险、取舍和后续细化方向
 

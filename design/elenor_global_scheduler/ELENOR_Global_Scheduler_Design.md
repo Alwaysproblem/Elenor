@@ -2,26 +2,29 @@
 
 ## 1. 定位、目标和 First Silicon cutline
 
-Global Scheduler 是 ELENOR chip-level 控制面的核心，位于 Host Interface/Runtime Processor 与 Tile Group/Global DMA/Collective/Event Fabric 之间。它消费已经通过 Runtime Processor 基础校验的 command queue entry，管理全局 event/barrier/fault/resource map，启动 Group Task，并将 `elenor_group_task_launch_desc_v0_t` 转发到 Tile Group Sequencer。它不解释高层 graph；graph schedule 已由 compiler/runtime 降到 command buffer、descriptor table、TileGroupTask 和 Tile Program。
+Global Scheduler 规格描述的是未来芯片的**系统级命令提交与 event/dependency 边界**，不是当前软件 `pipeline_validator` 中的 Group 内 ready-action scheduler。当前可执行主路径是 `source xDSL → compile_program → immutable CompiledProgram → independent verify/load(actual bindings) → LoadedProgram → Simulator.run`；CPU Device interpreter 执行已编译的 `nexus.*` 控制序列，不在 Runtime 进行 graph lowering 或同步修复。
 
-Global Scheduler 的设计目标：
+当前单 Group 参考模型中，`CpuDeviceController`、`DevicePort` 与 `GroupPortAdapter` 表达 CPU 提交和消息边界；GroupPort 接受请求时只登记有界 pending root metadata，root 之后完整准入 L2 Arena、事件/控制预算和 Group slot。Group 内另有**每 root** `TileGroupSequencer` 维护 registration cursor/fence/completion，以及**Group 共享** `GroupScheduler` 调度已注册 action。它们不是本文件所描述的多 Group 芯片全局 Scheduler，也没有证明该硬件模块已经实现。
 
-1. **确定性调度**：同一 command sequence 在相同 event/descriptor 条件下产生相同 group task dispatch 顺序和 event 结果。
-2. **事件驱动**：command wait_ref、`signal_event + signal_sequence`、DMA completion、tile/group done、barrier 统一进入 Event Fabric。
-3. **资源绑定**：把 context、queue、Tile Group mask、program reference、descriptor_iova、fault_record_slot 绑定到可审计的 group task。
-4. **First Silicon 稳定优先**：先闭合 command/event/barrier/DMA/PMU，再扩展 multi-model priority、preemption 和 PMU feedback scheduling。
+本模块硬件目标负责系统级 command/event/dependency、资源映射及向 Group 的消息提交；它消费预先形成的 command/descriptor，不生成 Tile Program、不 lower graph，也不代替 Group root admission。命令结构、CSR、跨 Group 仲裁和物理实现仍是草案，未冻结的字段由后续规格冻结。
 
-First Silicon V1 cutline：
+设计目标：
 
-| 能力              | First Silicon V1                                                          | Architecture V1 / 后续规格               |
-| ----------------- | ------------------------------------------------------------------------- | ---------------------------------------- |
-| Command consume   | 接收 Runtime Processor 输出的 validated command header                    | 多级 hardware command parser             |
-| Queue policy      | round-robin 或 fixed priority，策略由后续规格冻结                         | 多模型 QoS、aging、deadline              |
-| Event/barrier     | wait/signal、completion event、timeout、barrier                           | event dependency graph 优化              |
-| Group task launch | LAUNCH_GROUP_TASK、DMA、BARRIER、EVENT_WAIT/SIGNAL、RESET_DOMAIN 基础命令 | full graph schedule hardware assist      |
-| Resource map      | static group mask、queue/context binding                                  | dynamic group partition、SRAM quota 调整 |
-| Fault             | invalid state、timeout、resource conflict、downstream fault 汇聚          | per-context recovery policy 扩展         |
-| PMU               | queue occupancy、event wait、scheduler stall、dispatch latency            | PMU feedback scheduling                  |
+1. **确定性提交**：相同的 command、依赖与下游接受条件产生可审计的提交顺序和 terminal event。
+2. **事件驱动**：command wait_ref、`signal_event + signal_sequence`、DMA completion、Group/root completion 与故障按显式事件身份交接。
+3. **边界清晰**：系统级 queue / dependency / Group 消息准入不与 Group 内 action ISSUE、Tile Task admission 或 UCE issue 混为一个 scheduler。
+4. **First Silicon 草案优先**：先冻结 command/event/barrier/DMA/PMU 的硬件协议；priority、preemption、PMU feedback 与多 Group 动态分配仍是扩展项。
+
+下表列出待实现硬件目标，不代表本轮已验证的 RTL 能力：
+
+| 能力             | 硬件规格目标                                               | 后续扩展                                 |
+| ---------------- | ---------------------------------------------------------- | ---------------------------------------- |
+| Command consume  | 接收已准备的 command header                                | 多级 hardware command parser             |
+| Queue policy     | 有界队列仲裁，具体策略由后续规格冻结                       | 多模型 QoS、aging、deadline              |
+| Event/barrier    | wait/signal、completion、timeout 与明确的 participant 合同 | event dependency graph 优化              |
+| Group submission | 发送 Group 消息并接收 accepted/completion                  | 多 Group 动态分区、跨 Group load-balance |
+| Resource map     | queue/context 与可用 Group 的静态绑定                      | 动态 SRAM quota 调整                     |
+| Fault / PMU      | 下游 fault 汇聚与本地 queue/event/backpressure 观测        | per-context recovery、反馈调度           |
 
 模块框图：
 
@@ -56,22 +59,26 @@ Runtime Processor / Queue Fetcher
 
 ## 2. 职责、非职责和 ownership
 
+本节区分目标硬件 Global Scheduler 与当前软件参考实现：本表中的全局队列、跨 Group 资源映射和硬件 event fabric 均未由单 Group 模型实现。`GroupScheduler` 的有限 action 表与单 cycle ISSUE/REGISTER 属 Group ownership，不能当作本模块的当前执行对象。
+
 ### 2.1 职责
 
-| 职责                    | 说明                                                                                                                                                                |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| command dispatch        | 从多个 queue 中选择 ready command，维护 queue head 更新条件。                                                                                                       |
-| dependency check        | 检查 wait_ref 中每个 `event_id + expected_sequence` 是否 DONE，ERROR/TIMEOUT/RESET 是否阻断 command。                                                               |
-| event allocation/update | 对 command `signal_event + signal_sequence`、group task done、DMA done、barrier done 统一更新。                                                                     |
-| group task launch       | 向 Tile Group Sequencer 发送 elenor_group_task_launch_desc_v0_t：task_id、group_id、role binding、descriptor pointer、group mask、stream config 和 residency hint。 |
-| DMA task launch         | 将 ELENOR_CMD_DMA 转换成 Global DMA descriptor launch，并绑定 completion event。                                                                                    |
-| barrier                 | 管理 group/tile/global barrier 参与者、timeout 和 fault propagation。                                                                                               |
-| resource map            | 管理 context->queue->group partition、active command、inflight group task。                                                                                         |
-| timeout                 | 以 command timeout_cycles 或默认 policy 生成 timeout event/fault。                                                                                                  |
-| fault propagation       | 将 downstream fault 映射到 command/event/fault record。                                                                                                             |
-| PMU                     | 统计 queue occupancy、event wait、dispatch latency、scheduler backpressure。                                                                                        |
+本表描述目标硬件 Scheduler 的职责草案；当前软件参考模型中对应职责分别由 CPU/Device interpreter、GroupPort 与 Group 内组件承担（见 §1 与 §2.3），不存在一个已实现的芯片级调度器实体。
 
-### 2.2 非职责
+| 职责                    | 说明                                                                                                          |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------- |
+| command dispatch        | 从多个 queue 中选择 ready command，维护 queue head 更新条件。                                                 |
+| dependency check        | 检查 wait_ref 中每个 `event_id + expected_sequence` 是否 DONE，ERROR/TIMEOUT/RESET 是否阻断 command。         |
+| event allocation/update | 对 command `signal_event + signal_sequence`、group task done、DMA done、barrier done 统一更新。               |
+| group task message      | 向 Group 发送硬件 v0 descriptor 草案：root identity、资源/事件引用与 hint。消息接受不等于完整 root 资源准入。 |
+| DMA task launch         | 将 ELENOR_CMD_DMA 转换成 Global DMA descriptor launch，并绑定 completion event。                              |
+| barrier                 | 管理 group/tile/global barrier 参与者、timeout 和 fault propagation。                                         |
+| resource map            | 管理 context->queue->group partition、active command、inflight group task。                                   |
+| timeout                 | 以 command timeout_cycles 或默认 policy 生成 timeout event/fault。                                            |
+| fault propagation       | 将 downstream fault 映射到 command/event/fault record。                                                       |
+| PMU                     | 统计 queue occupancy、event wait、dispatch latency、scheduler backpressure。                                  |
+
+### 2.2 非职责（目标硬件 + 当前模型共同边界）
 
 - 不解释高层 graph，不执行 MLIR/ONNX/PyTorch 语义。
 - 不执行 Tile Program；Tile Program PC、launch/wait/branch 归 Tile UCE。
@@ -82,18 +89,23 @@ Runtime Processor / Queue Fetcher
 
 ### 2.3 Ownership matrix
 
-| 对象               | Owner                                               | Scheduler 权限                                                            |
-| ------------------ | --------------------------------------------------- | ------------------------------------------------------------------------- |
-| command header     | Runtime/Queue Fetcher validates，Scheduler consumes | 读 type/wait/signal/timeout/context/desc pointer。                        |
-| descriptor body    | Engine/DMA/Tile Group Sequencer consumes            | Scheduler 只做 bounds/version/owner 级检查，不解析 engine 私有字段。      |
-| event table        | Event Fabric/Scheduler                              | 创建、wait、signal、timeout、reset。                                      |
-| barrier state      | Scheduler                                           | 维护 participant mask、arrival count、timeout。                           |
-| group task         | Scheduler owns until accepted by Group              | 生成 task_id、group_id、role binding、descriptor_iova 和 residency hint。 |
-| group resource map | Scheduler                                           | 分配/释放 group，记录 context ownership。                                 |
-| queue head         | Runtime/Scheduler handshake                         | command accepted 或 rejected with event 后更新。                          |
-| fault record slot  | Fault Fabric owns，Scheduler 填 source metadata     | 写 command_id/context/queue/source/timeout。                              |
+| 对象                  | Owner / 边界                          | Scheduler 权限                                                                                      |
+| --------------------- | ------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| CPU 指令/提交序列     | 已加载程序中的 `CpuDeviceController`  | 执行依赖、pending/outstanding 与 completion；不 lowering graph。                                    |
+| Device 消息           | `DevicePort` 协议边界                 | 传递稳定 request identity；不等同于 Group root 已 ACTIVE。                                          |
+| pending root metadata | 当前模型 `GroupPortAdapter`           | 有界排队；只保留 metadata，不预占 Group slot/L2 Arena。                                             |
+| Group root resources  | Group root admission                  | 完整提交 L2 Arena、event/control budget 与 execution slot；不是全局 Scheduler 的本地 action table。 |
+| system command queue  | 目标硬件 Scheduler（草案）            | 消费已准备 header、检查系统级依赖并决定消息发送。                                                   |
+| Group action table    | Group 共享 `GroupScheduler`（模型内） | 注册 action 后 ISSUE；与系统级 command queue 分离。                                                 |
+| event table           | Event Fabric / Group runtime model    | 维护 event producer/consumer、generation、sequence 与 terminal status。                             |
+| barrier state         | 对应同步域的 owner                    | participant 与 epoch 必须显式；不得将 Context `nest.barrier` 推广成 Device barrier。                |
+| group task message    | Scheduler until message accepted      | 转发硬件 v0 descriptor 草案；消息接受不表示模型中的完整 root 准入已完成。                           |
+| group resource map    | 目标硬件 Scheduler（草案）            | system-level Group ownership；不可混称 Group slot 或 Tile UCE context。                             |
+| fault record slot     | Fault Fabric（硬件草案）              | 写来源与请求身份；布局仍由后续规格冻结。                                                            |
 
 ## 3. 微架构和状态机
+
+本节的子模块、pipeline、event/barrier/timeout 结构均为**目标硬件草案**，用于说明未来 Scheduler 的内部组织；当前参考实现中没有这些 RTL 模块。软件模型中相应机制分别是：CPU 的 pending/outstanding/completion 管理、GroupPort 的 SAME/COMPATIBLE pending 队列、Group EventTable 的 owner/generation/sequence，以及 Group `GroupScheduler` 的单条 ISSUE/REGISTER。
 
 ### 3.1 子模块
 
@@ -129,7 +141,7 @@ Q_READY
   -> RETIRE
 ```
 
-每一级建议寄存化，避免 wait_ref fan-in、resource conflict check 和 NoC ready 组合成一条长路径。
+此 pipeline 是系统级硬件命令处理草案。软件参考执行时，CPU/Device 只递交已编译的操作；Group 内的 ready-action ISSUE 由另一层共享 `GroupScheduler` 执行，不能将本 pipeline 描述为 graph lowering 或 Group action PC。
 
 | 阶段            | 输入                                           | 输出                              | fault 条件                                                   |
 | --------------- | ---------------------------------------------- | --------------------------------- | ------------------------------------------------------------ |
@@ -188,6 +200,8 @@ command timeout_cycles 可直接映射到 timeout wheel entry，粒度由后续�
 - completion 到达时取消 timeout；若 timeout 与 completion 同周期，优先级由后续规格冻结，必须有 SVA 覆盖。
 
 ## 4. 接口、descriptor、寄存器和协议
+
+本节的所有 C 结构、CSR offset 与 command enum 都是**硬件 ABI v0 草案**，只定义目标芯片的消息边界；它们不是当前 `CompiledProgram`（schema 2 / compiler ABI v2 软件 artifact）的编码，也不是已实现的寄存器。字段宽度、CRC、endianness、物理搬运与命令集由后续规格冻结。
 
 ### 4.1 输入 command record
 
@@ -253,7 +267,7 @@ typedef struct {
 } elenor_group_task_launch_desc_v0_t;
 ```
 
-校验要求：Scheduler 只检查 ABI version、descriptor bounds、tile_mask_union/role_count 合法、group ownership、wait/signal event 范围、role binding（role_id/tile_mask/tile_program_id/version/hash）的基本一致性，以及 hint 字段不含未支持必需位。program ready 由下游 Tile Group Sequencer 的 Program Residency Manager 保证，不由 Scheduler 发出显式 `program.load`。
+校验要求：Scheduler 只检查硬件消息/descriptor 草案中的 ABI version、bounds、tile mask / role 数量及 wait/signal identity 等系统级字段；它不作 source graph lowering、不插入隐式依赖，也不取代 Group 的完整 root resource admission。descriptor v0 与当前 `CompiledProgram` / `ExecTileGroupTask` 软件 DTO 是不同命名空间，不是当前软件产物的二进制布局。
 
 ### 4.3 Task 发往 Tile Group 的协议
 
@@ -278,7 +292,7 @@ residency_hint / cache_policy
 flags
 ```
 
-Tile Group accept 后，Scheduler 可认为 group task inflight；group task done/error 通过 completion_router 返回。Scheduler 不进入 Tile Program 细节，也不管理 group/tile local program slot。
+在硬件目标中，Scheduler 只能在明确的下游消息接受后将请求记为已提交/inflight；Group 返回的 root done/error 才终结它。当前参考模型中的 CPU request 在 GroupPort 接受 pending metadata 后仍占 Device outstanding；只有 Group root 完整 admission 才占 Group execution slot 并拥有 L2。Scheduler 不进入 Group action ISSUE、Tile Program PC 或 UCE eligible-head 仲裁。
 
 ### 4.4 Scheduler CSR
 
@@ -299,63 +313,57 @@ Active command 运行时修改 policy、resource map、queue enable 的行为必
 
 ## 5. 数据流、控制流和时序路径
 
-### 5.1 LAUNCH_GROUP_TASK 流程
+### 5.1 已准备命令的系统级提交（硬件目标草案）
 
 ```text
-Command Arbiter
-  -> select ready queue
-Command Decoder
-  -> sees ELENOR_CMD_LAUNCH_GROUP_TASK
-Dependency Checker
-  -> wait events done?
-Resource Map
-  -> group mask available and owned by context?
-Group Task Builder
-  -> build per-group task
-NoC VC0
-  -> send task to group Tile Group Sequencer
-Completion Router
-  -> collect group done/error
-Event Fabric
-  -> signal command event
-Queue Retire
-  -> advance queue head
+已加载的可执行程序 / 已准备 command record
+  -> CPU/Device interpreter 执行 nexus submit / depends_on / await
+  -> DevicePort 接受消息（CPU outstanding 仍有效）
+  -> GroupPort 接收有界 pending root metadata（软件参考模型）
+  -> Group root 完整 admission：L2 / event-control budget / Group slot
+  -> per-root Sequencer registration cursor / fence
+  -> Group 共享 ready-action ISSUE / REGISTER
+  -> Grid Route -> 每 Tile Task admission / UCE 执行
+  -> root completion 经 DevicePort 返回 CPU
 ```
 
-Group task 可跨多个 group；completion policy 可为 all-groups done 或 first-error abort，First Silicon V1 推荐 first-error records fault、stop affected group task、signal event error。
+`Global Scheduler` 的硬件职责映射在 DevicePort 消息边界之外仍待明确的 command/CSR ABI 与 RTL 规格；它不承担编译期 lowering，也不拥有 Group 内 ready-action 表。系统级 message queue acceptance 与 Group root 资源准入是不同事件：前者不代表后者已经成功，也不因 pending 而部分占有 L2 或 execution slot。
+
+下列 v0 command/descriptor 结构只说明预期的硬件消息载荷和事件关联，不是当前 Python/JSON executable artifact 的 codec，也不是已经实现的寄存器 ABI。若单条硬件命令面向多 Group，其 completion aggregation / first-error policy 需由后续规格单独冻结；当前模型只覆盖 1 Group。
 
 ### 5.2 DMA command 流程
 
 ```text
-Scheduler
-  -> dependency/resource check
-  -> sends DMA descriptor pointer to Global DMA
-Global DMA
-  -> validates DMA descriptor details
-  -> performs copy
-  -> returns done/error/timeout
-Scheduler/Event Fabric
-  -> signal event and retire command
+system Scheduler (target hardware)
+  -> dependency/resource check on explicit command contract
+  -> send DMA descriptor pointer
+Global DMA (target hardware)
+  -> validate descriptor and perform supported transfer
+  -> return done/error/timeout
+Event Fabric
+  -> signal explicit event and retire command
 ```
 
-Scheduler 不参与 DMA burst 级调度，但负责 DMA command 的 event dependency、timeout、fault_record_slot 和 queue retire。
+Scheduler 不参与 DMA burst 级调度。当前参考模型的传输合同有限：`full_memory` 按实现支持的腿推进，连续 row-major、等字节数才合法；该模型不证明任意 strided/2D 物理 DMA。
 
 ### 5.3 Event wait/signal 流程
 
-- `ELENOR_CMD_EVENT_WAIT`：若 event terminal DONE，command immediate complete；若 PENDING，queue blocked 并挂入 waiter；若 ERROR/TIMEOUT/RESET，产生 dependent fault 或 error event。
-- `ELENOR_CMD_EVENT_SIGNAL`：写 event DONE 或指定状态，用于 host/runtime software event。权限由 context filter 决定。
-- engine completion event：由 completion_router 写入，唤醒 waiters。
+- 系统级 `EVENT_WAIT` / `EVENT_SIGNAL` 是待冻结硬件命令合同，不等同于源 IR 的任意 Context 内 `nest.await` / `nest.barrier`。
+- 当前 CPU `nexus.await` 等待其显式 producer request completion；Group `nest.await` lower 为该 root 后续注册的 fence；Group `nest.barrier` 等待同 Context 更早 action。两者均不是隐式全 Group/Device barrier。
+- engine / DMA completion 按 event identity、generation/sequence 与 owner 交接；任何硬件事件表命名、容量、错误码与 CSR 编码仍待规格冻结。
 
 ### 5.4 关键时序路径
 
-| 路径                  | 风险                      | 缓解                                                                                         |
-| --------------------- | ------------------------- | -------------------------------------------------------------------------------------------- |
-| multi-queue arbitrate | queue 数多时 fan-in 大    | 分层仲裁，per-priority ready bitmap。                                                        |
-| wait_ref_count scan   | 多 event 依赖组合路径长   | 限制 First Silicon wait_ref_count 或分拍检查；每项比较 event_id + sequence，由后续规格冻结。 |
-| event waiter wakeup   | 高 fanout wakeup          | waiter bitmap 分块，queue pending bit 寄存。                                                 |
-| resource map check    | context/group mask CAM    | static partition 用 RAM lookup + mask compare。                                              |
-| timeout wheel cancel  | completion 同周期 cancel  | tag match 寄存，定义优先级。                                                                 |
-| completion_router     | DMA/group/collective 多源 | source arbiter + event update FIFO。                                                         |
+| 路径                  | 风险                            | 缓解                                                                                    |
+| --------------------- | ------------------------------- | --------------------------------------------------------------------------------------- |
+| multi-queue arbitrate | queue 数多时 fan-in 大          | 分层仲裁，ready bitmap 参数由硬件规格冻结。                                             |
+| wait_ref_count scan   | 多 event 依赖组合路径长         | 限制或分拍检查；每项比较 event_id + sequence，由后续规格冻结。                          |
+| event waiter wakeup   | 高 fanout wakeup                | waiter bitmap 分块，queue pending bit 寄存。                                            |
+| resource map check    | context/group mask CAM          | static partition 用 RAM lookup + mask compare。                                         |
+| message acceptance    | 下游只收 metadata，资源尚未准入 | 分别记录 message accepted 与 Group root active/completion，不把它们算成同一 handshake。 |
+| completion_router     | DMA/group/collective 多源       | source arbiter + event update FIFO；跨时钟与容量仍待硬件规格冻结。                      |
+
+硬件接口未来可允许单 Group 或多 Group 目标，但当前参考模型只覆盖 1 Group；多 Group completion aggregation、跨 Group 调度公平性及物理消息时序均由后续规格冻结。
 
 ## 6. 配置、PPA、性能模型和 PMU
 
@@ -373,6 +381,8 @@ Scheduler 不参与 DMA burst 级调度，但负责 DMA command 的 event depend
 | arbitration policy        | 由后续规格冻结          |
 
 ### 6.2 PMU counters
+
+此处 PMU 表为目标硬件 counter 草案，不能与模拟器同名/相似字段直接等同。模型中 CPU 可记录 `device_outstanding_full` 与 Port backpressure 的 `device_admission_wait`；GroupPort 的 root admission wait 通过 `context_admission_wait` / 具体 wait reason trace 观察；Group action credit/ordering 与 Tile `WAIT_CONTEXT_LIMIT` / UCE eligible-head 阻塞分别归不同层。并发 stall 属不同组件视角，不应求和为唯一全局 cycle。
 
 | Counter                           | 说明                        | Stall owner                  |
 | --------------------------------- | --------------------------- | ---------------------------- |
@@ -416,6 +426,8 @@ First Silicon V1 不要求硬件消除所有 launch overhead，但必须用 PMU 
 - Timing closure 优先关注 multi-queue arbitration、wait_ref scan、waiter wakeup fanout、resource mask compare、timeout cancel 和 completion_router arbitration。
 
 ## 7. RTL/软件实现建议
+
+本节建议针对未来硬件实现。当前软件参考实现中，系统级命令/依赖/事件职责由 `CpuDeviceController`、`GroupPortAdapter` 与 Group 组件的既有结构承担；若硬件落地，需要把 §4 的消息边界映射为 RTL 接口，而不是把软件类名直接当作模块名。
 
 ### 7.1 RTL 建议
 
@@ -471,6 +483,8 @@ First Silicon V1 不要求硬件消除所有 launch overhead，但必须用 PMU 
 9. 读取 PMU，确认 queue occupancy、event wait、dispatch latency、NoC backpressure 可解释。
 
 ### 8.3 验收标准
+
+以上单元测试、bring-up 与验收条目均是待实施的硬件 Scheduler 计划；当前参考验证覆盖的是编译产物、只读加载、单 Group 运行合同及可观察生命周期，不构成多 Group Global Scheduler RTL、CSR、CDC 或 command ABI 的验收证据。
 
 - command queue + event + barrier 最小闭环通过。
 - DMA 1D/2D/strided copy 能通过 Scheduler 发起并产生 completion event。

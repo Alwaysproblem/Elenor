@@ -10,11 +10,11 @@ fontfamily: xeCJK
 
 # ELENOR AI Compute Accelerator 架构设计文档
 
-版本: v0.1-review
+版本: v0.1-review（调度/资源架构同步于 2026-09-26）
 
-状态: 架构评审稿
+状态: 调度与资源架构方向已确定；硬件 binary ABI、引擎微架构与物理参数仍为草案
 
-适用范围: 架构评审、RTL 拆解、编译器/runtime 任务拆解、driver/firmware ABI 讨论、性能建模和验证规划
+适用范围: 当前调度/资源参考模型、架构评审、RTL/firmware ABI 讨论与验证规划
 
 ## 0. 文档目的
 
@@ -24,15 +24,15 @@ fontfamily: xeCJK
 
 - ELENOR 要解决的 workload 范围和不解决的系统边界。
 - Chip、Tile Group、Compute Tile、Engine 四层职责边界。
-- BOA、Enhanced Vector、MFE、USE 四类执行能力的分工。
-- Device Runtime、Tile Group Sequencer、Tile UCE、Stream Queue 的控制流模型。
-- HBM/DDR/LPDDR -> L2 -> L1 -> engine 的数据流模型。
-- Command buffer、descriptor、program、event 和 runtime ABI 的基本形态。
-- 编译器 lowering、runtime package、Tile Program template 和 descriptor auto-patch 的配合方式。
-- Paged Attention、MoE、SSM、Embedding/GNN、多模型并发等关键 workload 的映射。
-- 性能模型、PMU counter、验证计划、实施路线和关键风险。
+- 当前执行对象与 CPU/Group/Tile 的责任边界。
+- BOA、EVU、MFE、USE 四类引擎的目标分工与尚未建模的内部实现。
+- `Graph → Context → Grid → Task → Tile Program → Engine` 的依赖、资源准入与退休。
+- HBM→L2 Arena→L1 Arena→引擎，以及 Profile、readonly/context-local 共享。
+- 源 IR `nexus.*` / `nest.*` / `tile.*` 到编译、只读加载、运行的合同。
+- §20 的可运行实例，§21/23 的观测与验证边界。
 
-本文不是最终 RTL specification，也不是 compiler dialect 的完整语法定义。它是架构层面的正式评审稿，用于锁定方向、边界、关键接口和后续任务拆解。
+`pipeline_validator/` 是当前调度与资源语义参考实现（1 Group × 4 Tile），
+不是 RTL golden 算术模型；本文的 binary ABI、物理拓扑与引擎内部尚待后续规格冻结。
 
 ## 1. Executive Summary
 
@@ -64,19 +64,17 @@ Compute != Control != Data Movement
 | MFE                   | Memory Flow       | Page Stream、Segment Stream、Sparse Block Stream、layout transform |
 | USE                   | State / Control   | Scan、Recurrence、Dynamic Shape assist、Token Routing、Event       |
 
-ELENOR 的硬件消费 command buffer、descriptor、TileGroupTask 和 Tile Program，不直接消费高层 graph。高层动态图由 compiler/runtime 降到可执行 command sequence、descriptor table 和 executable package。
+当前可执行主线是 `source xDSL ModuleOp → compile_program → immutable
+CompiledProgram → independent verifier / load_program(actual bindings) →
+LoadedProgram → Simulator.run`。编译器绑定资源、Profile、布局和依赖，
+插入普通 await 与显式配置/维护项；Loader 验证和绑定，不重新 lowering、
+补同步或现场选档。模拟器消费封印产物，不解释高层 graph。
 
-一句话总结 ELENOR 的执行模型：
-
-```text
-Graph Schedule 描述 group task 依赖；
-TileGroupTask 推进 device pipeline（Tile Group Sequencer 准备 Tile-SPMD role dispatch）；
-Tile Program 推进 tile-local kernel pipeline；
-Stream Queue 连接 role；
-Group DMA 搬 HBM/DDR/LPDDR 到 L2；
-Tile DMA 搬 L2 到 L1；
-BOA/Vector/MFE/USE 分别承担 dense、irregular、memory-flow 和 state/control。
-```
+`Graph → Context(root invocation) → Grid → Task → Tile Program → Engine`
+是调度层次。Grid 是一次 dispatch 的有限 Task 域，不是独立处理器；
+Stream Queue 是可选 credit/EOS overlay，显式 L2 view/event 也能完成数据交接。
+对照 [`examples/README.md`](../examples/README.md) 的实例矩阵；算术、
+binary ABI 和实际驻留程序字节通路未因时间模型而冻结。
 
 ## 2. 设计定位和系统边界
 
@@ -189,6 +187,11 @@ V1.x / V2 Reserved
 
 本文后续章节描述的是 Architecture V1 的目标形态；§27 单独给出实现阶段和 phase exit criteria。
 
+当前已由 validator 验证的是分层有界提交/ready-action、逐 Tile UCE context
+准入、事件生命周期、Arena 与 Profile 协议，不是上表 BOA/EVU/MFE/USE
+数值 RTL 闭环。First Silicon 的引擎、物理容量、队列深度、频率和编码
+仍由 PPA exploration 与后续规格冻结；bring-up Phase 不是源 IR 的运行时对象。
+
 ### 3.4 V1 Requirements & Acceptance Matrix
 
 | V1 需求            | 架构机制                                                                                          | 关键 ABI / Contract                                          | PMU 证据                                                      | 验证入口                      | 首次闭环阶段 |
@@ -219,56 +222,40 @@ V1.x / V2 Reserved
 ELENOR Device 的芯片级结构如下：
 
 ```text
-Host / System SoC
-        |
-        v
-+--------------------------------------------------------------------+
-| ELENOR Device                                                      |
-|                                                                    |
-| +------------------+   +-------------------+   +---------------+   |
-| | Host Interface   |   | Runtime Processor |   | Global PMU    |   |
-| | PCIe/CXL/AXI     |   | RISC-V / uCtrl    |   | Trace/Error   |   |
-| +--------+---------+   +---------+---------+   +-------+-------+   |
-|          |                       |                     |           |
-|          v                       v                     v           |
-| +----------------------------------------------------------------+ |
-| | Global Scheduler / Command Queue / Event Fabric                | |
-| +----------------------------------------------------------------+ |
-|          |                       |                     |           |
-|          v                       v                     v           |
-| +------------------+   +-------------------+   +---------------+   |
-| | Global DMA       |   | Memory Controller |   | Collective    |   |
-| | 2D/strided/copy  |   | HBM/DDR/LPDDR     |   | reduce/bcast  |   |
-| +--------+---------+   +---------+---------+   +-------+-------+   |
-|          |                       |                     |           |
-|          +-----------------------+---------------------+           |
-|                                  |                                 |
-|                                  v                                 |
-|                              NoC / Router                         |
-|                                  |                                 |
-|                                  v                                 |
-|                        Tile Group x N                             |
-+--------------------------------------------------------------------+
+Host / System SoC (器件边界：未建模)
+  → CPU nexus 控制 / DevicePort 消息
+  → GroupPort pending root metadata / 完整资源准入
+  → 每 root Sequencer + Group 共享 ready-action Scheduler
+  → Grid Route → Compute Tile × 4（当前验证 slice）
+       ├─ L1 Task Arena / Frame / UCE contexts
+       └─ BOA / EVU / MFE / USE
+HBM ↔ Group L2 Arena ↔ 每 Tile L1 Arena ↔ Engine
 ```
+
+Host Interface、全芯片多个 Group、物理 NoC/Collective 仍是未验证的
+器件集成目标；不能把当前模型中的 `GroupScheduler` 当作全芯片 scheduler。
 
 ### 4.2 芯片级模块职责
 
-| 模块              | 职责                                                                                                          |
-| ----------------- | ------------------------------------------------------------------------------------------------------------- |
-| Host Interface    | 连接 PCIe/CXL/AXI 等 host/system interconnect，提交 command buffer 和管理 doorbell。                          |
-| Runtime Processor | RISC-V 或 micro-controller，负责 command queue consume、shape branch、fault handling、profiling aggregation。 |
-| Global Scheduler  | 解析 graph schedule，调度 Group Task，管理全局 event 和资源。                                                 |
-| Global DMA        | 支持 host/HBM/DDR/LPDDR 与 device 内部 memory hierarchy 的大粒度搬运。                                        |
-| Memory Controller | 管理 HBM/DDR/LPDDR 访问。                                                                                     |
-| Collective        | 支持跨 group 或全局 reduce/broadcast 等操作。                                                                 |
-| Global PMU        | 采集全局性能、trace 和错误信息。                                                                              |
-| NoC / Router      | 承载 command/control、data stream、collective 三类流量。                                                      |
+| 模块              | 职责                                                                                                                 |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Host Interface    | 连接 PCIe/CXL/AXI 等 host/system interconnect，提交 command buffer 和管理 doorbell。                                 |
+| Runtime Processor | RISC-V 或 micro-controller，负责 command queue consume、shape branch、fault handling、profiling aggregation。        |
+| Global Scheduler  | 系统级提交/依赖的未来器件边界；当前 `GroupScheduler` 只负责一个 Group 内 ready-action，不模拟多 Group 芯片全局调度。 |
+| Global DMA        | 支持 host/HBM/DDR/LPDDR 与 device 内部 memory hierarchy 的大粒度搬运。                                               |
+| Memory Controller | 管理 HBM/DDR/LPDDR 访问。                                                                                            |
+| Collective        | 支持跨 group 或全局 reduce/broadcast 等操作。                                                                        |
+| Global PMU        | 采集全局性能、trace 和错误信息。                                                                                     |
+| NoC / Router      | 承载 command/control、data stream、collective 三类流量。                                                             |
 
 ## 5. Tile Group 架构
 
 ### 5.1 Tile Group 定位
 
 Tile Group 是 ELENOR 的局部数据复用和局部同步单元。它避免所有 tile 都直接冲击全局内存和全局 NoC。
+
+下图是历史硬件组织示意；当前 1 Group × 4 Tile 的调度拓扑以 §7 ASCII 图为准，
+原“Compute Tile × 8”是未验证的产品配置建议。
 
 ![ELENOR Chip Architecture](./image/Elenor_L2.png)
 
@@ -305,23 +292,28 @@ Tile Group 解决以下问题：
 
 ### 5.2 Tile Group 模块职责
 
-| 模块                       | 层级       | 核心职责                                                                             | 不负责                               |
-| -------------------------- | ---------- | ------------------------------------------------------------------------------------ | ------------------------------------ |
-| Tile Group Sequencer       | Tile Group | Group Task action index 推进、Group DMA、role dispatch、group 级同步                 | BOA 执行、Vector 执行、Tile 内部调度 |
-| Stream Queue Engine        | Tile Group | Producer-Consumer 队列、Backpressure、Credit 管理、EOS 传播                          | 数据计算                             |
-| Barrier / Event Engine     | Tile Group | Tile 同步、role 同步、DMA 完成通知、事件传播                                         | 数据搬运                             |
-| Group DMA Engine           | Tile Group | HBM 到 L2 数据搬运、Weight Prefetch、Activation Prefetch、Pipeline Prefetch          | L2 到 L1 搬运                        |
-| Shared SRAM / L2           | Tile Group | Group 共享缓存、Stream Buffer、Prefetch Buffer、Partial Result Buffer、Program Cache | Cache coherency                      |
-| Collective Engine          | Tile Group | Reduce、Broadcast、AllReduce、ReduceScatter、Group 同步归约                          | Tile 内部计算                        |
-| Multicast / Broadcast Unit | Tile Group | 权重广播、Activation 广播、多 consumer fanout                                        | 数据计算                             |
-| Group PMU                  | Tile Group | DMA 利用率、Pipeline stall、Buffer occupancy、Group 级性能统计                       | 调度决策                             |
-| Tile Dispatcher            | Tile Group | Tile Program 派发、Tile 资源绑定                                                     | Graph 调度                           |
+| 模块                       | 层级       | 核心职责                                                                                      | 不负责                    |
+| -------------------------- | ---------- | --------------------------------------------------------------------------------------------- | ------------------------- |
+| Tile Group Sequencer       | Tile Group | 每 root registration cursor/fence/completion；共享 GroupScheduler 执行有限 ready-action issue | CPU 提交、Tile 指令 issue |
+| Stream Queue Engine        | Tile Group | Producer-Consumer 队列、Backpressure、Credit 管理、EOS 传播                                   | 数据计算                  |
+| Barrier / Event Engine     | Tile Group | Tile 同步、role 同步、DMA 完成通知、事件传播                                                  | 数据搬运                  |
+| Group DMA Engine           | Tile Group | HBM 到 L2 数据搬运、Weight Prefetch、Activation Prefetch、Pipeline Prefetch                   | L2 到 L1 搬运             |
+| Shared SRAM / L2           | Tile Group | root L2 Arena、Profile 和 readonly backing/claim；HBM↔L2 数据通路                             | Tile L1 Arena/引擎计算    |
+| Collective Engine          | Tile Group | Reduce、Broadcast、AllReduce、ReduceScatter、Group 同步归约                                   | Tile 内部计算             |
+| Multicast / Broadcast Unit | Tile Group | 权重广播、Activation 广播、多 consumer fanout                                                 | 数据计算                  |
+| Group PMU                  | Tile Group | DMA 利用率、Pipeline stall、Buffer occupancy、Group 级性能统计                                | 调度决策                  |
+| Tile Dispatcher            | Tile Group | 有界 Grid Route 登记及每 Tile 独立 Task 准入                                                  | Graph 高层 lowering       |
 
 ## 6. Compute Tile 架构
 
 ### 6.1 Compute Tile 定位
 
 ![ELENOR Compute Tile Architecture](./image/Elenor_Tile_v0.png)
+
+图为历史硬件组织示意；物理结构待实现。当前 Task 在选中 Tile 上各自完整
+提交 L1 Arena/Frame、UCE pin、父 L2 pin 和 R lease；一个 Tile 暂不能准入，
+不回滚其他 Tile 已提交的 Task。`--context-mode` 精确控制模拟的每 Tile
+UCE execution context 数（默认 1，支持 1..8），硅片数量由 PPA 冻结。
 
 Compute Tile 是 kernel 执行域，负责 Tile Program 内的 L2 到 L1 搬运、BOA/Vector/MFE/USE 协同和 Local SRAM 管理。
 
@@ -392,7 +384,7 @@ Tile-local RISC-V / micro-controller
 
 ## 7. 分层职责和控制流
 
-ELENOR 的关键是把 workload 拆到不同层级，避免任一硬件模块承担过多职责。
+ELENOR 按下列 ownership 分层；单 Group 验证 slice 不能等同完整芯片全局调度。
 
 | 层级         | 解决的问题                                                              | 不应该做的事                         |
 | ------------ | ----------------------------------------------------------------------- | ------------------------------------ |
@@ -408,50 +400,44 @@ ELENOR 的关键是把 workload 拆到不同层级，避免任一硬件模块承
 ### 7.1 控制流层次
 
 ```text
-Graph Schedule PC / Group Task Iterator
-        |
-        v
-Tile Group Sequencer action index
-        |
-        v
-Tile PC / Tile UCE
-        |
-        v
-BOA / EVU / MFE / USE tasks
-        |
-        v
-BOA / EVU micro-sequencer and datapath
+CPU nexus.program：提交 / depends_on / await；pending / outstanding / completion
+  → DevicePort 消息 → GroupPort pending root metadata → 完整 L2/slot/控制资源准入
+  → 每 root TileGroupSequencer registration cursor + fence + completion
+  → Group 共享 GroupScheduler：有限 action 表，poll completion/control → ISSUE → REGISTER
+  → Grid Route 有界登记 → 每 Tile 独立 Task commit
+  → 每 Tile Tile UCE：eligible-head RR 单指令 issue → 有界引擎队列
+  → engine/transfer completion → event → Task 安全退休 → root 退休
 ```
 
-| 控制层        | 控制器               | 管理对象                                                    |
-| ------------- | -------------------- | ----------------------------------------------------------- |
-| Graph Level   | Device Runtime       | Graph schedule、group task dependency、context、queue       |
-| Group Level   | Tile Group Sequencer | Group Task、Group DMA、role dispatch、group barrier         |
-| Kernel Level  | Tile UCE             | Tile Program、stream token、descriptor patch、engine launch |
-| State Level   | USE                  | state update、scan、recurrence、checkpoint/restore          |
-| Compute Level | BOA / EVU Sequencer  | Micro loop、operand fetch、local reduce、vector mask        |
+| 层           | 当前 owner                                         | 合同                                                                |
+| ------------ | -------------------------------------------------- | ------------------------------------------------------------------- |
+| CPU/Device   | `CpuDeviceController` / `DevicePort`               | `nexus.*` 控制序列、依赖、有限 outstanding；不持有 Group L2 Arena   |
+| GroupPort    | `GroupPortAdapter`                                 | 有界 pending 元数据与 root 完整资源准入分离                         |
+| Group        | `TileGroupSequencer` + Group 共享 `GroupScheduler` | 每 root 注册/完成与有界 ready-action ISSUE 分离，Grid Route 管 Task |
+| Tile         | `ComputeTile` / Tile UCE                           | 每 Tile Task/Frame/UCE pin 准入，eligible-head RR，单指令 issue     |
+| State/Engine | USE / BOA / EVU / MFE                              | 状态/计算/搬运；引擎微架构仍按 §8–11 目标规划                       |
 
 ### 7.2 数据流层次
 
-| 数据路径                        | 控制模块                           |
-| ------------------------------- | ---------------------------------- |
-| HBM 到 L2                       | Group DMA Engine / MFE global path |
-| L2 到 L1                        | Tile DMA Engine / Tile UCE         |
-| Page/segment metadata 到 stream | MFE                                |
-| L1 到 BOA                       | Tile UCE + BOA Sequencer           |
-| L1 到 EVU                       | Tile UCE + EVU Sequencer           |
-| L1 到 USE state                 | Tile UCE + USE                     |
-| Role 到 Role                    | Stream Queue Engine                |
-| Tile 到 Tile                    | Collective Engine / Broadcast Unit |
+| 数据路径                        | 控制模块                                        |
+| ------------------------------- | ----------------------------------------------- |
+| HBM 到 L2                       | Group DMA Engine / MFE global path              |
+| L2 到 L1                        | Tile DMA Engine / Tile UCE                      |
+| Page/segment metadata 到 stream | MFE                                             |
+| L1 到 BOA                       | Tile UCE + BOA Sequencer                        |
+| L1 到 EVU                       | Tile UCE + EVU Sequencer                        |
+| L1 到 USE state                 | Tile UCE + USE                                  |
+| Context/Task 间                 | L2 view + event；跨 root readonly publish/claim |
+| 可选 Role 到 Role               | Stream Queue 的 credit/EOS overlay              |
 
 ### 7.3 Pipeline 层次
 
-| Pipeline 层      | 推进者               | 粒度                           |
-| ---------------- | -------------------- | ------------------------------ |
-| Device Pipeline  | Tile Group Sequencer | Group Task / Role              |
-| Kernel Pipeline  | Tile UCE             | DMA -> BOA/EVU/MFE/USE -> DMA  |
-| State Pipeline   | USE                  | scan / recurrence / checkpoint |
-| Compute Pipeline | BOA / EVU Sequencer  | Micro-op / Loop                |
+| Pipeline 层   | 推进者                             | 粒度                                       |
+| ------------- | ---------------------------------- | ------------------------------------------ |
+| Device 提交   | CPU controller + GroupPort         | root request / dependency / completion     |
+| Group action  | 每 root Sequencer + GroupScheduler | register / issue / completion              |
+| Tile Task     | Grid Route + 每 Tile UCE           | admission / L1 Arena / eligible-head issue |
+| State/Compute | USE / BOA / EVU 内部               | 待建模的引擎循环                           |
 
 ## 8. BOA: Block Outer-product Accelerator
 
@@ -1207,7 +1193,7 @@ RTL 原型 v1: 小 RISC-V 或极简 sequencer + USE state FU
 工业化 v2: RISC-V + custom instruction，或 sequencer + fallback RISC-V
 ```
 
-## 12. Memory Hierarchy 和 SRAM / NoC 定量模型
+## 12. Memory Hierarchy、Arena 与 SRAM Profile
 
 ### 12.1 层级结构
 
@@ -1234,6 +1220,42 @@ Tile Local SRAM / L1
         +--> USE state cache
         +--> DMA staging buffer
 ```
+
+当前 root invocation 拥有 L2 Arena，`TaskIdentity` 拥有 L1 Arena；owner
+准入时预留逐 bank 容量，view 只代表局部访问权。`nest.release` /
+`tile.free` 使 view 失效，不立即返还 Arena 或 R lease。L1 在 owner
+退休前可依据编译期 `_tile_lifetimes` 复用 slot/offset（运行时按既定
+layout 再绑定）；L2 在同一 Arena 内永久 no-rebind，每个 buffer
+独占全 stripe-round padding 后的 span，不能以 barrier 换取复用。
+默认 16 banks × 256 B 为 4096 B 整轮，实际按 Registry geometry/alignment
+计算并逐 bank 证明。`prepare_resources` 若发现 no-rebind 高水位超过
+源 `l2_spm_bytes`，会向上规范化**可执行合同**并重新逐 Profile 校验，
+不会在运行期扩容、删掉 allowed mode 或调低 R。
+
+每层独立 Profile：root `l2_mode`、dispatch `l1_mode`、Tile Program
+`allowed_profiles`；同层全部成员统一，所有 Tile 的 L1 是同一配置域。
+mode 指定每 bank 的 SPM/Cache bytes，系统预留从 SPM 中扣除；
+Cache `target_bytes` 是共享 hint。root/Task 分别按活跃 L2/L1 Profile
+进行 SAME 优先、COMPATIBLE 次之的 FIFO 队首准入；容量、碎片、slot、
+控制资源和 `(parent binding_id, launch_generation, tile_id)` 的 R
+lease 各自可阻塞。Profile 真正切换必须由编译器提供普通 await 和完整
+配置/维护事务；普通 await 自身不是完整 quiescence。切换由唯一 writer
+依次 ACQUIRE、CHECK_FRONTIER、CLOSE_ISSUE、DRAIN_REFERENCES、
+CLEAN_INVALIDATE、DRAIN_DOWNSTREAM、PREPARE、WAIT_READY_ACK、
+COMMIT、WAIT_COMMIT_ACK、OPEN_ISSUE、RELEASE；SAME/COMPATIBLE 补位
+不切换、不递增 generation。L1-only 切换可保留父 L2 Arena；
+L2 切换先等旧 root 完成 frontier 和引用收敛。
+
+L2 `private` 为默认；`context-local` 支持同 invocation 的 leaf→partial→
+combine，release 关闭读者 `input_released`、写者 `output_ready`、
+prefetch/store 访问；没有 HBM store 也可做 scratch。若有最终 HBM store，
+必须覆盖所有实际 writer，不能在 store 后又写。
+`readonly` 以 `nest.publish` + `nexus.shared.ref` 跨 root 在同 Group/L2
+epoch 导出；发布后禁止写，claim 经 DECLARED→BOUND→RELEASED；
+producer 退休后仍须保留被 claim/pin/inflight 使用的 backing，物理容量按
+backing 去重。搬运只支持连续 row-major 且源/目标等字节；full_memory
+逐 HBM/DMA/NoC/L2/L1/LocalDMA 腿推进，runtime/timing_only 折叠普通
+搬运但保留合同/Profile gate。2D/strided DMA 是未建模的硬件扩展。
 
 ### 12.2 Local SRAM 分区建议
 
@@ -1345,6 +1367,9 @@ V1 优先级：
 1D/2D/strided copy > async event > multicast > gather list
 ```
 
+上述 `elenor_dma_desc_t` 与 2D/strided 列表是待冻结的器件 ABI 能力，
+不是当前 validator 已执行的 shape reinterpretation 或转置。
+
 ## 13. Tile L1 Slot Frame 和 Descriptor Patch Contract
 
 固定内存地址做固定事情的想法有价值，但更推荐抽象成：
@@ -1354,6 +1379,12 @@ V1 优先级：
 ```
 
 不建议把某个绝对物理地址永远绑定到某个算子语义，例如 `0x0000` 永远是 matmul A、`0x8000` 永远是 matmul B。该方式对 softmax、paged attention、dynamic shape 和 workspace 都不友好。
+
+当前 Frame Slot 是 Task L1 Arena 内的静态 buffer 绑定索引；
+program resident slot、Group execution slot、UCE execution context、
+ABI 隔离 `context_id` 均不是 Frame Slot。shadow bind 与 generation
+约束访问；view free 不归还全局配额，Task 安全退休才释放 L1 Arena
+与 R lease。L1 编译期 lifetime 复用同一 slot/offset 不是动态池分配。
 
 ### 13.1 推荐 Slot 设计
 
@@ -1427,8 +1458,8 @@ typedef struct {
 3. metadata/page-list slot 可以由 MFE 写入、UCE/USE 读取，但写入 owner 必须唯一。
 4. state slot 由 USE 管理，DMA 只能通过明确 command 或 checkpoint/restore path 修改。
 5. bank placement 应能被 compiler/runtime 指定或 hint，以降低 BOA/EVU/MFE 并发冲突。
-6. UCE sliding window 不引入 V1 硬件动态 allocator；`window_size>1` 只能使用 compiler/runtime 预先声明的 ping-pong / multi-buffer slot set。
-7. buffer 正确性由 Slot Frame owner/lifetime、event sequence 和 UCE dependency scoreboard 保证，不由 window size 本身保证。
+6. UCE execution context 数是参数，不以 `window_size` 表示；单 context 是配置特例。
+7. 正确性由 Task/Frame owner、generation、event 及别名证明保证；硅片字段编码由后续规格冻结。
 
 ### 13.4 Descriptor Template Auto-Patch
 
@@ -1533,54 +1564,9 @@ NoC 需要支撑三类流量：
 - MoE expert output combine。
 - multi-tile normalization statistics。
 
-## 15. Execution Objects 和 Implicit Program Residency
+## 15. Execution Objects、编译产物与 Program Residency
 
-### 15.1 Package 组织
-
-Program 不是整个 graph，也不是单个 op，而是 TileGroupTask / Kernel Tile Program。
-
-````text
-model.pkg
-|
-├── graph_schedule.bin
-|   ├── group task table
-|   ├── role binding table
-|   ├── dependency table
-|   ├── memory lifetime table
-|   └── launch metadata
-|
-├── tile_programs/
-|   ├── tile_kernel_a.program
-|   ├── tile_kernel_b.program
-|   ├── tile_kernel_c.program
-|   └── tile_epilogue.program
-|
-├── descriptors/
-|   ├── tensor_desc_table
-|   ├── dma_desc_table
-|   ├── stream_desc_table
-|   └── tile_desc_table
-|
-├── weights/
-|
-└── relocation_table
-
-### 15.2 核心对象
-
-| 对象            |                              粒度 | 作用                                                          |
-| --------------- | --------------------------------: | ------------------------------------------------------------- |
-| Graph Schedule   |                              整图 | 描述 group task 间依赖、context、queue、memory lifetime           |
-| TileGroupTask    |                        Tile Group | group task、Group DMA prefetch/store、role dispatch、group barrier |
-| TileRoleBinding  |                  Tile Group role | tile_mask、tile_program_id/version/hash、in/out stream、descriptor window |
-| Prepared Tile Task|                          Tile | local program handle、descriptor window、slot frame、stream binding |
-| Tile Program     |                              Tile | 由 Tile UCE 执行，控制 L2 到 L1 DMA、BOA、EVU、MFE、USE       |
-| Descriptor       |                          动态参数 | shape、stride、address、tiling、stream、state、patch 信息     |
-| Stream Queue     |                        role 间 | producer-consumer、credit、backpressure、EOS/error token      |
-| Slot Frame      |                           Tile L1 | tile program 和 descriptor 引用的 L1 memory binding           |
-| Program Table   | runtime 索引 / residency registry | program_id 到 section metadata / local resident handle 的映射 |
-| Event Table     |            runtime / group / tile | completion、dependency、fault、timeout 状态                   |
-
-### 15.3 Program Residency Contract
+### 15.1 当前编译、加载和执行链
 
 ```text
 Compiler-visible:
@@ -1617,8 +1603,49 @@ Data:
 - Tile Group Sequencer 必须在 dispatch 前保证 program ready。
 - Tile UCE 只消费 resident local handle，不从 global memory 直接拉 program。
 
-- Tile UCE First Silicon V1 固定 `window_size=1`，即单 active Tile Program；V1.x/V2 可在不改变 public IR 的前提下探索 `window_size=2~4` issue/preparation overlap。
-- 若开启 `window_size>1`，每个 window entry 必须携带 frame generation、descriptor window、`event_id + sequence`、read/write slot mask 和 timeout epoch；reset/drain 后旧 completion 必须因 sequence mismatch 被拒绝或转 fault。
+当前 pipeline validator 简化了编译、加载和执行链的验证过程，省略了对实际硬件的复杂交互。实际芯片设计中，需要详细考虑这个流程。
+
+```text
+source xDSL ModuleOp
+  → compile_program（lower → layout/R/allowed modes → bind Profile/await/maintenance
+    → dependencies/identity/hash → seal → independent verifier）
+  → immutable CompiledProgram
+  → independent verifier / load_program(actual_bindings) → LoadedProgram
+  → Simulator.run
+```
+
+源 ModuleOp 不改写；Loader 不导入 compiler，不补依赖或现场选择 Profile。
+`CompiledProgram` 软件持久化 schema_version=2 / compiler_abi="v2"；
+hardware YAML schema 2、Registry/hash、硬件 command/event ABI v0
+属于不同命名空间，不能把 Python DTO/JSON codec 称作硬件二进制编码。
+
+### 15.2 核心对象与 ownership
+
+| 对象                               | 当前粒度/owner             | 语义                                                        |
+| ---------------------------------- | -------------------------- | ----------------------------------------------------------- |
+| Graph / `nexus.program`            | CPU/Device                 | 有界提交、依赖、await、completion                           |
+| Context / root invocation          | Group                      | L2 Arena、Profile、root event；底层 `ExecTileGroupTask`     |
+| Grid / `nest.dispatch.tasks.async` | 一次 dispatch              | 有界 Task Route、`input_released` / `output_ready` / done   |
+| Task / `TaskIdentity`              | 所选 Tile                  | 独立 L1 Arena、Frame、UCE pin、R lease                      |
+| Tile Program                       | 同一模板的每个逻辑 Task    | `tile.*` load/engine/store/await/signal                     |
+| `ExecTileRoleBinding`              | root 内的 dispatch binding | 连接当前 DTO、实际 L2/view、Program；并非 Stream Queue 必选 |
+| Program Table / Event Table        | Group/Tile                 | 程序身份/epoch/ready 与事件依赖/完成                        |
+
+`placement` 是 Tile mask，非空 `task.range` 的数目必须等于 popcount，
+逻辑 Task 按所选 Tile 顺序映射；`logical_tasks` 是 Context 所有 dispatch
+的 Task 总数。Grid done 表示所有 Task 安全退役；`input_released`
+只说明相关输入读取结束，`output_ready` 只说明相关 L1→L2 输出完成，
+都不是 HBM 持久化或 Arena 退休。当前仅 `#nest.aggregate<all_tasks>`。
+
+### 15.3 隐式 Program Residency
+
+ProgramResidencyManager 以 `program_id + version + hash + epoch` 区分
+resident identity；cold miss 估算 HBM→L2 + L2→program SRAM + ACK
+延迟，warm hit 为零额外安装延迟，reset 会使 epoch/驻留失效。
+**这不是程序字节的真实逐腿 DMA 事务**。编译器不输出
+`program.load/prefetch/install`，Group 在 dispatch 前提供 implicit
+program-ready gating，Tile UCE 只消费 resident handle。真实程序
+字节格式、搬运通道、校验安装硬件由后续规格冻结。
 
 ### 15.4 Cold Launch
 
@@ -1681,41 +1708,69 @@ Tile UCE:
 
 Warm path 的目标是减少 residency miss，主要 patch descriptor，从而降低 launch overhead；正确性仍由 `program_id + version + hash + epoch` 保证。
 
-## 16. TileGroupTask、Tile Program 和 Stream Queue Contract
+### 15.4 硬件部署草案的边界
 
-### 16.1 Device Pipeline 语义
+旧 `model.pkg`/`graph_schedule.bin`/`group_tasks`/`tile_programs`/
+`descriptors`/`weights`/`relocation_table` 目录是尚未冻结的**硬件
+部署提案**，不是当前 CompiledProgram codec 的文件布局。物理 Host
+upload、doorbell 与真实 program SRAM 安装不在当前模型中。
 
-一个 TileGroupTask 可以有多个 role（TileRoleBinding）：
+## 16. Context、Grid、Task 调度与事件合同
 
-```text
-Role0 -> Role1 -> Role2
-```
+### 16.1 root 提交与 Group 准入
 
-Role 之间不是严格串行的全量执行：
+`--device-context-mode N` / `SimConfig.device_context_count` 限制 CPU
+已交付的 outstanding request，不是 Group slot；CPU 请求可已标
+ACTIVE，但 Group 的 `active_cycle` 尚未到达。GroupPort 首先仅接受有界
+pending metadata；root admission 才完整提交 L2 Arena、事件/控制预算、
+Group execution ownership。`group.active_context_capacity` 默认 8，
+`nest.context context=N` pin 对应 Group slot，等待不占半套资源。
 
-```text
-不是：Role0 全部完成 -> Role1 开始 -> Role2 开始
-而是：Block 粒度流动，role 之间通过 stream queue 连接。
-```
+GroupPort 在 slot 退休后尝试 SAME/COMPATIBLE 两类 FIFO 队首，SAME
+优先，受阻可让 COMPATIBLE 补位，但不越过同类队首装箱。Group
+`GroupScheduler.step` 每 cycle 先 poll completion/control、再 ISSUE、
+后 REGISTER（各最多一条）；每 root Sequencer 的 registration cursor
+在登记后前进，不等 action 完成。完成回收不受满表阻塞。
+S0 只允许窗口中各 Context 最老 action 参与；S1 可越过 PENDING
+依赖扫描；S2 当前同 S1，不代表第三个已实现策略。扫描窗口由
+`scan_width` 决定，与 Tile UCE context 数/引擎 ingress queue 深度无关。
 
-Stream Queue 提供：
+`nest.await` lowering 为 `WAIT_EVENT`，并 fence 本 Context 后续注册；
+`nest.barrier` lowering 为 `BARRIER_GROUP`，等待该 Context 的更早 action；
+二者都不会隐式成为全 Group/Device barrier。普通 action 的
+`depends_on` 只约束实际生产者；显式等待与数据依赖不是同一事件。
 
-- producer-consumer token 传递。
-- credit。
-- backpressure。
-- EOS 传播。
-- error token 传播。
-- role 间异步重叠。
+### 16.2 Grid Route 与每 Tile Task
 
-### 16.2 Stream Queue Binary Contract
+`dispatch_role` 先登记有限 Grid Route；`_step_task_admission` 每 Tile
+每 tick 至多完整提交一个 Task；Tile 0 等待不撤销 Tile 1 已接纳的 Task。
+Task admission 以当前 L1 Profile 比较 SAME/COMPATIBLE 队首，受
+slot、L1 逐 bank 容量/碎片、Frame、UCE pin、父 L2 pin、
+`requested_contexts_per_tile=R` lease 限制。R 的计数 key 为
+`(parent binding_id, launch_generation, tile_id)`，覆盖父 Context
+的全部 Grid；route pending 未取 lease，Task 安全退休/取消隔离确认
+才归还，free/input_released 不归还。准备失败可 abort/rollback
+未对外可见的半提交；已接受计算靠 drain/cancel-confirm 收敛，
+不是任意计算事务回滚。
+
+`--context-mode N` 指每 Tile 精确 UCE execution contexts（模型默认
+1，可配 1..8）；dispatch `context=N` 在所选各 Tile pin 同号 UCE
+context。Tile UCE 选择 eligible head 并以 RR 轮转、每 cycle
+单指令 issue；event、stream、引擎 queue credit 阻塞的 head 可以跳过。
+硅片物理数、引擎 ingress 深度仍由 PPA 冻结。RR issue 与 FIFO
+admission 是不同仲裁层，不推出全局无饥饿保证。
+
+### 16.3 生命周期与 Stream Queue 边界
+
+Task 完成后等待在途 transfer/view 关闭、L1 Arena 退休、L2 pin 释放、
+Frame 释放及 R lease 归还；Grid 全部所选 Task 退休才 done；root
+等待其动作/事件与 L2 Arena/backing claim 安全收敛才完成。
+`input_released` / `output_ready` 为方向性 signal，并非全 Task done。
+Stream Queue 仅是可选 producer-consumer credit/backpressure/EOS/error
+overlay；显式 L2 buffer/view/event 可直接交接，不要求所有 role
+经过 block token。下面结构仅是尚未冻结的硬件 binary ABI v0 示意：
 
 ```c
-typedef enum {
-    ELENOR_STREAM_TOKEN_VALID = 1 << 0,
-    ELENOR_STREAM_TOKEN_EOS   = 1 << 1,
-    ELENOR_STREAM_TOKEN_ERROR = 1 << 2,
-} elenor_stream_token_flags_t;
-
 typedef struct {
     uint32_t queue_id;
     uint32_t depth;
@@ -1745,275 +1800,73 @@ typedef struct {
 6. **multi-consumer**：必须明确是 broadcast、refcount token，还是每个 consumer 独立 queue。
 7. **reset/drain**：reset tile、reset group、reset device 时，queue 的 token、credit 和 pending event 必须有确定状态。
 
-### 16.3 TileGroupTask 示例
+当前模型的 CPU step → Group step → CPU harvest 顺序保证本 Group
+cycle 完成最早在下一 cycle 唤醒 CPU 依赖；这是模拟推进顺序，
+不是 Host/FPGA 共用同步时钟承诺。
 
-TileGroupTask 的 action index 由 Tile Group Sequencer 推进。下面是一个典型的 attention-style group task pseudo-flow（两个 TileRoleBinding，通过 stream queue 做 producer-consumer 重叠）：
+### 16.4 未建模的控制与引擎扩展
 
-```asm
-group_task.accept
-
-    init_stream    S0, depth=3
-
-    dma.prefetch   block=0, dst=L2_BUF0 -> ev_pref0:seq_pref0
-    dma.prefetch   block=1, dst=L2_BUF1 -> ev_pref1:seq_pref1
-
-    dispatch.role  role_id=0 event=ev_role0_block seq=seq_role0_block[0] ; QK source role: tile_mask=0x03, out_stream=S0
-    dispatch.role  role_id=1 event=ev_role1_block seq=seq_role1_block[0] ; softmax+AV consumer role: tile_mask=0x0C, in_stream=S0
-
-loop_blocks:
-    wait.event     ev_role0_block seq=seq_role0_block[block_id]
-
-    dma.prefetch   next_block, dst=L2_NEXT -> ev_pref_next:seq_pref_next[block_id + 1]
-
-    signal.event   ev_role0_block seq=seq_role0_block[block_id] payload=current_block
-    wait.event     ev_role1_block seq=seq_role1_block[block_id]
-
-    advance_block
-    branch_lt      block_id, block_count, loop_blocks
-
-    push_eos       S0
-    wait.event     ev_role1_done seq=seq_role1_done ; role 1 completion fan-in
-
-    collective.run reduce=partial_sum -> ev_reduce:seq_reduce
-    wait.event     ev_reduce seq=seq_reduce
-    dma.store      L2_OUT -> HBM -> ev_store:seq_store
-    wait.event     ev_store seq=seq_store
-
-group_task.complete signal=ev_group_task_done seq=seq_group_task_done
-```
-
-`seq_*[block_id]` 表示 runtime/Sequencer 为同一 event id 的每次循环复用分配的新 expected sequence；示例不得把固定 sequence 跨 block 重用。
-
-Tile Group Sequencer 的职责：
-
-1. 维护 Group Task action index。
-2. 初始化 / reset / drain stream queue。
-3. 控制 Group DMA HBM 到 L2 prefetch / store。
-4. Dispatch prepared tile task（per TileRoleBinding）。
-5. 处理 role / event / barrier / collective。
-6. 推进 group task 并发出 completion event。
-
-### 16.4 Tile Program 示例
-
-Tile Program 运行在每个 Compute Tile 的 UCE 上。UCE 与 USE 可以共享同一个 tile-local RISC-V / micro-controller，但 Tile Program 的 PC、launch、wait、branch 和 stream token 由 UCE 功能组件负责。
-
-```asm
-TILE_BEGIN
-
-loop:
-    STREAM_POP      in_token, S_IN
-    BRANCH_EOS      in_token, done
-
-    STREAM_ACQUIRE  out_token, S_OUT
-
-    DMA_LOAD        L2_ADDR(in_token), L1_IN
-    WAIT            dma_done
-
-    BOA_RUN         L1_IN, L1_TMP
-    WAIT            boa_done
-
-    EVU_RUN         L1_TMP, L1_OUT
-    WAIT            evu_done
-
-    DMA_STORE       L1_OUT, L2_ADDR(out_token)
-    WAIT            dma_done
-
-    STREAM_PUSH     S_OUT, out_token
-    STREAM_RELEASE  S_IN, in_token
-
-    BRANCH          loop
-
-done:
-    STREAM_PUSH_EOS S_OUT
-    SIGNAL_TILE_DONE
-
-TILE_END
-```
-
-Tile UCE 的职责：
-
-1. 维护 Tile PC。
-2. 控制 L2 到 L1 DMA。
-3. 启动 BOA / EVU / MFE / USE。
-4. 管理 L1 buffer 和 slot frame。
-5. 处理 stream token。
-6. 执行 descriptor template patch。
-7. signal tile done。
-
-Tile UCE sliding window admission contract：
-
-```text
-V1:
-  uce_window_size = 1
-  P0 complete/release -> P1 active
-
-V1.x / V2 reserved:
-  uce_window_size = 2..4
-  P0 store in-flight + P1 load/patch/compute may overlap
-  only when buffer hazard table proves slot independence
-```
-
-约束：
-
-1. sliding window 是 issue lookahead / preparation depth，不是 Tile UCE multithreading、preemption 或 multi-context scheduling。
-2. correctness 由 `event_id + sequence`、dependency scoreboard、Slot Frame owner/lifetime 和 buffer alias rules 保证；window size 本身不提供 correctness。
-3. UCE front-end 可以保持 single-issue in-order；多个 window entry 只表示多个 Tile Program context 在 event/slot scoreboard 中 in-flight。
-4. SRAM 侧使用预先声明的 ping-pong / multi-buffer slot set；V1 不新增 dynamic slot allocator。
-5. MFE async load/store overlap 需要 queue credit 和 store visibility event；store request accepted 不等于 output buffer release。
-6. read-only const slot 可以跨 window alias；任何 writable alias、WAR/RAW/WAW hazard 必须 stall admission 或 fault。
-
-### 16.5 Tile Group Sequencer ISA 建议
-
-```asm
-DISPATCH
-WAIT
-STREAM_WAIT
-BARRIER
-REDUCE
-BROADCAST
-DMA_PREFETCH
-JMP
-END
-```
-
-### 16.6 Tile UCE ISA 建议
-
-```asm
-DMA_LOAD
-DMA_STORE
-STREAM_POP
-STREAM_PUSH
-LAUNCH_BOA
-LAUNCH_EVU
-LAUNCH_MFE
-LAUNCH_USE
-WAIT
-FENCE
-PATCH_DESC
-BRANCH
-LOOP
-END
-```
+带循环的 Group ISA、tile-local branch、Collective/Stream 的完整
+RTL、多 Group 芯片调度和微码编码仍由后续规格冻结；不把伪 ISA
+或既有 `ExecTileGroupTask` 名称误读为已执行的循环控制器。
 
 ## 17. Tile-SPMD 编程范式
 
 ### 17.1 核心思想
 
-ELENOR 采用类似 CUDA Tile IR 的方式对 Tile Group 编程。Tile Group 内部采用 SPMD 风格运行程序。
+ELENOR 当前源 IR 以 `nexus.*`、`nest.*`、`tile.*` 分别描述 CPU
+提交、root/Group L2 调度与 Task/Tile L1/引擎编排。Tile-SPMD
+模板由所选 Tile 上的逻辑 Task 复用；Context 超块、Grid Task
+切片、Tile Program 内静态 K chunk 是不同 tiling 层级。
+Tile 程序依赖 task id、已绑定的 view/layout、Tile/Group 标识，
+不是为每个 Tile 独立生成高层 graph，也不暴露 GPU thread/warp。
+未建模的 USE 状态指令、引擎微码和 descriptor codegen 不构成当前
+源 IR 的第四套控制层。
 
-编程范式不是传统 GPU SIMT，也不是纯 NPU descriptor list，而是：
+### 17.2 与 GPU 术语的边界
 
-```text
-Tile-SPMD command IR
-+ Tile UCE program control ISA
-+ USE state/control functional units
-+ descriptor-driven MFE / BOA / EVU engines
-+ Tile Group Sequencer
-+ kernel template library
-+ descriptor template auto-patch
-```
+`Grid` 是一次 dispatch 的有限 Task 域，`placement` 是 Tile mask；
+`task.range` 的大小等于 popcount(placement)，不是 CUDA 任意维 grid。
+一个 Task 映射一个选中 Tile；`tile_id` 不是 GPU `threadIdx`，
+Task 的 Frame/L1 Arena 和 per-Tile UCE context pin 都必须显式准入。
+普通 `nest.barrier` 只等待同一 Context 的先前 action，不等于
+跨全部 root 的 GPU grid-level sync。
 
-编译器不应该为每个 tile 生成独立程序，而应该生成 group sequence，选择少量 tile kernel template，并生成 descriptor template。每个 tile 运行同一份 Tile-SPMD program，通过 tile_id、group_id 和 descriptor template 决定自己处理的数据。
+### 17.3 Context / Grid 源 IR 片段
 
-```text
-所有 tile 运行同一份 tile program template，
-通过 tile_id / group_id / descriptor offset 决定自己处理哪块数据。
-```
-
-### 17.2 CUDA 对应关系
-
-| CUDA                | ELENOR 设计                       |
-| ------------------- | --------------------------------- |
-| kernel              | tile kernel template              |
-| grid                | tile grid / tile group grid       |
-| block / CTA         | tile                              |
-| blockIdx            | tile_id                           |
-| threadIdx           | 不暴露，交给 BOA/EVU/MFE 内部处理 |
-| shared memory       | tile L1 SRAM / slot frame         |
-| `__syncthreads()`   | local event wait                  |
-| grid-level sync     | group barrier                     |
-| global load/store   | MFE / DMA descriptor              |
-| tensor core MMA     | BOA descriptor                    |
-| vector op           | EVU descriptor                    |
-| state update / scan | USE descriptor / custom op        |
-
-### 17.3 Group Task IR 示例
+以下**非独立模块**片段取自
+[`ready_action_branch.mlir`](../examples/scenarios/ready_action_branch.mlir)；
+完整输入及资源合同请使用该文件，不能单独编译此摘录。
 
 ```mlir
-mychip.group_task @ffn_matmul {
-  mychip.launch_grid @matmul_tile_kernel
-      grid = [%num_tiles_m, %num_tiles_n]
-      group = @group0
-      args = (%A, %B, %C, %M, %N, %K)
-
-  mychip.group_barrier @group0
-}
+    %tasks = nest.task.range from = 0 to = 1 : !nest.task_range
+    %pa = nest.dma.prefetch.async %ha into %ai : !nest.event<"pa">
+    %ga, %ira, %ora = nest.dispatch.tasks.async @slow l1_mode = 0 tasks(%tasks) globals()
+      bindings(%ai, %ao)
+      ins(%ai) outs(%ao)
+      signal_policy {
+        input_released = #nest.aggregate<all_tasks>
+        output_ready = #nest.aggregate<all_tasks>
+      } depends_on(%pa) : (!nest.event<"ga">, !nest.event<"ira">, !nest.event<"ora">)
 ```
 
-Pipeline mode（多 role producer-consumer 重叠）：
+### 17.4 Tile Program 源 IR 片段
+
+同一 [`ready_action_branch.mlir`](../examples/scenarios/ready_action_branch.mlir)
+的 `@fast` Task 内片段，**非独立模块**；Grid Task 的布局由
+编译器静态确定，UCE 按依赖执行，不是 GPU warp。
 
 ```mlir
-mychip.group_task @group0(%input, %output) {
-  __omp_magic("s0", "= group_task.stream depth = 3 : !group_task.stream")
-
-  group_task.prefetch %input[%c0] to %l2_buf0
-  group_task.prefetch %input[%c1] to %l2_buf1
-
-  group_task.dispatch @role0
-      tile_mask = 0x03
-      program = @tile_kernel0
-      out_stream = __omp_magic("s0", "")
-
-  group_task.dispatch @role1
-      tile_mask = 0x0C
-      program = @tile_kernel1
-      in_stream = __omp_magic("s0", "")
-
-  group_task.wait_done
-}
-```
-
-### 17.4 Tile-SPMD IR 示例
-
-```mlir
-mychip.tile.kernel @matmul_tile_kernel(%ctx, %A, %B, %C) {
-  __omp_magic("tid", "= mychip.tile.id %ctx")
-
-  mychip.launch.mfe @load_A_desc {
-    tensor = __omp_magic("", "A,")
-    tile_id = __omp_magic("", "tid,")
-    dst_slot = #slot<A>
-  } -> %e0
-
-  mychip.launch.mfe @load_B_desc {
-    tensor = __omp_magic("", "B,")
-    tile_id = __omp_magic("", "tid,")
-    dst_slot = #slot<B>
-  } -> %e1
-
-  mychip.wait %e0, %e1
-
-  mychip.launch.boa @matmul_desc {
-    a_slot = #slot<A>,
-    b_slot = #slot<B>,
-    c_slot = #slot<C>
-  } -> %e2
-
-  mychip.wait %e2
-
-  mychip.launch.mfe @store_C_desc {
-    tensor = __omp_magic("", "C,")
-    tile_id = __omp_magic("", "tid,")
-    src_slot = #slot<C>
-  } -> %e3
-
-  mychip.wait %e3
-
-  mychip.ret
-}
+    %compute = tile.boa.async "matmul" m = 32 n = 32 k = 32 ops = 65536 : !tile.event<"compute">
+    tile.await %compute
+    %store = tile.store.async %local into %ov : !tile.event<"store">
+    tile.await %store
 ```
 
 ### 17.5 Descriptor IR 示例
+
+以下 `mychip.desc` 只是未建模的引擎 descriptor/codegen 设计示意，
+不是可执行 `nexus/nest/tile` IR 或已冻结的二进制 encoding。
 
 ```mlir
 mychip.desc @matmul_desc {
@@ -2118,27 +1971,22 @@ firmware/tile_kernels/
 
 ## 18. Runtime、Command ABI 和 Event Model
 
+本节的 C 结构、CSR 与 command encoding 是硬件 ABI v0 草案；
+当前可执行合同是 §15 的 immutable CompiledProgram→只读 load/bind→
+CPU `nexus.*` 提交。`context_id` 作为隔离域标识，不等于 Group
+execution slot 或 Tile UCE context pin。root completion、
+Grid done、方向性 signal、DMA/HBM visibility 与 event generation
+分别建模，Loader 不在提交时补齐同步。
+
 ### 18.1 设计原则
 
-硬件执行 command，不执行高层 graph。
-
-```text
-High-level Graph
-    |
-Compiler partition and lowering
-    |
-Descriptor generation
-    |
-Command buffer
-    |
-Runtime submit
-    |
-Hardware queues
-```
-
-Runtime 的职责是把 compiler 生成的 executable package 加载到 device，分配 buffer，上传 program、descriptor、weight，并在 launch 时 patch descriptor、提交 command、等待 event。
-
-本节中的结构体是 ABI v0 的建议样例，不是最终二进制冻结定义。后续实现阶段需要根据实际需求完善 field、alignment、versioning、validation 和兼容策略。
+硬件不解释高层 graph；当前编译器 lower xDSL source 后封印可执行
+`CompiledProgram`，独立 verifier 在 load 时核对 target/hash/actual
+bindings，CPU 依照 `nexus.*` 控制序列通过 DevicePort 提交。
+高层 ONNX/StableHLO 自动导入、物理 Host upload/doorbell 和
+driver/firmware 栈是未建模的部署设计，不得当成 `Simulator.run`
+的实际调用路径。以下结构体仍是硬件 ABI v0 建议样例，
+field/alignment/versioning 由后续规格冻结。
 
 ### 18.2 TensorView
 
@@ -2312,31 +2160,23 @@ if (seq_len <= 512) {
 
 ## 19. 编译器栈
 
-### 19.1 Lowering Pipeline
+### 19.1 当前 Lowering Pipeline
 
 ```text
-PyTorch / JAX / ONNX
-        |
-StableHLO / Torch-MLIR
-        |
-Tensor / Linalg
-        |
-Shape Specialization
-        |
-Engine Partition
-        |
-BOA Dialect
-EVU Dialect
-MFE Dialect
-USE Dialect
-Runtime Dialect
-        |
-Descriptor Template Generation
-        |
-Command Buffer Packing
-        |
-Hardware Runtime
+source xDSL ModuleOp (`nexus.*` / `nest.*` / `tile.*`)
+  → verify_workload_ir + call-site lowering
+  → prepare_resources（layout / allowed modes / R×逐 bank / 控制预算）
+  → bind_profiles（普通 await / 显式配置与范围维护）
+  → action dependencies / event frontier / program identity
+  → seal immutable CompiledProgram → independent verifier
+  → load_program（只读 verify + actual bindings）→ LoadedProgram
+  → Simulator.run
 ```
+
+编译器可向上规范化 no-rebind 的可执行 L2 reservation，不能把源码
+合同数值承诺为不变；Loader 不重新选择 Profile。ONNX/StableHLO、
+自动 Engine Partition、dynamic CFG/shape 和真实 descriptor binary
+codegen 仍是未实施的上游/器件计划。
 
 ### 19.2 Engine Partition 规则
 
@@ -2352,6 +2192,10 @@ Hardware Runtime
 | dynamic branch                   | Runtime / Tile UCE |
 
 ### 19.3 推荐 Pass Pipeline
+
+以下自动 partition/pass 列表是未建模的未来方案，不是现行编译主线；
+当前三个所有权前缀分别是 `nexus`（CPU）、`nest`（root/Group）、
+`tile`（Task/Tile），不是六个已实现的 `elenor.*` dialect。
 
 ```text
 -stablehlo-to-linalg
@@ -2371,38 +2215,16 @@ Hardware Runtime
 -elenor-descriptor-abi-lowering
 ```
 
-### 19.4 First Compiler Deliverable
+### 19.4 当前 compiler 与下一层工作
 
-首版 compiler 不应该立刻追求完整自动 partition、自动 tiling、layout search 和所有 engine 的 codegen。更合理的第一阶段目标是：
+当前 `compile_program` 按调用点 lower 已编写的 Task 模板，证明
+layout、allowed Profile、R 包络、事件依赖/共享 hazard、控制预算、
+Store visibility 与配置事务，封印 `schema_version=2` /
+`compiler_abi="v2"` 后调用独立 verifier；`load_program` 只读核对
+artifact/target/actual bindings，不做二次 lowering。
 
-```text
-1. Pattern-based kernel selection
-2. Tile kernel library selection
-3. Descriptor template generation
-4. Command buffer packing
-5. FileCheck + golden descriptor test
-```
-
-示例 lowering：
-
-```mlir
-linalg.matmul
-  -> elenor.select_kernel "matmul_boa_v1"
-  -> elenor.boa_desc
-  -> elenor.command_buffer
-```
-
-示例 Runtime IR：
-
-```mlir
-elenor.kernel_call @matmul_boa_v1 {
-  grid = [%tiles_m, %tiles_n],
-  frame = @matmul_frame,
-  descriptors = [@load_a, @load_b, @boa_matmul, @store_c]
-}
-```
-
-这个策略允许硬件、runtime 和 compiler 基于稳定 descriptor ABI 并行开发；自动 tiling、fusion、advanced memory planning 可以在 ABI 稳定之后逐步增强。
+高层图自动切分、engine codegen、真实 binary descriptor emission
+和动态 CFG/shape 仍属未实现扩展，不得与现行编译能力混称。
 
 ### 19.5 Compiler 复杂度控制原则
 
@@ -2414,6 +2236,23 @@ elenor.kernel_call @matmul_boa_v1 {
 - Descriptor ABI lowering 必须有 golden binary descriptor 测试。
 
 ## 20. Workload 映射
+
+当前可执行示例对应关系见
+[`examples/README.md`](../examples/README.md)；本节原 Attention/MoE/SSM
+表是未来 workload 映射目标，并非这些模型已经执行数值验证。
+
+| 调度特征           | 可运行输入                                                                                                                                                                                                                                                                      | 可验证收益/条件                                                                  |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| 分层 Tile-SPMD     | [`matmul-2048x512-boa256`](../examples/workloads/matmul_2048x512x64_boa256x256x32.mlir)、[`reduce-sum-multiuce`](../examples/workloads/reduce_sum_multiuce.mlir)                                                                                                                | Context 超块、Grid Task Tile 分工、Tile 内 K chunk 静态展开                      |
+| 异步流水           | [`reduce-sum-single-context`](../examples/workloads/reduce_sum_ktiled_single_context.mlir)、[`matmul-splitk-pipeline`](../examples/workloads/matmul_splitk_pipeline.mlir)                                                                                                       | prefetch、双缓冲与 acc 有独立依赖；有资源与 credit 才可能重叠                    |
+| 异构与有界重排     | [`matmul-pow-parallel`](../examples/workloads/matmul_pow_parallel.mlir)、[`ready-action-branch`](../examples/scenarios/ready_action_branch.mlir)                                                                                                                                | 独立分支 BOA/EVU；S0 队首与 S1 有限跳过 PENDING 对照                             |
+| 补位/真实依赖/尾部 | [`free-slot`](../examples/workloads/matmul_pow_free_slot.mlir)、[`data-dep`](../examples/workloads/matmul_pow_data_dep.mlir)、[`tail`](../examples/workloads/matmul17_pow_tail_overlap.mlir)、[`device-dependency-submit`](../examples/scenarios/device_dependency_submit.mlir) | CPU outstanding、Group/Tile 准入、producer 依赖与 Tile0 尾 Task 分开看           |
+| context-local L2   | [`matmul-splitk-multicontext-pipeline`](../examples/workloads/matmul_splitk_multicontext_pipeline.mlir)、[`reduce-sum-splitk-multiuce`](../examples/workloads/reduce_sum_splitk_multiuce.mlir)                                                                                  | partial 不经 HBM scratch，但占 L2 Arena；原 split-K 两例规模不同，不比较周期比值 |
+| readonly L2        | [`shared`](../examples/scenarios/l2_shared_weight.mlir)、[`private`](../examples/scenarios/l2_private_weight.mlir)、[`fanout`](../examples/scenarios/l2_shared_fanout.mlir)                                                                                                     | 减少重复 HBM→L2 prefetch，仍有 Tile L2→L1 load，backing 等 claim 关闭            |
+| Profile/资源       | [`admission`](../examples/scenarios/l2_admission_wait.mlir)、[`reconfiguration`](../examples/scenarios/profile_reconfiguration.mlir)、[`switch`](../examples/scenarios/l2_admission_profile_switch.mlir)                                                                        | SAME/COMPATIBLE 补位与真实切档区分，切档须事务/ACK                               |
+
+[`gather-matmul`](../examples/workloads/gather_matmul.mlir) 的 Gather
+命中由源码 authored profile 提供，不是 Cache 容量推导命中率。
 
 ### 20.1 Transformer Dense Attention
 
@@ -2576,16 +2415,19 @@ dense tower           -> BOA
 
 ### 20.6 多模型并发
 
-多模型并发不建议让每个模型独占全芯片。推荐方式：
-
-- group-level partition: 按 Tile Group 切分模型。
-- command queue priority: latency-sensitive 模型高优先级。
-- SRAM quota: 避免一个模型占满 shared SRAM。
-- PMU feedback: 根据 stall 和利用率调整分配。
-
-未来可以将 tile group 分成若干组，每组有局部调度硬件做管理。
+当前基线是同一 Group 中多 root Context 通过依赖、L2/L1 Profile
+兼容与容量/控制资源准入交错执行；ready-action 的 S1 可以越过
+PENDING 依赖，但不绕过显式 await/barrier 或 FIFO 类别队首。
+多 Group 分区、priority、preemption、PMU 反馈分配是未建模扩展。
 
 ## 21. 性能模型和 PMU
+
+当前 snapshot/trace 分别记录 admission 的
+WAIT_CAPACITY/FRAGMENTATION/SLOT/CONTROL_RESOURCE/CONTEXT_LIMIT、
+action credit/ordering、Arena/claim/lease、Profile generation/member ACK
+和 full_memory 真实 HBM/MFE 搬运。按组件/域归因的并行 stall 不能
+直接相加为唯一全局 cycle；实际搬运完成看 `MFE:load`/`MFE:store`
+及 HBM 腿，不把 `uce_issue` 当传输完成。
 
 ### 21.1 总体模型
 
@@ -2727,6 +2569,12 @@ typedef enum {
 
 ## 22. Driver、Firmware 和 Runtime 软件
 
+当前 `Simulator.run` 主链是 CPU `CpuDeviceController` →
+`DevicePort`/`GroupPortAdapter` → Group/Tile；下列 HostRuntime、
+KernelDriver、firmware/IOMMU/doorbell/interrupt 为未来器件软件设计，
+不是现有模拟器调用栈。firmware 不在运行时重新 lower 源 IR、
+推导隐式等待或修复编译产物合同。
+
 ### 22.1 软件分层
 
 ```text
@@ -2788,16 +2636,13 @@ ELENOR hardware queues
 
 ### 23.1 验证层级
 
-| 层级                   | 方法                                                        |
-| ---------------------- | ----------------------------------------------------------- |
-| Python model           | golden reference、random tensor test、workload trace        |
-| MLIR compiler          | FileCheck、descriptor ABI test、golden binary descriptor    |
-| Runtime ABI            | command ring、event table、fault record、reset domain tests |
-| RTL unit               | Verilator/VCS、constrained random、SVA                      |
-| Tile integration       | command queue + SRAM + UCE/USE + engine smoke test          |
-| Group integration      | stream queue、collective、broadcast、DMA overlap            |
-| System integration     | driver + firmware + runtime end-to-end                      |
-| Performance validation | PMU counter + benchmark + roofline 对齐                     |
+| 层级             | 已验证内容与未实现边界                                                              |
+| ---------------- | ----------------------------------------------------------------------------------- |
+| 源与可执行合同   | parse/verify、compile + independent verifier、只读 load + binding                   |
+| 调度/资源模拟    | 同 Group CPU/Group/Tile，事件、credit、Arena/claim/lease、Profile ACK 与 reset 隔离 |
+| copy byte oracle | 可选 ByteStore 注入且 full_memory 才能证明搬运字节结果                              |
+| BOA/EVU/USE 数值 | 当前 timing descriptor 不执行张量算术；golden/RTL 尚待实施                          |
+| RTL/器件         | SRAM/NoC 物理、Host/firmware/驱动、engine golden、PPA 均为 bring-up 目标            |
 
 ### 23.2 最小 Bring-up 顺序
 
@@ -2863,6 +2708,10 @@ ELENOR hardware queues
 - timing: high fanout control signal、SRAM boundary timing、NoC router critical path。
 
 ## 24. 配置建议
+
+以下规模为未验证产品建议；当前调度/资源参考模型只有
+**1 Group × 4 Tile**，不能从这组模拟结果外推 8 Tile/Group
+或多 Group 芯片吞吐、物理频率和 SRAM 宏实现。
 
 ### 24.1 Edge 配置
 
@@ -3046,6 +2895,10 @@ ELENOR hardware queues
 
 ## 27. 实施路线和实现计划
 
+这里的 Phase 是**研发/bring-up 阶段**，不是源码 IR 的运行时
+Phase 对象。调度、Arena、Profile 方向已由当前 validator 合同确定；
+仍需冻结硬件容量/编码、引擎内核与物理/PPA。
+
 本章描述实现阶段，不改变前文 Architecture V1 的目标形态。实现计划的原则是：
 
 ```text
@@ -3182,6 +3035,10 @@ Exit criteria：
 
 ## 28. 评审重点问题
 
+评审不再重新选择单 active UCE、runtime source lowering 或强制
+Stream Queue 交接为基线；应检查当前有限多 context、完整资源准入、
+事件可见性及与尚未冻结硬件 ABI 的接口。
+
 建议评审时重点检查以下问题：
 
 1. **架构边界是否清晰**: 硬件是否仍保持 descriptor-driven，而没有滑向高层 graph interpreter。
@@ -3221,45 +3078,14 @@ Exit criteria：
 
 ## 30. 总结
 
-ELENOR 的推荐形态是：
+调度与资源方向采用 `Graph → Context → Grid → Task → Tile Program →
+Engine`，编译器封印不可变执行合同、Loader 只读绑定；CPU 消息提交、
+Group ready-action 和每 Tile eligible-head RR 各有独立容量及事件域。
+L2 root/L1 Task Arena、三类共享、逐层 Profile、R lease 与完整切档
+事务是当前语义基线。实例/验证入口见
+[`examples/README.md`](../examples/README.md)、
+[`pipeline_validator/README.md`](../pipeline_validator/README.md) 和
+[`IR_SPEC.md`](../pipeline_validator/IR_SPEC.md)。
 
-```text
-64 Tiles
-+ 8 Tile Groups
-+ BOA dense compute
-+ Enhanced Vector irregular compute
-+ MFE memory flow
-+ Tile UCE program control
-+ USE state/control functional units
-+ descriptor-driven runtime
-+ TileGroupTask / Tile Program execution model
-+ Stream Queue Contract
-+ Tile Slot Frame ABI
-+ MLIR compiler stack
-+ PMU-guided profiling
-```
-
-它的核心优势不是单点 TOPS，而是把未来 AI workload 中最难共存的四类问题拆开：
-
-- dense compute 交给 BOA。
-- irregular compute 交给 EVU。
-- dynamic data movement 交给 MFE。
-- program control 交给 Tile UCE / Tile Group Sequencer / Runtime。
-- stateful compute 交给 USE。
-
-Device Runtime 提交 Group Task；Tile Group Sequencer 准备 Tile-SPMD role dispatch；Tile UCE 推进 tile-local kernel pipeline；USE 管理 state/scan/recurrence；Stream Queue 连接 role；Group DMA 搬 HBM -> L2；Tile DMA 搬 L2 -> L1；BOA/EVU/MFE/USE 完成实际计算、数据流和状态更新。
-
-后续最值得优先细化的方向：
-
-1. Architecture V1、First Silicon V1、V1.x/V2 reserved 的 cutline。
-2. UCE / USE / MFE / Runtime ownership matrix。
-3. BOA tile size 和 SRAM banking 的定量性能模型。
-4. MFE Page Stream 的 descriptor 和 RTL microarchitecture。
-5. MLIR ELENOR dialect 的 op 定义、type system 和 lowering pass。
-6. Runtime command buffer ABI 的二进制 layout。
-7. PMU counter 与 roofline benchmark 的对应关系。
-8. Stream Queue 的 credit/backpressure/EOS/error/reset 形式化协议。
-9. Tile Slot Frame ABI 与 descriptor template auto-patch 的精确定义。
-10. Phase exit criteria 和 canonical workload trace。
-
-这些 contract 补齐后，ELENOR 文档才能从架构评审稿进入 RTL、compiler、runtime、driver、firmware 可以并行拆解的规格阶段。
+BOA/EVU/MFE/USE、OPA、Collective 的内部器件目标仍按各模块规格；
+当前不证明张量算术、RTL、芯片多 Group 吞吐或 binary ABI。

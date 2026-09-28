@@ -1,5 +1,7 @@
 # L2 显式共享与 buffer 粒度提前释放实现计划
 
+> 本文保留设计演进/实施记录；当前调度与资源架构基线见[主架构规格](../ELENOR_Architecture_Design_v1.md)，源 IR 合同见[IR_SPEC](../../pipeline_validator/IR_SPEC.md)。原验收状态与数字仅对应本文记录的范围，不代表本轮新增 RTL 或性能验收。
+
 ## 背景与交付目标
 
 实现 TODO 第 5、6 项：默认私有 L2 分配；显式跨 context 只读共享 weight；允许 single-writer 发布中间结果后供多个 context 只读消费；最后使用者结束且物理访问排空后，归还 buffer 的 striped extent。恢复同 profile 下 release 驱动的 FIFO 提前准入，并提供不同 memory profile 必须等旧 context 的 HBM store 完成、profile 切换结束后才启动后续 load 的 MLIR 对照案例。

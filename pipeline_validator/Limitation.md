@@ -10,8 +10,8 @@ LoadedProgram → Simulator.run`；Simulator 不包含源码 lowering fallback�
 - 编译产物深不可变、可严格 JSON 持久化，并绑定 source/Registry/target/
   artifact hash、调用点、relocation、source map、依赖证明、Profile 入口/
   出口与静态资源预算；Loader 只读验证，不重编译或修图。
-- CPU Device interpreter、消息端口、Group S0/S1/S2 ready-action 窗口、
-  Tile UCE eligible-head RR 与独立完成。
+- CPU Device interpreter、消息端口、Group S0/S1 ready-action 窗口
+  （S2 当前同 S1，保留名称未差异化）、Tile UCE eligible-head RR 与独立完成。
 - Root pending metadata 与 Group execution Slot/L2 Arena/event/control 资源
   分离；待准入 Root 不预占这些硬件资源。
 - Grid Route 有界登记、每 Tile 独立 Task 补位；某 Tile 暂时阻塞不会回滚
@@ -46,9 +46,11 @@ LoadedProgram → Simulator.run`；Simulator 不包含源码 lowering fallback�
 - **FIFO 头约束**：Root 和每 Tile 都只比较 SAME/COMPATIBLE 两类的 FIFO
   队首；SAME 队首受阻时可由 COMPATIBLE 队首补位，但不会越过同类队首
   做小对象装箱。没有用户优先级、aging、抢占或迁移已提交 Task。
-- **静态 Arena 布局**：只在编译器能证明 view 生命周期不重叠时复用
-  Slot/offset；L2 复用还需要 release 后有支配它的 Context barrier。
-  Runtime 不压缩碎片、不搬迁 Arena，也不动态借用另一个 owner 的预留。
+- **静态 Arena 布局**：L1 仅在编译器证明 view lifetime 不重叠时复用
+  Slot/offset，运行期 `tile.alloc` 只是按既定布局重新绑定；L2
+  永久 no-rebind，每个 buffer 在同一 root Arena 内保有自己的
+  全 stripe-round padded span，即使 release 后有 Context barrier
+  也不复用。Runtime 不压缩碎片、不搬迁 Arena 或借用其他 owner 预留。
 - **统一同层模式**：一个 Profile 覆盖该层的全部成员；不支持 per-bank、
   per-Context 私有 Cache 分区或运行时试档。L1 与 L2 可独立切换，但实际
   组合必须在编译产物中预先验证。
@@ -66,6 +68,10 @@ LoadedProgram → Simulator.run`；Simulator 不包含源码 lowering fallback�
   frontier，不再按所有历史事件计数，但仍受静态容量限制。Grid Route、
   pending Root、action/inflight/DMA/ACK/Frame Slot 等也都是有限资源；
   过大的单产物会被编译器或 Loader 拒绝。
+
+- **源/可执行资源合同不同**：L2 no-rebind 布局若超过源
+  `l2_spm_bytes`，编译期可向上规范化可执行 reservation 再逐
+  Profile 验证；R 和 allowed modes 不偷偷降低或删减。
 
 ## 时序、引擎与互连简化
 

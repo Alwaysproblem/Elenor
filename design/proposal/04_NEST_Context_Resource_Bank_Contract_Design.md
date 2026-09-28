@@ -1,5 +1,7 @@
 # NEST SRAM Profile、资源合同与 simulator_experiment 实现
 
+> 本文保留设计演进/实施记录；当前调度与资源架构基线见[主架构规格](../ELENOR_Architecture_Design_v1.md)，源 IR 合同见[IR_SPEC](../../pipeline_validator/IR_SPEC.md)。原验收状态与数字仅对应本文记录的范围，不代表本轮新增 RTL 或性能验收。
+
 > 状态：`simulator_experiment` 实现已落地，**验收进行中**。完整回归、示例 corpus、Perfetto 审计以及 T/RV/CB 逐 ID 证据由集成 owner 在门禁结束后统一签署；本文当前只描述实现合同和完成门槛，不把尚未挂接的证据标记为最终接受。
 > 依据：[NEST_SRAM_Bank_Runtime_IR_Proposal_v0.1.md](../../review/NEST_SRAM_Bank_Runtime_IR_Proposal_v0.1.md)、当前 `pipeline_validator` 实现及用户 review。**L2 mode 由 `nest.context` 指定，L1 mode 由 Task 启动操作指定；await 保持普通事件等待写法。编译器生成显式等待和配置执行序列，Loader 只读验证，Runtime 只执行已加载产物，不现场补依赖或配置步骤。**
 > 软件接口为 contract v0；本文列出的 mode bytes、系统预留、维护能力、粒度和控制时序是可复现实验目标，真实物理编码与数值仍由后续硬件规格冻结。

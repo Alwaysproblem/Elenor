@@ -1,16 +1,17 @@
-# Nexus — ELENOR Pipeline Validator
+# Nexus — ELENOR 架构与 Pipeline Validator
 
 > 本仓库由人类与大模型（LLM）共同打造：架构设想、代码实现、测试与设计文档均在人机协作中迭代完成。
 
 ## 项目简介
 
-`pipeline_validator/` 是一个 cycle-accurate 的 **runtime / memory 契约验证器**，以一个
-FPGA slice 的规模（1 个 Tile Group × 4 个 Compute Tile）模拟 ELENOR 风格加速器的
-`Graph → Context → Grid → Task → Tile Program → Engine` 完整控制路径。
-
-它不是"给什么跑什么"的通用时序模拟器：程序必须先通过编译期证明，runtime 只执行已被
-证明合法的不可变产物，且另一个独立验证器会重新推导编译器的每一个决定。执行路径是
-显式的、单向的：
+ELENOR 的**调度与资源架构方向**以 `pipeline_validator/` 为当前参考实现，
+不是“下一步大概想法”。模型规模为 1 Group × 4 Tile，执行
+`Graph → Context(root) → Grid → Task → Tile Program → Engine`；
+可运行特征与条件见[实例矩阵](./examples/README.md#调度方法与代表实例)，
+架构边界见[主规格](./design/ELENOR_Architecture_Design_v1.md)。
+三层定位：**模型事实**由编译/运行证据支持；**架构方向**将这些合同
+作为芯片设计基线；物理 SRAM/NoC、引擎张量算术、硅片 UCE 数与
+binary ABI **尚未冻结**，不将模拟周期当器件性能。
 
 ```text
 source xDSL ModuleOp
@@ -26,30 +27,19 @@ runtime 源 IR lowering 回退路径。
 
 ## 核心架构思想
 
-### 1. 编译期证明，运行期零补救（prove, don't repair）
+### 1. 编译期证明，运行期不补合同（prove, don't repair）
 
-这是整个项目的第一性原则，贯穿每一层：
-
-- **编译器是证明器**。`compile_program` 在产出可执行体的同时，对 _每一个_ advertised
-  Profile mode、_每一个_ 真实出现的 L1/L2 mode 组合、逐 bank 的 striped 布局与 padding、
-  Frame Slot、事件 live frontier、Grid/控制资源上限、`R × 子 Arena` 包络做静态证明。
-  证明不过就拒绝编译——compiler 从不悄悄丢弃非法 mode，从不自动调低
-  `requested_contexts_per_tile`。
-- **产物携带证明**。`CompiledProgram` 是深度不可变对象，内嵌 canonical source、
-  Profile Registry、dependency proofs、static effects、resource budgets、binding
-  guards、source map、重定位表和四个 SHA-256（source / registry / target / artifact）。
-  持久化 codec 用显式 allowlist 解析：未知字段、重复 JSON key、非有限数值、版本
-  不符、hash 不符一律拒绝。
-- **验证器不信任编译器**。`execution_verifier.py`（全仓库最大的模块）不 import
-  compiler、不修复图，而是独立验证静态 executable 的 ordering / dependency contract
-  与资源、冒险不变量：transfer/view/descriptor 语义、跨 root 数据冒险、maintenance
-  覆盖与前序、事件 live frontier、L2 padded span 不重叠且逐 bank 守恒。它校验的是
-  静态契约——动态 issue 顺序由 runtime 的 `GroupScheduler` 按 scan / credit /
-  backpressure 决定，不在静态验证范围内。Loader 只做验证与绑定检查——不修复
-  依赖、不补插等待、不换 Profile、不重建源 IR。
-- **Runtime 不发明任何同步**。普通 await 就是普通 await，不会被隐式提升为全局
-  barrier；maintenance 只能来自编译器生成的描述符。非法程序在任何 cycle 运行之前
-  就已经失败。
+- `compile_program` 对每个已声明 Profile 与实际 L1/L2 组合、
+  逐 bank stripe/padding、Frame、live event frontier、Grid/control
+  和 R×子 Arena 包络做检查。L2 no-rebind 的高水位若大于源
+  `l2_spm_bytes`，编译器会**向上规范化可执行 reservation**
+  并重新逐 Profile 验证；不删 mode、不调低 R，更不是 runtime 扩容。
+- 不可变软件 artifact 携带 source/Registry/target/artifact hash；
+  独立 verifier 重推导静态资源、依赖、sharing 与 hazard。Loader
+  只读验证 actual bindings，不重编译或插入缺失等待。
+- 静态可判定的非法合同在运行前拒绝；真实运行仍可能因有限资源
+  等待、动态故障或取消而不能完成。普通 await 不自动升级为全局
+  静默；真正的 Profile 切换需要编译出的配置/维护事务及 ACK。
 
 ### 2. Compute / Control / Data Movement 分层进入 IR 与硬件边界
 
@@ -61,11 +51,12 @@ runtime 源 IR lowering 回退路径。
 | `nest.*`  | 一个 root Context      | L2 alloc、prefetch/store、dispatch、release、组内 await | Tile 内 L1 布局、Host 控制流 |
 | `nexus.*` | Host/CPU 模型          | submit_context、跨 root 依赖、await、return             | 任何片上资源细节             |
 
-硬件边界同样强制：`device.py` 的 CPU 控制器只依赖执行 DTO 与消息协议，**永远观察不到**
-TileGroup slot、sequencer、Tile context 或 per-task PC；`runtime/group_port.py` 是有界
-消息适配器，root 请求先只占用 pending 元数据，Group slot / L2 Arena / 事件预算 / 执行
-所有权在真正准入时才**原子提交**。两阶段准入让"排队"与"占用硬件"成为两个可分别观测
-的状态。
+`device.py` CPU controller 通过 DevicePort 消息提交，不读写 Group/Tile
+的 PC。GroupPort 请求先只占有界 pending metadata，root 准入才完整
+提交 Group execution slot、L2 Arena、事件/控制预算；CPU 可已标
+ACTIVE 而 Group `active_cycle` 仍未到达。准备失败可能 abort/rollback，
+保证不暴露半提交；已接受计算靠 drain/cancel-confirm 收敛，并非
+任意计算可事务回滚。
 
 ### 3. 一切资源有限，且每类等待都可归因
 
@@ -101,16 +92,21 @@ OPEN_ISSUE → RELEASE`。
 
 ## 调度设计
 
-三层调度，各自有界、各自可观测：
-
 ```text
-CPU:  CpuDeviceController（device.py）
-        有限 pending/completion credit，解释 nexus.program，只发消息
-  └─► Group: GroupScheduler（group_scheduler.py）—— ready-action 窗口
-        每 cycle 一次 REGISTER + 一次 ISSUE，有限 action 表 + 有界扫描
-        └─► Tile: tile.py —— 每 Tile 每 Tick 至多原子提交一个 Task
-              eligible-head round-robin，UCE context 是精确物理资源
+CPU: nexus 控制序列 → DevicePort → GroupPort 有界 pending/完整 root 准入
+  → 每 root TileGroupSequencer registration cursor / fence / completion
+  → Group 共享 GroupScheduler：poll completion/control → ISSUE → REGISTER
+  → 有界 Grid Route → 每 Tile 独立 Task commit
+  → UCE eligible-head RR 单指令 issue → 有界 engine queues → 安全退休
 ```
+
+`--device-context-mode N` 是 CPU 已交付 outstanding request 上限，
+`group.active_context_capacity` 是 Group execution slot 数（默认 8），
+`--context-mode N` 是每 Tile 精确 UCE contexts（默认 1，模型支持 1..8）。
+`requested_contexts_per_tile=R` 是同一 parent/launch generation/tile
+跨所有 Grid 的 Task lease，不等于物理 context 数；Frame Slot 与 program
+resident slot 又是独立资源。`placement` 的 popcount 等于非空 Task
+range 数量。Group RR 的 register/issue 与准入 FIFO 是不同仲裁层。
 
 - **Ready-action（S0/S1 策略）**：S0 每 Context 只许队首 action 参与发射（in-order），
   资源就绪的非队首被挡住时计入 `group_ordering_stall` PMU；S1（默认）允许扫描窗口
@@ -124,9 +120,10 @@ CPU:  CpuDeviceController（device.py）
 - **SAME/COMPATIBLE 双 FIFO 头**：root 准入对活跃 L2 Profile、Task 准入对每 Tile 活跃
   L1 Profile 各自维护两类队首；SAME 优先，SAME 队首无法完整提交时 COMPATIBLE 队首
   可补位，但同类内不许越头。这是"Profile 感知的准入"，不是通用乱序调度。
-- **原子提交，无回滚**：一个 Task 的提交原子覆盖 L1 Arena、UCE pin/Slot、Frame/
-  控制状态、父 L2 pin 和 R lease；一个 Tile 受阻不回滚其他 Tile 已提交的 Task。
-  Grid 在任何选中 Tile 仍 pending/active/retiring 时不能完成。
+- **完整 Task commit，有准备失败回滚**：提交涉及 L1 Arena、Frame、
+  UCE pin、父 L2 pin 与 R lease；未对外可见的失败准备可 abort/rollback。
+  一个 Tile 受阻不撤销其他 Tile 已提交的 Task；已接受工作只通过
+  drain/cancel-confirm 收敛。Grid 等全部 Task 安全退休。
 - **R lease 共驻约束**：`requested_contexts_per_tile` 以 `(parent binding, launch
 generation, tile)` 为键约束同 Tile 共驻 Task 数，只在 Task 安全退役或确认取消时
   归还——`tile.free`、`input_released`、`output_ready`、cancel 请求都不会提前归还。
@@ -141,11 +138,23 @@ generation, tile)` 为键约束同 Tile 共驻 Task 数，只在 Task 安全退�
   物理占用；claim 走 `DECLARED → BOUND → RELEASED` 状态机；`nest.publish` 在生产者
   最后一次访问后封存只读导出，原 Arena 可先于读者退役，快照单列 origin-retired
   backing，协议级字节总量按 backing 身份去重。
-- **编译期不复用已释放 L2 区域**：每个本地 L2 分配有独立不重叠的 stripe-rounded
-  padded span，验证器拒绝 span 重叠或逐 bank 不守恒的布局。
-- **逐腿传输状态机**：`memory/transfer.py` 把每次搬运建模为多腿 route
-  （HBM → Global DMA → NoC → L2 bank → L1 bank → Local DMA），每腿完成后才发射下一腿，
-  按 stage 报告等待原因做 PMU 归因；cancel 由 generation 隔离。
+- **L1 静态复用，L2 永久 no-rebind**：L1 `tile.free` 后可在同一
+  Task 的已编译 lifetime 内重用同一 slot/offset；运行期只是再绑定
+  既定布局。L2 每个 buffer 独占全 stripe-round padded span，
+  即使 release/barrier 后也不在同一 Arena 内重绑。死 scratch
+  无须 store，跨 Task 持久化的结果须先完成 store。
+- **L2 交接有三种**：`private` 默认；`context-local` 允许同一
+  invocation 内 leaf→partial→combine，无 HBM scratch 中转但占 L2；
+  `readonly` 在 `nest.publish` 后借 `nexus.shared.ref` 跨 root
+  claim 同一 backing，读者/pin/inflight 未关闭前 backing 不回收。
+  最终 HBM Store 必须覆盖全部实际 writer，不得在 Store 后继续写。
+- **逐腿传输状态机**：`full_memory` 按操作分别建立 route，而不是将所有腿串成一笔：
+  - HBM→L2 prefetch：`HBM_READ → GLOBAL_DMA → NOC_RESPONSE → L2_WRITE`。
+  - L2→L1 Tile load：`L2_READ → LOCAL_DMA → L1_WRITE`；Tile store：
+    `L1_READ → LOCAL_DMA → L2_WRITE`。
+  - L2→HBM store：`L2_READ → NOC_REQUEST → GLOBAL_DMA → HBM_WRITE`。
+    每腿完成后才推进下一腿，并按 stage 归因 PMU 等待；cancel 由 generation
+    隔离。`runtime` / `timing_only` 的普通搬运折叠，不能据此推断逐腿时序。
 
 ## Fidelity 阶梯与字节证明
 
@@ -267,41 +276,42 @@ python -m pipeline_validator --compiled-file artifacts/review.json \
 
 ## 质量门槛
 
-- **测试**：`python -m pytest pipeline_validator/tests/ -v` —— 452 个 collected
-  用例（390 个测试函数，含 parametrize 展开），全部通过方可提交
-- **Lint / 类型**：`conda run -n elenor-validator pre-commit run -a`（ruff + mypy 零
-  错误 + prettier）
-- **风格**：行宽 108、2 空格缩进、双引号、LF；所有 Python 模块均使用
-  `from __future__ import annotations`
+- **测试**：`python -m pytest pipeline_validator/tests/ -v`。
+- **Lint / 类型**：`conda run -n elenor-validator pre-commit run -a`
+  （ruff、mypy、prettier 等）。本说明不以历史测试数量代替本轮运行证据。
+- **Python 风格**：108 列、2 空格缩进、双引号、LF。
 
-## 文档导航（validator）
+## 文档导航：特点 → 实例 → 源码 → 正式规格
 
-- [`pipeline_validator/IR_SPEC.md`](./pipeline_validator/IR_SPEC.md) — 源与可执行 IR 规范
-  （契约、调度、准入、Arena 生命周期的权威定义）
-- [`pipeline_validator/README.md`](./pipeline_validator/README.md) — 详细使用与语义手册
-- [`pipeline_validator/Limitation.md`](./pipeline_validator/Limitation.md) — 有意保留的建模边界
-- [`examples/README.md`](./examples/README.md) — 示例索引与 MLIR 修改约束
+1. [调度特征与可运行实例](./examples/README.md#调度方法与代表实例)：
+   Tile-SPMD/异步流水/异构引擎/资源补位/依赖/尾部/context-local/readonly/Profile；
+   `bash examples/run.sh list` 获取唯一 case 绑定入口。
+2. [validator 使用手册](./pipeline_validator/README.md)、
+   [源 IR 合同](./pipeline_validator/IR_SPEC.md) 与
+   [模型边界](./pipeline_validator/Limitation.md)；源码从
+   `pipeline_validator/compiler/api.py`、`loader.py`、`device.py`、
+   `runtime/group_port.py`、`group_scheduler.py`、`tile_group.py`、
+   `tile.py` 跟到 `simulator.py`。
+3. [ELENOR 主架构规格](./design/ELENOR_Architecture_Design_v1.md)
+   §7/12/15–20：集成权威；模块按 ownership 阅读
+   [Compiler](./design/elenor_compiler/ELENOR_Compiler_Stack_Design.md)、
+   [Tile Group](./design/elenor_tile_group/ELENOR_Tile_Group_Design.md)、
+   [Tile UCE](./design/elenor_tile_uce/ELENOR_Tile_UCE_Design.md)、
+   [Memory/NoC](./design/elenor_memory_noc/ELENOR_Memory_NoC_Design.md)、
+   [Workload Mapping](./design/elenor_workload_mapping/ELENOR_Workload_Mapping_Design.md)。
+   `design/proposal/` 和 `review/` 保留历史演进，不覆盖正式规格。
 
-## 下一步大概想法：ELENOR AI 加速器
+## ELENOR 芯片架构方向与设计文档
 
-`design/` 下的 28 份架构规格是下一步的大概想法——把 validator 已建模的 runtime /
-memory 行为落地为一颗真实 AI 加速器。四类引擎覆盖未来工作负载空间：
+BOA 目标为 dense、EVU 为 irregular/vector、MFE 为数据流、USE 为
+state/control；它们的内部硬件规格不等于 validator 中 timing
+descriptor 的张量数值实现。Edge（8–16 Tile）、Balanced（64 Tile）、
+High End（128 Tile）是待 PPA 验证的产品建议，不是本轮仿真规模。
+图像是历史器件组织示意；当前控制拓扑以主规格 §7 的 ASCII 图为准。
 
-| 子系统  | 职责              | 典型工作负载                                                        |
-| ------- | ----------------- | ------------------------------------------------------------------- |
-| **BOA** | Dense Compute     | GEMM、Conv、QK、AV、Expert MLP                                      |
-| **EVU** | Irregular Compute | Softmax、Norm、RoPE、Activation、Gather/Scatter、Tail 处理          |
-| **MFE** | Memory Flow       | Page Stream、Segment Stream、Sparse / 布局变换相关数据流            |
-| **USE** | State / Control   | Scan、Recurrence、Dynamic Shape Assist、Token Routing、Event Assist |
+![ELENOR overview](./design/image/Elenor_v0.png)
 
-目标配置从边缘到数据中心统一复用：Edge（8–16 Tile，LPDDR）、Balanced（64 Tile，
-HBM/DDR）、High End（128 Tile，HBM）。
-
-![ELENOR overview](./image/Elenor_v0.png)
-
-设计文档入口：[`design/ELENOR_Architecture_Design_v1.md`](./design/ELENOR_Architecture_Design_v1.md)
-（总体架构），模块规格位于 `design/elenor_<module>/`，覆盖芯片顶层、四大引擎、
-片上组织、软件栈与验证计划；架构评审记录见 `review/`。PDF 导出：
+需要导出 PDF 时从仓库根目录运行：
 
 ```bash
 bash scripts/generate_pdf.sh -f design/ELENOR_Architecture_Design_v1.md

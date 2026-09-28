@@ -112,6 +112,7 @@ class _UCEContext:
   frame_bind_remaining: int = 0
   fault_reason: str = ""
   trace_slice_name: str | None = None
+  trace_start_cycle: int = 0
   prepare_total: int = 0
   memory: _TileContextMemory | None = None  # PR 2: per-context memory state
   task_identity: TaskIdentity | None = None  # PR 3: dispatch grid + logical task
@@ -1264,7 +1265,6 @@ class TileUCE:
       )
     )
     self._set_context_state(ctx, _UCEContextState.DONE, cycle)
-    self._close_context_trace(ctx, cycle)
 
   def _fault_context(self, ctx: _UCEContext, reason: str, cycle: int) -> None:
     if ctx.state == _UCEContextState.FAULT:
@@ -1285,7 +1285,6 @@ class TileUCE:
       )
     )
     self._set_context_state(ctx, _UCEContextState.FAULT, cycle)
-    self._close_context_trace(ctx, cycle)
 
   def _drop_event_ref(self, ref: _UCEEventRef) -> None:
     self._local_event_owner.pop(ref.runtime_id, None)
@@ -1329,6 +1328,7 @@ class TileUCE:
     ctx.frame_bind_remaining = 0
     ctx.fault_reason = ""
     ctx.trace_slice_name = None
+    ctx.trace_start_cycle = 0
     ctx.prepare_total = 0
     ctx.memory = None
     ctx.task_identity = None
@@ -1352,6 +1352,11 @@ class TileUCE:
 
   def _set_context_state(self, ctx: _UCEContext, state: _UCEContextState, cycle: int) -> None:
     ctx.state = state
+    if state in (_UCEContextState.DONE, _UCEContextState.FAULT):
+      self._close_context_trace(ctx, cycle)
+      if self.tracer is not None:
+        self.tracer.instant(f"Tile{self.tile_id}", f"UCE CTX{ctx.ctx_id}", self._state_label(ctx), cycle)
+      return
     self._trace_context_state(ctx, self._state_label(ctx), cycle)
 
   def _ensure_context_traces(self, cycle: int) -> None:
@@ -1367,19 +1372,19 @@ class TileUCE:
       if ctx.trace_slice_name != state_name:
         self._trace_context_state(ctx, state_name, cycle)
 
-  def _trace_context_state(
-    self, ctx: _UCEContext, new_state_name: str, cycle: int, args: dict | None = None
-  ) -> None:
-    thread = f"UCE CTX{ctx.ctx_id}"
-    if self.tracer is not None and ctx.trace_slice_name is not None:
-      self.tracer.end(f"Tile{self.tile_id}", thread, ctx.trace_slice_name, cycle)
+  def _trace_context_state(self, ctx: _UCEContext, new_state_name: str, cycle: int) -> None:
+    self._close_context_trace(ctx, cycle)
     ctx.trace_slice_name = new_state_name
-    if self.tracer is not None:
-      self.tracer.begin(f"Tile{self.tile_id}", thread, new_state_name, cycle, args=args)
+    ctx.trace_start_cycle = cycle
 
   def _close_context_trace(self, ctx: _UCEContext, cycle: int) -> None:
     if self.tracer is not None and ctx.trace_slice_name is not None:
-      self.tracer.end(f"Tile{self.tile_id}", f"UCE CTX{ctx.ctx_id}", ctx.trace_slice_name, cycle)
+      track = f"Tile{self.tile_id}"
+      thread = f"UCE CTX{ctx.ctx_id}"
+      if cycle > ctx.trace_start_cycle:
+        self.tracer.complete(track, thread, ctx.trace_slice_name, ctx.trace_start_cycle, cycle)
+      else:
+        self.tracer.instant(track, thread, ctx.trace_slice_name, cycle)
     ctx.trace_slice_name = None
 
   def _sample_context_counters(self, cycle: int) -> None:

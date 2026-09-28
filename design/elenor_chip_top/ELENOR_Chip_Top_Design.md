@@ -2,28 +2,40 @@
 
 ## 1. 定位、目标和 First Silicon cutline
 
-ELENOR Chip Top 是整颗 ELENOR Device 的顶层集成边界，负责把 Host Interface、Runtime Processor、Global Scheduler、Global DMA、Memory Controller、Collective、Global PMU、NoC/Router 和 Tile Group 阵列组合成一个可复位、可枚举、可提交 command、可产生 event、可读 PMU、可隔离 fault 的 device。它不是高层 graph interpreter；硬件只消费 command buffer、descriptor、TileGroupTask 和 Tile Program。
+ELENOR Chip Top 是整颗 Device 的集成边界。本文的 Host、Runtime Processor、Global Scheduler、DMA、Memory Controller、NoC、Tile Group 阵列及物理接口仍是硬件规格草案；当前可复现的调度/资源语义以 `pipeline_validator/` 为参考实现，验证范围为 1 Group × 4 Tile，不代表完整芯片已经实现。
 
-顶层目标有三类：
+当前软件参考主路径是：
 
-1. **控制面闭环**：host doorbell 进入 device 后，command queue、event table、barrier、fault record 和 interrupt 必须形成确定协议。
-2. **数据面闭环**：Global DMA/Memory Controller/NoC/Tile Group 的 HBM/DDR/LPDDR -> L2 -> L1 路径必须能执行 descriptor-driven copy，并产生 completion event。
-3. **观测面闭环**：Global PMU 能唯一归因 command queue、DMA、NoC、event wait、SRAM/engine 汇聚来的 stall，不重复计数同一 cycle。
+```text
+source xDSL ModuleOp
+  → compile_program → immutable CompiledProgram
+  → independent verify / load_program(actual bindings)
+  → LoadedProgram → Simulator.run
+```
 
-Architecture V1 允许描述完整芯片形态，包括多 Tile Group、多 NoC virtual channel、全局 collective、多 context 和 PMU feedback scheduling。First Silicon V1 只要求以下 cutline：
+CPU/Device 控制器执行已编译的提交、依赖与完成序列；它不承担高层 graph lowering。DevicePort / GroupPort 是消息边界：CPU outstanding、Group pending root metadata、Group execution slot 是不同资源。完整 root 资源准入由 Group 侧在 pending 之后进行；Tile Group 内再由每 root Sequencer、共享 Group ready-action scheduler、Grid Route 和每 Tile Task admission 推进。硬件 Global Scheduler、Host 接口、命令/CSR 二进制布局仍须由后续规格冻结，不能从软件 DTO 推定。
 
-| 范围              | First Silicon V1 必须实现                                                             | Architecture V1 / 后续规格                          |
-| ----------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| Host path         | doorbell、command ring、event/fault MSI/MSI-X 或 SoC interrupt                        | CXL.cache/coherent attach、复杂虚拟化               |
-| Runtime Processor | command consume、descriptor validation、shape branch 基础路径、reset/drain            | 高级 priority/preemption、PMU feedback scheduling   |
-| Global Scheduler  | queue dispatch、group task launch、event/barrier、basic resource map                  | 多模型 QoS、跨 group 动态重分配                     |
-| Global DMA        | 1D/2D/strided copy、async completion event、timeout fault                             | multicast、gather list、复杂 layout transform       |
-| Memory            | HBM/DDR/LPDDR 控制器接口、IOMMU/IOVA 透传检查                                         | coherent host memory policy                         |
-| NoC               | VC0 command/event、VC1 read response、VC2 write/stream、VC3 collective 预留或最小实现 | hierarchical mesh 参数、QoS aging、adaptive routing |
-| PMU               | queue occupancy、DMA bandwidth、NoC VC congestion、event wait、fault counter          | trace sampling、feedback scheduler                  |
-| Reset             | device/group/tile reset domain、drain protocol、fault record 保留                     | partial context preemption                          |
+架构方向采用 `Graph → Context(root invocation) → Grid → Task → Tile Program → Engine`，以 `nexus.*`、`nest.*`、`tile.*` 表达 CPU/Device、root/Group、Task/Tile 三级 ownership。它不是 GPU thread/warp 模型。BOA、EVU、MFE、USE 等引擎内部微架构不由当前调度参考模型证明。
 
-所有位宽、队列深度、Tile Group 数、NoC 拓扑参数、SRAM profile、时钟频率和功耗域划分在本文中不冻结，写为 `由后续规格冻结` 或 `由 PPA exploration 冻结`。
+顶层硬件目标分为三类：
+
+1. **控制面**：定义 Host/Device 命令提交、依赖、event、故障与中断的硬件边界；执行链和资源所有权遵循上面的当前参考语义。
+2. **数据面**：规划 Global DMA、Memory Controller、NoC、L2 与 Tile L1 的连接；具体物理路径、时序和搬运能力未由单 Group 模型验证。
+3. **观测面**：规划跨模块 PMU/故障可观测接口；具体 CSR、counter 和跨时钟域协议尚未冻结。
+
+下表是硬件规划 cutline，不是当前模型或 First Silicon 的已实现/已验收能力：
+
+| 范围              | 硬件规格目标                                                  | 未建模 / 后续规格                        |
+| ----------------- | ------------------------------------------------------------- | ---------------------------------------- |
+| Host path         | doorbell、command ring、event/fault 通知                      | PCIe/CXL、复杂虚拟化                     |
+| Runtime Processor | 执行已准备命令、显式依赖与 reset/drain 协议                   | 高层 graph lowering、priority/preemption |
+| Global Scheduler  | 系统级 queue/dependency/event 与 Group 消息提交               | 多 Group 物理仲裁、QoS、完整硬件 ABI     |
+| Group/Tile        | root 准入、共享 action issue、逐 Tile Task/UCE 执行的架构映射 | 多 Group / 多 Tile 的硅片规模与微架构    |
+| Global DMA        | descriptor-driven copy 和 completion 的目标接口               | 1D/2D/strided 能力、真实带宽与故障行为   |
+| Memory / NoC      | HBM/DDR/LPDDR、L2/L1 及控制/数据隔离的目标连接                | 具体拓扑、VC、IOMMU 与物理实现           |
+| PMU / Reset       | queue/event/transfer/fault/reset 的归因与确定收敛             | CSR、counter、reset 域和时钟实现         |
+
+所有位宽、队列深度、Tile Group 数、NoC 拓扑参数、SRAM profile、时钟频率和功耗域划分均未冻结，写为 `由后续规格冻结` 或 `由 PPA exploration 冻结`。
 
 顶层概念图：
 
@@ -87,16 +99,24 @@ Host / System SoC
 
 ### 2.3 Ownership matrix
 
-| 对象                   | Owner                                             | Consumer                               | 顶层约束                                                          |
-| ---------------------- | ------------------------------------------------- | -------------------------------------- | ----------------------------------------------------------------- |
-| command ring tail/head | Host Interface / Runtime Processor                | Global Scheduler                       | head 更新必须在 descriptor validation 后发生。                    |
-| event table            | Global Scheduler / Event Fabric                   | Host Interface、Runtime Processor、PMU | event_id 必须全局唯一或带 context_id namespace。                  |
-| fault record           | 产生 fault 的模块写入，Global Scheduler 分配 slot | driver/runtime                         | fault 必须包含 command_id、context_id、queue_id 和 source id。    |
-| global address map     | Chip Top                                          | DMA、MFE global path、Host Interface   | CSR/HBM/NoC apertures 不可重叠。                                  |
-| reset domain           | Chip Top reset controller                         | 所有模块                               | reset 必须定义 pending event、queue credit、DMA inflight 的结果。 |
-| PMU timestamp          | Global PMU                                        | group/tile PMU、driver                 | timestamp source 必须单调，跨 clock domain 使用同步快照。         |
+| 对象                        | Owner / 边界                          | Consumer                 | 约束                                                                                 |
+| --------------------------- | ------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------ |
+| 编译产物与实际 bindings     | `compile_program` / 只读 Loader       | CPU/Device interpreter   | Loader 不 lowering、不补依赖、不重新选 Profile。                                     |
+| CPU pending/outstanding     | `CpuDeviceController`                 | DevicePort               | pending descriptor 与已交付 outstanding 分开；outstanding 上限不是 Group slot 数。   |
+| pending root metadata       | `GroupPortAdapter`（软件参考边界）    | Group root admission     | 成功 submit 只占有界 metadata；尚未占 L2 Arena、Group slot 或完整控制预算。          |
+| root L2 / Group execution   | Tile Group root admission             | per-root Sequencer       | 准入时完整提交；`Group slot` 不是 Tile UCE execution context。                       |
+| root registration/fence     | `TileGroupSequencer`（每 root 一份）  | GroupScheduler           | 保持各自 registration cursor、依赖 fence、completion 和 root lifecycle。             |
+| ready-action table / issue  | Group 共享 `GroupScheduler`           | Registered root actions  | poll completion/control 后，每 cycle 至多 ISSUE 一条并 REGISTER 一条。               |
+| Grid Route / Task admission | Tile Group / 每 Tile                  | Tile UCE                 | Route 有界；每 Tile 独立完整提交 Task，不因另一 Tile 阻塞而回滚已提交 Task。         |
+| UCE context / single issue  | 每个 Compute Tile 的 Tile UCE         | Tile Program / engines   | 每 Task 取得本 Tile 的 UCE pin；eligible-head RR 单指令 issue。                      |
+| event table                 | Event Fabric / Group software model   | Device、Group、Tile      | 生产者、generation、sequence 和 completion 身份须明确；硬件表布局仍是草案。          |
+| global address map          | Chip Top（硬件规划）                  | DMA、MFE、Host Interface | 地址空间、权限与物理 aperture 由后续规格冻结。                                       |
+| reset domain                | Chip Top reset controller（硬件规划） | 所有模块                 | reset/drain 必须使 pending、credit、inflight 与旧 generation completion 有确定结果。 |
+| PMU timestamp               | Global PMU（硬件规划）                | Group/Tile PMU、driver   | 跨域 snapshot/时间戳机制未冻结；模型分域 stall 不能直接相加成全局唯一周期。          |
 
 ## 3. 微架构和状态机
+
+本节子模块划分、lifecycle 状态机与 reset/CDC 策略是目标硬件组织草案。当前软件参考模型只提供 Group/Tile 内部行为与消息边界的语义，不实现 host 枚举、firmware boot、doorbell、物理 reset 控制器或跨时钟域同步；这些结构在硬件规格冻结前不得引用为已实现行为。
 
 ### 3.1 顶层子模块
 
@@ -167,6 +187,8 @@ POR
 
 ## 4. 接口、descriptor、寄存器和协议
 
+本节 CSR/端口/descriptor 均为**硬件 ABI v0 草案**；当前可执行 artifact 是 schema 2 / compiler ABI v2 的软件 `CompiledProgram`，两者命名空间不同。软件模型不提供这些寄存器、端口与物理协议。
+
 ### 4.1 顶层端口类别
 
 | 类别       | 示例信号                                                    | 说明                                                 |
@@ -225,49 +247,42 @@ typedef struct {
 - timeout_cycles 不为非法保留值；具体范围由后续规格冻结。
 - fault_record_slot 可写或由硬件分配。
 
-Event Fabric 输出 `PENDING/DONE/ERROR/TIMEOUT/RESET`，用于 DMA completion、role synchronization、tile done、group done 和 graph done。
+Event Fabric 输出 `PENDING/DONE/ERROR/TIMEOUT/RESET`，用于 DMA completion、Grid/Task phase signal、tile/Task terminal、root/group done 与程序级完成事件。
 
 ## 5. 数据流、控制流和时序路径
 
-### 5.1 Cold launch 控制流
+### 5.1 当前参考模型的提交、准入与执行顺序
 
 ```text
-Host Runtime
-  -> load package / allocate HBM / upload program + descriptor
-  -> write queue base/event base/fault base CSR
-  -> ring doorbell
-Host Interface
-  -> validates doorbell ordering
-  -> notifies Runtime Processor / Scheduler
-Runtime Processor
-  -> consumes command header
-  -> validates version/context/descriptor bounds
-Global Scheduler
-  -> allocates event/fault slots
-  -> launches Group Task to target Tile Groups
-Global DMA / NoC
-  -> moves program/data to Group SRAM or Tile path
-Tile Group
-  -> executes TileGroupTask and Tile Program
-Event Fabric
-  -> writes event done/error and interrupts host
+已编译、已独立验证并 load 的 CompiledProgram
+  → CpuDeviceController 执行 nexus 提交 / depends_on / await
+  → DevicePort 消息边界
+  → GroupPort 接收有界 pending root metadata
+  → Group root admission 完整提交 L2 Arena、event/control 预算和 Group slot
+  → 每 root TileGroupSequencer 注册有序 action（cursor / fence / completion）
+  → Group 共享 GroupScheduler：poll completion/control → ISSUE → REGISTER
+  → dispatch 登记有限 Grid Route
+  → 每 Tile 独立 Task commit / R lease / UCE pin
+  → Tile UCE eligible-head RR 单指令 issue → 有界 engine queues
+  → transfer / engine completion → event → Task、Grid、root 安全退休
+  → CPU harvest completion；依赖最早在下一 CPU step 被唤醒
 ```
 
-关键 ordering：descriptor writes 必须在 doorbell 前对 device 可见；event write 必须在 interrupt 前对 host 可见；fault record write 必须在 event error 前对 host 可见。
+这条链是当前单 Group 软件模型的职责映射，不是 Host/FPGA 统一时钟或已实现硬件微架构的声明。CPU 请求交给 Port 后可仍计入 Device outstanding，而 Group slot 只有 root 完整准入才占用；这两者不可混为同一容量。
 
 ### 5.2 数据面路径
 
 ```text
 Host pinned memory / HBM / DDR / LPDDR
-    -> Host Interface or Memory Controller
-    -> Global DMA read channel
-    -> NoC VC1 response / VC2 write-stream
-    -> Group Shared SRAM / L2
-    -> Tile DMA / MFE tile port
-    -> Tile L1 Slot Frame
+    -> Memory Controller / Global DMA（硬件目标，未由当前模型完整实现）
+    -> NoC / Group L2
+    -> Tile DMA / MFE port
+    -> Tile L1 Arena / Frame
 ```
 
-Chip Top 必须给 DMA、MFE global path 和 Memory Controller 统一 backpressure 语义。若 data stream 堵塞，不允许阻塞 VC0 command/event 到不可恢复；NoC 至少将 command/event 与 bulk data 分 VC。
+当前 `full_memory` 模型可以按受限传输合同观察 HBM、NoC、L2、L1 与 LocalDMA 事务；它不证明物理 NoC、任意 strided DMA、算术数值或器件时序。descriptor writes、event/fault visibility 与 interrupt ordering 仍属硬件 ABI/协议冻结事项。硬件侧还要求 DMA、MFE global path 与 Memory Controller 统一 backpressure 语义：data stream 堵塞不允许使 command/event 通路不可恢复（NoC 至少按 VC 分离 command/event 与 bulk data）。
+
+关键 ordering（硬件合同目标）：descriptor writes 必须在 doorbell 前对 device 可见；event write 必须在 interrupt 前对 host 可见；fault record write 必须在 event error 前对 host 可见。
 
 ### 5.3 关键时序路径
 
@@ -297,6 +312,8 @@ Chip Top 必须给 DMA、MFE global path 和 Memory Controller 统一 backpressu
 
 ### 6.2 顶层 PMU counter
 
+当前 Group admission/issue、Tile admission/R lease 与 CPU outstanding 的具体观测点由软件快照和 PMU 分别报告；它们不是可直接当作硬件 CSR 名称或硅片计数的 ABI。PMU counter 名称、跨域时间戳和全局 stall 汇总语义均待硬件规格冻结。
+
 | Counter                        | 归因 owner       | 用途                                             |
 | ------------------------------ | ---------------- | ------------------------------------------------ |
 | chip_cycles                    | none             | 时间基准。                                       |
@@ -321,6 +338,8 @@ PMU 唯一归因规则：同一 cycle 只能有一个 primary stall owner；glob
 - Counter、trace、fault record 默认低开销，trace sampling buffer 容量由后续规格冻结。
 
 ## 7. RTL/软件实现建议
+
+本节是未来硬件切分建议；当前参考模型不含这些 RTL 模块，软件类/函数不映射为已实现模块名。
 
 ### 7.1 RTL 切分
 
@@ -368,7 +387,7 @@ PMU 唯一归因规则：同一 cycle 只能有一个 primary stall owner；glob
 
 ### 8.2 系统 bring-up 验收
 
-First Silicon V1 顶层验收必须覆盖：
+本节各项是后续硬件 bring-up / RTL 验收目标，不是当前 1 Group × 4 Tile 软件参考模型已完成的芯片验收。模型可证明已实现调度路径中的容量、依赖、事件、Arena/lease 生命周期和受限传输协议；Host/NoC 物理闭环、真实 DMA/中断、CSR/CDC/RDC、RTL/SVA/formal 和器件性能仍需独立验证。First Silicon V1 顶层验收必须覆盖：
 
 1. command queue + event + barrier 最小闭环。
 2. DMA 1D/2D/strided copy + completion event。

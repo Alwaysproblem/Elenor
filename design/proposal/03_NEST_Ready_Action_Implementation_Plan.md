@@ -1,5 +1,7 @@
 # NEST Ready-Action 实施计划与循环记录
 
+> 本文保留设计演进/实施记录；当前调度与资源架构基线见[主架构规格](../ELENOR_Architecture_Design_v1.md)，源 IR 合同见[IR_SPEC](../../pipeline_validator/IR_SPEC.md)。原验收状态与数字仅对应本文记录的范围，不代表本轮新增 RTL 或性能验收。
+
 ## 1. 本轮目标与边界
 
 依据 `02_NEST_Ready_Action_Pipeline_Validator_Implementation_Review.md` 实施。Device 作为 CPU 软件控制模型独立，Group/Tile 作为未来 FPGA/RTL 的硬件行为模型独立；本轮交付是可执行 Python/xDSL 周期模型与证据，不声称已有 RTL、Fmax 或功耗结果。

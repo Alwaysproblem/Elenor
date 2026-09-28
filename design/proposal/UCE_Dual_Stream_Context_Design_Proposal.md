@@ -1,5 +1,7 @@
 # Tile UCE Dual-Context Execution Mode Proposal
 
+> 本文保留设计演进/实施记录；当前调度与资源架构基线见[主架构规格](../ELENOR_Architecture_Design_v1.md)，源 IR 合同见[IR_SPEC](../../pipeline_validator/IR_SPEC.md)。原验收状态与数字仅对应本文记录的范围，不代表本轮新增 RTL 或性能验收。
+
 版本：v0.2
 定位：**在不新增 group-level fetchable program object 的前提下**，为 resident Tile Programs 提供一个更可落地的 dual-context coroutine-style execution mode。
 状态：**architecture exploration / contract-convergence proposal**；First Silicon V1 仍以 `single-context + single-issue + in-order` Tile UCE 为 canonical cutline。
