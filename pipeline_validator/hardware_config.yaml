@@ -59,7 +59,7 @@ memory:
     capacity_bytes: 8388608 # 8 MB Balanced-small (12.3)
     banks: 16
     access_latency_cycles: 4 # 由 SRAM profile 冻结
-    bank_bandwidth_gbs: 12.8 # per-bank，由 SRAM profile 冻结
+    bank_bandwidth_gbs: 64 # per-bank，由 SRAM profile 冻结
     cache:
       lookup_latency_cycles: 4 # synthetic reference profile 40-74
       mshr_entries: 64 # synthetic reference profile 40-74
@@ -104,8 +104,8 @@ engines:
     pipeline_depth: 4 # per-channel descriptor-accept queue depth
 
     command_queues:
-      load_depth: 1 # UCE -> MFE load ingress FIFO
-      store_depth: 1 # UCE -> MFE store ingress FIFO
+      load_depth: 4 # UCE -> MFE load ingress FIFO
+      store_depth: 4 # UCE -> MFE store ingress FIFO
 
     channels:
       load: 1 # 并行 load channel 数，V1 基线 1；由 SRAM/NoC profile 冻结
@@ -130,8 +130,8 @@ control:
 fabric:
   # 当前 validator 的 group-level HBM <-> L2 DMA 模型。
   dma:
-    bandwidth_gbs: 204.8 # per-channel peak，frozen later
-    channels: 2
+    bandwidth_gbs: 256.0 # per-channel peak，frozen later
+    channels: 4
     launch_cycles: 2
     descriptor_cycles: 2 # T_desc
     issue_cycles: 1 # T_issue
