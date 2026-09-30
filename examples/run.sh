@@ -100,6 +100,13 @@ Runnable workloads:
                                  workloads/transformer_prefill_attention_multicontext.mlir
                                  (同一 prefill 的 4 个独立 query-block grids；
                                  R=4，非复制 4 个请求；--context-mode 4)
+  transformer-prefill-attention-dispatchparallel
+                                 workloads/transformer_prefill_attention_dispatchparallel_multicontext.mlir
+                                 (producer 程序去掉 software pipeline（在飞 load ≤2、
+                                 store 即时 drain、input_released 在最后一个 load 后），
+                                 并行改由 dispatch 数提供：Q 链 ∥ K/V 链 16 个 QKV
+                                 dispatch + 每块 outproj lo/hi 共 8 个；attention tail
+                                 与基线逐 op 相同)
   transformer-decode-kv-multicontext
                                  workloads/transformer_decode_kv_multicontext.mlir
                                  (单请求 split-KV 4 partitions + stable softmax
@@ -654,6 +661,22 @@ case "$name" in
   transformer-prefill-attention-multicontext)
     set -- \
       --ir-file "$ROOT_DIR/examples/workloads/transformer_prefill_attention_multicontext.mlir" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --context-mode 4 \
+      --group-policy s1 \
+      --input-binding X=0x1000000:1048576:r \
+      --input-binding WQ=0x2000000:2097152:r \
+      --input-binding WK=0x3000000:524288:r \
+      --input-binding WV=0x3100000:524288:r \
+      --input-binding WO=0x4000000:2097152:r \
+      --input-binding OUT=0x5000000:1048576:w \
+      --max-cycles 2000000 \
+      "$@"
+    ;;
+  transformer-prefill-attention-dispatchparallel)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/transformer_prefill_attention_dispatchparallel_multicontext.mlir" \
       --hw-override num_dma_channels=2 \
       --hw-override hbm_fixed_latency_cycles=10 \
       --context-mode 4 \

@@ -385,6 +385,51 @@ examples/artifacts/tools/trace_processor_shell \
   -q examples/generators/analyze_multicontext.sql
 ```
 
+## Dispatch 并行对照：`transformer_prefill_attention_dispatchparallel_multicontext.mlir`
+
+问题：multicontext 基线的三个 producer 程序（`qkv_chunk_init` /
+`qkv_chunk_accum` / `prefill_outproj_tile`）靠 **tile 程序内 software
+pipeline** 拿吞吐——Q store 与下一条 K BOA co-issue、`input_released` 在最后
+一条 BOA 之前提前发出让根级提前换装。本对照把这套 pipeline 从 producer 里
+**全部拆掉**，改用 dispatch 数量换并行：
+
+- producer 内不再流水：任意时刻在飞的 L1 load ≤2（权重 fill + 首个 X fill，
+  然后 X + 一份 partial）；每条 store 在下一条 BOA 之前 drain 完；
+  `input_released` 在最后一个 L2 load 之后才发。
+- 并行改由 dispatch 提供：Q 投影（写 `q_l2`）与 K/V 投影（写 `k_l2`/`v_l2`）
+  是独立分配，每个 input-K chunk 拆成两个互不争用的 Grid——16 个 QKV
+  dispatch 组成两条独立的 8 步链；每个 query block 的输出投影按 64 行
+  低/高两半各发一个 Grid（各自的输出 buffer），8 个互不争用的 outproj
+  dispatch；OUT 物理布局相应改为 `[qblock, half, head, row, feat]`
+  （每 (qblock,half) 一条整 buffer store，字节数与基线一致）。
+- attention 程序与基线逐 op 相同（归一化 SSA 后零 diff，有测试锁定）。
+- 28 个 Grid（基线 20），`GRID_WINDOW=8` 退休节流保持在 16 条 route 表内。
+
+### 实测（2026-09-30，R=4，同一套 flag）
+
+| 指标                           |    软件流水基线 |   dispatch 并行 |      变化 |
+| ------------------------------ | --------------: | --------------: | --------: |
+| cycles                         |         506,126 |         488,827 | **−3.4%** |
+| utilization                    |          100.0% |          100.0% |      持平 |
+| BOA active cycles（有用 MACs） |       1,844,224 |       1,844,224 |        0% |
+| EVU active cycles              |         100,864 |         100,864 |        0% |
+| MFE active cycles              |         245,386 |         305,512 |      +24% |
+| hbm_read / hbm_write_bytes     | 6.29 / 1.05 MiB | 6.29 / 1.05 MiB |      持平 |
+| dependency_stall_cycles        |       1,959,475 |       1,889,727 |     −3.6% |
+| memory_stall_cycles            |          97,550 |          60,866 |    −37.6% |
+| l2_read_bytes                  |      35,127,296 |      47,710,208 |    +35.8% |
+
+trace 证据：Q 链（Grid 4→199µs）与 K/V 链（5→214µs）重叠 193µs——两条链
+确实并行；`prefill_outproj_lo/hi`（345→478 / 345→486µs）同样重叠；每 tile
+Task lease 峰值 4。producer 拆成 Q/KV 两条链后，X staging 每 chunk 被
+两个 Grid 各读一次，MFE 的 L2→L1 读因此多约 2 MiB（+24%），但换来的是
+BOA 在 100% utilization 下更少的依赖停顿。
+
+结论：**在这份时序模型里，dispatch 级并行（多 Grid、独立 buffer）比
+producer 内 software pipeline 更有效**——把 pipeline 从 producer 拆掉、
+用 Q/KV 双链 + outproj 分半补回来，净收益 3.4%。前提是拆出来的 Grid
+必须写独立分配（整 buffer WAW 会把行/头维度的拆分重新串行化）。
+
 ## 边界
 
 Timing model only：`tile.boa.async` / `tile.evu.async` 不携带 tensor
