@@ -58,28 +58,32 @@ input bindings、context 数量、memory fidelity 和必要的硬件 override。
 
 ## 可运行 workload
 
-| 名称                                  | 编辑文件                                             | 主要路径                                                                                         |
-| ------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `gather`                              | `workloads/gather_profiled.mlir`                     | deterministic profiled Gather                                                                    |
-| `gather-matmul`                       | `workloads/gather_matmul.mlir`                       | Gather → BOA Matmul                                                                              |
-| `matmul-gather-add`                   | `workloads/matmul_gather_add.mlir`                   | BOA Matmul → Gather → EVU Add                                                                    |
-| `gather-matmul-4tiles-2contexts`      | `workloads/gather_matmul_4tiles_2contexts.mlir`      | `placement=15`，4 tiles × 2 contexts，Gather → Matmul                                            |
-| `matmul-gather-add-4tiles-2contexts`  | `workloads/matmul_gather_add_4tiles_2contexts.mlir`  | `placement=15`，4 tiles × 2 contexts，Matmul → Gather → Add                                      |
-| `pow-dual-context`                    | `workloads/pow_dual_context.mlir`                    | 两个同 shape context 并发                                                                        |
-| `pow-dual-context-mixed-shapes`       | `workloads/pow_dual_context_mixed_shapes.mlir`       | 两个不同 shape context 并发                                                                      |
-| `matmul-pow-parallel`                 | `workloads/matmul_pow_parallel.mlir`                 | 2 matmul + 2 pow context 全并发，BOA/EVU 并行                                                    |
-| `matmul-pow-free-slot`                | `workloads/matmul_pow_free_slot.mlir`                | matmul 先占满 slot，pow 等首个空槽提前调度                                                       |
-| `matmul-pow-data-dep`                 | `workloads/matmul_pow_data_dep.mlir`                 | pow 消费 matmul 输出 C，只等生产者、不过早也不过度串行                                           |
-| `matmul17-pow-tail-overlap`           | `workloads/matmul17_pow_tail_overlap.mlir`           | 17 个 tile context（4 x placement15 + 1 x placement1），pow 与尾 context 重叠                    |
-| `pow-sequential-contexts`             | `workloads/pow_sequential_contexts.mlir`             | 两个 context 串行提交                                                                            |
-| `matmul-2048x512-boa256`              | `workloads/matmul_2048x512x64_boa256x256x32.mlir`    | 2048x512x64 matmul，BOA 256x256x32，K tile 内展开，4 context                                     |
-| `reduce-sum-single-context`           | `workloads/reduce_sum_ktiled_single_context.mlir`    | 256x4096 Reduce-Sum，单 context：1 dispatch 4 task，K chunk 双缓冲 + f32 acc                     |
-| `reduce-sum-splitk-multicontext`      | `workloads/reduce_sum_splitk_multicontext.mlir`      | 256x16384 Reduce-Sum，split-K 跨 8 context 分区 + HBM 部分和 combine                             |
-| `reduce-sum-multiuce`                 | `workloads/reduce_sum_multiuce.mlir`                 | 512x4096 Reduce-Sum，UCE supertile × task 行块两级 M 分工，全 tile 4 context（--context-mode 4） |
-| `reduce-sum-gpu-tree`                 | `workloads/reduce_sum_gpu_tree.mlir`                 | 256x4096 Reduce-Sum，GPU reduce-tree：4 leaf 按 K 配对 + 两级合并树                              |
-| `reduce-sum-splitk-multiuce`          | `workloads/reduce_sum_splitk_multiuce.mlir`          | 256x4096 Reduce-Sum，全 tile 4 UCE context 沿 reduce axis 切分 + context-local L2 扁平合并       |
-| `matmul-splitk-pipeline`              | `workloads/matmul_splitk_pipeline.mlir`              | 256x256x512 matmul，reduce-K tiling 三级流水（split-K leaf + scratch 合并）                      |
-| `matmul-splitk-multicontext-pipeline` | `workloads/matmul_splitk_multicontext_pipeline.mlir` | 512x512x512 matmul，M/N 2×2 四 context；各 context 以 context-local L2 合并 split-K partial      |
+| 名称                                         | 编辑文件                                                    | 主要路径                                                                                                                                                                                            |
+| -------------------------------------------- | ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gather`                                     | `workloads/gather_profiled.mlir`                            | deterministic profiled Gather                                                                                                                                                                       |
+| `gather-matmul`                              | `workloads/gather_matmul.mlir`                              | Gather → BOA Matmul                                                                                                                                                                                 |
+| `matmul-gather-add`                          | `workloads/matmul_gather_add.mlir`                          | BOA Matmul → Gather → EVU Add                                                                                                                                                                       |
+| `gather-matmul-4tiles-2contexts`             | `workloads/gather_matmul_4tiles_2contexts.mlir`             | `placement=15`，4 tiles × 2 contexts，Gather → Matmul                                                                                                                                               |
+| `matmul-gather-add-4tiles-2contexts`         | `workloads/matmul_gather_add_4tiles_2contexts.mlir`         | `placement=15`，4 tiles × 2 contexts，Matmul → Gather → Add                                                                                                                                         |
+| `pow-dual-context`                           | `workloads/pow_dual_context.mlir`                           | 两个同 shape context 并发                                                                                                                                                                           |
+| `pow-dual-context-mixed-shapes`              | `workloads/pow_dual_context_mixed_shapes.mlir`              | 两个不同 shape context 并发                                                                                                                                                                         |
+| `matmul-pow-parallel`                        | `workloads/matmul_pow_parallel.mlir`                        | 2 matmul + 2 pow context 全并发，BOA/EVU 并行                                                                                                                                                       |
+| `matmul-pow-free-slot`                       | `workloads/matmul_pow_free_slot.mlir`                       | matmul 先占满 slot，pow 等首个空槽提前调度                                                                                                                                                          |
+| `matmul-pow-data-dep`                        | `workloads/matmul_pow_data_dep.mlir`                        | pow 消费 matmul 输出 C，只等生产者、不过早也不过度串行                                                                                                                                              |
+| `matmul17-pow-tail-overlap`                  | `workloads/matmul17_pow_tail_overlap.mlir`                  | 17 个 tile context（4 x placement15 + 1 x placement1），pow 与尾 context 重叠                                                                                                                       |
+| `pow-sequential-contexts`                    | `workloads/pow_sequential_contexts.mlir`                    | 两个 context 串行提交                                                                                                                                                                               |
+| `matmul-2048x512-boa256`                     | `workloads/matmul_2048x512x64_boa256x256x32.mlir`           | 2048x512x64 matmul，BOA 256x256x32，K tile 内展开，4 context                                                                                                                                        |
+| `reduce-sum-single-context`                  | `workloads/reduce_sum_ktiled_single_context.mlir`           | 256x4096 Reduce-Sum，单 context：1 dispatch 4 task，K chunk 双缓冲 + f32 acc                                                                                                                        |
+| `reduce-sum-splitk-multicontext`             | `workloads/reduce_sum_splitk_multicontext.mlir`             | 256x16384 Reduce-Sum，split-K 跨 8 context 分区 + HBM 部分和 combine                                                                                                                                |
+| `reduce-sum-multiuce`                        | `workloads/reduce_sum_multiuce.mlir`                        | 512x4096 Reduce-Sum，UCE supertile × task 行块两级 M 分工，全 tile 4 context（--context-mode 4）                                                                                                    |
+| `reduce-sum-gpu-tree`                        | `workloads/reduce_sum_gpu_tree.mlir`                        | 256x4096 Reduce-Sum，GPU reduce-tree：4 leaf 按 K 配对 + 两级合并树                                                                                                                                 |
+| `reduce-sum-splitk-multiuce`                 | `workloads/reduce_sum_splitk_multiuce.mlir`                 | 256x4096 Reduce-Sum，全 tile 4 UCE context 沿 reduce axis 切分 + context-local L2 扁平合并                                                                                                          |
+| `matmul-splitk-pipeline`                     | `workloads/matmul_splitk_pipeline.mlir`                     | 256x256x512 matmul，reduce-K tiling 三级流水（split-K leaf + scratch 合并）                                                                                                                         |
+| `matmul-splitk-multicontext-pipeline`        | `workloads/matmul_splitk_multicontext_pipeline.mlir`        | 512x512x512 matmul，M/N 2×2 四 context；各 context 以 context-local L2 合并 split-K partial                                                                                                         |
+| `transformer-prefill-attention`              | `workloads/transformer_prefill_attention_pipeline.mlir`     | Transformer Prefill attention block（GQA 16:4，seq=512）：单 root 内 QKV K-chunk 流水 + 4×4 blocked attention（L1 KV ping/pong）+ Wo prefetch overlap + N-split 输出投影；baseline 对照 `_baseline` |
+| `transformer-decode-kv`                      | `workloads/transformer_decode_kv_pipeline.mlir`             | Decode step @valid_len=2048：8 个 KV block L2 ping/pong 流水 + online softmax state + fixed-position KV append；baseline 对照 `_baseline`；生成器在 `generators/`                                   |
+| `transformer-prefill-attention-multicontext` | `workloads/transformer_prefill_attention_multicontext.mlir` | 单次 Prefill 四 query-row grids，默认每 tile 两 UCE contexts，共享 Q/K/V 与 WO                                                                                                                      |
+| `transformer-decode-kv-multicontext`         | `workloads/transformer_decode_kv_multicontext.mlir`         | 单请求 split-KV 四分区 + stable merge；默认两 UCE contexts，显式 HBM channel-aware packet packing                                                                                                   |
 
 多 context trace：
 
@@ -243,6 +247,49 @@ final L1 buffer
   → nest.dma.store.async
   → writable HBM output binding
 ```
+
+## Transformer workload 组（timing-only）
+
+`workloads/transformer_*.mlir` 由 `generators/generate_transformer_prefill.py`
+/ `generate_transformer_decode.py` 生成（生成器确定性；不要手改生成的
+MLIR，改参数后重新生成）。文件顶部注明：validator 是 timing/resource
+模型，`tile.boa.async`/`tile.evu.async` 不携带 tensor operand，不验证
+数值正确性。
+
+- **Prefill**（seq=512, GQA 16:4, BF16）：单 root。QKV 投影按 K=128 分 8 个
+  chunk，L2 ping/pong prefetch 与 BOA accumulate 流水；attention 每 tile
+  4 query block × 4 KV block，L1 KV ping/pong（per-head BOA QK + EVU
+  online softmax + BOA PV）；Wo prefetch 门控在最后 chunk 的
+  `input_released` 上与 attention 重叠；输出投影 N-split（Wo N-packed）。
+  baseline 变体逐 chunk `prefetch → nest.await → dispatch → nest.await`
+  串行。`analyze_transformer.py` 输出 useful BOA utilization 等指标。
+- **Decode**（valid_len=2048, KV_BLOCK=256）：8 个 KV block 静态展开，
+  L2 ping/pong：`prefetch(b+2)` 门控 `input_released(b)`，`dispatch(b+1)`
+  另需 `output_ready(b)`（online softmax state 经 context-local L2 state
+  buffer 循环携带）；`kv_append_tile` 把当前 token 的 K/V 写入静态
+  append 位置（K_APPEND/V_APPEND）。`actual_II`、`pipeline_efficiency`
+  见 `analyze_transformer.py --decode-trace`。
+
+```bash
+bash examples/run.sh transformer-decode-kv \
+  --memory-trace --trace-json /tmp/dec.json --json
+python examples/generators/analyze_transformer.py \
+  --decode /tmp/pipe.report.json /tmp/base.report.json \
+  --decode-trace /tmp/dec.json
+```
+
+同一请求内部的 multicontext 优化（不是增加 `num_requests`）：
+
+```bash
+bash examples/run.sh transformer-prefill-attention-multicontext --memory-trace --json
+bash examples/run.sh transformer-decode-kv-multicontext --memory-trace --json
+```
+
+两个入口默认 `--context-mode 2`，没有增大硬件带宽或 Group queue capacity。
+生成器、R1/R2/R4 消融、物理 packing/binding 变化、性能归因与 Perfetto
+并发检查见 [generator README](generators/README.md#单请求内-multicontext-优化)。
+Decode 的 packet/channel 放置收益必须与 UCE multicontext 收益分开；
+旧串行 KV-block II 分析公式不能直接用于 split-KV completion 顺序。
 
 ## 协议场景
 

@@ -123,6 +123,8 @@
 
 ## R3
 
+- 当前的 input release 或者 output release 在 tile program 中粒度是在太粗是不是适合硬件设计需要考量，还有考虑是否需要按照 buffer 的名字进行 release
+
 ## example
 
 ## 需要调研的问题 （2026-09-25：第 1、2 条已由实现闭环 ✅ ｜ 第 3 条编译器无法预知调度/SPM 占用 ❌ 仍开放）

@@ -45,6 +45,8 @@ class WorkloadReport:
   profile: dict = field(default_factory=dict)
   arenas: dict = field(default_factory=dict)
   task_leases: dict = field(default_factory=dict)
+  traffic: dict = field(default_factory=dict)  # per-interface completed bytes
+  stall_categories: dict = field(default_factory=dict)  # guide KPI grouping
 
 
 def _ratio(counters: dict, total: int) -> float:
@@ -317,6 +319,28 @@ def build_report(wl: WorkloadInfo, result: SimResult, num_tiles: int = 4) -> Wor
     ),
   }
   request_timing = _request_timing_summary(device_raw)
+  traffic = {
+    name: value for name, value in sorted(pmu.events.items()) if name.endswith("_bytes")
+  }
+  stall_labels = pmu.stall_breakdown()
+  stall_cycles = pmu.named_cycles
+  # WAIT_OPERAND is the same physical stall as engine_queue_full (tile.py
+  # attributes engine-queue retries to WAIT_OPERAND), so dependency stall
+  # counts only WAIT_EVENT to keep the categories disjoint.
+  stall_categories = {
+    "admission_stall_cycles": stall_cycles.get("group_admission_wait_cycles", 0),
+    "dependency_stall_cycles": stall_labels.get("engine_wait_event", 0),
+    "engine_queue_stall_cycles": stall_cycles.get("engine_queue_full", 0),
+    "memory_stall_cycles": (
+      stall_cycles.get("l1_bank_wait", 0)
+      + stall_cycles.get("l1_cache_wait", 0)
+      + stall_cycles.get("l2_bank_wait", 0)
+      + stall_cycles.get("l2_cache_wait", 0)
+      + stall_cycles.get("noc_credit_wait", 0)
+      + stall_cycles.get("dma_queue_wait", 0)
+      + stall_cycles.get("hbm_outstanding_wait", 0)
+    ),
+  }
   profile_raw = result.group_snapshot.get("profile")
   if not isinstance(profile_raw, Mapping):
     profile_raw = {}
@@ -367,6 +391,8 @@ def build_report(wl: WorkloadInfo, result: SimResult, num_tiles: int = 4) -> Wor
     profile=_bounded_snapshot(profile_raw, name="profile"),
     arenas=_bounded_snapshot(arenas_raw, name="arenas"),
     task_leases=_bounded_snapshot(task_leases_raw, name="task_leases"),
+    traffic=traffic,
+    stall_categories=stall_categories,
   )
 
 
@@ -701,7 +727,17 @@ def report_to_text(r: WorkloadReport, *, detailed: bool = False) -> str:
         lines.append(f"    {key:<30}: {inner}")
       else:
         lines.append(f"    {key:<30}: {value}")
-  lines.append("")
+    lines.append("")
+  if r.traffic:
+    lines.append("  Traffic (completed bytes per interface):")
+    for key, value in r.traffic.items():
+      lines.append(f"    {key:<30}: {value}")
+    lines.append("")
+  if r.stall_categories:
+    lines.append("  Stall categories:")
+    for key, value in r.stall_categories.items():
+      lines.append(f"    {key:<30}: {value}")
+    lines.append("")
   if detailed:
     _append_report_section(lines, "Configured/effective resources", r.resources)
     if r.profile:
@@ -775,6 +811,8 @@ def report_to_json(r: WorkloadReport) -> str:
       "registry_hash": r.registry_hash,
       "engine_active": r.engine_active,
       "stall_breakdown": r.stall_breakdown,
+      "stall_categories": r.stall_categories,
+      "traffic": r.traffic,
       "stream_counters": r.stream_counters,
       "events": r.events,
       "memory": r.memory,

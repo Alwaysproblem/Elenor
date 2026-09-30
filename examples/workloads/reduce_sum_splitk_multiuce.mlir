@@ -214,15 +214,20 @@ builtin.module {
       %y_l2 : !nest.l2_buffer<4x64xf32>)
                 resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
           tile_l1_spm_bytes_per_context = 8192> {
-    %q0_v = tile.subview %q0_l2 task = %task task_dim = 0 offsets = [0, 0] sizes = [1, 64] strides = [1, 1]
+    %q0_v = tile.subview %q0_l2 task = %task task_dim = 0 offsets = [0, 0] sizes = [1, 64]
+      strides = [1, 1]
         : !nest.l2_view<1x64xf32>
-    %q1_v = tile.subview %q1_l2 task = %task task_dim = 0 offsets = [0, 0] sizes = [1, 64] strides = [1, 1]
+    %q1_v = tile.subview %q1_l2 task = %task task_dim = 0 offsets = [0, 0] sizes = [1, 64]
+      strides = [1, 1]
         : !nest.l2_view<1x64xf32>
-    %q2_v = tile.subview %q2_l2 task = %task task_dim = 0 offsets = [0, 0] sizes = [1, 64] strides = [1, 1]
+    %q2_v = tile.subview %q2_l2 task = %task task_dim = 0 offsets = [0, 0] sizes = [1, 64]
+      strides = [1, 1]
         : !nest.l2_view<1x64xf32>
-    %q3_v = tile.subview %q3_l2 task = %task task_dim = 0 offsets = [0, 0] sizes = [1, 64] strides = [1, 1]
+    %q3_v = tile.subview %q3_l2 task = %task task_dim = 0 offsets = [0, 0] sizes = [1, 64]
+      strides = [1, 1]
         : !nest.l2_view<1x64xf32>
-    %y_v = tile.subview %y_l2 task = %task task_dim = 0 offsets = [0, 0] sizes = [1, 64] strides = [1, 1]
+    %y_v = tile.subview %y_l2 task = %task task_dim = 0 offsets = [0, 0] sizes = [1, 64]
+      strides = [1, 1]
         : !nest.l2_view<1x64xf32>
     %qa = tile.alloc shape = [1, 64] dtype = "f32"
         alignment = 64 : !tile.l1_buffer<1x64xf32>

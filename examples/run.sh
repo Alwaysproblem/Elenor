@@ -79,6 +79,33 @@ Runnable workloads:
                                  每个 context 的 split-K partial 在 L2 本地合并；
                                  --context-mode 4 --device-context-mode 4)
 
+  transformer-prefill-attention
+                                 workloads/transformer_prefill_attention_pipeline.mlir
+                                 (512 token prefill attention block，单 root：
+                                 QKV K-chunk 流水 + blocked attention
+                                 (4x4, L1 KV ping/pong) + Wo prefetch overlap +
+                                 N-split output projection；timing-only)
+  transformer-prefill-attention-baseline
+                                 workloads/transformer_prefill_attention_baseline.mlir
+                                 (同一 workload 的逐 chunk 串行对照：
+                                 prefetch -> await -> dispatch -> await)
+  transformer-decode-kv          workloads/transformer_decode_kv_pipeline.mlir
+                                 (decode step @valid_len=2048，8 个 KV block
+                                 L2 ping/pong 流水 + online softmax state +
+                                 fixed-position KV append；测 KV block II)
+  transformer-decode-kv-baseline workloads/transformer_decode_kv_baseline.mlir
+                                 (逐 block prefetch->await->dispatch->await
+                                 串行对照)
+  transformer-prefill-attention-multicontext
+                                 workloads/transformer_prefill_attention_multicontext.mlir
+                                 (同一 prefill 的 4 个独立 query-block grids；
+                                 R=4，非复制 4 个请求；--context-mode 4)
+  transformer-decode-kv-multicontext
+                                 workloads/transformer_decode_kv_multicontext.mlir
+                                 (单请求 split-KV 4 partitions + stable softmax
+                                 merge；KV packet 64B gap 分散 HBM channel；
+                                 --context-mode 4)
+
 Protocol scenarios:
   ready-action-branch           scenarios/ready_action_branch.mlir
   device-dependency-submit      scenarios/device_dependency_submit.mlir
@@ -557,6 +584,108 @@ case "$name" in
       --input-binding A_OUT=0x200000:131072:rw \
       --input-binding B_IN=0x300000:131072:r \
       --max-cycles 300000 \
+      "$@"
+    ;;
+  transformer-prefill-attention)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/transformer_prefill_attention_pipeline.mlir" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --input-binding X=0x1000000:1048576:r \
+      --input-binding WQ=0x2000000:2097152:r \
+      --input-binding WK=0x3000000:524288:r \
+      --input-binding WV=0x3100000:524288:r \
+      --input-binding WO=0x4000000:2097152:r \
+      --input-binding OUT=0x5000000:1048576:w \
+      --max-cycles 2000000 \
+      "$@"
+    ;;
+  transformer-prefill-attention-baseline)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/transformer_prefill_attention_baseline.mlir" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --group-policy s0 \
+      --input-binding X=0x1000000:1048576:r \
+      --input-binding WQ=0x2000000:2097152:r \
+      --input-binding WK=0x3000000:524288:r \
+      --input-binding WV=0x3100000:524288:r \
+      --input-binding WO=0x4000000:2097152:r \
+      --input-binding OUT=0x5000000:1048576:w \
+      --max-cycles 2000000 \
+      "$@"
+    ;;
+  transformer-decode-kv)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/transformer_decode_kv_pipeline.mlir" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --input-binding K_CACHE=0x1000000:1048576:r \
+      --input-binding V_CACHE=0x2000000:1048576:r \
+      --input-binding Q_IN=0x3000000:2048:r \
+      --input-binding S_INIT=0x3001000:4224:rw \
+      --input-binding OUT=0x3010000:4096:w \
+      --input-binding H_T=0x3011000:2048:r \
+      --input-binding WK_A=0x3012000:524288:r \
+      --input-binding WV_A=0x3092000:524288:r \
+      --input-binding K_APPEND=0x3200000:512:w \
+      --input-binding V_APPEND=0x3201000:512:w \
+      --max-cycles 400000 \
+      "$@"
+    ;;
+  transformer-decode-kv-baseline)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/transformer_decode_kv_baseline.mlir" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --input-binding K_CACHE=0x1000000:1048576:r \
+      --input-binding V_CACHE=0x2000000:1048576:r \
+      --input-binding Q_IN=0x3000000:2048:r \
+      --input-binding S_INIT=0x3001000:4224:rw \
+      --input-binding OUT=0x3010000:4096:w \
+      --input-binding H_T=0x3011000:2048:r \
+      --input-binding WK_A=0x3012000:524288:r \
+      --input-binding WV_A=0x3092000:524288:r \
+      --input-binding K_APPEND=0x3200000:512:w \
+      --input-binding V_APPEND=0x3201000:512:w \
+      --max-cycles 400000 \
+      "$@"
+    ;;
+  transformer-prefill-attention-multicontext)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/transformer_prefill_attention_multicontext.mlir" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --context-mode 4 \
+      --group-policy s1 \
+      --input-binding X=0x1000000:1048576:r \
+      --input-binding WQ=0x2000000:2097152:r \
+      --input-binding WK=0x3000000:524288:r \
+      --input-binding WV=0x3100000:524288:r \
+      --input-binding WO=0x4000000:2097152:r \
+      --input-binding OUT=0x5000000:1048576:w \
+      --max-cycles 2000000 \
+      "$@"
+    ;;
+  transformer-decode-kv-multicontext)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/transformer_decode_kv_multicontext.mlir" \
+      --hw-override num_dma_channels=2 \
+      --hw-override hbm_fixed_latency_cycles=10 \
+      --context-mode 4 \
+      --group-policy s1 \
+      --input-binding K_CACHE_mc=0x1000000:1049088:r \
+      --input-binding V_CACHE_mc=0x2000040:1049088:r \
+      --input-binding Q_IN_mc=0x3000000:2048:r \
+      --input-binding S_INIT_STATE_mc=0x3001000:512:r \
+      --input-binding S_INIT_OUT_mc=0x3002000:16384:r \
+      --input-binding OUT_mc=0x3010000:4096:w \
+      --input-binding H_T_mc=0x3011000:2048:r \
+      --input-binding WK_A_mc=0x3012000:524288:r \
+      --input-binding WV_A_mc=0x3092000:524288:r \
+      --input-binding K_APPEND_mc=0x3200000:512:w \
+      --input-binding V_APPEND_mc=0x3201000:512:w \
+      --max-cycles 400000 \
       "$@"
     ;;
   file)

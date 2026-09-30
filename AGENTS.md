@@ -252,7 +252,13 @@ commits are blocked on lint or type errors.
 - **Type checker:** mypy (zero errors required; run via pre-commit).
 - **Pre-commit:** `conda run -n elenor-validator pre-commit run -a` runs the
   full gate before commit. Installed hooks: ruff, mypy, prettier,
-  trailing-whitespace, end-of-file-fixer, check-yaml.
+  trailing-whitespace, end-of-file-fixer, check-yaml, format-mlir
+  (local hook running `python3 scripts/format_mlir.py`).
+- **MLIR formatting:** `conda run -n elenor-validator python scripts/format_mlir.py
+[--check] [PATH ...]` wraps >100-column lines in `examples/**/*.mlir`
+  (token-preserving; idempotent). `scripts/format_mlir.py` is the stdlib-only
+  implementation (imported by the generators' `write_workload` via
+  `PYTHONPATH=.`, so regenerated workload fixtures stay wrapped).
 - **Package manager:** pip within the conda environment; no `pyproject.toml` yet.
 - **PDF export:** Docker image `alwaysproblem/pandoc`, Pandoc with `xelatex`,
   `eisvogel.latex` template at `gen_docs_config/eisvogel.latex`.

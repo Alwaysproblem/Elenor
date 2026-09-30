@@ -932,6 +932,7 @@ class TileGroup:
       resource = ticket.wait_resource or "l2"
       self.pmu.add_event(f"{resource}_admission_wakeup")
       self.pmu.add_cycle(f"{resource}_admission_wait_cycles", cycle - ticket.enqueue_cycle)
+      self.pmu.add_cycle("group_admission_wait_cycles", cycle - ticket.enqueue_cycle)
     seq.admission_status = ContextAdmissionStatus.ACTIVE
     seq.admission_wait_start_cycle = None
     self._live_launches[(seq.context_name, seq.device_slot, seq.context_launch_generation)] = seq
@@ -1891,6 +1892,8 @@ class TileGroup:
     self.pmu.add_cycle("l1_cache_wait", l1_cache_wait)
     self.pmu.add_cycle("hbm_outstanding_wait", tm._hbm_read.wait_cycles + tm._hbm_write.wait_cycles)
     self.pmu.add_cycle("hbm_outstanding_peak", tm.pmu_hbm_outstanding_peak)
+    for name, value in sorted(tm.consume_byte_deltas().items()):
+      self.pmu.add_event(name, value)
     # reset component counters so next cycle records only the delta
     tm.pmu_issued_count = 0
     tm.pmu_completed_count = 0

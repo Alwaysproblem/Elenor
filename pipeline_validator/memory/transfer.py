@@ -466,6 +466,23 @@ class TransferManager:
     self.pmu_hbm_outstanding_peak: int = 0
     # all-time max (never reset per cycle) for snapshot reconciliation
     self.pmu_hbm_outstanding_peak_max: int = 0
+    # Completed-transaction bytes per interface (one entry per leg kind).
+    # ``_byte_deltas`` holds the delta since the last TileGroup._aggregate_pmu
+    # call; ``pmu_bytes_total`` is cumulative for the run snapshot.
+    self._byte_counters: dict[TransferLegKind, str] = {
+      TransferLegKind.HBM_READ: "hbm_read_bytes",
+      TransferLegKind.HBM_WRITE: "hbm_write_bytes",
+      TransferLegKind.GLOBAL_DMA: "global_dma_bytes",
+      TransferLegKind.NOC_REQUEST: "noc_request_bytes",
+      TransferLegKind.NOC_RESPONSE: "noc_response_bytes",
+      TransferLegKind.L2_READ: "l2_read_bytes",
+      TransferLegKind.L2_WRITE: "l2_write_bytes",
+      TransferLegKind.LOCAL_DMA: "local_dma_bytes",
+      TransferLegKind.L1_READ: "l1_read_bytes",
+      TransferLegKind.L1_WRITE: "l1_write_bytes",
+    }
+    self._byte_deltas: dict[str, int] = {}
+    self.pmu_bytes_total: dict[str, int] = {}
     self._issued_by_op: dict[str, int] = {}
     # One global outstanding CAM/credit pool shared by HBM reads+writes.
     self._hbm_outstanding_txns: set[str] = set()
@@ -1414,7 +1431,31 @@ class TransferManager:
       txn.completed_cycle = cycle
       self._record_terminal(txn.transaction_id, TransferStatus.DONE)
       self.pmu_completed_count += 1
+      self._count_transaction_bytes(txn)
       completed.append(txn)
+
+  def _count_transaction_bytes(self, txn: MemoryTransaction) -> None:
+    """Attribute one completed transaction's bytes to each traversed leg.
+
+    Every leg of the route carries the full transaction payload, so the
+    counters measure bytes crossing each interface (HBM, Global DMA, NoC,
+    L2 bank ports, tile-local DMA, L1 ports) rather than unique data
+    volume.  Cache-internal lookup/fill legs are not counted.
+    """
+    for leg in txn.legs:
+      name = self._byte_counters.get(leg.kind)
+      if name is None:
+        continue
+      self._byte_deltas[name] = self._byte_deltas.get(name, 0) + txn.bytes_total
+      self.pmu_bytes_total[name] = self.pmu_bytes_total.get(name, 0) + txn.bytes_total
+
+  def consume_byte_deltas(self) -> dict[str, int]:
+    """Return and clear the per-interface byte deltas completed this tick."""
+    if not self._byte_deltas:
+      return {}
+    deltas = dict(self._byte_deltas)
+    self._byte_deltas.clear()
+    return deltas
 
   def has_inflight_access(self, handle: AllocationHandle) -> bool:
     """Return whether an unfinished transaction references ``handle``.
@@ -1723,6 +1764,8 @@ class TransferManager:
     self.pmu_noc_credit_wait_cycles = 0
     self.pmu_hbm_outstanding_peak = 0
     self.pmu_hbm_outstanding_peak_max = 0
+    self._byte_deltas.clear()
+    self.pmu_bytes_total.clear()
     self._issued_by_op.clear()
 
   @property
@@ -1776,6 +1819,7 @@ class TransferManager:
       "cancelled_total": self.pmu_cancelled_count,
       "faulted_total": self.pmu_faulted_count,
       "noc_credit_wait_cycles": self.pmu_noc_credit_wait_cycles,
+      "byte_counters": dict(sorted(self.pmu_bytes_total.items())),
       "hbm_outstanding": len(self._hbm_outstanding_txns),
       "hbm_outstanding_peak": self.pmu_hbm_outstanding_peak_max,
       "issued_by_op": dict(self._issued_by_op),
