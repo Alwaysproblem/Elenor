@@ -102,9 +102,11 @@ Runnable workloads:
                                  R=4，非复制 4 个请求；--context-mode 4)
   transformer-prefill-attention-dispatchparallel
                                  workloads/transformer_prefill_attention_dispatchparallel_multicontext.mlir
-                                 (producer 程序去掉 software pipeline（在飞 load ≤2、
-                                 store 即时 drain、input_released 在最后一个 load 后），
-                                 并行改由 dispatch 数提供：Q 链 ∥ K/V 链 16 个 QKV
+                                 (producer 程序不做 load 提前流水、所有 tile.await
+                                 下沉到最后依赖安全点：weight 与首个 X/部分和并发、
+                                 store 与下一独立 fill 并发、store 不与未完成 BOA
+                                 并发、input_released 仍在最后一个 load 后；并行改由
+                                 dispatch 数提供：Q 链 ∥ K/V 链 16 个 QKV
                                  dispatch + 每块 outproj lo/hi 共 8 个；attention tail
                                  与基线逐 op 相同)
   transformer-decode-kv-multicontext

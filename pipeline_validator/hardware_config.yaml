@@ -79,7 +79,7 @@ memory:
 engines:
   boa:
     opa:
-      count: 4
+      count: 8
       rows: 16
       cols: 16
 

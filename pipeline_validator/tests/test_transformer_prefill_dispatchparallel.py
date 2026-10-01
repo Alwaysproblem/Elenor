@@ -1,11 +1,15 @@
 """Structural invariants of the dispatch-parallel prefill comparison workload.
 
-The example's claim is precise: the three producer programs contain no
-software pipelining (at most two loads in flight, every store drained before
-the next BOA, ``input_released`` after the final load), and the parallelism
-they gave up is recovered by independent Grids — a Q chain and a K/V chain on
-separate allocations plus per-half output projections.  All of that is visible
-in the IR without running a simulation.
+The example's claim is precise: the three producer programs do no load
+hoisting (no fill is issued across the BOA that reads its buffer, so
+``input_released`` still fires after the final L2 load) and every
+``tile.await`` is sunk to the last dependency-safe point — the weight fill
+co-issues with the first X fill plus the first partials behind one merged
+await, each store overlaps the next independent fill, and no store ever
+co-issues with an outstanding BOA.  The parallelism the producers gave up is
+recovered by independent Grids — a Q chain and a K/V chain on separate
+allocations plus per-half output projections.  All of that is visible in the
+IR without running a simulation.
 """
 
 from __future__ import annotations
@@ -39,6 +43,12 @@ PRODUCERS = (
   "qkv_kv_accum",
   "prefill_outproj_lo",
   "prefill_outproj_hi",
+)
+QKV_PRODUCERS = (
+  "qkv_q_init",
+  "qkv_q_accum",
+  "qkv_kv_init",
+  "qkv_kv_accum",
 )
 _TILE_OP = re.compile(
   r"tile\.(load|store|boa|evu)\.async|tile\.await|tile\.signal (input_released|output_ready)"
@@ -96,32 +106,52 @@ def dispatch_module():
 
 
 @pytest.mark.parametrize("program", PRODUCERS)
-def test_producers_never_overlap_more_than_two_loads(dispatch_module, program):
-  """At most two L1 loads may be in flight before any await."""
-  in_flight = 0
-  for kind in _tile_ops(_program_bodies(DISPATCH)[program]):
-    if kind in ("load", "boa", "store"):
-      in_flight += 1
-      if kind == "load":
-        assert in_flight <= 2, f"{program} has {in_flight} loads in flight"
-    elif kind == "await":
-      in_flight = 0
-  assert in_flight <= 2
+def test_producers_issue_the_first_fills_before_any_await(dispatch_module, program):
+  """The weight fill co-issues with the first X fill (plus first partials)."""
+  ops = _tile_ops(_program_bodies(DISPATCH)[program])
+  first_await = ops.index("await")
+  loads_before = sum(1 for kind in ops[:first_await] if kind == "load")
+  assert loads_before >= 2, f"{program} awaits before the weight and X fills overlap"
 
 
 @pytest.mark.parametrize("program", PRODUCERS)
-def test_producers_drain_every_store_before_the_next_compute(dispatch_module, program):
-  """No store may co-issue with a following BOA (that was the baseline pipeline)."""
+def test_producers_keep_fill_bursts_bounded(dispatch_module, program):
+  """Sinking still honors the single-buffer WAR chain: at most five fills."""
+  in_flight = 0
+  for kind in _tile_ops(_program_bodies(DISPATCH)[program]):
+    if kind == "load":
+      in_flight += 1
+      assert in_flight <= 5, f"{program} has {in_flight} loads in flight"
+    elif kind == "await":
+      in_flight = 0
+
+
+@pytest.mark.parametrize("program", PRODUCERS)
+def test_producers_never_issue_a_store_under_an_outstanding_boa(dispatch_module, program):
+  """RAW on the accumulator: a store waits for its own BOA's await."""
+  outstanding_boas = 0
+  for kind in _tile_ops(_program_bodies(DISPATCH)[program]):
+    if kind == "boa":
+      outstanding_boas += 1
+    elif kind == "store":
+      assert outstanding_boas == 0, f"{program} stores under an outstanding BOA"
+    elif kind == "await":
+      outstanding_boas = 0
+
+
+@pytest.mark.parametrize("program", QKV_PRODUCERS)
+def test_producers_co_issue_every_store_with_the_next_fill(dispatch_module, program):
+  """The sunk stores overlap a later independent fill (the old drain is gone)."""
+  overlapped = False
   pending_store = False
   for kind in _tile_ops(_program_bodies(DISPATCH)[program]):
     if kind == "store":
       pending_store = True
     elif kind == "await":
       pending_store = False
-    elif kind == "boa":
-      assert not pending_store, f"{program} issues a BOA before draining a store"
-    elif kind == "input_released":
-      assert not pending_store
+    elif kind == "load" and pending_store:
+      overlapped = True
+  assert overlapped, f"{program} never overlaps a store with a later fill"
 
 
 @pytest.mark.parametrize("program", PRODUCERS)

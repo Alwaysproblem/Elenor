@@ -2,15 +2,17 @@
 //
 // Same logical shapes, packing and attention tail as
 // transformer_prefill_attention_multicontext.mlir; the three producer programs
-// drop software pipelining and the schedule compensates with more Grids:
+// drop load hoisting and the schedule compensates with more Grids:
 //
-// No software pipeline inside the producers:
-// - at most two L1 loads are ever in flight (a weight fill plus the first X
-//   fill, then X plus one accumulated partial);
-// - every store drains before the next BOA is issued (the baseline overlaps
-//   the Q store with the K BOA);
-// - input_released fires only after the final L2 load, so staging recycling
-//   cannot start early.
+// No load hoisting inside the producers; every tile.await is sunk to the
+// last dependency-safe point:
+// - the weight fill co-issues with the first X fill (plus the first
+//   accumulated partials), behind one merged await before the first BOA;
+// - each store issues as soon as its own BOA has been awaited and overlaps
+//   the next independent fill (the K store co-issues with the V BOA);
+// - no store ever co-issues with an outstanding BOA and no load is hoisted
+//   across the BOA that reads its buffer, so input_released still fires only
+//   after the final L2 load and staging recycling cannot start early.
 //
 // Parallelism comes from dispatch count instead:
 // - the Q projection (writes q_l2) and the K/V projection (writes k_l2/v_l2)
@@ -48,81 +50,73 @@ builtin.module {
     %0 = tile.subview %wq_chunk task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 128, 256]
       strides = [1, 1, 1] : !nest.l2_view<1x128x256xbf16>
     %wq_loaded = tile.load.async %0 into %wq_buf : !tile.event<"wq_loaded">
-    tile.await %wq_loaded
     %1 = tile.subview %x_chunk offsets = [0, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded = tile.load.async %1 into %x_buf : !tile.event<"x_loaded_0">
-    tile.await %x_loaded
+    tile.await %x_loaded, %wq_loaded
     %2 = tile.subview %q_l2 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 256]
       strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %q_boa = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 : !tile.event<"q_boa_0">
     tile.await %q_boa
     %q_stored = tile.store.async %q_acc into %2 : !tile.event<"q_stored_0">
-    tile.await %q_stored
     %3 = tile.subview %x_chunk offsets = [64, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_1 = tile.load.async %3 into %x_buf : !tile.event<"x_loaded_1">
-    tile.await %x_loaded_1
+    tile.await %x_loaded_1, %q_stored
     %4 = tile.subview %q_l2 task = %task task_dim = 0 offsets = [0, 64, 0] sizes = [1, 64, 256]
       strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %q_boa_1 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 : !tile.event<"q_boa_1">
     tile.await %q_boa_1
     %q_stored_1 = tile.store.async %q_acc into %4 : !tile.event<"q_stored_1">
-    tile.await %q_stored_1
     %5 = tile.subview %x_chunk offsets = [128, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_2 = tile.load.async %5 into %x_buf : !tile.event<"x_loaded_2">
-    tile.await %x_loaded_2
+    tile.await %x_loaded_2, %q_stored_1
     %6 = tile.subview %q_l2 task = %task task_dim = 0 offsets = [0, 128, 0] sizes = [1, 64, 256]
       strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %q_boa_2 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 : !tile.event<"q_boa_2">
     tile.await %q_boa_2
     %q_stored_2 = tile.store.async %q_acc into %6 : !tile.event<"q_stored_2">
-    tile.await %q_stored_2
     %7 = tile.subview %x_chunk offsets = [192, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_3 = tile.load.async %7 into %x_buf : !tile.event<"x_loaded_3">
-    tile.await %x_loaded_3
+    tile.await %x_loaded_3, %q_stored_2
     %8 = tile.subview %q_l2 task = %task task_dim = 0 offsets = [0, 192, 0] sizes = [1, 64, 256]
       strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %q_boa_3 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 : !tile.event<"q_boa_3">
     tile.await %q_boa_3
     %q_stored_3 = tile.store.async %q_acc into %8 : !tile.event<"q_stored_3">
-    tile.await %q_stored_3
     %9 = tile.subview %x_chunk offsets = [256, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_4 = tile.load.async %9 into %x_buf : !tile.event<"x_loaded_4">
-    tile.await %x_loaded_4
+    tile.await %x_loaded_4, %q_stored_3
     %10 = tile.subview %q_l2 task = %task task_dim = 0 offsets = [0, 256, 0] sizes = [1, 64, 256]
       strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %q_boa_4 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 : !tile.event<"q_boa_4">
     tile.await %q_boa_4
     %q_stored_4 = tile.store.async %q_acc into %10 : !tile.event<"q_stored_4">
-    tile.await %q_stored_4
     %11 = tile.subview %x_chunk offsets = [320, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_5 = tile.load.async %11 into %x_buf : !tile.event<"x_loaded_5">
-    tile.await %x_loaded_5
+    tile.await %x_loaded_5, %q_stored_4
     %12 = tile.subview %q_l2 task = %task task_dim = 0 offsets = [0, 320, 0] sizes = [1, 64, 256]
       strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %q_boa_5 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 : !tile.event<"q_boa_5">
     tile.await %q_boa_5
     %q_stored_5 = tile.store.async %q_acc into %12 : !tile.event<"q_stored_5">
-    tile.await %q_stored_5
     %13 = tile.subview %x_chunk offsets = [384, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_6 = tile.load.async %13 into %x_buf : !tile.event<"x_loaded_6">
-    tile.await %x_loaded_6
+    tile.await %x_loaded_6, %q_stored_5
     %14 = tile.subview %q_l2 task = %task task_dim = 0 offsets = [0, 384, 0] sizes = [1, 64, 256]
       strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %q_boa_6 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 : !tile.event<"q_boa_6">
     tile.await %q_boa_6
     %q_stored_6 = tile.store.async %q_acc into %14 : !tile.event<"q_stored_6">
-    tile.await %q_stored_6
     %15 = tile.subview %x_chunk offsets = [448, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_7 = tile.load.async %15 into %x_buf : !tile.event<"x_loaded_7">
-    tile.await %x_loaded_7
+    tile.await %x_loaded_7, %q_stored_6
     tile.signal input_released(%task)
     %16 = tile.subview %q_l2 task = %task task_dim = 0 offsets = [0, 448, 0] sizes = [1, 64, 256]
       strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
@@ -150,24 +144,23 @@ builtin.module {
     %17 = tile.subview %wq_chunk_1 task = %task_1 task_dim = 0 offsets = [0, 0, 0]
       sizes = [1, 128, 256] strides = [1, 1, 1] : !nest.l2_view<1x128x256xbf16>
     %wq_loaded_1 = tile.load.async %17 into %wq_buf_1 : !tile.event<"wq_loaded">
-    tile.await %wq_loaded_1
     %18 = tile.subview %x_chunk_1 offsets = [0, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_8 = tile.load.async %18 into %x_buf_1 : !tile.event<"x_loaded_0">
     %19 = tile.subview %q_l2_1 task = %task_1 task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 256]
       strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %q_partial_loaded = tile.load.async %19 into %q_acc_1 : !tile.event<"q_partial_loaded_0">
-    tile.await %x_loaded_8, %q_partial_loaded
+    tile.await %x_loaded_8, %q_partial_loaded, %wq_loaded_1
     %20 = tile.subview %q_l2_1 task = %task_1 task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 256]
       strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %q_boa_8 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 accumulate
       : !tile.event<"q_boa_0">
     tile.await %q_boa_8
     %q_stored_8 = tile.store.async %q_acc_1 into %20 : !tile.event<"q_stored_0">
-    tile.await %q_stored_8
     %21 = tile.subview %x_chunk_1 offsets = [64, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_9 = tile.load.async %21 into %x_buf_1 : !tile.event<"x_loaded_1">
+    tile.await %q_stored_8
     %22 = tile.subview %q_l2_1 task = %task_1 task_dim = 0 offsets = [0, 64, 0] sizes = [1, 64, 256]
       strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %q_partial_loaded_1 = tile.load.async %22 into %q_acc_1 : !tile.event<"q_partial_loaded_1">
@@ -178,10 +171,10 @@ builtin.module {
       : !tile.event<"q_boa_1">
     tile.await %q_boa_9
     %q_stored_9 = tile.store.async %q_acc_1 into %23 : !tile.event<"q_stored_1">
-    tile.await %q_stored_9
     %24 = tile.subview %x_chunk_1 offsets = [128, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_10 = tile.load.async %24 into %x_buf_1 : !tile.event<"x_loaded_2">
+    tile.await %q_stored_9
     %25 = tile.subview %q_l2_1 task = %task_1 task_dim = 0 offsets = [0, 128, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %q_partial_loaded_2 = tile.load.async %25 into %q_acc_1 : !tile.event<"q_partial_loaded_2">
@@ -192,10 +185,10 @@ builtin.module {
       : !tile.event<"q_boa_2">
     tile.await %q_boa_10
     %q_stored_10 = tile.store.async %q_acc_1 into %26 : !tile.event<"q_stored_2">
-    tile.await %q_stored_10
     %27 = tile.subview %x_chunk_1 offsets = [192, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_11 = tile.load.async %27 into %x_buf_1 : !tile.event<"x_loaded_3">
+    tile.await %q_stored_10
     %28 = tile.subview %q_l2_1 task = %task_1 task_dim = 0 offsets = [0, 192, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %q_partial_loaded_3 = tile.load.async %28 into %q_acc_1 : !tile.event<"q_partial_loaded_3">
@@ -206,10 +199,10 @@ builtin.module {
       : !tile.event<"q_boa_3">
     tile.await %q_boa_11
     %q_stored_11 = tile.store.async %q_acc_1 into %29 : !tile.event<"q_stored_3">
-    tile.await %q_stored_11
     %30 = tile.subview %x_chunk_1 offsets = [256, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_12 = tile.load.async %30 into %x_buf_1 : !tile.event<"x_loaded_4">
+    tile.await %q_stored_11
     %31 = tile.subview %q_l2_1 task = %task_1 task_dim = 0 offsets = [0, 256, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %q_partial_loaded_4 = tile.load.async %31 into %q_acc_1 : !tile.event<"q_partial_loaded_4">
@@ -220,10 +213,10 @@ builtin.module {
       : !tile.event<"q_boa_4">
     tile.await %q_boa_12
     %q_stored_12 = tile.store.async %q_acc_1 into %32 : !tile.event<"q_stored_4">
-    tile.await %q_stored_12
     %33 = tile.subview %x_chunk_1 offsets = [320, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_13 = tile.load.async %33 into %x_buf_1 : !tile.event<"x_loaded_5">
+    tile.await %q_stored_12
     %34 = tile.subview %q_l2_1 task = %task_1 task_dim = 0 offsets = [0, 320, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %q_partial_loaded_5 = tile.load.async %34 into %q_acc_1 : !tile.event<"q_partial_loaded_5">
@@ -234,10 +227,10 @@ builtin.module {
       : !tile.event<"q_boa_5">
     tile.await %q_boa_13
     %q_stored_13 = tile.store.async %q_acc_1 into %35 : !tile.event<"q_stored_5">
-    tile.await %q_stored_13
     %36 = tile.subview %x_chunk_1 offsets = [384, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_14 = tile.load.async %36 into %x_buf_1 : !tile.event<"x_loaded_6">
+    tile.await %q_stored_13
     %37 = tile.subview %q_l2_1 task = %task_1 task_dim = 0 offsets = [0, 384, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %q_partial_loaded_6 = tile.load.async %37 into %q_acc_1 : !tile.event<"q_partial_loaded_6">
@@ -248,10 +241,10 @@ builtin.module {
       : !tile.event<"q_boa_6">
     tile.await %q_boa_14
     %q_stored_14 = tile.store.async %q_acc_1 into %38 : !tile.event<"q_stored_6">
-    tile.await %q_stored_14
     %39 = tile.subview %x_chunk_1 offsets = [448, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_15 = tile.load.async %39 into %x_buf_1 : !tile.event<"x_loaded_7">
+    tile.await %q_stored_14
     %40 = tile.subview %q_l2_1 task = %task_1 task_dim = 0 offsets = [0, 448, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %q_partial_loaded_7 = tile.load.async %40 into %q_acc_1 : !tile.event<"q_partial_loaded_7">
@@ -292,136 +285,120 @@ builtin.module {
       sizes = [1, 128, 64] strides = [1, 1, 1] : !nest.l2_view<1x128x64xbf16>
     %wk_loaded = tile.load.async %42 into %wk_buf : !tile.event<"wk_loaded">
     %wv_loaded = tile.load.async %43 into %wv_buf : !tile.event<"wv_loaded">
-    tile.await %wk_loaded, %wv_loaded
     %44 = tile.subview %x_chunk_2 offsets = [0, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_16 = tile.load.async %44 into %x_buf_2 : !tile.event<"x_loaded_0">
-    tile.await %x_loaded_16
+    tile.await %x_loaded_16, %wk_loaded, %wv_loaded
     %45 = tile.subview %k_l2 task = %task_2 task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_boa = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"k_boa_0">
     tile.await %k_boa
     %k_stored = tile.store.async %k_acc into %45 : !tile.event<"k_stored_0">
-    tile.await %k_stored
     %46 = tile.subview %v_l2 task = %task_2 task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_boa = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"v_boa_0">
     tile.await %v_boa
     %v_stored = tile.store.async %v_acc into %46 : !tile.event<"v_stored_0">
-    tile.await %v_stored
     %47 = tile.subview %x_chunk_2 offsets = [64, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_17 = tile.load.async %47 into %x_buf_2 : !tile.event<"x_loaded_1">
-    tile.await %x_loaded_17
+    tile.await %x_loaded_17, %k_stored, %v_stored
     %48 = tile.subview %k_l2 task = %task_2 task_dim = 0 offsets = [0, 64, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_boa_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"k_boa_1">
     tile.await %k_boa_1
     %k_stored_1 = tile.store.async %k_acc into %48 : !tile.event<"k_stored_1">
-    tile.await %k_stored_1
     %49 = tile.subview %v_l2 task = %task_2 task_dim = 0 offsets = [0, 64, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_boa_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"v_boa_1">
     tile.await %v_boa_1
     %v_stored_1 = tile.store.async %v_acc into %49 : !tile.event<"v_stored_1">
-    tile.await %v_stored_1
     %50 = tile.subview %x_chunk_2 offsets = [128, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_18 = tile.load.async %50 into %x_buf_2 : !tile.event<"x_loaded_2">
-    tile.await %x_loaded_18
+    tile.await %x_loaded_18, %k_stored_1, %v_stored_1
     %51 = tile.subview %k_l2 task = %task_2 task_dim = 0 offsets = [0, 128, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_boa_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"k_boa_2">
     tile.await %k_boa_2
     %k_stored_2 = tile.store.async %k_acc into %51 : !tile.event<"k_stored_2">
-    tile.await %k_stored_2
     %52 = tile.subview %v_l2 task = %task_2 task_dim = 0 offsets = [0, 128, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_boa_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"v_boa_2">
     tile.await %v_boa_2
     %v_stored_2 = tile.store.async %v_acc into %52 : !tile.event<"v_stored_2">
-    tile.await %v_stored_2
     %53 = tile.subview %x_chunk_2 offsets = [192, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_19 = tile.load.async %53 into %x_buf_2 : !tile.event<"x_loaded_3">
-    tile.await %x_loaded_19
+    tile.await %x_loaded_19, %k_stored_2, %v_stored_2
     %54 = tile.subview %k_l2 task = %task_2 task_dim = 0 offsets = [0, 192, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_boa_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"k_boa_3">
     tile.await %k_boa_3
     %k_stored_3 = tile.store.async %k_acc into %54 : !tile.event<"k_stored_3">
-    tile.await %k_stored_3
     %55 = tile.subview %v_l2 task = %task_2 task_dim = 0 offsets = [0, 192, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_boa_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"v_boa_3">
     tile.await %v_boa_3
     %v_stored_3 = tile.store.async %v_acc into %55 : !tile.event<"v_stored_3">
-    tile.await %v_stored_3
     %56 = tile.subview %x_chunk_2 offsets = [256, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_20 = tile.load.async %56 into %x_buf_2 : !tile.event<"x_loaded_4">
-    tile.await %x_loaded_20
+    tile.await %x_loaded_20, %k_stored_3, %v_stored_3
     %57 = tile.subview %k_l2 task = %task_2 task_dim = 0 offsets = [0, 256, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_boa_4 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"k_boa_4">
     tile.await %k_boa_4
     %k_stored_4 = tile.store.async %k_acc into %57 : !tile.event<"k_stored_4">
-    tile.await %k_stored_4
     %58 = tile.subview %v_l2 task = %task_2 task_dim = 0 offsets = [0, 256, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_boa_4 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"v_boa_4">
     tile.await %v_boa_4
     %v_stored_4 = tile.store.async %v_acc into %58 : !tile.event<"v_stored_4">
-    tile.await %v_stored_4
     %59 = tile.subview %x_chunk_2 offsets = [320, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_21 = tile.load.async %59 into %x_buf_2 : !tile.event<"x_loaded_5">
-    tile.await %x_loaded_21
+    tile.await %x_loaded_21, %k_stored_4, %v_stored_4
     %60 = tile.subview %k_l2 task = %task_2 task_dim = 0 offsets = [0, 320, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_boa_5 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"k_boa_5">
     tile.await %k_boa_5
     %k_stored_5 = tile.store.async %k_acc into %60 : !tile.event<"k_stored_5">
-    tile.await %k_stored_5
     %61 = tile.subview %v_l2 task = %task_2 task_dim = 0 offsets = [0, 320, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_boa_5 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"v_boa_5">
     tile.await %v_boa_5
     %v_stored_5 = tile.store.async %v_acc into %61 : !tile.event<"v_stored_5">
-    tile.await %v_stored_5
     %62 = tile.subview %x_chunk_2 offsets = [384, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_22 = tile.load.async %62 into %x_buf_2 : !tile.event<"x_loaded_6">
-    tile.await %x_loaded_22
+    tile.await %x_loaded_22, %k_stored_5, %v_stored_5
     %63 = tile.subview %k_l2 task = %task_2 task_dim = 0 offsets = [0, 384, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_boa_6 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"k_boa_6">
     tile.await %k_boa_6
     %k_stored_6 = tile.store.async %k_acc into %63 : !tile.event<"k_stored_6">
-    tile.await %k_stored_6
     %64 = tile.subview %v_l2 task = %task_2 task_dim = 0 offsets = [0, 384, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_boa_6 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"v_boa_6">
     tile.await %v_boa_6
     %v_stored_6 = tile.store.async %v_acc into %64 : !tile.event<"v_stored_6">
-    tile.await %v_stored_6
     %65 = tile.subview %x_chunk_2 offsets = [448, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_23 = tile.load.async %65 into %x_buf_2 : !tile.event<"x_loaded_7">
-    tile.await %x_loaded_23
+    tile.await %x_loaded_23, %k_stored_6, %v_stored_6
     tile.signal input_released(%task_2)
     %66 = tile.subview %k_l2 task = %task_2 task_dim = 0 offsets = [0, 448, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_boa_7 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"k_boa_7">
     tile.await %k_boa_7
     %k_stored_7 = tile.store.async %k_acc into %66 : !tile.event<"k_stored_7">
-    tile.await %k_stored_7
     %67 = tile.subview %v_l2 task = %task_2 task_dim = 0 offsets = [0, 448, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_boa_7 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"v_boa_7">
     tile.await %v_boa_7
     %v_stored_7 = tile.store.async %v_acc into %67 : !tile.event<"v_stored_7">
-    tile.await %v_stored_7
+    tile.await %k_stored_7, %v_stored_7
     tile.signal output_ready(%task_2)
     tile.free %x_buf_2
     tile.free %k_acc
@@ -452,193 +429,177 @@ builtin.module {
       sizes = [1, 128, 64] strides = [1, 1, 1] : !nest.l2_view<1x128x64xbf16>
     %wk_loaded_1 = tile.load.async %68 into %wk_buf_1 : !tile.event<"wk_loaded">
     %wv_loaded_1 = tile.load.async %69 into %wv_buf_1 : !tile.event<"wv_loaded">
-    tile.await %wk_loaded_1, %wv_loaded_1
     %70 = tile.subview %x_chunk_3 offsets = [0, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_24 = tile.load.async %70 into %x_buf_3 : !tile.event<"x_loaded_0">
-    tile.await %x_loaded_24
     %71 = tile.subview %k_l2_1 task = %task_3 task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_partial_loaded = tile.load.async %71 into %k_acc_1 : !tile.event<"k_partial_loaded_0">
     %72 = tile.subview %v_l2_1 task = %task_3 task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_partial_loaded = tile.load.async %72 into %v_acc_1 : !tile.event<"v_partial_loaded_0">
-    tile.await %k_partial_loaded, %v_partial_loaded
+    tile.await %x_loaded_24, %k_partial_loaded, %v_partial_loaded, %wk_loaded_1, %wv_loaded_1
     %73 = tile.subview %k_l2_1 task = %task_3 task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_boa_8 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
       : !tile.event<"k_boa_0">
     tile.await %k_boa_8
     %k_stored_8 = tile.store.async %k_acc_1 into %73 : !tile.event<"k_stored_0">
-    tile.await %k_stored_8
     %74 = tile.subview %v_l2_1 task = %task_3 task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_boa_8 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
       : !tile.event<"v_boa_0">
     tile.await %v_boa_8
     %v_stored_8 = tile.store.async %v_acc_1 into %74 : !tile.event<"v_stored_0">
-    tile.await %v_stored_8
     %75 = tile.subview %x_chunk_3 offsets = [64, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_25 = tile.load.async %75 into %x_buf_3 : !tile.event<"x_loaded_1">
-    tile.await %x_loaded_25
+    tile.await %k_stored_8, %v_stored_8
     %76 = tile.subview %k_l2_1 task = %task_3 task_dim = 0 offsets = [0, 64, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_partial_loaded_1 = tile.load.async %76 into %k_acc_1 : !tile.event<"k_partial_loaded_1">
     %77 = tile.subview %v_l2_1 task = %task_3 task_dim = 0 offsets = [0, 64, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_partial_loaded_1 = tile.load.async %77 into %v_acc_1 : !tile.event<"v_partial_loaded_1">
-    tile.await %k_partial_loaded_1, %v_partial_loaded_1
+    tile.await %x_loaded_25, %k_partial_loaded_1, %v_partial_loaded_1
     %78 = tile.subview %k_l2_1 task = %task_3 task_dim = 0 offsets = [0, 64, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_boa_9 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
       : !tile.event<"k_boa_1">
     tile.await %k_boa_9
     %k_stored_9 = tile.store.async %k_acc_1 into %78 : !tile.event<"k_stored_1">
-    tile.await %k_stored_9
     %79 = tile.subview %v_l2_1 task = %task_3 task_dim = 0 offsets = [0, 64, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_boa_9 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
       : !tile.event<"v_boa_1">
     tile.await %v_boa_9
     %v_stored_9 = tile.store.async %v_acc_1 into %79 : !tile.event<"v_stored_1">
-    tile.await %v_stored_9
     %80 = tile.subview %x_chunk_3 offsets = [128, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_26 = tile.load.async %80 into %x_buf_3 : !tile.event<"x_loaded_2">
-    tile.await %x_loaded_26
+    tile.await %k_stored_9, %v_stored_9
     %81 = tile.subview %k_l2_1 task = %task_3 task_dim = 0 offsets = [0, 128, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_partial_loaded_2 = tile.load.async %81 into %k_acc_1 : !tile.event<"k_partial_loaded_2">
     %82 = tile.subview %v_l2_1 task = %task_3 task_dim = 0 offsets = [0, 128, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_partial_loaded_2 = tile.load.async %82 into %v_acc_1 : !tile.event<"v_partial_loaded_2">
-    tile.await %k_partial_loaded_2, %v_partial_loaded_2
+    tile.await %x_loaded_26, %k_partial_loaded_2, %v_partial_loaded_2
     %83 = tile.subview %k_l2_1 task = %task_3 task_dim = 0 offsets = [0, 128, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_boa_10 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
       : !tile.event<"k_boa_2">
     tile.await %k_boa_10
     %k_stored_10 = tile.store.async %k_acc_1 into %83 : !tile.event<"k_stored_2">
-    tile.await %k_stored_10
     %84 = tile.subview %v_l2_1 task = %task_3 task_dim = 0 offsets = [0, 128, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_boa_10 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
       : !tile.event<"v_boa_2">
     tile.await %v_boa_10
     %v_stored_10 = tile.store.async %v_acc_1 into %84 : !tile.event<"v_stored_2">
-    tile.await %v_stored_10
     %85 = tile.subview %x_chunk_3 offsets = [192, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_27 = tile.load.async %85 into %x_buf_3 : !tile.event<"x_loaded_3">
-    tile.await %x_loaded_27
+    tile.await %k_stored_10, %v_stored_10
     %86 = tile.subview %k_l2_1 task = %task_3 task_dim = 0 offsets = [0, 192, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_partial_loaded_3 = tile.load.async %86 into %k_acc_1 : !tile.event<"k_partial_loaded_3">
     %87 = tile.subview %v_l2_1 task = %task_3 task_dim = 0 offsets = [0, 192, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_partial_loaded_3 = tile.load.async %87 into %v_acc_1 : !tile.event<"v_partial_loaded_3">
-    tile.await %k_partial_loaded_3, %v_partial_loaded_3
+    tile.await %x_loaded_27, %k_partial_loaded_3, %v_partial_loaded_3
     %88 = tile.subview %k_l2_1 task = %task_3 task_dim = 0 offsets = [0, 192, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_boa_11 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
       : !tile.event<"k_boa_3">
     tile.await %k_boa_11
     %k_stored_11 = tile.store.async %k_acc_1 into %88 : !tile.event<"k_stored_3">
-    tile.await %k_stored_11
     %89 = tile.subview %v_l2_1 task = %task_3 task_dim = 0 offsets = [0, 192, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_boa_11 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
       : !tile.event<"v_boa_3">
     tile.await %v_boa_11
     %v_stored_11 = tile.store.async %v_acc_1 into %89 : !tile.event<"v_stored_3">
-    tile.await %v_stored_11
     %90 = tile.subview %x_chunk_3 offsets = [256, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_28 = tile.load.async %90 into %x_buf_3 : !tile.event<"x_loaded_4">
-    tile.await %x_loaded_28
+    tile.await %k_stored_11, %v_stored_11
     %91 = tile.subview %k_l2_1 task = %task_3 task_dim = 0 offsets = [0, 256, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_partial_loaded_4 = tile.load.async %91 into %k_acc_1 : !tile.event<"k_partial_loaded_4">
     %92 = tile.subview %v_l2_1 task = %task_3 task_dim = 0 offsets = [0, 256, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_partial_loaded_4 = tile.load.async %92 into %v_acc_1 : !tile.event<"v_partial_loaded_4">
-    tile.await %k_partial_loaded_4, %v_partial_loaded_4
+    tile.await %x_loaded_28, %k_partial_loaded_4, %v_partial_loaded_4
     %93 = tile.subview %k_l2_1 task = %task_3 task_dim = 0 offsets = [0, 256, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_boa_12 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
       : !tile.event<"k_boa_4">
     tile.await %k_boa_12
     %k_stored_12 = tile.store.async %k_acc_1 into %93 : !tile.event<"k_stored_4">
-    tile.await %k_stored_12
     %94 = tile.subview %v_l2_1 task = %task_3 task_dim = 0 offsets = [0, 256, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_boa_12 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
       : !tile.event<"v_boa_4">
     tile.await %v_boa_12
     %v_stored_12 = tile.store.async %v_acc_1 into %94 : !tile.event<"v_stored_4">
-    tile.await %v_stored_12
     %95 = tile.subview %x_chunk_3 offsets = [320, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_29 = tile.load.async %95 into %x_buf_3 : !tile.event<"x_loaded_5">
-    tile.await %x_loaded_29
+    tile.await %k_stored_12, %v_stored_12
     %96 = tile.subview %k_l2_1 task = %task_3 task_dim = 0 offsets = [0, 320, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_partial_loaded_5 = tile.load.async %96 into %k_acc_1 : !tile.event<"k_partial_loaded_5">
     %97 = tile.subview %v_l2_1 task = %task_3 task_dim = 0 offsets = [0, 320, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_partial_loaded_5 = tile.load.async %97 into %v_acc_1 : !tile.event<"v_partial_loaded_5">
-    tile.await %k_partial_loaded_5, %v_partial_loaded_5
+    tile.await %x_loaded_29, %k_partial_loaded_5, %v_partial_loaded_5
     %98 = tile.subview %k_l2_1 task = %task_3 task_dim = 0 offsets = [0, 320, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_boa_13 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
       : !tile.event<"k_boa_5">
     tile.await %k_boa_13
     %k_stored_13 = tile.store.async %k_acc_1 into %98 : !tile.event<"k_stored_5">
-    tile.await %k_stored_13
     %99 = tile.subview %v_l2_1 task = %task_3 task_dim = 0 offsets = [0, 320, 0] sizes = [1, 64, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_boa_13 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
       : !tile.event<"v_boa_5">
     tile.await %v_boa_13
     %v_stored_13 = tile.store.async %v_acc_1 into %99 : !tile.event<"v_stored_5">
-    tile.await %v_stored_13
     %100 = tile.subview %x_chunk_3 offsets = [384, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_30 = tile.load.async %100 into %x_buf_3 : !tile.event<"x_loaded_6">
-    tile.await %x_loaded_30
+    tile.await %k_stored_13, %v_stored_13
     %101 = tile.subview %k_l2_1 task = %task_3 task_dim = 0 offsets = [0, 384, 0]
       sizes = [1, 64, 64] strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_partial_loaded_6 = tile.load.async %101 into %k_acc_1 : !tile.event<"k_partial_loaded_6">
     %102 = tile.subview %v_l2_1 task = %task_3 task_dim = 0 offsets = [0, 384, 0]
       sizes = [1, 64, 64] strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_partial_loaded_6 = tile.load.async %102 into %v_acc_1 : !tile.event<"v_partial_loaded_6">
-    tile.await %k_partial_loaded_6, %v_partial_loaded_6
+    tile.await %x_loaded_30, %k_partial_loaded_6, %v_partial_loaded_6
     %103 = tile.subview %k_l2_1 task = %task_3 task_dim = 0 offsets = [0, 384, 0]
       sizes = [1, 64, 64] strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_boa_14 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
       : !tile.event<"k_boa_6">
     tile.await %k_boa_14
     %k_stored_14 = tile.store.async %k_acc_1 into %103 : !tile.event<"k_stored_6">
-    tile.await %k_stored_14
     %104 = tile.subview %v_l2_1 task = %task_3 task_dim = 0 offsets = [0, 384, 0]
       sizes = [1, 64, 64] strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_boa_14 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
       : !tile.event<"v_boa_6">
     tile.await %v_boa_14
     %v_stored_14 = tile.store.async %v_acc_1 into %104 : !tile.event<"v_stored_6">
-    tile.await %v_stored_14
     %105 = tile.subview %x_chunk_3 offsets = [448, 0] sizes = [64, 128] strides = [1, 1]
       : !nest.l2_view<64x128xbf16>
     %x_loaded_31 = tile.load.async %105 into %x_buf_3 : !tile.event<"x_loaded_7">
-    tile.await %x_loaded_31
+    tile.await %k_stored_14, %v_stored_14
     %106 = tile.subview %k_l2_1 task = %task_3 task_dim = 0 offsets = [0, 448, 0]
       sizes = [1, 64, 64] strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %k_partial_loaded_7 = tile.load.async %106 into %k_acc_1 : !tile.event<"k_partial_loaded_7">
     %107 = tile.subview %v_l2_1 task = %task_3 task_dim = 0 offsets = [0, 448, 0]
       sizes = [1, 64, 64] strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_partial_loaded_7 = tile.load.async %107 into %v_acc_1 : !tile.event<"v_partial_loaded_7">
-    tile.await %k_partial_loaded_7, %v_partial_loaded_7
+    tile.await %x_loaded_31, %k_partial_loaded_7, %v_partial_loaded_7
     tile.signal input_released(%task_3)
     %108 = tile.subview %k_l2_1 task = %task_3 task_dim = 0 offsets = [0, 448, 0]
       sizes = [1, 64, 64] strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
@@ -646,14 +607,13 @@ builtin.module {
       : !tile.event<"k_boa_7">
     tile.await %k_boa_15
     %k_stored_15 = tile.store.async %k_acc_1 into %108 : !tile.event<"k_stored_7">
-    tile.await %k_stored_15
     %109 = tile.subview %v_l2_1 task = %task_3 task_dim = 0 offsets = [0, 448, 0]
       sizes = [1, 64, 64] strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %v_boa_15 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
       : !tile.event<"v_boa_7">
     tile.await %v_boa_15
     %v_stored_15 = tile.store.async %v_acc_1 into %109 : !tile.event<"v_stored_7">
-    tile.await %v_stored_15
+    tile.await %k_stored_15, %v_stored_15
     tile.signal output_ready(%task_3)
     tile.free %x_buf_3
     tile.free %k_acc_1
@@ -2041,11 +2001,10 @@ builtin.module {
     %158 = tile.subview %o_l2_4 offsets = [0, 0, 0] sizes = [1, 64, 256] strides = [1, 1, 1]
       : !nest.l2_view<1x64x256xbf16>
     %o0_loaded = tile.load.async %158 into %o : !tile.event<"o0_loaded">
-    tile.await %o0_loaded
     %159 = tile.subview %wo_l2 task = %task_8 task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 256]
       strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w0_0_loaded = tile.load.async %159 into %w_buf : !tile.event<"w0_0_loaded">
-    tile.await %w0_0_loaded
+    tile.await %w0_0_loaded, %o0_loaded
     %outproj0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj0_0">
     tile.await %outproj0
@@ -2073,11 +2032,10 @@ builtin.module {
     %163 = tile.subview %o_l2_4 offsets = [1, 0, 0] sizes = [1, 64, 256] strides = [1, 1, 1]
       : !nest.l2_view<1x64x256xbf16>
     %o1_loaded = tile.load.async %163 into %o : !tile.event<"o1_loaded">
-    tile.await %o1_loaded
     %164 = tile.subview %wo_l2 task = %task_8 task_dim = 0 offsets = [0, 256, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w1_0_loaded = tile.load.async %164 into %w_buf : !tile.event<"w1_0_loaded">
-    tile.await %w1_0_loaded
+    tile.await %w1_0_loaded, %o1_loaded
     %outproj1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
       : !tile.event<"outproj1_0">
     tile.await %outproj1
@@ -2105,11 +2063,10 @@ builtin.module {
     %168 = tile.subview %o_l2_4 offsets = [2, 0, 0] sizes = [1, 64, 256] strides = [1, 1, 1]
       : !nest.l2_view<1x64x256xbf16>
     %o2_loaded = tile.load.async %168 into %o : !tile.event<"o2_loaded">
-    tile.await %o2_loaded
     %169 = tile.subview %wo_l2 task = %task_8 task_dim = 0 offsets = [0, 512, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w2_0_loaded = tile.load.async %169 into %w_buf : !tile.event<"w2_0_loaded">
-    tile.await %w2_0_loaded
+    tile.await %w2_0_loaded, %o2_loaded
     %outproj2 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
       : !tile.event<"outproj2_0">
     tile.await %outproj2
@@ -2137,11 +2094,10 @@ builtin.module {
     %173 = tile.subview %o_l2_4 offsets = [3, 0, 0] sizes = [1, 64, 256] strides = [1, 1, 1]
       : !nest.l2_view<1x64x256xbf16>
     %o3_loaded = tile.load.async %173 into %o : !tile.event<"o3_loaded">
-    tile.await %o3_loaded
     %174 = tile.subview %wo_l2 task = %task_8 task_dim = 0 offsets = [0, 768, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w3_0_loaded = tile.load.async %174 into %w_buf : !tile.event<"w3_0_loaded">
-    tile.await %w3_0_loaded
+    tile.await %w3_0_loaded, %o3_loaded
     %outproj3 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
       : !tile.event<"outproj3_0">
     tile.await %outproj3
@@ -2191,11 +2147,10 @@ builtin.module {
     %179 = tile.subview %o_l2_5 offsets = [0, 64, 0] sizes = [1, 64, 256] strides = [1, 1, 1]
       : !nest.l2_view<1x64x256xbf16>
     %o0_loaded_1 = tile.load.async %179 into %o_1 : !tile.event<"o0_loaded">
-    tile.await %o0_loaded_1
     %180 = tile.subview %wo_l2_1 task = %task_9 task_dim = 0 offsets = [0, 0, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w0_0_loaded_1 = tile.load.async %180 into %w_buf_1 : !tile.event<"w0_0_loaded">
-    tile.await %w0_0_loaded_1
+    tile.await %w0_0_loaded_1, %o0_loaded_1
     %outproj0_4 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj0_0">
     tile.await %outproj0_4
@@ -2223,11 +2178,10 @@ builtin.module {
     %184 = tile.subview %o_l2_5 offsets = [1, 64, 0] sizes = [1, 64, 256] strides = [1, 1, 1]
       : !nest.l2_view<1x64x256xbf16>
     %o1_loaded_1 = tile.load.async %184 into %o_1 : !tile.event<"o1_loaded">
-    tile.await %o1_loaded_1
     %185 = tile.subview %wo_l2_1 task = %task_9 task_dim = 0 offsets = [0, 256, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w1_0_loaded_1 = tile.load.async %185 into %w_buf_1 : !tile.event<"w1_0_loaded">
-    tile.await %w1_0_loaded_1
+    tile.await %w1_0_loaded_1, %o1_loaded_1
     %outproj1_4 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
       : !tile.event<"outproj1_0">
     tile.await %outproj1_4
@@ -2255,11 +2209,10 @@ builtin.module {
     %189 = tile.subview %o_l2_5 offsets = [2, 64, 0] sizes = [1, 64, 256] strides = [1, 1, 1]
       : !nest.l2_view<1x64x256xbf16>
     %o2_loaded_1 = tile.load.async %189 into %o_1 : !tile.event<"o2_loaded">
-    tile.await %o2_loaded_1
     %190 = tile.subview %wo_l2_1 task = %task_9 task_dim = 0 offsets = [0, 512, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w2_0_loaded_1 = tile.load.async %190 into %w_buf_1 : !tile.event<"w2_0_loaded">
-    tile.await %w2_0_loaded_1
+    tile.await %w2_0_loaded_1, %o2_loaded_1
     %outproj2_4 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
       : !tile.event<"outproj2_0">
     tile.await %outproj2_4
@@ -2287,11 +2240,10 @@ builtin.module {
     %194 = tile.subview %o_l2_5 offsets = [3, 64, 0] sizes = [1, 64, 256] strides = [1, 1, 1]
       : !nest.l2_view<1x64x256xbf16>
     %o3_loaded_1 = tile.load.async %194 into %o_1 : !tile.event<"o3_loaded">
-    tile.await %o3_loaded_1
     %195 = tile.subview %wo_l2_1 task = %task_9 task_dim = 0 offsets = [0, 768, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w3_0_loaded_1 = tile.load.async %195 into %w_buf_1 : !tile.event<"w3_0_loaded">
-    tile.await %w3_0_loaded_1
+    tile.await %w3_0_loaded_1, %o3_loaded_1
     %outproj3_4 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
       : !tile.event<"outproj3_0">
     tile.await %outproj3_4

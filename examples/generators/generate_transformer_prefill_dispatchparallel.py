@@ -1,14 +1,20 @@
-"""Generate a Prefill whose producer programs drop software pipelining.
+"""Generate a Prefill whose producer programs sink every tile.await.
 
 The baseline multicontext prefill pipelines inside the tile programs: Q/K/V
 stores co-issue with the following BOAs and ``input_released`` fires before the
 last BOA so the root can refill staging early.  This variant keeps the same
-logical work and the same attention tail but removes that pipelining from the
+logical work and the same attention tail but replaces that hoisting in the
 three producer programs (``qkv_chunk_{init,accum}`` -> split Q vs K/V,
-``prefill_outproj_tile`` -> split per output row half):
+``prefill_outproj_tile`` -> split per output row half) with sunk awaits:
 
-* at most two L1 loads are ever in flight; every store is drained before the
-  next BOA is issued and ``input_released`` only fires after the last L2 load;
+* no load is hoisted across the BOA that reads its buffer (one X buffer and
+  one accumulator per program keep the true RAW/WAR chain), so
+  ``input_released`` only fires after the last L2 load;
+* every ``tile.await`` is sunk to the last dependency-safe point: the weight
+  fill co-issues with the first X fill (plus the first partials when
+  accumulating) behind one merged await before the first BOA, and each store
+  issues as soon as its own BOA has been awaited, overlapping the next
+  independent fills — no store ever co-issues with an outstanding BOA;
 * the parallelism that the pipeline used to provide comes from dispatching
   more, independent Grids instead: the Q chain (writes ``q_l2``) and the K/V
   chain (writes ``k_l2``/``v_l2``) are separate allocations, so 16 QKV
@@ -172,10 +178,14 @@ def _tile_contract(
 def _qkv_program(
   cfg: DispatchParallelConfig, hw: HardwareConfig, contexts_per_tile: int, *, accumulate: bool, q_only: bool
 ) -> TileProgramDefOp:
-  """Project one input-K chunk, Q only or K/V only, with no intra-program overlap.
+  """Project one input-K chunk, Q only or K/V only, with sunk awaits.
 
-  At most two L1 loads are in flight, every store drains before the next BOA,
-  and ``input_released`` fires only after the final L2 load.
+  No load is hoisted across the BOA that reads its buffer, so
+  ``input_released`` still fires only after the final L2 load.  Every
+  ``tile.await`` sits at the last dependency-safe point: the weight fill
+  co-issues with the first X fill (plus the first partials when accumulating)
+  behind one merged await, and each store issues right after its own BOA has
+  been awaited, overlapping the next independent fills.
   """
   seq, rows, chunk = cfg.seq_len, cfg.projection_row_block, cfg.proj_k_chunk
   q_slice, hd = cfg.q_slice, cfg.head_dim
@@ -245,45 +255,53 @@ def _qkv_program(
     weight_loads += [wk_loaded, wv_loaded]
     dests = [("k", hd, k_acc, k_l2), ("v", hd, v_acc, v_l2)]
 
-  # The two allowed in-flight loads: this weight fill plus the first X fill.
-  body.append(TileAwaitOp(weight_loads))
-
+  # Sunk awaits: every async op issues as soon as its L1 buffers are free and
+  # each await sits at the last legal point before a conflicting op (RAW on an
+  # accumulator, WAR on a reused buffer).  Stores are never awaited inline;
+  # they drain in the gate that protects the next conflicting op.
+  pending_stores: list = []
   for row_block in range(cfg.projection_row_blocks):
     row = row_block * rows
     x_v = l2_view(x_chunk, None, None, [row, 0], [rows, chunk], [rows, chunk], "bf16")
     x_loaded = l1_load(x_v, x_buf, f"x_loaded_{row_block}")
     body += [x_v, x_loaded]
+    partial_loads = []
     if accumulate:
-      # At most two loads in flight: the K/V chain drains X first, then the
-      # two partials together; the Q chain issues X plus its one partial.
-      if q_only:
-        dv = l2_view(q_l2, task, 0, [0, row, 0], [1, rows, q_slice], [1, rows, q_slice], "bf16")
-        loaded = l1_load(dv, q_acc, f"q_partial_loaded_{row_block}")
+      if row_block:
+        # The partial fills overwrite the accumulators the previous stores
+        # still read, so they are the first ops gated by those stores.
+        body.append(TileAwaitOp(pending_stores))
+        pending_stores = []
+      for tag, width, acc_buf, dest in dests:
+        dv = l2_view(dest, task, 0, [0, row, 0], [1, rows, width], [1, rows, width], "bf16")
+        loaded = l1_load(dv, acc_buf, f"{tag}_partial_loaded_{row_block}")
         body += [dv, loaded]
-        body.append(TileAwaitOp([x_loaded, loaded]))
-      else:
-        body.append(TileAwaitOp([x_loaded]))
-        partial_loads = []
-        for tag, width, acc_buf, dest in dests:
-          dv = l2_view(dest, task, 0, [0, row, 0], [1, rows, width], [1, rows, width], "bf16")
-          loaded = l1_load(dv, acc_buf, f"{tag}_partial_loaded_{row_block}")
-          body += [dv, loaded]
-          partial_loads.append(loaded)
-        body.append(TileAwaitOp(partial_loads))
+        partial_loads.append(loaded)
+    # One merged gate before the first BOA: RAW on X plus the partials, plus
+    # the WAR of the BOAs over accumulators still being stored when this is
+    # not the first chunk (the accumulate path already drained them above).
+    gate = [x_loaded, *partial_loads]
+    if row_block == 0:
+      gate += weight_loads
     else:
-      body.append(TileAwaitOp([x_loaded]))
+      gate += pending_stores
+      pending_stores = []
+    body.append(TileAwaitOp(gate))
     if row_block == cfg.projection_row_blocks - 1:
-      # No software pipelining: the root may only recycle staging after the
-      # final L2 read of this program, not before the last BOA.
+      # The root may only recycle staging after the final L2 read of this
+      # program, not before the last BOA.
       body.append(TileSignalOp("input_released", task))
     for tag, width, acc_buf, dest in dests:
       dv = l2_view(dest, task, 0, [0, row, 0], [1, rows, width], [1, rows, width], "bf16")
       boa = boa_matmul(rows, width, chunk, f"{tag}_boa_{row_block}", accumulate=accumulate)
-      # No store/BOA overlap: the previous store drained before this BOA.
+      # RAW accumulator: the store issues only after its own BOA has been
+      # awaited, then overlaps the next chunk's independent fills.
       body += [dv, boa, TileAwaitOp([boa])]
       stored = l1_store(acc_buf, dv, f"{tag}_stored_{row_block}")
-      body += [stored, TileAwaitOp([stored])]
+      body.append(stored)
+      pending_stores.append(stored)
 
+  body.append(TileAwaitOp(pending_stores))
   body.append(TileSignalOp("output_ready", task))
   body += [TileFreeOp(buf) for buf in allocs]
   body.append(TileReturnOp())
@@ -389,7 +407,11 @@ def _attention_program(
 def _outproj_program(
   cfg: DispatchParallelConfig, hw: HardwareConfig, contexts_per_tile: int, row_half: int
 ) -> TileProgramDefOp:
-  """Project one 64-row half of one query block, strictly serial.
+  """Project one 64-row half of one query block with sunk awaits.
+
+  The O fill co-issues with the first weight fill behind one merged await;
+  later weight fills stay directly awaited before their BOA because they
+  reuse the one weight buffer the previous BOA is still reading.
 
   Each half owns an independent output buffer, so the low and high halves of a
   query block are two Grids that never contend.
@@ -423,12 +445,19 @@ def _outproj_program(
       o_l2, None, None, [head_block, row_offset, 0], [1, rows, q_slice], [1, rows, q_slice], "bf16"
     )
     ol = l1_load(ov, o_buf, f"o{head_block}_loaded")
-    body += [ov, ol, TileAwaitOp([ol])]
+    body += [ov, ol]
     for chunk_index in range(chunks):
       row = head_block * q_slice + chunk_index * k_chunk
       wv = l2_view(wo_l2, task, 0, [0, row, 0], [1, k_chunk, q_slice], [1, k_chunk, q_slice], "bf16")
       wl = l1_load(wv, w_buf, f"w{head_block}_{chunk_index}_loaded")
-      body += [wv, wl, TileAwaitOp([wl])]
+      body += [wv, wl]
+      # The O fill is consumed by the first BOA of the head block, so its
+      # await sinks into that BOA's gate; the remaining weight fills are
+      # gated only by themselves (the previous BOA already drained).
+      gate: list = [wl]
+      if chunk_index == 0:
+        gate.append(ol)
+      body.append(TileAwaitOp(gate))
       if head_block == cfg.kv_heads - 1 and chunk_index == chunks - 1:
         body.append(TileSignalOp("input_released", task))
       boa = boa_matmul(
@@ -453,7 +482,7 @@ def _outproj_program(
 def make_prefill_dispatchparallel(
   *, hw: HardwareConfig | None = None, contexts_per_tile: int = 4
 ) -> ModuleOp:
-  """Build prefill with pipelining stripped from the producers and more Grids."""
+  """Build prefill whose producers sink every await and dispatch more Grids."""
   if type(contexts_per_tile) is not int or contexts_per_tile not in (1, 2, 4):
     raise ValueError("contexts_per_tile must be one of 1, 2, or 4")
   cfg = DispatchParallelConfig()
@@ -789,15 +818,17 @@ def main() -> None:
     "",
     "Same logical shapes, packing and attention tail as",
     "transformer_prefill_attention_multicontext.mlir; the three producer programs",
-    "drop software pipelining and the schedule compensates with more Grids:",
+    "drop load hoisting and the schedule compensates with more Grids:",
     "",
-    "No software pipeline inside the producers:",
-    "- at most two L1 loads are ever in flight (a weight fill plus the first X",
-    "  fill, then X plus one accumulated partial);",
-    "- every store drains before the next BOA is issued (the baseline overlaps",
-    "  the Q store with the K BOA);",
-    "- input_released fires only after the final L2 load, so staging recycling",
-    "  cannot start early.",
+    "No load hoisting inside the producers; every tile.await is sunk to the",
+    "last dependency-safe point:",
+    "- the weight fill co-issues with the first X fill (plus the first",
+    "  accumulated partials), behind one merged await before the first BOA;",
+    "- each store issues as soon as its own BOA has been awaited and overlaps",
+    "  the next independent fill (the K store co-issues with the V BOA);",
+    "- no store ever co-issues with an outstanding BOA and no load is hoisted",
+    "  across the BOA that reads its buffer, so input_released still fires only",
+    "  after the final L2 load and staging recycling cannot start early.",
     "",
     "Parallelism comes from dispatch count instead:",
     "- the Q projection (writes q_l2) and the K/V projection (writes k_l2/v_l2)",

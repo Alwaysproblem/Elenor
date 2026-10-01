@@ -124,6 +124,7 @@
 ## R3
 
 - 当前的 input release 或者 output release 在 tile program 中粒度是在太粗是不是适合硬件设计需要考量，还有考虑是否需要按照 buffer 的名字进行 release
+- 当前 还需要 考虑加入 scatter 的支持 和 page attention 的模拟
 
 ## example
 
