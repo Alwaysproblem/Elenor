@@ -745,12 +745,12 @@ def make_prefill_dispatchparallel(
     )
   for query_block, half in outproj_dispatches:
     half_name = "lo" if half == 0 else "hi"
-    store = next(
+    store_result = next(
       event
       for event in store_events
       if event.name_hint == f"out_store_{query_block}_{half_name}"
     )
-    block.add_op(NestReleaseOp(out_l2[query_block * out_halves + half], depends_on=[store]))
+    block.add_op(NestReleaseOp(out_l2[query_block * out_halves + half], depends_on=[store_result]))
 
   block.add_op(NestAwaitOp([*grid_dones, *store_events]))
   block.add_op(NestReturnOp())
