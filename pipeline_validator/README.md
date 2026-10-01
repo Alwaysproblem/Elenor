@@ -563,6 +563,17 @@ miss sequence comes from `tile.profiled.access`; it is not a measured cache hit
 rate. Byte equality claims require the explicit `full_memory` + `ByteStore`
 path described above.
 
+## Running the tests
+
+```bash
+conda run -n elenor-validator python -m pytest pipeline_validator/tests/ -v
+```
+
+The suite runs in parallel by default: `pytest.ini` at the repository root
+sets `addopts = -n auto` (`pytest-xdist`, one worker process per CPU). Pass
+`-n0` for a serial run or `-n N` to cap workers. Tests write only to their
+own pytest `tmp_path`, so parallel workers are isolated.
+
 ## Files
 
 ```text

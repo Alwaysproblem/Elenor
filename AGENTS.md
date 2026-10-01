@@ -279,12 +279,14 @@ Run with pytest in the conda environment:
 conda run -n elenor-validator python -m pytest pipeline_validator/tests/ -v
 ```
 
-- **26 tests** across 4 test classes:
-  - `TestStreamQueue` (9 tests) — credit invariant, backpressure, EOS, reset.
-  - `TestIR` (5 tests) — Tile/TileGroupTask builders produce valid IR.
-  - `TestSimulation` (9 tests) — end-to-end: all 6 workloads complete,
-    credit invariant holds, report is renderable.
-  - `TestTracer` (3 tests) — Perfetto/Chrome trace JSON + HTML output.
+- **Parallel by default:** `pytest.ini` at the repo root sets
+  `addopts = -n auto` (`pytest-xdist`, one worker process per CPU). Use
+  `-n0` for a serial run or `-n N` to cap workers. All tests write only to
+  their own pytest `tmp_path`, so parallel workers are isolated.
+- **Coverage:** 500+ tests across the modules in `pipeline_validator/tests/` —
+  unit tests (stream queue, IR builders, tracer, transfer/cache, profiles)
+  plus end-to-end simulations (6 built-in workloads, transformer
+  prefill/decode multicontext) and CLI/trace audits.
 - **All tests must pass** before committing. Run `pre-commit run -a` first,
   then `pytest`.
 
@@ -305,8 +307,8 @@ The document review in `review/ELENOR_Document_Review.md` identified:
 - **`review/deep-research-report.md`** — an external feasibility/competitive technical review.
 - **`.omp/skills/ai-chips/SKILL.md`** — a _persona prompt_ (compiler/RTL/chip/architecture expert) for how to answer hardware-design questions, not a procedural workflow. Relevant when explaining chip-design concepts to the (Chinese-speaking, no-hardware-experience) project owner.
 - **`gen_docs_config/AGENTS.md`** — an `omx agents-init` managed scaffold for the `gen_docs_config/` subtree; not the project-wide AGENTS.md.
-- **`pipeline_validator/`** — cycle-accurate pipeline efficiency validator (Python, 6 workloads, 26 tests). See `pipeline_validator/README.md` for usage.
+- **`pipeline_validator/`** — cycle-accurate pipeline efficiency validator (Python, 6 workloads, 500+ tests). See `pipeline_validator/README.md` for usage.
 - **`.pre-commit-config.yaml`** — pre-commit hooks: ruff, mypy, prettier, trailing-whitespace, end-of-file-fixer, check-yaml.
 - **`ruff.toml`** — Python linter/formatter configuration (108-char lines, 2-space indent, double quotes, N801 ignored for arch naming conventions).
-- **`pipeline_validator/environment.yml`** — conda environment `elenor-validator` (Python 3.11, pytest, ruff, mypy).
+- **`pipeline_validator/environment.yml`** — conda environment `elenor-validator` (Python 3.11, pytest + pytest-xdist, ruff, mypy).
 - **`.prettierrc`** — code formatter for Markdown/JSON/YAML (es5 trailing commas, 2-space tab, no semicolons).
