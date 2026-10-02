@@ -470,8 +470,26 @@ def _device_maintenance(
     return None
   dependencies = tuple(sorted(dict.fromkeys(event for event, _, _ in overlaps)))
   levels = tuple(dict.fromkeys(level for _, _, item in overlaps for level in item.levels))
+  # Plan §2: when every write overlapping a cached read is a Tile Scatter,
+  # the invalidate resolves at run time to just the committed bytes instead
+  # of the whole view (the ledger is the source of truth).  Scattered
+  # HBM writes otherwise wipe the L2 copy of the untouched KV prefix.
+  precise_reads = {
+    id(item)
+    for item in cached_reads
+    if all(old.precise_writes for _, old, new in overlaps if new is item)
+  }
   ranges = tuple(
-    dict.fromkeys(_maintenance_range(registry, inputs, item, item.levels) for _, _, item in overlaps)
+    dict.fromkeys(
+      (
+        replace(
+          _maintenance_range(registry, inputs, item, item.levels), precise_writes=True
+        )
+        if id(item) in precise_reads
+        else _maintenance_range(registry, inputs, item, item.levels)
+      )
+      for _, _, item in overlaps
+    )
   )
   source = _generated(trigger.source_ref, "memory_visibility_pass", "cross-Context HBM-to-cache visibility")
   desc = MemoryMaintenanceDesc(
