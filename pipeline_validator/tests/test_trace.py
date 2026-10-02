@@ -20,6 +20,7 @@ from pipeline_validator.compiler import compile_program
 from pipeline_validator.config import HardwareConfig
 from pipeline_validator.execution_ir import GlobalBinding
 from pipeline_validator.loader import load_program
+from pipeline_validator.memory.byte_store import ByteStore
 from pipeline_validator.simulator import SimConfig, Simulator
 from pipeline_validator.trace import Tracer
 from pipeline_validator.workloads import PowWorkload
@@ -445,10 +446,20 @@ class TestLegSlicesAndFlows:
     flow has exactly one start and one end."""
     from pipeline_validator.tests.test_runtime import GATHER_BINDINGS, make_gather_module
 
-    module = make_gather_module([("r0", "L1_HIT", "line0", None), ("r1", "L2_HIT", "line1", None)])
+    module = make_gather_module([0, 1, 2])
     hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
+    oracle = ByteStore()
+    table = next(item for item in GATHER_BINDINGS.values() if item.name == "table")
+    indices = next(item for item in GATHER_BINDINGS.values() if item.name == "indices")
+    oracle.seed_hbm(table.base_iova, bytes((i * 7) % 251 for i in range(4096)))
+    oracle.seed_hbm(
+      indices.base_iova, b"".join(int(row).to_bytes(4, "little") for row in (0, 1, 2))
+    )
     sim = Simulator(
-      hw, SimConfig(fidelity="full_memory", max_cycles=10000, memory_trace=True), enable_tracer=True
+      hw,
+      SimConfig(fidelity="full_memory", max_cycles=10000, memory_trace=True),
+      byte_store=oracle,
+      enable_tracer=True,
     )
     result = run_source(sim, module, GATHER_BINDINGS)
     assert result.completed, result.reason

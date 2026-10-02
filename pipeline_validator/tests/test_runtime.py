@@ -52,8 +52,8 @@ from pipeline_validator.dialects.elenor import (
   TileBoaOp,
   TileEvuOp,
   TileGatherOp,
+  TileIndexedMapAttr,
   TileLoadOp,
-  TileProfiledAccessOp,
   TileProgramDefOp,
   TileReturnOp,
   TileSignalOp,
@@ -70,7 +70,13 @@ from pipeline_validator.execution_ir import (
   TaskIdentity,
 )
 from pipeline_validator.loader import load_program
-from pipeline_validator.memory import L2SRAM, AdmissionFailure, MemoryInvariantError, NoCRouter, PayloadTracker
+from pipeline_validator.memory import (
+  L2SRAM,
+  AdmissionFailure,
+  MemoryInvariantError,
+  NoCRouter,
+  PayloadTracker,
+)
 from pipeline_validator.memory.arena import ArenaPool, RootInvocation
 from pipeline_validator.profiles import CacheRequirement, ContextResources, TileResources, build_registry
 from pipeline_validator.runtime import EventStatus, EventTable, FaultCode, FaultRing
@@ -233,7 +239,10 @@ MODEL_BINDINGS = {
   "Y1": GlobalBinding("Y1", 0x200000, L2_WAIT_BYTES, "rw"),
 }
 
-GATHER_BINDINGS = {"table": GlobalBinding("table", 0x400000, 4096, "r")}
+GATHER_BINDINGS = {
+  "table": GlobalBinding("table", 0x400000, 4096, "r"),
+  "indices": GlobalBinding("indices", 0x500000, 16, "r"),
+}
 
 
 def assert_uce_instructions_issue_once(result: SimResult) -> list[dict]:
@@ -317,36 +326,46 @@ def assert_model_launch_lifecycle(result: SimResult) -> tuple[list[dict], dict[i
 
 
 def make_gather_module(
-  accesses: list[tuple[str, str, str | None, str | None]],
+  index_rows: list[int],
   *,
   include_evu_context: bool = False,
-  l1_mshr_hint: int = 16,
+  window_entries: int = 4,
+  segment: int = 16,
 ) -> ModuleOp:
-  cache = CacheRequirement(True, "read", "forbidden", 65536)
+  """Address-resolved gather: one 16 B segment per index row."""
+  cache = CacheRequirement(False, "read", "allowed", 65536)
   program = TileProgramDefOp(
     "gather_tile",
     TileResources((1, 2), 2048, l1_cache=cache, l2_cache=cache),
-    arg_types=[NestTask(), NestGlobalView.of([4096], "i8")],
-    arg_names=["task", "table"],
+    arg_types=[NestTask(), NestGlobalView.of([4096], "i8"), NestBuffer.of([len(index_rows)], "i32")],
+    arg_names=["task", "table", "indices_l2"],
   )
-  _task, table = program.body.block.args
-  indices = TileAllocOp([16], "i32")
-  destination = TileAllocOp([len(accesses) * 64], "i8")
-  profile = [
-    TileProfiledAccessOp(request_id, outcome, 64, line_token=line_token, merge_group=merge_group)
-    for request_id, outcome, line_token, merge_group in accesses
-  ]
+  _task, table, indices_l2 = program.body.block.args
+  indices_view = TileSubviewOp(indices_l2, None, None, [0], [len(index_rows)], [1], NestL2View.of([len(index_rows)], "i32"))
+  indices = TileAllocOp([len(index_rows)], "i32")
+  destination = TileAllocOp([len(index_rows) * segment], "i8")
+  load_indices = TileLoadOp(indices_view.result, indices.result, "indices_ready")
   gather = TileGatherOp(
     table,
     indices.result,
     destination.result,
-    len(accesses) * 64,
-    65536,
-    l1_mshr_hint,
-    profile,
     "gather_done",
+    address_map=TileIndexedMapAttr.of(64, 0, 0, 1, 0, segment),
+    window_entries=window_entries,
   )
-  program.body.block.add_ops([indices, destination, gather, TileAwaitOp([gather.result]), TileReturnOp()])
+  program.body.block.add_ops(
+    [
+      indices_view,
+      indices,
+      destination,
+      load_indices,
+      TileAwaitOp([load_indices.result]),
+      TileSignalOp("input_released", _task),
+      gather,
+      TileAwaitOp([gather.result]),
+      TileReturnOp(),
+    ]
+  )
 
   context = NestContextOp(
     "gather_context",
@@ -358,24 +377,27 @@ def make_gather_module(
       requested_contexts_per_tile=1 + int(include_evu_context),
     ),
     placement=1,
-    arg_types=[NestGlobalMemref.of([4096], "i8")],
-    arg_names=["table"],
+    arg_types=[NestGlobalMemref.of([4096], "i8"), NestGlobalMemref.of([len(index_rows)], "i32")],
+    arg_names=["table", "indices"],
   )
-  table_arg = context.body.block.args[0]
+  table_arg, indices_arg = context.body.block.args
   table_view = NestSubviewOp(table_arg, [0], [4096], [1], NestGlobalView.of([4096], "i8"))
+  indices_global = NestSubviewOp(indices_arg, [0], [len(index_rows)], [1], NestGlobalView.of([len(index_rows)], "i32"))
+  indices_alloc = NestAllocOp("indices_l2", "in", [len(index_rows)], "i32")
+  indices_prefetch = NestPrefetchOp(indices_global.result, indices_alloc.result, "indices_prefetched")
   tasks = NestTaskRangeOp(0, 1)
   dispatch = NestDispatchOp(
     "gather_tile",
     tasks.result,
     [table_view.result],
-    [],
+    [indices_alloc.result],
     [],
     "grid_done",
-    "",
+    "input_released",
     "",
     l1_mode=1,
-    bindings=[],
-    signal_policy={},
+    bindings=[indices_alloc.result],
+    signal_policy={"input_released": "all_tasks"},
   )
   programs = [program]
   dispatches = [dispatch]
@@ -397,7 +419,17 @@ def make_gather_module(
     programs.append(evu_program)
     dispatches.append(evu_dispatch)
   context.body.block.add_ops(
-    [table_view, tasks, *dispatches, NestAwaitOp([item.grid_done for item in dispatches]), NestReturnOp()]
+    [
+      table_view,
+      indices_global,
+      indices_alloc,
+      indices_prefetch,
+      tasks,
+      *dispatches,
+      NestAwaitOp([item.grid_done for item in dispatches]),
+      NestReleaseOp(indices_alloc.result, (indices_prefetch.result, dispatch.input_released)),
+      NestReturnOp(),
+    ]
   )
   return ModuleOp([*programs, context])
 
@@ -586,188 +618,6 @@ def make_two_context_model(pins: tuple[int | None, ...] = (None, None)) -> Modul
 # ---------------------------------------------------------------------------
 # Deterministic profiled Gather runtime
 # ---------------------------------------------------------------------------
-
-
-class TestGatherRuntime:
-  def test_all_l1_profile_completes_without_hbm_refill(self):
-    module = make_gather_module([("r0", "L1_HIT", "line0", None), ("r1", "L1_HIT", "line1", None)])
-    simulator = Simulator(
-      HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10),
-      SimConfig(fidelity="full_memory", max_cycles=10000),
-      enable_tracer=True,
-    )
-    result = run_source(simulator, module, GATHER_BINDINGS)
-    assert result.completed, result.reason
-    assert result.pmu.events["gather_requests"] == 2
-    assert result.pmu.events["gather_l1_hits"] == 2
-    assert result.pmu.events["gather_hbm_misses"] == 0
-    assert {
-      "gather_requests",
-      "gather_l1_hits",
-      "gather_l2_hits",
-      "gather_hbm_misses",
-      "gather_mshr_merges",
-      "gather_mshr_stalls",
-      "gather_reorder_wait_cycles",
-      "gather_bytes",
-    } <= result.pmu.events.keys()
-    assert result.pmu.events["gather_l2_hits"] == 0
-    assert result.pmu.events["gather_mshr_merges"] == 0
-    assert result.pmu.events["gather_mshr_stalls"] == 0
-    assert result.pmu.events["gather_reorder_wait_cycles"] == 0
-    assert simulator.group.l2_cache.snapshot()["refills"] == 0
-    events = simulator.tracer._events if simulator.tracer is not None else []
-    writes = [event for event in events if event["name"] == "gather_destination_write"]
-    from pipeline_validator.report import build_report
-
-    report = build_report(WorkloadInfo("gather", "profiled gather", {}), result)
-    checks = {check["check"]: check for check in report.checks}
-    assert checks["gather_request_conservation"]["pass"]
-    assert checks["gather_zero_leak"]["pass"]
-    assert report.gather_fidelity == "deterministic_profiled_not_address_or_value_accurate"
-    done = [event for event in events if event["name"] == "gather_done"]
-    assert [event["args"]["ordinal"] for event in writes] == [0, 1]
-    assert len(done) == 1
-    assert done[0]["ts"] >= writes[-1]["ts"]
-
-  def test_l2_hit_uses_cache_noc_and_local_fill_without_hbm(self):
-    module = make_gather_module([("r0", "L2_HIT", "line0", None)])
-    simulator = Simulator(
-      HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10),
-      SimConfig(fidelity="full_memory", max_cycles=10000),
-    )
-    result = run_source(simulator, module, GATHER_BINDINGS)
-    assert result.completed, result.reason
-    issued = simulator.group.transfer_manager.snapshot()["issued_by_op"]
-    assert issued["gather_l2_hit"] == 1
-    assert issued.get("gather_hbm_refill", 0) == 0
-    assert simulator.group.tiles[0].l1_cache.snapshot()["refills"] == 1
-    assert simulator.group.l2_cache.snapshot()["hits"] == 1
-
-  def test_two_merged_hbm_misses_issue_one_leader_refill(self):
-    module = make_gather_module(
-      [("r0", "HBM_MISS", "line42", "miss42"), ("r1", "HBM_MISS", "line42", "miss42")]
-    )
-    simulator = Simulator(
-      HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10),
-      SimConfig(fidelity="full_memory", max_cycles=10000),
-      enable_tracer=True,
-    )
-    result = run_source(simulator, module, GATHER_BINDINGS)
-    assert result.completed, result.reason
-    assert result.pmu.events["gather_requests"] == 2
-    assert result.pmu.events["gather_hbm_misses"] == 2
-    assert result.pmu.events["gather_mshr_merges"] == 1
-    issued = simulator.group.transfer_manager.snapshot()["issued_by_op"]
-    assert issued["gather_hbm_refill"] == 1
-    assert issued["gather_l2_refill"] == 1
-    assert simulator.group.l2_cache.snapshot()["resident_lines"] == 1
-    assert simulator.group.tiles[0].l1_cache.snapshot()["resident_lines"] == 1
-    events = simulator.tracer._events if simulator.tracer is not None else []
-    writes = [event for event in events if event["name"] == "gather_destination_write"]
-    assert [event["args"]["ordinal"] for event in writes] == [0, 1]
-
-  def test_out_of_order_responses_materialize_in_profile_order(self):
-    module = make_gather_module(
-      [("slow", "HBM_MISS", "slow_line", None), ("fast", "L1_HIT", "fast_line", None)]
-    )
-    simulator = Simulator(
-      HardwareConfig().with_overrides(hbm_fixed_latency_cycles=20),
-      SimConfig(fidelity="full_memory", max_cycles=10000),
-      enable_tracer=True,
-    )
-    result = run_source(simulator, module, GATHER_BINDINGS)
-    assert result.completed, result.reason
-    events = simulator.tracer._events if simulator.tracer is not None else []
-    responses = [event for event in events if event["name"] == "gather_response"]
-    writes = [event for event in events if event["name"] == "gather_destination_write"]
-    done = [event for event in events if event["name"] == "gather_done"]
-    assert [event["args"]["ordinal"] for event in responses] == [1, 0]
-    assert [event["args"]["ordinal"] for event in writes] == [0, 1]
-    assert result.pmu.events["gather_reorder_wait_cycles"] > 0
-    assert len(done) == 1
-    assert done[0]["ts"] >= writes[-1]["ts"]
-    assert done[0]["args"] == {
-      "request_id": "fast",
-      "ordinal": 1,
-      "outcome": "L1_HIT",
-      "event_id": writes[-1]["args"]["event_id"],
-    }
-
-  def test_l1_mshr_full_stalls_one_gather_while_other_context_progresses(self):
-    module = make_gather_module(
-      [("r0", "HBM_MISS", "line0", None), ("r1", "HBM_MISS", "line1", None)],
-      include_evu_context=True,
-      l1_mshr_hint=1,
-    )
-    simulator = Simulator(
-      HardwareConfig().with_overrides(hbm_fixed_latency_cycles=30, l1_mshr_entries=1),
-      SimConfig(fidelity="full_memory", context_count=2, device_context_count=2, max_cycles=10000),
-      enable_tracer=True,
-    )
-    result = run_source(simulator, module, GATHER_BINDINGS)
-    from pipeline_validator.pmu import StallReason
-
-    assert result.pmu.stall_cycles[StallReason.WAIT_MSHR] > 0
-    assert result.completed, result.reason
-    assert result.pmu.events["gather_mshr_stalls"] == 1
-    assert simulator.group.tiles[0].l1_mshr.snapshot()["active"] == 0
-    assert simulator.group.l2_mshr.snapshot()["active"] == 0
-    events = simulator.tracer._events if simulator.tracer is not None else []
-    leases = [event for event in events if event["name"] == "task_lease_acquire"]
-    assert len(leases) == 2
-    assert {event["args"]["ctx_id"] for event in leases} == {0, 1}
-    evu = [event for event in events if event["name"] == "EVU:relu"]
-    gather_done = [event for event in events if event["name"] == "gather_done"]
-    assert len(evu) == 1
-    assert len(gather_done) == 1
-    assert evu[0]["ts"] < gather_done[0]["ts"]
-
-  def test_fault_reset_clears_gather_transactions_mshrs_and_allocations(self, monkeypatch):
-    module = make_gather_module([("r0", "HBM_MISS", "line0", None)])
-    config = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=1000)
-    simulator = Simulator(config, SimConfig(fidelity="full_memory", context_count=1, max_cycles=10000))
-    original_step = simulator.group.step
-    injected = False
-
-    def faulting_step(cycle):
-      nonlocal injected
-      done = original_step(cycle)
-      if not injected and simulator.group.tiles[0].mfe._gather_jobs:
-        injected = True
-        simulator.group.trigger_fault(
-          FaultCode.ADDRESS_FAULT, tile_id=0, cycle=cycle, desc_id="injected gather fault"
-        )
-      return done
-
-    monkeypatch.setattr(simulator.group, "step", faulting_step)
-    result = run_source(simulator, module, GATHER_BINDINGS)
-    assert injected
-    assert not result.completed
-    group = simulator.group
-    assert group.reset_domain.is_done
-    snapshot = group.snapshot()
-    memory = snapshot["memory"]
-    assert memory["mshr"]["l2"]["active"] == 0
-    assert memory["mshr"]["l2"]["callbacks"] == 0
-    assert memory["cache"]["l2"]["resident_lines"] == 0
-    assert all(item["resident_lines"] == 0 for item in memory["cache"]["l1"].values())
-    assert all(item["active"] == 0 for item in memory["mshr"]["l1"].values())
-    assert all(tile["gather_active_jobs"] == 0 for tile in snapshot["tiles"])
-    assert memory["transfers"]["inflight"] == 0
-    assert memory["l2"]["live_arenas"] == 0
-    assert all(item["allocator"]["live_arenas"] == 0 for item in memory["l1"].values())
-    assert all(
-      stage["busy_resources"] == 0 and stage["outstanding"] == 0
-      for stage in memory["transfers"]["stages"].values()
-    )
-
-  def test_gather_source_binding_bounds_fail_before_runtime(self):
-    module = make_gather_module([("r0", "L1_HIT", "line0", None)])
-    simulator = Simulator(HardwareConfig(), SimConfig(fidelity="full_memory"))
-    assert_run_rejected_without_group_mutation(
-      simulator, module, {"table": GlobalBinding("table", 0x400000, 4095, "r")}
-    )
 
 
 # ---------------------------------------------------------------------------

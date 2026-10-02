@@ -16,10 +16,11 @@ from .config import MAX_CONTEXT_COUNT, HardwareConfig
 from .engines import BOAEngine, Engine, EngineJob, EngineState, EVUEngine, MFEEngine, USEEngine
 from .execution_ir import (
   ExecEngineDesc,
-  ExecGatherDesc,
+  ExecTileGatherDesc,
   ExecTileInst,
   ExecTileOp,
   ExecTileProgram,
+  ExecTileScatterDesc,
   GridInstanceId,
   PhaseSignal,
   TaskIdentity,
@@ -46,6 +47,7 @@ _LAUNCH_OPS: frozenset[ExecTileOp] = frozenset(
     ExecTileOp.LAUNCH_USE,
     ExecTileOp.LAUNCH_MFE,
     ExecTileOp.LAUNCH_GATHER,
+    ExecTileOp.LAUNCH_SCATTER,
   }
 )
 
@@ -199,6 +201,7 @@ class TileUCE:
     tracer: Tracer | None = None,
     context_count: int = 1,
     runtime_enabled: bool = False,
+    host_tile: ComputeTile | None = None,
   ):
     if context_count < 1 or context_count > MAX_CONTEXT_COUNT:
       raise ValueError("context_count must be between 1 and 8")
@@ -208,6 +211,9 @@ class TileUCE:
     self.runtime_enabled = runtime_enabled
     self.pmu = PMUCounter()
     self.context_count = context_count
+    # Owning ComputeTile (injected by ComputeTile.__init__); carries the
+    # group-bound precise Scatter-write recorder (plan §2).
+    self.host_tile = host_tile
     self.contexts = [_UCEContext(ctx_id=i) for i in range(context_count)]
     self._current_ctx: int = 0
     self._rr_next_ctx: int = 0
@@ -223,6 +229,7 @@ class TileUCE:
       "MFE_LOAD": deque(),
       "MFE_STORE": deque(),
       "MFE_GATHER": deque(),
+      "MFE_SCATTER": deque(),
       "USE": deque(),
     }
     self._engine_queue_depths: dict[str, int] = {
@@ -232,6 +239,7 @@ class TileUCE:
       "MFE_LOAD": cfg.mfe_load_queue_depth,
       "MFE_STORE": cfg.mfe_store_queue_depth,
       "MFE_GATHER": cfg.mfe_load_queue_depth,
+      "MFE_SCATTER": cfg.mfe_store_queue_depth,
     }
 
   def can_accept_context(self, context_id: int | None = None) -> bool:
@@ -854,13 +862,19 @@ class TileUCE:
         bases.add(desc.transfer.dst.base)
       return frozenset(bases), False
     gather = desc.params.get("gather")
-    if isinstance(gather, ExecGatherDesc):
-      for view in (gather.source, gather.indices, gather.destination):
+    if isinstance(gather, ExecTileGatherDesc):
+      for view in (gather.indices, gather.destination):
         if view.space == "l1":
           bases.add(view.base)
       return frozenset(bases), False
-    if desc.op == "gather":
-      raise MemoryInvariantError("gather descriptor is missing")
+    scatter = desc.params.get("scatter")
+    if isinstance(scatter, ExecTileScatterDesc):
+      for view in (scatter.source, scatter.indices):
+        if view.space == "l1":
+          bases.add(view.base)
+      return frozenset(bases), False
+    if desc.op in ("gather", "scatter"):
+      raise MemoryInvariantError(f"{desc.op} descriptor is missing")
     return frozenset(), True
 
   def _assert_launch_l1_live(self, ctx: _UCEContext, ins: ExecTileInst) -> None:
@@ -986,6 +1000,8 @@ class TileUCE:
       return "USE"
     if ins.op == ExecTileOp.LAUNCH_GATHER:
       return "MFE_GATHER"
+    if ins.op == ExecTileOp.LAUNCH_SCATTER:
+      return "MFE_SCATTER"
     desc_ref = ins.args[0] if ins.args else ""
     desc = ctx.program.descriptors.get(desc_ref) if ctx.program is not None else None
     if desc is not None and desc.op in ("store", "dma_store"):
@@ -1017,7 +1033,9 @@ class TileUCE:
     self._local_event_owner[event_ref.runtime_id] = event_ref
     desc_ref = ins.args[0] if ins.args else ""
     launch_params: dict = {}
-    engine_kind = "MFE" if queue_key in ("MFE_LOAD", "MFE_GATHER", "MFE_STORE") else queue_key
+    engine_kind = (
+      "MFE" if queue_key in ("MFE_LOAD", "MFE_GATHER", "MFE_SCATTER", "MFE_STORE") else queue_key
+    )
     fifo.append(
       _EngineQueueEntry(ctx.ctx_id, event_ref, desc_ref, ins.op, engine_kind, launch_params=launch_params)
     )
@@ -1041,7 +1059,7 @@ class TileUCE:
   def _drain_engine_queues(self, cycle: int, tile: ComputeTile) -> None:
     from .memory.allocator import MemoryInvariantError
 
-    for queue_key in ("BOA", "EVU", "MFE_LOAD", "MFE_GATHER", "MFE_STORE", "USE"):
+    for queue_key in ("BOA", "EVU", "MFE_LOAD", "MFE_GATHER", "MFE_SCATTER", "MFE_STORE", "USE"):
       fifo = self._engine_queues[queue_key]
       if not fifo:
         continue
@@ -1057,6 +1075,10 @@ class TileUCE:
         job: object | None
         if queue_key == "MFE_GATHER":
           job = tile.mfe.launch_gather(
+            resolved.desc, cycle, entry.event_ref.runtime_id, **resolved.launch_params
+          )
+        elif queue_key == "MFE_SCATTER":
+          job = tile.mfe.launch_scatter(
             resolved.desc, cycle, entry.event_ref.runtime_id, **resolved.launch_params
           )
         else:
@@ -1082,7 +1104,7 @@ class TileUCE:
       return tile.boa
     if queue_key == "EVU":
       return tile.evu
-    if queue_key in ("MFE_LOAD", "MFE_GATHER", "MFE_STORE"):
+    if queue_key in ("MFE_LOAD", "MFE_GATHER", "MFE_SCATTER", "MFE_STORE"):
       return tile.mfe
     return tile.use
 
@@ -1105,17 +1127,22 @@ class TileUCE:
     if base.transfer is not None:
       params["bytes"] = base.transfer.bytes
       transaction = self._build_tile_transaction(ctx, base.transfer, entry, tile)
-    elif base.op == "gather":
-      gather = base.params.get("gather")
-      if not isinstance(gather, ExecGatherDesc):
-        raise ValueError("gather descriptor is missing")
-      if gather.l1_mshr_hint > self.cfg.l1_mshr_entries:
-        raise ValueError("gather l1_mshr_hint exceeds L1 MSHR capacity")
-      if ctx.memory is None or ctx.task_identity is None:
-        raise ValueError("gather context memory is missing")
-      source = self._resolve_tile_view(gather.source, ctx.memory, tile)
-      indices = self._resolve_tile_view(gather.indices, ctx.memory, tile)
-      destination = self._resolve_tile_view(gather.destination, ctx.memory, tile)
+    elif base.op in ("gather", "scatter"):
+      indexed = base.params.get(base.op)
+      if base.op == "gather" and isinstance(indexed, ExecTileGatherDesc):
+        if ctx.memory is None or ctx.task_identity is None:
+          raise ValueError("gather context memory is missing")
+        source = self._resolve_tile_view(indexed.source, ctx.memory, tile)
+        indices = self._resolve_tile_view(indexed.indices, ctx.memory, tile)
+        destination = self._resolve_tile_view(indexed.destination, ctx.memory, tile)
+      elif base.op == "scatter" and isinstance(indexed, ExecTileScatterDesc):
+        if ctx.memory is None or ctx.task_identity is None:
+          raise ValueError("scatter context memory is missing")
+        source = self._resolve_tile_view(indexed.source, ctx.memory, tile)
+        indices = self._resolve_tile_view(indexed.indices, ctx.memory, tile)
+        destination = self._resolve_tile_view(indexed.destination, ctx.memory, tile)
+      else:
+        raise ValueError(f"{base.op} descriptor is missing")
       task = ctx.task_identity
       grid = task.grid
       owner = destination.handle.owner
@@ -1133,6 +1160,30 @@ class TileUCE:
           entry.event_ref.local_name,
         ),
       }
+      launch_params["element_bytes"] = indexed.source.element_bytes
+      if base.op == "gather":
+        contract = ctx.program.resource_contract
+        launch_params["bypass_forbidden"] = bool(
+          contract is not None
+          and contract.l1_cache is not None
+          and contract.l1_cache.bypass == "forbidden"
+        )
+      else:
+        recorder = self.host_tile.precise_write_recorder if self.host_tile is not None else None
+        role_event = ctx.role_event_id or ""
+
+        def record_write(
+          allocation_id: str,
+          allocation_generation: int,
+          offset: int,
+          length: int,
+          _recorder=recorder,
+          _role_event: str = role_event,
+        ) -> None:
+          if _recorder is not None:
+            _recorder(_role_event, allocation_id, allocation_generation, offset, length)
+
+        launch_params["record_write"] = record_write
     params.update(
       {
         "tile_id": self.tile_id,
@@ -1436,7 +1487,9 @@ class ComputeTile:
     self.memory_trace = memory_trace
     self.runtime_enabled = runtime_enabled
     self.memory_enabled = memory_enabled
-    self.uce = TileUCE(tile_id, cfg, tracer, context_count=context_count, runtime_enabled=runtime_enabled)
+    self.uce = TileUCE(
+      tile_id, cfg, tracer, context_count=context_count, runtime_enabled=runtime_enabled, host_tile=self
+    )
     self.boa = BOAEngine(cfg, tile_id, tracer)
     self.evu = EVUEngine(cfg, tile_id, tracer)
     from .memory import DeterministicLRUCache, MshrTable
@@ -1461,6 +1514,9 @@ class ComputeTile:
       l2_mshr=l2_mshr,
       memory_trace=memory_trace,
     )
+    # Set by the owning TileGroup at bind time (plan §2): Scatter commits
+    # append to the group's precise-write ledger keyed by role event.
+    self.precise_write_recorder: Callable[[str, str, int, int, int], None] | None = None
     self.use = USEEngine(cfg, tile_id, tracer)
     self.streams: dict[int, StreamQueue] = {}
     self.pmu = PMUCounter()

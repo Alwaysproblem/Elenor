@@ -23,6 +23,7 @@ from ..execution_ir import (
   ExecDeviceOp,
   ExecGroupAction,
   ExecGroupActionOp,
+  ExecHostCall,
   ExecMemoryView,
   ExecModel,
   ExecTileGroupTask,
@@ -104,7 +105,7 @@ def _input_index(task: ExecTileGroupTask, view: ExecMemoryView) -> int:
 def _relocations(entry: ExecModel | ExecTileGroupTask) -> tuple[Relocation, ...]:
   result: list[Relocation] = []
   for binding_id, task in _entry_tasks(entry).items():
-    first_dispatch: dict[int, int] = {}
+    dispatch_ordinals: dict[int, list[int]] = {}
     for ordinal, action in enumerate(task.actions):
       if action.dst:
         result.append(Relocation(binding_id, "group", ordinal, "dst", "event"))
@@ -117,7 +118,7 @@ def _relocations(entry: ExecModel | ExecTileGroupTask) -> tuple[Relocation, ...]
           Relocation(binding_id, "context", ordinal, "global_view", "binding", _input_index(task, view), -1)
         )
       elif action.op is ExecGroupActionOp.DISPATCH_ROLE:
-        first_dispatch.setdefault(action.args[0].role_id, ordinal)
+        dispatch_ordinals.setdefault(action.args[0].role_id, []).append(ordinal)
         result.append(Relocation(binding_id, "group", ordinal, "args", "dispatch_events"))
       elif action.op in (ExecGroupActionOp.WAIT_EVENT, ExecGroupActionOp.SIGNAL_EVENT):
         result.append(Relocation(binding_id, "group", ordinal, "args", "event_tuple"))
@@ -141,21 +142,24 @@ def _relocations(entry: ExecModel | ExecTileGroupTask) -> tuple[Relocation, ...]
         result.append(Relocation(binding_id, "role", 0, "in_stream", "queue", -1, role_id))
       if role.out_stream is not None:
         result.append(Relocation(binding_id, "role", 0, "out_stream", "queue", -1, role_id))
-      dispatch_ordinal = first_dispatch.get(role_id)
-      if dispatch_ordinal is None:
+      ordinals = dispatch_ordinals.get(role_id)
+      if not ordinals:
         raise ValueError(f"role {role_id} in {binding_id!r} is never dispatched")
-      for view in role.global_actuals:
-        result.append(
-          Relocation(
-            binding_id,
-            "tile_role",
-            dispatch_ordinal,
-            "global_actuals",
-            "binding",
-            _input_index(task, view),
-            role_id,
+      # Every dispatch of a role binds its actuals, so each dispatch ordinal
+      # carries its own relocation row (load verification expects the same).
+      for dispatch_ordinal in ordinals:
+        for view in role.global_actuals:
+          result.append(
+            Relocation(
+              binding_id,
+              "tile_role",
+              dispatch_ordinal,
+              "global_actuals",
+              "binding",
+              _input_index(task, view),
+              role_id,
+            )
           )
-        )
 
   # Preserve deterministic traversal while rejecting an ambiguous duplicate.
   keys = [tuple(vars(item).values()) for item in result]
@@ -256,6 +260,14 @@ def _binding_guards_and_effects(
     for access in accesses:
       minimum[access.input_index] = max(minimum[access.input_index], access.end)
       permissions[access.input_index].add("w" if access.writing else "r")
+  if isinstance(entry, ExecModel):
+    for op in entry.body:
+      if op.op != "host_call" or not isinstance(op.command, ExecHostCall):
+        continue
+      for host_access in op.command.accesses:
+        index = host_access.input_index
+        minimum[index] = max(minimum[index], host_access.offset + host_access.bytes)
+        permissions[index].update(_access_permissions(host_access.mode))
   guards = tuple(
     BindingGuard(
       item.name,
@@ -265,6 +277,62 @@ def _binding_guards_and_effects(
     for index, item in enumerate(inputs)
   )
   return guards, effects
+
+
+def _access_permissions(mode: str) -> frozenset[str]:
+  return {"read": frozenset({"r"}), "write": frozenset({"w"}), "readwrite": frozenset({"r", "w"})}[mode]
+
+
+def _task_scopes(task: ExecTileGroupTask) -> tuple[str, ...]:
+  """Tile gather/scatter scopes a specialized task submission uses."""
+  scopes: set[str] = set()
+  for role in task.role_bindings.values():
+    for descriptor in role.tile_program.descriptors.values():
+      if descriptor.kind == "MFE" and descriptor.op in ("gather", "scatter"):
+        scope = descriptor.params[descriptor.op].scope
+        if scope:
+          scopes.add(scope)
+  return tuple(sorted(scopes))
+
+
+def _host_and_scope_effects(
+  entry: ExecModel | ExecTileGroupTask,
+) -> tuple[dict[str, object], dict[str, object]]:
+  """Plan §4 static_effects additions: host_accesses and scope_effects.
+
+  ``scope_effects`` keys are completion event tags; a submit records
+  ``use`` for every tile gather/scatter scope its task touches, a
+  host_call records ``mutate`` for its declared scopes.
+  """
+  if not isinstance(entry, ExecModel):
+    return {}, {}
+  host_effects: dict[str, object] = {}
+  scope_effects: dict[str, object] = {}
+  for op in entry.body:
+    if op.op == "host_call" and isinstance(op.command, ExecHostCall):
+      host_effects[op.instruction_id] = {
+        "name": op.command.name,
+        "accesses": tuple(
+          {
+            "input_index": access.input_index,
+            "offset": access.offset,
+            "bytes": access.bytes,
+            "mode": access.mode,
+          }
+          for access in op.command.accesses
+        ),
+        "scopes": op.command.scopes,
+      }
+      scope_effects[op.event_tag] = tuple(
+        {"scope": scope, "kind": "mutate"} for scope in op.command.scopes
+      )
+    elif op.op == "submit" and op.binding_id in entry.tasks:
+      scopes = _task_scopes(entry.tasks[op.binding_id])
+      if scopes:
+        scope_effects[op.event_tag] = tuple(
+          {"scope": scope, "kind": "use"} for scope in scopes
+        )
+  return host_effects, scope_effects
 
 
 def _validate_binding_assumptions(
@@ -329,6 +397,7 @@ def compile_program(
   entry, budgets = finalize_event_resources(entry, budgets, sim)
   entry = _finalize_program_identities(entry, hw)
   guards, access_effects = _binding_guards_and_effects(entry)
+  host_effects, scope_effects = _host_and_scope_effects(entry)
   _validate_binding_assumptions(binding_assumptions, guards)
   if print_workload_ir(module) != source_ir:
     raise ValueError("compiler pass mutated its source IR")
@@ -340,8 +409,8 @@ def compile_program(
   from ..execution_verifier import target_fingerprint, verify_compiled_program
 
   program = CompiledProgram(
-    2,
-    "v2",
+    3,
+    "v3",
     source_hash,
     source_ir,
     registry,
@@ -360,6 +429,8 @@ def compile_program(
     {
       "resources": resource_effects,
       "accesses": access_effects,
+      "host_accesses": host_effects,
+      "scope_effects": scope_effects,
       "program_text_bytes": {
         binding_id: tuple(sorted({role.tile_program.text_bytes for role in task.role_bindings.values()}))
         for binding_id, task in _entry_tasks(entry).items()

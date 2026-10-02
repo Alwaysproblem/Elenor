@@ -256,8 +256,11 @@ _CLASSES = (
   execution.GlobalBinding,
   execution.ExecGlobalInput,
   execution.ExecMemoryView,
-  execution.ExecProfiledAccess,
-  execution.ExecGatherDesc,
+  execution.ExecTileGatherDesc,
+  execution.ExecTileScatterDesc,
+  execution.ExecIndexedMap,
+  execution.ExecHostAccess,
+  execution.ExecHostCall,
   execution.ExecTransfer,
   execution.ExecL2Buffer,
   execution.ExecL1Buffer,
@@ -300,7 +303,7 @@ _CLASSES = (
 _TYPES = {cls.__name__: cls for cls in _CLASSES}
 _ENUMS = {
   cls.__name__: cls
-  for cls in (execution.ExecTileOp, execution.ExecGroupActionOp, execution.ExecGatherOutcome)
+  for cls in (execution.ExecTileOp, execution.ExecGroupActionOp)
 }
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _PROFILE_VALUES = (
@@ -479,10 +482,14 @@ def _validate_engine(desc: execution.ExecEngineDesc, name: str) -> None:
     if desc.params or type(desc.transfer) is not execution.ExecTransfer:
       raise ValueError(f"{name} has invalid transfer descriptor fields")
     _validate_executable_value(desc.transfer, f"{name}.transfer")
-  elif desc.kind == "MFE" and desc.op == "gather":
-    if set(desc.params) != {"gather"} or type(desc.params["gather"]) is not execution.ExecGatherDesc:
-      raise ValueError(f"{name} has invalid gather descriptor fields")
-    _validate_executable_value(desc.params["gather"], f"{name}.gather")
+  elif desc.kind == "MFE" and desc.op in ("gather", "scatter"):
+    key = desc.op
+    desc_cls = (
+      execution.ExecTileGatherDesc if desc.op == "gather" else execution.ExecTileScatterDesc
+    )
+    if set(desc.params) != {key} or type(desc.params[key]) is not desc_cls:
+      raise ValueError(f"{name} has invalid {desc.op} descriptor fields")
+    _validate_executable_value(desc.params[key], f"{name}.{key}")
     if desc.transfer is not None:
       raise ValueError(f"{name}.transfer must be absent")
   elif desc.kind == "EVU":
@@ -610,26 +617,43 @@ def _validate_executable_value(value: object, name: str) -> None:
   if _is_exact_type(value, execution.ExecMemoryView):
     _validate_view(value, name)
     return
-  if _is_exact_type(value, execution.ExecProfiledAccess):
-    _text(value.request_id, f"{name}.request_id")
-    if type(value.outcome) is not execution.ExecGatherOutcome:
-      raise ValueError(f"{name}.outcome is invalid")
-    _uint(value.bytes, f"{name}.bytes", positive=True)
-    _optional_text(value.line_token, f"{name}.line_token")
-    _optional_text(value.merge_group, f"{name}.merge_group")
+  if _is_exact_type(value, execution.ExecIndexedMap):
+    for field in ("index_scale", "offset", "task_stride", "repeat", "stride", "segment"):
+      item = getattr(value, field)
+      if type(item) is not int or item < 0:
+        raise ValueError(f"{name}.{field} must be a non-negative integer")
+    if value.index_scale <= 0 or value.repeat <= 0 or value.segment <= 0:
+      raise ValueError(f"{name} must have positive index_scale/repeat/segment")
     return
-  if _is_exact_type(value, execution.ExecGatherDesc):
+  if _is_exact_type(value, execution.ExecTileGatherDesc):
     _validate_view(value.source, f"{name}.source")
     _validate_view(value.indices, f"{name}.indices")
     _validate_view(value.destination, f"{name}.destination")
-    _uint(value.result_bytes, f"{name}.result_bytes", positive=True)
-    _uint(value.cache_target_bytes, f"{name}.cache_target_bytes")
-    _uint(value.l1_mshr_hint, f"{name}.l1_mshr_hint", positive=True)
-    accesses = _typed_tuple(value.accesses, execution.ExecProfiledAccess, f"{name}.accesses", nonempty=True)
-    for index, item in enumerate(accesses):
+    _validate_executable_value(value.address_map, f"{name}.address_map")
+    _uint(value.window_entries, f"{name}.window_entries", positive=True)
+    _optional_text(value.scope, f"{name}.scope")
+    return
+  if _is_exact_type(value, execution.ExecTileScatterDesc):
+    _validate_view(value.source, f"{name}.source")
+    _validate_view(value.indices, f"{name}.indices")
+    _validate_view(value.destination, f"{name}.destination")
+    _validate_executable_value(value.address_map, f"{name}.address_map")
+    _uint(value.window_entries, f"{name}.window_entries", positive=True)
+    _optional_text(value.scope, f"{name}.scope")
+    return
+  if _is_exact_type(value, execution.ExecHostAccess):
+    _uint(value.input_index, f"{name}.input_index")
+    _uint(value.offset, f"{name}.offset")
+    _uint(value.bytes, f"{name}.bytes", positive=True)
+    if value.mode not in ("read", "write", "readwrite"):
+      raise ValueError(f"{name}.mode is invalid")
+    return
+  if _is_exact_type(value, execution.ExecHostCall):
+    _text(value.name, f"{name}.name")
+    _typed_tuple(value.accesses, execution.ExecHostAccess, f"{name}.accesses")
+    for index, item in enumerate(value.accesses):
       _validate_executable_value(item, f"{name}.accesses[{index}]")
-    if sum(item.bytes for item in accesses) != value.result_bytes:
-      raise ValueError(f"{name}.accesses do not conserve result_bytes")
+    _strings(value.scopes, f"{name}.scopes", unique=True)
     return
   if _is_exact_type(value, execution.ExecTransfer):
     _validate_view(value.src, f"{name}.src")
@@ -818,7 +842,7 @@ def _validate_executable_value(value: object, name: str) -> None:
       _validate_executable_value(item, f"{name}.shared_inputs[{index}]")
     return
   if _is_exact_type(value, execution.ExecDeviceOp):
-    if value.op not in ("submit", "await", "return", "profile_reconfig", "memory_maintenance"):
+    if value.op not in ("submit", "host_call", "await", "return", "profile_reconfig", "memory_maintenance"):
       raise ValueError(f"{name}.op is not allowlisted")
     for field_name in ("ctx_name", "event_tag", "callsite_id", "binding_id"):
       _text(getattr(value, field_name), f"{name}.{field_name}", allow_empty=True)
@@ -831,11 +855,14 @@ def _validate_executable_value(value: object, name: str) -> None:
         if value.op == "profile_reconfig"
         else profiles.MemoryMaintenanceDesc
         if value.op == "memory_maintenance"
+        else execution.ExecHostCall
+        if value.op == "host_call"
         else None
       )
       if command_type is None or type(value.command) is not command_type:
         raise ValueError(f"{name}.command is invalid")
-    elif value.op in ("profile_reconfig", "memory_maintenance"):
+      _validate_executable_value(value.command, f"{name}.command")
+    elif value.op in ("profile_reconfig", "memory_maintenance", "host_call"):
       raise ValueError(f"{name}.command is missing")
     _validate_source_ref(value.source_ref, f"{name}.source_ref")
     _text(value.instruction_id, f"{name}.instruction_id")
@@ -864,7 +891,7 @@ def _validate_executable_value(value: object, name: str) -> None:
 
 
 def _validate_compiled_program_value(program: CompiledProgram, *, allow_unsealed: bool) -> None:
-  if type(program.schema_version) is not int or program.schema_version != 2 or program.compiler_abi != "v2":
+  if type(program.schema_version) is not int or program.schema_version != 3 or program.compiler_abi != "v3":
     raise ValueError("unsupported compiled schema or ABI; recompile the source with this compiler")
   _text(program.source_ir, "source_ir")
   _digest_text(program.source_hash, "source_hash")
@@ -1059,7 +1086,7 @@ def parse_compiled_program(text: str) -> CompiledProgram:
     if (
       isinstance(encoded, dict)
       and encoded.get("$type") == "CompiledProgram"
-      and (encoded.get("schema_version") != 2 or encoded.get("compiler_abi") != "v2")
+      and (encoded.get("schema_version") != 3 or encoded.get("compiler_abi") != "v3")
     ):
       raise ValueError("unsupported compiled schema or ABI; recompile from source")
     program = _decode(encoded)

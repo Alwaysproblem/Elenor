@@ -96,14 +96,18 @@ class TransferOp(Enum):
   GLOBAL_STORE = "global_store"
   TILE_LOAD = "tile_load"
   TILE_STORE = "tile_store"
-  GATHER_L1_HIT = "gather_l1_hit"
-  GATHER_L2_HIT = "gather_l2_hit"
-  GATHER_MISS_LOOKUP = "gather_miss_lookup"
+  INDEX_READ = "index_read"
+  GATHER_L1_LOOKUP = "gather_l1_lookup"
+  GATHER_L2_LOOKUP = "gather_l2_lookup"
+  GATHER_L2_RESPONSE = "gather_l2_response"
   GATHER_HBM_REFILL = "gather_hbm_refill"
   GATHER_L2_REFILL = "gather_l2_refill"
   GATHER_DEST_WRITE = "gather_dest_write"
   GATHER_DIRECT_L1_REFILL = "gather_direct_l1_refill"
   GATHER_DIRECT_RESPONSE = "gather_direct_response"
+  SCATTER_WRITE = "scatter_write"
+  HOST_READ = "host_read"
+  HOST_WRITE = "host_write"
   CACHE_CLEAN_L1 = "cache_clean_l1"
   CACHE_CLEAN_L2 = "cache_clean_l2"
 
@@ -211,6 +215,10 @@ class MemoryTransaction:
   noc_vc: int = 0  # virtual channel of the in-flight NOC leg
   # Byte visibility is deliberately tied to completed read/write legs.
   captured_data: bytes | None = None
+  # Per-byte validity mask for relaxed whole-line refills (plan §2):
+  # 1 = byte initialised in the store, 0 = never written (page tail /
+  # padding).  Destination writes touching a 0 byte fault.
+  captured_validity: bytes | None = None
   source_captured_cycle: int = -1
   destination_committed_cycle: int = -1
   # Runtime/profile generation captured by the submitter.  The manager's
@@ -767,9 +775,9 @@ class TransferManager:
     if any(level not in ("l1", "l2") for level in transaction.bypass_levels):
       raise MemoryInvariantError("transfer bypass level must be l1 or l2")
     gather_ops = (
-      TransferOp.GATHER_L1_HIT,
-      TransferOp.GATHER_L2_HIT,
-      TransferOp.GATHER_MISS_LOOKUP,
+      TransferOp.GATHER_L1_LOOKUP,
+      TransferOp.GATHER_L2_LOOKUP,
+      TransferOp.GATHER_L2_RESPONSE,
       TransferOp.GATHER_HBM_REFILL,
       TransferOp.GATHER_L2_REFILL,
       TransferOp.GATHER_DEST_WRITE,
@@ -777,7 +785,16 @@ class TransferManager:
       TransferOp.GATHER_DIRECT_RESPONSE,
     )
     clean_ops = (TransferOp.CACHE_CLEAN_L1, TransferOp.CACHE_CLEAN_L2)
-    if transaction.op in gather_ops or transaction.op in clean_ops:
+    single_endpoint_ops = (TransferOp.INDEX_READ,)
+    scatter_ops = (TransferOp.SCATTER_WRITE,)
+    host_ops = (TransferOp.HOST_READ, TransferOp.HOST_WRITE)
+    if (
+      transaction.op in gather_ops
+      or transaction.op in clean_ops
+      or transaction.op in single_endpoint_ops
+      or transaction.op in scatter_ops
+      or transaction.op in host_ops
+    ):
       transaction.legs = self._build_route(transaction)
     elif transaction.src is None and transaction.dst is None:
       transaction.legs = self._collapsed_leg(transaction)
@@ -836,16 +853,7 @@ class TransferManager:
     Group ops fold onto the Global DMA stage; tile-local ops fold onto
     the tile's local DMA stage (mfe_launch_cycles + mfe bandwidth).
     """
-    if txn.op in (
-      TransferOp.GATHER_L1_HIT,
-      TransferOp.GATHER_L2_HIT,
-      TransferOp.GATHER_MISS_LOOKUP,
-      TransferOp.GATHER_HBM_REFILL,
-      TransferOp.GATHER_L2_REFILL,
-      TransferOp.GATHER_DEST_WRITE,
-      TransferOp.GATHER_DIRECT_L1_REFILL,
-      TransferOp.GATHER_DIRECT_RESPONSE,
-    ):
+    if txn.op in self._GATHER_ROUTE_OPS:
       raise MemoryInvariantError("gather route must not be collapsed")
     if txn.op in (TransferOp.TILE_LOAD, TransferOp.TILE_STORE):
       tid = txn.tile_id or 0
@@ -863,150 +871,184 @@ class TransferManager:
       TransferLeg(TransferLegKind.GLOBAL_DMA, "hbm", "l2", txn.bytes_total, f"gdma:{txn.transaction_id}"),
     )
 
+  _GATHER_ROUTE_OPS = frozenset(
+    {
+      TransferOp.GATHER_L1_LOOKUP,
+      TransferOp.GATHER_L2_LOOKUP,
+      TransferOp.GATHER_L2_RESPONSE,
+      TransferOp.GATHER_HBM_REFILL,
+      TransferOp.GATHER_L2_REFILL,
+      TransferOp.GATHER_DEST_WRITE,
+      TransferOp.GATHER_DIRECT_L1_REFILL,
+      TransferOp.GATHER_DIRECT_RESPONSE,
+    }
+  )
+
   def _build_route(self, txn: MemoryTransaction) -> tuple[TransferLeg, ...]:
     op = txn.op
     tid = txn.tile_id or 0
-    if op == TransferOp.GATHER_L1_HIT:
+    txn_id = txn.transaction_id
+    if op == TransferOp.INDEX_READ:
       return (
         TransferLeg(
-          TransferLegKind.L1_CACHE_LOOKUP,
-          "l1_cache",
-          "l1_cache",
+          TransferLegKind.L1_READ,
+          "l1",
+          "l1",
           txn.bytes_total,
-          f"l1_cache_lookup:{tid}:{txn.transaction_id}",
+          f"l1_read:{tid}:index:{txn_id}",
         ),
       )
-    if op == TransferOp.GATHER_L2_HIT:
+    if op == TransferOp.GATHER_L1_LOOKUP:
       return (
         TransferLeg(
           TransferLegKind.L1_CACHE_LOOKUP,
           "l1_cache",
           "l1_cache",
           txn.bytes_total,
-          f"l1_cache_lookup:{tid}:{txn.transaction_id}",
+          f"l1_cache_lookup:{tid}:{txn_id}",
         ),
+      )
+    if op == TransferOp.GATHER_L2_LOOKUP:
+      return (
         TransferLeg(
           TransferLegKind.L2_CACHE_LOOKUP,
           "l2_cache",
           "l2_cache",
           txn.bytes_total,
-          f"l2_cache_lookup:{txn.transaction_id}",
-        ),
-        TransferLeg(
-          TransferLegKind.NOC_RESPONSE, "noc", "tile", txn.bytes_total, f"noc_rsp:{txn.transaction_id}"
-        ),
-        TransferLeg(
-          TransferLegKind.LOCAL_DMA,
-          "tile",
-          "l1_cache",
-          txn.bytes_total,
-          f"local_dma:{tid}:load:{txn.transaction_id}",
-        ),
-        TransferLeg(
-          TransferLegKind.L1_CACHE_FILL,
-          "l1_cache",
-          "l1_cache",
-          txn.bytes_total,
-          f"l1_cache_fill:{tid}:{txn.transaction_id}",
+          f"l2_cache_lookup:{txn_id}",
         ),
       )
-    if op == TransferOp.GATHER_MISS_LOOKUP:
+    if op == TransferOp.GATHER_L2_RESPONSE:
       return (
         TransferLeg(
-          TransferLegKind.L1_CACHE_LOOKUP,
-          "l1_cache",
-          "l1_cache",
-          txn.bytes_total,
-          f"l1_cache_lookup:{tid}:{txn.transaction_id}",
-        ),
-        TransferLeg(
-          TransferLegKind.L2_CACHE_LOOKUP,
-          "l2_cache",
-          "l2_cache",
-          txn.bytes_total,
-          f"l2_cache_lookup:{txn.transaction_id}",
-        ),
-      )
-    if op == TransferOp.GATHER_HBM_REFILL:
-      return (
-        TransferLeg(
-          TransferLegKind.HBM_READ, "hbm", "noc", txn.bytes_total, f"hbm_read:{txn.transaction_id}"
-        ),
-        TransferLeg(
-          TransferLegKind.NOC_RESPONSE, "noc", "l2_cache", txn.bytes_total, f"noc_rsp:{txn.transaction_id}"
-        ),
-        TransferLeg(
-          TransferLegKind.L2_CACHE_FILL,
-          "l2_cache",
-          "l2_cache",
-          txn.bytes_total,
-          f"l2_cache_fill:{txn.transaction_id}",
-        ),
-      )
-    if op == TransferOp.GATHER_L2_REFILL:
-      return (
-        TransferLeg(
-          TransferLegKind.NOC_RESPONSE, "l2_cache", "tile", txn.bytes_total, f"noc_rsp:{txn.transaction_id}"
-        ),
-        TransferLeg(
-          TransferLegKind.LOCAL_DMA,
-          "tile",
-          "l1_cache",
-          txn.bytes_total,
-          f"local_dma:{tid}:load:{txn.transaction_id}",
-        ),
-        TransferLeg(
-          TransferLegKind.L1_CACHE_FILL,
-          "l1_cache",
-          "l1_cache",
-          txn.bytes_total,
-          f"l1_cache_fill:{tid}:{txn.transaction_id}",
-        ),
-      )
-    if op == TransferOp.GATHER_DIRECT_L1_REFILL:
-      return (
-        TransferLeg(
-          TransferLegKind.HBM_READ, "hbm", "noc", txn.bytes_total, f"hbm_read:{txn.transaction_id}"
-        ),
-        TransferLeg(
-          TransferLegKind.NOC_RESPONSE, "noc", "tile", txn.bytes_total, f"noc_rsp:{txn.transaction_id}"
-        ),
-        TransferLeg(
-          TransferLegKind.LOCAL_DMA,
-          "tile",
-          "l1_cache",
-          txn.bytes_total,
-          f"local_dma:{tid}:load:{txn.transaction_id}",
-        ),
-        TransferLeg(
-          TransferLegKind.L1_CACHE_FILL,
-          "l1_cache",
-          "l1_cache",
-          txn.bytes_total,
-          f"l1_cache_fill:{tid}:{txn.transaction_id}",
-        ),
-      )
-    if op == TransferOp.GATHER_DIRECT_RESPONSE:
-      return (
-        TransferLeg(
-          TransferLegKind.HBM_READ, "hbm", "noc", txn.bytes_total, f"hbm_read:{txn.transaction_id}"
-        ),
-        TransferLeg(
-          TransferLegKind.NOC_RESPONSE, "noc", "tile", txn.bytes_total, f"noc_rsp:{txn.transaction_id}"
+          TransferLegKind.NOC_RESPONSE, "noc", "tile", txn.bytes_total, f"noc_rsp:{txn_id}"
         ),
         TransferLeg(
           TransferLegKind.LOCAL_DMA,
           "tile",
           "l1",
           txn.bytes_total,
-          f"local_dma:{tid}:load:{txn.transaction_id}",
+          f"local_dma:{tid}:load:{txn_id}",
+        ),
+      )
+    if op == TransferOp.GATHER_HBM_REFILL:
+      return (
+        TransferLeg(
+          TransferLegKind.HBM_READ, "hbm", "noc", txn.bytes_total, f"hbm_read:{txn_id}"
+        ),
+        TransferLeg(
+          TransferLegKind.NOC_RESPONSE, "noc", "l2_cache", txn.bytes_total, f"noc_rsp:{txn_id}"
+        ),
+        TransferLeg(
+          TransferLegKind.L2_CACHE_FILL,
+          "l2_cache",
+          "l2_cache",
+          txn.bytes_total,
+          f"l2_cache_fill:{txn_id}",
+        ),
+      )
+    if op == TransferOp.GATHER_L2_REFILL:
+      return (
+        TransferLeg(
+          TransferLegKind.NOC_RESPONSE, "l2_cache", "tile", txn.bytes_total, f"noc_rsp:{txn_id}"
+        ),
+        TransferLeg(
+          TransferLegKind.LOCAL_DMA,
+          "tile",
+          "l1_cache",
+          txn.bytes_total,
+          f"local_dma:{tid}:load:{txn_id}",
+        ),
+        TransferLeg(
+          TransferLegKind.L1_CACHE_FILL,
+          "l1_cache",
+          "l1_cache",
+          txn.bytes_total,
+          f"l1_cache_fill:{tid}:{txn_id}",
+        ),
+      )
+    if op == TransferOp.GATHER_DIRECT_L1_REFILL:
+      return (
+        TransferLeg(
+          TransferLegKind.HBM_READ, "hbm", "noc", txn.bytes_total, f"hbm_read:{txn_id}"
+        ),
+        TransferLeg(
+          TransferLegKind.NOC_RESPONSE, "noc", "tile", txn.bytes_total, f"noc_rsp:{txn_id}"
+        ),
+        TransferLeg(
+          TransferLegKind.LOCAL_DMA,
+          "tile",
+          "l1_cache",
+          txn.bytes_total,
+          f"local_dma:{tid}:load:{txn_id}",
+        ),
+        TransferLeg(
+          TransferLegKind.L1_CACHE_FILL,
+          "l1_cache",
+          "l1_cache",
+          txn.bytes_total,
+          f"l1_cache_fill:{tid}:{txn_id}",
+        ),
+      )
+    if op == TransferOp.GATHER_DIRECT_RESPONSE:
+      return (
+        TransferLeg(
+          TransferLegKind.HBM_READ, "hbm", "noc", txn.bytes_total, f"hbm_read:{txn_id}"
+        ),
+        TransferLeg(
+          TransferLegKind.NOC_RESPONSE, "noc", "tile", txn.bytes_total, f"noc_rsp:{txn_id}"
+        ),
+        TransferLeg(
+          TransferLegKind.LOCAL_DMA,
+          "tile",
+          "l1",
+          txn.bytes_total,
+          f"local_dma:{tid}:load:{txn_id}",
         ),
       )
     if op == TransferOp.GATHER_DEST_WRITE:
       return (
         TransferLeg(
-          TransferLegKind.L1_WRITE, "l1", "l1", txn.bytes_total, f"l1_write:{tid}:{txn.transaction_id}"
+          TransferLegKind.L1_WRITE, "l1", "l1", txn.bytes_total, f"l1_write:{tid}:{txn_id}"
         ),
+      )
+    if op == TransferOp.SCATTER_WRITE:
+      return (
+        TransferLeg(
+          TransferLegKind.L1_READ, "l1", "tile", txn.bytes_total, f"l1_read:{tid}:{txn_id}"
+        ),
+        TransferLeg(
+          TransferLegKind.LOCAL_DMA,
+          "tile",
+          "noc",
+          txn.bytes_total,
+          f"local_dma:{tid}:store:{txn_id}",
+        ),
+        TransferLeg(
+          TransferLegKind.NOC_REQUEST, "tile", "noc", txn.bytes_total, f"noc_req:{txn_id}"
+        ),
+        TransferLeg(
+          TransferLegKind.GLOBAL_DMA, "noc", "noc", txn.bytes_total, f"gdma:{txn_id}"
+        ),
+        TransferLeg(
+          TransferLegKind.HBM_WRITE, "noc", "hbm", txn.bytes_total, f"hbm_write:{txn_id}"
+        ),
+      )
+    if op == TransferOp.HOST_READ:
+      return (
+        TransferLeg(TransferLegKind.HBM_READ, "hbm", "noc", txn.bytes_total, f"hbm_read:{txn_id}"),
+        TransferLeg(TransferLegKind.GLOBAL_DMA, "noc", "noc", txn.bytes_total, f"gdma:{txn_id}"),
+        TransferLeg(
+          TransferLegKind.NOC_RESPONSE, "noc", "host", txn.bytes_total, f"noc_rsp:{txn_id}"
+        ),
+      )
+    if op == TransferOp.HOST_WRITE:
+      return (
+        TransferLeg(
+          TransferLegKind.NOC_REQUEST, "host", "noc", txn.bytes_total, f"noc_req:{txn_id}"
+        ),
+        TransferLeg(TransferLegKind.GLOBAL_DMA, "noc", "noc", txn.bytes_total, f"gdma:{txn_id}"),
+        TransferLeg(TransferLegKind.HBM_WRITE, "noc", "hbm", txn.bytes_total, f"hbm_write:{txn_id}"),
       )
     if op == TransferOp.CACHE_CLEAN_L1:
       return (
@@ -1237,7 +1279,13 @@ class TransferManager:
       self._fault_transaction(txn, "old-generation source return isolated", cycle)
       return False
     try:
-      txn.captured_data = self.byte_store.read_view(txn.src)
+      if txn.op is TransferOp.GATHER_HBM_REFILL and txn.src.handle.memory_space == "hbm":
+        # Whole-line refill: partial validity is the norm (page tail
+        # tokens, padding).  Capture data + mask without faulting; only
+        # a destination write touching an uninitialised byte faults.
+        txn.captured_data, txn.captured_validity = self.byte_store.read_view_relaxed(txn.src)
+      else:
+        txn.captured_data = self.byte_store.read_view(txn.src)
     except Exception as exc:
       self._fault_transaction(txn, f"source byte capture failed: {exc}", cycle)
       return False
@@ -1260,7 +1308,12 @@ class TransferManager:
       self._fault_transaction(txn, "destination write completed without captured bytes", cycle)
       return False
     try:
-      self.byte_store.write_view(txn.dst, txn.captured_data)
+      if txn.op is TransferOp.GATHER_DEST_WRITE:
+        # A destination segment covering uninitialised bytes faults here
+        # (plan §2: validity is enforced at the destination write).
+        self.byte_store.write_view_checked(txn.dst, txn.captured_data, txn.captured_validity)
+      else:
+        self.byte_store.write_view(txn.dst, txn.captured_data)
     except Exception as exc:
       self._fault_transaction(txn, f"destination byte commit failed: {exc}", cycle)
       return False
@@ -1513,6 +1566,10 @@ class TransferManager:
     if txn.status is not TransferStatus.DONE:
       raise MemoryInvariantError("transfer bytes are not yet visible")
     return txn.captured_data
+
+  def captured_validity(self, transaction_id: str) -> bytes | None:
+    transaction = self._transactions.get(transaction_id)
+    return None if transaction is None else transaction.captured_validity
 
   def acknowledge(self, transaction_id: str, cycle: int) -> None:
     """Acknowledge a confirmed terminal transaction.

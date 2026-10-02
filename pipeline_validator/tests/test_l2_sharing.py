@@ -14,11 +14,10 @@ from pipeline_validator.config import GroupSchedulerConfig, HardwareConfig, SimC
 from pipeline_validator.execution_ir import ExecModel, GlobalBinding
 from pipeline_validator.loader import load_program
 from pipeline_validator.memory.byte_store import ByteStore
-from pipeline_validator.tests.test_l2_sharing_source import CONTEXT_LOCAL_IR
 from pipeline_validator.profiles import ProfileBytes, ProfileLevelSource
 from pipeline_validator.simulator import Simulator
+from pipeline_validator.tests.test_l2_sharing_source import CONTEXT_LOCAL_IR
 from pipeline_validator.workload_ir import parse_workload_ir, print_workload_ir
-
 
 READER_AND_MODEL = """
   tile.program @read_shared(%task : !nest.task, %weight : !nest.l2_buffer<8192xi8>,
@@ -599,7 +598,11 @@ def test_published_destination_rejects_forged_write_permission_before_transfer_a
   from pipeline_validator.compiler.resources import layout_buffers
   from pipeline_validator.execution_ir import ExecL2Buffer
   from pipeline_validator.memory import (
-    AdmissionFailure, MemoryTransaction, ResolvedMemoryView, TransferOp, TransferStatus,
+    AdmissionFailure,
+    MemoryTransaction,
+    ResolvedMemoryView,
+    TransferOp,
+    TransferStatus,
   )
   from pipeline_validator.memory.arena import RootInvocation
   from pipeline_validator.tile_group import TileGroup

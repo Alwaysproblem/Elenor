@@ -6,9 +6,9 @@ builtin.module {
       %output_l2 : !nest.l2_buffer<1x256xi8>)
                 resource_contract = #tile.resources<allowed_profiles = [1, 2],
           tile_l1_spm_bytes_per_context = 2048,
-          l1_cache = {required = true, access = "read", bypass = "forbidden", target_bytes = 65536},
+          l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
           l2_cache = {
-            required = true, access = "read", bypass = "forbidden", target_bytes = 65536}
+            required = false, access = "read", bypass = "allowed", target_bytes = 65536}
             > {
     %indices_view = tile.subview %indices_l2
         offsets = [0] sizes = [16] strides = [1]
@@ -17,26 +17,17 @@ builtin.module {
         offsets = [0, 0] sizes = [1, 256] strides = [1, 1]
         : !nest.l2_view<1x256xi8>
     %indices_l1 = tile.alloc shape = [16] dtype = "i32"
-        : !tile.l1_buffer<16xi32>
+        alignment = 64 : !tile.l1_buffer<16xi32>
     %gather_dst = tile.alloc shape = [256] dtype = "i8"
-        : !tile.l1_buffer<256xi8>
+        alignment = 64 : !tile.l1_buffer<256xi8>
     %indices_ready = tile.load.async %indices_view into %indices_l1
         : !tile.event<"indices_ready">
     tile.await %indices_ready
     tile.signal input_released(%task)
     %gather_done = tile.gather.global.async %table
         indices(%indices_l1) into %gather_dst
-        result_bytes = 256
-        cache_target_bytes = 65536 l1_mshr_hint = 16 {
-      tile.profiled.access id = "r0" outcome = "L1_HIT"
-          bytes = 64 line = "line0"
-      tile.profiled.access id = "r1" outcome = "L2_HIT"
-          bytes = 64 line = "line1"
-      tile.profiled.access id = "r2" outcome = "HBM_MISS"
-          bytes = 64 line = "line42" merge = "line42"
-      tile.profiled.access id = "r3" outcome = "HBM_MISS"
-          bytes = 64 line = "line42" merge = "line42"
-    } : !tile.event<"gather_done">
+        map = #tile.indexed_map<index_scale = 64 offset = 0 task_stride = 0 repeat = 1 stride = 0 segment = 16>
+        window_entries = 16 : !tile.event<"gather_done">
     tile.await %gather_done
     tile.free %indices_l1
     %l2_store_done = tile.store.async %gather_dst into %output_view
@@ -54,7 +45,7 @@ builtin.module {
                 resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [1, 2],
           logical_tasks = 1, l2_spm_bytes = 8192, requested_contexts_per_tile = 1,
           l2_cache = {
-            required = true, access = "read", bypass = "forbidden", target_bytes = 65536}
+            required = false, access = "read", bypass = "allowed", target_bytes = 65536}
             > {
     %table_view = nest.subview %table offsets = [0] sizes = [8388608]
         strides = [1] : !nest.global_view<8388608xi8>
@@ -81,11 +72,11 @@ builtin.module {
           output_ready = #nest.aggregate<all_tasks>
         }
         depends_on(%indices_prefetched)
-        : (!nest.event<"grid_done">, !nest.event<"input_released">,
-           !nest.event<"output_ready">)
+        : (!nest.event<"gather_grid_done">, !nest.event<"gather_input_released">,
+           !nest.event<"gather_output_ready">)
     nest.release %indices_l2 depends_on(%input_released, %indices_prefetched)
     %hbm_store_done = nest.dma.store.async %output_l2 into %output_global
-        depends_on(%output_ready) : !nest.event<"hbm_store_done">
+        depends_on(%output_ready) : !nest.event<"gather_hbm_store_done">
     nest.release %output_l2 depends_on(%hbm_store_done)
     nest.await %grid_done, %hbm_store_done
     nest.return

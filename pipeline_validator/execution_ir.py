@@ -32,6 +32,7 @@ class ExecTileOp(Enum):
   LAUNCH_MFE = "launch.mfe"
   LAUNCH_USE = "launch.use"
   LAUNCH_GATHER = "launch.gather"
+  LAUNCH_SCATTER = "launch.scatter"
   WAIT = "wait"
   WAITALL = "waitall"
   FENCE = "fence"
@@ -51,10 +52,15 @@ class ExecTileOp(Enum):
   ALLOC_L1 = "alloc.l1"
 
 
-class ExecGatherOutcome(Enum):
-  L1_HIT = "L1_HIT"
-  L2_HIT = "L2_HIT"
-  HBM_MISS = "HBM_MISS"
+@dataclass(frozen=True)
+class ExecIndexedMap:
+  index_scale: int
+  offset: int
+  task_stride: int
+  repeat: int
+  stride: int
+  segment: int
+
 
 
 class ExecGroupActionOp(Enum):
@@ -140,24 +146,73 @@ class ExecMemoryView:
 
 
 @dataclass(frozen=True)
-class ExecProfiledAccess:
-  request_id: str
-  outcome: ExecGatherOutcome
-  bytes: int
-  line_token: str | None
-  merge_group: str | None
-
-
-@dataclass(frozen=True)
-class ExecGatherDesc:
+class ExecTileGatherDesc:
   source: ExecMemoryView
   indices: ExecMemoryView
   destination: ExecMemoryView
-  result_bytes: int
-  cache_target_bytes: int
-  l1_mshr_hint: int
-  accesses: tuple[ExecProfiledAccess, ...]
+  address_map: ExecIndexedMap
+  window_entries: int
+  scope: str | None
 
+
+@dataclass(frozen=True)
+class ExecTileScatterDesc:
+  source: ExecMemoryView
+  indices: ExecMemoryView
+  destination: ExecMemoryView
+  address_map: ExecIndexedMap
+  window_entries: int
+  scope: str | None
+
+
+@dataclass(frozen=True)
+class ExecHostAccess:
+  """One declared byte-range access of a ``nexus.host.call.async``.
+
+  ``input_index`` is always the ``nexus.program`` entry global formal
+  index; ``mode`` is ``"read" | "write" | "readwrite"``.
+  """
+
+  input_index: int
+  offset: int
+  bytes: int
+  mode: str
+
+
+@dataclass(frozen=True)
+class ExecHostCall:
+  """Software host routine invocation carried by ``ExecDeviceOp.command``."""
+
+  name: str
+  accesses: tuple[ExecHostAccess, ...]
+  scopes: tuple[str, ...]
+
+  def __post_init__(self):
+    _validate_host_call(self)
+
+
+def _validate_host_call(call: ExecHostCall) -> None:
+  if type(call.name) is not str or not call.name.strip():
+    raise ValueError("host call name must be a non-empty string")
+  accesses = tuple(call.accesses)
+  if any(type(access) is not ExecHostAccess for access in accesses):
+    raise ValueError("host call accesses must be ExecHostAccess values")
+  for index, access in enumerate(accesses):
+    if type(access.input_index) is not int or isinstance(access.input_index, bool):
+      raise ValueError(f"host call accesses[{index}].input_index must be an int")
+    if access.input_index < 0:
+      raise ValueError(f"host call accesses[{index}].input_index must be non-negative")
+    if type(access.offset) is not int or access.offset < 0:
+      raise ValueError(f"host call accesses[{index}].offset must be non-negative")
+    if type(access.bytes) is not int or access.bytes <= 0:
+      raise ValueError(f"host call accesses[{index}].bytes must be positive")
+    if access.mode not in ("read", "write", "readwrite"):
+      raise ValueError(f"host call accesses[{index}].mode is invalid")
+  scopes = tuple(call.scopes)
+  if any(type(scope) is not str or not scope.strip() for scope in scopes):
+    raise ValueError("host call scopes must be non-empty strings")
+  if len(scopes) != len(set(scopes)):
+    raise ValueError("host call scopes must be unique")
 
 @dataclass(frozen=True)
 class ExecTransfer:
@@ -417,14 +472,14 @@ class ExecTileGroupTask(FrozenRecord):
 class ExecDeviceOp(FrozenRecord):
   """One device-level instruction in a model execution body."""
 
-  op: str  # "submit" | "await" | "return"
+  op: str  # "submit" | "host_call" | "await" | "return"
   ctx_name: str = ""
   event_tag: str = ""
   actual_inputs: tuple[int, ...] = ()
   dependencies: tuple[str, ...] = ()
   callsite_id: str = ""
   binding_id: str = ""
-  command: ProfileReconfigDesc | MemoryMaintenanceDesc | None = None
+  command: ProfileReconfigDesc | MemoryMaintenanceDesc | ExecHostCall | None = None
   source_ref: SourceRef | None = None
   instruction_id: str = ""
 

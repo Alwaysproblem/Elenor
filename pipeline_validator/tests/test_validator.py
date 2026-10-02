@@ -49,10 +49,10 @@ from pipeline_validator.dialects.elenor import (
   TileEvent,
   TileEvuOp,
   TileGatherOp,
+  TileIndexedMapAttr,
   TileL1Buffer,
   TileLoadOp,
   TilePowOp,
-  TileProfiledAccessOp,
   TileProgramDefOp,
   TileReturnOp,
   TileSignalOp,
@@ -62,9 +62,8 @@ from pipeline_validator.dialects.elenor import (
 from pipeline_validator.engines import EngineState, MFEEngine
 from pipeline_validator.execution_ir import (
   ExecEngineDesc,
-  ExecGatherDesc,
-  ExecGatherOutcome,
   ExecGroupActionOp,
+  ExecTileGatherDesc,
   ExecTileOp,
   GlobalBinding,
 )
@@ -246,56 +245,49 @@ TILE_PROGRAM_NO_TASK_IR = """builtin.module {
 """
 
 
-GATHER_PROFILE = """    tile.profiled.access id = "r0" outcome = "L1_HIT"
-        bytes = 64 line = "line0"
-    tile.profiled.access id = "r1" outcome = "L2_HIT"
-        bytes = 64 line = "line1"
-    tile.profiled.access id = "r2" outcome = "HBM_MISS"
-        bytes = 64 line = "line42" merge = "miss42"
-    tile.profiled.access id = "r3" outcome = "HBM_MISS"
-        bytes = 64 line = "line42" merge = "miss42"
-"""
+GATHER_MAP = (
+  "        map = #tile.indexed_map<index_scale = 64 offset = 0 task_stride = 0"
+  " repeat = 1 stride = 0 segment = 16>"
+)
 
-GATHER_IR = (
-  """builtin.module {
+GATHER_IR = f"""builtin.module {{
   tile.program @gather_tile(
       %task : !nest.task,
       %table : !nest.global_view<4096xi8>)
       resource_contract = #tile.resources<allowed_profiles = [1, 2],
           tile_l1_spm_bytes_per_context = 2048,
-          l1_cache = {required = true, access = "read", bypass = "forbidden", target_bytes = 65536},
-          l2_cache = {required = true, access = "read", bypass = "forbidden", target_bytes = 65536}> {
+          l1_cache = {{required = false, access = "read", bypass = "allowed", target_bytes = 65536}},
+          l2_cache = {{required = false, access = "read", bypass = "allowed", target_bytes = 65536}}> {{
     %indices = tile.alloc shape = [16] dtype = "i32"
         : !tile.l1_buffer<16xi32>
     %destination = tile.alloc shape = [256] dtype = "i8"
         : !tile.l1_buffer<256xi8>
     %done = tile.gather.global.async %table
         indices(%indices) into %destination
-        result_bytes = 256 cache_target_bytes = 65536 l1_mshr_hint = 16 {
-"""
-  + GATHER_PROFILE
-  + """    } : !tile.event<"gather_done">
+{GATHER_MAP}
+        window_entries = 16 : !tile.event<"gather_done">
     tile.await %done
     tile.return
-  }
+  }}
 
   nest.context @gather_context(
       %table : !nest.global_memref<4096xi8>) placement = 1
       resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [1, 2],
           logical_tasks = 1, l2_spm_bytes = 0, requested_contexts_per_tile = 1,
-          l2_cache = {required = true, access = "read", bypass = "forbidden", target_bytes = 65536}> {
+          l2_cache = {{required = false, access = "read", bypass = "allowed", target_bytes = 65536}}> {{
     %table_view = nest.subview %table offsets = [0] sizes = [4096]
         strides = [1] : !nest.global_view<4096xi8>
     %tasks = nest.task.range from = 0 to = 1 : !nest.task_range
     %grid, %inrel, %outready = nest.dispatch.tasks.async @gather_tile l1_mode = 1
-        tasks(%tasks) globals(%table_view) bindings() ins() outs() signal_policy {}
+        tasks(%tasks) globals(%table_view) bindings() ins() outs() signal_policy {{}}
         : (!nest.event<"grid_done">, !nest.event<"">, !nest.event<"">)
     nest.await %grid
     nest.return
-  }
-}
+  }}
+}}
 """
-)
+
+
 
 
 class TestXDSLIR:
@@ -350,7 +342,7 @@ class TestXDSLIR:
     reparsed = parse_workload_ir(text, source_name="<gather-rt>")
     assert print_workload_ir(reparsed) == text
     assert "tile.gather.global.async" in text
-    assert text.index('id = "r0"') < text.index('id = "r3"')
+    assert "#tile.indexed_map<" in text
 
   def test_gather_lowering_produces_plain_execution_dtos(self):
     task = compiled_entry(parse_workload_ir(GATHER_IR))
@@ -363,22 +355,25 @@ class TestXDSLIR:
     gather = descriptor.params["gather"]
     assert descriptor.kind == "MFE"
     assert descriptor.op == "gather"
-    assert isinstance(gather, ExecGatherDesc)
+    assert isinstance(gather, ExecTileGatherDesc)
     assert gather.source.base == "formal:1"
     assert gather.indices.base == "l1:0"
     assert gather.destination.base == "l1:1"
-    assert gather.result_bytes == 256
-    assert tuple(access.outcome for access in gather.accesses) == (
-      ExecGatherOutcome.L1_HIT,
-      ExecGatherOutcome.L2_HIT,
-      ExecGatherOutcome.HBM_MISS,
-      ExecGatherOutcome.HBM_MISS,
-    )
+    assert gather.window_entries == 16
+    assert gather.scope is None
+    assert (
+      gather.address_map.index_scale,
+      gather.address_map.offset,
+      gather.address_map.task_stride,
+      gather.address_map.repeat,
+      gather.address_map.stride,
+      gather.address_map.segment,
+    ) == (64, 0, 0, 1, 0, 16)
 
   @pytest.mark.parametrize(
     "path",
     [
-      "examples/workloads/gather_profiled.mlir",
+      "examples/workloads/gather_indexed.mlir",
       "examples/workloads/gather_matmul.mlir",
       "examples/workloads/matmul_gather_add.mlir",
       "examples/workloads/gather_matmul_4tiles_2contexts.mlir",
@@ -437,29 +432,38 @@ class TestXDSLIR:
   @pytest.mark.parametrize(
     "text",
     [
-      GATHER_IR.replace(GATHER_PROFILE, ""),
-      GATHER_IR.replace('id = "r1"', 'id = "r0"', 1),
-      GATHER_IR.replace('id = "r0"', 'id = ""', 1),
-      GATHER_IR.replace('outcome = "L2_HIT"', 'outcome = "UNKNOWN"', 1),
-      GATHER_IR.replace("result_bytes = 256", "result_bytes = 0", 1),
-      GATHER_IR.replace("result_bytes = 256", "result_bytes = 257", 1),
-      GATHER_IR.replace("l1_mshr_hint = 16", "l1_mshr_hint = 0", 1),
-      GATHER_IR.replace('bytes = 64 line = "line0"', 'bytes = 0 line = "line0"', 1),
-      GATHER_IR.replace('bytes = 64 line = "line0"', 'bytes = 4097 line = "line0"', 1),
-      GATHER_IR.replace("result_bytes = 256", "result_bytes = 255", 1),
+      # destination must hold exactly I * R * L elements (the buffer type
+      # follows so the failure is the indexed-extent rule, not the allocator)
+      GATHER_IR.replace("shape = [256] dtype", "shape = [255] dtype", 1).replace(
+        "!tile.l1_buffer<256xi8>", "!tile.l1_buffer<255xi8>", 1
+      ),
+      GATHER_IR.replace("shape = [256] dtype", "shape = [257] dtype", 1).replace(
+        "!tile.l1_buffer<256xi8>", "!tile.l1_buffer<257xi8>", 1
+      ),
+      # indices and destination must be different allocations
       GATHER_IR.replace("into %destination", "into %indices", 1),
-      GATHER_IR.replace(
-        'outcome = "L1_HIT"\n        bytes = 64 line = "line0"',
-        'outcome = "L1_HIT"\n        bytes = 64 line = "line0" merge = "bad"',
-        1,
+      # index_scale / repeat / segment must be > 0
+      GATHER_IR.replace("index_scale = 64", "index_scale = 0", 1),
+      GATHER_IR.replace("repeat = 1", "repeat = 0", 1),
+      GATHER_IR.replace("segment = 16", "segment = 0", 1),
+      # offset / task_stride / stride must be >= 0
+      GATHER_IR.replace("offset = 0", "offset = -1", 1),
+      GATHER_IR.replace("task_stride = 0", "task_stride = -1", 1),
+      GATHER_IR.replace("stride = 0 segment", "stride = -1 segment", 1),
+      # window_entries must be > 0
+      GATHER_IR.replace("window_entries = 16", "window_entries = 0", 1),
+      # destination dtype must match the remote formal
+      GATHER_IR.replace('shape = [256] dtype = "i8"', 'shape = [256] dtype = "i32"', 1).replace(
+        "!tile.l1_buffer<256xi8>", "!tile.l1_buffer<256xi32>", 1
       ),
-      GATHER_IR.replace('line = "line42" merge = "miss42"', 'merge = "miss42"', 1),
-      GATHER_IR.replace(
-        'bytes = 64 line = "line42" merge = "miss42"', 'bytes = 32 line = "line99" merge = "miss42"', 1
+      # indices must be i32
+      GATHER_IR.replace('shape = [16] dtype = "i32"', 'shape = [16] dtype = "i8"', 1).replace(
+        "!tile.l1_buffer<16xi32>", "!tile.l1_buffer<16xi8>", 1
       ),
+      # an empty scope string is not a scope
       GATHER_IR.replace(
-        'tile.profiled.access id = "r0" outcome = "L1_HIT"\n        bytes = 64 line = "line0"',
-        "tile.return",
+        'window_entries = 16 : !tile.event<"gather_done">',
+        'window_entries = 16 scope = "" : !tile.event<"gather_done">',
         1,
       ),
     ],
@@ -468,21 +472,8 @@ class TestXDSLIR:
     with pytest.raises(VerifyException):
       parse_workload_ir(text, source_name="<invalid-gather>")
 
-  def test_profiled_access_is_rejected_at_tile_program_top_level(self):
-    text = GATHER_IR.replace(
-      '    } : !tile.event<"gather_done">\n    tile.await %done',
-      (
-        '    } : !tile.event<"gather_done">\n'
-        '    tile.profiled.access id = "top" outcome = "L1_HIT" bytes = 64\n'
-        "    tile.await %done"
-      ),
-      1,
-    )
-    with pytest.raises(VerifyException):
-      parse_workload_ir(text, source_name="<top-level-profile>")
-
   def test_gather_builders_are_public_operations(self):
-    cache = CacheRequirement(True, "read", "forbidden", 64)
+    cache = CacheRequirement(False, "read", "allowed", 64)
     program = TileProgramDefOp(
       "public_gather",
       TileResources((1, 2), 2048, l1_cache=cache, l2_cache=cache),
@@ -491,9 +482,15 @@ class TestXDSLIR:
     )
     _task, source = program.body.block.args
     indices = TileAllocOp([1], "i32")
-    destination = TileAllocOp([64], "i8")
-    access = TileProfiledAccessOp("r0", "L1_HIT", 64, line_token="line0")
-    gather = TileGatherOp(source, indices.result, destination.result, 64, 64, 1, [access], "done")
+    destination = TileAllocOp([16], "i8")
+    gather = TileGatherOp(
+      source,
+      indices.result,
+      destination.result,
+      "done",
+      address_map=TileIndexedMapAttr.of(64, 0, 0, 1, 0, 16),
+      window_entries=1,
+    )
     program.body.block.add_ops([indices, destination, gather, TileAwaitOp([gather.result]), TileReturnOp()])
     verify_workload_ir(
       ModuleOp(
@@ -2474,7 +2471,7 @@ class TestTileFree:
 
   @pytest.mark.parametrize("buffer", ["indices_l1", "gather_dst"])
   def test_gather_buffers_live_until_gather_completion(self, buffer):
-    source = (Path(__file__).resolve().parents[2] / "examples/workloads/gather_profiled.mlir").read_text()
+    source = (Path(__file__).resolve().parents[2] / "examples/workloads/gather_indexed.mlir").read_text()
     with pytest.raises(VerifyException):
       parse_workload_ir(
         source.replace(

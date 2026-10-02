@@ -1185,20 +1185,18 @@ class TestGatherTransferRoutes:
     )
 
   @pytest.mark.parametrize("full_memory", [False, True])
-  def test_six_gather_routes_have_exact_leg_sequences(self, full_memory):
+  def test_gather_routes_have_exact_leg_sequences(self, full_memory):
     from pipeline_validator.config import HardwareConfig
     from pipeline_validator.memory.transfer import TransferLegKind, TransferManager, TransferOp
 
+    # Plan §2: address-driven Gather route set.  The MISS_LOOKUP leg
+    # sequence from the profiled era is gone; lookups are standalone
+    # transactions and SCATTER_WRITE writes through both caches.
     expected = {
-      TransferOp.GATHER_L1_HIT: (TransferLegKind.L1_CACHE_LOOKUP,),
-      TransferOp.GATHER_L2_HIT: (
-        TransferLegKind.L1_CACHE_LOOKUP,
-        TransferLegKind.L2_CACHE_LOOKUP,
-        TransferLegKind.NOC_RESPONSE,
-        TransferLegKind.LOCAL_DMA,
-        TransferLegKind.L1_CACHE_FILL,
-      ),
-      TransferOp.GATHER_MISS_LOOKUP: (TransferLegKind.L1_CACHE_LOOKUP, TransferLegKind.L2_CACHE_LOOKUP),
+      TransferOp.INDEX_READ: (TransferLegKind.L1_READ,),
+      TransferOp.GATHER_L1_LOOKUP: (TransferLegKind.L1_CACHE_LOOKUP,),
+      TransferOp.GATHER_L2_LOOKUP: (TransferLegKind.L2_CACHE_LOOKUP,),
+      TransferOp.GATHER_L2_RESPONSE: (TransferLegKind.NOC_RESPONSE, TransferLegKind.LOCAL_DMA),
       TransferOp.GATHER_HBM_REFILL: (
         TransferLegKind.HBM_READ,
         TransferLegKind.NOC_RESPONSE,
@@ -1210,21 +1208,31 @@ class TestGatherTransferRoutes:
         TransferLegKind.L1_CACHE_FILL,
       ),
       TransferOp.GATHER_DEST_WRITE: (TransferLegKind.L1_WRITE,),
+      TransferOp.SCATTER_WRITE: (
+        TransferLegKind.L1_READ,
+        TransferLegKind.LOCAL_DMA,
+        TransferLegKind.NOC_REQUEST,
+        TransferLegKind.GLOBAL_DMA,
+        TransferLegKind.HBM_WRITE,
+      ),
     }
     manager = TransferManager(HardwareConfig(), full_memory=full_memory)
     for index, (op, expected_legs) in enumerate(expected.items()):
       transaction = self._transaction(f"route:{index}", op)
       manager.submit(transaction, cycle=0)
       assert tuple(leg.kind for leg in transaction.legs) == expected_legs
-      assert TransferLegKind.GLOBAL_DMA not in expected_legs
-      assert TransferLegKind.L2_WRITE not in expected_legs
+      if op is not TransferOp.SCATTER_WRITE:
+        # Scatter writes through the Global DMA to HBM (plan §2); gathers
+        # never take the Global DMA or write the L2 data path.
+        assert TransferLegKind.GLOBAL_DMA not in expected_legs
+        assert TransferLegKind.L2_WRITE not in expected_legs
 
   def test_gather_route_cannot_collapse(self):
     from pipeline_validator.config import HardwareConfig
     from pipeline_validator.memory.transfer import TransferManager, TransferOp
 
     manager = TransferManager(HardwareConfig(), full_memory=False)
-    transaction = self._transaction("no-collapse", TransferOp.GATHER_L1_HIT)
+    transaction = self._transaction("no-collapse", TransferOp.GATHER_L1_LOOKUP)
     with pytest.raises(MemoryInvariantError, match="gather route must not be collapsed"):
       manager._collapsed_leg(transaction)
 
@@ -1290,7 +1298,7 @@ class TestGatherTransferRoutes:
     manager = TransferManager(config, full_memory=True, noc=noc)
     owner = _task_owner()
 
-    lookup = self._transaction("lookup", TransferOp.GATHER_L1_HIT, owner=owner)
+    lookup = self._transaction("lookup", TransferOp.GATHER_L1_LOOKUP, owner=owner)
     manager.submit(lookup, cycle=0)
     manager.step(cycle=0)
     lookup_completion = lookup.leg_completion_cycle

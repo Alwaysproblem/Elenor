@@ -1225,6 +1225,7 @@ class ProfileController:
     handles = self._owner_inputs.get(owner)
     if handles is None:
       raise MemoryInvariantError("maintenance owner inputs were not bound")
+    group = getattr(self.group, "precise_write_ledger", None)
     result: list[CacheRange] = []
     for item in command.ranges:
       if not 0 <= item.input_index < len(handles):
@@ -1232,6 +1233,21 @@ class ProfileController:
       handle = handles[item.input_index]
       if item.offset < 0 or item.bytes <= 0 or item.offset + item.bytes > handle.size_bytes:
         raise MemoryInvariantError("maintenance range exceeds actual binding")
+      if item.precise_writes and group is not None:
+        # Plan §2: a precise-writes range is the runtime intersection of
+        # the Scatter commits of the command's dependency events with the
+        # static range; empty → the invalidate is a no-op.
+        committed: list[tuple[str, int, int, int]] = []
+        for event in command.dependencies:
+          committed.extend(group.get(event, ()))
+        for allocation_id, _generation, offset, length in committed:
+          if allocation_id != handle.allocation_id:
+            continue
+          start = max(offset, item.offset)
+          end = min(offset + length, item.offset + item.bytes)
+          if start < end:
+            result.append(CacheRange(handle.allocation_id, handle.generation, start, end - start))
+        continue
       result.append(CacheRange(handle.allocation_id, handle.generation, item.offset, item.bytes))
     return tuple(result)
 

@@ -546,6 +546,10 @@ class MaintenanceRange:
   offset: int
   bytes: int
   levels: tuple[str, ...]
+  # Plan §2: precise-writes ranges resolve at runtime to the exact byte
+  # spans a Tile Scatter committed to HBM (ledger intersect), instead of
+  # the conservative whole-write view.
+  precise_writes: bool = False
 
   def __post_init__(self):
     uint64(self.input_index, "maintenance input_index")

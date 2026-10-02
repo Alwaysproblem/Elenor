@@ -6,13 +6,13 @@ from dataclasses import dataclass, replace
 
 from ..execution_ir import (
   ExecDeviceOp,
-  ExecGatherDesc,
-  ExecGatherOutcome,
   ExecGroupAction,
   ExecGroupActionOp,
   ExecMemoryView,
   ExecModel,
+  ExecTileGatherDesc,
   ExecTileGroupTask,
+  ExecTileScatterDesc,
 )
 from ..profiles import (
   CallBinding,
@@ -92,10 +92,22 @@ class _GlobalAccess:
   writing: bool
   event: str
   levels: tuple[str, ...]
+  scope: str | None = None
+  precise_writes: bool = False
+  # Plan §2: write levels already invalidated by a later postwrite
+  # command inside the same task; a device-level fence for them is
+  # redundant and skipped.
+  post_invalidated_levels: frozenset[str] = frozenset()
 
 
 def _view_access(
-  task: ExecTileGroupTask, view: ExecMemoryView, writing: bool, event: str, levels: tuple[str, ...] = ()
+  task: ExecTileGroupTask,
+  view: ExecMemoryView,
+  writing: bool,
+  event: str,
+  levels: tuple[str, ...] = (),
+  scope: str | None = None,
+  precise_writes: bool = False,
 ) -> _GlobalAccess:
   if not view.base.startswith("global:"):
     raise ValueError("compiler visibility analysis requires a resolved global view")
@@ -104,7 +116,9 @@ def _view_access(
   if input_index is None:
     raise ValueError(f"global view {name!r} has no Context formal backing")
   start = _view_offset_bytes(view.offsets, view.backing_dims, view.element_bytes)
-  return _GlobalAccess(input_index, start, start + view.bytes, writing, event, levels)
+  return _GlobalAccess(
+    input_index, start, start + view.bytes, writing, event, levels, scope, precise_writes
+  )
 
 
 def _action_accesses(task: ExecTileGroupTask, action: ExecGroupAction) -> tuple[_GlobalAccess, ...]:
@@ -124,18 +138,30 @@ def _action_accesses(task: ExecTileGroupTask, action: ExecGroupAction) -> tuple[
   result: list[_GlobalAccess] = []
   for descriptor in role.tile_program.descriptors.values():
     gather = descriptor.params.get("gather")
-    if isinstance(gather, ExecGatherDesc):
+    if isinstance(gather, ExecTileGatherDesc):
       formal = int(gather.source.base.removeprefix("formal:"))
-      levels = (
-        ("l1",)
-        if all(access.outcome is ExecGatherOutcome.L1_HIT for access in gather.accesses)
-        else ("l1", "l2")
+      levels = ("l1", "l2")
+      result.append(
+        _view_access(task, actuals[formal], False, action.dst or "", levels, gather.scope)
       )
-      result.append(_view_access(task, actuals[formal], False, action.dst or "", levels))
+    scatter = descriptor.params.get("scatter")
+    if isinstance(scatter, ExecTileScatterDesc):
+      formal = int(scatter.destination.base.removeprefix("formal:"))
+      result.append(
+        _view_access(
+          task, actuals[formal], True, action.dst or "", (), scatter.scope, precise_writes=True
+        )
+      )
   return tuple(result)
 
 
 def _overlaps(left: _GlobalAccess, right: _GlobalAccess) -> bool:
+  if (
+    left.scope is not None
+    and right.scope is not None
+    and left.scope != right.scope
+  ):
+    return False  # statically disjoint page scopes (plan §2)
   return left.input_index == right.input_index and left.start < right.end and right.start < left.end
 
 
@@ -273,6 +299,9 @@ def insert_task_maintenance(task: ExecTileGroupTask, registry: ProfileRegistry) 
         source = _generated(
           action.source_ref, "memory_visibility_pass", "invalidate cache after overlapping HBM write"
         )
+        # Plan §2: when every covered write is a Tile Scatter (precise),
+        # the runtime resolves the invalidate down to the committed bytes.
+        all_precise = all(old.precise_writes for old in overlapping_writes)
         ranges = tuple(
           dict.fromkeys(
             _maintenance_range(registry, task.global_inputs, item, item.levels)
@@ -280,6 +309,10 @@ def insert_task_maintenance(task: ExecTileGroupTask, registry: ProfileRegistry) 
             if any(_overlaps(old, item) for old in overlapping_writes)
           )
         )
+        if all_precise:
+          ranges = tuple(
+            replace(range_item, precise_writes=True) for range_item in ranges
+          )
         desc = MemoryMaintenanceDesc(
           f"{action.instruction_id}:postwrite_invalidate", levels, ranges, dependencies, source
         )
@@ -293,7 +326,23 @@ def insert_task_maintenance(task: ExecTileGroupTask, registry: ProfileRegistry) 
           )
         )
     output.append(action)
-    prior_writes.extend(writes)
+    for write in writes:
+      covered = frozenset(
+        level
+        for read in cached_reads
+        for old in prior_writes
+        if _overlaps(old, read) and _overlaps(write, read)
+        for level in read.levels
+      )
+      if covered:
+        prior_writes.append(
+          replace(
+            write,
+            post_invalidated_levels=frozenset(set(write.post_invalidated_levels) | covered),
+          )
+        )
+      else:
+        prior_writes.append(write)
     prior_cached_reads.extend(cached_reads)
   return replace(task, actions=normalize_action_dependencies(output, task.role_bindings))
 
@@ -415,7 +464,7 @@ def _device_maintenance(
     for old in accesses
     if old.writing
     for new in cached_reads
-    if _overlaps(old, new)
+    if _overlaps(old, new) and not set(new.levels) <= set(old.post_invalidated_levels)
   ]
   if not overlaps:
     return None
@@ -554,6 +603,18 @@ def bind_profiles(
         output.append(source_op)
       continue
     if source_op.op == "return":
+      output.append(source_op)
+      continue
+    if source_op.op == "host_call":
+      # Software host routines carry no device work; their completion event
+      # joins the submitted-event space for downstream dependency checks.
+      if not set(source_op.dependencies) <= submitted:
+        raise ValueError(
+          f"Device host_call {source_op.instruction_id!r} has forward or unknown dependencies "
+          f"{sorted(set(source_op.dependencies) - submitted)}"
+        )
+      submitted.add(source_op.event_tag)
+      awaited[source_op.event_tag] = source_op.instruction_id
       output.append(source_op)
       continue
     if source_op.op != "submit":

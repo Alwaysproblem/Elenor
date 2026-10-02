@@ -790,11 +790,11 @@ NestActionLike: TypeAlias = (  # noqa: UP040
 )
 TileActionLike: TypeAlias = (  # noqa: UP040
   "TileSubviewOp | TileAllocOp | TileFreeOp | TileLoadOp | TileStoreOp"
-  " | TileGatherOp | TilePowOp | TileEvuOp | TileBoaOp | TileAwaitOp"
-  " | TileSignalOp | TileReturnOp"
+  " | TileGatherOp | TileScatterOp | TilePowOp | TileEvuOp | TileBoaOp"
+  " | TileAwaitOp | TileSignalOp | TileReturnOp"
 )
 NexusActionLike: TypeAlias = (  # noqa: UP040
-  "NexusSubmitContextOp | NexusSharedRefOp | NexusAwaitOp | NexusReturnOp"
+  "NexusSubmitContextOp | NexusHostCallOp | NexusSharedRefOp | NexusAwaitOp | NexusReturnOp"
 )
 
 
@@ -1708,6 +1708,172 @@ class NexusReturnOp(IRDLOperation):
     return cls()
 
 
+@irdl_op_definition
+class NexusHostCallOp(IRDLOperation):
+  """``%e = nexus.host.call.async "name" bindings(%G, ...) accesses = [...]
+  scopes = [...] depends_on(%p) : !nexus.event<"tag">`` - software host routine.
+
+  ``bindings`` and ``accesses`` pair positionally one-to-one; the same SSA
+  binding may repeat with pairwise-disjoint byte ranges.  Each access is
+  ``{offset = N, bytes = M, mode = "read"|"write"|"readwrite"}``.  Scopes are
+  unique non-empty names; zero bindings imply zero accesses.
+  """
+
+  name = "nexus.host.call.async"
+
+  host_routine = prop_def(StringAttr)
+  bindings = var_operand_def(NestGlobalMemref)
+  accesses = prop_def(ArrayAttr)
+  scopes = prop_def(ArrayAttr)
+  depends_on = var_operand_def(NexusEvent)
+  result = result_def(NexusEvent)
+  irdl_options = (AttrSizedOperandSegments(),)
+
+  def __init__(
+    self,
+    name: str,
+    tag: str,
+    bindings: Sequence = (),
+    accesses: Sequence[tuple[int, int, str]] = (),
+    scopes: Sequence[str] = (),
+    depends_on: Sequence = (),
+  ):
+    if len(list(bindings)) != len(list(accesses)):
+      raise ValueError("host call bindings and accesses must pair one-to-one")
+    access_attrs: list[DictionaryAttr] = []
+    for offset, byte_count, mode in accesses:
+      access_attrs.append(
+        DictionaryAttr(
+          {
+            "offset": _index_attr(offset),
+            "bytes": _index_attr(byte_count),
+            "mode": StringAttr(mode),
+          }
+        )
+      )
+    super().__init__(
+      result_types=[NexusEvent(StringAttr(tag))],
+      properties=_props(
+        {
+          "host_routine": StringAttr(name),
+          "accesses": ArrayAttr(access_attrs),
+          "scopes": ArrayAttr([StringAttr(scope) for scope in scopes]),
+        }
+      ),
+      operands=[list(bindings), list(depends_on)],
+    )
+    self.result.name_hint = tag
+
+  @property
+  def access_list(self) -> tuple[tuple[int, int, str], ...]:
+    """Return ``(offset, bytes, mode)`` triples, one per declared access."""
+    entries: list[tuple[int, int, str]] = []
+    for attribute in self.accesses.data:
+      if not isinstance(attribute, DictionaryAttr):
+        raise ValueError("host call access entries must be dictionaries")
+      fields = attribute.data
+      if set(fields) != {"offset", "bytes", "mode"}:
+        raise ValueError("host call access must contain offset, bytes, and mode")
+      offset, byte_count, mode = fields["offset"], fields["bytes"], fields["mode"]
+      if not isinstance(offset, IntegerAttr) or not isinstance(byte_count, IntegerAttr):
+        raise ValueError("host call access offset and bytes must be integers")
+      if not isinstance(mode, StringAttr):
+        raise ValueError("host call access mode must be a string")
+      entries.append((int(offset.value.data), int(byte_count.value.data), mode.data))
+    return tuple(entries)
+
+  @property
+  def scope_list(self) -> tuple[str, ...]:
+    return tuple(attribute.data for attribute in self.scopes.data)
+
+  def print(self, printer: Printer) -> None:
+    printer.print_string(" ")
+    printer.print_string_literal(self.host_routine.data)
+    printer.print_string(" bindings(")
+    for i, operand in enumerate(self.bindings):
+      if i:
+        printer.print_string(", ")
+      printer.print_operand(operand)
+    printer.print_string(") accesses = [")
+    for i, entry in enumerate(self.access_list):
+      if i:
+        printer.print_string(", ")
+      offset, byte_count, mode = entry
+      printer.print_string("{offset = ")
+      printer.print_int(offset)
+      printer.print_string(", bytes = ")
+      printer.print_int(byte_count)
+      printer.print_string(', mode = "')
+      printer.print_string(mode)
+      printer.print_string('"}')
+    printer.print_string("]")
+    if self.scopes.data:
+      printer.print_string(" scopes = [")
+      for i, scope in enumerate(self.scopes.data):
+        if i:
+          printer.print_string(", ")
+        printer.print_string_literal(scope.data)
+      printer.print_string("]")
+    _print_depends_on(printer, self.depends_on)
+    _print_event_type(printer, self.result.type)
+
+  @classmethod
+  def parse(cls, parser: Parser) -> Self:
+    name = parser.parse_str_literal()
+    bindings: list = []
+    if parser.parse_optional_keyword("bindings") is not None:
+      bindings = list(
+        parser.parse_comma_separated_list(
+          parser.Delimiter.PAREN, parser.parse_operand, " in host call bindings operand list"
+        )
+      )
+    parser.parse_keyword("accesses")
+    parser.parse_punctuation("=")
+    access_attrs = parser.parse_comma_separated_list(
+      parser.Delimiter.SQUARE, parser.parse_attribute, " in host call accesses list"
+    )
+    for attribute in access_attrs:
+      if not isinstance(attribute, DictionaryAttr):
+        parser.raise_error("host call access entries must be dictionaries")
+    scopes: list[str] = []
+    if parser.parse_optional_keyword("scopes") is not None:
+      parser.parse_punctuation("=")
+      scopes = list(
+        parser.parse_comma_separated_list(
+          parser.Delimiter.SQUARE, parser.parse_str_literal, " in host call scopes list"
+        )
+      )
+    depends_on = _parse_depends_on(parser)
+    event_type = _parse_event_type(parser, NexusEvent)
+    tag = event_type.tag.data  # type: ignore[attr-defined]
+    if len(bindings) != len(access_attrs):
+      parser.raise_error("host call bindings and accesses must pair one-to-one")
+    return cls(
+      name,
+      tag,
+      bindings=bindings,
+      accesses=cls._access_triples(parser, access_attrs),
+      scopes=scopes,
+      depends_on=depends_on,
+    )
+
+  @staticmethod
+  def _access_triples(parser: Parser, access_attrs: Sequence) -> list[tuple[int, int, str]]:
+    triples: list[tuple[int, int, str]] = []
+    for attribute in access_attrs:
+      assert isinstance(attribute, DictionaryAttr)
+      fields = attribute.data
+      if set(fields) != {"offset", "bytes", "mode"}:
+        parser.raise_error("host call access must contain offset, bytes, and mode")
+      offset, byte_count, mode = fields["offset"], fields["bytes"], fields["mode"]
+      if not isinstance(offset, IntegerAttr) or not isinstance(byte_count, IntegerAttr):
+        parser.raise_error("host call access offset and bytes must be integers")
+      if not isinstance(mode, StringAttr):
+        parser.raise_error("host call access mode must be a string")
+      triples.append((int(offset.value.data), int(byte_count.value.data), mode.data))
+    return triples
+
+
 # ---------------------------------------------------------------------------
 # tile.* program-body actions
 # ---------------------------------------------------------------------------
@@ -1924,97 +2090,130 @@ class TileStoreOp(_TileAsyncOp):
     return cls(src, dst, tag)
 
 
-@irdl_op_definition
-class TileProfiledAccessOp(IRDLOperation):
-  """One deterministic profiled request inside ``tile.gather.global.async``."""
+@irdl_attr_definition
+class TileIndexedMapAttr(ParametrizedAttribute):
+  """Generic indexed address map: ``#tile.indexed_map<...>``.
 
-  name = "tile.profiled.access"
+  ``remote_element = index[i] * S + O + t * P + j * T`` for index i,
+  repeat segment j (0 <= j < R), and logical task id t; the destination
+  segment is ``local_element = (i * R + j) * L`` and copies ``L`` remote
+  elements.  All units are elements of the remote dtype.  S/R/L > 0 and
+  O/P/T >= 0 are verified by the source verifier, not the parser.
+  """
 
-  request_id = prop_def(StringAttr)
-  outcome = prop_def(StringAttr)
-  bytes = prop_def(IntegerAttr)
-  line_token = opt_prop_def(StringAttr)
-  merge_group = opt_prop_def(StringAttr)
+  name = "tile.indexed_map"
 
-  def __init__(
-    self,
-    request_id: str,
-    outcome: str,
-    num_bytes: int,
-    line_token: str | None = None,
-    merge_group: str | None = None,
-  ):
-    super().__init__(
-      properties=_props(
-        {
-          "request_id": StringAttr(request_id),
-          "outcome": StringAttr(outcome),
-          "bytes": _index_attr(num_bytes),
-          "line_token": None if line_token is None else StringAttr(line_token),
-          "merge_group": None if merge_group is None else StringAttr(merge_group),
-        }
-      )
+  index_scale: StringAttr
+  offset: StringAttr
+  task_stride: StringAttr
+  repeat: StringAttr
+  stride: StringAttr
+  segment: StringAttr
+
+  @staticmethod
+  def of(
+    index_scale: int,
+    offset: int,
+    task_stride: int,
+    repeat: int,
+    stride: int,
+    segment: int,
+  ) -> TileIndexedMapAttr:
+    return TileIndexedMapAttr(
+      StringAttr(str(index_scale)),
+      StringAttr(str(offset)),
+      StringAttr(str(task_stride)),
+      StringAttr(str(repeat)),
+      StringAttr(str(stride)),
+      StringAttr(str(segment)),
     )
 
-  def print(self, printer: Printer) -> None:
-    _print_str_kw(printer, "id", self.request_id.data)
-    _print_str_kw(printer, "outcome", self.outcome.data)
-    _print_int_kw(printer, "bytes", self.bytes.value.data)
-    if self.line_token is not None:
-      _print_str_kw(printer, "line", self.line_token.data)
-    if self.merge_group is not None:
-      _print_str_kw(printer, "merge", self.merge_group.data)
-
   @classmethod
-  def parse(cls, parser: Parser) -> Self:
-    request_id = _parse_str_kw(parser, "id")
-    outcome = _parse_str_kw(parser, "outcome")
-    num_bytes = _parse_int_kw(parser, "bytes")
-    line_token = _parse_opt_str_kw(parser, "line")
-    merge_group = _parse_opt_str_kw(parser, "merge")
-    return cls(request_id, outcome, num_bytes, line_token=line_token, merge_group=merge_group)
+  def parse_parameters(cls, parser: AttrParser) -> list:
+    parser.parse_punctuation("<")
+    index_scale = _parse_map_int_kw(parser, "index_scale")
+    offset = _parse_map_int_kw(parser, "offset")
+    task_stride = _parse_map_int_kw(parser, "task_stride")
+    repeat = _parse_map_int_kw(parser, "repeat")
+    stride = _parse_map_int_kw(parser, "stride")
+    segment = _parse_map_int_kw(parser, "segment")
+    parser.parse_punctuation(">")
+    return [
+      StringAttr(str(index_scale)),
+      StringAttr(str(offset)),
+      StringAttr(str(task_stride)),
+      StringAttr(str(repeat)),
+      StringAttr(str(stride)),
+      StringAttr(str(segment)),
+    ]
+
+  def print_parameters(self, printer: Printer) -> None:
+    printer.print_string("<")
+    _print_map_int_kw(printer, "index_scale", int(self.index_scale.data))
+    _print_map_int_kw(printer, "offset", int(self.offset.data))
+    _print_map_int_kw(printer, "task_stride", int(self.task_stride.data))
+    _print_map_int_kw(printer, "repeat", int(self.repeat.data))
+    _print_map_int_kw(printer, "stride", int(self.stride.data))
+    _print_map_int_kw(printer, "segment", int(self.segment.data))
+    printer.print_string(">")
+
+  @property
+  def values(self) -> tuple[int, int, int, int, int, int]:
+    return (
+      int(self.index_scale.data),
+      int(self.offset.data),
+      int(self.task_stride.data),
+      int(self.repeat.data),
+      int(self.stride.data),
+      int(self.segment.data),
+    )
+
+
+def _parse_map_int_kw(parser: Parser | AttrParser, keyword: str) -> int:
+  parser.parse_keyword(keyword)
+  parser.parse_punctuation("=")
+  return parser.parse_integer()
+
+
+def _print_map_int_kw(printer: Printer, keyword: str, value: int) -> None:
+  printer.print_string(f" {keyword} = {value}")
 
 
 @irdl_op_definition
 class TileGatherOp(_TileAsyncOp):
-  """Deterministic profiled global gather into one tile-local L1 buffer."""
+  """Address-resolved global gather into one tile-local L1 buffer."""
 
   name = "tile.gather.global.async"
 
   source = operand_def(NestGlobalView)
   indices = operand_def(TileL1Buffer)
   destination = operand_def(TileL1Buffer)
-  result_bytes = prop_def(IntegerAttr)
-  cache_target_bytes = prop_def(IntegerAttr)
-  l1_mshr_hint = prop_def(IntegerAttr)
-  profile = region_def("single_block")
-
-  traits = traits_def(NoTerminator())
+  address_map = prop_def(TileIndexedMapAttr)
+  window_entries = prop_def(IntegerAttr)
+  scope = opt_prop_def(StringAttr)
 
   def __init__(
     self,
     source,
     indices,
     destination,
-    result_bytes: int,
-    cache_target_bytes: int,
-    l1_mshr_hint: int,
-    accesses: Sequence[TileProfiledAccessOp],
     tag: str,
+    *,
+    address_map: TileIndexedMapAttr,
+    window_entries: int = 4,
+    scope: str | None = None,
     _region: Region | None = None,
   ):
-    profile = _single_block_region(accesses) if _region is None else _region
     self._finish(
       tag,
       operands=[source, indices, destination],
       properties=_props(
         {
-          "result_bytes": _index_attr(result_bytes),
-          "cache_target_bytes": _index_attr(cache_target_bytes),
-          "l1_mshr_hint": _index_attr(l1_mshr_hint),
+          "address_map": address_map,
+          "window_entries": _index_attr(window_entries),
+          "scope": None if scope is None else StringAttr(scope),
         }
       ),
-      regions=[profile],
     )
 
   def print(self, printer: Printer) -> None:
@@ -2024,10 +2223,11 @@ class TileGatherOp(_TileAsyncOp):
     printer.print_operand(self.indices)
     printer.print_string(") into ")
     printer.print_operand(self.destination)
-    _print_int_kw(printer, "result_bytes", self.result_bytes.value.data)
-    _print_int_kw(printer, "cache_target_bytes", self.cache_target_bytes.value.data)
-    _print_int_kw(printer, "l1_mshr_hint", self.l1_mshr_hint.value.data)
-    _print_body_region(printer, self.profile)
+    printer.print_string(" map = ")
+    printer.print_attribute(self.address_map)
+    _print_int_kw(printer, "window_entries", self.window_entries.value.data)
+    if self.scope is not None:
+      _print_str_kw(printer, "scope", self.scope.data)
     _print_event_type(printer, self.result.type)
 
   @classmethod
@@ -2036,10 +2236,13 @@ class TileGatherOp(_TileAsyncOp):
     indices = _parse_operand_group(parser, "indices")
     parser.parse_keyword("into")
     destination = parser.parse_operand()
-    result_bytes = _parse_int_kw(parser, "result_bytes")
-    cache_target_bytes = _parse_int_kw(parser, "cache_target_bytes")
-    l1_mshr_hint = _parse_int_kw(parser, "l1_mshr_hint")
-    profile = _parse_body_region(parser)
+    parser.parse_keyword("map")
+    parser.parse_punctuation("=")
+    address_map = parser.parse_attribute()
+    if not isinstance(address_map, TileIndexedMapAttr):
+      parser.raise_error("gather expects a #tile.indexed_map address map")
+    window_entries = _parse_opt_int_kw(parser, "window_entries")
+    scope = _parse_opt_str_kw(parser, "scope")
     event_type = _parse_event_type(parser, TileEvent)
     if len(indices) != 1:
       parser.raise_error("gather indices(...) expects exactly one L1 buffer")
@@ -2048,13 +2251,94 @@ class TileGatherOp(_TileAsyncOp):
       source,
       indices[0],
       destination,
-      result_bytes,
-      cache_target_bytes,
-      l1_mshr_hint,
-      (),
       tag,
-      _region=profile,
+      address_map=address_map,
+      window_entries=4 if window_entries is None else window_entries,
+      scope=scope,
     )
+
+
+@irdl_op_definition
+class TileScatterOp(_TileAsyncOp):
+  """Address-resolved scatter from one tile-local L1 buffer to the global view."""
+
+  name = "tile.scatter.global.async"
+
+  source = operand_def(TileL1Buffer)
+  indices = operand_def(TileL1Buffer)
+  destination = operand_def(NestGlobalView)
+  address_map = prop_def(TileIndexedMapAttr)
+  scatter_window = prop_def(IntegerAttr)
+  scope = opt_prop_def(StringAttr)
+
+  def __init__(
+    self,
+    source,
+    indices,
+    destination,
+    tag: str,
+    *,
+    address_map: TileIndexedMapAttr,
+    window_entries: int = 1,
+    scope: str | None = None,
+  ):
+    self._finish(
+      tag,
+      operands=[source, indices, destination],
+      properties=_props(
+        {
+          "address_map": address_map,
+          "scatter_window": _index_attr(window_entries),
+          "scope": None if scope is None else StringAttr(scope),
+        }
+      ),
+    )
+
+  @property
+  def window_entries(self):
+    return self.scatter_window
+
+  def print(self, printer: Printer) -> None:
+    printer.print_string(" ")
+    printer.print_operand(self.source)
+    printer.print_string(" indices(")
+    printer.print_operand(self.indices)
+    printer.print_string(") into ")
+    printer.print_operand(self.destination)
+    printer.print_string(" map = ")
+    printer.print_attribute(self.address_map)
+    _print_int_kw(printer, "window_entries", self.scatter_window.value.data)
+    if self.scope is not None:
+      _print_str_kw(printer, "scope", self.scope.data)
+    _print_event_type(printer, self.result.type)
+
+  @classmethod
+  def parse(cls, parser: Parser) -> Self:
+    source = parser.parse_operand()
+    indices = _parse_operand_group(parser, "indices")
+    parser.parse_keyword("into")
+    destination = parser.parse_operand()
+    parser.parse_keyword("map")
+    parser.parse_punctuation("=")
+    address_map = parser.parse_attribute()
+    if not isinstance(address_map, TileIndexedMapAttr):
+      parser.raise_error("scatter expects a #tile.indexed_map address map")
+    window_entries = _parse_opt_int_kw(parser, "window_entries")
+    scope = _parse_opt_str_kw(parser, "scope")
+    event_type = _parse_event_type(parser, TileEvent)
+    if len(indices) != 1:
+      parser.raise_error("scatter indices(...) expects exactly one L1 buffer")
+    tag = event_type.tag.data  # type: ignore[attr-defined]
+    return cls(
+      source,
+      indices[0],
+      destination,
+      tag,
+      address_map=address_map,
+      window_entries=4 if window_entries is None else window_entries,
+      scope=scope,
+    )
+
 
 
 @irdl_op_definition
@@ -2281,8 +2565,8 @@ operations: list[type[Operation]] = [
   TileFreeOp,
   TileLoadOp,
   TileStoreOp,
-  TileProfiledAccessOp,
   TileGatherOp,
+  TileScatterOp,
   TilePowOp,
   TileEvuOp,
   TileBoaOp,
@@ -2291,6 +2575,7 @@ operations: list[type[Operation]] = [
   TileReturnOp,
   NexusProgramOp,
   NexusSubmitContextOp,
+  NexusHostCallOp,
   NexusSharedRefOp,
   NexusAwaitOp,
   NexusReturnOp,
@@ -2312,6 +2597,7 @@ Elenor = Dialect(
     NestContextResourcesAttr,
     NexusEvent,
     NestGlobalMemref,
+    TileIndexedMapAttr,
     TileResourcesAttr,
   ],
 )
@@ -2344,6 +2630,7 @@ __all__ = [
   "NexusActionLike",
   "NexusAwaitOp",
   "NexusEvent",
+  "NexusHostCallOp",
   "NexusProgramOp",
   "NexusReturnOp",
   "NexusSharedRefOp",
@@ -2357,13 +2644,12 @@ __all__ = [
   "TileEvuOp",
   "TileFreeOp",
   "TileGatherOp",
+  "TileIndexedMapAttr",
   "TileL1Buffer",
   "TileLoadOp",
-  "TilePowOp",
-  "TileProfiledAccessOp",
-  "TileProgramDefOp",
   "TileResourcesAttr",
   "TileReturnOp",
+  "TileScatterOp",
   "TileSignalOp",
   "TileStoreOp",
   "TileSubviewOp",

@@ -274,6 +274,8 @@ class TileGroup:
       )
       for i in range(cfg.num_tiles)
     ]
+    for tile in self.tiles:
+      tile.precise_write_recorder = self._record_precise_scatter_write
     self.sequencer = TileGroupSequencer(self)
     self._active_sequencers: list[TileGroupSequencer] = []
     self._next_launch_id: int = 0
@@ -337,6 +339,13 @@ class TileGroup:
     # role_event_id -> tile_id -> shared live L1 name/handle map.  Each
     # inner map is the same object held by that tile's UCE context.
     self._role_l1_handles: dict[str, dict[int, dict[str, AllocationHandle]]] = {}
+    # Plan §2: precise Scatter-write ledger.  Key is the role (grid) event
+    # runtime id; values are (allocation_id, allocation_generation,
+    # offset, bytes).  Cleared in begin_launch.
+    self.precise_write_ledger: dict[str, list[tuple[str, int, int, int]]] = {}
+    # Plan §2: root request id of the run root, set by GroupPortAdapter on
+    # accept; None for standalone launches.
+    self.root_request_id: str | None = None
     # transaction id -> sequencer
     self._txn_sequencer: dict[str, TileGroupSequencer] = {}
     # group transaction id -> (logical direction, visual concurrency slot)
@@ -1959,6 +1968,25 @@ class TileGroup:
 
   # ---- lifecycle ------------------------------------------------------
 
+  def _record_precise_scatter_write(
+    self,
+    role_event_id: str,
+    allocation_id: str,
+    allocation_generation: int,
+    offset: int,
+    length: int,
+  ) -> None:
+    """Append one committed Scatter segment to the precise-write ledger.
+
+    Plan §2: entries key on the dispatch's grid event runtime id (the
+    launching UCE context captures it in the record_write closure);
+    runtime maintenance resolves these byte ranges for precise
+    invalidate.
+    """
+    self.precise_write_ledger.setdefault(role_event_id, []).append(
+      (allocation_id, allocation_generation, offset, length)
+    )
+
   def begin_launch(self, program, bindings) -> None:
     """Clear retired launch bookkeeping; never reset profiles, Cache or residency."""
     if self.poisoned_reason is not None:
@@ -1993,6 +2021,8 @@ class TileGroup:
     self._l2_released.clear()
     self._role_trace.clear()
     self._role_l1_handles.clear()
+    self.precise_write_ledger.clear()
+    self.root_request_id = None
     self._role_done_tiles.clear()
     self._role_event_tile_mask.clear()
     self._protocol_live_l2.clear()

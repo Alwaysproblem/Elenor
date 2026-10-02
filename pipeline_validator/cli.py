@@ -236,6 +236,13 @@ def main(argv=None) -> int:
     help="bind a global input: NAME=BASE:SIZE:PERM",
   )
   parser.add_argument(
+    "--input-data",
+    action="append",
+    default=[],
+    metavar="NAME=PATH",
+    help="seed a bound global input from file bytes: NAME=PATH (full_memory only)",
+  )
+  parser.add_argument(
     "--hw-override",
     action="append",
     default=[],
@@ -311,6 +318,11 @@ def main(argv=None) -> int:
     parser.error("--print-ir is mutually exclusive with compilation output options")
   if args.all and args.compiled_output is not None:
     parser.error("--compiled-output requires one source input and cannot be used with --all")
+  if args.input_data and (args.all or args.compile_only or args.print_ir):
+    parser.error(
+      "--input-data requires one source run and is mutually exclusive with"
+      " --all, --compile-only, and --print-ir"
+    )
 
   try:
     parsed_bindings = [_parse_input_binding(spec) for spec in args.input_binding]
@@ -319,6 +331,19 @@ def main(argv=None) -> int:
       if binding.name in bindings:
         raise ValueError(f"duplicate --input-binding for '{binding.name}'")
       bindings[binding.name] = binding
+    input_data: dict[str, Path] = {}
+    for spec in args.input_data:
+      if "=" not in spec:
+        raise ValueError("--input-data expects NAME=PATH")
+      name, _, data_path = spec.partition("=")
+      if not name or not data_path:
+        raise ValueError("--input-data expects NAME=PATH")
+      if name in input_data:
+        raise ValueError(f"duplicate --input-data for '{name}'")
+      input_data[name] = Path(data_path)
+    unknown = sorted(set(input_data) - set(bindings))
+    if unknown:
+      raise ValueError(f"--input-data names unknown bindings: {unknown}")
     hw_overrides = _parse_overrides(args.hw_override)
     sim_overrides = _parse_overrides(args.sim_override)
     profile_overrides = _parse_profile_bytes(args.profile_bytes)
@@ -361,6 +386,33 @@ def main(argv=None) -> int:
   except (TypeError, ValueError) as exc:
     print(f"invalid input: {exc}", file=sys.stderr)
     return 2
+
+  byte_store = None
+  if input_data:
+    if sim_cfg.fidelity != "full_memory":
+      parser.error("--input-data requires full_memory fidelity")
+    from .memory.byte_store import ByteStore
+
+    byte_store = ByteStore()
+    for name in sorted(input_data):
+      binding = bindings[name]
+      data_path = input_data[name]
+      try:
+        payload = data_path.read_bytes()
+      except OSError as exc:
+        print(f"failed to read --input-data for '{name}': {exc}", file=sys.stderr)
+        return 2
+      if not payload:
+        print(f"--input-data for '{name}' is empty", file=sys.stderr)
+        return 2
+      if len(payload) > binding.size_bytes:
+        print(
+          f"--input-data for '{name}' is {len(payload)} bytes, exceeds binding size {binding.size_bytes}",
+          file=sys.stderr,
+        )
+        return 2
+      byte_store.seed_hbm(binding.base_iova, payload)
+      print(f"[seed] {name} <- {data_path} ({len(payload)} bytes)", file=sys.stderr)
 
   if args.compiled_file is not None:
     try:
@@ -438,7 +490,7 @@ def main(argv=None) -> int:
   enable_tracer = bool(args.trace or args.memory_trace or args.trace_json or args.trace_html)
   for loaded in loaded_programs:
     info: WorkloadInfo = loaded.compiled.workload_info
-    sim = Simulator(hw, sim_cfg, enable_tracer=enable_tracer)
+    sim = Simulator(hw, sim_cfg, enable_tracer=enable_tracer, byte_store=byte_store)
     try:
       print(f"[run] {info.name}", file=sys.stderr)
       result = sim.run(loaded)

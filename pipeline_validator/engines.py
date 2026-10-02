@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from .config import HardwareConfig
-from .execution_ir import ExecEngineDesc, ExecGatherDesc, ExecGatherOutcome, ExecProfiledAccess
+from .execution_ir import ExecEngineDesc, ExecTileGatherDesc, ExecTileScatterDesc
 from .memory import (
   DeterministicLRUCache,
   MemoryInvariantError,
@@ -38,6 +38,10 @@ from .memory import (
   MshrWait,
   ResolvedMemoryView,
   slice_resolved_view,
+)
+from .memory.address_provider import (
+  decode_index_i32,
+  resolve_indexed_segments,
 )
 from .memory.cache import CacheLineIdentity, CacheProvenance
 from .memory.transfer import MemoryTransaction, TransferOp, TransferStatus
@@ -269,41 +273,119 @@ class _MFETransferJob:
 
 
 @dataclass
-class _MFEGatherRequest:
-  access: ExecProfiledAccess
+class _GatherIndexSlot:
+  """One index slot: from INDEX_READ issue to all its payload writes."""
+
   ordinal: int
-  state: str = "LOOKUP"
+  state: str = "INDEX_READ"  # INDEX_READ | DECODED | DONE
+  transaction_id: str | None = None
+  value: int | None = None
+  issued: bool = False
+  released: bool = False  # all segments written to destination
+
+
+@dataclass
+class _GatherSegmentRequest:
+  """One cache-line-shaped payload request with a global ordinal.
+
+  The request covers exactly one (remote, local) byte pair produced by
+  ``resolve_indexed_segments``; when either cache level is enabled the
+  remote slice is line-aligned (first/last lines may be partial, which
+  turns the request into a bypass or an inline segment of a refill).
+  """
+
+  ordinal: int
+  slot_ordinal: int
+  remote: ResolvedMemoryView
+  local: ResolvedMemoryView
+  state: str = "LOOKUP_L1"  # LOOKUP_L1 | LOOKUP_L2 | WAIT_L1_MSHR | WAIT_L2_MSHR
+  #  | WAIT_L1_FILL | WAIT_L2_FILL | HBM_REFILL | L1_DIRECT_REFILL
+  #  | DIRECT_RESPONSE | L2_REFILL | RESPONSE_READY | DONE
+  within_line: int = 0  # byte offset of this segment inside the line slice
   transaction_id: str | None = None
   l1_mshr_token: int | None = None
   l2_mshr_token: int | None = None
   wait_version: int | None = None
   response_ready: bool = False
   merged_counted: bool = False
-  # Byte-oracle source resolution (only populated when a ByteStore is wired).
+  bypass: bool = False
   line_identity: CacheLineIdentity | None = None
   line_provenance: CacheProvenance | None = None
   line_data: bytes | None = None
-  within_line: int = 0
-  source_offset: int = 0
+  line_validity: bytes | None = None
   hit_data: bytes | None = None
+  hit_validity: bytes | None = None
 
 
 @dataclass
 class _MFEGatherJob:
   desc: ExecEngineDesc
   event_id: str
+  gather: ExecTileGatherDesc
   source: ResolvedMemoryView | None
   indices: ResolvedMemoryView | None
   destination: ResolvedMemoryView | None
   issuer: MemoryOwner
   namespace: tuple[int, int, int, int, str]
-  requests: list[_MFEGatherRequest]
-  offsets: tuple[int, ...]
   start_cycle: int
+  element_bytes: int = 1
+  slots: list[_GatherIndexSlot] = field(default_factory=list)
+  next_slot: int = 0
+  next_request_ordinal: int = 0
+  requests: list[_GatherSegmentRequest] = field(default_factory=list)
   next_write_ordinal: int = 0
+  write_request: _GatherSegmentRequest | None = None
   write_transaction_id: str | None = None
   transaction_ids: set[str] = field(default_factory=set)
   binding_id: str | None = None
+  bypass_forbidden: bool = False
+
+
+@dataclass
+class _ScatterIndexSlot:
+  """One Scatter index slot: INDEX_READ issue to decoded segments."""
+
+  ordinal: int
+  state: str = "INDEX_READ"  # INDEX_READ | DECODED | DONE
+  transaction_id: str | None = None
+  value: int | None = None
+
+
+@dataclass
+class _ScatterSegment:
+  """One (i, j) Scatter payload segment with ordered-overwrite state."""
+
+  ordinal: int
+  slot_ordinal: int
+  remote: ResolvedMemoryView
+  local: ResolvedMemoryView
+  state: str = "WAIT_INDEX"  # WAIT_INDEX | WAIT_PREDECESSOR | READY | WRITE | DONE
+  read_transaction_id: str | None = None
+  transaction_id: str | None = None
+  data: bytes | None = None
+  committed_cycle: int | None = None
+
+
+@dataclass
+class _MFEScatterJob:
+  desc: ExecEngineDesc
+  event_id: str
+  scatter: ExecTileScatterDesc
+  source: ResolvedMemoryView | None
+  indices: ResolvedMemoryView | None
+  destination: ResolvedMemoryView | None
+  issuer: MemoryOwner
+  namespace: tuple[int, int, int, int, str]
+  start_cycle: int
+  element_bytes: int = 1
+  slots: list[_ScatterIndexSlot] = field(default_factory=list)
+  next_slot: int = 0
+  segments: list[_ScatterSegment] = field(default_factory=list)
+  next_segment_ordinal: int = 0
+  transaction_ids: set[str] = field(default_factory=set)
+  binding_id: str | None = None
+  first_failed: bool = False
+  failure_reason: str = ""
 
 
 class MFEEngine(Engine):
@@ -364,6 +446,7 @@ class MFEEngine(Engine):
       _MFELane(f"MFE_ST{j}", cfg.mfe_pipeline_depth) for j in range(cfg.mfe_store_channels)
     ]
     self._gather_jobs: dict[str, _MFEGatherJob] = {}
+    self._scatter_jobs: dict[str, _MFEScatterJob] = {}
     self._current_cycle = 0
 
   def _emit_memory_trace(self, cycle: int) -> None:
@@ -385,7 +468,7 @@ class MFEEngine(Engine):
 
   @property
   def state(self) -> EngineState:
-    if self._gather_jobs or any(lane.running is not None for lane in self._lanes):
+    if self._gather_jobs or self._scatter_jobs or any(lane.running is not None for lane in self._lanes):
       return EngineState.RUNNING
     return EngineState.IDLE
 
@@ -396,13 +479,17 @@ class MFEEngine(Engine):
   @property
   def is_busy(self) -> bool:
     lanes_full = all(lane.accepted() >= lane.depth for lane in self._lanes)
-    gather_capacity = self.cfg.mfe_load_channels * self.cfg.mfe_pipeline_depth
-    return lanes_full and len(self._gather_jobs) >= gather_capacity
+    indexed_capacity = self.cfg.mfe_load_channels * self.cfg.mfe_pipeline_depth
+    return lanes_full and len(self._gather_jobs) + len(self._scatter_jobs) >= indexed_capacity
 
   @property
   def accepted_count(self) -> int:
-    """Accepted lane jobs plus active Gather state machines."""
-    return sum(lane.accepted() for lane in self._lanes) + len(self._gather_jobs)
+    """Accepted lane jobs plus active Gather/Scatter state machines."""
+    return (
+      sum(lane.accepted() for lane in self._lanes)
+      + len(self._gather_jobs)
+      + len(self._scatter_jobs)
+    )
 
   @property
   def has_accepted_jobs(self) -> bool:
@@ -437,47 +524,44 @@ class MFEEngine(Engine):
     issuer: MemoryOwner,
     namespace: tuple[int, int, int, int, str],
     binding_id: str | None = None,
+    bypass_forbidden: bool = False,
+    element_bytes: int = 1,
   ) -> _MFEGatherJob | None:
-    """Accept one Gather and issue only stages enabled by active profiles."""
+    """Accept one address-resolved Gather and start its index window."""
     capacity = self.cfg.mfe_load_channels * self.cfg.mfe_pipeline_depth
-    if len(self._gather_jobs) >= capacity:
+    if len(self._gather_jobs) + len(self._scatter_jobs) >= capacity:
       return None
     if event_id in self._gather_jobs:
       raise ValueError("duplicate gather event id")
     gather = desc.params.get("gather")
-    if not isinstance(gather, ExecGatherDesc):
+    if not isinstance(gather, ExecTileGatherDesc):
       raise ValueError("gather descriptor is missing")
     if self.transfer_manager is None:
       raise ValueError("gather requires a TransferManager")
-
-    offsets: list[int] = []
-    offset = 0
-    requests: list[_MFEGatherRequest] = []
-    for ordinal, access in enumerate(gather.accesses):
-      offsets.append(offset)
-      offset += access.bytes
-      requests.append(_MFEGatherRequest(access=access, ordinal=ordinal))
+    if getattr(self.transfer_manager, "byte_store", None) is None:
+      raise ValueError("indexed memory requires ByteStore input data")
+    if source is None or indices is None or destination is None:
+      raise ValueError("gather requires resolved source, index and destination views")
+    if element_bytes <= 0:
+      raise ValueError("gather element_bytes must be > 0")
+    index_count = indices.size_bytes // 4
+    if index_count <= 0:
+      raise ValueError("gather indices view is empty")
     job = _MFEGatherJob(
       desc=desc,
       event_id=event_id,
+      gather=gather,
       source=source,
       indices=indices,
       destination=destination,
       issuer=issuer,
       namespace=namespace,
-      requests=requests,
-      offsets=tuple(offsets),
       start_cycle=cycle,
+      element_bytes=element_bytes,
+      slots=[_GatherIndexSlot(ordinal=i) for i in range(index_count)],
       binding_id=binding_id,
+      bypass_forbidden=bypass_forbidden,
     )
-    self._resolve_byte_sources(job)
-    for request in requests:
-      outcome = request.access.outcome
-      if outcome is ExecGatherOutcome.L1_HIT and not self.l1_cache.enabled:
-        raise ValueError("L1_HIT requires a non-zero L1 cache profile")
-      if outcome is ExecGatherOutcome.L2_HIT and not self.l2_cache.enabled:
-        raise ValueError("L2_HIT requires a non-zero L2 cache profile")
-
     self._gather_jobs[event_id] = job
     for metric in (
       "gather_requests",
@@ -486,95 +570,86 @@ class MFEEngine(Engine):
       "gather_hbm_misses",
       "gather_mshr_merges",
       "gather_mshr_stalls",
-      "gather_reorder_wait_cycles",
+      "gather_cache_bypass_requests",
+      "gather_index_reads",
       "gather_bytes",
+      "gather_reorder_wait_cycles",
     ):
       self.pmu.add_event(metric, 0)
     self.pmu.add_event("launch")
-    self.pmu.add_event("gather_requests", len(requests))
-    self.pmu.add_event("gather_bytes", gather.result_bytes)
-    for request in requests:
-      outcome = request.access.outcome
-      if outcome is ExecGatherOutcome.L1_HIT:
-        self.pmu.add_event("gather_l1_hits")
-        op = TransferOp.GATHER_L1_HIT
-      elif outcome is ExecGatherOutcome.L2_HIT:
-        self.pmu.add_event("gather_l2_hits")
-        op = TransferOp.GATHER_L2_HIT
-      else:
-        self.pmu.add_event("gather_hbm_misses")
-        if not self.l1_cache.enabled and not self.l2_cache.enabled:
-          source_view = self._gather_source_view(job, request, full_line=False)
-          self._submit_gather_transaction(
-            job,
-            request,
-            TransferOp.GATHER_DIRECT_RESPONSE,
-            cycle,
-            phase="direct_response",
-            src=source_view,
-            bytes_total=source_view.size_bytes if source_view is not None else None,
-          )
-          continue
-        op = TransferOp.GATHER_MISS_LOOKUP
-      self._submit_gather_transaction(job, request, op, cycle, phase="lookup")
+    self.pmu.add_event("gather_requests", index_count)
+    self.pmu.add_event("gather_index_reads", index_count)
+    self.pmu.add_event("gather_bytes", destination.size_bytes)
+    self._issue_gather_index_slots(job, cycle)
     return job
 
-  def _resolve_byte_sources(self, job: _MFEGatherJob) -> None:
-    """Bind every formal Gather token to actual allocation provenance."""
-    if job.source is None:
-      raise ValueError("formal Gather requires an actual source view")
-    store = getattr(self.transfer_manager, "byte_store", None)
-    if store is None:
-      handle = job.source.handle
-      binding_name = getattr(handle.owner, "binding_name", "")
-      for request in job.requests:
-        opaque = request.access.line_token or request.access.request_id
-        request.line_identity = CacheLineIdentity(
-          handle.allocation_id,
-          handle.generation,
-          job.source.offset_bytes,
-          job.source.size_bytes,
-          opaque,
-          False,
-        )
-        request.line_provenance = CacheProvenance(
-          binding_name,
-          handle.allocation_id,
-          handle.generation,
-          job.source.offset_bytes,
-          job.source.size_bytes,
-          False,
-        )
-        request.within_line = 0
-        request.source_offset = 0
-      return
-    if not job.binding_id:
-      raise ValueError("Gather byte oracle requires call binding_id")
-    for request in job.requests:
-      (request.line_identity, request.line_provenance, request.within_line, request.source_offset) = (
-        store.resolve_profiled_source(
-          job.binding_id,
-          request.access.request_id,
-          job.source,
-          request.access.bytes,
-          self.cfg.cache_line_bytes,
-        )
-      )
-
-  def _gather_source_view(
-    self, job: _MFEGatherJob, request: _MFEGatherRequest, *, full_line: bool
-  ) -> ResolvedMemoryView | None:
-    if job.source is None:
+  def launch_scatter(
+    self,
+    desc: ExecEngineDesc,
+    cycle: int,
+    event_id: str,
+    *,
+    source: ResolvedMemoryView | None,
+    indices: ResolvedMemoryView | None,
+    destination: ResolvedMemoryView | None,
+    issuer: MemoryOwner,
+    namespace: tuple[int, int, int, int, str],
+    binding_id: str | None = None,
+    record_write=None,
+    element_bytes: int = 1,
+  ) -> _MFEScatterJob | None:
+    """Accept one address-resolved Scatter (bypasses both caches)."""
+    capacity = self.cfg.mfe_load_channels * self.cfg.mfe_pipeline_depth
+    if len(self._gather_jobs) + len(self._scatter_jobs) >= capacity:
       return None
-    if request.line_identity is None or (
-      request.line_provenance is not None and not request.line_provenance.precise
+    if event_id in self._scatter_jobs:
+      raise ValueError("duplicate scatter event id")
+    scatter = desc.params.get("scatter")
+    if not isinstance(scatter, ExecTileScatterDesc):
+      raise ValueError("scatter descriptor is missing")
+    if self.transfer_manager is None:
+      raise ValueError("scatter requires a TransferManager")
+    if getattr(self.transfer_manager, "byte_store", None) is None:
+      raise ValueError("indexed memory requires ByteStore input data")
+    if source is None or indices is None or destination is None:
+      raise ValueError("scatter requires resolved source, index and destination views")
+    if element_bytes <= 0:
+      raise ValueError("scatter element_bytes must be > 0")
+    index_count = indices.size_bytes // 4
+    if index_count <= 0:
+      raise ValueError("scatter indices view is empty")
+    job = _MFEScatterJob(
+      desc=desc,
+      event_id=event_id,
+      scatter=scatter,
+      source=source,
+      indices=indices,
+      destination=destination,
+      issuer=issuer,
+      namespace=namespace,
+      start_cycle=cycle,
+      element_bytes=element_bytes,
+      slots=[_ScatterIndexSlot(ordinal=i) for i in range(index_count)],
+      binding_id=binding_id,
+    )
+    job.record_write = record_write  # type: ignore[attr-defined]
+    self._scatter_jobs[event_id] = job
+    for metric in (
+      "scatter_segments",
+      "scatter_bytes",
+      "scatter_index_reads",
+      "scatter_overlap_wait_cycles",
+      "scatter_commit_latency_cycles",
     ):
-      return slice_resolved_view(job.source, 0, request.access.bytes)
-    relative_offset = request.source_offset
-    if full_line:
-      relative_offset -= relative_offset % self.cfg.cache_line_bytes
-    size = self.cfg.cache_line_bytes if full_line else request.access.bytes
-    return slice_resolved_view(job.source, relative_offset, size)
+      self.pmu.add_event(metric, 0)
+    self.pmu.add_event("launch")
+    self.pmu.add_event("scatter_index_reads", index_count)
+    self.pmu.add_event("scatter_segments", index_count * scatter.address_map.repeat)
+    self.pmu.add_event("scatter_bytes", source.size_bytes)
+    self._issue_scatter_index_slots(job, cycle)
+    return job
+
+  # -- indexed window + transaction helpers ----------------------------
 
   def _start_lane(self, lane: _MFELane, cycle: int) -> None:
     if not lane.queue:
@@ -589,14 +664,188 @@ class MFEEngine(Engine):
       self.transfer_manager.submit(job.transaction, cycle, self.pmu)
       job.transaction_submitted = True
 
-  def _transaction_id(self, job: _MFEGatherJob, request: _MFEGatherRequest, phase: str) -> str:
+  def _issue_gather_index_slots(self, job: _MFEGatherJob, cycle: int) -> None:
+    """Fill the index window: at most window_entries slots in flight."""
+    assert self.transfer_manager is not None and job.indices is not None
+    window = job.gather.window_entries
+    in_flight = sum(1 for slot in job.slots if slot.issued and not slot.released)
+    for slot in job.slots[job.next_slot :]:
+      if in_flight >= window:
+        break
+      index_slice = slice_resolved_view(job.indices, slot.ordinal * 4, 4)
+      transaction_id = self._slot_transaction_id(job.namespace, "gather", slot.ordinal, "index_read")
+      run_generation, profile_generations = self.transfer_manager.transaction_identity(
+        (("l1", self.tile_id), ("l2", 0))
+      )
+      transaction = MemoryTransaction(
+        transaction_id=transaction_id,
+        op=TransferOp.INDEX_READ,
+        issuer=job.issuer,
+        src=index_slice,
+        dst=None,
+        bytes_total=4,
+        completion_event=job.event_id,
+        tile_id=self.tile_id,
+        run_generation=run_generation,
+        profile_generations=profile_generations,
+      )
+      self.transfer_manager.submit(transaction, cycle, self.pmu)
+      slot.transaction_id = transaction_id
+      slot.issued = True
+      job.transaction_ids.add(transaction_id)
+      job.next_slot = slot.ordinal + 1
+      in_flight += 1
+
+  def _issue_scatter_index_slots(self, job: _MFEScatterJob, cycle: int) -> None:
+    assert self.transfer_manager is not None and job.indices is not None
+    window = job.scatter.window_entries
+    in_flight = sum(1 for slot in job.slots if slot.transaction_id is not None and slot.value is None)
+    for slot in job.slots[job.next_slot :]:
+      if in_flight >= window:
+        break
+      index_slice = slice_resolved_view(job.indices, slot.ordinal * 4, 4)
+      transaction_id = self._slot_transaction_id(job.namespace, "scatter", slot.ordinal, "index_read")
+      run_generation, profile_generations = self.transfer_manager.transaction_identity(
+        (("l1", self.tile_id), ("l2", 0))
+      )
+      transaction = MemoryTransaction(
+        transaction_id=transaction_id,
+        op=TransferOp.INDEX_READ,
+        issuer=job.issuer,
+        src=index_slice,
+        dst=None,
+        bytes_total=4,
+        completion_event=job.event_id,
+        tile_id=self.tile_id,
+        run_generation=run_generation,
+        profile_generations=profile_generations,
+      )
+      self.transfer_manager.submit(transaction, cycle, self.pmu)
+      slot.transaction_id = transaction_id
+      job.transaction_ids.add(transaction_id)
+      job.next_slot = slot.ordinal + 1
+      in_flight += 1
+
+  @staticmethod
+  def _slot_transaction_id(job_namespace: tuple, kind: str, ordinal: int, phase: str) -> str:
+    prefix = ":".join(str(value) for value in job_namespace)
+    return f"{prefix}:{kind}:{ordinal}:{phase}"
+
+  def _gather_transaction_id(self, job: _MFEGatherJob, ordinal: int, phase: str) -> str:
     prefix = ":".join(str(value) for value in job.namespace)
-    return f"{prefix}:gather:{request.ordinal}:{phase}"
+    return f"{prefix}:gather:{ordinal}:{phase}"
+
+  def _scatter_transaction_id(self, job: _MFEScatterJob, ordinal: int, phase: str) -> str:
+    prefix = ":".join(str(value) for value in job.namespace)
+    return f"{prefix}:scatter:{ordinal}:{phase}"
+
+  def _gather_segment_requests(
+    self, job: _MFEGatherJob, slot: _GatherIndexSlot, cycle: int
+  ) -> None:
+    """Decode one index and append its line-shaped payload requests.
+
+    Plan §2: with any cache enabled each segment is cut by cache line.
+    A part whose full line stays inside the resolved remote view becomes
+    a whole-line request (refill the line, then keep the part's bytes);
+    a part whose line leaves the view becomes a bypass request counted
+    in ``gather_cache_bypass_requests`` and faulted when the program's
+    contract forbids bypass.  With both caches disabled each segment is
+    one direct request.
+    """
+    assert self.transfer_manager is not None
+    assert job.source is not None and job.destination is not None
+    element_bytes = job.element_bytes
+    task_id = job.namespace[2]
+    assert slot.value is not None
+    pairs = resolve_indexed_segments(
+      job.gather.address_map,
+      slot.value,
+      slot.ordinal,
+      task_id,
+      job.source,
+      job.destination,
+      element_bytes,
+    )
+    line_bytes = self.cfg.cache_line_bytes
+    view_end = job.source.offset_bytes + job.source.size_bytes
+    for remote, local in pairs:
+      if not (self.l1_cache.enabled or self.l2_cache.enabled):
+        # No cache: one direct request per segment (plan §2 SPM pass-through).
+        self._append_gather_request(job, slot, remote, local, 0, bypass=True, line_bytes=line_bytes)
+        continue
+      cursor = 0
+      total = remote.size_bytes
+      while cursor < total:
+        absolute = remote.offset_bytes + cursor
+        line_start = absolute - absolute % line_bytes
+        line_end = line_start + line_bytes
+        part_start = max(absolute, line_start)
+        part_end = min(absolute + total - cursor, line_end)
+        within = part_start - line_start
+        part_bytes = part_end - part_start
+        local_slice = slice_resolved_view(local, cursor, part_bytes)
+        whole_line = line_end <= view_end
+        if whole_line:
+          # The whole line must be sliced from the source view: the segment
+          # slice itself starts mid-line and would be out of bounds.
+          remote_slice = slice_resolved_view(
+            job.source, line_start - job.source.offset_bytes, line_bytes
+          )
+        else:
+          remote_slice = slice_resolved_view(remote, cursor, part_bytes)
+          self.pmu.add_event("gather_cache_bypass_requests")
+          if job.bypass_forbidden:
+            raise MemoryInvariantError("gather_cache_bypass_forbidden")
+        if remote_slice is None or local_slice is None:
+          raise MemoryInvariantError("gather segment slice is not resolvable")
+        self._append_gather_request(
+          job, slot, remote_slice, local_slice, within, bypass=not whole_line, line_bytes=line_bytes
+        )
+        cursor += part_bytes
+
+  def _append_gather_request(
+    self,
+    job: _MFEGatherJob,
+    slot: _GatherIndexSlot,
+    remote: ResolvedMemoryView,
+    local: ResolvedMemoryView,
+    within_line: int,
+    *,
+    bypass: bool,
+    line_bytes: int,
+  ) -> None:
+    request = _GatherSegmentRequest(
+      ordinal=job.next_request_ordinal,
+      slot_ordinal=slot.ordinal,
+      remote=remote,
+      local=local,
+      within_line=within_line,
+    )
+    job.next_request_ordinal += 1
+    if bypass:
+      # Plan §2: a bypass request reads its own bytes straight from HBM and
+      # never allocates or touches a cache line.
+      request.bypass = True
+      request.state = "DIRECT_RESPONSE"
+    else:
+      assert remote.handle is not None
+      line_offset = (remote.offset_bytes // line_bytes) * line_bytes
+      request.line_identity = CacheLineIdentity(
+        remote.handle.allocation_id, remote.handle.generation, line_offset
+      )
+      request.line_provenance = CacheProvenance(
+        getattr(remote.handle.owner, "binding_name", ""),
+        remote.handle.allocation_id,
+        remote.handle.generation,
+        line_offset,
+        line_bytes,
+      )
+    job.requests.append(request)
 
   def _submit_gather_transaction(
     self,
     job: _MFEGatherJob,
-    request: _MFEGatherRequest,
+    request: _GatherSegmentRequest,
     op: TransferOp,
     cycle: int,
     *,
@@ -606,15 +855,21 @@ class MFEEngine(Engine):
     bytes_total: int | None = None,
   ) -> None:
     assert self.transfer_manager is not None
-    transaction_id = self._transaction_id(job, request, phase)
+    transaction_id = self._gather_transaction_id(job, request.ordinal, phase)
     run_generation, profile_generations = self.transfer_manager.transaction_identity(
       (("l1", self.tile_id), ("l2", 0))
     )
-    total = request.access.bytes if bytes_total is None else bytes_total
+    total = request.remote.size_bytes if bytes_total is None else bytes_total
     captured_data = None
-    if op is TransferOp.GATHER_DEST_WRITE and request.hit_data is not None:
+    captured_validity = None
+    if op is TransferOp.GATHER_DEST_WRITE:
+      # The destination write carries only this request's segment bytes
+      # (the remote side may be a whole cache line).
       captured_data = request.hit_data
-    bypass_levels = self._gather_bypass_levels(request)
+      captured_validity = request.hit_validity
+      if captured_data is None or len(captured_data) != request.local.size_bytes:
+        raise MemoryInvariantError("gather destination write lacks segment bytes")
+      total = request.local.size_bytes
     provenance = request.line_provenance
     transaction = MemoryTransaction(
       transaction_id=transaction_id,
@@ -626,9 +881,10 @@ class MFEEngine(Engine):
       completion_event=job.event_id,
       tile_id=self.tile_id,
       captured_data=captured_data,
+      captured_validity=captured_validity,
       run_generation=run_generation,
       profile_generations=profile_generations,
-      bypass_levels=bypass_levels,
+      bypass_levels=self._gather_bypass_levels(request),
       conservative_source_ranges=(
         (
           provenance.allocation_id,
@@ -644,6 +900,48 @@ class MFEEngine(Engine):
     request.transaction_id = transaction_id
     request.state = phase.upper()
     job.transaction_ids.add(transaction_id)
+
+  def _gather_bypass_levels(self, request: _GatherSegmentRequest) -> tuple[str, ...]:
+    """Skip cache lookup/fill legs for a bypass request or disabled level."""
+    levels: list[str] = []
+    if not self.l1_cache.enabled:
+      levels.append("l1")
+    if not self.l2_cache.enabled:
+      levels.append("l2")
+    return tuple(levels)
+
+  def _scatter_submit(
+    self,
+    job: _MFEScatterJob,
+    segment: _ScatterSegment,
+    op: TransferOp,
+    cycle: int,
+    *,
+    phase: str,
+    src: ResolvedMemoryView | None = None,
+    dst: ResolvedMemoryView | None = None,
+  ) -> str:
+    assert self.transfer_manager is not None
+    transaction_id = self._scatter_transaction_id(job, segment.ordinal, phase)
+    run_generation, profile_generations = self.transfer_manager.transaction_identity(
+      (("l1", self.tile_id), ("l2", 0))
+    )
+    transaction = MemoryTransaction(
+      transaction_id=transaction_id,
+      op=op,
+      issuer=job.issuer,
+      src=src,
+      dst=dst,
+      bytes_total=segment.remote.size_bytes,
+      completion_event=job.event_id,
+      tile_id=self.tile_id,
+      captured_data=segment.data if op is TransferOp.SCATTER_WRITE else None,
+      run_generation=run_generation,
+      profile_generations=profile_generations,
+    )
+    self.transfer_manager.submit(transaction, cycle, self.pmu)
+    job.transaction_ids.add(transaction_id)
+    return transaction_id
 
   def begin_reset_drain(self, cycle: int) -> tuple[str, ...]:
     """Freeze never-submitted lane entries; accepted jobs keep running."""
@@ -700,13 +998,10 @@ class MFEEngine(Engine):
       retired += 1
 
     for event_id, gather_job in tuple(self._gather_jobs.items()):
-      transaction_ids = {
-        request.transaction_id for request in gather_job.requests if request.transaction_id is not None
-      }
-      if gather_job.write_transaction_id is not None:
-        transaction_ids.add(gather_job.write_transaction_id)
+      transaction_ids = set(gather_job.transaction_ids)
       statuses = {
-        transaction_id: self.transfer_manager.status(transaction_id) for transaction_id in transaction_ids
+        transaction_id: self.transfer_manager.status(transaction_id)
+        for transaction_id in transaction_ids
       }
       if any(
         status in (TransferStatus.PENDING, TransferStatus.RUNNING, TransferStatus.CANCEL_REQUESTED)
@@ -714,13 +1009,18 @@ class MFEEngine(Engine):
       ):
         continue
       has_cancel = any(
-        status in (TransferStatus.CANCELLED, TransferStatus.FAULTED) for status in statuses.values()
+        status in (TransferStatus.CANCELLED, TransferStatus.FAULTED)
+        for status in statuses.values()
       )
       l1_tokens = {
-        request.l1_mshr_token for request in gather_job.requests if request.l1_mshr_token is not None
+        request.l1_mshr_token
+        for request in gather_job.requests
+        if request.l1_mshr_token is not None
       }
       l2_tokens = {
-        request.l2_mshr_token for request in gather_job.requests if request.l2_mshr_token is not None
+        request.l2_mshr_token
+        for request in gather_job.requests
+        if request.l2_mshr_token is not None
       }
       has_tokens = bool(l1_tokens or l2_tokens)
       inactive_orphan = (
@@ -742,55 +1042,71 @@ class MFEEngine(Engine):
           self.l2_mshr.cancel(token)
       self._gather_jobs.pop(event_id)
       retired += 1
+
+    for event_id, scatter_job in tuple(self._scatter_jobs.items()):
+      live = {
+        transaction_id
+        for transaction_id in scatter_job.transaction_ids
+        if self.transfer_manager.status(transaction_id)
+        in (TransferStatus.PENDING, TransferStatus.RUNNING, TransferStatus.CANCEL_REQUESTED)
+      }
+      if live:
+        continue
+      self._isolate_scatter(scatter_job, cycle)
+      self._scatter_jobs.pop(event_id)
+      retired += 1
+
     if retired and self.tracer is not None:
-      self.tracer.instant(f"Tile{self.tile_id}", "MFE", "mfe_isolation_retired", cycle, {"jobs": retired})
+      self.tracer.instant(
+        f"Tile{self.tile_id}", "MFE", "mfe_isolation_retired", cycle, {"jobs": retired}
+      )
     return retired
 
-  def _gather_bypass_levels(self, request: _MFEGatherRequest) -> tuple[str, ...]:
-    """Skip cache lookup/fill legs for disabled cache levels."""
-    levels: list[str] = []
-    if not self.l1_cache.enabled:
-      levels.append("l1")
-    if not self.l2_cache.enabled:
-      levels.append("l2")
-    return tuple(levels)
-
-  def _transaction_done(self, request: _MFEGatherRequest) -> bool:
-    if request.transaction_id is None or self.transfer_manager is None:
+  def _transaction_done(self, transaction_id: str | None) -> bool:
+    if transaction_id is None or self.transfer_manager is None:
       return False
-    return self.transfer_manager.status(request.transaction_id) is TransferStatus.DONE
+    return self.transfer_manager.status(transaction_id) is TransferStatus.DONE
 
-  def _transaction_terminal(self, request: _MFEGatherRequest) -> TransferStatus | None:
-    if request.transaction_id is None or self.transfer_manager is None:
+  def _transaction_terminal(self, transaction_id: str | None) -> TransferStatus | None:
+    if transaction_id is None or self.transfer_manager is None:
       return None
-    status = self.transfer_manager.status(request.transaction_id)
+    status = self.transfer_manager.status(transaction_id)
     if status in (TransferStatus.FAULTED, TransferStatus.CANCELLED):
       return status
     return None
 
-  def _acknowledge_request_transaction(self, request: _MFEGatherRequest, cycle: int) -> None:
-    if request.transaction_id is None or self.transfer_manager is None:
+  def _acknowledge_transaction(self, transaction_id: str | None, cycle: int) -> None:
+    if transaction_id is None or self.transfer_manager is None:
       return
-    self.transfer_manager.acknowledge(request.transaction_id, cycle)
-    request.transaction_id = None
+    self.transfer_manager.acknowledge(transaction_id, cycle)
 
-  def _note_merge(self, request: _MFEGatherRequest) -> None:
+  def _note_merge(self, request: _GatherSegmentRequest) -> None:
     if request.merged_counted:
       return
     request.merged_counted = True
     self.pmu.add_event("gather_mshr_merges")
 
-  def _enter_mshr_wait(self, request: _MFEGatherRequest, state: str, wait: MshrWait) -> None:
+  @staticmethod
+  def _merge_group(request: _GatherSegmentRequest) -> str:
+    assert request.line_identity is not None
+    identity = request.line_identity
+    return f"{identity.allocation_id}:{identity.allocation_generation}:{identity.line_offset}"
+
+  def _enter_mshr_wait(self, request: _GatherSegmentRequest, state: str, wait: MshrWait) -> None:
     if request.state != state:
       self.pmu.add_event("gather_mshr_stalls")
     request.state = state
     request.wait_version = wait.version
     request.transaction_id = None
 
-  def _mark_response_ready(self, job: _MFEGatherJob, request: _MFEGatherRequest, cycle: int) -> None:
+  @property
+  def _byte_oracle_enabled(self) -> bool:
+    return self.transfer_manager is not None and self.transfer_manager.byte_store is not None
+
+  def _mark_response_ready(
+    self, job: _MFEGatherJob, request: _GatherSegmentRequest, cycle: int
+  ) -> None:
     if request.response_ready:
-      return
-    if job.event_id not in self._gather_jobs:
       return
     request.response_ready = True
     request.state = "RESPONSE_READY"
@@ -802,36 +1118,37 @@ class MFEEngine(Engine):
         "gather_response",
         cycle,
         {
-          "request_id": request.access.request_id,
           "ordinal": request.ordinal,
-          "outcome": request.access.outcome.value,
+          "index_slot": request.slot_ordinal,
           "event_id": job.event_id,
+          "bypass": request.bypass,
         },
       )
 
-  def _invoke_callbacks(self, callbacks) -> None:
-    for callback in callbacks:
-      callback()
-
-  @property
-  def _byte_oracle_enabled(self) -> bool:
-    return self.transfer_manager is not None and self.transfer_manager.byte_store is not None
-
   def _mark_response_from_cache(
-    self, job: _MFEGatherJob, request: _MFEGatherRequest, cache: DeterministicLRUCache, cycle: int
+    self,
+    job: _MFEGatherJob,
+    request: _GatherSegmentRequest,
+    cache: DeterministicLRUCache,
+    cycle: int,
   ) -> None:
     if request.line_identity is not None:
       line = cache.read_line(request.line_identity, require_data=self._byte_oracle_enabled)
       if line is not None:
         request.line_data = line
-        request.hit_data = line[request.within_line : request.within_line + request.access.bytes]
+        start = request.within_line
+        end = start + request.local.size_bytes
+        request.hit_data = line[start:end]
+        validity = cache.read_validity(request.line_identity)
+        if validity is not None:
+          request.hit_validity = validity[start:end]
     self._mark_response_ready(job, request, cycle)
 
-  def _try_l1_mshr(self, job: _MFEGatherJob, request: _MFEGatherRequest, cycle: int) -> None:
+  def _try_l1_mshr(self, job: _MFEGatherJob, request: _GatherSegmentRequest, cycle: int) -> None:
     if not self.l1_cache.enabled:
       self._try_l2_mshr(job, request, cycle)
       return
-    allocation = self.l1_mshr.allocate(request.access.merge_group)
+    allocation = self.l1_mshr.allocate(self._merge_group(request))
     if isinstance(allocation, MshrWait):
       self._enter_mshr_wait(request, "WAIT_L1_MSHR", allocation)
       return
@@ -847,22 +1164,21 @@ class MFEEngine(Engine):
       return
     self._try_l2_mshr(job, request, cycle)
 
-  def _try_l2_mshr(self, job: _MFEGatherJob, request: _MFEGatherRequest, cycle: int) -> None:
+  def _try_l2_mshr(self, job: _MFEGatherJob, request: _GatherSegmentRequest, cycle: int) -> None:
     if not self.l2_cache.enabled:
       if not self.l1_cache.enabled:
         raise MemoryInvariantError("both disabled cache levels must use direct Gather response")
-      source = self._gather_source_view(job, request, full_line=True)
       self._submit_gather_transaction(
         job,
         request,
         TransferOp.GATHER_DIRECT_L1_REFILL,
         cycle,
         phase="l1_direct_refill",
-        src=source,
-        bytes_total=source.size_bytes if source is not None else None,
+        src=request.remote,
+        bytes_total=request.remote.size_bytes,
       )
       return
-    allocation = self.l2_mshr.allocate(request.access.merge_group)
+    allocation = self.l2_mshr.allocate(self._merge_group(request))
     if isinstance(allocation, MshrWait):
       self._enter_mshr_wait(request, "WAIT_L2_MSHR", allocation)
       return
@@ -877,73 +1193,169 @@ class MFEEngine(Engine):
         callback = lambda: self._mark_response_from_cache(job, request, self.l2_cache, self._current_cycle)
       self.l2_mshr.wait(allocation.token, callback)
       return
-    source = self._gather_source_view(job, request, full_line=True)
     self._submit_gather_transaction(
       job,
       request,
       TransferOp.GATHER_HBM_REFILL,
       cycle,
       phase="hbm_refill",
-      src=source,
-      bytes_total=source.size_bytes if source is not None else None,
+      src=request.remote,
+      bytes_total=request.remote.size_bytes,
     )
 
-  def _submit_l2_refill(self, job: _MFEGatherJob, request: _MFEGatherRequest, cycle: int) -> None:
-    if job.event_id not in self._gather_jobs:
-      return
-    self._submit_gather_transaction(job, request, TransferOp.GATHER_L2_REFILL, cycle, phase="l2_refill")
+  def _submit_l2_refill(self, job: _MFEGatherJob, request: _GatherSegmentRequest, cycle: int) -> None:
+    self._submit_gather_transaction(
+      job, request, TransferOp.GATHER_L2_REFILL, cycle, phase="l2_refill"
+    )
 
-  def _tick_gather_request(self, job: _MFEGatherJob, request: _MFEGatherRequest, cycle: int) -> None:
-    if request.state == "WAIT_L1_MSHR":
-      if request.wait_version != self.l1_mshr.version:
-        self._try_l1_mshr(job, request, cycle)
-      return
-    if request.state == "WAIT_L2_MSHR":
-      if request.wait_version != self.l2_mshr.version:
+  def _tick_gather_request(
+    self, job: _MFEGatherJob, request: _GatherSegmentRequest, cycle: int
+  ) -> None:
+    """Advance one payload request through the lookup/fill FSM."""
+    if request.state in ("WAIT_L1_MSHR", "WAIT_L2_MSHR"):
+      if request.state == "WAIT_L1_MSHR":
+        if request.wait_version != self.l1_mshr.version:
+          self._try_l1_mshr(job, request, cycle)
+      elif request.wait_version != self.l2_mshr.version:
         self._try_l2_mshr(job, request, cycle)
       return
     if request.state in ("WAIT_L1_FILL", "WAIT_L2_FILL", "RESPONSE_READY", "WRITE", "DONE"):
       return
-    if not self._transaction_done(request):
-      terminal = self._transaction_terminal(request)
+
+    if request.state == "DIRECT_RESPONSE" and request.transaction_id is None:
+      # Bypass request: read exactly its own bytes, never a cache line.
+      self._submit_gather_transaction(
+        job,
+        request,
+        TransferOp.GATHER_DIRECT_RESPONSE,
+        cycle,
+        phase="direct_response",
+        src=request.remote,
+        bytes_total=request.remote.size_bytes,
+      )
+      return
+
+    if request.state == "LOOKUP_L1" and request.transaction_id is None:
+      self._submit_gather_transaction(
+        job, request, TransferOp.GATHER_L1_LOOKUP, cycle, phase="lookup_l1"
+      )
+      return
+    if request.state == "LOOKUP_L2" and request.transaction_id is None:
+      self._submit_gather_transaction(
+        job, request, TransferOp.GATHER_L2_LOOKUP, cycle, phase="lookup_l2"
+      )
+      return
+
+    if not self._transaction_done(request.transaction_id):
+      terminal = self._transaction_terminal(request.transaction_id)
       if terminal is not None:
-        raise MemoryInvariantError(f"gather transaction {request.transaction_id} reached {terminal.value}")
+        raise MemoryInvariantError(
+          f"gather transaction {request.transaction_id} reached {terminal.value}"
+        )
       return
 
     state = request.state
-    if state in ("HBM_REFILL", "L1_DIRECT_REFILL", "DIRECT_RESPONSE") and request.line_identity is not None:
-      # Data comes from the completed source-read leg, never a fresh HBM
-      # read after the timing event.
-      request.line_data = self.transfer_manager.captured_data(request.transaction_id)
-    self._acknowledge_request_transaction(request, cycle)
-    token = request.access.line_token
-    if state == "LOOKUP":
-      if request.access.outcome is ExecGatherOutcome.L1_HIT:
-        self._record_hit(self.l1_cache, request, token, job)
-        self._mark_response_ready(job, request, cycle)
-      elif request.access.outcome is ExecGatherOutcome.L2_HIT:
-        if self.l1_cache.enabled:
-          self.l1_cache.record_miss()
-        self._record_hit(self.l2_cache, request, token, job)
-        if self.l1_cache.enabled:
-          self.l1_cache.refill(
-            token,
-            identity=request.line_identity,
-            provenance=request.line_provenance,
-            data=request.line_data,
-          )
-        self._mark_response_ready(job, request, cycle)
+    if state in ("HBM_REFILL", "L1_DIRECT_REFILL", "DIRECT_RESPONSE"):
+      assert self.transfer_manager is not None
+      line = self.transfer_manager.captured_data(request.transaction_id)
+      validity = self.transfer_manager.captured_validity(request.transaction_id)
+      if state == "DIRECT_RESPONSE" and line is not None and request.within_line == 0:
+        request.hit_data = line
+        request.hit_validity = validity
       else:
-        if self.l1_cache.enabled:
-          self.l1_cache.record_miss()
+        request.line_data = line
+        request.line_validity = validity
+    acknowledged = request.transaction_id
+    self._acknowledge_transaction(acknowledged, cycle)
+    job.transaction_ids.discard(acknowledged)
+    request.transaction_id = None
+    identity = request.line_identity
+
+    if state in ("LOOKUP_L1", "LOOKUP_L2"):
+      if self.tracer is not None:
+        self.tracer.instant(
+          f"Tile{self.tile_id}",
+          "MFE",
+          "gather_lookup",
+          cycle,
+          {
+            "ordinal": request.ordinal,
+            "level": "l1" if state == "LOOKUP_L1" else "l2",
+            "allocation_id": identity.allocation_id if identity is not None else "",
+            "line_offset": identity.line_offset if identity is not None else -1,
+            "bypass": request.bypass,
+            "event_id": job.event_id,
+          },
+        )
+
+    if state == "LOOKUP_L1":
+      assert identity is not None
+      if self.l1_cache.contains(identity):
+        self.l1_cache.record_hit(identity, require_resident=True)
+        self.pmu.add_event("gather_l1_hits")
+        self._mark_response_from_cache(job, request, self.l1_cache, cycle)
+      else:
+        self.l1_cache.record_miss()
         if self.l2_cache.enabled:
-          self.l2_cache.record_miss()
+          request.state = "LOOKUP_L2"
+          self._submit_gather_transaction(
+            job, request, TransferOp.GATHER_L2_LOOKUP, cycle, phase="lookup_l2"
+          )
+        else:
+          self._try_l1_mshr(job, request, cycle)
+      return
+
+    if state == "LOOKUP_L2":
+      assert identity is not None
+      if self.l2_cache.contains(identity):
+        self.l2_cache.record_hit(identity, require_resident=True)
+        self.pmu.add_event("gather_l2_hits")
+        if self.l1_cache.enabled:
+          allocation = self.l1_mshr.allocate(self._merge_group(request))
+          if isinstance(allocation, MshrWait):
+            self._enter_mshr_wait(request, "WAIT_L1_MSHR", allocation)
+            return
+          request.l1_mshr_token = allocation.token
+          if not allocation.leader:
+            self._note_merge(request)
+            request.state = "WAIT_L1_FILL"
+            self.l1_mshr.wait(
+              allocation.token,
+              lambda: self._mark_response_from_cache(job, request, self.l1_cache, self._current_cycle),
+            )
+            return
+          request.state = "L2_REFILL"
+          self._submit_l2_refill(job, request, cycle)
+        else:
+          self._mark_response_from_cache(job, request, self.l2_cache, cycle)
+      else:
+        self.l2_cache.record_miss()
+        self.pmu.add_event("gather_hbm_misses")
         self._try_l1_mshr(job, request, cycle)
       return
 
     if state == "HBM_REFILL":
+      assert identity is not None
+      if self.tracer is not None:
+        self.tracer.instant(
+          f"Tile{self.tile_id}",
+          "MFE",
+          "gather_refill",
+          cycle,
+          {
+            "ordinal": request.ordinal,
+            "allocation_id": identity.allocation_id,
+            "line_offset": identity.line_offset,
+            "bytes": request.remote.size_bytes,
+            "event_id": job.event_id,
+          },
+        )
       self.l2_cache.refill(
-        token, identity=request.line_identity, provenance=request.line_provenance, data=request.line_data
+        None,
+        identity=identity,
+        provenance=request.line_provenance,
+        data=request.line_data,
+        validity=request.line_validity,
       )
       assert request.l2_mshr_token is not None
       callbacks = self.l2_mshr.complete(request.l2_mshr_token)
@@ -956,8 +1368,13 @@ class MFEEngine(Engine):
       return
 
     if state == "L1_DIRECT_REFILL":
+      assert identity is not None
       self.l1_cache.refill(
-        token, identity=request.line_identity, provenance=request.line_provenance, data=request.line_data
+        None,
+        identity=identity,
+        provenance=request.line_provenance,
+        data=request.line_data,
+        validity=request.line_validity,
       )
       assert request.l1_mshr_token is not None
       callbacks = self.l1_mshr.complete(request.l1_mshr_token)
@@ -968,17 +1385,23 @@ class MFEEngine(Engine):
 
     if state == "DIRECT_RESPONSE":
       if request.line_data is not None:
-        request.hit_data = request.line_data
+        start = request.within_line
+        end = start + request.local.size_bytes
+        request.hit_data = request.line_data[start:end]
+        if request.line_validity is not None:
+          request.hit_validity = request.line_validity[start:end]
       self._mark_response_ready(job, request, cycle)
       return
 
     if state == "L2_REFILL":
-      if request.line_identity is not None:
-        request.line_data = self.l2_cache.read_line(
-          request.line_identity, require_data=self._byte_oracle_enabled
-        )
+      assert identity is not None
+      request.line_data = self.l2_cache.read_line(identity, require_data=self._byte_oracle_enabled)
       self.l1_cache.refill(
-        token, identity=request.line_identity, provenance=request.line_provenance, data=request.line_data
+        None,
+        identity=identity,
+        provenance=request.line_provenance,
+        data=request.line_data,
+        validity=request.line_validity,
       )
       assert request.l1_mshr_token is not None
       callbacks = self.l1_mshr.complete(request.l1_mshr_token)
@@ -986,26 +1409,38 @@ class MFEEngine(Engine):
       self._mark_response_from_cache(job, request, self.l1_cache, cycle)
       self._invoke_callbacks(callbacks)
 
-  def _record_hit(
-    self, cache: DeterministicLRUCache, request: _MFEGatherRequest, token: str | None, job: _MFEGatherJob
-  ) -> None:
-    precise = request.line_provenance is not None and request.line_provenance.precise
-    if (
-      request.line_identity is not None
-      and request.line_provenance is not None
-      and not precise
-      and not cache.contains(request.line_identity)
-    ):
-      cache.install_metadata(token, request.line_identity, request.line_provenance)
-    cache.record_hit(
-      request.line_identity if request.line_identity is not None else token,
-      require_resident=request.line_identity is not None and precise,
-    )
-    if request.line_identity is not None and precise:
-      data = cache.read_line(request.line_identity, require_data=self._byte_oracle_enabled)
-      if data is not None:
-        request.line_data = data
-        request.hit_data = data[request.within_line : request.within_line + request.access.bytes]
+  def _invoke_callbacks(self, callbacks) -> None:
+    for callback in callbacks:
+      callback()
+
+  def _tick_gather(self, job: _MFEGatherJob, cycle: int) -> EngineJob | None:
+    """Advance one Gather job: index window, lookups, ordered dest writes."""
+    assert self.transfer_manager is not None
+    store = getattr(self.transfer_manager, "byte_store", None)
+    # 1. Index window: harvest finished INDEX_READs and decode them.
+    for slot in job.slots:
+      if slot.state == "INDEX_READ":
+        terminal = self._transaction_terminal(slot.transaction_id)
+        if terminal is not None:
+          raise MemoryInvariantError(
+            f"gather index read {slot.transaction_id} reached {terminal.value}"
+          )
+        if not self._transaction_done(slot.transaction_id):
+          continue
+        assert store is not None
+        slot.value = decode_index_i32(self.transfer_manager.captured_data(slot.transaction_id))
+        acknowledged = slot.transaction_id
+        self._acknowledge_transaction(acknowledged, cycle)
+        job.transaction_ids.discard(acknowledged)
+        slot.transaction_id = None
+        slot.state = "DECODED"
+        self._gather_segment_requests(job, slot, cycle)
+    self._issue_gather_index_slots(job, cycle)
+
+    # 2. Payload FSM.
+    for request in job.requests:
+      self._tick_gather_request(job, request, cycle)
+    return self._tick_gather_materialization(job, cycle)
 
   def _tick_gather_materialization(self, job: _MFEGatherJob, cycle: int) -> EngineJob | None:
     if job.write_transaction_id is not None:
@@ -1015,8 +1450,11 @@ class MFEEngine(Engine):
         raise MemoryInvariantError(f"Gather destination write reached {status.value}")
       if status is TransferStatus.DONE:
         request = job.requests[job.next_write_ordinal]
-        self.transfer_manager.acknowledge(job.write_transaction_id, cycle)
+        acknowledged = job.write_transaction_id
+        self.transfer_manager.acknowledge(acknowledged, cycle)
+        job.transaction_ids.discard(acknowledged)
         request.transaction_id = None
+        request.state = "DONE"
         if self.tracer is not None:
           self.tracer.instant(
             f"Tile{self.tile_id}",
@@ -1024,31 +1462,22 @@ class MFEEngine(Engine):
             "gather_destination_write",
             cycle,
             {
-              "request_id": request.access.request_id,
               "ordinal": request.ordinal,
-              "outcome": request.access.outcome.value,
+              "index_slot": request.slot_ordinal,
               "event_id": job.event_id,
             },
           )
-        request.state = "DONE"
         job.write_transaction_id = None
         job.next_write_ordinal += 1
+        slot = job.slots[request.slot_ordinal]
+        if all(req.state == "DONE" for req in job.requests if req.slot_ordinal == slot.ordinal):
+          slot.released = True
 
-    if job.next_write_ordinal >= len(job.requests):
+    if job.next_write_ordinal >= len(job.requests) and all(slot.released for slot in job.slots):
       self.pmu.add_event("complete")
-      final_request = job.requests[-1]
       if self.tracer is not None:
         self.tracer.instant(
-          f"Tile{self.tile_id}",
-          "MFE",
-          "gather_done",
-          cycle,
-          {
-            "request_id": final_request.access.request_id,
-            "ordinal": final_request.ordinal,
-            "outcome": final_request.access.outcome.value,
-            "event_id": job.event_id,
-          },
+          f"Tile{self.tile_id}", "MFE", "gather_done", cycle, {"event_id": job.event_id}
         )
       return EngineJob(
         desc=job.desc,
@@ -1058,22 +1487,198 @@ class MFEEngine(Engine):
         pmu=PMUCounter(),
       )
 
-    next_request = job.requests[job.next_write_ordinal]
-    if job.write_transaction_id is None and next_request.response_ready:
-      destination = slice_resolved_view(
-        job.destination, job.offsets[next_request.ordinal], next_request.access.bytes
-      )
-      self._submit_gather_transaction(
-        job, next_request, TransferOp.GATHER_DEST_WRITE, cycle, phase="write", dst=destination
-      )
-      job.write_transaction_id = next_request.transaction_id
-      return None
+    if job.write_transaction_id is None and job.next_write_ordinal < len(job.requests):
+      request = job.requests[job.next_write_ordinal]
+      if request.response_ready:
+        self._submit_gather_transaction(
+          job,
+          request,
+          TransferOp.GATHER_DEST_WRITE,
+          cycle,
+          phase="write",
+          dst=request.local,
+        )
+        job.write_transaction_id = request.transaction_id
+        request.transaction_id = None
+        return None
 
-    if not next_request.response_ready and any(
-      request.response_ready for request in job.requests[job.next_write_ordinal + 1 :]
+    if (
+      job.next_write_ordinal < len(job.requests)
+      and not job.requests[job.next_write_ordinal].response_ready
     ):
-      self.pmu.add_event("gather_reorder_wait_cycles")
+      if any(item.response_ready for item in job.requests[job.next_write_ordinal + 1 :]):
+        self.pmu.add_event("gather_reorder_wait_cycles")
     return None
+
+  # -- Scatter FSM ------------------------------------------------------
+
+  def _tick_scatter(self, job: _MFEScatterJob, cycle: int) -> EngineJob | None:
+    """Advance one Scatter job: index decode, ordered overwrite, commit."""
+    assert self.transfer_manager is not None
+    store = getattr(self.transfer_manager, "byte_store", None)
+    for slot in job.slots:
+      if slot.state == "INDEX_READ":
+        terminal = self._transaction_terminal(slot.transaction_id)
+        if terminal is not None:
+          job.first_failed = True
+          job.failure_reason = f"scatter index read {terminal.value}"
+          continue
+        if not self._transaction_done(slot.transaction_id):
+          continue
+        assert store is not None
+        slot.value = decode_index_i32(self.transfer_manager.captured_data(slot.transaction_id))
+        acknowledged = slot.transaction_id
+        self._acknowledge_transaction(acknowledged, cycle)
+        job.transaction_ids.discard(acknowledged)
+        slot.transaction_id = None
+        slot.state = "DECODED"
+        self._scatter_segment_requests(job, slot)
+    self._issue_scatter_index_slots(job, cycle)
+    # Decoded slots release their segments into the ordered-overwrite queue.
+    for segment in job.segments:
+      if segment.state == "WAIT_INDEX":
+        segment.state = "WAIT_PREDECESSOR"
+
+    for segment in job.segments:
+      self._tick_scatter_segment(job, segment, cycle)
+
+    if job.first_failed:
+      # Stop new issue; isolate in-flight; first-fault-wins record.
+      self._isolate_scatter(job, cycle)
+      raise MemoryInvariantError(f"scatter fault: {job.failure_reason}")
+
+    for slot in job.slots:
+      if slot.state != "DECODED":
+        continue
+      if all(
+        segment.state == "DONE" for segment in job.segments if segment.slot_ordinal == slot.ordinal
+      ):
+        slot.state = "DONE"
+    if all(slot.state == "DONE" for slot in job.slots) and all(
+      segment.state == "DONE" for segment in job.segments
+    ):
+      self.pmu.add_event("complete")
+      if self.tracer is not None:
+        self.tracer.instant(
+          f"Tile{self.tile_id}", "MFE", "scatter_done", cycle, {"event_id": job.event_id}
+        )
+      return EngineJob(
+        desc=job.desc,
+        start_cycle=job.start_cycle,
+        finish_cycle=cycle,
+        event_id=job.event_id,
+        pmu=PMUCounter(),
+      )
+    return None
+
+  def _scatter_segment_requests(self, job: _MFEScatterJob, slot: _ScatterIndexSlot) -> None:
+    assert job.source is not None and job.destination is not None
+    element_bytes = job.element_bytes
+    task_id = job.namespace[2]
+    pairs = resolve_indexed_segments(
+      job.scatter.address_map,
+      slot.value,  # type: ignore[arg-type]
+      slot.ordinal,
+      task_id,
+      job.destination,
+      job.source,
+      element_bytes,
+    )
+    for remote, local in pairs:
+      segment = _ScatterSegment(
+        ordinal=job.next_segment_ordinal,
+        slot_ordinal=slot.ordinal,
+        remote=remote,
+        local=local,
+      )
+      job.next_segment_ordinal += 1
+      job.segments.append(segment)
+
+  def _segment_overlaps_pending(self, job: _MFEScatterJob, segment: _ScatterSegment) -> bool:
+    """True when an earlier unordered segment's byte range overlaps."""
+    end = segment.remote.offset_bytes + segment.remote.size_bytes
+    for other in job.segments:
+      if other is segment or other.ordinal >= segment.ordinal or other.state != "WRITE":
+        continue
+      other_end = other.remote.offset_bytes + other.remote.size_bytes
+      if segment.remote.offset_bytes < other_end and other.remote.offset_bytes < end:
+        return True
+    return False
+
+  def _tick_scatter_segment(
+    self, job: _MFEScatterJob, segment: _ScatterSegment, cycle: int
+  ) -> None:
+    assert self.transfer_manager is not None
+    if segment.state in ("WAIT_INDEX", "DONE"):
+      return
+    if segment.state == "WAIT_PREDECESSOR":
+      if not self._segment_overlaps_pending(job, segment):
+        segment.state = "READY"
+      else:
+        self.pmu.add_event("scatter_overlap_wait_cycles")
+        return
+    if segment.state == "READY":
+      # One SCATTER_WRITE transaction: its L1_READ leg captures the
+      # source bytes and the HBM_WRITE leg commits them (plan §2).
+      segment.data = None
+      transaction_id = self._scatter_submit(
+        job,
+        segment,
+        TransferOp.SCATTER_WRITE,
+        cycle,
+        phase="write",
+        src=segment.local,
+        dst=segment.remote,
+      )
+      segment.transaction_id = transaction_id
+      segment.state = "WRITE"
+      return
+    if segment.state == "WRITE":
+      if not self._transaction_done(segment.transaction_id):
+        terminal = self._transaction_terminal(segment.transaction_id)
+        if terminal is not None:
+          job.first_failed = True
+          job.failure_reason = f"scatter write {terminal.value}"
+        return
+      if segment.data is None:
+        segment.data = self.transfer_manager.captured_data(segment.transaction_id)
+      acknowledged = segment.transaction_id
+      self.transfer_manager.acknowledge(acknowledged, cycle)
+      segment.transaction_id = None
+      job.transaction_ids.discard(acknowledged)
+      segment.state = "DONE"
+      segment.committed_cycle = cycle
+      if self.tracer is not None:
+        self.tracer.instant(
+          f"Tile{self.tile_id}",
+          "MFE",
+          "scatter_write",
+          cycle,
+          {
+            "ordinal": segment.ordinal,
+            "index_slot": segment.slot_ordinal,
+            "event_id": job.event_id,
+            "bytes": segment.remote.size_bytes,
+          },
+        )
+      record_write = getattr(job, "record_write", None)
+      if record_write is not None:
+        handle = segment.remote.handle
+        record_write(
+          handle.allocation_id,
+          handle.generation,
+          segment.remote.offset_bytes,
+          segment.remote.size_bytes,
+        )
+
+  def _isolate_scatter(self, job: _MFEScatterJob, cycle: int) -> None:
+    assert self.transfer_manager is not None
+    for transaction_id in tuple(job.transaction_ids):
+      status = self.transfer_manager.status(transaction_id)
+      if status in (TransferStatus.PENDING, TransferStatus.RUNNING, TransferStatus.CANCEL_REQUESTED):
+        continue
+      self.transfer_manager.acknowledge(transaction_id, cycle)
+      job.transaction_ids.discard(transaction_id)
 
   def tick(self, cycle: int, start_queued: bool = True) -> list[EngineJob]:
     """Advance transfer lanes and all active Gather state machines."""
@@ -1134,31 +1739,38 @@ class MFEEngine(Engine):
           },
         )
 
-    gather_active = len(self._gather_jobs)
-    finished_gathers: list[str] = []
+    gather_active = len(self._gather_jobs) + len(self._scatter_jobs)
+    finished: list[str] = []
     for event_id, gather_job in list(self._gather_jobs.items()):
-      for request in gather_job.requests:
-        self._tick_gather_request(gather_job, request, cycle)
-      completion = self._tick_gather_materialization(gather_job, cycle)
+      completion = self._tick_gather(gather_job, cycle)
       if completion is not None:
         completed.append(completion)
-        finished_gathers.append(event_id)
-      # PR 5: gather FSM transitions are the only writers of
-      # cache/MSHR state — push stats after each job's tick
-      # (change-only sampling keeps this constant-cost).
+        finished.append(event_id)
+      # Gather FSM transitions are the only writers of cache/MSHR state;
+      # push stats after each job's tick (change-only sampling keeps this
+      # constant-cost).
       self._emit_memory_trace(cycle)
-    for event_id in finished_gathers:
+    for event_id in finished:
       self._gather_jobs.pop(event_id, None)
+    finished = []
+    for event_id, scatter_job in list(self._scatter_jobs.items()):
+      completion = self._tick_scatter(scatter_job, cycle)
+      if completion is not None:
+        completed.append(completion)
+        finished.append(event_id)
+      self._emit_memory_trace(cycle)
+    for event_id in finished:
+      self._scatter_jobs.pop(event_id, None)
 
-    blocked_gathers = sum(
+    blocked_indexed = sum(
       1
       for gather_job in self._gather_jobs.values()
       if any(request.state in ("WAIT_L1_MSHR", "WAIT_L2_MSHR") for request in gather_job.requests)
     )
     if active_lanes or gather_active:
       self.pmu.add_cycle("mfe_active", 1)
-      if blocked_gathers:
-        self.pmu.add(StallReason.WAIT_MSHR, blocked_gathers)
+      if blocked_indexed:
+        self.pmu.add(StallReason.WAIT_MSHR, blocked_indexed)
       else:
         self.pmu.add(StallReason.NONE, 1)
     else:
@@ -1170,7 +1782,11 @@ class MFEEngine(Engine):
 
   def reset(self) -> None:
     self.cancel_unissued(self._current_cycle)
-    if any(lane.running is not None or lane.queue for lane in self._lanes) or self._gather_jobs:
+    if (
+      any(lane.running is not None or lane.queue for lane in self._lanes)
+      or self._gather_jobs
+      or self._scatter_jobs
+    ):
       raise MemoryInvariantError("MFE reset requires accepted work to complete or cancel-confirm")
     self.l1_cache.reset()
     self.l1_mshr.reset()

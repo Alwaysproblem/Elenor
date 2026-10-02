@@ -24,6 +24,7 @@ from pipeline_validator.memory import (
 from pipeline_validator.memory.allocator import ContextBufferOwner
 from pipeline_validator.memory.arena import ArenaPool, RootInvocation
 from pipeline_validator.memory.byte_store import ByteStore
+from pipeline_validator.memory.cache import CacheLineIdentity, CacheProvenance
 from pipeline_validator.profiles import (
   MaintenanceRange,
   MemoryMaintenanceDesc,
@@ -323,9 +324,9 @@ class TestByteOracle:
     oracle.seed_hbm(binding.base_iova, payload)
     handle = group.hbm.bind_external(binding, cycle)
     source = ResolvedMemoryView(handle, 0, 64, handle.base_address, handle.bank_segments, "r")
-    oracle.bind_profiled_source("refill-call", "late", 0)
-    identity, provenance, _within, _offset = oracle.resolve_profiled_source(
-      "refill-call", "late", source, 64, hw.cache_line_bytes
+    identity = CacheLineIdentity(handle.allocation_id, handle.generation, 0)
+    provenance = CacheProvenance(
+      binding.name, handle.allocation_id, handle.generation, 0, 64
     )
     table = group.tiles[0].l1_mshr
     token = table.allocate("late", generation=1)
@@ -557,11 +558,7 @@ class TestByteOracle:
     handle = group.hbm.bind_external(target, 0)
     oracle.seed_cache_line("l2", 0, "target", 0, old)
     oracle.validate_seed_coverage()
-    oracle.bind_profiled_source("consumer-binding", "r0", 0)
-    actual_source = ResolvedMemoryView(handle, 0, 64, handle.base_address, handle.bank_segments, "r")
-    identity, _provenance, _within, _offset = oracle.resolve_profiled_source(
-      "consumer-binding", "r0", actual_source, 64, hw.cache_line_bytes
-    )
+    identity = CacheLineIdentity(handle.allocation_id, handle.generation, 0)
     cache = group.l2_cache
     assert cache.read_line(identity) == old
 
@@ -698,8 +695,8 @@ COHERENCE_IR = """builtin.module {
   tile.program @lookup(%t : !nest.task, %table : !nest.global_view<64xi8>,
       %idx : !nest.l2_buffer<16xi32>, %output : !nest.l2_buffer<64xi8>)
       resource_contract = #tile.resources<allowed_profiles = [1], tile_l1_spm_bytes_per_context = 2048,
-        l1_cache = {required = true, access = "read", bypass = "forbidden", target_bytes = 2000000},
-        l2_cache = {required = true, access = "read", bypass = "forbidden", target_bytes = 2000000}> {
+        l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 2000000},
+        l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 2000000}> {
     %iv = tile.subview %idx offsets = [0] sizes = [16] strides = [1] : !nest.l2_view<16xi32>
     %ov = tile.subview %output offsets = [0] sizes = [64] strides = [1] : !nest.l2_view<64xi8>
     %li = tile.alloc shape = [16] dtype = "i32" : !tile.l1_buffer<16xi32>
@@ -708,9 +705,8 @@ COHERENCE_IR = """builtin.module {
     tile.await %ld
     tile.signal input_released(%t)
     %g = tile.gather.global.async %table indices(%li) into %lv
-        result_bytes = 64 cache_target_bytes = 2000000 l1_mshr_hint = 1 {
-      tile.profiled.access id = "row" outcome = "HBM_MISS" bytes = 64 line = "row"
-    } : !tile.event<"gather">
+        map = #tile.indexed_map<index_scale = 16 offset = 0 task_stride = 0 repeat = 1 stride = 0 segment = 4>
+        window_entries = 1 : !tile.event<"gather">
     tile.await %g
     %st = tile.store.async %lv into %ov : !tile.event<"stored">
     tile.await %st
@@ -799,14 +795,12 @@ class TestCompiledCoherence:
     oracle = ObservedBytes()
     oracle.seed_hbm(0x1000, new)
     oracle.seed_hbm(0x2000, old)
-    oracle.seed_hbm(0x3000, bytes(64))
+    # 16 index slots reading 4 B each; four distinct rows (0,1,2,3) repeated
+    # so the same cache line is merged by the MSHRs.
+    oracle.seed_hbm(0x3000, b"".join(int(row).to_bytes(4, "little") for row in [0, 1, 2, 3] * 4))
     oracle.seed_hbm(0x4000, b"\xee" * 64)
     oracle.seed_cache_line("l1", 0, "table", 0, old)
     oracle.seed_cache_line("l2", 0, "table", 0, old)
-    consumer = next(
-      binding for binding in program.call_bindings.values() if binding.context_name == "consumer"
-    )
-    oracle.bind_profiled_source(consumer.binding_id, "row", 0)
     bindings = {
       "fresh": GlobalBinding("fresh", 0x1000, 64, "r"),
       "table": GlobalBinding("table", 0x2000, 64, "rw"),
@@ -817,8 +811,12 @@ class TestCompiledCoherence:
     result = simulator.run(load_program(program, hw, config, actual_bindings=bindings))
     assert result.completed, result.reason
     assert stale_during_write == [(old, old)]
+    # The DMA refreshed HBM and the maintenance made the new bytes visible.
     assert oracle.read_hbm(0x2000, 64) == new
-    assert oracle.read_hbm(0x4000, 64) == new
+    # The Gather then read table[index*16 : +4] per index slot, so OUT holds
+    # bytes 0..3, 16..19, 32..35, 48..51 repeated four times.
+    expected_out = b"".join(new[row * 16 : row * 16 + 4] for row in [0, 1, 2, 3] * 4)
+    assert oracle.read_hbm(0x4000, 64) == expected_out
     assert simulator.group.profile_controller.generations == {"l1": 0, "l2": 0}
 
     removed_ids = {op.instruction_id for op in controls}

@@ -78,6 +78,9 @@ class _CacheLine:
   profile_generation: int
   version: int
   dirty: bool = False
+  # Per-byte validity mask for partially-initialised lines (plan §2);
+  # None means all bytes valid (legacy/test seeds).
+  validity: bytes | None = None
   pending_clean: str | None = None
   invalidate_after_clean: bool = False
 
@@ -167,6 +170,42 @@ class DeterministicLRUCache:
       if line.profile_generation != self.profile_generation:
         raise MemoryInvariantError("cache hit references an old profile generation")
       self._lines.move_to_end(identity)
+
+  def read_validity(self, token_or_identity: str | CacheLineIdentity) -> bytes | None:
+    if not self.enabled:
+      raise MemoryInvariantError("cache validity read targets a disabled cache")
+    identity = self._resolve_identity(token_or_identity)
+    line = self._lines.get(identity) if identity is not None else None
+    if line is None or line.profile_generation != self.profile_generation:
+      raise MemoryInvariantError("cache line is not resident in the active generation")
+    return line.validity
+
+  def clear_validity_range(
+    self, allocation_id: str, allocation_generation: int, offset: int, length: int
+  ) -> None:
+    """Oracle-only: drop validity bits of cached copies of a range.
+
+    Plan §4: page hand-off invalidates cached validity for the old
+    owner's data so the new owner can never observe stale bytes.  Tags,
+    LRU order and counters are untouched and no traffic is billed.
+    """
+    for identity, line in self._lines.items():
+      if identity.allocation_id != allocation_id:
+        continue
+      if identity.allocation_generation != allocation_generation:
+        continue
+      if line.validity is None:
+        continue
+      line_start = identity.line_offset
+      line_end = line_start + len(line.validity)
+      overlap_start = max(line_start, offset)
+      overlap_end = min(line_end, offset + length)
+      if overlap_start >= overlap_end:
+        continue
+      mask = bytearray(line.validity)
+      for position in range(overlap_start - line_start, overlap_end - line_start):
+        mask[position] = 0
+      line.validity = bytes(mask)
 
   def record_miss(self) -> None:
     if self.enabled:
@@ -262,6 +301,7 @@ class DeterministicLRUCache:
     identity: CacheLineIdentity | None = None,
     provenance: CacheProvenance | None = None,
     data: bytes | None = None,
+    validity: bytes | None = None,
     profile_generation: int | None = None,
     dirty: bool = False,
   ) -> None:
@@ -274,6 +314,8 @@ class DeterministicLRUCache:
       raise MemoryInvariantError("dirty line requires write_back cache policy")
     if data is not None and len(data) != self.line_bytes:
       raise MemoryInvariantError("cache refill data must be exactly one line")
+    if validity is not None and len(validity) != self.line_bytes:
+      raise MemoryInvariantError("cache refill validity must be exactly one line")
     if identity is None:
       if provenance is not None:
         identity = CacheLineIdentity(
@@ -319,6 +361,7 @@ class DeterministicLRUCache:
         raise MemoryInvariantError("cannot refill a line while its clean is pending")
       existing.provenance = provenance
       existing.data = data if data is not None else existing.data
+      existing.validity = validity if validity is not None else existing.validity
       existing.dirty = existing.dirty or dirty
       existing.profile_generation = generation
       if token and existing.token != token:
@@ -335,6 +378,7 @@ class DeterministicLRUCache:
       token=token,
       provenance=provenance,
       data=data,
+      validity=validity,
       profile_generation=generation,
       version=self._next_version,
       dirty=dirty,

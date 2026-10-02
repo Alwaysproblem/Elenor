@@ -7,10 +7,11 @@ actual transfers, views, tile descriptors, and formal-to-actual bindings.
 
 from __future__ import annotations
 
+import itertools
 import math
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, fields, is_dataclass, replace
+from dataclasses import dataclass, field, fields, is_dataclass, replace
 from enum import Enum
 from itertools import pairwise
 from typing import NoReturn
@@ -21,11 +22,11 @@ from .execution_ir import (
   ExecDeviceOp,
   ExecDispatchRequest,
   ExecEngineDesc,
-  ExecGatherDesc,
-  ExecGatherOutcome,
   ExecGlobalInput,
   ExecGroupAction,
   ExecGroupActionOp,
+  ExecHostCall,
+  ExecIndexedMap,
   ExecL1Buffer,
   ExecL2Buffer,
   ExecMemoryView,
@@ -34,14 +35,16 @@ from .execution_ir import (
   ExecReleaseRequest,
   ExecSharedInput,
   ExecStreamDesc,
+  ExecTileGatherDesc,
   ExecTileGroupTask,
   ExecTileOp,
   ExecTileProgram,
   ExecTileRoleBinding,
+  ExecTileScatterDesc,
   ExecTransfer,
   GlobalBinding,
 )
-from .immutable import FrozenMap, digest
+from .immutable import FrozenMap, canonical_value, digest
 from .profiles import (
   MAINTENANCE_STEPS,
   PROFILE_STEPS,
@@ -260,44 +263,66 @@ def _verify_transfer(transfer: object, where: str) -> ExecTransfer:
   return transfer
 
 
-def _verify_gather(gather: object, where: str) -> ExecGatherDesc:
-  if not isinstance(gather, ExecGatherDesc):
-    _fail(f"{where} is not an ExecGatherDesc")
+def _verify_indexed_map(address_map: object, where: str) -> ExecIndexedMap:
+  if not isinstance(address_map, ExecIndexedMap):
+    _fail(f"{where} is not an ExecIndexedMap")
+  if address_map.index_scale <= 0 or address_map.repeat <= 0 or address_map.segment <= 0:
+    _fail(f"{where} must have positive index_scale/repeat/segment")
+  if address_map.offset < 0 or address_map.task_stride < 0 or address_map.stride < 0:
+    _fail(f"{where} must have non-negative offset/task_stride/stride")
+  return address_map
+
+
+def _verify_tile_gather(gather: object, where: str) -> ExecTileGatherDesc:
+  if not isinstance(gather, ExecTileGatherDesc):
+    _fail(f"{where} is not an ExecTileGatherDesc")
   source = _verify_view(gather.source, f"{where}.source", spaces={"global"})
   indices = _verify_view(gather.indices, f"{where}.indices", spaces={"l1"})
   destination = _verify_view(gather.destination, f"{where}.destination", spaces={"l1"})
   if indices.base == destination.base:
     _fail(f"{where} indices and destination alias the same L1 allocation")
-  _uint(gather.result_bytes, f"{where}.result_bytes", positive=True)
-  _uint(gather.cache_target_bytes, f"{where}.cache_target_bytes")
-  _uint(gather.l1_mshr_hint, f"{where}.l1_mshr_hint", positive=True)
-  if gather.result_bytes > destination.bytes:
-    _fail(f"{where}.result_bytes exceeds destination")
-  if not gather.accesses:
-    _fail(f"{where} has no profiled accesses")
-  request_ids: set[str] = set()
-  merge_contracts: dict[str, tuple[str, int]] = {}
-  profiled_bytes = 0
-  for index, access in enumerate(gather.accesses):
-    request_id = _nonempty(access.request_id, f"{where}.accesses[{index}].request_id")
-    if request_id in request_ids:
-      _fail(f"{where} has duplicate request_id {request_id!r}")
-    request_ids.add(request_id)
-    if not isinstance(access.outcome, ExecGatherOutcome):
-      _fail(f"{where} has an invalid gather outcome")
-    _uint(access.bytes, f"{where}.accesses[{index}].bytes", positive=True)
-    if access.bytes > source.bytes:
-      _fail(f"{where} access exceeds source extent")
-    if access.merge_group:
-      if access.outcome is not ExecGatherOutcome.HBM_MISS or not access.line_token:
-        _fail(f"{where} merge group requires an HBM miss and line token")
-      contract = (access.line_token, access.bytes)
-      if merge_contracts.setdefault(access.merge_group, contract) != contract:
-        _fail(f"{where} merge group has inconsistent requests")
-    profiled_bytes += access.bytes
-  if profiled_bytes != gather.result_bytes:
-    _fail(f"{where} profiled bytes differ from result_bytes")
+  _verify_indexed_map(gather.address_map, f"{where}.address_map")
+  _uint(gather.window_entries, f"{where}.window_entries", positive=True)
+  if indices.dtype != "i32" or indices.element_bytes != 4:
+    _fail(f"{where} indices must be i32")
+  if destination.dtype != source.dtype or destination.element_bytes != source.element_bytes:
+    _fail(f"{where} destination dtype must match source dtype")
+  index_count = indices.bytes // 4
+  if index_count <= 0:
+    _fail(f"{where} indices must hold at least one element")
+  element_bytes = source.element_bytes
+  required_bytes = index_count * gather.address_map.repeat * gather.address_map.segment * element_bytes
+  if destination.bytes != required_bytes:
+    _fail(f"{where} destination must hold exactly I*R*L elements")
+  if gather.scope is not None:
+    _nonempty(gather.scope, f"{where}.scope")
   return gather
+
+
+def _verify_tile_scatter(scatter: object, where: str) -> ExecTileScatterDesc:
+  if not isinstance(scatter, ExecTileScatterDesc):
+    _fail(f"{where} is not an ExecTileScatterDesc")
+  source = _verify_view(scatter.source, f"{where}.source", spaces={"l1"})
+  indices = _verify_view(scatter.indices, f"{where}.indices", spaces={"l1"})
+  destination = _verify_view(scatter.destination, f"{where}.destination", spaces={"global"})
+  if indices.base == source.base:
+    _fail(f"{where} indices and source alias the same L1 allocation")
+  _verify_indexed_map(scatter.address_map, f"{where}.address_map")
+  _uint(scatter.window_entries, f"{where}.window_entries", positive=True)
+  if indices.dtype != "i32" or indices.element_bytes != 4:
+    _fail(f"{where} indices must be i32")
+  if source.dtype != destination.dtype or source.element_bytes != destination.element_bytes:
+    _fail(f"{where} source dtype must match destination dtype")
+  index_count = indices.bytes // 4
+  if index_count <= 0:
+    _fail(f"{where} indices must hold at least one element")
+  element_bytes = destination.element_bytes
+  required_bytes = index_count * scatter.address_map.repeat * scatter.address_map.segment * element_bytes
+  if source.bytes != required_bytes:
+    _fail(f"{where} source must hold exactly I*R*L elements")
+  if scatter.scope is not None:
+    _nonempty(scatter.scope, f"{where}.scope")
+  return scatter
 
 
 def _layout_digest(layout: ArenaLayout) -> str:
@@ -418,8 +443,11 @@ class _ProgramEffects:
   l2_reads: tuple[int, ...]
   l2_writes: tuple[int, ...]
   global_reads: tuple[int, ...]
+  global_writes: tuple[int, ...]
   uses_l1: bool
   gather_levels: frozenset[str]
+  scatter_formals: frozenset[int] = frozenset()
+  gather_scopes: Mapping[int, str | None] = field(default_factory=dict)
 
 
 def _verify_program(
@@ -481,7 +509,15 @@ def _verify_program(
   l2_reads: list[int] = []
   l2_writes: list[int] = []
   global_reads: list[int] = []
+  global_writes: list[int] = []
   gather_levels: set[str] = set()
+  scatter_formals: set[int] = set()
+  gather_scopes: dict[int, str | None] = {}
+  has_gather = any(
+    isinstance(descriptor.params.get("gather"), ExecTileGatherDesc)
+    for descriptor in program.descriptors.values()
+    if isinstance(descriptor, ExecEngineDesc)
+  )
   for name, descriptor in program.descriptors.items():
     if not isinstance(name, str) or not isinstance(descriptor, ExecEngineDesc) or descriptor.name != name:
       _fail(f"{where} has an invalid descriptor mapping")
@@ -497,14 +533,26 @@ def _verify_program(
     elif descriptor.kind == "MFE" and descriptor.op == "gather":
       if descriptor.transfer is not None or set(descriptor.params) != {"gather"}:
         _fail(f"{where}.descriptors[{name!r}] has invalid gather fields")
-      gather = _verify_gather(descriptor.params["gather"], f"{where}.descriptors[{name!r}].gather")
-      if gather.l1_mshr_hint > hw.l1_mshr_entries:
-        _fail(f"{where}.descriptors[{name!r}] exceeds L1 MSHR capacity")
+      gather = _verify_tile_gather(descriptor.params["gather"], f"{where}.descriptors[{name!r}].gather")
       effects.extend(((gather.source, False), (gather.indices, False), (gather.destination, True)))
-      outcomes = {access.outcome for access in gather.accesses}
-      gather_levels.add("l1")
-      if any(outcome is not ExecGatherOutcome.L1_HIT for outcome in outcomes):
+      if has_gather:
+        gather_levels.add("l1")
         gather_levels.add("l2")
+      source_view = gather.source
+      if source_view.base.startswith("formal:"):
+        gather_scopes[_formal_index(source_view, f"{where}.descriptors[{name!r}]")] = gather.scope
+    elif descriptor.kind == "MFE" and descriptor.op == "scatter":
+      if descriptor.transfer is not None or set(descriptor.params) != {"scatter"}:
+        _fail(f"{where}.descriptors[{name!r}] has invalid scatter fields")
+      scatter = _verify_tile_scatter(
+        descriptor.params["scatter"], f"{where}.descriptors[{name!r}].scatter"
+      )
+      effects.extend(((scatter.source, False), (scatter.indices, False), (scatter.destination, True)))
+      destination_view = scatter.destination
+      if destination_view.base.startswith("formal:"):
+        gather_scopes[
+          _formal_index(destination_view, f"{where}.descriptors[{name!r}]")
+        ] = scatter.scope
     elif descriptor.kind == "EVU":
       if descriptor.transfer is not None or not isinstance(descriptor.params, Mapping):
         _fail(f"{where}.descriptors[{name!r}] has invalid EVU fields")
@@ -540,8 +588,14 @@ def _verify_program(
           (l2_writes if writing else l2_reads).append(formal_index)
         elif formal.space == "global":
           if writing:
-            _fail(f"{where} tile descriptor writes a global formal")
-          global_reads.append(formal_index)
+            # Only the Scatter destination may target a global formal; the
+            # Scatter path is validated in full by _verify_tile_scatter.
+            if not isinstance(descriptor, ExecEngineDesc) or descriptor.op != "scatter":
+              _fail(f"{where} tile descriptor writes a global formal")
+            global_writes.append(formal_index)
+            scatter_formals.add(formal_index)
+          else:
+            global_reads.append(formal_index)
       elif view.space == "l1":
         if view.base not in l1_buffers:
           _fail(f"{where}.descriptors[{name!r}] references an absent L1 buffer")
@@ -559,8 +613,11 @@ def _verify_program(
     tuple(dict.fromkeys(l2_reads)),
     tuple(dict.fromkeys(l2_writes)),
     tuple(dict.fromkeys(global_reads)),
+    tuple(dict.fromkeys(global_writes)),
     bool(l1_buffers or descriptor_views),
     frozenset(gather_levels),
+    frozenset(scatter_formals),
+    FrozenMap(gather_scopes),
   )
 
 
@@ -608,43 +665,19 @@ def _verify_cache_requirement(
 
 
 def _cache_path_requirements(
-  gathers: Sequence[ExecGatherDesc], profile: MemoryProfile, where: str
+  gathers: Sequence[ExecTileGatherDesc], profile: MemoryProfile, where: str
 ) -> tuple[bool, bool, bool]:
-  """Return actual cache use, bypass, and required-cache facts."""
+  """Return actual cache use, bypass, and required-cache facts.
 
-  used = False
-  bypass_needed = False
-  required_needed = False
-  for gather in gathers:
-    for access in gather.accesses:
-      outcome = access.outcome
-      if profile.level == "l1":
-        if outcome is ExecGatherOutcome.L1_HIT:
-          used = True
-          required_needed = True
-        elif outcome in (ExecGatherOutcome.L2_HIT, ExecGatherOutcome.HBM_MISS):
-          if profile.cache_bytes:
-            used = True
-          else:
-            bypass_needed = True
-        else:
-          _fail(f"{where} has an invalid Gather outcome")
-      elif profile.level == "l2":
-        if outcome is ExecGatherOutcome.L1_HIT:
-          continue
-        if outcome is ExecGatherOutcome.L2_HIT:
-          used = True
-          required_needed = True
-        elif outcome is ExecGatherOutcome.HBM_MISS:
-          if profile.cache_bytes:
-            used = True
-          else:
-            bypass_needed = True
-        else:
-          _fail(f"{where} has an invalid Gather outcome")
-      else:
-        _fail(f"{where} has an invalid cache level")
-  return used, bypass_needed, required_needed
+  Plan §2: with an address-driven Gather, a program containing a Gather
+  uses any level whose profile enables a cache; a disabled level is a
+  bypass path.  Scatter never touches the cache and never needs a bypass.
+  """
+
+  del where
+  used = bool(gathers) and profile.cache_bytes > 0
+  bypass_needed = bool(gathers) and profile.cache_bytes == 0
+  return used, bypass_needed, False
 
 
 def _verify_cache_contract(program: ExecTileProgram, registry: ProfileRegistry, where: str) -> None:
@@ -654,7 +687,7 @@ def _verify_cache_contract(program: ExecTileProgram, registry: ProfileRegistry, 
   gathers = tuple(
     gather
     for descriptor in program.descriptors.values()
-    if isinstance(gather := descriptor.params.get("gather"), ExecGatherDesc)
+    if isinstance(gather := descriptor.params.get("gather"), ExecTileGatherDesc)
   )
   for mode in contract.allowed_profiles:
     profile = registry.profile("l1", mode)
@@ -673,7 +706,7 @@ def _verify_parent_l2_capability(
   gathers = tuple(
     gather
     for descriptor in program.descriptors.values()
-    if isinstance(gather := descriptor.params.get("gather"), ExecGatherDesc)
+    if isinstance(gather := descriptor.params.get("gather"), ExecTileGatherDesc)
   )
   used, bypass_needed, required_needed = _cache_path_requirements(gathers, profile, where)
   _verify_cache_requirement(
@@ -726,6 +759,7 @@ def _verify_tile_instructions(
     elif inst.op in (
       ExecTileOp.LAUNCH_MFE,
       ExecTileOp.LAUNCH_GATHER,
+      ExecTileOp.LAUNCH_SCATTER,
       ExecTileOp.LAUNCH_EVU,
       ExecTileOp.LAUNCH_BOA,
     ):
@@ -736,7 +770,13 @@ def _verify_tile_instructions(
         _fail(f"{where} has duplicate tile event {launch_event!r}")
       descriptor = program.descriptors[inst.args[0]]
       expected_op = {
-        "MFE": ExecTileOp.LAUNCH_GATHER if descriptor.op == "gather" else ExecTileOp.LAUNCH_MFE,
+        "MFE": (
+          ExecTileOp.LAUNCH_GATHER
+          if descriptor.op == "gather"
+          else ExecTileOp.LAUNCH_SCATTER
+          if descriptor.op == "scatter"
+          else ExecTileOp.LAUNCH_MFE
+        ),
         "EVU": ExecTileOp.LAUNCH_EVU,
         "BOA": ExecTileOp.LAUNCH_BOA,
       }[descriptor.kind]
@@ -829,6 +869,8 @@ class _Access:
   event: str
   action_index: int
   cache_levels: frozenset[str] = frozenset()
+  scope: str | None = None
+  precise_writes: bool = False
 
 
 @dataclass(frozen=True)
@@ -841,7 +883,12 @@ class _TaskSummary:
 
 def _binding_effects(
   binding: ExecTileRoleBinding, effects: _ProgramEffects, where: str
-) -> tuple[tuple[str, ...], tuple[str, ...], tuple[tuple[ExecMemoryView, frozenset[str]], ...]]:
+) -> tuple[
+  tuple[str, ...],
+  tuple[str, ...],
+  tuple[tuple[ExecMemoryView, frozenset[str], str | None], ...],
+  tuple[tuple[ExecMemoryView, str | None], ...],
+]:
   program = binding.tile_program
   l2_formals = [index for index, formal in enumerate(program.formals) if formal.space == "l2"]
   global_formals = [index for index, formal in enumerate(program.formals) if formal.space == "global"]
@@ -856,8 +903,15 @@ def _binding_effects(
   global_reads = []
   for index in effects.global_reads:
     view = _verify_view(global_map[index], f"{where}.global_actual", spaces={"global"})
-    global_reads.append((view, effects.gather_levels))
-  return reads, writes, tuple(global_reads)
+    global_reads.append((view, effects.gather_levels, effects.gather_scopes.get(index)))
+  global_writes = []
+  for index in effects.global_writes:
+    view = _verify_view(global_map[index], f"{where}.global_actual", spaces={"global"})
+    scope = effects.gather_scopes.get(index)
+    global_writes.append((view, scope))
+  return reads, writes, tuple(global_reads), tuple(global_writes)
+
+
 def _rectangles_cover_shape(
   rectangles: Sequence[tuple[tuple[int, int], ...]], dims: tuple[int, ...]
 ) -> bool:
@@ -909,6 +963,7 @@ def _writer_rectangles(
     in (
       ExecTileOp.LAUNCH_MFE,
       ExecTileOp.LAUNCH_GATHER,
+      ExecTileOp.LAUNCH_SCATTER,
       ExecTileOp.LAUNCH_EVU,
       ExecTileOp.LAUNCH_BOA,
     )
@@ -1234,7 +1289,7 @@ def _verify_task(
       _verify_parent_l2_capability(
         binding.tile_program, contract, registry.profile("l2", l2_mode), f"{where}.role_bindings[{role_id}]"
       )
-    role_reads, role_writes, _ = _binding_effects(binding, effects, f"{where}.role_bindings[{role_id}]")
+    role_reads, role_writes, _, _ = _binding_effects(binding, effects, f"{where}.role_bindings[{role_id}]")
     for views in effects.descriptor_views.values():
       for view, _writing in views:
         if view.space != "l2" or view.task_dim is None:
@@ -1416,7 +1471,7 @@ def _verify_task(
       if dispatch_domain is None:
         _fail(f"{action_where} dispatch role is missing its validated task range")
       logical_tasks += dispatch_domain.to_task - dispatch_domain.from_task
-      reads, writes, global_reads = _binding_effects(binding, effects, action_where)
+      reads, writes, global_reads, global_writes = _binding_effects(binding, effects, action_where)
       if any(slot not in l2_live for slot in (*reads, *writes)):
         _fail(f"{action_where} accesses an unbound or released L2 view")
       if {*reads, *writes} & published:
@@ -1445,13 +1500,19 @@ def _verify_task(
         _fail(f"{action_where} uses an unpermitted cross-layer profile combination")
       read_done = request.input_released_event
       write_done = request.output_ready_event
-      for view, levels in global_reads:
+      for view, levels, scope in global_reads:
         active_levels = frozenset(
           level
           for level in levels
           if registry.profile(level, current_l1 if level == "l1" else call.resolved_l2_mode).cache_bytes
         )
-        action_accesses.append(_global_access(view, input_index, False, grid_done, index, active_levels))
+        action_accesses.append(
+          _global_access(view, input_index, False, grid_done, index, active_levels, scope)
+        )
+      for view, scope in global_writes:
+        action_accesses.append(
+          _global_access(view, input_index, True, grid_done, index, frozenset(), scope, True)
+        )
       dispatch_by_ordinal[request.dispatch_ordinal] = (reads, writes, request)
       profile_frontier.append(grid_done)
     elif action.op is ExecGroupActionOp.WAIT_EVENT:
@@ -1712,6 +1773,8 @@ def _global_access(
   event: str,
   action_index: int,
   cache_levels: frozenset[str] = frozenset(),
+  scope: str | None = None,
+  precise_writes: bool = False,
 ) -> _Access:
   _verify_view(view, "global access", spaces={"global"})
   name = view.base.removeprefix("global:")
@@ -1723,7 +1786,10 @@ def _global_access(
   start = _view_start(view)
   if start + view.bytes > formal.size_bytes:
     _fail("global view exceeds its executable input formal")
-  return _Access(formal_index, start, start + view.bytes, writing, event, action_index, cache_levels)
+  return _Access(
+    formal_index, start, start + view.bytes, writing, event, action_index, cache_levels, scope,
+    precise_writes,
+  )
 
 
 def _verify_action_hazards(
@@ -1770,6 +1836,12 @@ def _verify_global_hazards(
         or not (current.writing or previous.writing)
       ):
         continue
+      if (
+        current.scope is not None
+        and previous.scope is not None
+        and current.scope != previous.scope
+      ):
+        continue  # statically disjoint page scopes (plan §2 scope proof)
       if not _ordered(previous.event, action.dependencies, ancestors):
         _fail(f"action {action.instruction_id!r} lacks a required global RAW/WAR/WAW edge")
       if (
@@ -1980,6 +2052,7 @@ def _verify_device_control(
   active: dict[str, tuple[CallBinding, _TaskSummary]] = {}
   history: dict[str, list[str]] = {"l1": [], "l2": []}
   maintenance: list[tuple[int, MemoryMaintenanceDesc]] = []
+  scope_records: list[tuple[str, frozenset[str], str]] = []
   returned = False
 
   for index, op in enumerate(body):
@@ -2042,6 +2115,18 @@ def _verify_device_control(
       history["l2"].append(op.event_tag)
       if summary.uses_l1:
         history["l1"].append(op.event_tag)
+      ordered_events = waited_events | _event_ancestors(op.dependencies, ancestors)
+      submit_scopes = _device_task_scopes(task)
+      for prior_event, prior_scopes, prior_kind in scope_records:
+        if prior_kind != "mutate":
+          continue  # use/use pairs stay unordered; only host mutations gate submits
+        sharing = prior_scopes & submit_scopes
+        if sharing and prior_event not in ordered_events:
+          _fail(
+            f"{where} accesses scope '{sorted(sharing)[0]}' without a dependency on the prior"
+            f" host {prior_kind}"
+          )
+      scope_records.append((op.event_tag, submit_scopes, "use"))
       current = ProfileState(call.exit_l1_mode, current.l2_mode)
     elif op.op == "await":
       if (
@@ -2062,6 +2147,51 @@ def _verify_device_control(
       waited_events.update(closure)
       for event in closure:
         active.pop(event, None)
+    elif op.op == "host_call":
+      command = op.command
+      if (
+        op.actual_inputs
+        or op.ctx_name
+        or op.binding_id
+        or not isinstance(command, ExecHostCall)
+      ):
+        _fail(f"{where} has invalid host call fields")
+      if not command.name.strip():
+        _fail(f"{where} host call routine name must be non-empty")
+      if not op.event_tag or op.event_tag in produced:
+        _fail(f"{where} has a missing or duplicate completion event")
+      if len(op.dependencies) != len(set(op.dependencies)) or not set(op.dependencies) <= produced:
+        _fail(f"{where} has invalid host call dependencies")
+      declared: dict[int, list[tuple[int, int]]] = {}
+      for access_index, access in enumerate(command.accesses):
+        if type(access.input_index) is not int or not 0 <= access.input_index < len(inputs):
+          _fail(f"{where}.accesses[{access_index}] names an out-of-range global input")
+        formal = inputs[access.input_index]
+        if access.mode not in ("read", "write", "readwrite"):
+          _fail(f"{where}.accesses[{access_index}] has an invalid mode")
+        if access.offset + access.bytes > formal.size_bytes:
+          _fail(f"{where}.accesses[{access_index}] exceeds global input '{formal.name}'")
+        declared.setdefault(access.input_index, []).append(
+          (access.offset, access.offset + access.bytes)
+        )
+      for input_index, spans in declared.items():
+        spans.sort()
+        if any(
+          start < previous_end
+          for (_, previous_end), (start, _) in itertools.pairwise(spans)
+        ):
+          _fail(f"{where} has overlapping accesses on global input {input_index}")
+      ordered_events = waited_events | _event_ancestors(op.dependencies, ancestors)
+      for prior_event, prior_scopes, prior_kind in scope_records:
+        sharing = prior_scopes & set(command.scopes)
+        if sharing and prior_event not in ordered_events:
+          _fail(
+            f"{where} mutates scope '{sorted(sharing)[0]}' without a dependency on the prior"
+            f" host {prior_kind}"
+          )
+      scope_records.append((op.event_tag, frozenset(command.scopes), "mutate"))
+      ancestors[op.event_tag] = _event_ancestors(op.dependencies, ancestors)
+      produced.add(op.event_tag)
     elif op.op == "profile_reconfig":
       profile_command = op.command
       if (
@@ -2132,8 +2262,8 @@ def _verify_device_control(
     if current != ProfileState(call.entry_l1_mode, call.resolved_l2_mode):
       _fail("standalone entry prefix does not establish its compiled entry profile")
     summary = summaries[program.entry.binding_id]
-    for access in summary.accesses:
-      standalone_access = replace(access, action_index=len(program.entry_prefix))
+    for task_access in summary.accesses:
+      standalone_access = replace(task_access, action_index=len(program.entry_prefix))
       if (
         standalone_access.writing
         and standalone_access.cache_levels
@@ -2144,6 +2274,91 @@ def _verify_device_control(
   if current != program.exit_profiles:
     _fail("device control exit profile does not match compiled exit_profiles")
   _verify_cross_root_maintenance(submitted, maintenance, ancestors)
+
+
+def _host_static_effects(
+  program: CompiledProgram, tasks: Mapping[str, ExecTileGroupTask]
+) -> tuple[dict[str, object], dict[str, object]]:
+  """Independently recompute the host_accesses and scope_effects maps.
+
+  Mirrors the compiler's static effect bookkeeping from the frozen DTOs
+  only; the executable body is the sole input.
+  """
+  entry = program.entry
+  if not isinstance(entry, ExecModel):
+    return {}, {}
+  host_accesses: dict[str, object] = {}
+  scope_effects: dict[str, object] = {}
+  for op in entry.body:
+    if op.op == "host_call" and isinstance(op.command, ExecHostCall):
+      host_accesses[op.instruction_id] = {
+        "name": op.command.name,
+        "accesses": tuple(
+          {
+            "input_index": access.input_index,
+            "offset": access.offset,
+            "bytes": access.bytes,
+            "mode": access.mode,
+          }
+          for access in op.command.accesses
+        ),
+        "scopes": op.command.scopes,
+      }
+      scope_effects[op.event_tag] = tuple(
+        {"scope": scope, "kind": "mutate"} for scope in op.command.scopes
+      )
+    elif op.op == "submit" and op.binding_id in tasks:
+      scopes = sorted(_device_task_scopes(tasks[op.binding_id]))
+      if scopes:
+        scope_effects[op.event_tag] = tuple(
+          {"scope": scope, "kind": "use"} for scope in scopes
+        )
+  return host_accesses, scope_effects
+
+
+def _verify_host_static_effects(
+  program: CompiledProgram, tasks: Mapping[str, ExecTileGroupTask], inputs: Sequence[ExecGlobalInput]
+) -> None:
+  """Compare artifact static_effects host maps against an independent recompute."""
+  if set(program.static_effects) - {
+    "resources",
+    "accesses",
+    "host_accesses",
+    "scope_effects",
+    "program_text_bytes",
+  }:
+    _fail("static_effects contains unknown keys")
+  expected_host, expected_scope = _host_static_effects(program, tasks)
+  for key, expected in (("host_accesses", expected_host), ("scope_effects", expected_scope)):
+    declared = program.static_effects.get(key, {})
+    if not isinstance(declared, Mapping):
+      _fail(f"static_effects[{key!r}] must be a mapping keyed by instruction/event identity")
+    if set(declared) != set(expected):
+      _fail(f"static_effects[{key!r}] does not match the executable device body")
+    for identity, entry in expected.items():
+      actual = declared[identity]
+      if canonical_value(actual) != canonical_value(entry):
+        _fail(f"static_effects[{key!r}][{identity!r}] disagrees with the executable body")
+  if not isinstance(program.entry, ExecModel):
+    return
+  for op in program.entry.body:
+    if op.op != "host_call" or not isinstance(op.command, ExecHostCall):
+      continue
+    for access in op.command.accesses:
+      if not 0 <= access.input_index < len(inputs):
+        _fail("host call access names an out-of-range global input")
+
+
+def _device_task_scopes(task: ExecTileGroupTask) -> frozenset[str]:
+  """Scopes a specialized submission uses: every tile gather/scatter scope."""
+  scopes: set[str] = set()
+  for role in task.role_bindings.values():
+    for descriptor in role.tile_program.descriptors.values():
+      if descriptor.kind == "MFE" and descriptor.op in ("gather", "scatter"):
+        scope = descriptor.params[descriptor.op].scope
+        if scope:
+          scopes.add(scope)
+  return frozenset(scopes)
 
 
 def _verify_cross_root_hazards(
@@ -2164,11 +2379,16 @@ def _verify_cross_root_hazards(
       and current.start < previous.end
       and previous.start < current.end
       and (current.writing or previous.writing)
+      # Different non-empty scopes own disjoint pages (plan §1).
+      and not (
+        current.scope is not None
+        and previous.scope is not None
+        and current.scope != previous.scope
+      )
       for current in current_accesses
       for previous in prior_accesses
     ):
       _fail(f"device submit {op.instruction_id!r} is missing a global RAW/WAR/WAW edge")
-
 
 def _verify_cross_root_maintenance(
   submits: Sequence[tuple[int, ExecDeviceOp, CallBinding, _TaskSummary, tuple[_Access, ...]]],
@@ -2244,6 +2464,8 @@ def _verify_shared_relationships(
     if op.op == "profile_reconfig":
       if isinstance(op.command, ProfileReconfigDesc) and op.command.level == "l2":
         l2_epoch += 1
+    elif op.op == "host_call":
+      device_ancestors[op.event_tag] = _event_ancestors(op.dependencies, device_ancestors)
     elif op.op == "submit":
       ancestry = _event_ancestors(op.dependencies, device_ancestors)
       device_ancestors[op.event_tag] = ancestry
@@ -2333,12 +2555,29 @@ def _verify_shared_relationships(
         )
 
 
+def _fail_indexed_memory_fidelity(program: CompiledProgram, sim: SimConfig) -> None:
+  """Plan §2: address-resolved indexed memory requires full_memory ByteStore."""
+  entry = program.entry
+  tasks = entry.tasks.values() if isinstance(entry, ExecModel) else (entry,)
+  for task in tasks:
+    for binding in task.role_bindings.values():
+      for descriptor in binding.tile_program.descriptors.values():
+        if any(
+          isinstance(descriptor.params.get(key), (ExecTileGatherDesc, ExecTileScatterDesc))
+          for key in ("gather", "scatter")
+        ):
+          if sim.fidelity != "full_memory":
+            _fail("indexed memory requires full_memory fidelity")
+          return
+
+
 def verify_compiled_program(program: CompiledProgram, hw: HardwareConfig, sim: SimConfig) -> None:
   """Verify package integrity and executable semantics without graph mutation."""
   if not isinstance(program, CompiledProgram):
     _fail("expected CompiledProgram")
-  if type(program.schema_version) is not int or program.schema_version != 2 or program.compiler_abi != "v2":
+  if type(program.schema_version) is not int or program.schema_version != 3 or program.compiler_abi != "v3":
     _fail("unsupported compiled schema or compiler ABI; recompile from source")
+  _fail_indexed_memory_fidelity(program, sim)
   if not _is_frozen(program):
     _fail("compiled artifact is not deeply immutable")
   for name in ("source_hash", "registry_hash", "target_hash", "artifact_hash"):
@@ -2446,6 +2685,7 @@ def verify_compiled_program(program: CompiledProgram, hw: HardwareConfig, sim: S
   _verify_relocations(program, tasks)
   _verify_source_map(program, tasks)
   _verify_device_control(program, tasks, summaries, inputs)
+  _verify_host_static_effects(program, tasks, inputs)
   _verify_shared_relationships(program, tasks)
   _verify_binding_guards(program, summaries, inputs)
 
@@ -2669,6 +2909,14 @@ def _guard_permissions(required: set[str]) -> str:
   return "rw" if required == {"r", "w"} else next(iter(required), "r")
 
 
+def _host_access_permissions(mode: str) -> frozenset[str]:
+  return {
+    "read": frozenset({"r"}),
+    "write": frozenset({"w"}),
+    "readwrite": frozenset({"r", "w"}),
+  }[mode]
+
+
 def _required_binding_contract(
   program: CompiledProgram, summaries: Mapping[str, _TaskSummary], inputs: Sequence[ExecGlobalInput]
 ) -> dict[str, tuple[int, str]]:
@@ -2681,6 +2929,16 @@ def _required_binding_contract(
         actual = op.actual_inputs[access.formal_index]
         required[actual].add("w" if access.writing else "r")
         minimum[actual] = max(minimum[actual], access.end)
+    for op in program.entry.body:
+      if op.op != "host_call" or not isinstance(op.command, ExecHostCall):
+        continue
+      for host_access in op.command.accesses:
+        if not 0 <= host_access.input_index < len(inputs):
+          _fail("host call access names an out-of-range global input")
+        required[host_access.input_index].update(_host_access_permissions(host_access.mode))
+        minimum[host_access.input_index] = max(
+          minimum[host_access.input_index], host_access.offset + host_access.bytes
+        )
   else:
     summary = summaries[program.entry.binding_id]
     for access in summary.accesses:

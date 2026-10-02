@@ -15,7 +15,6 @@ from pipeline_validator.immutable import digest
 from pipeline_validator.memory import AdmissionFailure, AdmissionFailureKind, MemoryInvariantError
 from pipeline_validator.memory.allocator import ContextBufferOwner
 from pipeline_validator.memory.arena import WAIT_CAPACITY, WAIT_FRAGMENTATION, ArenaPool, RootInvocation
-from pipeline_validator.tile_group import TileGroup
 from pipeline_validator.profiles import (
   ArenaLayout,
   MemoryProfile,
@@ -28,6 +27,7 @@ from pipeline_validator.profiles import (
   parse_memory_target,
   validate_allowed,
 )
+from pipeline_validator.tile_group import TileGroup
 
 
 def _source_with(hw: HardwareConfig, *, level: str, mode: int, spm: int, cache: int) -> ProfileSourceConfig:
