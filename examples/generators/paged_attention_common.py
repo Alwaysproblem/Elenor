@@ -508,7 +508,11 @@ def _release_handler(state: HostRunState, r: int):
 
   def handler(_request):
     used = scenario.used_table_entries(r)
-    yield HostWrite(BLOCK_TABLE, 0, struct.pack(f"<{used}i", *([-1] * used)))
+    # BLOCK_TABLE holds one row of ``max_pages`` entries per request, so
+    # this request clears its own row (plan §6); offset 0 would belong to
+    # request 0 and could hand a still-running request a -1 index.
+    row = r * scenario.max_pages * 4
+    yield HostWrite(BLOCK_TABLE, row, struct.pack(f"<{used}i", *([-1] * used)))
     yield HostWrite(LENGTHS, r * 4, struct.pack("<i", -1))
     yield HostFreePages(POOL_NAME, scenario.scope(r))
 

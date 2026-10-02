@@ -10020,7 +10020,7 @@ builtin.module {
       : !nexus.event<"committed_r1_s3">
     %released_r1 = nexus.host.call.async "release_r1" bindings(%BLOCK_TABLE_12, %LENGTHS)
       accesses = [
-        {offset = 0, bytes = 132, mode = "write"}, {offset = 4, bytes = 4, mode = "write"}]
+        {offset = 196, bytes = 132, mode = "write"}, {offset = 4, bytes = 4, mode = "write"}]
       depends_on(%committed_r1_s3) : !nexus.event<"released_r1">
     %prepared_r2_s0 = nexus.host.call.async "prepare_r2_s0" bindings(%APPEND_IDS_12)
       accesses = [{offset = 32, bytes = 4, mode = "write"}] scopes = ["owner_2"]
@@ -10069,7 +10069,7 @@ builtin.module {
       : !nexus.event<"committed_r2_s3">
     %released_r2 = nexus.host.call.async "release_r2" bindings(%BLOCK_TABLE_12, %LENGTHS)
       accesses = [
-        {offset = 0, bytes = 196, mode = "write"}, {offset = 8, bytes = 4, mode = "write"}]
+        {offset = 392, bytes = 196, mode = "write"}, {offset = 8, bytes = 4, mode = "write"}]
       depends_on(%committed_r2_s3) : !nexus.event<"released_r2">
     nexus.await %step_done_r0_s0, %step_done_r0_s1, %step_done_r0_s2, %step_done_r0_s3, %released_r0
       , %step_done_r1_s0, %step_done_r1_s1, %step_done_r1_s2, %step_done_r1_s3, %released_r1,

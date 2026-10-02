@@ -832,7 +832,8 @@ def build_module(scn: Scenario, variant: str, hw) -> ModuleOp:
       scn.release_routine(request),
       f"released_r{request}",
       bindings=[args[BLOCK_TABLE], args[LENGTHS]],
-      accesses=[(0, used * 4, "write"), (request * 4, 4, "write")],
+      # Each request clears its own BLOCK_TABLE row (see _release_handler).
+      accesses=[(request * scn.max_pages * 4, used * 4, "write"), (request * 4, 4, "write")],
       scopes=[],
       depends_on=[depends],
     )
