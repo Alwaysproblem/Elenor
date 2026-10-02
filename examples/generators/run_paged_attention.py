@@ -31,11 +31,9 @@ from pipeline_validator.report import build_report, report_to_json, report_to_te
 from pipeline_validator.simulator import Simulator
 from pipeline_validator.workload_ir import load_workload_ir
 
-# The pipeline variant issues one attention Grid per partition plus the merge
-# Grid, so a step context with 16 blocks needs 17 live Grid routes (plan §6).
-# This is a scenario resource requirement expressed through the sim override,
-# not a change to the bundled hardware default (group policy s1 ships 16).
-SCENARIO_SIM_OVERRIDES = {"group.dispatch_capacity": 32}
+# No scenario override is needed: the pipeline's live Grid window is its
+# partition depth, which fits group policy s1's shipped capacity.
+SCENARIO_SIM_OVERRIDES: dict[str, object] = {}
 
 
 def _parse_overrides(specs: list[str]) -> dict[str, object]:

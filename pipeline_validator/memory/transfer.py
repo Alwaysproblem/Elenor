@@ -139,6 +139,20 @@ class StageWaitReason(Enum):
   L1_CACHE = "l1_cache"
   L2_CACHE = "l2_cache"
 
+_GATHER_HBM_READ_OPS = frozenset(
+  {
+    TransferOp.GATHER_HBM_REFILL,
+    TransferOp.GATHER_DIRECT_L1_REFILL,
+    TransferOp.GATHER_DIRECT_RESPONSE,
+  }
+)
+"""Gather legs whose HBM source may legitimately cover uninitialised bytes.
+
+Plan §2: a whole-line refill and a sub-line bypass segment both cross page
+tail tokens and padding, so their source capture keeps a validity mask and
+only the destination write faults.
+"""
+
 
 class TransferStatus(Enum):
   PENDING = "pending"
@@ -1279,10 +1293,15 @@ class TransferManager:
       self._fault_transaction(txn, "old-generation source return isolated", cycle)
       return False
     try:
-      if txn.op is TransferOp.GATHER_HBM_REFILL and txn.src.handle.memory_space == "hbm":
-        # Whole-line refill: partial validity is the norm (page tail
-        # tokens, padding).  Capture data + mask without faulting; only
-        # a destination write touching an uninitialised byte faults.
+      if (
+        txn.op in _GATHER_HBM_READ_OPS
+        and txn.src.handle.memory_space == "hbm"
+      ):
+        # Gather reads carry per-byte validity: a whole-line refill or a
+        # sub-line bypass segment legitimately covers uninitialised bytes
+        # (page tail tokens, padding).  Capture data + mask without
+        # faulting; only a destination write touching such a byte faults
+        # (plan §2 - the fault belongs to the destination write).
         txn.captured_data, txn.captured_validity = self.byte_store.read_view_relaxed(txn.src)
       else:
         txn.captured_data = self.byte_store.read_view(txn.src)
@@ -1308,9 +1327,11 @@ class TransferManager:
       self._fault_transaction(txn, "destination write completed without captured bytes", cycle)
       return False
     try:
-      if txn.op is TransferOp.GATHER_DEST_WRITE:
+      if txn.op in (TransferOp.GATHER_DEST_WRITE, TransferOp.GATHER_DIRECT_RESPONSE):
         # A destination segment covering uninitialised bytes faults here
-        # (plan §2: validity is enforced at the destination write).
+        # (plan §2: validity is enforced at the destination write).  A
+        # bypass leg writes its L1 destination through this same commit,
+        # so it is checked here too instead of in the MFE.
         self.byte_store.write_view_checked(txn.dst, txn.captured_data, txn.captured_validity)
       else:
         self.byte_store.write_view(txn.dst, txn.captured_data)

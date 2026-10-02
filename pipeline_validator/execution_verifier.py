@@ -1999,12 +1999,16 @@ def _verify_budget_covers(task: ExecTileGroupTask, budget: ResourceBudget, where
     base = _event_ancestors(action.dependencies, ancestors)
     for event in action.output_events:
       event_ancestors = set(base)
-      if action.op is ExecGroupActionOp.DISPATCH_ROLE and event == action.dst:
-        event_ancestors.update(
-          event
-          for event in (action.args[0].input_released_event, action.args[0].output_ready_event)
-          if event
-        )
+      if action.op is ExecGroupActionOp.DISPATCH_ROLE:
+        request = action.args[0]
+        if event == action.dst:
+          event_ancestors.update(
+            signal for signal in (request.input_released_event, request.output_ready_event) if signal
+          )
+        elif event == request.output_ready_event and action.dst is not None:
+          # An output_ready dependency proves its Grid retired (mirrors
+          # compiler/resources._resource_budget).
+          event_ancestors.add(action.dst)
       ancestors[event] = frozenset(event_ancestors)
   expected_uses, required_frontier = _reconstruct_event_resources(task, where)
   if not isinstance(task.event_uses, Mapping):

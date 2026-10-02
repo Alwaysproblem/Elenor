@@ -441,11 +441,22 @@ def _resource_budget(task: ExecTileGroupTask) -> ResourceBudget:
     base = set(completed)
     for event in action.output_events:
       event_ancestors = set(base)
-      if action.op is ExecGroupActionOp.DISPATCH_ROLE and event == action.dst:
+      if action.op is ExecGroupActionOp.DISPATCH_ROLE:
         request = action.args[0]
-        event_ancestors.update(
-          signal for signal in (request.input_released_event, request.output_ready_event) if signal
-        )
+        if event == action.dst:
+          event_ancestors.update(
+            signal
+            for signal in (request.input_released_event, request.output_ready_event)
+            if signal
+          )
+        elif event == request.output_ready_event and action.dst is not None:
+          # Depending on a dispatch's output_ready proves that Grid already
+          # reached its retirement point, so its grid_done counts as
+          # completed.  Without this a producer/consumer chain such as the
+          # PagedAttention pipeline (block b waits on block b-4's
+          # output_ready) accumulates every dispatched Grid and reports a
+          # false live-route bound.
+          event_ancestors.add(action.dst)
       ancestors[event] = frozenset(event_ancestors)
   frame_slots = 0
   for role in task.role_bindings.values():

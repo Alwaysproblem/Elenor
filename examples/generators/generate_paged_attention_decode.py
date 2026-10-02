@@ -159,11 +159,14 @@ def build_append_program(scn: Scenario, request: int, tip: int, hw) -> TileProgr
   idx_event_v = TileLoadOp(idx_view.result, idx_l1_v.result, f"aidx_v_{suffix}")
   k_event = TileLoadOp(k_view.result, k_l1.result, f"k_row_{suffix}")
   v_event = TileLoadOp(v_view.result, v_l1.result, f"v_row_{suffix}")
-  k_map = TileIndexedMapAttr.of(scn.page_stride_elements, tip * d, scn.page_tokens * d, 1, 0, d)
+  # Token-major page layout (matches seed_pool and the Gather segments):
+  # head h of token t lives at ``(t * kvh + h) * d`` inside the K (or V)
+  # section, so the append Scatter writes one ``d``-element row per head.
+  k_map = TileIndexedMapAttr.of(scn.page_stride_elements, tip * kvh * d, d, 1, 0, d)
   v_map = TileIndexedMapAttr.of(
     scn.page_stride_elements,
-    (kvh * scn.page_tokens + tip) * d,
-    scn.page_tokens * d,
+    (kvh * scn.page_tokens + tip * kvh) * d,
+    d,
     1,
     0,
     d,
@@ -280,13 +283,14 @@ def build_attention_program(
   acc_event = TileLoadOp(acc_view.result, acc_l1.result, f"acc_{suffix}")
   # The gather consumes the L1 index, so the index load completes first
   # (workload_ir L1 order rule for gather indices).
-  k_map = TileIndexedMapAttr.of(
-    scn.page_stride_elements, 0, scn.page_tokens * d, 1, 0, tokens * d
-  )
+  # Token-major page layout (shared with the append Scatter and the seed):
+  # a block's ``tokens`` tokens live at ``[idx*S, +tokens*kvh*d)`` and task
+  # ``h`` owns the ``d``-element slice of every token that belongs to head h.
+  k_map = TileIndexedMapAttr.of(scn.page_stride_elements, 0, d, 1, 0, tokens * d)
   v_map = TileIndexedMapAttr.of(
     scn.page_stride_elements,
     kvh * scn.page_tokens * d,
-    scn.page_tokens * d,
+    d,
     1,
     0,
     tokens * d,
@@ -569,7 +573,10 @@ def build_step_context(scn: Scenario, request: int, step: int, variant: str, hw)
     for p in range(partitions)
   ]
   out_v = global_view(out_arg, [request, step, 0, 0, 0], [1, 1, kvh, hpk, d], scn.state_dtype)
-  table_v = {b: global_view(table_arg, [b], [1], "i32") for b in range(last)}
+  # BLOCK_TABLE holds one row of ``max_pages`` entries per request, so this
+  # request's block b reads entry ``request * max_pages + b``.
+  table_base = request * scn.max_pages
+  table_v = {b: global_view(table_arg, [table_base + b], [1], "i32") for b in range(last)}
   block.add_ops([pool_v, k_new_v, v_new_v, append_v, q_v, *state_v, *acc_v, out_v])
   block.add_ops(list(table_v.values()))
 
@@ -623,6 +630,10 @@ def build_step_context(scn: Scenario, request: int, step: int, variant: str, hw)
       block.add_op(pf_bidx[b])
       idx_prefetch = pf_bidx[b]
     depends: list = [pf_q, pf_state[p], pf_acc[p], idx_prefetch]
+    if final:
+      # The final block reads the page the append just wrote, so it must
+      # observe the Scatter commit before it gathers (plan §6 DAG).
+      depends.append(append_disp.grid_done)
     if pipeline and b >= 4:
       depends.append(outreadies[b - 4])
     if not pipeline and b > 0:
@@ -781,7 +792,7 @@ def build_module(scn: Scenario, variant: str, hw) -> ModuleOp:
     depends = None
     for step in range(scn.steps):
       tag = f"r{request}_s{step}"
-      prepare_deps = [depends] if depends is not None else []
+      prepare_deps: list = [depends] if depends is not None else []
       prepare = NexusHostCallOp(
         scn.prepare_routine(request, step),
         f"prepared_{tag}",

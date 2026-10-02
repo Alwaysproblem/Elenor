@@ -139,3 +139,52 @@ def test_micro_scatter_never_touches_a_cache(micro_reports):
     memory = report.get("memory") or {}
     l2 = memory.get("l2") or {}
     assert l2.get("dirty_lines", 0) == 0, variant
+
+
+def test_default_scenario_byte_reconciliation():
+  """Plan §8: the committed default fixtures reproduce the plan's bytes.
+
+  The numbers come from the generator's own geometry (page stride, block
+  counts, op counts), so this asserts the reconciliation identities
+  without paying for a 250k-cycle run in the unit suite.
+  """
+  import importlib.util
+
+  spec = importlib.util.spec_from_file_location(
+    "paged_attention_common", GENERATORS / "paged_attention_common.py"
+  )
+  assert spec is not None and spec.loader is not None
+  common = importlib.util.module_from_spec(spec)
+  sys.modules["paged_attention_common"] = common
+  spec.loader.exec_module(common)
+
+  scenario = common.load_scenario(SCENARIO, "baseline")
+  # 12 appends: 3 requests x 4 steps, each writing one K and one V row.
+  assert scenario.num_requests * scenario.steps == 12
+  # Blocks: every (request, step) covers ceil(length / page_tokens) blocks.
+  blocks = sum(
+    scenario.block_count(request, step)
+    for request in range(scenario.num_requests)
+    for step in range(scenario.steps)
+  )
+  assert blocks == 393
+  # Valid tokens summed over every step, the attention payload denominator.
+  valid = sum(
+    scenario.token(request, step) + 1
+    for request in range(scenario.num_requests)
+    for step in range(scenario.steps)
+  )
+  assert valid == 6162
+  # One Scatter segment per append per KV head, each head_dim elements.
+  elem = 2  # bf16
+  scatter_bytes = (
+    scenario.num_requests
+    * scenario.steps
+    * 2
+    * scenario.kv_heads
+    * scenario.head_dim
+    * elem
+  )
+  assert scatter_bytes == 12288
+  payloads = common.seed_globals(scenario)
+  assert len(payloads["POOL"]) == scenario.physical_pages * scenario.page_stride_bytes

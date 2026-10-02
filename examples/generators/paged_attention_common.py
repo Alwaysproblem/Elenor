@@ -36,6 +36,7 @@ from pipeline_validator.runtime.host_session import (  # noqa: E402
   HostAllocPages,
   HostEnvironment,
   HostFreePages,
+  HostRoutineFactory,
   HostWrite,
 )
 
@@ -365,8 +366,11 @@ def seed_pool(scenario: Scenario) -> bytes:
       high = min(length, (index + 1) * scenario.page_tokens)
       for token in range(low, high):
         local = token - low
+        # Page layout is token-major: head h of token t lives at
+        # ``(t * kv_heads + h) * head_dim`` inside the K (or V) section, which
+        # is exactly what one Gather segment of ``tokens * head_dim`` reads.
         for head in range(scenario.kv_heads):
-          row = (head * scenario.page_tokens + local) * scenario.head_dim * elem
+          row = ((local * scenario.kv_heads + head) * scenario.head_dim) * elem
           for byte in range(scenario.head_dim * elem):
             pool[base + row + byte] = kv_byte(request, token, head, byte, K_BIAS)
           vrow = kv_section * elem + row
@@ -455,7 +459,7 @@ def make_host_environment(scenario: Scenario) -> tuple[HostEnvironment, HostRunS
     page_count=scenario.physical_pages,
     initial_owners={scenario.scope(r): scenario.mapping()[r] for r in range(scenario.num_requests)},
   )
-  handlers: dict[str, object] = {}
+  handlers: dict[str, HostRoutineFactory] = {}
   for r in range(scenario.num_requests):
     for s in range(scenario.steps):
       handlers[scenario.prepare_routine(r, s)] = _prepare_handler(state, r, s)
