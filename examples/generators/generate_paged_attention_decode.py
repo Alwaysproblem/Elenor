@@ -34,6 +34,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import format_mlir
 import paged_attention_common as common
 from paged_attention_common import (
   APPEND_IDS,
@@ -902,6 +903,11 @@ def main() -> int:
       "#tile.indexed_map<index_scale=page_stride, task_stride=B*D, segment=valid*D>.",
     ]
     write_workload(path, header, module)
+    # The repository formats examples/*.mlir to 100 columns in pre-commit, so
+    # record the hash of the formatted text: the scenario hash stays valid
+    # whether or not the hook has run yet.
+    formatted = format_mlir.format_text(path.read_text(encoding="utf-8"))
+    path.write_text(formatted, encoding="utf-8")
     hashes[variant] = hashlib.sha256(path.read_bytes()).hexdigest()
     print(f"wrote {path}")
   scenario_path = out_dir / "paged_attention_decode_scenario.json"

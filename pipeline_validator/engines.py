@@ -577,7 +577,8 @@ class MFEEngine(Engine):
     ):
       self.pmu.add_event(metric, 0)
     self.pmu.add_event("launch")
-    self.pmu.add_event("gather_requests", index_count)
+    # ``gather_requests`` shares its unit with the hit/miss/bypass counters
+    # (one payload request), so it is accumulated as segments resolve below.
     self.pmu.add_event("gather_index_reads", index_count)
     self.pmu.add_event("gather_bytes", destination.size_bytes)
     self._issue_gather_index_slots(job, cycle)
@@ -771,7 +772,11 @@ class MFEEngine(Engine):
     for remote, local in pairs:
       if not (self.l1_cache.enabled or self.l2_cache.enabled):
         # No cache: one direct request per segment (plan §2 SPM pass-through).
+        self.pmu.add_event("gather_cache_bypass_requests")
+        if job.bypass_forbidden:
+          raise MemoryInvariantError("gather_cache_bypass_forbidden")
         self._append_gather_request(job, slot, remote, local, 0, bypass=True, line_bytes=line_bytes)
+        self.pmu.add_event("gather_requests")
         continue
       cursor = 0
       total = remote.size_bytes
@@ -801,6 +806,7 @@ class MFEEngine(Engine):
         self._append_gather_request(
           job, slot, remote_slice, local_slice, within, bypass=not whole_line, line_bytes=line_bytes
         )
+        self.pmu.add_event("gather_requests")
         cursor += part_bytes
 
   def _append_gather_request(

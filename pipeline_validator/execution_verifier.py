@@ -2415,6 +2415,13 @@ def _verify_cross_root_maintenance(
             or current.formal_index != previous.formal_index
             or current.start >= previous.end
             or previous.start >= current.end
+            # Different non-empty scopes own disjoint pages (plan §1), so
+            # neither an ordering edge nor a maintenance command is needed.
+            or (
+              current.scope is not None
+              and previous.scope is not None
+              and current.scope != previous.scope
+            )
           ):
             continue
           producer = replace(

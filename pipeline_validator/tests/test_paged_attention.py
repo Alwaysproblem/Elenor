@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -37,7 +38,7 @@ def _generate(output_dir: Path, **overrides) -> Path:
   subprocess.run(
     command,
     cwd=ROOT,
-    env={"PYTHONPATH": f"{ROOT}:{GENERATORS}", "PATH": "/usr/bin:/bin"},
+    env={**os.environ, "PYTHONPATH": os.pathsep.join([str(ROOT), str(GENERATORS), str(ROOT / "scripts")])},
     check=True,
     capture_output=True,
   )
@@ -65,7 +66,7 @@ def _run(scenario: Path, variant: str, max_cycles: int = 200000) -> tuple[dict, 
       str(report),
     ],
     cwd=ROOT,
-    env={"PYTHONPATH": str(ROOT), "PATH": "/usr/bin:/bin"},
+    env={**os.environ, "PYTHONPATH": str(ROOT)},
     check=False,
     capture_output=True,
   )
@@ -121,6 +122,32 @@ def test_micro_scatter_commits_and_gather_reads_back(micro_reports):
     # Attention gathers run for every block of every step.
     assert events.get("gather_requests", 0) >= 8, variant
     assert events.get("gather_index_reads", 0) == events.get("gather_requests", 0), variant
+
+
+def test_micro_gather_cache_counters_conserve(micro_reports):
+  """Plan §2/§Verification 2: cache-enabled Gather keeps the counters honest.
+
+  Every payload request must land in exactly one of L1 hit, L2 hit,
+  HBM miss or bypass.  The counters previously mixed units (index count
+  versus payload-request count), which hid a fully bypassed run.
+  """
+  for variant, report in micro_reports.items():
+    events = report["events"]
+    requests = events.get("gather_requests", 0)
+    classified = (
+      events.get("gather_l1_hits", 0)
+      + events.get("gather_l2_hits", 0)
+      + events.get("gather_hbm_misses", 0)
+      + events.get("gather_cache_bypass_requests", 0)
+    )
+    assert requests > 0, variant
+    assert requests == classified, (variant, requests, classified)
+    # Cache is enabled for this scenario, so a run must exercise it.
+    assert events.get("gather_hbm_misses", 0) > 0, variant
+    check = next(
+      item for item in report["checks"] if item["check"] == "gather_request_conservation"
+    )
+    assert check["pass"], (variant, check)
 
 
 def test_micro_page_pool_closes_without_leak(micro_reports):

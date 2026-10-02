@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -98,6 +99,17 @@ def main(argv: list[str] | None = None) -> int:
     overrides["memory_trace"] = True
 
   hw = HardwareConfig.from_yaml(args.hw_config) if args.hw_config else HardwareConfig()
+  # The decode fixtures declare l1_mode/l2_mode = 1, so the engine's caches
+  # must actually hold capacity: the bundled default target resets to mode 0
+  # (SPM only), which would silently turn every Gather into a bypass.
+  target = hw.memory_target
+  hw = hw.with_overrides(
+    memory_target=replace(
+      target,
+      l1=replace(target.l1, reset_mode=scenario.l1_mode),
+      l2=replace(target.l2, reset_mode=scenario.l2_mode),
+    )
+  )
   hw = hw.with_overrides(**_parse_overrides(args.hw_override))
   sim = SimConfig(fidelity="full_memory").with_overrides(**overrides)
 

@@ -1,5 +1,6 @@
 // PagedAttention decode (baseline variant, plan §6) -- timing model, no numerics.
-// R=3 initial=[255, 511, 767] steps=4 page_tokens=16 kv_heads=4 heads_per_kv=4 head_dim=64 pages=128 page_stride=16448B
+//R=3 initial=[255, 511, 767] steps=4 page_tokens=16 kv_heads=4 heads_per_kv=4 head_dim=64 pages=128
+// page_stride=16448B
 // Pool pages are host-managed (HostAllocPages/HostFreePages); the block table is
 // host-written between steps; attention gathers K/V rows straight into L1 with
 // #tile.indexed_map<index_scale=page_stride, task_stride=B*D, segment=valid*D>.
