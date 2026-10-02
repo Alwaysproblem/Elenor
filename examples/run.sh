@@ -8,6 +8,7 @@ usage() {
 Usage:
   bash examples/run.sh list
   bash examples/run.sh <name> [extra pipeline_validator args]
+  bash examples/run.sh fidelity-of <name>   # required fidelity, empty = any
   bash examples/run.sh file <path.mlir> [pipeline_validator args]
 
 Examples:
@@ -168,7 +169,29 @@ if [[ "$name" == "help" || "$name" == "--help" || "$name" == "-h" ]]; then
 fi
 shift
 
+# Scenarios that read a byte oracle (``--input-data``) only run under
+# full_memory; ``run_all_workload.sh`` queries this with ``fidelity-of``
+# and skips a scenario whose pin does not match the sweep.
+scenario_fidelity() {
+  case "$1" in
+    gather|gather-matmul|matmul-gather-add|gather-matmul-4tiles-2contexts|matmul-gather-add-4tiles-2contexts|indexed-memory|paged-attention-decode|paged-attention-decode-baseline)
+      echo full_memory
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
 case "$name" in
+  fidelity-of)
+    if [[ $# -lt 1 ]]; then
+      echo "error: fidelity-of requires a scenario name" >&2
+      exit 2
+    fi
+    scenario_fidelity "$1"
+    exit 0
+    ;;
   gather)
     set -- \
       --ir-file "$ROOT_DIR/examples/workloads/gather_indexed.mlir" \

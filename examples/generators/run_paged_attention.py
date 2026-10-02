@@ -38,15 +38,24 @@ SCENARIO_SIM_OVERRIDES: dict[str, object] = {}
 
 
 def _parse_overrides(specs: list[str]) -> dict[str, object]:
+  """Parse KEY=VALUE overrides; integers when they parse, else strings.
+
+  The sweep injects ``fidelity=runtime`` alongside numeric overrides, so a
+  string fallback keeps one parser for both callers.
+  """
   result: dict[str, object] = {}
   for spec in specs:
     if "=" not in spec:
       raise ValueError(f"override must be KEY=VALUE, got {spec!r}")
     key, _, value = spec.partition("=")
+    key = key.strip()
+    value = value.strip()
+    if not key or not value:
+      raise ValueError(f"override must be KEY=VALUE, got {spec!r}")
     try:
-      result[key.strip()] = int(value, 0)
-    except ValueError as exc:
-      raise ValueError(f"override {key!r} must be an integer") from exc
+      result[key] = int(value, 0)
+    except ValueError:
+      result[key] = value
   return result
 
 

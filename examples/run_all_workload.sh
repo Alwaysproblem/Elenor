@@ -108,6 +108,13 @@ run_all() {
   local name
   mkdir -p "$out_dir"
   for name in "${SCENARIO_LIST[@]}"; do
+    # A scenario that reads a byte oracle pins full_memory; skip it in a
+    # sweep that cannot provide one instead of failing the whole run.
+    required="$(bash "$ROOT_DIR/examples/run.sh" fidelity-of "$name" || true)"
+    if [[ -n "$required" && "$required" != "$fidelity" ]]; then
+      echo "--- SKIP [fidelity=$fidelity] $name (requires $required)"
+      continue
+    fi
     echo "=== [fidelity=$fidelity] $name ==="
     bash "$ROOT_DIR/examples/run.sh" "$name" \
       --memory-trace \
