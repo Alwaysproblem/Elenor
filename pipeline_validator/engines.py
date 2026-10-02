@@ -302,6 +302,12 @@ class _GatherSegmentRequest:
   #  | WAIT_L1_FILL | WAIT_L2_FILL | HBM_REFILL | L1_DIRECT_REFILL
   #  | DIRECT_RESPONSE | L2_REFILL | RESPONSE_READY | DONE
   within_line: int = 0  # byte offset of this segment inside the line slice
+  # Bumped when a maintenance command evicts the line between a lookup and
+  # its read, so the resubmitted legs get fresh transaction ids.
+  retry: int = 0
+  # Which conservation bucket already paid for this request, so an
+  # eviction downgrade can move the charge instead of adding a second one.
+  charged: str | None = None
   transaction_id: str | None = None
   l1_mshr_token: int | None = None
   l2_mshr_token: int | None = None
@@ -732,9 +738,11 @@ class MFEEngine(Engine):
     prefix = ":".join(str(value) for value in job_namespace)
     return f"{prefix}:{kind}:{ordinal}:{phase}"
 
-  def _gather_transaction_id(self, job: _MFEGatherJob, ordinal: int, phase: str) -> str:
+  def _gather_transaction_id(
+    self, job: _MFEGatherJob, ordinal: int, phase: str, retry: int = 0
+  ) -> str:
     prefix = ":".join(str(value) for value in job.namespace)
-    return f"{prefix}:gather:{ordinal}:{phase}"
+    return f"{prefix}:gather:{ordinal}:{phase}" + (f"#{retry}" if retry else "")
 
   def _scatter_transaction_id(self, job: _MFEScatterJob, ordinal: int, phase: str) -> str:
     prefix = ":".join(str(value) for value in job.namespace)
@@ -861,7 +869,7 @@ class MFEEngine(Engine):
     bytes_total: int | None = None,
   ) -> None:
     assert self.transfer_manager is not None
-    transaction_id = self._gather_transaction_id(job, request.ordinal, phase)
+    transaction_id = self._gather_transaction_id(job, request.ordinal, phase, request.retry)
     run_generation, profile_generations = self.transfer_manager.transaction_identity(
       (("l1", self.tile_id), ("l2", 0))
     )
@@ -1139,16 +1147,57 @@ class MFEEngine(Engine):
     cycle: int,
   ) -> None:
     if request.line_identity is not None:
-      line = cache.read_line(request.line_identity, require_data=self._byte_oracle_enabled)
+      try:
+        line = cache.read_line(request.line_identity, require_data=self._byte_oracle_enabled)
+        validity = cache.read_validity(request.line_identity)
+      except MemoryInvariantError:
+        # A maintenance command evicted the line between the lookup leg
+        # completing and this read; treat it as evicted rather than failed.
+        self._downgrade_after_eviction(job, request, cycle)
+        return
       if line is not None:
         request.line_data = line
         start = request.within_line
         end = start + request.local.size_bytes
         request.hit_data = line[start:end]
-        validity = cache.read_validity(request.line_identity)
         if validity is not None:
           request.hit_validity = validity[start:end]
     self._mark_response_ready(job, request, cycle)
+
+  def _downgrade_after_eviction(
+    self, job: _MFEGatherJob, request: _GatherSegmentRequest, cycle: int
+  ) -> None:
+    """Release this line and fall back to a direct HBM read.
+
+    Plan §2: an eviction here means a Scatter committed over the line, so
+    the reader must observe the new bytes.  Re-querying the cache would
+    only race the invalidation again; reading HBM directly is both correct
+    and terminating.  Any MSHR waiters on the released token are woken so
+    they re-evaluate too.
+    """
+    for table, attr in ((self.l1_mshr, "l1_mshr_token"), (self.l2_mshr, "l2_mshr_token")):
+      token = getattr(request, attr)
+      if token is None:
+        continue
+      setattr(request, attr, None)
+      if not table.is_active(token):
+        continue
+      # complete() hands back the waiters; dropping them would strand every
+      # merged request in WAIT_*_FILL forever.
+      self._invoke_callbacks(table.complete(token))
+    request.hit_data = None
+    request.hit_validity = None
+    request.response_ready = False
+    request.retry += 1
+    request.bypass = True
+    request.state = "DIRECT_RESPONSE"
+    if request.charged is not None:
+      # Conservation charges one bucket per request: move the earlier hit
+      # or miss to the bypass bucket instead of counting both.
+      self.pmu.add_event(request.charged, -1)
+      request.charged = None
+    self.pmu.add_event("gather_cache_bypass_requests")
+    request.charged = "gather_cache_bypass_requests"
 
   def _try_l1_mshr(self, job: _MFEGatherJob, request: _GatherSegmentRequest, cycle: int) -> None:
     if not self.l1_cache.enabled:
@@ -1299,6 +1348,7 @@ class MFEEngine(Engine):
       if self.l1_cache.contains(identity):
         self.l1_cache.record_hit(identity, require_resident=True)
         self.pmu.add_event("gather_l1_hits")
+        request.charged = "gather_l1_hits"
         self._mark_response_from_cache(job, request, self.l1_cache, cycle)
       else:
         self.l1_cache.record_miss()
@@ -1316,6 +1366,7 @@ class MFEEngine(Engine):
       if self.l2_cache.contains(identity):
         self.l2_cache.record_hit(identity, require_resident=True)
         self.pmu.add_event("gather_l2_hits")
+        request.charged = "gather_l2_hits"
         if self.l1_cache.enabled:
           allocation = self.l1_mshr.allocate(self._merge_group(request))
           if isinstance(allocation, MshrWait):
@@ -1337,6 +1388,7 @@ class MFEEngine(Engine):
       else:
         self.l2_cache.record_miss()
         self.pmu.add_event("gather_hbm_misses")
+        request.charged = "gather_hbm_misses"
         self._try_l1_mshr(job, request, cycle)
       return
 
@@ -1401,7 +1453,12 @@ class MFEEngine(Engine):
 
     if state == "L2_REFILL":
       assert identity is not None
-      request.line_data = self.l2_cache.read_line(identity, require_data=self._byte_oracle_enabled)
+      try:
+        request.line_data = self.l2_cache.read_line(identity, require_data=self._byte_oracle_enabled)
+      except MemoryInvariantError:
+        # Evicted again between the refill and this read.
+        self._downgrade_after_eviction(job, request, cycle)
+        return
       self.l1_cache.refill(
         None,
         identity=identity,

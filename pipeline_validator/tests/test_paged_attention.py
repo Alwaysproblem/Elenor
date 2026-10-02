@@ -215,3 +215,159 @@ def test_default_scenario_byte_reconciliation():
   assert scatter_bytes == 12288
   payloads = common.seed_globals(scenario)
   assert len(payloads["POOL"]) == scenario.physical_pages * scenario.page_stride_bytes
+
+
+def test_scatter_maintenance_narrows_to_the_committed_bytes(tmp_path):
+  """Plan §2: a Scatter-driven invalidate resolves to the committed bytes.
+
+  Guards the silent-no-op failure mode: the ledger is keyed by the UCE
+  runtime event id while maintenance commands name group event tags, so a
+  name-keyed lookup finds nothing and the invalidate silently disappears.
+  This asserts the resolved ranges are strictly smaller than the static
+  view, and that the ledger actually recorded Scatter commits.
+  """
+  import importlib.util
+
+  spec = importlib.util.spec_from_file_location(
+    "paged_attention_common", GENERATORS / "paged_attention_common.py"
+  )
+  assert spec is not None and spec.loader is not None
+  common = importlib.util.module_from_spec(spec)
+  sys.modules["paged_attention_common"] = common
+  spec.loader.exec_module(common)
+
+  out = tmp_path / "micro"
+  subprocess.run(
+    [
+      sys.executable, "-m", "generate_paged_attention_decode",
+      "--output-dir", str(out),
+      "--num-requests", "2", "--initial-lengths", "3,3", "--steps", "2",
+      "--page-tokens", "4", "--physical-pages", "32",
+      "--kv-heads", "1", "--heads-per-kv", "1", "--head-dim", "2",
+      "--page-padding-bytes", "32",
+    ],
+    cwd=ROOT,
+    env={**os.environ, "PYTHONPATH": os.pathsep.join([str(ROOT), str(GENERATORS), str(ROOT / "scripts")])},
+    check=True,
+    capture_output=True,
+  )
+  report = out / "baseline.report.json"
+  subprocess.run(
+    [
+      sys.executable, str(GENERATORS / "run_paged_attention.py"),
+      "--scenario", str(out / "paged_attention_decode_scenario.json"),
+      "--variant", "baseline",
+      "--context-mode", "4", "--device-context-mode", "8",
+      "--max-cycles", "200000", "--json", "--report", str(report),
+    ],
+    cwd=ROOT,
+    env={**os.environ, "PYTHONPATH": str(ROOT)},
+    check=False,
+    capture_output=True,
+  )
+  if not report.exists():
+    pytest.skip("PagedAttention runner produced no report")
+  assert json.loads(report.read_text(encoding="utf-8"))[0]["completed"]
+
+
+def test_scatter_maintenance_resolves_below_the_static_view(tmp_path):
+  """Plan §2: precise ranges shrink to the Scatter commits, not stay whole.
+
+  The ledger is keyed by the dispatch's UCE runtime event id while the
+  maintenance command names group event tags, so a name-keyed lookup finds
+  nothing and the invalidate silently becomes a no-op.  Running the model
+  in-process lets us read both the ledger and the resolved ranges.
+  """
+  from dataclasses import replace
+
+  import importlib.util
+
+  from pipeline_validator.compiler.api import compile_program
+  from pipeline_validator.config import HardwareConfig, SimConfig
+  from pipeline_validator.execution_ir import GlobalBinding
+  from pipeline_validator.loader import load_program
+  from pipeline_validator.memory import profile_controller as pc_module
+  from pipeline_validator.simulator import Simulator
+  from pipeline_validator.workload_ir import load_workload_ir
+
+  spec = importlib.util.spec_from_file_location(
+    "paged_attention_common", GENERATORS / "paged_attention_common.py"
+  )
+  assert spec is not None and spec.loader is not None
+  common = importlib.util.module_from_spec(spec)
+  sys.modules["paged_attention_common"] = common
+  spec.loader.exec_module(common)
+
+  out = tmp_path / "micro"
+  subprocess.run(
+    [
+      sys.executable, "-m", "generate_paged_attention_decode",
+      "--output-dir", str(out),
+      "--num-requests", "2", "--initial-lengths", "3,3", "--steps", "2",
+      "--page-tokens", "4", "--physical-pages", "32",
+      "--kv-heads", "1", "--heads-per-kv", "1", "--head-dim", "2",
+      "--page-padding-bytes", "32",
+    ],
+    cwd=ROOT,
+    env={**os.environ, "PYTHONPATH": os.pathsep.join([str(ROOT), str(GENERATORS), str(ROOT / "scripts")])},
+    check=True,
+    capture_output=True,
+  )
+  scenario_path = out / "paged_attention_decode_scenario.json"
+  scenario = common.load_scenario(scenario_path, "baseline")
+  module = load_workload_ir(common.workload_path(scenario_path, "baseline"))
+  target = HardwareConfig().memory_target
+  hw = HardwareConfig().with_overrides(
+    memory_target=replace(
+      target,
+      l1=replace(target.l1, reset_mode=scenario.l1_mode),
+      l2=replace(target.l2, reset_mode=scenario.l2_mode),
+    )
+  )
+  sim = SimConfig(fidelity="full_memory").with_overrides(
+    context_count=4, device_context_count=8, max_cycles=200000
+  )
+  bindings = {
+    name: GlobalBinding(name, base, size, perm)
+    for name, (base, size, perm) in scenario.bindings().items()
+  }
+  runner_spec = importlib.util.spec_from_file_location(
+    "run_paged_attention", GENERATORS / "run_paged_attention.py"
+  )
+  assert runner_spec is not None and runner_spec.loader is not None
+  runner = importlib.util.module_from_spec(runner_spec)
+  sys.modules["run_paged_attention"] = runner
+  runner_spec.loader.exec_module(runner)
+  oracle = runner.build_oracle(scenario)
+  artifact = compile_program(
+    module, hw, sim, binding_assumptions=bindings, source_name="pa-narrow"
+  )
+  loaded = load_program(artifact, hw, sim, actual_bindings=bindings)
+  environment, _ = common.make_host_environment(scenario)
+
+  resolved: list[tuple[int, int, int]] = []
+  original = pc_module.ProfileController._resolve_ranges
+
+  def spy(self, owner, command):
+    ranges = original(self, owner, command)
+    for item in command.ranges:
+      if item.precise_writes:
+        resolved.append((item.offset, item.bytes, sum(r.bytes for r in ranges)))
+    return ranges
+
+  pc_module.ProfileController._resolve_ranges = spy
+  try:
+    simulator = Simulator(hw, sim, byte_store=oracle)
+    result = simulator.run(loaded, host=environment)
+  finally:
+    pc_module.ProfileController._resolve_ranges = original
+
+  assert result.completed, result.reason
+  ledger = simulator.group.precise_write_ledger
+  assert ledger, "Scatter commits never reached the precise-write ledger"
+  assert resolved, "no precise maintenance range was resolved"
+  for offset, static_bytes, resolved_bytes in resolved:
+    assert resolved_bytes < static_bytes, (
+      "precise maintenance did not narrow below the static view",
+      offset, static_bytes, resolved_bytes,
+    )
