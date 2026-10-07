@@ -291,6 +291,59 @@ bash examples/run.sh transformer-decode-kv-multicontext --memory-trace --json
 Decode 的 packet/channel 放置收益必须与 UCE multicontext 收益分开；
 旧串行 KV-block II 分析公式不能直接用于 split-KV completion 顺序。
 
+## PagedAttention decode（full_memory）
+
+```bash
+bash examples/run.sh paged-attention-decode --json --report /tmp/pa.pipeline.json
+bash examples/run.sh paged-attention-decode-baseline --json --report /tmp/pa.baseline.json
+# 输出完整 trace 时另加 --trace-json /tmp/pa.trace.json
+```
+
+两个入口使用 `workloads/paged_attention_decode_scenario.json` 和
+`generators/run_paged_attention.py`，默认启用 memory trace、4 个 Tile hardware
+contexts 和 8 个 device contexts。`full_memory` 保留真实地址、ByteStore、
+逐 cache-line Gather/Scatter、cache/MSHR、NoC 和多段 transfer；
+BOA/EVU 仍是 timing/resource 模型，不计算 attention 的数值结果。
+
+Runner 使用 scenario 声明的 `hbm_fixed_latency_cycles`、`num_dma_channels`、
+`group_policy`、`contexts_per_tile` 和 `max_cycles`，不再把记录的场景参数
+悄悄替换为硬件/仿真默认值。默认场景的 HBM latency 为 10 cycles，
+Global DMA channels 为 2。
+
+- 不指定 `--hw-config`：scenario 提供上述两个硬件 timing 参数；
+  `--hw-override KEY=VALUE` 可以覆盖它们。
+- 指定 `--hw-config`：该文件选择硬件 target（未写字段使用 bundled defaults），
+  替代 scenario 的硬件 timing 参数；`--hw-override` 最后生效。
+- 仿真配置：scenario → `--sim-override` → 专用选项
+  `--group-policy`、`--context-mode`、`--max-cycles`。
+  `run.sh` 自带的 context 选项可由后续同名命令行选项覆盖。
+- L1/L2 reset mode 与生成的 IR contract 一致；`--max-cycles` 只限制
+  simulation loop，不限制 seed/parse/compile/load 的墙钟时间。
+
+运行时间包含逐 cycle 控制与有限 lookup/HBM/DMA 资源的排队，不能用
+小尺寸 micro 测试的完成时间推断默认尺寸的运行时间。memory trace 的
+cache/MSHR 统计使用增量计数；饱和 transfer stage 的重复拒绝使用
+resource-free epoch 跳过重复 issue 计算，但每 cycle 的 generation/liveness
+检查、wait 计数、仲裁顺序和 trace 事件保持不变。
+
+本机实测的实现层 A/B（同一默认尺寸，固定旧硬件参数
+`--hw-override hbm_fixed_latency_cycles=200 --hw-override num_dma_channels=4`）：
+
+| 验证运行                                  | 原版墙钟 | 优化后墙钟 | 加速比 |
+| ----------------------------------------- | -------- | ---------- | ------ |
+| 完整 pipeline，关闭 memory trace          | 786.7 s  | 462.7 s    | 1.70×  |
+| pipeline 前 30k cycles，开启 memory trace | 98.3 s   | 29.4 s     | 3.35×  |
+
+前 30k cycles 的对照有意触发 cycle cap，不是完成时间。
+完整无 trace 运行均为 516,209 cycles，JSON report 逐字节一致；
+另一个 60k-cycle 对照的 JSON report 与完整 Chrome trace 也逐字节一致。
+墙钟数值仅供本机参考，不代表硬件性能。
+
+配置修复后的实际 `run.sh paged-attention-decode`（默认 memory trace、
+scenario 的 HBM latency=10 / DMA channels=2）在本机完成于
+374,048 cycles / 695.1 s，所有检查 PASS。这一 cycle 变化来自
+应用场景参数，与上表保持模拟结果不变的实现加速分开计算。
+
 ## 协议场景
 
 | 名称                                | 编辑文件                                           | 主要路径                |

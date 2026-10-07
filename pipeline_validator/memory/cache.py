@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
 
@@ -130,6 +131,7 @@ class DeterministicLRUCache:
     self._misses = 0
     self._refills = 0
     self._evictions = 0
+    self._dirty_lines = 0
     self._discarded_dirty_lines = 0
 
   @property
@@ -362,7 +364,9 @@ class DeterministicLRUCache:
       existing.provenance = provenance
       existing.data = data if data is not None else existing.data
       existing.validity = validity if validity is not None else existing.validity
-      existing.dirty = existing.dirty or dirty
+      if dirty and not existing.dirty:
+        self._dirty_lines += 1
+        existing.dirty = True
       existing.profile_generation = generation
       if token and existing.token != token:
         self._unindex_token(existing.token, identity)
@@ -383,6 +387,7 @@ class DeterministicLRUCache:
       version=self._next_version,
       dirty=dirty,
     )
+    self._dirty_lines += int(dirty)
     self._index_token(token, identity)
 
   def seed_line(
@@ -425,22 +430,13 @@ class DeterministicLRUCache:
       line.data = data
     if line.data is None:
       raise MemoryInvariantError("dirty cache line requires byte data")
+    if not line.dirty:
+      self._dirty_lines += 1
     line.dirty = True
     self._next_version += 1
     line.version = self._next_version
     self._lines.move_to_end(identity)
 
-  def _matches(self, line: _CacheLine, ranges: tuple[CacheRange, ...] | None) -> bool:
-    if ranges is None:
-      return True
-    provenance = line.provenance
-    return any(
-      item.allocation_id == provenance.allocation_id
-      and item.allocation_generation == provenance.allocation_generation
-      and item.offset < provenance.end_offset
-      and provenance.source_offset < item.end
-      for item in ranges
-    )
 
   def begin_maintenance(
     self, ranges: tuple[CacheRange, ...] | None, *, clean: bool, invalidate: bool
@@ -450,10 +446,33 @@ class DeterministicLRUCache:
     Clean lines are invalidated immediately.  Dirty lines remain resident and
     inaccessible to reconfiguration until their returned request completes.
     """
+    # Index once, not once per resident line. Prefix-max ends preserve the
+    # original overlap predicate even for nested/overlapping ranges.
+    ranges_by_allocation: dict[tuple[str, int], list[tuple[int, int]]] = {}
+    if ranges is not None:
+      for item in ranges:
+        key = (item.allocation_id, item.allocation_generation)
+        ranges_by_allocation.setdefault(key, []).append((item.offset, item.end))
+    interval_index: dict[tuple[str, int], tuple[list[int], list[int]]] = {}
+    for key, intervals in ranges_by_allocation.items():
+      intervals.sort()
+      starts: list[int] = []
+      ends: list[int] = []
+      for start, end in intervals:
+        starts.append(start)
+        ends.append(max(end, ends[-1]) if ends else end)
+      interval_index[key] = (starts, ends)
     requests: list[CacheCleanRequest] = []
     for identity, line in tuple(self._lines.items()):
-      if not self._matches(line, ranges):
-        continue
+      if ranges is not None:
+        provenance = line.provenance
+        indexed = interval_index.get((provenance.allocation_id, provenance.allocation_generation))
+        if indexed is None:
+          continue
+        starts, ends = indexed
+        last = bisect_left(starts, provenance.end_offset) - 1
+        if last < 0 or ends[last] <= provenance.source_offset:
+          continue
       if line.pending_clean is not None:
         continue
       if line.dirty:
@@ -492,6 +511,7 @@ class DeterministicLRUCache:
     if not success:
       line.invalidate_after_clean = False
       return
+    self._dirty_lines -= int(line.dirty)
     line.dirty = False
     if line.invalidate_after_clean:
       self._remove_line(identity)
@@ -500,6 +520,8 @@ class DeterministicLRUCache:
 
   def _remove_line(self, identity: CacheLineIdentity) -> None:
     line = self._lines.pop(identity, None)
+    if line is not None:
+      self._dirty_lines -= int(line.dirty)
     if line is None:
       return
     if line.pending_clean is not None:
@@ -514,9 +536,10 @@ class DeterministicLRUCache:
       raise MemoryInvariantError("recovery reset requires all cache refills to drain")
     if self._pending_cleans or any(line.pending_clean is not None for line in self._lines.values()):
       raise MemoryInvariantError("recovery reset requires all cache cleans to isolate")
-    discarded = sum(line.dirty for line in self._lines.values())
+    discarded = self._dirty_lines
     self._lines.clear()
     self._tokens.clear()
+    self._dirty_lines = 0
     self._discarded_dirty_lines += discarded
     return discarded
 
@@ -527,7 +550,7 @@ class DeterministicLRUCache:
       raise MemoryInvariantError("cache profile generation must increase monotonically")
     if self._pending_cleans:
       raise MemoryInvariantError("cannot reconfigure cache with pending clean work")
-    if any(line.dirty for line in self._lines.values()):
+    if self._dirty_lines:
       raise MemoryInvariantError("cannot reconfigure cache with dirty lines")
     if write_policy is not None:
       if write_policy not in ("read_only", "write_back"):
@@ -550,7 +573,7 @@ class DeterministicLRUCache:
       resident_lines=resident_lines,
       resident_bytes=resident_lines * self.line_bytes,
       capacity_bytes=self.capacity_bytes,
-      dirty_lines=sum(line.dirty for line in self._lines.values()),
+      dirty_lines=self._dirty_lines,
       pending_cleans=len(self._pending_cleans),
       discarded_dirty_lines=self._discarded_dirty_lines,
     )
@@ -586,7 +609,7 @@ class DeterministicLRUCache:
     }
 
   def reset(self) -> None:
-    if self._pending_cleans or any(line.dirty for line in self._lines.values()):
+    if self._pending_cleans or self._dirty_lines:
       raise MemoryInvariantError("cache reset would discard uncompleted dirty state")
     self._lines.clear()
     self._tokens.clear()

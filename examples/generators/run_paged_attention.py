@@ -13,15 +13,12 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-from paged_attention_common import (
+from examples.generators.paged_attention_common import (
   load_scenario,
   make_host_environment,
   seed_globals,
   workload_path,
 )
-
 from pipeline_validator.compiled_program import serialize_compiled_program
 from pipeline_validator.compiler.api import compile_program, dump_compiled_source
 from pipeline_validator.config import HardwareConfig, SimConfig
@@ -31,10 +28,6 @@ from pipeline_validator.memory.byte_store import ByteStore
 from pipeline_validator.report import build_report, report_to_json, report_to_text
 from pipeline_validator.simulator import Simulator
 from pipeline_validator.workload_ir import load_workload_ir
-
-# No scenario override is needed: the pipeline's live Grid window is its
-# partition depth, which fits group policy s1's shipped capacity.
-SCENARIO_SIM_OVERRIDES: dict[str, object] = {}
 
 
 def _parse_overrides(specs: list[str]) -> dict[str, object]:
@@ -94,7 +87,11 @@ def main(argv: list[str] | None = None) -> int:
   args = parser.parse_args(argv)
 
   scenario = load_scenario(Path(args.scenario), args.variant)
-  overrides = dict(SCENARIO_SIM_OVERRIDES)
+  overrides: dict[str, object] = {
+    "group.policy": scenario.group_policy,
+    "context_count": scenario.contexts_per_tile,
+    "max_cycles": scenario.max_cycles,
+  }
   overrides.update(_parse_overrides(args.sim_override))
   if args.group_policy is not None:
     overrides["group.policy"] = args.group_policy
@@ -107,7 +104,16 @@ def main(argv: list[str] | None = None) -> int:
   if args.memory_trace:
     overrides["memory_trace"] = True
 
-  hw = HardwareConfig.from_yaml(args.hw_config) if args.hw_config else HardwareConfig()
+  # An explicit hardware file selects a target instead of the scenario's
+  # timing defaults. Individual --hw-override values take precedence below.
+  hw = (
+    HardwareConfig.from_yaml(args.hw_config)
+    if args.hw_config
+    else HardwareConfig().with_overrides(
+      num_dma_channels=scenario.num_dma_channels,
+      hbm_fixed_latency_cycles=scenario.hbm_fixed_latency_cycles,
+    )
+  )
   # The decode fixtures declare l1_mode/l2_mode = 1, so the engine's caches
   # must actually hold capacity: the bundled default target resets to mode 0
   # (SPM only), which would silently turn every Gather into a bypass.

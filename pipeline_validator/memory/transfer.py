@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from .allocator import AllocationHandle, BankSegment, MemoryInvariantError, MemoryOwner
@@ -253,6 +253,31 @@ class MemoryTransaction:
   # failed-acquisition transaction can never release a reference it does
   # not hold.
   reference_acquired: bool = False
+  _issue_plan: _LegIssuePlan | None = field(default=None, init=False, repr=False, compare=False)
+
+
+def _parse_bank_ids(requests: list[StageRequest]) -> tuple[int, ...] | None:
+  """Bank indices when every request names a non-negative bank, else None.
+
+  ``None`` selects the channel/outstanding issue path of a stage.
+  """
+  bank_ids: list[int] = []
+  for req in requests:
+    try:
+      bank_id = int(req.resource_id)
+    except ValueError:
+      bank_id = -1
+    bank_ids.append(bank_id)
+  return tuple(bank_ids) if bank_ids and all(bank_id >= 0 for bank_id in bank_ids) else None
+
+
+class StageFreeEpoch:
+  """Monotonic counter of resource/credit frees, shareable across stages."""
+
+  __slots__ = ("value",)
+
+  def __init__(self) -> None:
+    self.value = 0
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +309,7 @@ class TransferStage:
     burst_bytes: int = 1,
     max_outstanding: int | None = None,
     shared_outstanding: set[str] | None = None,
+    shared_free_epoch: StageFreeEpoch | None = None,
   ):
     if not isinstance(wait_reason, StageWaitReason):
       raise TypeError("transfer stage wait_reason must be a StageWaitReason")
@@ -299,7 +325,19 @@ class TransferStage:
     self._holders: list[str | None] = [None] * resource_count
     # HBM read/write pass the same set to model one global CAM pool.
     self._outstanding_txns: set[str] = shared_outstanding if shared_outstanding is not None else set()
+    # Stages sharing an outstanding pool share its epoch: a credit returned
+    # by one can unblock the other.
+    self._free_epoch = shared_free_epoch if shared_free_epoch is not None else StageFreeEpoch()
     self.wait_cycles: int = 0  # cumulative StageWait cycles (PMU delta)
+
+  @property
+  def free_epoch(self) -> int:
+    """Bumped whenever a resource or outstanding credit may have been freed.
+
+    Issue only ever adds occupancy, so a request that waited at the same
+    epoch would wait again; the manager uses this to skip futile retries.
+    """
+    return self._free_epoch.value
 
   @property
   def _outstanding(self) -> int:
@@ -316,20 +354,26 @@ class TransferStage:
     (different banks run in parallel, same bank serializes).
     Channel/outstanding stages: pick the first free resource.
     """
+    return self._issue_parsed(transaction_id, requests, _parse_bank_ids(requests), cycle)
+
+  def _issue_parsed(
+    self,
+    transaction_id: str,
+    requests: list[StageRequest],
+    bank_ids: tuple[int, ...] | None,
+    cycle: int,
+  ) -> StageResult | StageWait:
+    """``try_issue`` with bank indices already parsed once for the leg.
+
+    The manager retries a blocked leg every cycle with identical requests,
+    so it parses them once per leg instead of once per retry.
+    """
     if self.max_outstanding is not None and self._outstanding >= self.max_outstanding:
       return StageWait(self.wait_reason)
-    # Determine if this is a bank-based stage (resource_id is a bank index)
-    bank_ids: list[int] = []
-    for req in requests:
-      try:
-        bank_ids.append(int(req.resource_id))
-      except ValueError:
-        bank_ids.append(-1)
-    is_bank_based = bank_ids and all(b >= 0 for b in bank_ids)
-    if is_bank_based:
+    if bank_ids is not None:
       # Check all required banks are free
       for bid in bank_ids:
-        if bid < 0 or bid >= self.resource_count:
+        if bid >= self.resource_count:
           return StageWait(self.wait_reason)
         if self._busy_until[bid] > cycle:
           return StageWait(self.wait_reason)
@@ -351,7 +395,7 @@ class TransferStage:
         accepted_cycle=cycle,
         completion_cycle=max_completion,
         channels=len(bank_ids),
-        resources=tuple(bank_ids),
+        resources=bank_ids,
       )
     # Channel/outstanding stage: pick first free resource
     free_idx = None
@@ -375,11 +419,15 @@ class TransferStage:
     return StageResult(accepted_cycle=cycle, completion_cycle=completion, channels=1, resources=(free_idx,))
 
   def _release_resources(self, transaction_id: str) -> None:
+    freed = transaction_id in self._outstanding_txns
     self._outstanding_txns.discard(transaction_id)
     for i, holder in enumerate(self._holders):
       if holder == transaction_id:
         self._busy_until[i] = 0
         self._holders[i] = None
+        freed = True
+    if freed:
+      self._free_epoch.value += 1
 
   def release_outstanding(self, transaction_id: str) -> None:
     """Return one outstanding credit and free the transaction's resources.
@@ -405,11 +453,13 @@ class TransferStage:
         self._outstanding_txns.discard(holder)
         self._busy_until[i] = 0
         self._holders[i] = None
+        self._free_epoch.value += 1
 
   def reset(self) -> None:
     self._busy_until = [0] * self.resource_count
     self._holders = [None] * self.resource_count
     self._outstanding_txns.clear()
+    self._free_epoch.value += 1
     self.wait_cycles = 0
 
   def snapshot(self) -> dict:
@@ -422,6 +472,24 @@ class TransferStage:
       "max_outstanding": self.max_outstanding,
       "wait_cycles": self.wait_cycles,
     }
+
+
+@dataclass(slots=True)
+class _LegIssuePlan:
+  """Derived leg inputs; no memoization of mutable generation/liveness checks."""
+
+  leg: TransferLeg
+  src: ResolvedMemoryView | None
+  dst: ResolvedMemoryView | None
+  tile_id: int | None
+  op: TransferOp
+  stage: TransferStage
+  reads_source: bool
+  writes_destination: bool
+  issue_phase: str
+  requests: list[StageRequest] | None = None
+  bank_ids: tuple[int, ...] | None = None
+  wait_epoch: int = -1
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +576,7 @@ class TransferManager:
     self._issued_by_op: dict[str, int] = {}
     # One global outstanding CAM/credit pool shared by HBM reads+writes.
     self._hbm_outstanding_txns: set[str] = set()
+    hbm_free_epoch = StageFreeEpoch()
     self._hbm_read = TransferStage(
       "hbm_read",
       StageWaitReason.HBM_OUTSTANDING,
@@ -517,6 +586,7 @@ class TransferManager:
       cfg.hbm_burst_bytes,
       max_outstanding=cfg.hbm_outstanding_limit,
       shared_outstanding=self._hbm_outstanding_txns,
+      shared_free_epoch=hbm_free_epoch,
     )
     self._hbm_write = TransferStage(
       "hbm_write",
@@ -527,6 +597,7 @@ class TransferManager:
       cfg.hbm_burst_bytes,
       max_outstanding=cfg.hbm_outstanding_limit,
       shared_outstanding=self._hbm_outstanding_txns,
+      shared_free_epoch=hbm_free_epoch,
     )
     self._global_dma = TransferStage(
       "global_dma",
@@ -1369,24 +1440,47 @@ class TransferManager:
       if leg.kind in (TransferLegKind.NOC_RESPONSE, TransferLegKind.NOC_REQUEST):
         self._step_noc_leg(txn, leg, cycle, completed)
         continue
-      stage = self._stage_for_leg(leg, txn)
-      if txn.leg_start_cycle < 0:
-        if self._leg_reads_source(leg, txn):
+      plan = txn._issue_plan
+      if (
+        plan is None
+        or plan.leg is not leg
+        or plan.src is not txn.src
+        or plan.dst is not txn.dst
+        or plan.tile_id != txn.tile_id
+        or plan.op is not txn.op
+      ):
+        stage = self._stage_for_leg(leg, txn)
+        reads_source = self._leg_reads_source(leg, txn)
+        writes_destination = self._leg_writes_destination(leg, txn)
+        if reads_source:
           issue_phase = "source_issue"
-        elif self._leg_writes_destination(leg, txn):
+        elif writes_destination:
           issue_phase = "destination_issue"
         else:
           issue_phase = "transport_issue"
-        if not self._generation_valid(txn, issue_phase):
-          self._fault_transaction(txn, f"old-generation transfer {issue_phase} rejected", cycle)
+        plan = txn._issue_plan = _LegIssuePlan(
+          leg, txn.src, txn.dst, txn.tile_id, txn.op, stage,
+          reads_source, writes_destination, issue_phase,
+        )
+      stage = plan.stage
+      if txn.leg_start_cycle < 0:
+        # Still validate every cycle, including cached waits: a stale queued
+        # transaction must fault on the same cycle as before this optimization.
+        if not self._generation_valid(txn, plan.issue_phase):
+          self._fault_transaction(txn, f"old-generation transfer {plan.issue_phase} rejected", cycle)
           continue
-        req = self._requests_for_leg(leg, txn)
-        result = stage.try_issue(txn.transaction_id, req, cycle)
-        if isinstance(result, StageWait):
-          txn.wait_reason = result.reason
+        if plan.requests is None:
+          plan.requests = self._requests_for_leg(leg, txn)
+          plan.bank_ids = _parse_bank_ids(plan.requests)
+        result = None
+        if plan.wait_epoch != stage.free_epoch:
+          result = stage._issue_parsed(txn.transaction_id, plan.requests, plan.bank_ids, cycle)
+        if result is None or isinstance(result, StageWait):
+          plan.wait_epoch = stage.free_epoch
+          txn.wait_reason = stage.wait_reason
           stage.wait_cycles += 1
           if self.trace is not None:
-            self.trace.transfer_wait(txn.transaction_id, result.reason.value)
+            self.trace.transfer_wait(txn.transaction_id, stage.wait_reason.value)
           continue
         txn.wait_reason = StageWaitReason.NONE
         txn.leg_start_cycle = result.accepted_cycle
@@ -1414,9 +1508,9 @@ class TransferManager:
           self.trace.transfer_leg_completed(txn, cycle)
           if stage.name in ("hbm_read", "hbm_write"):
             self._trace_hbm_outstanding(cycle)
-        if self._leg_reads_source(leg, txn) and not self._capture_source(txn, cycle):
+        if plan.reads_source and not self._capture_source(txn, cycle):
           continue
-        if self._leg_writes_destination(leg, txn) and not self._commit_destination(txn, cycle):
+        if plan.writes_destination and not self._commit_destination(txn, cycle):
           continue
         self._advance_leg(txn, cycle, completed)
     # track HBM outstanding peak after this cycle's issue activity
@@ -1483,6 +1577,7 @@ class TransferManager:
 
   def _advance_leg(self, txn: MemoryTransaction, cycle: int, completed: list[MemoryTransaction]) -> None:
     """Advance to the next leg, respecting cancel and byte visibility."""
+    txn._issue_plan = None
     if txn.noc_tag:
       self._noc_traversed.pop(txn.noc_tag, None)
     txn.leg_start_cycle = -1

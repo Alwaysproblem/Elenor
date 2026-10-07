@@ -29,14 +29,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+from xdsl.dialects.builtin import ModuleOp
 
-import format_mlir
-import paged_attention_common as common
-from paged_attention_common import (
+from examples.generators import paged_attention_common as common
+from examples.generators.paged_attention_common import (
   APPEND_IDS,
   BLOCK_TABLE,
   GLOBAL_ORDER,
@@ -44,9 +42,7 @@ from paged_attention_common import (
   PARTITIONS,
   Scenario,
 )
-from transformer_common import contract_bytes, write_workload
-from xdsl.dialects.builtin import ModuleOp
-
+from examples.generators.transformer_common import contract_bytes, write_workload
 from pipeline_validator.dialects.elenor import (
   NestAllocOp,
   NestAwaitOp,
@@ -84,6 +80,7 @@ from pipeline_validator.dialects.elenor import (
   TileSubviewOp,
 )
 from pipeline_validator.profiles import CacheRequirement, ContextResources, TileResources
+from scripts import format_mlir
 
 # The last attention block reads its page id from the APPEND_IDS slot (the
 # token appended this step lives on that page), so the block-table prefetch

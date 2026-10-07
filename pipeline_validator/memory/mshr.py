@@ -62,6 +62,7 @@ class MshrTable:
     self._next_token = 0
     self._merged = 0
     self._stalls = 0
+    self._callbacks = 0
     self._version = 0
 
   @property
@@ -101,6 +102,7 @@ class MshrTable:
     if entry.generation != self.generation:
       raise MemoryInvariantError("MSHR waiter targets an old generation")
     entry.callbacks.append(callback)
+    self._callbacks += 1
 
   def is_active(self, token: int) -> bool:
     return token in self._entries
@@ -114,6 +116,7 @@ class MshrTable:
     if entry.generation != expected or expected != self.generation:
       raise MemoryInvariantError("old-generation MSHR cancellation rejected")
     self._entries.pop(token)
+    self._callbacks -= len(entry.callbacks)
     if entry.merge_group is not None:
       self._groups.pop((entry.generation, entry.merge_group), None)
     self._version += 1
@@ -127,6 +130,7 @@ class MshrTable:
     if entry.generation != expected or expected != self.generation:
       raise MemoryInvariantError("old-generation MSHR refill rejected")
     self._entries.pop(token)
+    self._callbacks -= len(entry.callbacks)
     if entry.merge_group is not None:
       self._groups.pop((entry.generation, entry.merge_group), None)
     self._version += 1
@@ -146,7 +150,7 @@ class MshrTable:
       active=len(self._entries),
       merged=self._merged,
       stalls=self._stalls,
-      callbacks=sum(len(entry.callbacks) for entry in self._entries.values()),
+      callbacks=self._callbacks,
       capacity=self.capacity,
       version=self._version,
       generation=self.generation,

@@ -29,6 +29,12 @@ repos:
     rev: v2.1.0
     hooks:
       - id: mypy
+        args:
+          [
+            "--ignore-missing-imports",
+            "--scripts-are-modules",
+            "--explicit-package-bases",
+          ]
         additional_dependencies:
           ["types-requests", "types-pyyaml", "xdsl==0.69.0"]
         exclude: tests(/\w*)*/functional/|tests/input|tests(/\w*)*data/|doc/|TFserving/ClientAPI/go/pkg/|(/\w*)*_test.py

@@ -87,6 +87,73 @@ def micro_reports(tmp_path_factory) -> dict[str, dict]:
   return reports
 
 
+def _run_scenario_options(scenario: Path, report_name: str, *options: str) -> tuple[int, dict]:
+  report = scenario.parent / f"{report_name}.report.json"
+  process = subprocess.run(
+    [
+      sys.executable, str(GENERATORS / "run_paged_attention.py"),
+      "--scenario", str(scenario), "--variant", "pipeline",
+      "--device-context-mode", "8", "--json", "--report", str(report), *options,
+    ],
+    cwd=ROOT,
+    env={**os.environ, "PYTHONPATH": str(ROOT)},
+    capture_output=True,
+    text=True,
+    check=False,
+  )
+  assert report.exists(), process.stderr
+  return process.returncode, json.loads(report.read_text(encoding="utf-8"))[0]
+
+
+def test_runner_scenario_cycle_cap_and_explicit_override_precedence(tmp_path):
+  scenario = _generate(tmp_path)
+  data = json.loads(scenario.read_text(encoding="utf-8"))
+  data["max_cycles"] = 1
+  scenario.write_text(json.dumps(data), encoding="utf-8")
+  code, capped = _run_scenario_options(scenario, "scenario_cap")
+  assert code == 1
+  assert not capped["completed"]
+  assert "cycle cap 1 reached" in capped["reason"]
+  code, completed = _run_scenario_options(
+    scenario, "override_cap", "--sim-override", "max_cycles=200000",
+  )
+  assert code == 0 and completed["completed"], completed["reason"]
+  code, capped = _run_scenario_options(
+    scenario, "dedicated_cap", "--sim-override", "max_cycles=200000", "--max-cycles", "1",
+  )
+  assert code == 1 and not capped["completed"]
+  assert "cycle cap 1 reached" in capped["reason"]
+
+
+def test_runner_scenario_latency_hardware_file_and_override_precedence(tmp_path):
+  scenario = _generate(tmp_path)
+  data = json.loads(scenario.read_text(encoding="utf-8"))
+  data["hbm_fixed_latency_cycles"] = 400
+  scenario.write_text(json.dumps(data), encoding="utf-8")
+  code, slow = _run_scenario_options(scenario, "scenario_slow")
+  assert code == 0 and slow["completed"], slow["reason"]
+  data["hbm_fixed_latency_cycles"] = 10
+  scenario.write_text(json.dumps(data), encoding="utf-8")
+  code, fast = _run_scenario_options(scenario, "scenario_fast")
+  assert code == 0 and fast["completed"], fast["reason"]
+  assert fast["cycles"] < slow["cycles"]
+
+  data["hbm_fixed_latency_cycles"] = 400
+  scenario.write_text(json.dumps(data), encoding="utf-8")
+  hardware = tmp_path / "hardware.yaml"
+  hardware.write_text(
+    "memory:\n  hbm:\n    fixed_latency_cycles: 10\nfabric:\n  dma:\n    channels: 2\n",
+    encoding="utf-8",
+  )
+  code, selected = _run_scenario_options(scenario, "hardware_file", "--hw-config", str(hardware))
+  assert code == 0 and selected["cycles"] == fast["cycles"], selected["reason"]
+  code, overridden = _run_scenario_options(
+    scenario, "hardware_override", "--hw-config", str(hardware),
+    "--hw-override", "hbm_fixed_latency_cycles=400",
+  )
+  assert code == 0 and overridden["cycles"] == slow["cycles"], overridden["reason"]
+
+
 def test_default_scenario_json_matches_plan_geometry():
   """Plan §6: the committed scenario records the plan's default parameters."""
   data = json.loads(SCENARIO.read_text(encoding="utf-8"))
@@ -278,9 +345,8 @@ def test_scatter_maintenance_resolves_below_the_static_view(tmp_path):
   nothing and the invalidate silently becomes a no-op.  Running the model
   in-process lets us read both the ledger and the resolved ranges.
   """
-  from dataclasses import replace
-
   import importlib.util
+  from dataclasses import replace
 
   from pipeline_validator.compiler.api import compile_program
   from pipeline_validator.config import HardwareConfig, SimConfig

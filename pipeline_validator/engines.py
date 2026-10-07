@@ -1301,11 +1301,13 @@ class MFEEngine(Engine):
       )
       return
 
-    if not self._transaction_done(request.transaction_id):
-      terminal = self._transaction_terminal(request.transaction_id)
-      if terminal is not None:
+    if request.transaction_id is None or self.transfer_manager is None:
+      return
+    status = self.transfer_manager.status(request.transaction_id)
+    if status is not TransferStatus.DONE:
+      if status in (TransferStatus.FAULTED, TransferStatus.CANCELLED):
         raise MemoryInvariantError(
-          f"gather transaction {request.transaction_id} reached {terminal.value}"
+          f"gather transaction {request.transaction_id} reached {status.value}"
         )
       return
 
@@ -1483,12 +1485,14 @@ class MFEEngine(Engine):
     # 1. Index window: harvest finished INDEX_READs and decode them.
     for slot in job.slots:
       if slot.state == "INDEX_READ":
-        terminal = self._transaction_terminal(slot.transaction_id)
-        if terminal is not None:
+        if slot.transaction_id is None:
+          continue
+        status = self.transfer_manager.status(slot.transaction_id)
+        if status in (TransferStatus.FAULTED, TransferStatus.CANCELLED):
           raise MemoryInvariantError(
-            f"gather index read {slot.transaction_id} reached {terminal.value}"
+            f"gather index read {slot.transaction_id} reached {status.value}"
           )
-        if not self._transaction_done(slot.transaction_id):
+        if status is not TransferStatus.DONE:
           continue
         assert store is not None
         slot.value = decode_index_i32(self.transfer_manager.captured_data(slot.transaction_id))
