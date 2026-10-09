@@ -854,6 +854,8 @@ class MFEEngine(Engine):
         line_offset,
         line_bytes,
       )
+      if not self.l1_cache.enabled:
+        request.state = "LOOKUP_L2"
     job.requests.append(request)
 
   def _submit_gather_transaction(

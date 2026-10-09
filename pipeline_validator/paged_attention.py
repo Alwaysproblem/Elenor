@@ -1,14 +1,19 @@
-"""Shared geometry, naming and host-runtime helpers for the PagedAttention
-decode slice (plan §6).
+"""PagedAttention decode domain: shared geometry, naming, scenario JSON,
+launch bindings, KV byte seeding and host-runtime helpers (plan §6).
 
-One module serves three consumers:
+One canonical module serves the PagedAttention slice end to end:
 
-- ``generate_paged_attention_decode.py`` authors the two workload IRs and
-  the scenario JSON from :class:`Scenario`;
-- ``run_paged_attention.py`` builds the launch bindings, seeds the
-  ``ByteStore`` and assembles the ``HostEnvironment`` the simulator drives;
-- ``test_paged_attention.py`` reuses the same math for micro scenarios and
-  the reconciliation assertions.
+- ``examples/generators/generate_paged_attention_decode.py`` authors the two
+  workload IRs and the scenario JSON from :class:`Scenario`;
+- the unified ``python -m pipeline_validator`` CLI builds the launch
+  bindings (:func:`build_bindings`), seeds the ``ByteStore`` oracle
+  (:func:`build_oracle`) and assembles the ``HostEnvironment``
+  (:func:`make_host_environment`) the simulator drives;
+- the tests reuse the same math for micro scenarios and the reconciliation
+  assertions.
+
+The module depends only on the validator runtime; it never imports the
+compiler or the example generators.
 
 The KV page layout is fixed: one page holds ``page_tokens`` tokens of
 ``kv_heads * head_dim`` bf16 elements per kind, laid out as
@@ -23,16 +28,14 @@ import hashlib
 import json
 import random
 import struct
-import sys
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[2]
-if str(REPO) not in sys.path:
-  sys.path.insert(0, str(REPO))
-
-from pipeline_validator.memory.page_pool import HostPagePoolSpec  # noqa: E402
-from pipeline_validator.runtime.host_session import (  # noqa: E402
+from .execution_ir import GlobalBinding
+from .memory.byte_store import ByteStore
+from .memory.page_pool import HostPagePoolSpec
+from .runtime.host_session import (
   HostAllocPages,
   HostEnvironment,
   HostFreePages,
@@ -93,6 +96,9 @@ class Scenario:
   placement: int = 15
   contexts_per_tile: int = 4
   l1_mode: int = 1
+  # Baseline-variant L1 profile override; None follows l1_mode so the
+  # sequential comparator stays on the scenario default unless pinned.
+  baseline_l1_mode: int | None = None
   l2_mode: int = 1
   group_policy: str = "s1"
   num_dma_channels: int = 2
@@ -520,6 +526,43 @@ def _release_handler(state: HostRunState, r: int):
 
 
 # ---------------------------------------------------------------------------
+# Launch bindings and ByteStore oracle (unified CLI)
+# ---------------------------------------------------------------------------
+
+
+def build_bindings(scenario: Scenario) -> dict[str, GlobalBinding]:
+  """``{name: GlobalBinding}`` launch view of :meth:`Scenario.bindings`."""
+  return {
+    name: GlobalBinding(name, base, size, permission)
+    for name, (base, size, permission) in scenario.bindings().items()
+  }
+
+
+def build_oracle(
+  scenario: Scenario,
+  bindings: Mapping[str, GlobalBinding] | None = None,
+) -> ByteStore:
+  """Seed canonical payloads into a fresh ``ByteStore``.
+
+  With ``bindings`` the payloads are placed at the actual launch bindings'
+  base iovas and must fit each binding's declared size; without them the
+  scenario's canonical layout (``FIRST_BINDING_IOVA`` / ``BINDING_ALIGN``)
+  is used.
+  """
+  launch_bindings = build_bindings(scenario) if bindings is None else bindings
+  store = ByteStore()
+  for name, payload in seed_globals(scenario).items():
+    binding = launch_bindings[name]
+    if len(payload) > binding.size_bytes:
+      raise ValueError(
+        f"oracle payload {name} ({len(payload)} B) does not fit binding"
+        f" {binding.name} ({binding.size_bytes} B)"
+      )
+    store.seed_hbm(binding.base_iova, payload)
+  return store
+
+
+# ---------------------------------------------------------------------------
 # Scenario JSON (schema_version=1, plan §6)
 # ---------------------------------------------------------------------------
 
@@ -534,6 +577,7 @@ def scenario_to_dict(scenario: Scenario, source_hashes: dict[str, str]) -> dict:
     "page_padding_bytes": scenario.page_padding_bytes,
     "contexts_per_tile": scenario.contexts_per_tile,
     "l1_mode": scenario.l1_mode,
+    "baseline_l1_mode": scenario.baseline_l1_mode,
     "l2_mode": scenario.l2_mode,
     "seed": scenario.seed,
     "initial_mapping": {
@@ -576,6 +620,9 @@ def scenario_from_dict(data: dict) -> Scenario:
     placement=int(data["placement"]),
     contexts_per_tile=int(data["contexts_per_tile"]),
     l1_mode=int(data["l1_mode"]),
+    baseline_l1_mode=(
+      None if data.get("baseline_l1_mode") is None else int(data["baseline_l1_mode"])
+    ),
     l2_mode=int(data["l2_mode"]),
     group_policy=str(data["group_policy"]),
     num_dma_channels=int(data["num_dma_channels"]),
@@ -591,20 +638,31 @@ def workload_path(scenario_path: Path, variant: str) -> Path:
   return Path(scenario_path).parent / f"paged_attention_decode_{variant}.mlir"
 
 
-def load_scenario(scenario_path: Path, variant: str) -> Scenario:
-  """Load one variant's scenario, verifying the recorded source hash first
-  (plan §6: replay checks the scenario source_hash)."""
+def load_scenario(scenario_path: Path, variant: str, *, verify_source: bool = True) -> Scenario:
+  """Load one variant's scenario (plan §6).
+
+  With ``verify_source`` the recorded ``source_hash`` for the selected
+  variant is checked against the fixture IR next to the scenario.  Both
+  modes resolve the variant's L1 mode (the baseline override) and stamp
+  :attr:`Scenario.variant` with the selected variant, so source-free
+  compiled replay (``verify_source=False``) works with the ``.mlir``
+  removed.
+  """
   data = json.loads(Path(scenario_path).read_text(encoding="utf-8"))
   if data.get("schema_version") != 1:
     raise ValueError(f"unsupported scenario schema_version {data.get('schema_version')!r}")
   hashes = data.get("source_hashes") or {}
   if variant not in hashes:
     raise ValueError(f"scenario source_hashes has no entry for variant '{variant}'")
-  ir_path = workload_path(scenario_path, variant)
-  digest = hashlib.sha256(ir_path.read_bytes()).hexdigest()
-  if digest != hashes[variant]:
-    raise ValueError(
-      f"scenario source_hash mismatch for '{variant}': {ir_path} hashes to {digest[:16]}...,"
-      f" scenario records {hashes[variant][:16]}... (regenerate the workloads)"
-    )
-  return scenario_from_dict(data)
+  if verify_source:
+    ir_path = workload_path(scenario_path, variant)
+    digest = hashlib.sha256(ir_path.read_bytes()).hexdigest()
+    if digest != hashes[variant]:
+      raise ValueError(
+        f"scenario source_hash mismatch for '{variant}': {ir_path} hashes to {digest[:16]}...,"
+        f" scenario records {hashes[variant][:16]}... (regenerate the workloads)"
+      )
+  scenario = replace(scenario_from_dict(data), variant=variant)
+  if variant == "baseline" and scenario.baseline_l1_mode is not None:
+    scenario = replace(scenario, l1_mode=scenario.baseline_l1_mode)
+  return scenario

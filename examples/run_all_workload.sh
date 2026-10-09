@@ -22,7 +22,9 @@ set -e
 # Usage:
 #   bash examples/run_all_workload.sh                  # 仅 runtime
 #   bash examples/run_all_workload.sh --full-memory    # runtime + full_memory
-#   bash examples/run_all_workload.sh --scenarios 'a b c' [--full-memory]
+#   bash examples/run_all_workload.sh --scenarios 'a b c' [--full-memory] [-- EXTRA_ARGS...]
+#   bash examples/run_all_workload.sh -s paged-attention-decode -fm -- --max-cycles 500000 --json
+#   -- EXTRA_ARGS...  -- 后面的参数原样转发给每个实际运行的场景。
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FULL_MEMORY_DIR="$ROOT_DIR/examples/traces/full-memory-traces"
@@ -33,6 +35,7 @@ RUNTIME_DIR="$ROOT_DIR/examples/traces/runtime-traces"
 RUN_FULL_MEMORY=0
 SCENARIOS_ARG=""
 SCENARIOS_SET=0
+EXTRA_ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -fm|--full-memory) RUN_FULL_MEMORY=1 ;;
@@ -46,12 +49,17 @@ while [[ $# -gt 0 ]]; do
       SCENARIOS_SET=1
       shift
       ;;
+    --)
+      shift
+      EXTRA_ARGS=("$@")
+      break
+      ;;
     -h|--help)
-      grep -E '^# (Usage:| *bash)' "$0" | sed 's/^# \{0,2\}//'
+      grep -E '^# (Usage:| *bash| *-- )' "$0" | sed 's/^# \{0,2\}//'
       exit 0
       ;;
     *)
-      echo "error: unknown argument '$1' (expected --full-memory / --scenarios)" >&2
+      echo "error: unknown argument '$1' (expected --full-memory / --scenarios / -- EXTRA_ARGS...)" >&2
       exit 2
       ;;
   esac
@@ -120,7 +128,8 @@ run_all() {
       --memory-trace \
       --sim-override fidelity="$fidelity" \
       --trace-json "$out_dir/$name.json" \
-      --report "$out_dir/$name.log"
+      --report "$out_dir/$name.log" \
+      "${EXTRA_ARGS[@]}"
   done
 }
 

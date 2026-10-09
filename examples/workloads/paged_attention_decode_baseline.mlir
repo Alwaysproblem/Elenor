@@ -10,7 +10,7 @@ builtin.module {
     %task: !nest.task, %pool: !nest.global_view<128x8224xbf16>,
     %k_new_l2: !nest.l2_buffer<4x1x64xbf16>, %v_new_l2: !nest.l2_buffer<4x1x64xbf16>,
     %append_idx_l2: !nest.l2_buffer<1xi32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 16384,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -46,7 +46,7 @@ builtin.module {
     %task_1: !nest.task, %pool_1: !nest.global_view<128x8224xbf16>,
     %k_new_l2_1: !nest.l2_buffer<4x1x64xbf16>, %v_new_l2_1: !nest.l2_buffer<4x1x64xbf16>,
     %append_idx_l2_1: !nest.l2_buffer<1xi32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 16384,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -83,7 +83,7 @@ builtin.module {
     %task_2: !nest.task, %pool_2: !nest.global_view<128x8224xbf16>,
     %k_new_l2_2: !nest.l2_buffer<4x1x64xbf16>, %v_new_l2_2: !nest.l2_buffer<4x1x64xbf16>,
     %append_idx_l2_2: !nest.l2_buffer<1xi32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 16384,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -120,7 +120,7 @@ builtin.module {
     %task_3: !nest.task, %pool_3: !nest.global_view<128x8224xbf16>,
     %k_new_l2_3: !nest.l2_buffer<4x1x64xbf16>, %v_new_l2_3: !nest.l2_buffer<4x1x64xbf16>,
     %append_idx_l2_3: !nest.l2_buffer<1xi32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 16384,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -157,7 +157,7 @@ builtin.module {
     %task_4: !nest.task, %pool_4: !nest.global_view<128x8224xbf16>,
     %block_idx_l2: !nest.l2_buffer<1xi32>, %q_l2: !nest.l2_buffer<4x4x64xbf16>,
     %state_l2: !nest.l2_buffer<4x4x2xf32>, %acc_l2: !nest.l2_buffer<4x4x64xf32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 28672,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -215,7 +215,7 @@ builtin.module {
     %task_5: !nest.task, %pool_5: !nest.global_view<128x8224xbf16>,
     %block_idx_l2_1: !nest.l2_buffer<1xi32>, %q_l2_1: !nest.l2_buffer<4x4x64xbf16>,
     %state_l2_1: !nest.l2_buffer<4x4x2xf32>, %acc_l2_1: !nest.l2_buffer<4x4x64xf32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 28672,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -282,7 +282,7 @@ builtin.module {
     %task_6: !nest.task, %pool_6: !nest.global_view<128x8224xbf16>,
     %block_idx_l2_2: !nest.l2_buffer<1xi32>, %q_l2_2: !nest.l2_buffer<4x4x64xbf16>,
     %state_l2_2: !nest.l2_buffer<4x4x2xf32>, %acc_l2_2: !nest.l2_buffer<4x4x64xf32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 28672,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -349,7 +349,7 @@ builtin.module {
     %task_7: !nest.task, %pool_7: !nest.global_view<128x8224xbf16>,
     %block_idx_l2_3: !nest.l2_buffer<1xi32>, %q_l2_3: !nest.l2_buffer<4x4x64xbf16>,
     %state_l2_3: !nest.l2_buffer<4x4x2xf32>, %acc_l2_3: !nest.l2_buffer<4x4x64xf32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 28672,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -416,7 +416,7 @@ builtin.module {
     %task_8: !nest.task, %pool_8: !nest.global_view<128x8224xbf16>,
     %block_idx_l2_4: !nest.l2_buffer<1xi32>, %q_l2_4: !nest.l2_buffer<4x4x64xbf16>,
     %state_l2_4: !nest.l2_buffer<4x4x2xf32>, %acc_l2_4: !nest.l2_buffer<4x4x64xf32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 28672,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -483,7 +483,7 @@ builtin.module {
     %task_9: !nest.task, %pool_9: !nest.global_view<128x8224xbf16>,
     %k_new_l2_4: !nest.l2_buffer<4x1x64xbf16>, %v_new_l2_4: !nest.l2_buffer<4x1x64xbf16>,
     %append_idx_l2_4: !nest.l2_buffer<1xi32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 16384,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -520,7 +520,7 @@ builtin.module {
     %task_10: !nest.task, %pool_10: !nest.global_view<128x8224xbf16>,
     %k_new_l2_5: !nest.l2_buffer<4x1x64xbf16>, %v_new_l2_5: !nest.l2_buffer<4x1x64xbf16>,
     %append_idx_l2_5: !nest.l2_buffer<1xi32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 16384,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -557,7 +557,7 @@ builtin.module {
     %task_11: !nest.task, %pool_11: !nest.global_view<128x8224xbf16>,
     %k_new_l2_6: !nest.l2_buffer<4x1x64xbf16>, %v_new_l2_6: !nest.l2_buffer<4x1x64xbf16>,
     %append_idx_l2_6: !nest.l2_buffer<1xi32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 16384,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -594,7 +594,7 @@ builtin.module {
     %task_12: !nest.task, %pool_12: !nest.global_view<128x8224xbf16>,
     %k_new_l2_7: !nest.l2_buffer<4x1x64xbf16>, %v_new_l2_7: !nest.l2_buffer<4x1x64xbf16>,
     %append_idx_l2_7: !nest.l2_buffer<1xi32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 16384,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -631,7 +631,7 @@ builtin.module {
     %task_13: !nest.task, %pool_13: !nest.global_view<128x8224xbf16>,
     %block_idx_l2_5: !nest.l2_buffer<1xi32>, %q_l2_5: !nest.l2_buffer<4x4x64xbf16>,
     %state_l2_5: !nest.l2_buffer<4x4x2xf32>, %acc_l2_5: !nest.l2_buffer<4x4x64xf32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 28672,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -690,7 +690,7 @@ builtin.module {
     %task_14: !nest.task, %pool_14: !nest.global_view<128x8224xbf16>,
     %block_idx_l2_6: !nest.l2_buffer<1xi32>, %q_l2_6: !nest.l2_buffer<4x4x64xbf16>,
     %state_l2_6: !nest.l2_buffer<4x4x2xf32>, %acc_l2_6: !nest.l2_buffer<4x4x64xf32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 28672,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -758,7 +758,7 @@ builtin.module {
     %task_15: !nest.task, %pool_15: !nest.global_view<128x8224xbf16>,
     %block_idx_l2_7: !nest.l2_buffer<1xi32>, %q_l2_7: !nest.l2_buffer<4x4x64xbf16>,
     %state_l2_7: !nest.l2_buffer<4x4x2xf32>, %acc_l2_7: !nest.l2_buffer<4x4x64xf32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 28672,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -825,7 +825,7 @@ builtin.module {
     %task_16: !nest.task, %pool_16: !nest.global_view<128x8224xbf16>,
     %block_idx_l2_8: !nest.l2_buffer<1xi32>, %q_l2_8: !nest.l2_buffer<4x4x64xbf16>,
     %state_l2_8: !nest.l2_buffer<4x4x2xf32>, %acc_l2_8: !nest.l2_buffer<4x4x64xf32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 28672,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -892,7 +892,7 @@ builtin.module {
     %task_17: !nest.task, %pool_17: !nest.global_view<128x8224xbf16>,
     %block_idx_l2_9: !nest.l2_buffer<1xi32>, %q_l2_9: !nest.l2_buffer<4x4x64xbf16>,
     %state_l2_9: !nest.l2_buffer<4x4x2xf32>, %acc_l2_9: !nest.l2_buffer<4x4x64xf32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 28672,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -959,7 +959,7 @@ builtin.module {
     %task_18: !nest.task, %pool_18: !nest.global_view<128x8224xbf16>,
     %k_new_l2_8: !nest.l2_buffer<4x1x64xbf16>, %v_new_l2_8: !nest.l2_buffer<4x1x64xbf16>,
     %append_idx_l2_8: !nest.l2_buffer<1xi32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 16384,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -996,7 +996,7 @@ builtin.module {
     %task_19: !nest.task, %pool_19: !nest.global_view<128x8224xbf16>,
     %k_new_l2_9: !nest.l2_buffer<4x1x64xbf16>, %v_new_l2_9: !nest.l2_buffer<4x1x64xbf16>,
     %append_idx_l2_9: !nest.l2_buffer<1xi32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 16384,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -1033,7 +1033,7 @@ builtin.module {
     %task_20: !nest.task, %pool_20: !nest.global_view<128x8224xbf16>,
     %k_new_l2_10: !nest.l2_buffer<4x1x64xbf16>, %v_new_l2_10: !nest.l2_buffer<4x1x64xbf16>,
     %append_idx_l2_10: !nest.l2_buffer<1xi32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 16384,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -1070,7 +1070,7 @@ builtin.module {
     %task_21: !nest.task, %pool_21: !nest.global_view<128x8224xbf16>,
     %k_new_l2_11: !nest.l2_buffer<4x1x64xbf16>, %v_new_l2_11: !nest.l2_buffer<4x1x64xbf16>,
     %append_idx_l2_11: !nest.l2_buffer<1xi32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 16384,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -1107,7 +1107,7 @@ builtin.module {
     %task_22: !nest.task, %pool_22: !nest.global_view<128x8224xbf16>,
     %block_idx_l2_10: !nest.l2_buffer<1xi32>, %q_l2_10: !nest.l2_buffer<4x4x64xbf16>,
     %state_l2_10: !nest.l2_buffer<4x4x2xf32>, %acc_l2_10: !nest.l2_buffer<4x4x64xf32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 28672,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -1166,7 +1166,7 @@ builtin.module {
     %task_23: !nest.task, %pool_23: !nest.global_view<128x8224xbf16>,
     %block_idx_l2_11: !nest.l2_buffer<1xi32>, %q_l2_11: !nest.l2_buffer<4x4x64xbf16>,
     %state_l2_11: !nest.l2_buffer<4x4x2xf32>, %acc_l2_11: !nest.l2_buffer<4x4x64xf32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 28672,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -1234,7 +1234,7 @@ builtin.module {
     %task_24: !nest.task, %pool_24: !nest.global_view<128x8224xbf16>,
     %block_idx_l2_12: !nest.l2_buffer<1xi32>, %q_l2_12: !nest.l2_buffer<4x4x64xbf16>,
     %state_l2_12: !nest.l2_buffer<4x4x2xf32>, %acc_l2_12: !nest.l2_buffer<4x4x64xf32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 28672,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -1301,7 +1301,7 @@ builtin.module {
     %task_25: !nest.task, %pool_25: !nest.global_view<128x8224xbf16>,
     %block_idx_l2_13: !nest.l2_buffer<1xi32>, %q_l2_13: !nest.l2_buffer<4x4x64xbf16>,
     %state_l2_13: !nest.l2_buffer<4x4x2xf32>, %acc_l2_13: !nest.l2_buffer<4x4x64xf32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 28672,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -1368,7 +1368,7 @@ builtin.module {
     %task_26: !nest.task, %pool_26: !nest.global_view<128x8224xbf16>,
     %block_idx_l2_14: !nest.l2_buffer<1xi32>, %q_l2_14: !nest.l2_buffer<4x4x64xbf16>,
     %state_l2_14: !nest.l2_buffer<4x4x2xf32>, %acc_l2_14: !nest.l2_buffer<4x4x64xf32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 28672,
       l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
@@ -1438,7 +1438,7 @@ builtin.module {
     %S_INIT: !nest.global_memref<3x4x4x4x4x2xf32>, %O_INIT: !nest.global_memref<3x4x4x4x4x64xf32>,
     %OUT: !nest.global_memref<3x4x4x4x64xf32>)
     placement = 15
-        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2],
+        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2, 3],
       logical_tasks = 68, l2_spm_bytes = 32768, requested_contexts_per_tile = 4,
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
     %k_new = nest.alloc slot = "k_new" role = "in" shape = [4, 1, 64] dtype = "bf16" alignment = 256
@@ -1791,7 +1791,7 @@ builtin.module {
     %S_INIT_1: !nest.global_memref<3x4x4x4x4x2xf32>,
     %O_INIT_1: !nest.global_memref<3x4x4x4x4x64xf32>, %OUT_1: !nest.global_memref<3x4x4x4x64xf32>)
     placement = 15
-        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2],
+        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2, 3],
       logical_tasks = 72, l2_spm_bytes = 32768, requested_contexts_per_tile = 4,
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
     %k_new_1 = nest.alloc slot = "k_new" role = "in" shape = [4, 1, 64] dtype = "bf16"
@@ -2163,7 +2163,7 @@ builtin.module {
     %S_INIT_2: !nest.global_memref<3x4x4x4x4x2xf32>,
     %O_INIT_2: !nest.global_memref<3x4x4x4x4x64xf32>, %OUT_2: !nest.global_memref<3x4x4x4x64xf32>)
     placement = 15
-        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2],
+        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2, 3],
       logical_tasks = 72, l2_spm_bytes = 32768, requested_contexts_per_tile = 4,
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
     %k_new_2 = nest.alloc slot = "k_new" role = "in" shape = [4, 1, 64] dtype = "bf16"
@@ -2535,7 +2535,7 @@ builtin.module {
     %S_INIT_3: !nest.global_memref<3x4x4x4x4x2xf32>,
     %O_INIT_3: !nest.global_memref<3x4x4x4x4x64xf32>, %OUT_3: !nest.global_memref<3x4x4x4x64xf32>)
     placement = 15
-        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2],
+        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2, 3],
       logical_tasks = 72, l2_spm_bytes = 32768, requested_contexts_per_tile = 4,
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
     %k_new_3 = nest.alloc slot = "k_new" role = "in" shape = [4, 1, 64] dtype = "bf16"
@@ -2907,7 +2907,7 @@ builtin.module {
     %S_INIT_4: !nest.global_memref<3x4x4x4x4x2xf32>,
     %O_INIT_4: !nest.global_memref<3x4x4x4x4x64xf32>, %OUT_4: !nest.global_memref<3x4x4x4x64xf32>)
     placement = 15
-        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2],
+        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2, 3],
       logical_tasks = 132, l2_spm_bytes = 32768, requested_contexts_per_tile = 4,
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
     %k_new_4 = nest.alloc slot = "k_new" role = "in" shape = [4, 1, 64] dtype = "bf16"
@@ -3546,7 +3546,7 @@ builtin.module {
     %S_INIT_5: !nest.global_memref<3x4x4x4x4x2xf32>,
     %O_INIT_5: !nest.global_memref<3x4x4x4x4x64xf32>, %OUT_5: !nest.global_memref<3x4x4x4x64xf32>)
     placement = 15
-        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2],
+        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2, 3],
       logical_tasks = 136, l2_spm_bytes = 32768, requested_contexts_per_tile = 4,
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
     %k_new_5 = nest.alloc slot = "k_new" role = "in" shape = [4, 1, 64] dtype = "bf16"
@@ -4204,7 +4204,7 @@ builtin.module {
     %S_INIT_6: !nest.global_memref<3x4x4x4x4x2xf32>,
     %O_INIT_6: !nest.global_memref<3x4x4x4x4x64xf32>, %OUT_6: !nest.global_memref<3x4x4x4x64xf32>)
     placement = 15
-        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2],
+        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2, 3],
       logical_tasks = 136, l2_spm_bytes = 32768, requested_contexts_per_tile = 4,
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
     %k_new_6 = nest.alloc slot = "k_new" role = "in" shape = [4, 1, 64] dtype = "bf16"
@@ -4862,7 +4862,7 @@ builtin.module {
     %S_INIT_7: !nest.global_memref<3x4x4x4x4x2xf32>,
     %O_INIT_7: !nest.global_memref<3x4x4x4x4x64xf32>, %OUT_7: !nest.global_memref<3x4x4x4x64xf32>)
     placement = 15
-        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2],
+        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2, 3],
       logical_tasks = 136, l2_spm_bytes = 32768, requested_contexts_per_tile = 4,
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
     %k_new_7 = nest.alloc slot = "k_new" role = "in" shape = [4, 1, 64] dtype = "bf16"
@@ -5520,7 +5520,7 @@ builtin.module {
     %S_INIT_8: !nest.global_memref<3x4x4x4x4x2xf32>,
     %O_INIT_8: !nest.global_memref<3x4x4x4x4x64xf32>, %OUT_8: !nest.global_memref<3x4x4x4x64xf32>)
     placement = 15
-        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2],
+        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2, 3],
       logical_tasks = 196, l2_spm_bytes = 32768, requested_contexts_per_tile = 4,
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
     %k_new_8 = nest.alloc slot = "k_new" role = "in" shape = [4, 1, 64] dtype = "bf16"
@@ -6443,7 +6443,7 @@ builtin.module {
     %S_INIT_9: !nest.global_memref<3x4x4x4x4x2xf32>,
     %O_INIT_9: !nest.global_memref<3x4x4x4x4x64xf32>, %OUT_9: !nest.global_memref<3x4x4x4x64xf32>)
     placement = 15
-        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2],
+        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2, 3],
       logical_tasks = 200, l2_spm_bytes = 32768, requested_contexts_per_tile = 4,
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
     %k_new_9 = nest.alloc slot = "k_new" role = "in" shape = [4, 1, 64] dtype = "bf16"
@@ -7386,7 +7386,7 @@ builtin.module {
     %O_INIT_10: !nest.global_memref<3x4x4x4x4x64xf32>,
     %OUT_10: !nest.global_memref<3x4x4x4x64xf32>)
     placement = 15
-        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2],
+        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2, 3],
       logical_tasks = 200, l2_spm_bytes = 32768, requested_contexts_per_tile = 4,
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
     %k_new_10 = nest.alloc slot = "k_new" role = "in" shape = [4, 1, 64] dtype = "bf16"
@@ -8329,7 +8329,7 @@ builtin.module {
     %O_INIT_11: !nest.global_memref<3x4x4x4x4x64xf32>,
     %OUT_11: !nest.global_memref<3x4x4x4x64xf32>)
     placement = 15
-        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2],
+        resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [0, 1, 2, 3],
       logical_tasks = 200, l2_spm_bytes = 32768, requested_contexts_per_tile = 4,
       l2_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536}> {
     %k_new_11 = nest.alloc slot = "k_new" role = "in" shape = [4, 1, 64] dtype = "bf16"

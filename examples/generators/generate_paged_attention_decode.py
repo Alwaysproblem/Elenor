@@ -19,30 +19,32 @@ block dispatch gathers its page's K/V rows with ``tile.gather.global.async``
 directly into L1 and then runs the online-softmax decode timing model.
 
 Host routines ``prepare_r{r}_s{s}`` / ``commit_r{r}_s{s}`` / ``release_r{r}``
-manage the page pool and the block table (plan §6); the runner provides the
+manage the page pool and the block table (plan §6); the unified runtime
+(``pipeline_validator.paged_attention.make_host_environment``) provides the
 handlers.  Cross-request ordering is only through the per-request host
 chain: prepare(s) -> step(s) -> commit(s) -> prepare(s+1) -> ... ->
 release(r); no cross-request barriers.
+
+Pipeline resource contracts permit profiles 1, 2 and 3; the baseline retains
+all capacity-compatible profiles, including profile 0.
+
+Generate (shipped configuration: pipeline dispatches at L1 profile 3,
+baseline comparator stays on profile 1):
+  PYTHONPATH=. python examples/generators/generate_paged_attention_decode.py \\
+    --l1-mode 3 --baseline-l1-mode 1
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 
 from xdsl.dialects.builtin import ModuleOp
 
-from examples.generators import paged_attention_common as common
-from examples.generators.paged_attention_common import (
-  APPEND_IDS,
-  BLOCK_TABLE,
-  GLOBAL_ORDER,
-  LENGTHS,
-  PARTITIONS,
-  Scenario,
-)
 from examples.generators.transformer_common import contract_bytes, write_workload
+from pipeline_validator import paged_attention as common
 from pipeline_validator.dialects.elenor import (
   NestAllocOp,
   NestAwaitOp,
@@ -79,6 +81,14 @@ from pipeline_validator.dialects.elenor import (
   TileStoreOp,
   TileSubviewOp,
 )
+from pipeline_validator.paged_attention import (
+  APPEND_IDS,
+  BLOCK_TABLE,
+  GLOBAL_ORDER,
+  LENGTHS,
+  PARTITIONS,
+  Scenario,
+)
 from pipeline_validator.profiles import CacheRequirement, ContextResources, TileResources
 from scripts import format_mlir
 
@@ -99,10 +109,17 @@ def _pool_types(scn: Scenario):
   return NestGlobalMemref.of(shape, scn.kv_dtype), NestGlobalView.of(shape, scn.kv_dtype)
 
 
+def _allowed_profiles(variant: str, compatible: tuple[int, ...]) -> tuple[int, ...]:
+  """Restrict pipeline contracts to profiles 1-3 without changing capacity checks."""
+  if variant == "pipeline":
+    return tuple(mode for mode in (1, 2, 3) if mode in compatible)
+  return compatible
+
+
 def _tile_resources(scn: Scenario, hw, buffers, level: str):
   bytes_reserved, allowed = contract_bytes(hw, level, buffers)
   return TileResources(
-    allowed_profiles=allowed,
+    allowed_profiles=_allowed_profiles(scn.variant, allowed),
     tile_l1_spm_bytes_per_context=bytes_reserved,
     l1_cache=_cache_requirement(),
     l2_cache=_cache_requirement(),
@@ -462,6 +479,11 @@ def build_step_context(scn: Scenario, request: int, step: int, variant: str, hw)
   kvh, hpk, d = scn.kv_heads, scn.heads_per_kv, scn.head_dim
   elem = common.DTYPE_BYTES[scn.kv_dtype]
   pipeline = variant == "pipeline"
+  # The baseline comparator pins its own L1 profile when baseline_l1_mode is
+  # set, so switching the pipeline's profile does not silently move it.
+  dispatch_l1_mode = (
+    scn.l1_mode if pipeline or scn.baseline_l1_mode is None else scn.baseline_l1_mode
+  )
   blocks = scn.block_count(request, step)
   last = blocks - 1
   tip = scn.token_in_page(request, step)
@@ -491,7 +513,7 @@ def build_step_context(scn: Scenario, request: int, step: int, variant: str, hw)
     scn.context_name(request, step),
     ContextResources(
       l2_mode=scn.l2_mode,
-      allowed_profiles=allowed_l2,
+      allowed_profiles=_allowed_profiles(variant, allowed_l2),
       logical_tasks=logical_tasks,
       l2_spm_bytes=l2_bytes,
       requested_contexts_per_tile=scn.contexts_per_tile,
@@ -603,7 +625,7 @@ def build_step_context(scn: Scenario, request: int, step: int, variant: str, hw)
     f"append_grid_{tag}",
     f"append_inrel_{tag}",
     "",
-    l1_mode=scn.l1_mode,
+    l1_mode=dispatch_l1_mode,
     bindings=[k_new_l2, v_new_l2, append_idx_l2],
     signal_policy={"input_released": "all_tasks"},
     depends_on=[pf_k, pf_v, pf_append],
@@ -645,7 +667,7 @@ def build_step_context(scn: Scenario, request: int, step: int, variant: str, hw)
       f"att{b}_grid_{tag}",
       f"att{b}_inrel_{tag}",
       f"att{b}_out_{tag}",
-      l1_mode=scn.l1_mode,
+      l1_mode=dispatch_l1_mode,
       bindings=[idx_buffer, q_l2, state_l2[p], acc_l2[p]],
       signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
       depends_on=depends,
@@ -672,7 +694,7 @@ def build_step_context(scn: Scenario, request: int, step: int, variant: str, hw)
       f"merge_grid_{tag}",
       f"merge_inrel_{tag}",
       f"merge_out_{tag}",
-      l1_mode=scn.l1_mode,
+      l1_mode=dispatch_l1_mode,
       bindings=[*state_l2, *acc_l2, out_l2],
       signal_policy={"input_released": "all_tasks", "output_ready": "all_tasks"},
       depends_on=merge_deps,
@@ -746,6 +768,7 @@ def build_step_context(scn: Scenario, request: int, step: int, variant: str, hw)
 def build_module(scn: Scenario, variant: str, hw) -> ModuleOp:
   """Full module for one variant: tile programs, step contexts and the
   nexus.program with the host-call DAG (plan §6)."""
+  scn = replace(scn, variant=variant)
   programs: list = []
   for request in range(scn.num_requests):
     for tip in sorted({scn.token_in_page(request, s) for s in range(scn.steps)}):
@@ -859,6 +882,10 @@ def main() -> int:
                       help="tile placement mask; default 2**kv_heads-1 for the group")
   parser.add_argument("--initial-owner-pages", default=None,
                       help="comma-separated first pages per request; default seeded shuffle")
+  parser.add_argument("--l1-mode", type=int, default=None,
+                      help="L1 profile for pipeline dispatches (default: Scenario default)")
+  parser.add_argument("--baseline-l1-mode", type=int, default=None,
+                      help="L1 profile for baseline dispatches (default: follow --l1-mode)")
   args = parser.parse_args()
 
   lengths = tuple(int(v) for v in args.initial_lengths.split(","))
@@ -879,6 +906,10 @@ def main() -> int:
     page_padding_bytes=args.page_padding_bytes,
     initial_mapping=mapping,
   )
+  if args.l1_mode is not None:
+    scenario = replace(scenario, l1_mode=args.l1_mode)
+  if args.baseline_l1_mode is not None:
+    scenario = replace(scenario, baseline_l1_mode=args.baseline_l1_mode)
 
   from pipeline_validator.config import HardwareConfig
 

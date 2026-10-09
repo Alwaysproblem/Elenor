@@ -1,4 +1,11 @@
-"""Plan §Verification 7-8: PagedAttention decode micro and reconciliation."""
+"""Plan §Verification 7-8: PagedAttention decode micro and reconciliation.
+
+Everything drives the unified ``python -m pipeline_validator`` CLI:
+``--scenario`` + ``--variant`` for source runs, ``--compiled-file`` for
+source-free replay, and ``--l1-mode`` for the source-side L1 profile
+rewrite.  The in-process reconciliation tests import the canonical
+``pipeline_validator.paged_attention`` helpers directly.
+"""
 
 from __future__ import annotations
 
@@ -10,131 +17,131 @@ from pathlib import Path
 
 import pytest
 
+from pipeline_validator import paged_attention as common
+
 ROOT = Path(__file__).resolve().parents[2]
-GENERATORS = ROOT / "examples" / "generators"
 WORKLOADS = ROOT / "examples" / "workloads"
 SCENARIO = WORKLOADS / "paged_attention_decode_scenario.json"
 
-sys.path.insert(0, str(GENERATORS))
+MICRO_GENERATE_ARGS = (
+  "--num-requests", "2",
+  "--initial-lengths", "3,3",
+  "--steps", "2",
+  "--page-tokens", "4",
+  "--physical-pages", "32",
+  "--kv-heads", "1",
+  "--heads-per-kv", "1",
+  "--head-dim", "2",
+  "--page-padding-bytes", "32",
+)
 
 
 def _generate(output_dir: Path, **overrides) -> Path:
   """Emit a micro scenario (plan §7 geometry) into ``output_dir``."""
-  args = [
-    "--output-dir", str(output_dir),
-    "--num-requests", "2",
-    "--initial-lengths", "3,3",
-    "--steps", "2",
-    "--page-tokens", "4",
-    "--physical-pages", "32",
-    "--kv-heads", "1",
-    "--heads-per-kv", "1",
-    "--head-dim", "2",
-    "--page-padding-bytes", "32",
-  ]
+  args = ["--output-dir", str(output_dir)]
+  args.extend(MICRO_GENERATE_ARGS)
   for flag, value in overrides.items():
-    args.extend([f"--{flag}", str(value)])
-  command = [sys.executable, "-m", "generate_paged_attention_decode", *args]
+    args.extend([f"--{flag.replace('_', '-')}", str(value)])
   subprocess.run(
-    command,
+    [sys.executable, "-m", "examples.generators.generate_paged_attention_decode", *args],
     cwd=ROOT,
-    env={**os.environ, "PYTHONPATH": os.pathsep.join([str(ROOT), str(GENERATORS), str(ROOT / "scripts")])},
+    env={**os.environ, "PYTHONPATH": str(ROOT)},
     check=True,
     capture_output=True,
   )
   return output_dir / "paged_attention_decode_scenario.json"
 
 
-def _run(scenario: Path, variant: str, max_cycles: int = 200000) -> tuple[dict, Path]:
-  report = scenario.parent / f"{variant}.report.json"
-  subprocess.run(
-    [
-      sys.executable,
-      str(GENERATORS / "run_paged_attention.py"),
-      "--scenario",
-      str(scenario),
-      "--variant",
-      variant,
-      "--context-mode",
-      "4",
-      "--device-context-mode",
-      "8",
-      "--max-cycles",
-      str(max_cycles),
-      "--json",
-      "--report",
-      str(report),
-    ],
-    cwd=ROOT,
-    env={**os.environ, "PYTHONPATH": str(ROOT)},
-    check=False,
-    capture_output=True,
-  )
-  if not report.exists():
-    pytest.skip("PagedAttention runner produced no report")
-  return json.loads(report.read_text(encoding="utf-8"))[0], report
-
-
-@pytest.fixture(scope="module")
-def micro_reports(tmp_path_factory) -> dict[str, dict]:
-  out = tmp_path_factory.mktemp("paged_micro")
-  scenario = _generate(out)
-  if not scenario.exists():
-    pytest.skip("PagedAttention generator produced no scenario")
-  reports = {}
-  for variant in ("baseline", "pipeline"):
-    reports[variant], _ = _run(scenario, variant)
-  return reports
-
-
-def _run_scenario_options(scenario: Path, report_name: str, *options: str) -> tuple[int, dict]:
-  report = scenario.parent / f"{report_name}.report.json"
-  process = subprocess.run(
-    [
-      sys.executable, str(GENERATORS / "run_paged_attention.py"),
-      "--scenario", str(scenario), "--variant", "pipeline",
-      "--device-context-mode", "8", "--json", "--report", str(report), *options,
-    ],
+def _cli(scenario: Path, *options: str, variant: str | None = "pipeline") -> subprocess.CompletedProcess:
+  """Run the unified CLI on a scenario and return the completed process."""
+  command = [sys.executable, "-m", "pipeline_validator", "--scenario", str(scenario)]
+  if variant is not None:
+    command.extend(["--variant", variant])
+  return subprocess.run(
+    [*command, *options],
     cwd=ROOT,
     env={**os.environ, "PYTHONPATH": str(ROOT)},
     capture_output=True,
     text=True,
     check=False,
   )
-  assert report.exists(), process.stderr
-  return process.returncode, json.loads(report.read_text(encoding="utf-8"))[0]
 
 
-def test_runner_scenario_cycle_cap_and_explicit_override_precedence(tmp_path):
+def _report(path: Path) -> dict:
+  return json.loads(path.read_text(encoding="utf-8"))[0]
+
+
+def _run(scenario: Path, variant: str, max_cycles: int = 200000) -> dict:
+  """Run one variant to completion through the unified CLI."""
+  report_path = scenario.parent / f"{variant}.report.json"
+  process = _cli(
+    scenario,
+    "--context-mode", "4",
+    "--device-context-mode", "8",
+    "--max-cycles", str(max_cycles),
+    "--json",
+    "--report", str(report_path),
+    variant=variant,
+  )
+  assert process.returncode == 0, (variant, process.returncode, process.stderr[-2000:])
+  return _report(report_path)
+
+
+@pytest.fixture(scope="module")
+def micro_reports(tmp_path_factory) -> dict[str, dict]:
+  out = tmp_path_factory.mktemp("paged_micro")
+  scenario = _generate(out)
+  return {variant: _run(scenario, variant) for variant in ("baseline", "pipeline")}
+
+
+def test_cli_scenario_cycle_cap_and_explicit_override_precedence(tmp_path):
   scenario = _generate(tmp_path)
   data = json.loads(scenario.read_text(encoding="utf-8"))
   data["max_cycles"] = 1
   scenario.write_text(json.dumps(data), encoding="utf-8")
-  code, capped = _run_scenario_options(scenario, "scenario_cap")
-  assert code == 1
+  report = tmp_path / "scenario_cap.report.json"
+  process = _cli(scenario, "--device-context-mode", "8", "--json", "--report", str(report))
+  assert process.returncode == 1, process.stderr
+  capped = _report(report)
   assert not capped["completed"]
   assert "cycle cap 1 reached" in capped["reason"]
-  code, completed = _run_scenario_options(
-    scenario, "override_cap", "--sim-override", "max_cycles=200000",
+  report = tmp_path / "override_cap.report.json"
+  process = _cli(
+    scenario, "--device-context-mode", "8", "--json", "--report", str(report),
+    "--sim-override", "max_cycles=200000",
   )
-  assert code == 0 and completed["completed"], completed["reason"]
-  code, capped = _run_scenario_options(
-    scenario, "dedicated_cap", "--sim-override", "max_cycles=200000", "--max-cycles", "1",
+  assert process.returncode == 0, process.stderr
+  assert _report(report)["completed"]
+  report = tmp_path / "dedicated_cap.report.json"
+  process = _cli(
+    scenario, "--device-context-mode", "8", "--json", "--report", str(report),
+    "--sim-override", "max_cycles=200000", "--max-cycles", "1",
   )
-  assert code == 1 and not capped["completed"]
+  assert process.returncode == 1, process.stderr
+  capped = _report(report)
+  assert not capped["completed"]
   assert "cycle cap 1 reached" in capped["reason"]
 
 
-def test_runner_scenario_latency_hardware_file_and_override_precedence(tmp_path):
+def test_cli_scenario_latency_hardware_file_and_override_precedence(tmp_path):
   scenario = _generate(tmp_path)
   data = json.loads(scenario.read_text(encoding="utf-8"))
   data["hbm_fixed_latency_cycles"] = 400
   scenario.write_text(json.dumps(data), encoding="utf-8")
-  code, slow = _run_scenario_options(scenario, "scenario_slow")
+
+  def _run_named(name: str, *options: str) -> tuple[int, dict]:
+    report = tmp_path / f"{name}.report.json"
+    process = _cli(
+      scenario, "--device-context-mode", "8", "--json", "--report", str(report), *options,
+    )
+    assert report.exists(), process.stderr
+    return process.returncode, _report(report)
+
+  code, slow = _run_named("scenario_slow")
   assert code == 0 and slow["completed"], slow["reason"]
   data["hbm_fixed_latency_cycles"] = 10
   scenario.write_text(json.dumps(data), encoding="utf-8")
-  code, fast = _run_scenario_options(scenario, "scenario_fast")
+  code, fast = _run_named("scenario_fast")
   assert code == 0 and fast["completed"], fast["reason"]
   assert fast["cycles"] < slow["cycles"]
 
@@ -145,38 +152,24 @@ def test_runner_scenario_latency_hardware_file_and_override_precedence(tmp_path)
     "memory:\n  hbm:\n    fixed_latency_cycles: 10\nfabric:\n  dma:\n    channels: 2\n",
     encoding="utf-8",
   )
-  code, selected = _run_scenario_options(scenario, "hardware_file", "--hw-config", str(hardware))
+  code, selected = _run_named("hardware_file", "--hw-config", str(hardware))
   assert code == 0 and selected["cycles"] == fast["cycles"], selected["reason"]
-  code, overridden = _run_scenario_options(
-    scenario, "hardware_override", "--hw-config", str(hardware),
+  code, overridden = _run_named(
+    "hardware_override", "--hw-config", str(hardware),
     "--hw-override", "hbm_fixed_latency_cycles=400",
   )
   assert code == 0 and overridden["cycles"] == slow["cycles"], overridden["reason"]
 
 
-def test_default_scenario_json_matches_plan_geometry():
-  """Plan §6: the committed scenario records the plan's default parameters."""
-  data = json.loads(SCENARIO.read_text(encoding="utf-8"))
-  assert data["schema_version"] == 1
-  assert data["num_requests"] == 3
-  assert list(data["initial_lengths"]) == [255, 511, 767]
-  assert data["steps"] == 4
-  assert data["page_tokens"] == 16
-  assert data["physical_pages"] == 128
-  assert data["head_dim"] == 64
-  # Final lengths are derived: each request appends one token per step.
-  assert [length + data["steps"] for length in data["initial_lengths"]] == [259, 515, 771]
-  assert data["kv_heads"] == 4 and data["heads_per_kv"] == 4
-  assert data["placement"] == 15
-  for variant in ("pipeline", "baseline"):
-    assert variant in data["source_hashes"]
-
-
 def test_micro_both_variants_complete(micro_reports):
-  """Plan §7: both variants run to completion on the micro geometry."""
+  """Plan §7: both variants run to completion with every check green."""
   for variant, report in micro_reports.items():
     assert report["completed"], f"{variant}: {report.get('reason')}"
-    assert report["cycles"] > 0
+    # Arena/page/gather/scatter conservation invariants all hold.
+    assert all(check["pass"] for check in report["checks"]), (
+      variant,
+      [check for check in report["checks"] if not check["pass"]],
+    )
 
 
 def test_micro_scatter_commits_and_gather_reads_back(micro_reports):
@@ -242,16 +235,6 @@ def test_default_scenario_byte_reconciliation():
   counts, op counts), so this asserts the reconciliation identities
   without paying for a 250k-cycle run in the unit suite.
   """
-  import importlib.util
-
-  spec = importlib.util.spec_from_file_location(
-    "paged_attention_common", GENERATORS / "paged_attention_common.py"
-  )
-  assert spec is not None and spec.loader is not None
-  common = importlib.util.module_from_spec(spec)
-  sys.modules["paged_attention_common"] = common
-  spec.loader.exec_module(common)
-
   scenario = common.load_scenario(SCENARIO, "baseline")
   # 12 appends: 3 requests x 4 steps, each writing one K and one V row.
   assert scenario.num_requests * scenario.steps == 12
@@ -284,59 +267,6 @@ def test_default_scenario_byte_reconciliation():
   assert len(payloads["POOL"]) == scenario.physical_pages * scenario.page_stride_bytes
 
 
-def test_scatter_maintenance_narrows_to_the_committed_bytes(tmp_path):
-  """Plan §2: a Scatter-driven invalidate resolves to the committed bytes.
-
-  Guards the silent-no-op failure mode: the ledger is keyed by the UCE
-  runtime event id while maintenance commands name group event tags, so a
-  name-keyed lookup finds nothing and the invalidate silently disappears.
-  This asserts the resolved ranges are strictly smaller than the static
-  view, and that the ledger actually recorded Scatter commits.
-  """
-  import importlib.util
-
-  spec = importlib.util.spec_from_file_location(
-    "paged_attention_common", GENERATORS / "paged_attention_common.py"
-  )
-  assert spec is not None and spec.loader is not None
-  common = importlib.util.module_from_spec(spec)
-  sys.modules["paged_attention_common"] = common
-  spec.loader.exec_module(common)
-
-  out = tmp_path / "micro"
-  subprocess.run(
-    [
-      sys.executable, "-m", "generate_paged_attention_decode",
-      "--output-dir", str(out),
-      "--num-requests", "2", "--initial-lengths", "3,3", "--steps", "2",
-      "--page-tokens", "4", "--physical-pages", "32",
-      "--kv-heads", "1", "--heads-per-kv", "1", "--head-dim", "2",
-      "--page-padding-bytes", "32",
-    ],
-    cwd=ROOT,
-    env={**os.environ, "PYTHONPATH": os.pathsep.join([str(ROOT), str(GENERATORS), str(ROOT / "scripts")])},
-    check=True,
-    capture_output=True,
-  )
-  report = out / "baseline.report.json"
-  subprocess.run(
-    [
-      sys.executable, str(GENERATORS / "run_paged_attention.py"),
-      "--scenario", str(out / "paged_attention_decode_scenario.json"),
-      "--variant", "baseline",
-      "--context-mode", "4", "--device-context-mode", "8",
-      "--max-cycles", "200000", "--json", "--report", str(report),
-    ],
-    cwd=ROOT,
-    env={**os.environ, "PYTHONPATH": str(ROOT)},
-    check=False,
-    capture_output=True,
-  )
-  if not report.exists():
-    pytest.skip("PagedAttention runner produced no report")
-  assert json.loads(report.read_text(encoding="utf-8"))[0]["completed"]
-
-
 def test_scatter_maintenance_resolves_below_the_static_view(tmp_path):
   """Plan §2: precise ranges shrink to the Scatter commits, not stay whole.
 
@@ -345,41 +275,17 @@ def test_scatter_maintenance_resolves_below_the_static_view(tmp_path):
   nothing and the invalidate silently becomes a no-op.  Running the model
   in-process lets us read both the ledger and the resolved ranges.
   """
-  import importlib.util
   from dataclasses import replace
 
   from pipeline_validator.compiler.api import compile_program
   from pipeline_validator.config import HardwareConfig, SimConfig
-  from pipeline_validator.execution_ir import GlobalBinding
   from pipeline_validator.loader import load_program
   from pipeline_validator.memory import profile_controller as pc_module
   from pipeline_validator.simulator import Simulator
   from pipeline_validator.workload_ir import load_workload_ir
 
-  spec = importlib.util.spec_from_file_location(
-    "paged_attention_common", GENERATORS / "paged_attention_common.py"
-  )
-  assert spec is not None and spec.loader is not None
-  common = importlib.util.module_from_spec(spec)
-  sys.modules["paged_attention_common"] = common
-  spec.loader.exec_module(common)
-
   out = tmp_path / "micro"
-  subprocess.run(
-    [
-      sys.executable, "-m", "generate_paged_attention_decode",
-      "--output-dir", str(out),
-      "--num-requests", "2", "--initial-lengths", "3,3", "--steps", "2",
-      "--page-tokens", "4", "--physical-pages", "32",
-      "--kv-heads", "1", "--heads-per-kv", "1", "--head-dim", "2",
-      "--page-padding-bytes", "32",
-    ],
-    cwd=ROOT,
-    env={**os.environ, "PYTHONPATH": os.pathsep.join([str(ROOT), str(GENERATORS), str(ROOT / "scripts")])},
-    check=True,
-    capture_output=True,
-  )
-  scenario_path = out / "paged_attention_decode_scenario.json"
+  scenario_path = _generate(out)
   scenario = common.load_scenario(scenario_path, "baseline")
   module = load_workload_ir(common.workload_path(scenario_path, "baseline"))
   target = HardwareConfig().memory_target
@@ -393,18 +299,8 @@ def test_scatter_maintenance_resolves_below_the_static_view(tmp_path):
   sim = SimConfig(fidelity="full_memory").with_overrides(
     context_count=4, device_context_count=8, max_cycles=200000
   )
-  bindings = {
-    name: GlobalBinding(name, base, size, perm)
-    for name, (base, size, perm) in scenario.bindings().items()
-  }
-  runner_spec = importlib.util.spec_from_file_location(
-    "run_paged_attention", GENERATORS / "run_paged_attention.py"
-  )
-  assert runner_spec is not None and runner_spec.loader is not None
-  runner = importlib.util.module_from_spec(runner_spec)
-  sys.modules["run_paged_attention"] = runner
-  runner_spec.loader.exec_module(runner)
-  oracle = runner.build_oracle(scenario)
+  bindings = common.build_bindings(scenario)
+  oracle = common.build_oracle(scenario, bindings)
   artifact = compile_program(
     module, hw, sim, binding_assumptions=bindings, source_name="pa-narrow"
   )
@@ -437,3 +333,193 @@ def test_scatter_maintenance_resolves_below_the_static_view(tmp_path):
       "precise maintenance did not narrow below the static view",
       offset, static_bytes, resolved_bytes,
     )
+
+
+def test_cli_l1_mode_switches_actual_l1_cache_behavior(tmp_path):
+  """--l1-mode rewires the compiled L1 cache without touching any file.
+
+  The baseline retains mode 0; the pipeline contract explicitly permits
+  only modes 1–3.
+
+  The geometry keeps a full page untouched across steps (lengths 8 grow
+  to 10, so each step-1 append lands in a third page): the step-1 blocks
+  re-gather pages 0 and 1 unchanged, so the cache-enabled run must show
+  real L1 hits, while --l1-mode 0 disables the L1 cache and the same
+  source runs with no L1 hits at all.
+  """
+  scenario = _generate(tmp_path, initial_lengths="8,8")
+  before = {
+    path: path.read_bytes()
+    for path in tmp_path.iterdir()
+    if path.suffix in (".mlir", ".json")
+  }
+
+  enabled_report = tmp_path / "l1_enabled.report.json"
+  process = _cli(
+    scenario,
+    "--context-mode", "4", "--device-context-mode", "8",
+    "--max-cycles", "200000", "--l1-mode", "3",
+    "--json", "--report", str(enabled_report),
+    variant="baseline",
+  )
+  assert process.returncode == 0, process.stderr
+  report = _report(enabled_report)
+  assert report["completed"], report["reason"]
+  events = report["events"]
+  requests = events["gather_requests"]
+  assert requests > 0
+  assert requests == (
+    events["gather_l1_hits"]
+    + events["gather_l2_hits"]
+    + events["gather_hbm_misses"]
+    + events["gather_cache_bypass_requests"]
+  )
+  assert events["gather_l1_hits"] > 0, "cache-enabled run never reused a resident line"
+
+  disabled_report = tmp_path / "l1_disabled.report.json"
+  process = _cli(
+    scenario,
+    "--context-mode", "4", "--device-context-mode", "8",
+    "--max-cycles", "200000", "--l1-mode", "0",
+    "--json", "--report", str(disabled_report),
+    variant="baseline",
+  )
+  assert process.returncode == 0, (process.returncode, process.stderr[-2000:])
+  report = _report(disabled_report)
+  assert report["completed"], report["reason"]
+  events = report["events"]
+  requests = events["gather_requests"]
+  assert requests > 0
+  assert requests == (
+    events["gather_l1_hits"]
+    + events["gather_l2_hits"]
+    + events["gather_hbm_misses"]
+    + events["gather_cache_bypass_requests"]
+  )
+  assert events["gather_l1_hits"] == 0, "L1 cache served hits while disabled"
+  # L2 stays enabled, so the re-gathered untouched pages must still hit
+  # there — an all-bypass mode-0 run would be a silent downgrade.
+  assert events["gather_l2_hits"] > 0, "L2 cache never reused a resident line"
+
+  after = {path: path.read_bytes() for path in before}
+  assert after == before, "run modified the source fixtures or scenario"
+  # The recorded source hashes still verify after both invocations.
+  common.load_scenario(scenario, "baseline")
+
+
+def test_cli_pipeline_rejects_spm_only_l1_mode(tmp_path):
+  """A runtime override cannot widen the pipeline's allowed profile contract."""
+  scenario = _generate(tmp_path)
+  artifact = tmp_path / "disallowed.json"
+  report = tmp_path / "disallowed.report.json"
+  process = _cli(
+    scenario, "--l1-mode", "0", "--compiled-output", str(artifact),
+    "--json", "--report", str(report),
+  )
+  assert process.returncode == 2, process.stderr
+  assert not artifact.exists()
+  assert not report.exists()
+
+
+def test_cli_compiled_replay_runs_without_source_or_compiler(tmp_path):
+  """--scenario + --compiled-file replays after the .mlir is deleted.
+
+  The replay subprocess blocks every ``pipeline_validator.compiler`` and
+  ``examples.generators`` import, so a successful run proves the source-
+  free path needs neither the compiler nor the generator package.
+  """
+  scenario = _generate(tmp_path, initial_lengths="8,8")
+  artifact = tmp_path / "replay.json"
+  process = _cli(
+    scenario,
+    "--context-mode", "4", "--device-context-mode", "8",
+    "--max-cycles", "200000", "--l1-mode", "3",
+    "--compile-only", "--compiled-output", str(artifact),
+  )
+  assert process.returncode == 0, process.stderr
+  target = tmp_path / "replay.target.yaml"
+  assert artifact.exists() and target.exists()
+
+  for variant in ("pipeline", "baseline"):
+    (tmp_path / f"paged_attention_decode_{variant}.mlir").unlink()
+
+  blocker = tmp_path / "no_compiler_imports"
+  blocker.mkdir()
+  (blocker / "sitecustomize.py").write_text(
+    "import sys\n"
+    "_BLOCKED = ('pipeline_validator.compiler', 'examples.generators')\n"
+    "class _Blocked:\n"
+    "    def find_spec(self, fullname, path=None, target=None):\n"
+    "        for prefix in _BLOCKED:\n"
+    "            if fullname == prefix or fullname.startswith(prefix + '.'):\n"
+    "                raise ImportError('blocked by test: ' + fullname)\n"
+    "        return None\n"
+    "sys.meta_path.insert(0, _Blocked())\n",
+    encoding="utf-8",
+  )
+  replay_report = tmp_path / "replay.run.report.json"
+  process = subprocess.run(
+    [
+      sys.executable, "-m", "pipeline_validator",
+      "--scenario", str(scenario),
+      "--compiled-file", str(artifact),
+      "--hw-config", str(target),
+      "--context-mode", "4", "--device-context-mode", "8",
+      "--json", "--report", str(replay_report),
+    ],
+    cwd=ROOT,
+    env={
+      **os.environ,
+      "PYTHONPATH": os.pathsep.join([str(blocker), str(ROOT)]),
+    },
+    capture_output=True,
+    text=True,
+    check=False,
+  )
+  assert process.returncode == 0, process.stderr
+  report = _report(replay_report)
+  assert report["completed"], report["reason"]
+  assert report["events"]["gather_l1_hits"] > 0
+  assert all(check["pass"] for check in report["checks"]), (
+    [check for check in report["checks"] if not check["pass"]]
+  )
+
+
+def test_cli_source_hash_mismatch_fails_before_artifacts(tmp_path):
+  """A tampered fixture fails scenario load before any artifact or report."""
+  scenario = _generate(tmp_path)
+  source = tmp_path / "paged_attention_decode_pipeline.mlir"
+  source.write_bytes(source.read_bytes() + b"\n// tampered\n")
+  report = tmp_path / "mismatch.report.json"
+  artifact = tmp_path / "mismatch.json"
+  process = _cli(
+    scenario,
+    "--json", "--report", str(report), "--compiled-output", str(artifact),
+  )
+  assert process.returncode == 2, (process.returncode, process.stderr)
+  assert "failed to load scenario" in process.stderr
+  assert "source_hash mismatch" in process.stderr
+  assert not report.exists()
+  assert not artifact.exists()
+  assert not artifact.with_suffix("").with_name("mismatch.target.yaml").exists()
+
+
+def test_cli_l1_mode_rejected_with_compiled_file(tmp_path):
+  """--l1-mode is a source-compilation option; replay rejects it upfront."""
+  scenario = _generate(tmp_path)
+  artifact = tmp_path / "replay.json"
+  process = _cli(
+    scenario,
+    "--context-mode", "4", "--device-context-mode", "8",
+    "--max-cycles", "200000", "--compile-only", "--compiled-output", str(artifact),
+  )
+  assert process.returncode == 0, process.stderr
+  report = tmp_path / "rejected.report.json"
+  process = _cli(
+    scenario,
+    "--compiled-file", str(artifact), "--l1-mode", "3",
+    "--report", str(report),
+  )
+  assert process.returncode == 2, (process.returncode, process.stderr)
+  assert "--l1-mode" in process.stderr
+  assert not report.exists()

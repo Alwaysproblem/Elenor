@@ -28,9 +28,9 @@ Runnable workloads:
   indexed-memory                 workloads/indexed_gather_scatter.mlir
                                  (独立索引对照场景：[4,4]i32 表，i32 索引
                                  L1 读，Tile Gather -> Tile Scatter 写 OUT)
-  paged-attention-decode         examples/generators/run_paged_attention.py (pipeline)
+  paged-attention-decode         workloads/paged_attention_decode_pipeline.mlir
   paged-attention-decode-baseline
-                                 examples/generators/run_paged_attention.py (baseline)
+                                 workloads/paged_attention_decode_baseline.mlir
   gather-matmul                  workloads/gather_matmul.mlir
   matmul-gather-add              workloads/matmul_gather_add.mlir
   gather-matmul-4tiles-2contexts
@@ -799,8 +799,7 @@ case "$name" in
     if [[ "$name" == "paged-attention-decode-baseline" ]]; then
       pa_variant="baseline"
     fi
-    exec conda run -n elenor-validator env PYTHONPATH=. python \
-      "$ROOT_DIR/examples/generators/run_paged_attention.py" \
+    set -- \
       --scenario "$ROOT_DIR/examples/workloads/paged_attention_decode_scenario.json" \
       --variant "$pa_variant" \
       --context-mode 4 \

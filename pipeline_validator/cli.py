@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 from xdsl.utils.exceptions import ParseError, VerifyException
 
+from . import paged_attention
 from .compiled_program import (
   CompiledProgram,
   WorkloadInfo,
@@ -21,6 +22,7 @@ from .compiled_program import (
 )
 from .config import _HW_YAML_PATH_TO_FIELD, MAX_CONTEXT_COUNT, HardwareConfig, SimConfig
 from .execution_ir import GlobalBinding
+from .immutable import digest
 from .loader import load_program
 from .profiles import ProfileBytes, ProfileLevelSource
 from .report import build_report, report_to_json, report_to_text
@@ -166,7 +168,7 @@ def _persist_program(
   output = (
     Path(requested_output)
     if requested_output is not None
-    else _DEFAULT_ARTIFACT_DIR / f"{program.artifact_hash}.json"
+    else _DEFAULT_ARTIFACT_DIR / program.artifact_hash / f"{digest(hw)}.json"
   )
   artifact, executable, compiled_mlir, target = _artifact_paths(output)
   _write_content_addressed(
@@ -213,6 +215,12 @@ def main(argv=None) -> int:
   mode.add_argument("-a", "--all", action="store_true", help="compile and run all workloads")
   mode.add_argument("--ir-file", metavar="PATH", help="load one external source IR module")
   mode.add_argument("--compiled-file", metavar="PATH", help="load and run one compiled JSON artifact")
+  parser.add_argument(
+    "--scenario", metavar="PATH", help="load PagedAttention scenario defaults, inputs, and Host handlers"
+  )
+  parser.add_argument(
+    "--variant", choices=("pipeline", "baseline"), default=None, help="scenario variant (default: pipeline)"
+  )
   parser.add_argument(
     "--compile-only",
     action="store_true",
@@ -279,6 +287,13 @@ def main(argv=None) -> int:
     metavar="N",
     help="CPU outstanding Group-launch limit: 1-8 (default: 1)",
   )
+  parser.add_argument(
+    "--l1-mode",
+    type=int,
+    default=None,
+    metavar="N",
+    help="override source dispatch L1 mode and initial L1 profile before compilation",
+  )
   parser.add_argument("--max-cycles", type=int, default=None, help="cycle cap (default 2_000_000)")
   parser.add_argument("--trace", action="store_true", help="enable per-cycle trace dump")
   parser.add_argument(
@@ -308,11 +323,15 @@ def main(argv=None) -> int:
   args = parser.parse_args(argv)
 
   if args.compiled_file is not None and (
-    args.compile_only or args.compiled_output is not None or args.profile_bytes or args.print_ir
+    args.compile_only
+    or args.compiled_output is not None
+    or args.profile_bytes
+    or args.print_ir
+    or args.l1_mode is not None
   ):
     parser.error(
       "--compiled-file is mutually exclusive with --compile-only, --compiled-output, "
-      "--profile-bytes, and --print-ir"
+      "--profile-bytes, --l1-mode, and --print-ir"
     )
   if args.print_ir and (args.compile_only or args.compiled_output is not None or args.profile_bytes):
     parser.error("--print-ir is mutually exclusive with compilation output options")
@@ -323,6 +342,27 @@ def main(argv=None) -> int:
       "--input-data requires one source run and is mutually exclusive with"
       " --all, --compile-only, and --print-ir"
     )
+  if args.variant is not None and args.scenario is None:
+    parser.error("--variant requires --scenario")
+  if args.scenario is not None and (args.workload is not None or args.all or args.list):
+    parser.error("--scenario cannot be combined with --workload, --all, or --list")
+
+  scenario = None
+  if args.scenario is not None:
+    scenario_path = Path(args.scenario)
+    variant = args.variant or "pipeline"
+    try:
+      scenario = paged_attention.load_scenario(
+        scenario_path, variant, verify_source=args.compiled_file is None
+      )
+    except (OSError, UnicodeError, KeyError, TypeError, ValueError) as exc:
+      print(f"failed to load scenario '{scenario_path}': {exc}", file=sys.stderr)
+      return 2
+    if args.compiled_file is None:
+      source_path = paged_attention.workload_path(scenario_path, variant)
+      if args.ir_file is not None and Path(args.ir_file).resolve() != source_path.resolve():
+        parser.error("--ir-file must match the selected --scenario variant")
+      args.ir_file = str(source_path)
 
   try:
     parsed_bindings = [_parse_input_binding(spec) for spec in args.input_binding]
@@ -331,6 +371,8 @@ def main(argv=None) -> int:
       if binding.name in bindings:
         raise ValueError(f"duplicate --input-binding for '{binding.name}'")
       bindings[binding.name] = binding
+    if scenario is not None:
+      bindings = {**paged_attention.build_bindings(scenario), **bindings}
     input_data: dict[str, Path] = {}
     for spec in args.input_data:
       if "=" not in spec:
@@ -360,9 +402,32 @@ def main(argv=None) -> int:
 
   try:
     hw = HardwareConfig.from_yaml(args.hw_config) if args.hw_config else HardwareConfig()
+    if scenario is not None:
+      if args.hw_config is None:
+        hw = hw.with_overrides(
+          num_dma_channels=scenario.num_dma_channels,
+          hbm_fixed_latency_cycles=scenario.hbm_fixed_latency_cycles,
+        )
+      # A replay target already records its entry profiles, including any
+      # source-mode override. Do not replace those with scenario defaults.
+      if args.compiled_file is None or args.hw_config is None:
+        target = hw.memory_target
+        hw = replace(
+          hw,
+          memory_target=replace(
+            target,
+            l1=replace(target.l1, reset_mode=scenario.l1_mode),
+            l2=replace(target.l2, reset_mode=scenario.l2_mode),
+          ),
+        )
     hw = hw.with_overrides(**hw_overrides)
     if profile_overrides:
       hw = _apply_profile_bytes(hw, profile_overrides)
+    if args.l1_mode is not None:
+      target = hw.memory_target
+      hw = replace(
+        hw, memory_target=replace(target, l1=replace(target.l1, reset_mode=args.l1_mode))
+      )
   except (OSError, TypeError, ValueError) as exc:
     print(f"failed to load hardware configuration: {exc}", file=sys.stderr)
     return 2
@@ -382,18 +447,37 @@ def main(argv=None) -> int:
   if args.memory_trace:
     sim_overrides["memory_trace"] = True
   try:
-    sim_cfg = SimConfig().with_overrides(**sim_overrides)
+    sim_cfg = SimConfig()
+    if scenario is not None:
+      sim_cfg = SimConfig(fidelity="full_memory").with_overrides(
+        **{
+          "group.policy": scenario.group_policy,
+          "context_count": scenario.contexts_per_tile,
+          "max_cycles": scenario.max_cycles,
+        }
+      )
+    sim_cfg = sim_cfg.with_overrides(**sim_overrides)
   except (TypeError, ValueError) as exc:
     print(f"invalid input: {exc}", file=sys.stderr)
     return 2
 
   byte_store = None
+  if scenario is not None:
+    if sim_cfg.fidelity != "full_memory":
+      parser.error("--scenario requires full_memory fidelity")
+    if not args.compile_only and not args.print_ir:
+      try:
+        byte_store = paged_attention.build_oracle(scenario, bindings)
+      except (TypeError, ValueError) as exc:
+        print(f"failed to prepare scenario inputs: {exc}", file=sys.stderr)
+        return 2
   if input_data:
     if sim_cfg.fidelity != "full_memory":
       parser.error("--input-data requires full_memory fidelity")
     from .memory.byte_store import ByteStore
 
-    byte_store = ByteStore()
+    if byte_store is None:
+      byte_store = ByteStore()
     for name in sorted(input_data):
       binding = bindings[name]
       data_path = input_data[name]
@@ -443,6 +527,17 @@ def main(argv=None) -> int:
       print(f"failed to load source IR '{source}': {exc}", file=sys.stderr)
       return 2
 
+    if args.l1_mode is not None:
+      from xdsl.dialects.builtin import IndexType, IntegerAttr
+
+      from .dialects.elenor import NestDispatchOp
+
+      mode_attr = IntegerAttr(args.l1_mode, IndexType())
+      for workload in workloads:
+        for op in workload.module.walk():
+          if isinstance(op, NestDispatchOp):
+            op.properties["l1_mode"] = mode_attr
+
     if args.print_ir:
       for index, workload in enumerate(workloads):
         if index:
@@ -488,12 +583,13 @@ def main(argv=None) -> int:
   outputs = []
   overall_pass = True
   enable_tracer = bool(args.trace or args.memory_trace or args.trace_json or args.trace_html)
+  host = paged_attention.make_host_environment(scenario)[0] if scenario is not None else None
   for loaded in loaded_programs:
     info: WorkloadInfo = loaded.compiled.workload_info
     sim = Simulator(hw, sim_cfg, enable_tracer=enable_tracer, byte_store=byte_store)
     try:
       print(f"[run] {info.name}", file=sys.stderr)
-      result = sim.run(loaded)
+      result = sim.run(loaded, host=host)
     except (RuntimeError, ValueError) as exc:
       print(f"execution failed for '{info.name}': {exc}", file=sys.stderr)
       return 1
@@ -505,10 +601,12 @@ def main(argv=None) -> int:
       try:
         if args.trace_json:
           path = _multi_output_path(args.trace_json, info.name, len(loaded_programs))
+          path.parent.mkdir(parents=True, exist_ok=True)
           path.write_text(result.tracer.to_chrome_json(), encoding="utf-8")
           print(f"trace (perfetto json) written to {path}", file=sys.stderr)
         if args.trace_html:
           path = _multi_output_path(args.trace_html, info.name, len(loaded_programs))
+          path.parent.mkdir(parents=True, exist_ok=True)
           path.write_text(trace_to_html(result.tracer), encoding="utf-8")
           print(f"trace (html) written to {path}", file=sys.stderr)
       except OSError as exc:
@@ -522,7 +620,9 @@ def main(argv=None) -> int:
   )
   try:
     if args.report:
-      Path(args.report).write_text(text + "\n", encoding="utf-8")
+      report_path = Path(args.report)
+      report_path.parent.mkdir(parents=True, exist_ok=True)
+      report_path.write_text(text + "\n", encoding="utf-8")
       print(f"report written to {args.report}", file=sys.stderr)
     else:
       print(text)
