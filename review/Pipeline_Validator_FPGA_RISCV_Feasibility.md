@@ -1,468 +1,378 @@
-# ELENOR / Nexus 可编程调度逻辑的 FPGA 固化可行性分析
+# Nexus / pipeline_validator 整体思路的 FPGA + RISC-V 实现可行性分析
 
-> **一句话总结与结论（[INFERENCE]）：ELENOR / Nexus 的调度逻辑可以采用“FPGA 固化事件、队列、背压与资源准入等实时机制，RISC-V 和可加载 Tile Program 保留软件灵活性”的方式实现，主要工程代价在软硬件协议、时序布线和一致性验证，而非完整计算阵列。**
+> **重评日期：2026-10-10。范围是当前代码描述的完整系统，不再仅评估调度器。** 包含编译与装载接口、CPU/Group/Tile 调度、BOA/EVU/USE、MFE Gather/Scatter、DMA、片上存储与 Cache、Profile 切换、Host 页管理、Stream、事件、故障恢复和观测链路。
 >
-> **本报告评估的是：参考 `pipeline_validator` 中的调度思路，实现真正驱动 engine / DMA 的 FPGA 调度控制器，并保留软件可编程性。不是移植 Python 模拟器，也不是在 FPGA 上复现模拟器的虚拟时钟与延迟模型。**
+> **结论（[INFERENCE]）：架构可以用 FPGA + RISC-V 实现；当前代码已经是较具体的控制/数据搬运行为参考，但还不是能够直接转换为完整计算硬件的规格。** 最大缺口已不只是调度协议，而是 BOA/EVU/USE 的真实数值语义与操作数接口、Cache 的物理组织、存储带宽、软硬件 ABI 和物理验证。
 >
-> **[INFERENCE] 结论：可行，而且适合采用“软件定义任务与策略、可编程序列器执行控制流、硬件维护实时协议”的分层方案。** 应固化的是依赖检查、资源准入、event/credit、背压和错误隔离等机制；不应将某个 matmul/pow 工作负载的步骤、shape、地址、依赖关系和放置方案写死在 RTL 中。
->
-> **推荐形态：Host compiler/runtime + 一个管理级 RISC-V/uCtrl + FPGA 中的 Group Sequencer、Tile UCE、event/queue/resource 单元。** RISC-V 执行管理固件，不运行模拟器；UCE 执行软件生成并装入的 Tile Program，不是某个固定 workload 的专用 FSM。
+> **“实现整体思路”“实现完整数值加速器”“达到当前 YAML 默认性能”是三个不同承诺。** 第一项有明确实现路径；第二项必须补齐计算合同并实现真实数据通路；第三项尚无综合、布局布线或板上证据，不能承诺一块 FPGA 原样达到。
 
-## 1. 评估目标：把调度器做出来，而不是把模拟器做出来
+本文区分 **源码事实、2026-10-10 运行观察、架构规格意图、[INFERENCE] 工程判断**。所有硬件映射、选型建议和实现步骤均属工程判断；不把 Python 对象当成已存在的寄存器、SRAM 或 RTL。只更新本报告，不修改模型、工作负载或其他规格。
 
-### 1.1 目标系统需要具备的能力
+## 1. 本次范围与上一版的实质差别
 
-1. 软件提交不同的 TileGroupTask、Tile Program、descriptor 和资源绑定，不重新生成 FPGA bitstream 就能改变受支持的计算流程。
-2. FPGA 根据真实的 `ready/valid`、完成事件、credit 和资源状态决定何时派发工作，而不是等待一个根据 `ops/bytes` 算出来的倒计时。
-3. 一个 context 阻塞时，能够在资源和策略允许的范围内推进其他工作；不要求 CPU 介入每次 engine completion。
-4. 软件仍控制任务组织、内存分配方案、shape 版本、资源分区和提交策略；硬件阻止越界、重复发射、过早释放、陈旧完成和资源冲突。
+### 1.1 什么算“完整实现”
 
-**这里的“固化”不是“完全不可编程”。** 可以将小指令集、队列协议和状态机固定成硬件电路，同时把它们执行的程序、描述符和支持范围内的调度参数放在可更新存储中。
+完整目标是：软件装载不同程序和 descriptor；RISC-V 处理设备管理与软件策略；FPGA 自主执行任务、搬运真实数据、完成约定算术、管理有限资源，并在错误/复位后安全恢复。不是把 Python 模拟器搬进软核，也不是用倒计时替代计算。
 
-### 1.2 范围边界
+- **Host 软件仍属于系统交付：**xDSL 编译、资源证明、模型/数据准备、装载与结果检查，不需要全部综合成电路。
+- **RISC-V 是软件执行载体：**设备程序解释、页分配、资源授权和恢复可移植为固件；当前 `CpuDeviceController` 不是 RISC-V ISA 模拟器，Python handler 也不是现成固件。
+- **FPGA 不仅做控制面：**还必须承担 DMA、Cache/MSHR、索引求址、真实数据搬运，以及 BOA/EVU/USE 等约定的计算能力。
+- **验证设施与目标硬件分开：**`ByteStore`、虚拟周期、Python callback、JSON trace 属于参考模型/验证环境；硬件实现其对应的数据可见性、状态和 PMU，不逐句翻译这些工具。
+- **当前边界是单 Group、四 Tile：**不能将此结论外推为多 Group NoC、分布式一致性或完整数据中心芯片已经可实现/已验证。
 
-- **范围内：**设备级 command/slot 管理、Group Task 推进、Tile UCE、多 context 等待与切换、engine ingress、event/phase、stream credit、资源准入与回收、PMU、fault/reset 协同。
-- **作为接口对象：**BOA、EVU、MFE、USE、DMA、memory system。分析它们必须给调度器提供什么协议，但不要求本项目同时实现其完整数值/存储数据通路。
-- **不属于本次目标：**CPython/xDSL 的 RISC-V 移植、FPGA 仿真加速器、全功能 AI 芯片、完整 HBM/NoC/cache 数据通路。
+后文可以建议降低频率或时分复用，但这只是实现方案选择，**不是把完整目标悄悄缩成单 Tile、仅调度器或只有 memcpy 的演示**。改变存储容量、并行度或算法支持集，必须标注新 target 并重新编译、验证，不能沿用旧性能结论。
 
-本文区分 **源码事实、运行观察、架构文档意图** 与 **[INFERENCE] 工程建议/预算**。后者不是综合、布局布线、功耗实测或已冻结规格。本文替换上一版偏向“模拟器迁移”的分析口径，不改变现有源码与架构规格。
+### 1.2 旧报告必须纠正的事实
 
-## 2. 从 Python 实现中应提取什么调度思路
+| 旧报告口径                                    | 当前源码事实                                                                                                                | 对硬件判断的影响                                                          |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Device 由模拟器按顺序简单占 slot              | `CpuDeviceController` 有依赖就绪提交、pending、outstanding/completion credit；GroupPort 独立管理 pending 与执行 slot        | CPU 与加速器边界更清楚，不能仍按单一 device PC/slot FSM 估算              |
+| UCE 当前 READY context 优先，阻塞才换         | `TileUCE._select_context` 是 eligible-head round-robin、共享单发射；队列接受后才推进 PC                                     | 应实现 RR 资格选择与 exactly-once 接受，不是旧的 current-context 优先策略 |
+| UCE 数取两类 context 数最大值                 | `context_count`、`device_context_count`、`group.active_context_capacity` 分别控制每 Tile UCE、CPU outstanding、Group 执行槽 | 三种容量独立，不能互相代替                                                |
+| Group 只推进线性 action index                 | 每 root 有注册游标；共享 `GroupScheduler` 有有界 ready-action 窗口；S0 队首受限，S1 可越过 PENDING 依赖，S2 当前同 S1       | 需 action 表、依赖状态、credit、注册 fence，而非一个全局线性 FSM          |
+| L2 strict FIFO，仅 final-free 触发重试        | Root/Task 按 SAME、COMPATIBLE 两类 FIFO 队首比较；重试受 pool/event/slot/Profile/gate 等版本变化驱动                        | 同类 FIFO 仍保留，但不等于全局单 FIFO，也不等于只听一次 free 通知         |
+| 多 Tile 全部准备后原子 dispatch               | 先登记有界 Grid Route，再逐 Tile 独立准入 Task；一 Tile 受阻不回滚其他 Tile 已提交的 Task                                   | 不应额外加入全 Grid 启动 barrier；部分 Grid 已运行的故障必须 drain        |
+| `BARRIER_GROUP` 只计数                        | 注册 fence 与 `barrier_ready` 等待该 Context 的先前 action                                                                  | 是 Context 内 barrier，不是跨 root 全局同步                               |
+| Gather 命中由 profile 给出，没有真实 Scatter  | 当前 `tile.gather.global.async` / `tile.scatter.global.async` 读取真实 i32 索引；按地址查 Cache，Scatter 有真实字节覆盖写   | MFE 数据路径已具备可执行参考，必须纳入硬件范围                            |
+| 没有需要真正实现的 Cache 数据面               | 当前有 Cache 行、LRU、MSHR 合并、维护、字节有效性和真实下游 clean 事务                                                      | Cache 组织与数据端口成为完整系统主要成本                                  |
+| 原控制面 612 KiB/8–15 人月/10–30 W 可代表项目 | 原预算排除了算术、tensor SRAM 和完整数据面                                                                                  | 不能继续作为本次全系统预算                                                |
 
-### 2.1 已存在的机制及其硬件含义
+依据：[S1]–[S9]。仓库 `Limitation.md`、部分 README 仍写“profiled Gather / 没有 Scatter”或 artifact schema 2/ABI v2；本次实际产物为 **schema 3 / compiler ABI v3**，Gather 报告为 `address_resolved_cache`。这些旧文字不能作为当前能力的否定证据；硬件 ABI `v0` 草案又是另一个版本空间。[S1][S6][S15]
 
-| 调度层/机制          | 当前 Python 实现                                                                                               | 应提取的硬件机制                                             | 不应照搬的部分                                                                       |
-| -------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
-| Device submit / slot | `Simulator._run_model` 按提交顺序推进，支持 slot pinning 和 first-free 分配；无 slot 则等待；完成后回收        | 可用 slot 表、命令接受/等待、完成退役                        | Python 的 device PC 循环不是完整多队列优先级调度器，也不应在硬件中直接解释高层 graph |
-| Group Task           | `TileGroupSequencer` 解释 action list，推进 action index，执行 DMA、dispatch、wait、release 等                 | 固定 action op 集合 + 可加载 action 数据 + wait/issue 状态机 | Group Task 不是第二套通用 program/ISA；不要引入无必要的 group 级 CPU                 |
-| Tile UCE context     | 当前 READY context 优先继续执行；当前不可运行时按循环顺序找下一个 READY context；另有 held-launch 优先重试路径 | 多份 context 状态 + 共享单 issue 前端 + 阻塞感知选择器       | **不是每拍 round-robin 时间片调度**，也不是 CPU 抢占式线程调度                       |
-| held-launch          | ingress FIFO 满则进入 `WAIT_ENGINE_QUEUE`；保留指令，成功入队才推进 PC；重试不重复发射 `uce_issue`             | 稳定的待发命令、ready/valid、exactly-once 接受语义           | trace 中的 issue attempt 不能当成 engine 已接受或已执行                              |
-| Event wait           | 等待指定完成事件；完成通知解除对应等待                                                                         | event scoreboard、wait 状态、局部唤醒                        | Python 字符串/set/dict 需变成有界、带身份与版本的硬件记录                            |
-| Phase aggregation    | 按 grid、launch generation、logical task 聚合 `input_released` / `output_ready`，防重复/陈旧信号               | 带 generation 的 task 位图/计数和完成聚合                    | 不能只按 physical tile mask 或 UCE context ID 聚合                                   |
-| L2 admission         | 合法但暂时放不下的 bundle 进入等待；只在 final-free 引起容量变化时重试，严格 FIFO                              | 事件驱动准入、资源授权、等待队列与去重通知                   | 不必把 Python first-fit/free-extent 搜索器做成全组合逻辑                             |
-| Role dispatch        | 多 Tile 资源规划成功后提交、绑定；失败回滚                                                                     | 预留—确认—提交协议，防止部分启动                             | 软件单线程下的“原子操作”不是 FPGA 中一个时钟能完成的组合逻辑                         |
-| Stream Queue         | credit、leased credit、已 pop 未 release、EOS/error                                                            | 有限 FIFO、credit 单元、控制 token 和错误通道                | EOS 不消耗数据 credit，不代表实际控制 token 不需要存储                               |
-| Fault / drain        | 停止新工作，清理 outstanding、event、credit 和 residency                                                       | 硬件快停、事务跟踪、隔离与固件恢复策略                       | Python 清对象不能等价为取消已发到总线的真实事务                                      |
+## 2. 完整系统能力盘点：哪些可提取，哪些必须新设计
 
-代码依据见 [S1]、[S2]、[S3]、[S4]。这些机制具有较小、明确的状态空间，适合硬件实现；复杂的任务选择和分配政策仍可由软件决定。
+| 子系统                     | 当前实际做到什么                                                                                              | FPGA + RISC-V 落地内容与缺口                                                                              |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Compiler / Loader          | 显式 compile → immutable artifact → load → run；hash、relocation、binding/权限、资源与依赖证明；Loader 不修图 | Host 侧保留；新增硬件程序/descriptor 编码与能力描述。JSON artifact 不是 FPGA 指令镜像                     |
+| Device / Host              | 有界 CPU 解释器、异步 Host 请求；HostSession 执行页分配及经 transfer 计费的读写                               | RISC-V/Host 固件实现协议与例程；不能把 `issue_width` 或 Python handler 的一次调用当真实 CPU 耗时          |
+| Group / Tile               | ready-action、逐 Tile Task 准入、UCE RR、有限 engine FIFO、event/phase                                        | RTL 状态表、资格扫描、微序列器与局部 completion；现有行为可作参考                                         |
+| Arena / 生命周期           | L2 Root Arena、L1 Task Arena、逐 bank stripe/padding、view/pin/inflight、R lease、只读跨 Context 共享         | 固件管理分配政策，硬件授权/生命周期表；不能 release 一个 view 就返还整个 Arena                            |
+| Global / Local DMA         | HBM/L2/L1 多腿传输、outstanding、bank 冲突、generation-aware cancel；ByteStore 可检查字节                     | burst、byte-enable、地址生成、AXI 请求/响应、有限 payload buffer、错误/可见性；stage 延迟公式不是 DMA RTL |
+| MFE Gather / Scatter       | 真实索引求址、Cache lookup/refill、MSHR、Gather 重排、重叠 Scatter 有序覆盖                                   | 求址流水、边界检查、有限请求窗/重排队列、写冲突 scoreboard；**不是 ScatterReduce/原子归约**               |
+| L1/L2 SRAM / Cache         | Profile 划分 SPM/Cache、模型 LRU、read-only/write-back 维护、精确写范围账本                                   | BRAM/URAM bank、tag/data、端口仲裁、替换与回写；物理 Cache 组织仍需决定                                   |
+| Profile / maintenance      | 单一 `ProfileController`、issue/range gate、drain、全成员 Prepare/Commit ACK、generation、recovery            | 可配置 bank 边界/映射与配置广播；不是“修改一个 CSR 后立即换容量”                                          |
+| Page pool / PagedAttention | Host 页分配、block table/length 更新、KV Gather/Scatter、scope 静态约束和字节种子                             | 页表/epoch、宿主可见性、MFE 动态访问授权需闭合；PagedAttention 算术仍未实现                               |
+| BOA / OPA                  | `m/n/k/ops/accumulate` 与 Roofline/launch 时序                                                                | 矩阵操作数、数据布局、MAC/累加/写回及数值规格；OPA 当前是峰值几何参数，不是 RTL 阵列                      |
+| EVU                        | op 名称与 ops/launch 时序；pow 另有 exponent/bytes                                                            | 向量读写、mask/tail、reduce、softmax 等运算的真实语义和数据通路                                           |
+| USE                        | 状态引擎的 ops/时钟比延迟模型                                                                                 | state layout、scan/recurrence、状态提交/恢复；不能由延迟模型推导具体算法                                  |
+| Collective                 | command/window 与时序 trace                                                                                   | 若交付 reduce/broadcast，必须补参与者、数据格式、归约顺序与真实网络；现模型不提供数值参考                 |
+| Stream / event / fault     | credit/leased/popped 状态、EOS/error、generation、fault ring、drain/reset                                     | 有限控制通道、唯一状态 owner/仲裁、迟到响应隔离、CDC；Python 共享对象不等于硬件实现                       |
+| PMU / trace / report       | 组件 snapshot、事务与生命周期计数、Perfetto 导出                                                              | 硬件计数/采样环、时间戳、overflow；Host 负责解码/生成 JSON，不把完整 trace 字符串放进 RTL                 |
 
-### 2.2 不能把当前模拟器当成已完成的控制器 ISA
+**可行性提高的原因是合同更具体，不是剩余硬件更少。** 软件/控制/内存模型已有大量可复用语义；真实算术和真实物理接口仍需工程设计。源码中的枚举、类名、形如 `softmax` 的 op 名称，不等于对应算法已经实现。
 
-当前代码还存在明显的行为级简化：
+## 3. 推荐软硬件划分与可编程性
 
-- `tile.py` 的 `MOV/ADD/CMP/LOAD_DESC/STORE_DESC` 等分支只推进 PC，`BRP` 直接跳转，没有完整模拟真实寄存器/谓词计算。不能因此声称动态控制指令已经具备可直接转成 RTL 的完整语义。[S2]
-- `BARRIER_GROUP` 目前只是计数并推进 action；真实硬件需要参与者到达、generation、错误与超时协议。[S3]
-- Engine 完成由延迟模型驱动，Gather 命中由 profile 提供；这些不是调度控制器应实现的运行机制。[S5]
-- 单 Group、logical task 到 Tile 的当前映射，以及没有真实多 Group 竞争，都限制了已有证据的外推范围。[S6]
+以下为 [INFERENCE] 推荐实现，不代表当前已经有 RTL。
 
-**本项目应保留调度的因果关系和安全性，不要求保留 Python 的每一个模型周期。** FPGA 增加取指、仲裁、跨域和握手延迟是正常的；必须把真实延迟反馈给模拟器，而不是用虚拟时钟隐藏它们。
+| 部分                                                       | 推荐实现位置                                                | 不应跨越的边界                                                    |
+| ---------------------------------------------------------- | ----------------------------------------------------------- | ----------------------------------------------------------------- |
+| xDSL、lowering、资源/依赖证明、数值参考                    | Host compiler/runtime                                       | FPGA 不解析 Python/xDSL/高层 graph                                |
+| `nexus.program` 提交、页管理、资源准备、程序版本、恢复策略 | 管理 RISC-V 固件；Host handler 可保留为 Host 服务或迁入固件 | 必须保持异步请求/完成与可见性合同，不能直接改 live 硬件表         |
+| GroupPort、ready-action、Root/Task grant、event/phase      | FPGA 控制器与有界 SRAM/寄存器表                             | 固件分配策略与硬件 grant 状态要有单一权威来源                     |
+| Tile UCE                                                   | 每 Tile 小型可编程单发射序列器                              | 执行软件装入的程序；不写死一个 workload，也不替 engine 做内部调度 |
+| MFE/DMA、Cache/MSHR、bank 互连                             | FPGA 数据通路                                               | 逐 index、逐 cache line、逐 completion 不绕经管理 CPU             |
+| BOA/EVU                                                    | FPGA DSP/LUT/BRAM 数据通路；合适的规则算术可用 HLS/IP       | 保留可编程 descriptor；完成必须来自真正计算/写回                  |
+| USE                                                        | 局部 RISC-V/uCtrl 加状态存储，或专用单元                    | 若共享管理核，必须计入并发、延迟和状态隔离代价                    |
+| 外部内存、PCIe/AXI、调试                                   | 板卡成熟 IP + 薄适配层                                      | 模型 HBM 通道编号不直接等于物理 HBM stack/AXI port                |
 
-### 2.3 必须明确区分的三个概念
+一个管理 RISC-V 加多个局部硬件前端通常比“所有动作都交给一个 CPU”更稳妥。NEORV32 等公开实现证明可综合管理软核和总线接口有成熟路径，但不证明本系统已满足资源/时序要求。[H1]
 
-- **Device slot：**设备侧一个 context/task 实例占用的执行管理位置。
-- **Tile UCE context：**某个 Tile 内的一份 PC、等待状态、程序/descriptor 绑定和事件归属。
-- **Engine job：**已经进入某个 engine 的独立任务；UCE 等待或换 context 时，它可能仍在运行。
+**同一 bitstream 可变的内容：**任务与依赖、合法 shape、Tile Program、descriptor、placement、buffer 绑定、Profile 选择、页表、支持范围内的调度参数。**通常要改 RTL/bitstream 的内容：**新算术原语、未预留的 queue/context/端口上限、新 Cache 组织、任意 engine 抢占。
 
-因此，增加 device slot 不等于增加 Tile；切换 UCE context 不等于暂停或抢占已经启动的 BOA job；一个 group context 完成，也不等于所有其他 context 都要停下来。
+UCE 不必是一颗完整 RISC-V；可加载的控制程序已提供软件灵活性。反之，把所有算术交给标量 RISC-V 固件虽然可能得到低速功能实现，却不能冒充 BOA/EVU 并行结构或沿用其性能预测。是否采用这种实现必须作为显式方案，而不是隐藏替代。
 
-当前模拟器允许两类 context 数各为 1–8，有效 UCE 数取二者最大值。架构 UCE 文档则将 First Silicon 定为单 context，将最多两个 context 的协程式切换列为扩展。**这些是不同成熟度的配置，不应把模拟器的 8-context 探索能力误称为已冻结硬件规格。**[S1]、[A1]
+## 4. 第一阻塞：计算语义尚不足以驱动完整硬件
 
-## 3. 推荐架构：软件策略 + 可编程序列器 + 硬件协议
+### 4.1 不只是“还没有写乘法器”
 
-### 3.1 结构与 ownership
+当前 `TileBoaOp` 主要携带 op 名、`m/n/k/ops/accumulate`，`TileEvuOp` 携带 op 名、`ops`；`_lower_engine_descriptor` 没有为它们生成类似 Gather/Scatter 那样的 source/destination view。`BOAEngine.latency`、`EVUEngine.latency`、`USEEngine.latency` 只算延迟，`Engine.tick` 到时返回完成，不读写 tensor 计算结果。[S6][S11]
+
+因此，即使购买现成 GEMM IP，也还不知道该 descriptor 要从哪些 buffer 读取什么格式、如何累加、向哪里写结果。当前实例中的 QK、PV、softmax、pow、reduce 名称和 ops 数不能补齐这些信息。
+
+### 4.2 完整数值实现前必须冻结
+
+1. **显式操作数合同：**输入/输出 view、offset/stride/layout、mask/tail、原位更新、alias/hazard；每个 op 的读写范围必须进入 compiler proof 和 Loader 校验。
+2. **数值合同：**支持 dtype、乘法与累加精度、round/saturate、溢出、NaN/Inf、reduce 顺序及容许误差。默认 YAML 的 BF16 参数和架构文档的 dtype 意图不能代替合同。[A1]
+3. **各引擎具体功能：**BOA 的 GEMM/累加/写回；EVU 的算术、归约、softmax 所需 exp/div；USE 的状态算法与 checkpoint；Collective 的实际数据操作。仅保留接口但没有计算不能算完成。
+4. **一致的可执行 oracle：**用显式输入产生可对比输出，覆盖尾块、重复累加、极值与多 context。ByteStore 只证明搬运字节，不替代 tensor reference。
+5. **完成可见性：**计算输出已写入约定存储且后继可读，才允许输出事件与回收；不是 descriptor 已接受或计算 pipeline 已启动。
+
+**[INFERENCE] 建议先补这一层合同再设计完整计算数据面。** 这不是新增用户没要求的算法，而是将代码里已声称的计算步骤变成可执行硬件所需的最低前提。没有这些输入，无法可靠估算完整 DSP 数、数值误差或开发周期。
+
+### 4.3 控制 ISA 也有残留占位
+
+公开源码 IR 当前以有限单块、展开的控制流为主。内部 `ExecTileOp` 仍包含 MOV/ADD/CMP/LOAD_DESC/STORE_DESC 等枚举，但 UCE 中这些分支只推进 PC；BRP 没有真正谓词求值，PATCH_DESC/FENCE 也不能据当前计时分支认定为完整硬件读写/内存栅栏。[S4]
+
+硬件 ABI 必须标明哪些 opcode 真正支持，并为使用到的指令定义寄存器、谓词、patch 权限和 fence 可见性；不支持的指令必须明确拒绝，不能把模拟器占位 no-op 固化为“已实现”。当前 straight-line 编译输出与未来通用可分支 ISA 应分开验收。
+
+## 5. 第二阻塞：内存系统可以实现，但不能直接翻译 Python 容器
+
+### 5.1 Gather / Scatter 已有可用行为参考
+
+`resolve_indexed_segments` 的求址单位是 remote dtype 的 **元素**：[S7]
 
 ```text
-Host compiler / runtime
-  ├─ 模型 lowering、任务拆分、Tile Program、descriptor template
-  ├─ 数据布局、依赖、shape 版本、全局资源与提交方案
-  └─ command / package / binding
-                 │
-                 ▼
-设备管理 RISC-V / uCtrl
-  ├─ command 合法性与上下文管理、shape 路径选择
-  ├─ 内存分配策略、资源授权准备、故障恢复
-  └─ 配置/发布已准备任务，不逐次轮询 engine 完成
-                 │
-                 ▼
-FPGA 调度控制面
-  ├─ Global Scheduler：ready command、依赖、slot、准入与退役
-  ├─ Tile Group Sequencer：action index、role dispatch、group wait
-  ├─ Program Residency Manager：miss 处理、验证、install-ready
-  ├─ Resource / Event / Stream 单元：资源协议与真实状态
-  └─ Tile UCE × 4
-       ├─ resident Tile Program fetch/decode/控制执行
-       ├─ context PC / wait / outstanding scoreboard
-       └─ engine command ingress + completion adapter
-                 │ ready/valid、completion、error
-                 ▼
-       BOA / EVU / MFE / USE / DMA
-       各自拥有数据通路与内部资源仲裁
+remote_element = index[i] * index_scale + offset + task_id * task_stride + j * stride
+local_element  = (i * repeat + j) * segment
 ```
 
-**[INFERENCE] 首选一个管理级 RISC-V 加每 Tile 一个小型可编程 UCE，不是每个 engine 配一个 CPU，也不是用一个 CPU 同步处理所有 Tile 的每次完成事件。** RISC-V 可以是 FPGA 软核、SoC FPGA 硬核或板外管理处理器；选择取决于接口与部署，而非调度语义。
+index 从 L1 读取为 little-endian signed i32；负 index、越 view、地址溢出被拒绝。Gather 按 cache line 切请求，执行 L1/L2 lookup、MSHR 合并与回填，再向目的 buffer 交付字节。不能用 HBM miss 数代替 HBM transaction 数：多个 miss 可合并为一次回填。
 
-| 对象/决策                                 | 推荐 owner                        | 必须遵守的边界                                             |
-| ----------------------------------------- | --------------------------------- | ---------------------------------------------------------- |
-| Graph lowering、kernel 组合、task 拆分    | Host compiler/runtime             | FPGA 不识别 ONNX/高层 graph                                |
-| 跨任务提交策略、资源分区、shape 版本选择  | Runtime/管理固件                  | 通过命令与受支持参数影响调度，不直接改正在运行的硬件状态   |
-| 已准备命令的依赖检查、slot grant、退役    | Global Scheduler                  | 固件不与它并发修改 slot/event 的同一权威记录               |
-| Group action 推进、共驻留 candidate 检查  | Tile Group Sequencer / Dispatcher | UCE 不另设一个 group-level 调度器                          |
-| Tile Program PC、wait、局部 runnable pick | Tile UCE                          | 不负责全局资源政策或 engine 内部调度                       |
-| Stream credit / FIFO 状态                 | Stream Queue 单元                 | CPU/UCE 通过协议请求操作，不直接加减 credit                |
-| L1/L2 实际 bank 仲裁、DMA 事务            | Memory/DMA 单元                   | 调度器消费其资源与完成信号，不重复实现第二套 bank 仲裁     |
-| MFE 的 cache/MSHR、Gather/地址生成        | MFE / memory subsystem            | 不放入通用任务调度器；调度器只见 launch、ready、完成和错误 |
-| USE 状态计算、checkpoint 内容             | USE                               | UCE/RISC-V 调度组件不因此承担全部状态数据通路              |
+Scatter 绕过两级 Cache，按段写真实目标。**重叠写保持 ordinal 覆盖顺序，非重叠段可以先完成**；它不是所有段完全串行，更不是 atomic add。编译器的写范围维护与运行期 precise-write ledger 用于后续 Cache 可见性。[S6][S8]
 
-这与现有架构的分层总体一致。[A1]、[A2]、[A3] 需要特别澄清 event ownership：Global Scheduler 文档由 Event Fabric/Scheduler 维护 event，Driver/Firmware 文档又列 firmware 写 event 状态。[A3]、[A4] **[INFERENCE] 推荐硬件 scoreboard 为实时状态的唯一写入者；固件如需 signal/cancel，通过经过校验和仲裁的请求更新它，而不是与 completion 电路同时直接写同一表项。**
+[INFERENCE] RTL 应采用求址流水、有限 index/request window、MSHR waiter 队列、Gather reorder 与 Scatter 区间冲突表。模型中 `slots` 按全部 index 数建 Python 列表，不能把 `window_entries` 误当成所有内部状态已自然有界；最大 index/repeat、段数、payload/reorder bytes 和溢出回压仍要冻结。
 
-### 3.2 为什么不是“全部 RTL 写死”或“全部 RISC-V 固件”
+### 5.2 Cache：地址真实不等于物理组织真实
 
-| 方案                                          | 优点                                 | 主要代价                                                                  | 本项目判断                                                     |
-| --------------------------------------------- | ------------------------------------ | ------------------------------------------------------------------------- | -------------------------------------------------------------- |
-| 为单个 workload 写固定 RTL FSM                | 少量固定步骤时简单、时序确定         | 改依赖、步骤或 shape 路径可能重做 RTL/bitstream                           | 不符合软件灵活性的要求                                         |
-| 单个 RISC-V 用固件解释所有 Tile 控制与完成    | 政策容易修改、调试直观               | 每条 launch/wait 都有指令与总线开销，多个 Tile 完成易形成串行瓶颈         | 可作为低发射率实现，但必须测量，不能假设能承载任意细粒度流水线 |
-| 可编程序列器 + 硬件 event/queue + 管理 RISC-V | 控制步骤可更新，快路径自治，职责明确 | 需要小型控制指令语义、程序装载、固件/RTL 接口与验证                       | **推荐**                                                       |
-| 每 Tile RISC-V + 自定义 launch/wait 辅助单元  | C/编译器工具链成熟，局部软件可扩展   | 核、指令存储、debug 和运行时开销复制到每个 Tile；仍需硬件 scoreboard/FIFO | 若未来 Tile 控制算法明显超出小指令集，再评估                   |
+`DeterministicLRUCache` 以 allocation/generation/line identity 为 key，使用一个 pool 内的 `OrderedDict` 查找和全局 LRU；它没有普通硬件 set-index/way 冲突模型。**当前命中率是这个组织下的地址驱动模拟结果，不是某个 FPGA Cache 的实测值。**[S8]
 
-以上为 [INFERENCE] 工程比较。软件灵活性并不一定要求每个 Tile 都运行 C 程序；**可加载 Tile Program 本身已经提供了软件可编程性。**
+默认 line 为 64 B；mode3 时每 Tile L1 Cache 有 8,192 行，L2 Cache 有 65,536 行。将如此大的查找/全局 LRU照搬成宽 CAM 和同拍更新网络，风险显著高于一个小 scoreboard。
 
-## 4. 软件究竟还能改变哪些东西
+[INFERENCE] 有两条真实路线：
 
-### 4.1 不重做 bitstream 的灵活性
+- 保留精确模型替换/查找语义，以多周期 tag 搜索和存储化元数据实现，接受更高延迟；不能承诺模型的一拍 L1 lookup。
+- 明确选 banked/set-associative Cache、替换算法和端口数，并同步修订 target/model、重新测 hit/miss 和性能。字节功能可保持，但旧命中率与周期预测不可保留不变。
 
-下表是推荐方案应支持的能力边界，不表示当前已有对应 RTL。
+默认 write policy 为 read-only；源码也有 write-back dirty clean/maintenance。它不会让 dirty victim 静默消失，不能将“有 clean 事务”误称为已定义完整的自动 dirty eviction 控制器。若支持 write-back，必须明确 victim 处理、writeback buffer、错误保留与 reset 丢弃规则。
 
-| 修改需求                                          | 软件改变什么                                              | 是否需要重做 FPGA                                      |
-| ------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------ |
-| matmul 后接 pow，改成接另一已支持 EVU 操作        | Tile Program、descriptor 与 event 依赖                    | 不需要，前提是 engine 已支持该操作                     |
-| 改 tile size、迭代数、shape 版本                  | 编译出的程序/descriptor、合法的 shape 参数                | 在 engine/存储/指令能力范围内不需要                    |
-| 调整 load/compute/store 重叠、ping-pong buffer 数 | Tile Program 中 launch/wait 顺序、slot/frame 绑定         | 在容量和 hazard 规则范围内不需要；硬件仍检查冲突       |
-| 改参与 Tile、任务分块、数据地址                   | role binding、tile mask、task range、descriptor           | 在已实现 topology 和 placement 能力范围内不需要        |
-| 根据运行 shape 选择另一执行路径                   | 管理固件选已编译版本，或使用已实现的 UCE 控制指令         | 不需要；不能依赖模拟器中尚未实现完整语义的谓词运算     |
-| 调整跨任务优先顺序和资源份额                      | 软件提交顺序、资源授权；若已实现则配置 queue policy/quota | 不需要，但不能超出硬件已有策略模式                     |
-| 改 allocator 策略，例如 first-fit 改为预留池      | 管理软件的分配策略与授权结果                              | 接口与 owner/lifetime 契约不变时，不需要修改调度快路径 |
-| 增加硬件中不存在的调度 opcode、端口或 event 格式  | 新控制原语/接口                                           | 需要 RTL/bitstream 与 ABI 演进                         |
-| 将非抢占 engine 改为可抢占                        | 新增 checkpoint/停止/恢复协议                             | 不能靠修改固件开关完成                                 |
-| 超出已综合的最大 context/queue 数                 | 改变物理容量                                              | 通常需要重新综合；运行时只能在已实现上限以内启用/停用  |
+### 5.3 Profile 是共享物理容量的切分，不是额外加一块 Cache
 
-**“软件可配置”不是“任意新算法都能通过 CSR 实现”。** FPGA 能执行哪些原语、具有多少状态存储和端口，仍然由硬件决定。初版不需要任意调度脚本引擎、复杂乱序或 partial reconfiguration 才能灵活。
+每 bank 的 SPM 与 Cache 来自同一总容量；system reserved SPM 还要从可供 Arena 的部分扣除。**不要把 12 MiB L1/L2 数据容量与 Profile Cache 再相加，重复计算 tensor data。**Tag、MSHR、ECC、有效性和控制 RAM 则另计。[S9][S12]
 
-### 4.2 初版建议保持的策略与可变项
+[INFERENCE] FPGA 可预布置 RAM bank，用地址边界/选择器实现合法模式。切档顺序必须保留：关闭 issue、证明相关引用静止、clean/invalidate、排空下游、Prepare、收齐 ready ACK、Commit、收齐 commit ACK、发布 generation、重新开放。当前成员为 4×16 个 L1 bank 加 16 个 L2 bank；实际 BRAM/URAM 深宽、端口、tag 区域与映射由后续规格冻结。
 
-**[INFERENCE] 推荐基线：**
+不必靠 partial reconfiguration 实现每次 Profile 切换；但也不能假设改一组软件容量字段就改变了 FPGA 物理 SRAM。
 
-- Group action 保持有限 op、线性 action index；具体 action list 由软件生成，不增加 group-level 分支 ISA。
-- Tile UCE 保持单 issue、程序内顺序执行，支持规范化后的控制/launch/wait/stream/patch 原语。
-- 保留阻塞感知 context 切换、held-launch 和独立 engine FIFO；不引入 engine 抢占。
-- L2 admission 默认保持当前 strict FIFO 的可解释行为。软件可在入队前调整提交顺序；若要对已等待队列做 priority/bypass，需要单独定义公平性、饥饿和顺序契约，不能默默改变现有规则。
-- 队列数量、context 上限、等待 fan-in、超时粒度等是能力参数；具体编码与数值由后续规格冻结。
+### 5.4 ByteStore、页所有权与 Host 的剩余边界
 
-这样固化的是“如何安全等待、发射、完成和回收”，而不是“哪个模型一定先执行哪一层”。
+ByteStore 是稀疏逐字节 oracle：未初始化读取报错、read-leg 完成捕获数据、write-leg 完成才提交目的。真实硬件需要实际 RAM，而不是 Python page dict。其逐字节 validity 若压成 1 bit/byte，12 MiB 数据就另需 1.5 MiB 位图；覆盖 16 GiB 外部内存则需 2 GiB，尚不含管理开销。**[INFERENCE] 必须区分验证用 validity 与产品承诺的 poison/初始化检查；不能默认硬件免费提供整个 oracle。**[S7]
 
-### 4.3 更新程序和策略时的安全边界
+`PagePoolRegistry` 已有 scope、epoch、allocate/free、lease/root-pin API；HostSession 有 scope 范围检查，编译产物有 scope effect 约束。但当前 MFE launch/子事务路径未调用该 registry 的 `lease/acquire/release`；不能仅凭 `AccessLease` 类和模块注释，就宣称设备侧每个动态索引已做页所有权授权。[S10]
 
-[A1]、[A4] 已要求 running program 不可 patch、descriptor 只允许修改已声明字段。推荐沿用：
+[INFERENCE] 若完整系统依赖页隔离，必须把 scope/epoch 验证接到真实 MFE 访问与终结路径，或冻结并证明等价的静态访问限制。binding 内合法并不自动等于当前 owner 持有该页。Host 页分配和更新 block table/length 的固件耗时、CPU cache clean/fence、DMA 可见性也必须计入；当前同步 Python 页管理不是这些物理代价的证据。
 
-1. Compiler 生成程序/descriptor，runtime 注册 `program_id/version/hash` 并发布任务。
-2. Group 侧 Residency Manager 保证程序已经装入并可执行；具体加载/校验可由硬件与管理固件协同完成。UCE 只接收 resident handle，compiler 不增加显式 program-load 指令。
-3. 新程序使用新版本或 inactive 存储区域，验证完成后供新 launch 使用；旧 context 继续执行旧版本。
-4. 更新 live descriptor、queue policy 或 frame 时，只能在约定的提交边界或 drain 后生效；不能令在途命令一半使用旧配置、一半使用新配置。
-5. CPU 发布描述符后再发布 ring entry/doorbell；使用平台要求的 memory ordering 与 cache maintenance。doorbell 不是对 CPU cache 可见性的自动保证。[A4]
+### 5.5 DMA / NoC 从时序路径变成真实事务
 
-## 5. 从模拟器调度走向真实硬件，必须补齐的协议
+`full_memory` 已区分 HBM、Global DMA、NoC VC、L2/L1 bank、Local DMA 的 route 与竞争；NoC 仍是简化单路由器，HBM stage 是固定延迟/带宽模型，不是 DRAM 行、刷新、turnaround 的完整控制器。[S7]
 
-### 5.1 发射与完成：把倒计时替换成真实因果关系
+[INFERENCE] 采用成熟 DDR/HBM/AXI IP，补 descriptor fetch、burst/边界拆分、byte-enable、有限在途 tag、payload buffering、响应乱序、总线错误、credit-return 与 backpressure。completion 必须对齐消费者需要的可见性；timeout/reset 不撤销已落内存的写。控制、错误和返还 credit 的路径不得被普通 payload 永久堵死。
 
-```text
-UCE 准备命令与 event 身份
-  -> ingress 接受：命令成为硬件持有的待执行工作
-  -> engine 接受：开始其内部执行/排队
-  -> engine 返回 done / error 与原 event 身份
-  -> Event Unit 更新 scoreboard
-  -> 依赖满足的 UCE / Group action 被唤醒
-```
+## 6. 控制面落地条件：保留当前语义，不恢复旧架构
 
-**[INFERENCE]** ingress 和 engine 之间可有 FIFO，因此两次接受可能不是同一拍。FIFO 未接受前，待发命令与关联 PC/身份保持稳定；接受后不能重复发射。event/outstanding 的分配与接收也必须一致，防止零延迟/早完成响应先于 scoreboard 建立。
+### 6.1 准入与资源退休
 
-完成事件必须代表约定的**可见性边界**：例如 store 的完成不能只是“写请求进入队列”，而必须满足消费者读取与 buffer 回收所需的可见性。超时、ERROR、RESET 不能冒充 DONE。
+- CPU 接受 root 先占 pending metadata，不等于占 Group execution slot/L2 Arena；`ACTIVE` 与 Group 实际 `active_cycle` 不是同一观察点。
+- Root 准入要将 slot、Arena、event/control 预算一起准备好；失败不能泄漏部分资源。
+- Grid 是有限登记对象，Task 按 Tile 独立补位。单 Task 提交前可以回滚准备，已提交 Task 只能按真实终结或 fault/drain 退休。
+- `input_released`、`output_ready`、`grid_done` 分开聚合；R lease 直到 Task 安全退休才归还。
+- `nest.release` / `tile.free` 失效的是 view；owner 安全退休且 pin/inflight/共享引用关闭后才返还 backing/Arena。共享只读 backing 可长于 producer root 生命周期。
 
-这保留 held-launch 思路，但不照搬 Python 固定的 engine 延迟。将来测到的 dispatch、completion-to-wakeup、credit-return 延迟应回填到模拟器。
+这些是当前源码合同，而不是新的全 Grid 原子提交方案。[S2]–[S5]
 
-### 5.2 Event 与 phase：固定机制、动态依赖
+### 6.2 有界表、同步存储和唯一 owner
 
-- 软件指定谁依赖谁；硬件检查这些已声明依赖是否满足，不进行任意图搜索。
-- Event 记录需要上下文归属、sequence/generation、状态和 producer 身份；不能只用一个裸 event ID。
-- `input_released`、`output_ready`、`grid_done` 必须分开。前者可允许输入 consumer pin 解除；输出可见不自动代表输出 buffer 可回收；grid 返回也不自动代表所有外部 store 已完成。
-- Phase aggregation 依据 logical task 身份和 launch/grid generation；同一 task 重复 signal 不得重复计数。
-- 使用有限表深度与明确回压；表满不能覆盖仍在等待的事件。reset 后迟到 completion 必须被隔离。
+当前默认容量见 `config.py`：CPU pending 32/completion 4096；Group active 8/pending 32/action 16/scan 4/event 4096/inflight 32；prefetch/store credit 各 8、dispatch 16；每 Tile UCE 配置 1–8。它们是模型参数，不是已综合上限。[S12]
 
-**[INFERENCE]** 4 Tile、有限 context 下，这可以用 BRAM/寄存器、位图、比较器与分级仲裁实现。真正影响时序的是多源同拍更新、表端口和 fanout，不是事件概念本身。
+[INFERENCE] 硬件需为每张表冻结 entry 宽度、深度、端口、更新优先级、回绕与表满行为。Group/Tile 本地 scoreboard 和有限完成 FIFO 比一个全局任意 fan-in CAM 更容易收敛。多源同拍完成应先入队仲裁，不允许覆盖活跃事件。
 
-### 5.3 内存分配留软件，资源安全留硬件
+尤其不能声称模型已经消除了所有共享写：**StreamQueue 是同一个 Python 对象，producer acquire/push 与 consumer pop/release 修改共同 FIFO/credit 状态，安全依赖单线程 step 顺序。**硬件必须由 queue/credit 单元统一更新，或定义等价的分布式 credit 协议；不能让 RISC-V、UCE 和 DMA 直接并发加减同一权威计数。
 
-**不建议把 `BankedFreeExtentAllocator` 的完整动态搜索硬化。** 当前 Python 的 first-fit、克隆 free map、跨 bank 搜索与回滚，是分配策略的参考实现，不是必须保留的调度电路。[S7]
+### 6.3 发射、故障与版本
 
-推荐分工：
+- UCE ingress 接受、engine 接受、engine 完成是三个边界；event 身份建立与入队提交必须一致，背压期间命令不变且不得重复发射。
+- event/phase/task/program/arena/Profile 都要携带对应身份与 generation，不能只比较裸 ID。
+- 程序运行期间 text 不可原地改写；新版本装载、验证后供新 launch 使用，旧任务保持原绑定。
+- 当前有 drain/reset FSM 和 cancel-confirm 参考；硬件须等待真实 accepted job、MSHR、NoC、DMA 与写响应闭合，再允许资源复用。
+- 跨时钟命令/完成用事务级 CDC/异步 FIFO；多 bit 总线逐位同步不保证同一条记录一致。reset 释放、epoch 和迟到 completion 必须一起设计。
 
-| 软件/管理固件                                   | FPGA 资源协议单元                                         |
-| ----------------------------------------------- | --------------------------------------------------------- |
-| 选择 static/ping-pong/pool/free-extent 分配方式 | 检查授权对象的 owner、generation、边界与权限              |
-| 为 context 准备 L1/L2 frame/buffer 方案         | 维护 live/pin/in-flight、hazard、reserved/committed 状态  |
-| 维护 free map 的单一权威副本                    | 只在依赖和在途访问均已满足时确认可以回收                  |
-| 收到真实回收通知后提交 free-map 更新            | 发出 release 完成通知，不把普通 phase signal 当成最终释放 |
-| 为待准入任务提供合法 grant                      | grant 到齐后再使能 dispatch，禁止部分资源成功就启动       |
+上述规则可以综合为硬件，但模型的 Python callback 顺序、`dict.clear()` 或固定 cycle 数不能作为物理正确性的替代。[S4][S5]
 
-这里需要一个**单写入者协议**，而不是软件和硬件各维护一份可随意修改的 free map。固件完成最终回收提交后，发布带版本的容量变化；等待队列据此重试。只收到 `input_released` 或一次 unpin，不能假设 allocator 已经 final-free。
+## 7. 全系统资源、带宽、功耗与平台判断
 
-这也符合 UCE 架构文档“compiler/runtime 预留 slot，UCE 做 owner/lifetime 检查、不引入 V1 硬件动态 allocator”的方向。[A1]
+### 7.1 当前 target 的规模，而非旧报告的控制器预算
 
-**与上一版口径的关键差别：**固件分配需要多少真实时间，就消耗多少真实时间；等待 grant 的任务停在准入状态，其他合法任务继续运行。不存在冻结整个芯片的“virtual cycle”来掩盖固件延迟。软件分配延迟可通过提前准备和批量授权摊薄，但必须纳入性能预算。
+以下为默认 `hardware_config.yaml` 的模型参数与算术推导，不是 FPGA 测量。[S12]
 
-### 5.4 多 Tile 原子 dispatch
+| 项目              | 当前模型配置/推导                                           | 硬件含义                                                             |
+| ----------------- | ----------------------------------------------------------- | -------------------------------------------------------------------- |
+| 拓扑/时钟         | 1 Group × 4 Tile；core/UCE 1 GHz                            | 1 GHz 是模型基线，不能当 FPGA 已达频率                               |
+| 数据 SRAM         | L2 8 MiB + 4×L1 1 MiB = **12 MiB**                          | 尚未计 tag/ECC、控制表、CPU、buffer；Profile 内 SPM/Cache 不重复相加 |
+| Bank              | L2 16；每 Tile L1 16，共 80 个成员                          | 容量放得下不代表端口和布线带宽足够                                   |
+| Tile Program 容量 | 每 Tile 64 KiB，共 256 KiB                                  | 当前 text size 还是估算，硬件编码后须重新检查驻留预算                |
+| mode3 Cache 数据  | L1 合计 2 MiB + L2 4 MiB = 6 MiB                            | 已包含在 12 MiB 内；tag、替换、MSHR 另计                             |
+| MSHR              | 每 Tile L1 16；L2 64                                        | entry 深度不决定 waiter/payload 队列容量，后者仍需预算               |
+| 外部内存          | 16 GiB、8 模型通道、819.2 GB/s、32 outstanding              | 物理控制器组织/实际带宽须由板卡 target 明确                          |
+| 片上带宽          | L2 每 bank 64 GB/s，即合计 1024 GB/s；L1 每 Tile 512 GB/s   | L1 的 512 是每 Tile，不是再乘 16 bank；都不是实测带宽                |
+| BOA 并行度        | 每 Tile 8×16×16 = 2048 MAC/cycle；全 Group 8192             | 理想 1 GHz、2 ops/MAC 得 16.384 TOPS；不是数值实现或持续性能         |
+| EVU / USE         | 每 Tile EVU 32 lanes；USE 500 MHz、128 KiB state-cache 参数 | 不代表已实现向量算术或实际 state RAM 数据通路                        |
 
-**[INFERENCE]** 推荐采用小型预留—提交协议：
+**[INFERENCE] 主要瓶颈会同时来自 RAM 端口、Cache tag/替换、DSP/累加存储和跨 Tile 宽总线。**只统计 BRAM 字节或 LUT，不足以判断是否能放下。
 
-1. Dispatcher 根据软件 role binding 确认目标 Tile、resident program、context 和资源授权。
-2. 对全部参与 Tile 预留资源，但暂不允许任何 engine 启动。
-3. 所有参与方准备成功后发布统一的 dispatch generation/commit。
-4. 提交前失败可撤销预留；一旦有工作实际启动，后续失败按 fault/drain 处理，不能假装没有执行过。
+例如假设 FPGA 为 200 MHz，要维持模型 L2 每 bank 64 GB/s，需要每 bank 每拍 320 B，即 2560 bit 数据服务宽度；同频下每 Tile 512 GB/s 需要合计 20,480 bit/cycle。这个推导说明不能仅把 `clock_mhz` 改小，却保留所有 GB/s 和一拍访问假设。
 
-“原子”指不能部分通过资源检查就产生不可回退副作用，不要求四个 Tile 在同一个物理时钟沿同时开始第一条指令。集中式小 Group reservation owner 可以避免分布式抢占竞争，不需要引入复杂全局一致性协议。
+### 7.2 有具体载体，但没有“默认参数原样落板”的证明
 
-### 5.5 背压和故障路径不能被数据流堵死
+以官方公开的 AMD Alveo U55C 为能力参照：[H2]
 
-- Stream data credit 不足时，EOS/error 仍必须有受控的存储/传播方案；不能靠无限队列保证。
-- Command、completion、fault、credit-return 不能形成互相等待的环：尤其不能让返回 credit 的 completion 被等待该 credit 的数据占满通道。
-- 停止新 issue、捕获故障身份和保持在途事务计数由硬件快速执行；选择重试、销毁 context、重建资源由管理软件处理。
-- 对真实 DMA 写，reset 不等于撤销已发生的内存副作用。必须 drain、处理迟到响应，并在确认安全后回收资源。
+| 官方项目      | 公布规格                           | 对本设计能说明什么                                                                 |
+| ------------- | ---------------------------------- | ---------------------------------------------------------------------------------- |
+| HBM2          | 16 GB，460 GB/s                    | 外部容量接近模型量级，但公布带宽低于模型 819.2 GB/s；GB/GiB 精确容量仍需核对       |
+| Internal SRAM | 43 MB                              | 原始容量大于 12 MiB 数据 SRAM，但 shell、CPU、tag、复制和端口碎片还要占用          |
+| DSP slices    | 9,024                              | 不能按“一 DSP = 一 BF16 MAC”直接认定能放下 8192 个 MAC；需实际算术映射与利用率预算 |
+| 板卡功耗      | typical 115 W，maximum total 150 W | 是厂商整卡规格，不是本设计预计或实测功耗                                           |
 
-上述协议是“软件灵活但硬件安全”的基础，不能因软件可信就省略。
+这是**平台存在性证据，不是推荐采购结论**。高端 FPGA + RISC-V 软核存在承载全系统原型的可能；具体 fit/Fmax 必须拿所选数值格式、Cache 组织、RAM 端口与 shell 做综合/P&R 后判断。带 RISC-V 硬核的 SoC FPGA 也可评估，但“自带 RISC-V”不保证数据面 SRAM/DSP/HBM 足够。
 
-## 6. 调度器的性能和资源代价
+[INFERENCE] 可以时分复用 MAC、降低 lane 数、改用 DDR 或更窄互连来实现功能；但默认 target 性能随之改变。将 L1/L2 外置 DDR 还改变层级竞争，不能只当容量扩展后继续引用原来的 SRAM 延迟。
 
-### 6.1 应关注的性能指标
+### 7.3 功耗、布线与成本的新口径
 
-真正需要约束的是：
+完整范围下，功耗必须计入计算 DSP、SRAM/Cache、DDR/HBM、PHY、时钟、RISC-V、控制与 debug；不能沿用只含控制面的 10–30 W 预留。模拟器 utilization 不能换算瓦数。
 
-- 每 Tile / 每 Group 每秒能接受多少条 command。
-- completion 到依赖任务重新可发射的延迟。
-- FIFO credit 返回到下一条命令接受的延迟。
-- 空闲 slot 回收、资源 grant、role dispatch 的延迟。
-- 多个 Tile 同时完成时的峰值 event 接收与排空能力。
-- 管理固件处理新任务、分配和故障的持续速率及最坏等待时间。
+[INFERENCE] 物理收敛优先事项：Tile 本地化、bank 级 pipeline、completion 分层聚合、少搬完整 descriptor、多传引用；单独预算跨 die/区域连线、clock/reset fanout 和 trace 汇聚。带 debug 的实现也要检查时序，不只检查去掉 probe 的理想版本。
 
-**[INFERENCE] 示例：**若局部 UCE 为 150 MHz，平均每条控制指令消耗 3 clocks，则每 Tile 理想上限约 5,000 万条控制指令/秒；一个任务若需要 8 条控制指令，未计阻塞前约为 625 万任务/秒，而不是 5,000 万个 engine job/秒。程序 fetch、patch、wait、event 更新都占成本，必须用实际程序测量。
+本次没有本设计 LUT/FF/DSP/BRAM 综合报告，也没有板上电源测量，**不提供新的总瓦数、确定人月或固定板卡报价**。旧的 8–15 人月/4–8 个月仅针对控制面，不能迁移为完整系统工期。成本应按第 10 节工作包，结合数值支持集、IP 复用、板卡/工具授权和验证范围重新估算；初次使用现成板卡可避免另起 PCB/DDR/PDN 项目。
 
-再看固件预算：`固件占用率 ≈ 每秒管理决策数 × 每次决策CPU周期 / CPU频率`。假设 200 MHz CPU、每次管理决策 2,000 周期、每秒 1 万次决策，占用率是 10%；若每秒 10 万次，则理论上已占满一个核，尚未计缓存 miss、总线等待和错误处理。
+## 8. 软件产物到硬件 ABI：当前已有基础，但仍缺最后一段
 
-**因此管理 CPU 应以已准备任务/资源批次为粒度，不能每个 Tile launch 都走一次重固件路径。** 以上是参数推导，不是实际频率或性能承诺。
+`CompiledProgram` 的不可变、严格 JSON、hash/Registry/target、call binding、relocation、resource budget 与独立 Loader 是有价值的软硬件边界。当前源码脱离编译器的执行复放已可运行，不需要 FPGA 上再做 lowering。[S1]
 
-### 6.2 存储主要属于控制状态，不是 tensor 容量
+但 `compiler/api.py::_finalize_program_identities` 的 `text_bytes` 仍按指令数和 descriptor 数估算；没有由真实 opcode/operand 编码生成的设备 text 镜像。软件 artifact ABI v3 不能直接作为硬件 ring/指令 ABI。[S11]
 
-把调度器做成硬件，不要求将模型里的 16 GiB HBM、8 MiB Group SRAM、4 × 1 MiB L1 都计入“调度器资源”。它们属于被调度的数据系统。Gather cache/MSHR 全体、BOA DSP 阵列也不属于这个控制器的必要组成。
+[INFERENCE] 需要补齐：
 
-**[INFERENCE] 一个用于估算方法的有界例子：**4 Tile、每 Tile 最大 8 UCE context；下列记录宽度/表深度只是预算假设，不冻结 ABI，也不表示必须将当前 depth=1 的队列扩大到 16。
+1. 硬件 command/event/descriptor/program image 的版本、大小、对齐、端序、地址宽度与 relocation；所有未定字段由后续规格冻结，不在本报告杜撰编码。
+2. 设备 capability 与编译 target 对齐：不支持的 dtype/op/Profile/队列上限在编译或装载时拒绝，不静默降档。
+3. CPU 发布 descriptor → 数据 cache maintenance/memory fence → doorbell；设备完成 → Host 读取结果的对应 acquire/可见性边界。
+4. resident handle 与 program ID/version/hash/epoch 绑定；真实 fetch/verify/install、running text 保护和错误装载路径。
+5. 把 Python Host routine 改成明确的 Host 服务/RISC-V 固件 ABI，覆盖页分配、动态元数据更新、失败与重试的既有语义，不在每个 index 上做远程回调。
 
-| 控制存储          | 假设                                                      |    原始容量 |
-| ----------------- | --------------------------------------------------------- | ----------: |
-| Context 状态      | 4 × 8 × 256 B                                             |       8 KiB |
-| Event 表          | 1,024 × 32 B                                              |      32 KiB |
-| Engine ingress    | 4 Tile × 6 类队列 × 16 entry × 32 B                       |      12 KiB |
-| Tile Program 存储 | 4 × 64 KiB                                                |     256 KiB |
-| Descriptor window | 4 × 8 KiB                                                 |      32 KiB |
-| 资源/授权目录     | 512 × 32 B                                                |      16 KiB |
-| 可选 trace buffer | 256 KiB                                                   |     256 KiB |
-| **以上示例合计**  | 不含 RISC-V 固件存储、其他 group/ring/stream 表和实现冗余 | **612 KiB** |
+`runtime/host_runtime.py`、`kernel_driver.py`、`firmware.py` 中的延迟/计数封装，不是已交付的 OS driver、RISC-V firmware 或 PCIe doorbell 实现。不要因目录和类名齐全而低估这部分工作。
 
-这说明调度器更接近一个带若干表和队列的小型控制子系统，而不是多 MiB 宽端口 tensor SRAM 加矩阵阵列。
+## 9. 本次实际运行证据与证明边界
 
-**资源风险仍然存在：**BRAM 宽度碎片、读写端口、表复制、多个 completion 同拍写入、softcore/debug、程序/descriptor 窗口、stream 数量都可能扩大占用。当前没有 RTL，不能给出可靠 LUT/FF 数，也不能保证某块小板一定放得下。
+### 9.1 六次当前场景运行
 
-### 6.3 微序列器与 RISC-V 的额外代价
+全部使用 `elenor-validator` 环境、当前 launcher、`fidelity=full_memory` 与 memory trace。前五次导出 trace JSON，PagedAttention 读取 report/PMU，未导出其完整 trace。结果来自本次运行，不沿用旧报告周期。[S13][S14]
 
-- 可加载 UCE 比写死 FSM 多出取指存储、PC、decode、小型寄存器/谓词状态与程序版本检查，换来软件改变控制流的能力。
-- 每 Tile 复制 RISC-V 则还要复制 CPU 核、指令/数据存储、debug、可能的 cache 和总线接口；因此不把它作为默认起点。
-- 共享一个管理 RISC-V 可以摊薄成本；若后续管理速率不足，先测瓶颈，再决定批处理、增加局部硬件原语或分组管理，而不是一开始加入大量核。
+| 场景                                    | 模型 cycles | memory transaction 完成/发出 | 本次观察                                                                                         |
+| --------------------------------------- | ----------: | ---------------------------: | ------------------------------------------------------------------------------------------------ |
+| `gather`                                |       1,210 |                      76 / 76 | 16 个真实 index 读取、16 个 miss 请求、12 次 MSHR merge、256 B Gather；不是 profile 人工指定命中 |
+| `indexed-memory`                        |       1,710 |                      24 / 24 | 3 个 Gather 请求、3 个 Scatter 段，各 48 B；重叠写等待 225 cycles                                |
+| `profile-reconfiguration`               |         403 |                        0 / 0 | 最终 L1/L2 mode2、generation 各 1；运行中 L1 Prepare/Commit 各 64 ACK，L2 各 16 ACK              |
+| `ready-action-branch --group-policy s0` |      16,835 |                        8 / 8 | fast BOA 在 cycle 16,717 开始；slow EVU 在 16,507 结束                                           |
+| `ready-action-branch --group-policy s1` |      16,604 |                        8 / 8 | fast BOA 在 cycle 150 开始，slow EVU 到 16,506 才结束；ready-action 允许独立分支补位             |
+| `paged-attention-decode`                |     169,588 |            269,995 / 269,995 | 27 次 Host call 全部完成；98,592 个 Gather 请求、96 个 Scatter 段；全流程完成                    |
 
-[INFERENCE] 对当前 4 Tile 调度原型，首先应做事件与队列吞吐预算，不应优先采购最多 DSP 或带 HBM 的器件。
+六次均 `completed=true`、credit 检查通过、Arena 零泄漏检查通过；有 Gather/Scatter 的报告相应守恒和 Gather 零泄漏检查也通过。各次事务 cancelled/faulted 均为零。**这些正常路径没有验证错误注入、reset 故障恢复或硬件 CDC。**
 
-## 7. 功耗、布线和实现难度
+PagedAttention 使用已提交场景：初始长度 `[255,511,767]`、4 steps、16 tokens/page、128 physical pages、placement 15、每 Tile 4 UCE context、CPU outstanding 8、L1 mode3/L2 mode1。其 Gather 分类为 L1 hit 73,728、L2 hit 11,602、HBM miss 13,249、bypass 13，总和等于请求数；这是当前 Cache 组织下的模拟统计。
 
-### 7.1 功耗：控制器的主要消耗在哪里
+Profile 场景没有数据事务，证明正常切档/ACK 路径，**不证明 dirty write-back、带流量切档或初始化耗时**。默认导出 trace 不含 pre-run Profile 初始化，不应将表中 ACK 数当成从上电开始的总数。S0/S1 的 engine 区间仍是时序模型，不能理解为真实 BOA/EVU 同拍完成数值计算。
 
-**[INFERENCE] 相对于完整 AI 数据通路，调度控制面的主要功耗来源是：**时钟网络、context/event/queue 表访问、状态翻转、跨模块广播、RISC-V 固件运行和调试输出，而不是数千个 MAC。
+### 9.2 额外字节与 compiled replay 核对
 
-不能从模拟器的 utilization 或 `uce_active` 直接换算瓦数：它没有真实逻辑映射、布线电容、器件漏电、温度与翻转率。硬件调度也不保证一定比固件更省总能量；小负载时 FPGA 静态功耗可能占很大比例。
+对 `indexed-memory` 的本次持久化 artifact，另用独立 Python 进程调用 `parse_compiled_program → load_program → Simulator.run`，读取保存的 target YAML 和原始输入 bin，**不 import compiler、不重新读取 MLIR**：
 
-**可以用于立项讨论、但不能用于电源选型的 [INFERENCE] 预留：**若使用中档 FPGA/SoC FPGA、单管理核、4 Tile 控制面，目标约 100–200 MHz，且不计真实高吞吐 engine/HBM，整板先按约 **10–30 W 量级**讨论电源与散热。选大型 FPGA、重度 DDR/高速接口或大量 debug 时可能明显超出；该范围不是“调度 RTL 本身消耗 10–30 W”，也不是任何具体板卡实测。
+- Gather indices 为 `(3,0,3)`，Scatter indices 为 `(1,1,2)`。
+- 最终 OUT row1 为 `[10,11,12,13]`，说明后序重叠写覆盖了先序写；row2 为 `[40,41,42,43]`。
+- 未写入的 row0/row3 仍触发 uninitialised-byte 错误，没有被隐式补零。
+- trace 中 Scatter ordinal 0、2、1 分别在 cycle 1301、1502、1703 提交；done 在 1703，既保留重叠覆盖顺序，也允许不重叠段提前完成。
+- replay 的产物版本为 schema 3 / ABI v3，`sys.modules` 未加载 `pipeline_validator.compiler`。
 
-更可靠的判断必须经过：资源预算 → 综合 → post-route activity-based 功耗估算 → 板上电源轨/整板输入与温度测量。[H3] 应分别报告管理 CPU、FPGA 静态、调度逻辑、外设与数据通路功耗，不能混在一起。
+这证明了真实字节搬运/覆盖与软件编译执行边界，**不证明 BOA matmul、EVU softmax/pow 或 attention 输出数值正确**。本次没有运行全套 pytest，也没有 FPGA 综合、RTL 仿真或板上测试。
 
-减少功耗的有效方向：
+### 9.3 复现与证据保存
 
-- 等待 context 用事件/位图触发或有限仲裁，不让管理 CPU 无意义忙轮询。
-- 表与队列使用 clock enable / RAM enable；时钟 gating 使用厂商支持资源。
-- completion 优先在 Tile 本地消费，只有 group 级事件向上聚合。
-- PMU 本地计数，trace 按需启用并批量导出。
-- 不为“软件灵活”引入不必要的通用 CPU 核和全局全连接总线。
-
-### 7.2 布线：这里更怕 fanout 和表端口，而不是算术深度
-
-| 物理风险                     | 原因                                          | 推荐处理及代价                                                                      |
-| ---------------------------- | --------------------------------------------- | ----------------------------------------------------------------------------------- |
-| 全局 event / reset 高 fanout | 多 context、多个 Tile 同时消费状态            | 本地 scoreboard、分层聚合与复位；增加少量状态复制与管线                             |
-| 大规模 wakeup CAM            | 每个完成 event 都和所有等待项并行比较         | 有界 event table、waiter 位图/列表、分拍或分 bank 更新；牺牲部分唤醒延迟换面积/时序 |
-| ready/grant 组合长路径       | dependency、resource、engine-ready 串成一条链 | 分级寄存化，定义清楚每一级的接受与预留；不要靠 false path 掩盖                      |
-| completion 突发              | 多 engine 同拍写同一 event/PMU 表             | 每源小 FIFO、本地汇聚、多 bank 或可证明足够的串行排空能力                           |
-| 跨 Tile 宽 command 总线      | 中央调度器搬运完整 descriptor                 | 全局只发送 task/descriptor 引用，Tile 本地取 descriptor；数据通路不穿过调度器       |
-| debug 拖累时序               | trace 汇聚和大量 probes                       | 独立预算采集存储/链路；检查带 debug 的实现，不只检查无 probe 版本                   |
-
-**[INFERENCE] 不建议将全部 engine command 和每拍 credit 都集中经过一个中央 RISC-V/总线。** 例如 4 Tile 各每秒 100 万条、每条 32 B 命令，单向记录量已达 128 MB/s，尚未计 completion/descriptor 和总线开销。局部控制与引用式命令能减少这种集中流量。
-
-### 7.3 时钟、CDC、reset
-
-- 100–200 MHz 可作为初始实现探索目标，不是已达成的 Fmax；不应拿模拟器 1 GHz 参数当 FPGA 时钟要求。
-- 调度控制核心可先单时钟；管理核、DDR/PCIe 和 engine 若属于其他域，通过握手/异步 FIFO连接。
-- 多 bit 命令不能每个 bit 各加两级同步器后就当作一致数据；需要事务级 CDC 协议。
-- reset 释放需按域同步；跨域 outstanding、epoch 和迟到响应要一起处理。
-- 增加流水线会改变物理延迟，但只要满足协议与规定顺序，就没有必要追求与 Python 逐周期相同。
-
-### 7.4 PCB 和平台选择
-
-**[INFERENCE] 首个原型采用现成开发板，不自研 PCB，也不以 HBM 卡作为默认选择。** 普通 FPGA + 成熟软核，或带 RISC-V 硬核的 SoC FPGA，都是可行载体。
-
-公开平台可作能力参照：Microchip PolarFire SoC/Icicle 集成应用 RISC-V 核与 FPGA fabric；NEORV32 提供可综合 MCU 级 RISC-V 软核及自定义接口。[H1]、[H2] 它们证明实现路径和工具生态存在，不证明本设计已放置布线成功。
-
-开发板将 BGA、供电和 DDR PCB 设计成本转移给板卡厂商，但使用者仍需满足供电、散热和接口限制。若自研板，才需要额外承担阻抗控制、差分/DDR 时序匹配、参考平面、PDN、供电时序、EMI 和热设计。**这些板级成本不是“调度逻辑固化”本身必需的第一步。**
-
-## 8. 工程工作量与落地条件
-
-### 8.1 工作量应按“调度控制面”估算
-
-以下为 **[INFERENCE] 预算范围**：已有 FPGA/固件经验，复用成熟板卡、CPU 核与接口 IP；单 Group、4 Tile，完整覆盖约定的多 context、event、queue、admission、资源生命周期、fault/reset 和软件装载路径。没有偷偷把它缩减成只会发一个固定命令的演示。
-
-| 工作包                         | [INFERENCE] 工作量 | 真正的难点                                                          |
-| ------------------------------ | ------------------ | ------------------------------------------------------------------- |
-| 调度契约与软件产物接口         | 1–2 人月           | UCE 指令语义、event 身份、原子准入、软件/硬件 owner、能力上限       |
-| FPGA 调度控制面                | 3–5 人月           | 序列器、scoreboard、queue/credit、多 context、预留提交、fault/reset |
-| 管理固件与装载/配置接口        | 1–2 人月           | task/资源授权、程序版本、ring 可见性、恢复与诊断                    |
-| 验证、集成、板上调试与时序收敛 | 3–6 人月           | completion 乱序/突发、背压、陈旧事件、回收竞态、CDC、实际接口       |
-| **合计**                       | **约 8–15 人月**   | 不含新 BOA/EVU/MFE 数据通路、自研 PCB、量产认证或任意硬件抢占       |
-
-两到三名有经验工程师承担时，日历时间可先按 **4–8 个月量级**排期，但接口冻结、板上问题和工具收敛会形成串行阻塞。若要同时新做 DMA、复杂 IOMMU 或 engine 协议适配，必须额外计入，不能藏在该范围中。
-
-与上一版“重写整个模拟器模型”的预算相比，本项目不需要硬化 profiled cache LRU、全内存时序模型或 trace 的 JSON 生成；工作重点转为真实调度协议和可编程控制器。
-
-### 8.2 现金成本和维护成本
-
-`项目成本 = 人月 × 团队全成本单价 + 开发板/工具/IP + 仪器/备件 + 集成与维护`
-
-例如按每人月 5 万元的**假设财务单价**，8–15 人月对应 40–75 万元人力成本；这不是薪资报价或项目正式报价。板卡与授权需按现有设备、器件和 IP 询价，本次没有市场报价依据。
-
-长期成本来自软件/RTL 的配套演进：新增一个调度原语，可能影响 compiler lowering、程序/descriptor ABI、固件、RTL、trace decoder 与验证。**将灵活性集中在程序和 descriptor、将稳定机制集中在硬件，可以显著减少必须重新综合的修改类型，但不能消除接口维护。**
-
-### 8.3 进入实施前必须决定的事项
-
-1. **语义与 cutline：**实现几个最大 context、哪些 UCE 控制指令、哪些 switch 条件；明确模拟器探索能力和 First Silicon 规范的差异。
-2. **唯一 owner：**event、slot、frame、free map、credit、program residency 各由谁维护，谁只能发请求。
-3. **界面和容量：**command/event/descriptor 的版本、字段、宽度、表深度、回绕与超限行为，均由后续规格冻结。
-4. **服务速率：**控制指令 issue、completion burst、唤醒延迟、固件准入速率与真实软件提交开销。
-5. **故障安全：**何时可以取消、何时必须 drain、什么时候允许资源复用；completion 和 timeout 同拍如何裁决。
-
-这些问题不需要先有完整 BOA 才能解决，但在它们未明确前，也不能承诺确定的 LUT、功耗或板卡型号。
-
-## 9. 验证证据：调度思路确实具有可提取的行为
-
-### 9.1 本次重新运行的调度场景
-
-运行的是现有 Python 模型，用于核对调度思路；不是 FPGA 功能或性能实测。全部开启 memory trace，检查模型完成、credit 守恒与 memory transaction 发出/完成一致性。
-
-| 场景                        | 报告 cycles | transaction 完成/发出 | 从 trace 核对的调度行为                                                                                       |
-| --------------------------- | ----------: | --------------------: | ------------------------------------------------------------------------------------------------------------- |
-| `matmul-pow-free-slot`      |     226,921 |             128 / 128 | `mm_m0n0` 在 106468 完成，`pow_y0` 在 106469 复用 slot 0；无需等到其他 matmul context 最晚的 162834           |
-| `matmul-pow-data-dep`       |     365,735 |             128 / 128 | `pow_np_c0` 在 116729 提交，等待两个所需 producer 的 106468/116728 完成，但不等无关 producer 的 155143/162834 |
-| `matmul17-pow-tail-overlap` |     367,484 |             145 / 145 | 两个 pow 在 118478/164584 提交，早于 tail context 的 220946 完成；首个 pow EVU 服务在 Tile 1 的 187657 开始   |
-| `l2-admission-wait`         |      29,052 |               16 / 16 | `ctx_b` 先占 device slot 等待容量；在 6982 收到容量变化后仅重试一次并 admitted，早于 `ctx_a` 的 29051 完成    |
-
-这四个场景都完成且 credit 检查通过。提交、准入与实际 engine 服务是不同观察点，不能互换。tail 场景证明其他任务可在 tail context 仍活跃时执行，**不证明抢占 tail engine，也不证明任意两个 BOA/EVU 数据通路都在同拍计算。**
-
-复现命令：
+本次报告、前五个 trace、compiled artifact 及 target snapshot、源码 SHA-256/evidence manifest 保存在 `/tmp/nexus-fpga-review-20261010/`。这是本机临时证据，不是仓库永久交付；可用下列命令重新产生。重跑前须确认源码版本，不能将新周期与旧模型参数混算。
 
 ```bash
-bash examples/run.sh matmul-pow-free-slot --memory-trace --trace-json /tmp/sched-free.json --json
-bash examples/run.sh matmul-pow-data-dep --memory-trace --trace-json /tmp/sched-dep.json --json
-bash examples/run.sh matmul17-pow-tail-overlap --memory-trace --trace-json /tmp/sched-tail.json --json
-bash examples/run.sh l2-admission-wait --memory-trace --trace-json /tmp/sched-admission.json --json
+D=/tmp/nexus-fpga-review-20261010
+
+bash examples/run.sh gather --sim-override fidelity=full_memory --memory-trace \
+  --trace-json "$D/gather.trace.json" --compiled-output "$D/gather.compiled.json" \
+  --report "$D/gather.report.json" --json
+bash examples/run.sh indexed-memory --sim-override fidelity=full_memory --memory-trace \
+  --trace-json "$D/indexed.trace.json" --compiled-output "$D/indexed.compiled.json" \
+  --report "$D/indexed.report.json" --json
+bash examples/run.sh profile-reconfiguration --sim-override fidelity=full_memory --memory-trace \
+  --trace-json "$D/profile.trace.json" --compiled-output "$D/profile.compiled.json" \
+  --report "$D/profile.report.json" --json
+for P in s0 s1; do
+  bash examples/run.sh ready-action-branch --group-policy "$P" \
+    --sim-override fidelity=full_memory --memory-trace \
+    --trace-json "$D/$P.trace.json" --compiled-output "$D/$P.compiled.json" \
+    --report "$D/$P.report.json" --json
+done
+bash examples/run.sh paged-attention-decode --sim-override fidelity=full_memory \
+  --compiled-output "$D/paged.compiled.json" --report "$D/paged.report.json" --json
 ```
 
-这些例子使用 launcher 自带的 context、容量与延迟 override。[S8] 模型中的 “done 后下一 cycle 提交” 和 “release 同 cycle admitted” 是当前实现的时序，不是要求未来真实 FPGA 无条件达到一拍唤醒。外部 IR 的普通报告检查主要是完成/credit；本次额外从 trace 核对了表中的因果关系，没有运行全套 pytest。
+## 10. 实施工作包与完整交付验收
 
-### 9.2 FPGA 验收应该比较什么
+以下是 [INFERENCE] 工程路径，不是把某一中间阶段冒称最终完成。当前证据支持进入规格收敛与实现探索，不支持直接给出已完成 RTL 的结论。
 
-**[INFERENCE] 推荐以协议和因果约束为主要验收依据：**
+| 工作包                | 必须交付                                                                           | 退出标准                                                                          |
+| --------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| 数值/指令/target 合同 | 各 engine 显式操作数、支持集、数值规则、Cache 组织、能力上限、硬件 ABI             | 编译输出不再依赖计时占位来表达真实计算；软件 oracle 可生成明确期望                |
+| RISC-V 与 Host 通路   | 程序装载、命令/完成环、页管理、grant、cache 可见性、恢复                           | 实际软/硬核执行固件；同一 bitstream 装载不同程序，无 Python callback 代执行       |
+| 调度与存储数据面      | Root/Task 准入、UCE、event/stream、Arena、Profile、DMA、Cache/MSHR、Gather/Scatter | 随机背压、乱序完成、重复/陈旧事件、部分 Grid 故障、资源守恒与字节 oracle 对比通过 |
+| 真实计算与 Collective | BOA/EVU/USE 及约定 Collective 数据路径                                             | 多 shape/dtype/tail/累加/状态场景数值对照；不能只比较 done 或 latency             |
+| 全系统集成            | Host 页管理 → KV append → Gather → QK/softmax/PV → 输出与回收                      | PagedAttention 等程序的数据、顺序、生命周期和数值闭环；不以预种子输出代替计算     |
+| 物理与板上验收        | 目标器件综合、P&R、CDC/RDC、带 debug 时序、实际接口和功耗                          | 报告 LUT/FF/DSP/RAM、WNS/Fmax、持续带宽、dispatch/wakeup 延迟、板上输入功率与温度 |
 
-- 同一已接受 command 恰好执行一次；背压期间不能丢命令、改身份或重复分配 event。
-- 依赖未满足不启动；与依赖无关的任务不被人为全局串行化。
-- 有限资源不超配；phase、store visibility 与最终回收关系正确。
-- completion 次序和延迟变化时仍正确；旧 generation、重复完成、reset 后迟到响应不污染新任务。
-- 软件能在同一 bitstream 上装载至少两种不同调度流程，以及不同合法 shape/role binding，证明不是将一个 workload 写死。
-- 记录实际 dispatch/wakeup/credit-return 延迟与资源利用率，再将硬件特征反馈给模型。
+控制协议可先用可注入延迟/乱序/错误的 endpoint 验证，算术可分模块对照 oracle；这些是验证夹具，不能作为完整加速器交付。规则算术可以用 HLS/成熟 IP，调度、Cache 一致性、资源生命周期和 CDC 仍需逐项约束与验证。
 
-初期可以用**可控制延迟、乱序和错误的协议测试端点**验证调度器；它只是验证夹具，不是交付的真实 engine，也不能据此声称完成芯片。之后应接入已有真实 DMA/engine 接口验证命令接受、数据可见性和故障边界。无需为了分析/验证调度器，先实现全部 AI 算术。
+最后应以**数值/字节结果、因果顺序、资源守恒、隔离与有界前进**判定正确性；用真实硬件延迟更新模拟器。没有必要追求与 Python 的每一个 cycle 相同，更不能冻结虚拟时间来隐藏固件开销。
 
-最终物理证据仍需目标器件的综合、post-route、CDC/RDC、板上交互和功耗测量；Python 场景无法代替这些证据。
+**最终判断：可以用 FPGA + RISC-V 实现当前整体设计思路；后续改动显著增强了控制、索引访存和资源协议的可落地性。要实现完整的可计算系统，下一优先级是补计算操作数/数值合同、Cache 物理组织与端到端 ABI，而不是继续把所有 engine 当外部黑盒后宣布可行。默认配置的性能、单板 fit、功耗和工期仍必须由真实实现验证。**
 
-## 10. 结论与证据索引
+## 11. 证据索引
 
-### 10.1 最终建议
+### 11.1 当前源码与运行输入
 
-**[INFERENCE] 可以将这套初步调度思路实现到 FPGA，且不必牺牲软件灵活性。** 推荐将系统设计成：
+| 编号 | 文件/入口                                                                                                                                                                                                                                                                                                                                                 | 本报告使用的依据                                                                      |
+| ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| S1   | [compiler/api.py](../pipeline_validator/compiler/api.py)、[compiled_program.py](../pipeline_validator/compiled_program.py)、[loader.py](../pipeline_validator/loader.py)、[execution_verifier.py](../pipeline_validator/execution_verifier.py)、[cli.py](../pipeline_validator/cli.py)                                                                    | compile/load 分离、schema/ABI、严格产物、独立校验与复放                               |
+| S2   | [device.py](../pipeline_validator/device.py)、[runtime/group_port.py](../pipeline_validator/runtime/group_port.py)、[simulator.py](../pipeline_validator/simulator.py)                                                                                                                                                                                    | CPU pending/dependency、Group slot、Host 与 Group 主循环                              |
+| S3   | [group_scheduler.py](../pipeline_validator/group_scheduler.py)、[tile_group_sequencer.py](../pipeline_validator/tile_group_sequencer.py)、[tile_group.py](../pipeline_validator/tile_group.py)                                                                                                                                                            | ready-action、barrier、逐 Tile 准入、Grid/phase/R lease                               |
+| S4   | [tile.py](../pipeline_validator/tile.py)：`_select_context`、`_issue_context`、`_enqueue_engine_launch`                                                                                                                                                                                                                                                   | eligible-head RR、控制占位、engine ingress                                            |
+| S5   | [runtime/event_table.py](../pipeline_validator/runtime/event_table.py)、[stream_queue.py](../pipeline_validator/stream_queue.py)、[runtime/reset_domain.py](../pipeline_validator/runtime/reset_domain.py)、[runtime/program_table.py](../pipeline_validator/runtime/program_table.py)                                                                    | 事件/credit、drain/reset、program residency                                           |
+| S6   | [engines.py](../pipeline_validator/engines.py)：BOA/EVU/USE `latency`、MFE `launch_gather`/`launch_scatter`、Gather/Scatter tick                                                                                                                                                                                                                          | 时序算术与真实索引搬运的区别                                                          |
+| S7   | [memory/address_provider.py](../pipeline_validator/memory/address_provider.py)、[memory/byte_store.py](../pipeline_validator/memory/byte_store.py)、[memory/transfer.py](../pipeline_validator/memory/transfer.py)、[memory/noc.py](../pipeline_validator/memory/noc.py)                                                                                  | 求址、oracle、read/write 提交、route 与物理简化                                       |
+| S8   | [memory/cache.py](../pipeline_validator/memory/cache.py)、[memory/mshr.py](../pipeline_validator/memory/mshr.py)、[compiler/profile_pass.py](../pipeline_validator/compiler/profile_pass.py)                                                                                                                                                              | LRU/identity、MSHR、维护和写范围合同                                                  |
+| S9   | [profiles.py](../pipeline_validator/profiles.py)、[memory/profile_controller.py](../pipeline_validator/memory/profile_controller.py)、[memory/arena.py](../pipeline_validator/memory/arena.py)、[compiler/resources.py](../pipeline_validator/compiler/resources.py)                                                                                      | Profile ACK/generation、bank/Arena 预算与生命周期                                     |
+| S10  | [memory/page_pool.py](../pipeline_validator/memory/page_pool.py)、[runtime/host_session.py](../pipeline_validator/runtime/host_session.py)、[paged_attention.py](../pipeline_validator/paged_attention.py)                                                                                                                                                | 页与 scope、Host 事务、PagedAttention handler；lease API 与设备接线的区别             |
+| S11  | [dialects/elenor.py](../pipeline_validator/dialects/elenor.py)：`TileBoaOp`/`TileEvuOp`/`TilePowOp`；[compiler/lowering.py](../pipeline_validator/compiler/lowering.py)：`_lower_engine_descriptor`                                                                                                                                                       | 当前计算 descriptor 缺少显式 tensor 输入/输出合同                                     |
+| S12  | [hardware_config.yaml](../pipeline_validator/hardware_config.yaml)、[config.py](../pipeline_validator/config.py)                                                                                                                                                                                                                                          | 默认容量/带宽/几何、独立 Device/Group/Tile 容量                                       |
+| S13  | [examples/run.sh](../examples/run.sh)、[indexed_gather_scatter.mlir](../examples/workloads/indexed_gather_scatter.mlir)、[gather_indexed.mlir](../examples/workloads/gather_indexed.mlir)、[ready_action_branch.mlir](../examples/scenarios/ready_action_branch.mlir)、[profile_reconfiguration.mlir](../examples/scenarios/profile_reconfiguration.mlir) | 本次 smoke 的 launcher、源 IR 与参数                                                  |
+| S14  | [paged_attention_decode_scenario.json](../examples/workloads/paged_attention_decode_scenario.json)、[paged_attention_decode_pipeline.mlir](../examples/workloads/paged_attention_decode_pipeline.mlir)                                                                                                                                                    | 默认 PagedAttention 几何、模式与源 hash                                               |
+| S15  | [Limitation.md](../pipeline_validator/Limitation.md)、[README.md](../pipeline_validator/README.md)                                                                                                                                                                                                                                                        | 单 Group/fidelity/初始化 trace 边界；Gather/schema 部分文字滞后，以源码和本次产物为准 |
 
-- **软件决定任务与资源方案：**做什么、依赖谁、用哪个程序和数据布局、何时提交。
-- **可编程 UCE/Group 控制器执行软件给出的控制对象：**具体的 load/compute/store 编排通过程序与 action 数据改变。
-- **硬件强制实时安全机制：**资源检查、event/credit、握手、背压、exactly-once 接受、隔离和快速故障停止。
-- **管理 RISC-V 处理变化快而不宜全硬化的工作：**分配策略、shape 版本、配置与恢复；不成为每条 engine 命令的串行中转站。
+### 11.2 架构意图与外部能力参照
 
-**成本的重点是控制协议、状态表端口、跨域/布线、验证和软硬件接口，而不是 HBM 容量或矩阵 DSP 数量。** 软件灵活性的重点是可加载程序/descriptor 和清晰的政策接口，而不是让软件随时修改任意正在运行的硬件状态。
+- [A1] [BOA 设计](../design/elenor_boa/ELENOR_BOA_Design.md)：数值格式、operand fetch、accumulator、writeback 的设计意图，不是当前数值模型实现。
+- [A2] [Tile UCE 设计](../design/elenor_tile_uce/ELENOR_Tile_UCE_Design.md)、[Driver/Firmware/Runtime 设计](../design/elenor_driver_firmware/ELENOR_Driver_Firmware_Runtime_Design.md)：可加载程序、ownership、doorbell/patch/residency 草案；与当前模型区分成熟度。
+- [H1] [NEORV32 官方项目](https://github.com/stnolting/neorv32)：可综合 RISC-V 管理软核及总线/软件生态；非本设计资源证明。
+- [H2] [AMD Alveo U55C 官方规格页](https://www.amd.com/en/products/accelerators/alveo/u55c/a-u55c-p00g-pq-g.html)：本次读取的 HBM、SRAM、DSP 与整卡功耗规格；非本设计实测或 fit 保证。
 
-### 10.2 当前源码依据
-
-| 编号 | 文件/符号                                                                                                                                         | 本报告使用的事实                                                |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| S1   | [simulator.py][S1]：`Simulator.__init__`、`_run_model`；[config.py](../pipeline_validator/config.py)：`MAX_CONTEXT_COUNT`                         | 共享 Group、slot 分配/退役、context 数、device submit/await     |
-| S2   | [tile.py][S2]：`step`、`_select_context`、`_retry_held_launch_issue`、`_issue_context`、`_enqueue_engine_launch`，约 243–308、532–671、785–877 行 | 当前 context 优先、held-launch、issue/accept 区别、控制指令简化 |
-| S3   | [tile_group_sequencer.py][S3]：`step`、各 action 分支，约 129–309 行                                                                              | Group action index、wait/dispatch/release、barrier 简化         |
-| S4   | [tile_group.py][S4]：准入约 603–733、`dispatch_role`、phase 约 1220–1293 行；[stream_queue.py](../pipeline_validator/stream_queue.py)             | final-free/FIFO 准入、原子 dispatch、phase 身份、credit/EOS     |
-| S5   | [engines.py][S5]；[memory/cache.py](../pipeline_validator/memory/cache.py)                                                                        | engine latency/profile 不属于真实调度器应复制的机制             |
-| S6   | [Limitation.md][S6]                                                                                                                               | 单 Group、无 tensor 数值、profiled Gather 和映射边界            |
-| S7   | [memory/allocator.py][S7]：`plan_bundle`、`_plan_one`、`commit`                                                                                   | 软件分配器策略与资源生命周期                                    |
-| S8   | [examples/run.sh][S8]；[examples/workloads](../examples/workloads)；[examples/scenarios](../examples/scenarios)                                   | 本次运行场景、各自参数和依赖设计                                |
-
-### 10.3 架构文档依据
-
-- [A1] **Tile UCE**：§1–2、§3.2.1、§3.3–3.5、§4.6。可加载 Tile Program、单 issue、context 边界、无 V1 硬件动态 allocator、engine 握手。
-- [A2] **Tile Group Sequencer**：§1–3。Group Task 是 descriptor/action list，不是 group-level program；group admission 与 UCE 的分工。
-- [A3] **Global Scheduler**：§2–3。命令仲裁、依赖/资源检查、event scoreboard、pipeline 寄存化。
-- [A4] **Driver/Firmware/Runtime**：§2.5、§4.5–4.6、§5.2。event ownership 需对齐；doorbell 可见性、受限 patch、程序驻留与 running text 不可改。
-
-### 10.4 外部能力与方法依据
-
-- [H1] Microchip，**PolarFire SoC Product Overview，DS60001656K**：RISC-V + FPGA fabric 的集成平台及 Icicle 开发板。仅作平台能力参照，不作本设计资源或功耗证明。
-- [H2] **NEORV32 官方项目**：可综合 MCU-class RISC-V 软核、接口与软件生态。仅作管理核选项，不要求使用该核。
-- [H3] Xilinx，**UG907 v2018.3，Power Analysis and Optimization**：静态/动态功耗、活动率、post-route 分析方法。实际实施应使用所选器件与工具版本的对应指南。
-
-[S1]: ../pipeline_validator/simulator.py
-[S2]: ../pipeline_validator/tile.py
-[S3]: ../pipeline_validator/tile_group_sequencer.py
-[S4]: ../pipeline_validator/tile_group.py
-[S5]: ../pipeline_validator/engines.py
-[S6]: ../pipeline_validator/Limitation.md
-[S7]: ../pipeline_validator/memory/allocator.py
-[S8]: ../examples/run.sh
-[A1]: ../design/elenor_tile_uce/ELENOR_Tile_UCE_Design.md
-[A2]: ../design/elenor_tile_group_sequencer/ELENOR_Tile_Group_Sequencer_Design.md
-[A3]: ../design/elenor_global_scheduler/ELENOR_Global_Scheduler_Design.md
-[A4]: ../design/elenor_driver_firmware/ELENOR_Driver_Firmware_Runtime_Design.md
-[H1]: https://ww1.microchip.com/downloads/aemDocuments/documents/FPGA/ProductDocuments/ProductBrief/PolarFire-SoC-Product-Overview-60001656.pdf
-[H2]: https://github.com/stnolting/neorv32
-[H3]: https://docs.amd.com/api/khub/documents/qILQe_LXLgAWMu~mbALIoA/content
+[S1]: ../pipeline_validator/compiled_program.py
+[S2]: ../pipeline_validator/device.py
+[S3]: ../pipeline_validator/group_scheduler.py
+[S4]: ../pipeline_validator/tile.py
+[S5]: ../pipeline_validator/runtime/reset_domain.py
+[S6]: ../pipeline_validator/engines.py
+[S7]: ../pipeline_validator/memory/address_provider.py
+[S8]: ../pipeline_validator/memory/cache.py
+[S9]: ../pipeline_validator/memory/profile_controller.py
+[S10]: ../pipeline_validator/memory/page_pool.py
+[S11]: ../pipeline_validator/compiler/lowering.py
+[S12]: ../pipeline_validator/hardware_config.yaml
+[S13]: ../examples/run.sh
+[S14]: ../examples/workloads/paged_attention_decode_scenario.json
+[S15]: ../pipeline_validator/Limitation.md
+[A1]: ../design/elenor_boa/ELENOR_BOA_Design.md
+[A2]: ../design/elenor_tile_uce/ELENOR_Tile_UCE_Design.md
+[H1]: https://github.com/stnolting/neorv32
+[H2]: https://www.amd.com/en/products/accelerators/alveo/u55c/a-u55c-p00g-pq-g.html

@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1120" style="font-family:sans-serif;font-size:14px;color:var(--fg,currentColor)" role="img" aria-labelledby="title desc">
+<title id="title">Pipeline Validator 资源占用和释放生命周期</title>
+<desc id="desc">当前实现的正常路径。Root slot、event quota、L2 backing、Grid route、L1 Task Arena、Frame、UCE context与R lease具有不同生命周期。阶段时轴非比例，阶段可以同cycle发生。Shared L2 backing可跨producer root退休存活。</desc>
+<text x="20.00" y="30.00" font-size="20" fill="currentColor" text-anchor="start">资源生命周期：任务已提交、已结束、资源可复用，是三件不同的事</text>
+<text x="20.00" y="55.00" font-size="14" fill="var(--muted,currentColor)" text-anchor="start">正常执行路径；阶段轴非比例，各阶段可发生在同一 cycle。框表示该项持有，不代表固定字节量。</text>
+<text x="190.00" y="85.00" font-size="14" fill="currentColor" text-anchor="middle">T0</text>
+<text x="190.00" y="106.00" font-size="13" fill="currentColor" text-anchor="middle">Port 接收</text>
+<path d="M190.00 123.00 L190.00 694.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="310.00" y="85.00" font-size="14" fill="currentColor" text-anchor="middle">T1</text>
+<text x="310.00" y="106.00" font-size="13" fill="currentColor" text-anchor="middle">root 准入</text>
+<path d="M310.00 123.00 L310.00 694.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="430.00" y="85.00" font-size="14" fill="currentColor" text-anchor="middle">T2</text>
+<text x="430.00" y="106.00" font-size="13" fill="currentColor" text-anchor="middle">Grid 登记</text>
+<path d="M430.00 123.00 L430.00 694.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="540.00" y="85.00" font-size="14" fill="currentColor" text-anchor="middle">T3</text>
+<text x="540.00" y="106.00" font-size="13" fill="currentColor" text-anchor="middle">Task 准入</text>
+<path d="M540.00 123.00 L540.00 694.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="710.00" y="85.00" font-size="14" fill="currentColor" text-anchor="middle">T4</text>
+<text x="710.00" y="106.00" font-size="13" fill="currentColor" text-anchor="middle">Task terminal</text>
+<path d="M710.00 123.00 L710.00 694.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="820.00" y="85.00" font-size="14" fill="currentColor" text-anchor="middle">T5</text>
+<text x="820.00" y="106.00" font-size="13" fill="currentColor" text-anchor="middle">Task 退休</text>
+<path d="M820.00 123.00 L820.00 694.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="940.00" y="85.00" font-size="14" fill="currentColor" text-anchor="middle">T6</text>
+<text x="940.00" y="106.00" font-size="13" fill="currentColor" text-anchor="middle">root 完成</text>
+<path d="M940.00 123.00 L940.00 694.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<path d="M180.00 118.00 L980.00 118.00" fill="none" stroke="currentColor"/>
+<text x="20.00" y="157.00" font-size="14" fill="currentColor" text-anchor="start">Group pending</text>
+<rect x="190.00" y="136.00" width="120.00" height="30.00" rx="4" fill="none" stroke="currentColor"/>
+<text x="250.00" y="157.00" font-size="14" fill="currentColor" text-anchor="middle">metadata</text>
+<text x="337.00" y="157.00" font-size="14" fill="currentColor" text-anchor="start">尚无 Group slot / L2 / L1；CPU 端可已有 outstanding / completion 额度</text>
+<text x="20.00" y="208.00" font-size="14" fill="currentColor" text-anchor="start">Group slot</text>
+<rect x="310.00" y="187.00" width="630.00" height="30.00" rx="4" fill="none" stroke="var(--c1,currentColor)"/>
+<text x="625.00" y="208.00" font-size="14" fill="var(--c1,currentColor)" text-anchor="middle">root 的 adapter slot：直到 harvest 中 _retire_slots 才归还</text>
+<text x="20.00" y="253.00" font-size="14" fill="currentColor" text-anchor="start">Group event quota</text>
+<rect x="310.00" y="232.00" width="617.00" height="30.00" rx="4" fill="none" stroke="var(--c1,currentColor)"/>
+<text x="618.50" y="253.00" font-size="14" fill="var(--c1,currentColor)" text-anchor="middle">准入预留配额；action 注册时分配事件条目；root 修剪时 release_owner</text>
+<text x="20.00" y="298.00" font-size="14" fill="currentColor" text-anchor="start">L2 Arena 元数据</text>
+<rect x="310.00" y="277.00" width="607.00" height="30.00" rx="4" fill="none" stroke="var(--c2,currentColor)"/>
+<text x="613.50" y="298.00" font-size="14" fill="var(--c2,currentColor)" text-anchor="middle">root 所有的逻辑 Arena；不是整段期间恒定占着初始字节数</text>
+<text x="20.00" y="343.00" font-size="14" fill="currentColor" text-anchor="start">L2 input backing</text>
+<rect x="310.00" y="322.00" width="365.00" height="30.00" rx="4" fill="none" stroke="var(--c2,currentColor)"/>
+<text x="492.50" y="343.00" font-size="14" fill="var(--c2,currentColor)" text-anchor="middle">输入已读完 + release 可提前归还</text>
+<text x="20.00" y="388.00" font-size="14" fill="currentColor" text-anchor="start">L2 output backing</text>
+<rect x="310.00" y="367.00" width="595.00" height="30.00" rx="4" fill="none" stroke="var(--c2,currentColor)"/>
+<text x="607.50" y="388.00" font-size="14" fill="var(--c2,currentColor)" text-anchor="middle">输出写回 / 依赖闭合后 release；不必等所有 root 控制状态消失</text>
+<text x="20.00" y="433.00" font-size="14" fill="currentColor" text-anchor="start">Shared L2（可选）</text>
+<rect x="310.00" y="412.00" width="607.00" height="30.00" rx="4" fill="none" stroke="var(--c3,currentColor)"/>
+<text x="613.50" y="433.00" font-size="14" fill="var(--c3,currentColor)" text-anchor="middle">若还有消费者 claim / alias / 引用，物理 backing 继续保留</text>
+<rect x="917.00" y="412.00" width="63.00" height="30.00" rx="4" fill="none" stroke="var(--c3,currentColor)" stroke-dasharray="5 4"/>
+<text x="20.00" y="466.00" font-size="14" fill="var(--muted,currentColor)" text-anchor="start">虚线尾：origin root 已退休 ≠ shared backing 已归还；等所有声明/绑定的消费者与引用闭合。</text>
+<path d="M20.00 483.00 L980.00 483.00" fill="none" stroke="var(--border,currentColor)"/>
+<text x="20.00" y="518.00" font-size="14" fill="currentColor" text-anchor="start">Grid Route</text>
+<rect x="430.00" y="497.00" width="390.00" height="30.00" rx="4" fill="none" stroke="var(--c4,currentColor)"/>
+<text x="625.00" y="518.00" font-size="14" fill="var(--c4,currentColor)" text-anchor="middle">先登记 route；最后一个 Tile Task 退休才 Grid done</text>
+<text x="20.00" y="563.00" font-size="14" fill="currentColor" text-anchor="start">L1 Task Arena</text>
+<rect x="540.00" y="542.00" width="280.00" height="30.00" rx="4" fill="none" stroke="var(--c5,currentColor)"/>
+<text x="680.00" y="563.00" font-size="14" fill="var(--c5,currentColor)" text-anchor="middle">整包预留 → Task 退休整包归还</text>
+<text x="20.00" y="608.00" font-size="14" fill="currentColor" text-anchor="start">Frame / UCE 槽</text>
+<rect x="540.00" y="587.00" width="280.00" height="30.00" rx="4" fill="none" stroke="var(--c5,currentColor)"/>
+<text x="680.00" y="608.00" font-size="14" fill="var(--c5,currentColor)" text-anchor="middle">prepare / bind → 执行 → 退休</text>
+<text x="20.00" y="653.00" font-size="14" fill="currentColor" text-anchor="start">R lease</text>
+<rect x="540.00" y="632.00" width="280.00" height="30.00" rx="4" fill="none" stroke="var(--c4,currentColor)"/>
+<text x="680.00" y="653.00" font-size="14" fill="var(--c4,currentColor)" text-anchor="middle">按 root binding × generation × Tile</text>
+<text x="20.00" y="684.00" font-size="13" fill="currentColor" text-anchor="start">L2 access pins：Task 准入时建立；纯读者在 input_released 聚合后解除；其余可在 publish/release 或 Task 退休时解除。</text>
+<path d="M20.00 702.00 L980.00 702.00" fill="none" stroke="var(--border,currentColor)"/>
+<rect x="20.00" y="721.00" width="460.00" height="132.00" rx="4" fill="none" stroke="var(--accent,currentColor)"/>
+<rect x="500.00" y="721.00" width="480.00" height="132.00" rx="4" fill="none" stroke="var(--accent,currentColor)"/>
+<text x="34.00" y="746.00" font-size="16" fill="currentColor" text-anchor="start" font-weight="bold">L2：view 生命周期 ≠ backing 容量生命周期</text>
+<text x="34.00" y="772.00" font-size="14" fill="currentColor" text-anchor="start">root commit 按编译 layout 预留 padded backing + slack。</text>
+<text x="34.00" y="796.00" font-size="14" fill="currentColor" text-anchor="start">nest.alloc 绑定 view；nest.release 使 view 失效。</text>
+<text x="34.00" y="820.00" font-size="14" fill="currentColor" text-anchor="start">无 producer / claim / alias / pin / inflight 后才归还 extent。</text>
+<text x="34.00" y="842.00" font-size="14" fill="var(--muted,currentColor)" text-anchor="start">所以单块可提前释放，也可能跨 root 保留。</text>
+<text x="514.00" y="746.00" font-size="16" fill="currentColor" text-anchor="start" font-weight="bold">L1：tile.free 不等于归还 Task Arena 容量</text>
+<text x="514.00" y="772.00" font-size="14" fill="currentColor" text-anchor="start">Task 准入时按 layout 整包预留 L1，Frame 绑定随后完成。</text>
+<text x="514.00" y="796.00" font-size="14" fill="currentColor" text-anchor="start">tile.alloc / tile.free 在已预留空间内绑定 / 失效 view。</text>
+<text x="514.00" y="820.00" font-size="14" fill="currentColor" text-anchor="start">UCE DONE 也不等于槽可立即复用：还要关闭引用和 Frame。</text>
+<text x="514.00" y="842.00" font-size="14" fill="var(--muted,currentColor)" text-anchor="start">R 是每 root、每 Tile 的并发租约上限，不是 UCE 总槽数。</text>
+<text x="20.00" y="886.00" font-size="17" fill="currentColor" text-anchor="start" font-weight="bold">退休门槛：不能把 “最后一个 compute 完成” 直接连到 “CPU 收到完成”</text>
+<rect x="20.00" y="901.00" width="300.00" height="84.00" rx="4" fill="none" stroke="var(--success,currentColor)"/>
+<rect x="340.00" y="901.00" width="300.00" height="84.00" rx="4" fill="none" stroke="var(--success,currentColor)"/>
+<rect x="660.00" y="901.00" width="320.00" height="84.00" rx="4" fill="none" stroke="var(--success,currentColor)"/>
+<text x="34.00" y="925.00" font-size="15" fill="currentColor" text-anchor="start" font-weight="bold">1. UCE terminal → Task 退休</text>
+<text x="34.00" y="949.00" font-size="14" fill="currentColor" text-anchor="start">无在途 L1 访问 → invalidate views</text>
+<text x="34.00" y="973.00" font-size="14" fill="currentColor" text-anchor="start">→ retire L1 Arena → 解剩余 L2 pins</text>
+<text x="354.00" y="925.00" font-size="15" fill="currentColor" text-anchor="start" font-weight="bold">2. 释放 Task 载体 → Grid done</text>
+<text x="354.00" y="949.00" font-size="14" fill="currentColor" text-anchor="start">Frame release → 归还 R lease</text>
+<text x="354.00" y="973.00" font-size="14" fill="currentColor" text-anchor="start">最后一个 Tile 退休 → 删除 Grid route</text>
+<text x="674.00" y="925.00" font-size="15" fill="currentColor" text-anchor="start" font-weight="bold">3. root 资源闭合 → CPU completion</text>
+<text x="674.00" y="949.00" font-size="14" fill="currentColor" text-anchor="start">无 route/lease/job，L2 views 已 released</text>
+<text x="674.00" y="973.00" font-size="14" fill="currentColor" text-anchor="start">根 Arena 退休 → event quota → Group slot</text>
+<path d="M321.00 943.00 L338.00 943.00" fill="none" stroke="currentColor"/>
+<path d="M641.00 943.00 L658.00 943.00" fill="none" stroke="currentColor"/>
+<text x="20.00" y="1012.00" font-size="14" fill="currentColor" text-anchor="start">L2 占用应看 pool 的 arena_reserved_bytes / physical_live_backing_bytes；arena.reserved_bytes 是初始预留常量。</text>
+<text x="20.00" y="1038.00" font-size="14" fill="currentColor" text-anchor="start">数据 SRAM 每 bank = system-reserved SPM + user SPM + cache；profile 在同一物理容量内切分，不可把 cache 再加一遍。</text>
+<text x="20.00" y="1064.00" font-size="14" fill="currentColor" text-anchor="start">顺序：CPU.step → Group.step → CPU.harvest（先退 slot 再准入新 root）；新 root 下一 cycle 才进入 Group 调度。</text>
+<text x="20.00" y="1094.00" font-size="13" fill="var(--muted,currentColor)" text-anchor="start">依据：tile_group.py::_step_tiles / retire_context_arena · memory/arena.py::_try_release_l2_backing · runtime/group_port.py</text>
+</svg>

@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1010" style="font-family:sans-serif;font-size:14px;color:var(--fg,currentColor)" role="img" aria-labelledby="title desc">
+  <title id="title">Pipeline Validator Tile UCE：独立 contexts、共享 issue 与异步完成</title>
+  <desc id="desc">当前 Tile UCE 的 eligible-head round-robin 仲裁。未就绪的 await 在 head probe 阶段被跳过，PC 不前进；launch 入共享 FIFO 后引擎异步推进。图中布局不是实测周期比例。</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="currentColor"/></marker></defs>
+  <g fill="currentColor"><text x="20" y="30" font-size="21">一个 Tile：多个 UCE contexts，但只有一个共享指令 issue 槽</text><text x="20" y="56" fill="var(--muted,currentColor)">机制示意，不按周期比例。context_count 可配置 1..8；下图用 3 个 context 说明阻塞与跳过。</text></g>
+  <text x="20" y="88" font-size="17" fill="currentColor">① 每 context 独立保存 PC、program、events、wait、tokens 和 L1 views</text>
+  <g fill="none" stroke="var(--border,currentColor)"><rect x="20" y="105" width="300" height="102" rx="6"/><rect x="340" y="105" width="300" height="102" rx="6"/><rect x="660" y="105" width="300" height="102" rx="6"/></g>
+  <g fill="currentColor">
+    <text x="34" y="129" font-weight="bold">CTX0：head = launch EVU</text><text x="34" y="153">L1 view 有效、目标 FIFO 有空位</text><text x="34" y="180" fill="var(--success,currentColor)">ELIGIBLE → 可以当选</text>
+    <text x="354" y="129" font-weight="bold">CTX1：head = await ev0</text><text x="354" y="153">ev0 未完成：probe 返回 WAIT_EVENT</text><text x="354" y="180" fill="var(--warning,currentColor)">不 issue，PC 仍停在 await；跳过</text>
+    <text x="674" y="129" font-weight="bold">CTX2：head = stream.acquire</text><text x="674" y="153">无 credit：probe 返回 WAIT_STREAM</text><text x="674" y="180" fill="var(--warning,currentColor)">不 issue，PC 不前进；跳过</text>
+    <text x="20" y="233">准备阶段：ACCEPT → FRAME_BIND → READY；所有处于准备阶段的 contexts 每 cycle 各自推进。</text>
+    <text x="20" y="257" fill="var(--muted,currentColor)">准备不占共享 issue 槽；cold program load 仍只是等待计数估算，不是真实 code DMA。</text>
+  </g>
+  <g fill="none" stroke="currentColor"><path d="M170 208 V216 H978 V281 H490 V289" marker-end="url(#arrow)"/><path d="M490 208 V216"/><path d="M810 208 V216"/></g>
+
+  <g fill="none" stroke="var(--accent,currentColor)"><rect x="20" y="292" width="940" height="114" rx="6"/></g>
+  <g fill="currentColor">
+    <text x="34" y="318" font-size="17" font-weight="bold">② eligible-head RR：从 _rr_next_ctx 开始环形扫描</text>
+    <text x="34" y="344">blocked head 不挡其他 context；选择第一个 ELIGIBLE（或 FAULT），下次从其后一个 context 开始。</text>
+    <text x="34" y="369">本 cycle 最多 issue 1 条指令；同一个 context 内不会越过未就绪的 await 去发后续指令。</text>
+    <text x="34" y="392" fill="var(--muted,currentColor)">注意：head probe 的 WAIT_EVENT 不等于 context FSM 已进入 WAIT_EVENT；不能据此声称 PC 已越过 await。</text>
+  </g>
+  <path d="M490 407 V438" fill="none" stroke="currentColor" marker-end="url(#arrow)"/>
+
+  <text x="20" y="431" font-size="17" fill="currentColor">③ launch 先进入 UCE 侧共享 FIFO，不是立刻完成运算</text>
+  <g fill="none" stroke="var(--accent,currentColor)"><rect x="20" y="446" width="300" height="97" rx="6"/><rect x="340" y="446" width="300" height="97" rx="6"/><rect x="660" y="446" width="300" height="97" rx="6"/></g>
+  <g fill="currentColor">
+    <text x="34" y="471" font-weight="bold">BOA / EVU / USE：各 1 条 FIFO</text><text x="34" y="495">每条 depth=1，跨 contexts 共享</text><text x="34" y="519">满：WAIT_ENGINE_QUEUE，head 不发</text>
+    <text x="354" y="471" font-weight="bold">MFE：4 条 UCE 侧 FIFO</text><text x="354" y="495">LOAD / GATHER：load_queue_depth</text><text x="354" y="519">STORE / SCATTER：store_queue_depth</text>
+    <text x="674" y="471" font-weight="bold">entry = context + event + descriptor</text><text x="674" y="495">成功入队：登记 event，PC 前进</text><text x="674" y="519">每 cycle 各 FIFO 队头尝试进 engine</text>
+    <text x="20" y="568" fill="var(--muted,currentColor)">engine 暂不接纳时队头原位重试；这是队列排放，不另占本 cycle 的 UCE 指令 issue 槽。</text>
+  </g>
+  <path d="M490 545 V590" fill="none" stroke="currentColor" marker-end="url(#arrow)"/>
+
+  <text x="20" y="594" font-size="17" fill="currentColor">④ 不同 engine 可重叠；同一个 engine 的服务资源仍然有限</text>
+  <g fill="none" stroke="var(--border,currentColor)"><rect x="20" y="610" width="440" height="98" rx="6"/><rect x="480" y="610" width="480" height="98" rx="6"/></g>
+  <g fill="currentColor">
+    <text x="34" y="635" font-weight="bold">BOA / EVU / USE：各自一次服务 1 个 job</text><text x="34" y="659">两个 contexts 的 EVU 操作仍要串行。</text><text x="34" y="683">EVU 与 BOA 则可以在不同服务资源上重叠。</text>
+    <text x="494" y="635" font-weight="bold">MFE load/store：可配置 channel lanes</text><text x="494" y="659">每条 lane 内串行；不同 lanes 可以重叠。</text><text x="494" y="683">Gather/Scatter 另有 indexed-job 路径，不等同普通 DMA lane。</text>
+  </g>
+
+  <text x="20" y="741" font-size="17" fill="currentColor">⑤ 每 cycle 先处理 completion，再选择本 cycle 的指令</text>
+  <g fill="none" stroke="var(--success,currentColor)"><rect x="20" y="757" width="220" height="61" rx="5"/><rect x="260" y="757" width="220" height="61" rx="5"/><rect x="500" y="757" width="220" height="61" rx="5"/><rect x="740" y="757" width="220" height="61" rx="5"/></g>
+  <g fill="currentColor" text-anchor="middle"><text x="130" y="781">Engine.tick</text><text x="130" y="804">完成 → notify_event</text><text x="370" y="781">drain completion_queue</text><text x="370" y="804">写所属 context.events_done</text><text x="610" y="781">drain engine FIFOs</text><text x="610" y="804">再推进准备状态</text><text x="850" y="781">RR 探头 → issue</text><text x="850" y="804">本 cycle 的完成已经可见</text></g>
+  <g fill="none" stroke="currentColor" marker-end="url(#arrow)"><path d="M240 788 H258"/><path d="M480 788 H498"/><path d="M720 788 H738"/></g>
+  <g fill="currentColor"><text x="20" y="845">cycle N 发出的 launch 最早 N+1 才进 engine；cycle N 完成的 event 可让本 cycle 的 await 通过。</text><text x="20" y="869" fill="var(--muted,currentColor)">通过仍需 RR 当选、占用一次指令 issue；不是让等待之后的下一条指令免费在同 cycle 一起执行。</text></g>
+
+  <g fill="none" stroke="var(--success,currentColor)"><rect x="20" y="891" width="940" height="69" rx="6"/></g>
+  <g fill="currentColor"><text x="34" y="916" font-weight="bold">⑥ Task terminal：RET / PC 到尾，还要等该 context 的全部 local events 完成</text><text x="34" y="941">terminal → Group 消费 → Arena / Frame / pins / lease 退休 → Grid done；不是最后一个 compute 完成就直接报 root done。</text><text x="20" y="988" fill="var(--muted,currentColor)">依据：tile.py:300–353, 576–678, 978–1109, 1298–1318 · engines.py:71–145, 448–519；Python 状态不是 RTL 寄存器。</text></g>
+</svg>

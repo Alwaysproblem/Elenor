@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1580" style="font-family:sans-serif;font-size:14px;color:var(--fg,currentColor)" role="img" aria-labelledby="title desc">
+<title id="title">Pipeline Validator Group–Tile 任务状态同步与注册表归属</title>
+<desc id="desc">当前源码的状态归属、标识、函数调用与事件队列，以及Grid和root退休时的清理。下方包含四Tile运行的phase聚合观测。布局和阶段位置非比例；这不是硬件NoC消息或中断实现。</desc>
+<defs><marker id="sync-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="currentColor"/></marker></defs>
+<text x="20" y="30" font-size="20" fill="currentColor" text-anchor="start" font-weight="bold">Group ↔ Tile：靠身份明确的通知维护各自状态，不是复制一张全局状态表</text>
+<text x="20" y="56" font-size="14" fill="currentColor" text-anchor="start">当前 pipeline_validator 实现：Group 管 Grid / phase / 退休；Tile UCE 管 PC / 本地执行 / 本地事件。</text>
+<text x="20" y="80" font-size="13" fill="var(--muted,currentColor)" text-anchor="start">注册表位于模拟器进程的 Python 对象中；没有把这条控制路径模拟成共享 HBM 状态表、NoC 消息包或硬件中断。</text>
+<rect x="20" y="95" width="960" height="104" rx="6" fill="none" stroke="var(--accent,currentColor)"/>
+<text x="34" y="120" font-size="16" fill="currentColor" text-anchor="start" font-weight="bold">先对齐身份：逻辑 Task ≠ 物理 Tile ≠ UCE context 槽</text>
+<text x="34" y="146" font-size="14" fill="currentColor" text-anchor="start">GridInstanceId = (context_name, device_slot, launch_generation, dispatch_ordinal)</text>
+<text x="34" y="169" font-size="14" fill="currentColor" text-anchor="start">TaskIdentity = (GridInstanceId, task_id)；root_key = (context_name, device_slot, launch_generation)</text>
+<text x="34" y="190" font-size="14" fill="var(--muted,currentColor)" text-anchor="start">route.expected[tile_id] 指向逻辑 Task；route.admissions[tile_id].context_id 指向实际 UCE 槽。</text>
+<text x="20" y="231" font-size="18" fill="currentColor" text-anchor="start" font-weight="bold">Group 侧：Simulator.group / TileGroup</text>
+<text x="535" y="231" font-size="18" fill="currentColor" text-anchor="start" font-weight="bold">每个 Tile：group.tiles[i].uce / TileUCE</text>
+<rect x="20" y="250" width="445" height="167" rx="6" fill="none" stroke="var(--c1,currentColor)"/>
+<rect x="535" y="250" width="445" height="167" rx="6" fill="none" stroke="var(--c2,currentColor)"/>
+<rect x="20" y="438" width="445" height="133" rx="6" fill="none" stroke="var(--c1,currentColor)"/>
+<rect x="535" y="438" width="445" height="133" rx="6" fill="none" stroke="var(--c2,currentColor)"/>
+<rect x="20" y="594" width="445" height="126" rx="6" fill="none" stroke="var(--c1,currentColor)"/>
+<rect x="535" y="594" width="445" height="126" rx="6" fill="none" stroke="var(--c2,currentColor)"/>
+<rect x="20" y="742" width="445" height="153" rx="6" fill="none" stroke="var(--c1,currentColor)"/>
+<rect x="535" y="742" width="445" height="153" rx="6" fill="none" stroke="var(--c2,currentColor)"/>
+<text x="34" y="276" font-size="15" fill="currentColor" text-anchor="start" font-weight="bold">_live_launches[root_key] → root sequencer</text>
+<text x="34" y="301" font-size="15" fill="currentColor" text-anchor="start" font-weight="bold">_grid_routes[GridInstanceId] → _GridRoute</text>
+<text x="34" y="325" font-size="14" fill="currentColor" text-anchor="start">expected：tile_id → TaskIdentity</text>
+<text x="34" y="348" font-size="14" fill="currentColor" text-anchor="start">admissions：tile_id → TileAdmission（含 context_id）</text>
+<text x="34" y="371" font-size="14" fill="currentColor" text-anchor="start">retired：已退休 Tile 集合；wait_reasons：准入背压</text>
+<text x="34" y="396" font-size="14" fill="var(--muted,currentColor)" text-anchor="start">dispatch 登记 route；成功准入才登记 admissions。</text>
+<text x="549" y="276" font-size="15" fill="currentColor" text-anchor="start" font-weight="bold">contexts[ctx_id] → _UCEContext</text>
+<text x="549" y="301" font-size="14" fill="currentColor" text-anchor="start">state / pc / program / task_identity / memory</text>
+<text x="549" y="325" font-size="14" fill="currentColor" text-anchor="start">event_records[local_name] → _UCEEventRef</text>
+<text x="549" y="348" font-size="14" fill="currentColor" text-anchor="start">events_done：此 context 已完成的本地事件名</text>
+<text x="549" y="371" font-size="14" fill="currentColor" text-anchor="start">bind_context 绑定 Task、清旧事件、pc=0、进入准备态</text>
+<text x="549" y="396" font-size="14" fill="var(--muted,currentColor)" text-anchor="start">运行中由 UCE 推进；Group 不逐周期复制其 PC/FSM。</text>
+<path d="M465 340 L533 340" fill="none" stroke="currentColor" marker-end="url(#sync-arrow)"/>
+<text x="500" y="328" font-size="13" fill="currentColor" text-anchor="middle">① bind</text>
+<text x="34" y="464" font-size="15" fill="currentColor" text-anchor="start" font-weight="bold">_grid_signals[GridInstanceId] → 聚合记录</text>
+<text x="34" y="487" font-size="14" fill="currentColor" text-anchor="start">expected_task_ids；seen[phase]：已报告的 task_id 集合</text>
+<text x="34" y="510" font-size="14" fill="currentColor" text-anchor="start">phase_event_ids；completed_phases</text>
+<text x="34" y="533" font-size="14" fill="currentColor" text-anchor="start">seen == expected 后才完成 Group phase event</text>
+<text x="34" y="556" font-size="14" fill="var(--muted,currentColor)" text-anchor="start">只有 Group 更新聚合表；不是看某个 Tile 的 DONE。</text>
+<text x="549" y="464" font-size="15" fill="currentColor" text-anchor="start" font-weight="bold">tile.signal → PhaseSignal(task_identity, phase)</text>
+<text x="549" y="487" font-size="14" fill="currentColor" text-anchor="start">phase = input_released / output_ready</text>
+<text x="549" y="510" font-size="14" fill="currentColor" text-anchor="start">_phase_signal_callback(signal, cycle)</text>
+<text x="549" y="533" font-size="14" fill="currentColor" text-anchor="start">直接调用 Group._on_phase_signal，同 cycle 聚合</text>
+<text x="549" y="556" font-size="14" fill="var(--muted,currentColor)" text-anchor="start">这是显式指令；engine job 完成不自动等于 phase。</text>
+<path d="M535 529 L467 529" fill="none" stroke="currentColor" marker-end="url(#sync-arrow)"/>
+<text x="500" y="517" font-size="13" fill="currentColor" text-anchor="middle">② phase</text>
+<text x="34" y="620" font-size="15" fill="currentColor" text-anchor="start" font-weight="bold">_retiring_tasks[TaskIdentity] → terminal 记录</text>
+<text x="34" y="643" font-size="14" fill="currentColor" text-anchor="start">等待在途访问、L1 views / Arena、Frame / pins 闭合</text>
+<text x="34" y="666" font-size="14" fill="currentColor" text-anchor="start">_task_leases[(binding_id, generation, tile_id)]</text>
+<text x="34" y="689" font-size="14" fill="currentColor" text-anchor="start">资源闭合 → 归还 R lease → 更新 route.retired</text>
+<text x="34" y="711" font-size="14" fill="var(--muted,currentColor)" text-anchor="start">最后一个 Tile 退休：删 route，发布 Grid done。</text>
+<text x="549" y="620" font-size="15" fill="currentColor" text-anchor="start" font-weight="bold">_terminal_events：Tile → Group 的本地队列</text>
+<text x="549" y="643" font-size="14" fill="currentColor" text-anchor="start">RET / PC 到尾，且 local events 全 done → UCE DONE</text>
+<text x="549" y="666" font-size="14" fill="currentColor" text-anchor="start">入队 TaskIdentity + tile_id + ctx_id + status / reason</text>
+<text x="549" y="689" font-size="14" fill="currentColor" text-anchor="start">Group._step_tiles 调用 drain_context_terminals 取走</text>
+<text x="549" y="711" font-size="14" fill="var(--muted,currentColor)" text-anchor="start">fault 也从此上报；不冒充正常退休成功。</text>
+<path d="M535 672 L467 672" fill="none" stroke="currentColor" marker-end="url(#sync-arrow)"/>
+<text x="500" y="660" font-size="12" fill="currentColor" text-anchor="middle">③ terminal</text>
+<text x="34" y="768" font-size="15" fill="currentColor" text-anchor="start" font-weight="bold">event_table._entries / _quotas：Group 事件账本</text>
+<text x="34" y="791" font-size="14" fill="currentColor" text-anchor="start">EventEntry：status / owner / generation / sequence</text>
+<text x="34" y="814" font-size="14" fill="currentColor" text-anchor="start">sequencer.notify_event → EventTable.signal（身份校验）</text>
+<text x="34" y="837" font-size="14" fill="currentColor" text-anchor="start">→ scheduler.note_completion：匹配主事件才归还 credit</text>
+<text x="34" y="860" font-size="14" fill="currentColor" text-anchor="start">phase done 解依赖；Grid done 才结束 dispatch inflight</text>
+<text x="34" y="882" font-size="14" fill="var(--muted,currentColor)" text-anchor="start">GroupScheduler 用它判断后续 action 是否可 issue。</text>
+<text x="549" y="768" font-size="15" fill="currentColor" text-anchor="start" font-weight="bold">本地 engine completion：仍留在 Tile 事件域</text>
+<text x="549" y="791" font-size="14" fill="currentColor" text-anchor="start">notify_event → _local_event_owner 找所属 context</text>
+<text x="549" y="814" font-size="14" fill="currentColor" text-anchor="start">→ _completion_queue → 对应 ctx.events_done</text>
+<text x="549" y="837" font-size="14" fill="currentColor" text-anchor="start">await 读本地完成状态；未就绪时 PC 留在 await</text>
+<text x="549" y="860" font-size="14" fill="currentColor" text-anchor="start">例如 ctx0:compute ≠ Group 的 s0l0_ev_outready_pow0</text>
+<text x="549" y="882" font-size="14" fill="var(--muted,currentColor)" text-anchor="start">同一任务有关联，但不是同一个 EventTable 条目。</text>
+<text x="20" y="924" font-size="14" fill="currentColor" text-anchor="start">① 下发实际是 _commit_route_task → tile.load_program → uce.bind_context；TaskIdentity 随绑定传入。</text>
+<text x="20" y="949" font-size="14" fill="var(--muted,currentColor)" text-anchor="start">对象可共享资源 handle / L1 映射引用，但任务进度不靠模拟的共享内存原子操作或 cache coherence 协议同步。</text>
+<text x="20" y="981" font-size="16" fill="currentColor" text-anchor="start" font-weight="bold">一个 cycle 内的通知可见性：Group 不必等到下一 cycle 才看到 Tile 的 phase / terminal</text>
+<rect x="20" y="997" width="225" height="60" rx="6" fill="none" stroke="var(--border,currentColor)"/>
+<rect x="265" y="997" width="225" height="60" rx="6" fill="none" stroke="var(--border,currentColor)"/>
+<rect x="510" y="997" width="225" height="60" rx="6" fill="none" stroke="var(--border,currentColor)"/>
+<rect x="755" y="997" width="225" height="60" rx="6" fill="none" stroke="var(--border,currentColor)"/>
+<text x="132" y="1021" font-size="14" fill="currentColor" text-anchor="middle">Tile.step</text>
+<text x="132" y="1044" font-size="14" fill="currentColor" text-anchor="middle">Engine 完成 → UCE issue</text>
+<text x="377" y="1021" font-size="14" fill="currentColor" text-anchor="middle">phase callback</text>
+<text x="377" y="1044" font-size="14" fill="currentColor" text-anchor="middle">当场更新 Group.seen</text>
+<text x="622" y="1021" font-size="14" fill="currentColor" text-anchor="middle">Group._step_tiles</text>
+<text x="622" y="1044" font-size="14" fill="currentColor" text-anchor="middle">收 terminal / 尝试资源退休</text>
+<text x="867" y="1021" font-size="14" fill="currentColor" text-anchor="middle">后续 Group ISSUE</text>
+<text x="867" y="1044" font-size="14" fill="currentColor" text-anchor="middle">能看见本 cycle 的事件更新</text>
+<path d="M245 1027 L263 1027" fill="none" stroke="currentColor" marker-end="url(#sync-arrow)"/>
+<path d="M490 1027 L508 1027" fill="none" stroke="currentColor" marker-end="url(#sync-arrow)"/>
+<path d="M735 1027 L753 1027" fill="none" stroke="currentColor" marker-end="url(#sync-arrow)"/>
+<text x="20" y="1090" font-size="17" fill="currentColor" text-anchor="start" font-weight="bold">状态何时清理？两侧不是同时清空所有字段</text>
+<rect x="20" y="1105" width="465" height="113" rx="6" fill="none" stroke="var(--border,currentColor)"/>
+<rect x="505" y="1105" width="475" height="113" rx="6" fill="none" stroke="var(--border,currentColor)"/>
+<text x="34" y="1131" font-size="15" fill="currentColor" text-anchor="start" font-weight="bold">Group：按 Grid、root 和 event 引用各自清理</text>
+<text x="34" y="1155" font-size="14" fill="currentColor" text-anchor="start">Grid done 删 _grid_routes；_grid_signals 保留到 root 退休。</text>
+<text x="34" y="1178" font-size="14" fill="currentColor" text-anchor="start">root 退休删 _live_launches，并释放该 owner 的事件配额。</text>
+<text x="34" y="1201" font-size="13" fill="currentColor" text-anchor="start">事件终态且 consumer_refs / future_uses 为 0，条目可先回收。</text>
+<text x="519" y="1131" font-size="15" fill="currentColor" text-anchor="start" font-weight="bold">Tile：DONE 字段可保留，不代表仍占着 Task 资源</text>
+<text x="519" y="1155" font-size="14" fill="currentColor" text-anchor="start">下次 bind_context 才注销旧 local event refs、重置 PC/状态。</text>
+<text x="519" y="1178" font-size="14" fill="currentColor" text-anchor="start">能否复用还要检查事件、队列、Frame 等条件，不只看 DONE。</text>
+<text x="519" y="1201" font-size="13" fill="currentColor" text-anchor="start">program_table 仅管代码身份 / 驻留，不是任务状态注册表。</text>
+<text x="20" y="1247" font-size="13" fill="var(--warning,currentColor)" text-anchor="start">防串任务：过期 root 的 phase 被忽略并计数；存活 root 的非法/重复 phase 触发 fault。Group event 校验 owner/代次/sequence。</text>
+<path d="M20 1267 L980 1267" fill="none" stroke="currentColor"/>
+<text x="20" y="1294" font-size="17" fill="currentColor" text-anchor="start" font-weight="bold">实测状态迁移：PowWorkload 的第一个 Grid，expected_task_ids = {0,1,2,3}</text>
+<text x="20" y="1317" font-size="13" fill="var(--muted,currentColor)" text-anchor="start">full_memory · 4 Tiles · 1 GHz · HBM 固定延迟 10 cycles；下列框顺序非等比，不是硬件消息传输时长。</text>
+<rect x="20" y="1330" width="225" height="77" rx="6" fill="none" stroke="var(--border,currentColor)"/>
+<text x="32" y="1353" font-size="14" fill="currentColor" text-anchor="start">cycle 1998：input_released</text>
+<text x="32" y="1376" font-size="14" fill="currentColor" text-anchor="start">seen = {0}</text>
+<text x="32" y="1397" font-size="14" fill="currentColor" text-anchor="start">Group phase event = PENDING</text>
+<rect x="265" y="1330" width="225" height="77" rx="6" fill="none" stroke="var(--border,currentColor)"/>
+<text x="277" y="1353" font-size="14" fill="currentColor" text-anchor="start">cycle 2006：input_released</text>
+<text x="277" y="1376" font-size="14" fill="currentColor" text-anchor="start">seen = {0,1}</text>
+<text x="277" y="1397" font-size="14" fill="currentColor" text-anchor="start">Group phase event = PENDING</text>
+<rect x="510" y="1330" width="225" height="77" rx="6" fill="none" stroke="var(--border,currentColor)"/>
+<text x="522" y="1353" font-size="14" fill="currentColor" text-anchor="start">cycle 2014：input_released</text>
+<text x="522" y="1376" font-size="14" fill="currentColor" text-anchor="start">seen = {0,1,2}</text>
+<text x="522" y="1397" font-size="14" fill="currentColor" text-anchor="start">Group phase event = PENDING</text>
+<rect x="755" y="1330" width="225" height="77" rx="6" fill="none" stroke="var(--success,currentColor)"/>
+<text x="767" y="1353" font-size="14" fill="currentColor" text-anchor="start">cycle 2022：input_released</text>
+<text x="767" y="1376" font-size="14" fill="currentColor" text-anchor="start">seen = {0,1,2,3}</text>
+<text x="767" y="1397" font-size="14" fill="currentColor" text-anchor="start">Group phase event = DONE</text>
+<path d="M245 1368 L263 1368" fill="none" stroke="currentColor" marker-end="url(#sync-arrow)"/>
+<path d="M490 1368 L508 1368" fill="none" stroke="currentColor" marker-end="url(#sync-arrow)"/>
+<path d="M735 1368 L753 1368" fill="none" stroke="currentColor" marker-end="url(#sync-arrow)"/>
+<rect x="20" y="1425" width="310" height="86" rx="6" fill="none" stroke="var(--border,currentColor)"/>
+<rect x="345" y="1425" width="310" height="86" rx="6" fill="none" stroke="var(--border,currentColor)"/>
+<rect x="670" y="1425" width="310" height="86" rx="6" fill="none" stroke="var(--border,currentColor)"/>
+<text x="34" y="1448" font-size="15" fill="currentColor" text-anchor="start" font-weight="bold">3182：Tile0 terminal → 本 Tile 退休</text>
+<text x="34" y="1472" font-size="14" fill="currentColor" text-anchor="start">其他 Tiles 未退齐：Grid event 仍 PENDING。</text>
+<text x="34" y="1495" font-size="13" fill="currentColor" text-anchor="start">一个 Tile DONE 不能代表整个 Grid done。</text>
+<text x="359" y="1448" font-size="15" fill="currentColor" text-anchor="start" font-weight="bold">3206：最后一个 Tile 退休</text>
+<text x="359" y="1472" font-size="14" fill="currentColor" text-anchor="start">删该 Grid route，Grid event → DONE。</text>
+<text x="359" y="1495" font-size="13" fill="currentColor" text-anchor="start">此时该 Grid 的 phase 记录仍在 Group。</text>
+<text x="684" y="1448" font-size="15" fill="currentColor" text-anchor="start" font-weight="bold">9090：整个 root 完成</text>
+<text x="684" y="1472" font-size="14" fill="currentColor" text-anchor="start">Group 活跃注册表、事件和租约清空。</text>
+<text x="684" y="1495" font-size="13" fill="currentColor" text-anchor="start">Tile contexts 仍可显示 DONE（本例均如此）。</text>
+<text x="20" y="1540" font-size="13" fill="var(--muted,currentColor)" text-anchor="start">源码：tile_group.py:1168–1477,1669–1846 · tile.py:255–291,355–499,748–773,1298–1318 · runtime/event_table.py</text>
+<text x="20" y="1565" font-size="13" fill="var(--muted,currentColor)" text-anchor="start">运行证据：examples/artifacts/group_tile_state_sync_20261013/state_probe.json；只观测当前状态，未修改模拟器逻辑。</text>
+</svg>
