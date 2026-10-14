@@ -153,9 +153,18 @@ class TestExplicitCompileLoadReplay:
       simulator.run(workload.module)
 
     text = serialize_compiled_program(artifact)
-    assert artifact.schema_version == 2
-    assert artifact.compiler_abi == "v2"
-    for schema_version, compiler_abi in ((1, "v0"), (2, "v0"), (1, "v1"), (2, "v1")):
+    assert artifact.schema_version == 3
+    assert artifact.compiler_abi == "v3"
+    # Plan §1: v3 clean cutover - every earlier schema/ABI pair is rejected
+    # with a recompile hint; no upgrade shim exists.
+    for schema_version, compiler_abi in (
+      (1, "v0"),
+      (2, "v0"),
+      (1, "v1"),
+      (2, "v1"),
+      (2, "v2"),
+      (3, "v2"),
+    ):
       legacy = json.loads(text)
       legacy["schema_version"] = schema_version
       legacy["compiler_abi"] = compiler_abi
@@ -375,7 +384,7 @@ class TestProfileAndAliasCompilation:
 
   def test_rv02_dispatch_baseline_must_belong_to_tile_allowed_profiles(self):
     text = (
-      (ROOT / "examples/workloads/gather_profiled.mlir")
+      (ROOT / "examples/workloads/gather_indexed.mlir")
       .read_text()
       .replace(
         "nest.dispatch.tasks.async @gather_tile l1_mode = 1",
@@ -388,26 +397,36 @@ class TestProfileAndAliasCompilation:
 
   def test_t24_cache_target_hint_is_not_a_private_capacity_quota(self):
     text = (
-      (ROOT / "examples/workloads/gather_profiled.mlir")
+      (ROOT / "examples/workloads/gather_indexed.mlir")
       .read_text()
       .replace("target_bytes = 65536", "target_bytes = 99999999")
-      .replace("cache_target_bytes = 65536", "cache_target_bytes = 99999999")
     )
     artifact = compile_program(parse_workload_ir(text), HardwareConfig(), SimConfig())
     assert artifact.resource_budgets
 
-  def test_t26_complete_program_cache_path_rejects_zero_cache_allowed_mode(self):
+  def test_t26_zero_cache_profile_is_a_legal_bypass_path(self):
+    """Plan §2: a disabled cache level is a bypass path, not a rejection."""
     text = (
-      (ROOT / "examples/workloads/gather_profiled.mlir")
+      (ROOT / "examples/workloads/gather_indexed.mlir")
       .read_text()
       .replace("#tile.resources<allowed_profiles = [1, 2]", "#tile.resources<allowed_profiles = [0, 1]", 1)
     )
-    with pytest.raises(ValueError):
+    compile_program(parse_workload_ir(text), HardwareConfig(), SimConfig())
+
+  def test_t26_forbidden_bypass_on_zero_cache_profile_is_rejected(self):
+    text = (
+      (ROOT / "examples/workloads/gather_indexed.mlir")
+      .read_text()
+      .replace("#tile.resources<allowed_profiles = [1, 2]", "#tile.resources<allowed_profiles = [0, 1]", 1)
+      .replace('l1_cache = {required = false, access = "read", bypass = "allowed"',
+               'l1_cache = {required = false, access = "read", bypass = "forbidden"', 1)
+    )
+    with pytest.raises(ValueError, match="bypass"):
       compile_program(parse_workload_ir(text), HardwareConfig(), SimConfig())
 
   def test_t27_underdeclared_layout_padding_is_rejected(self):
     text = (
-      (ROOT / "examples/workloads/gather_profiled.mlir")
+      (ROOT / "examples/workloads/gather_indexed.mlir")
       .read_text()
       .replace("tile_l1_spm_bytes_per_context = 2048", "tile_l1_spm_bytes_per_context = 1024", 1)
     )
@@ -415,13 +434,29 @@ class TestProfileAndAliasCompilation:
       compile_program(parse_workload_ir(text), HardwareConfig(), SimConfig())
 
   def test_rv03_t32_cross_layer_cache_combination_is_checked_not_cartesian_assumed(self):
-    text = (
-      (ROOT / "examples/workloads/gather_profiled.mlir")
-      .read_text()
-      .replace("l2_mode = 1, allowed_profiles = [1, 2]", "l2_mode = 0, allowed_profiles = [0]", 1)
+    """Plan §2: both levels may be bypassed, but the dispatch must stay in-contract."""
+    source = (ROOT / "examples/workloads/gather_indexed.mlir").read_text()
+    # Plan §2: a zero-cache profile on both levels is a legal bypass path.
+    bypassed = (
+      source.replace(
+        "l2_mode = 1, allowed_profiles = [1, 2]", "l2_mode = 0, allowed_profiles = [0, 1]", 1
+      )
+      .replace("#tile.resources<allowed_profiles = [1, 2]",
+               "#tile.resources<allowed_profiles = [0, 1]", 1)
+      .replace("nest.dispatch.tasks.async @gather_tile l1_mode = 1",
+               "nest.dispatch.tasks.async @gather_tile l1_mode = 0", 1)
     )
-    with pytest.raises(ValueError):
-      compile_program(parse_workload_ir(text), HardwareConfig(), SimConfig())
+    assert bypassed != source
+    compile_program(parse_workload_ir(bypassed), HardwareConfig(), SimConfig())
+    # A dispatch that asks for a mode outside the tile contract is rejected.
+    outside = source.replace(
+      "nest.dispatch.tasks.async @gather_tile l1_mode = 1",
+      "nest.dispatch.tasks.async @gather_tile l1_mode = 7",
+      1,
+    )
+    assert outside != source
+    with pytest.raises(VerifyException):
+      parse_workload_ir(outside)
 
   def test_c02_event_frontier_bounds_live_events_not_historical_waves(self):
     from pipeline_validator.config import GroupSchedulerConfig
@@ -705,8 +740,8 @@ class TestIndependentSharedArtifactVerification:
 
     loaded = load_program(replay, hw, sim, actual_bindings=bindings)
 
-    assert loaded.compiled.schema_version == 2
-    assert loaded.compiled.compiler_abi == "v2"
+    assert loaded.compiled.schema_version == 3
+    assert loaded.compiled.compiler_abi == "v3"
     assert serialize_compiled_program(loaded.compiled) == text
 
 

@@ -1225,6 +1225,7 @@ class ProfileController:
     handles = self._owner_inputs.get(owner)
     if handles is None:
       raise MemoryInvariantError("maintenance owner inputs were not bound")
+    group = getattr(self.group, "precise_write_ledger", None)
     result: list[CacheRange] = []
     for item in command.ranges:
       if not 0 <= item.input_index < len(handles):
@@ -1232,6 +1233,27 @@ class ProfileController:
       handle = handles[item.input_index]
       if item.offset < 0 or item.bytes <= 0 or item.offset + item.bytes > handle.size_bytes:
         raise MemoryInvariantError("maintenance range exceeds actual binding")
+      if item.precise_writes and group is not None:
+        # Plan §2: a precise-writes range resolves to the bytes Scatter
+        # actually committed.  The ledger is keyed by the dispatch's UCE
+        # runtime event id while the command names group event tags, so the
+        # lookup intersects on (allocation, byte range) across the
+        # run-scoped ledger instead of matching event names.
+        committed = [entry for entries in group.values() for entry in entries]
+        narrowed = False
+        for allocation_id, _generation, offset, length in committed:
+          if allocation_id != handle.allocation_id:
+            continue
+          start = max(offset, item.offset)
+          end = min(offset + length, item.offset + item.bytes)
+          if start < end:
+            result.append(CacheRange(handle.allocation_id, handle.generation, start, end - start))
+            narrowed = True
+        if narrowed:
+          continue
+        # Fail safe: with no ledger entry we cannot prove which bytes a
+        # write touched, so keep the conservative whole range rather than
+        # silently skipping the invalidate.
       result.append(CacheRange(handle.allocation_id, handle.generation, item.offset, item.bytes))
     return tuple(result)
 

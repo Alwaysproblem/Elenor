@@ -555,9 +555,9 @@ Free consumes a normal UCE instruction issue but does **not** return the
 parent Task Arena's extents or R lease. Thus another owner cannot gain
 capacity merely because one local view was freed.
 
-Before free, every preceding load destination, Store source, or Gather
-indices/destination access to that allocation must have been awaited by SSA
-event identity. Unrelated asynchronous memory operations do not block it.
+Before free, every preceding load destination, Store source, Gather
+indices/destination, or Scatter indices/source access to that allocation
+must have been awaited by SSA event identity. Unrelated asynchronous memory operations do not block it.
 BOA/EVU/Pow currently have opaque timing descriptors without L1 operands, so
 all preceding such compute events must also have been awaited. Later explicit
 load/store/Gather use, double free, forward/foreign references, and L2/global
@@ -618,41 +618,65 @@ BOA dense compute op. `accumulate` is optional (default false; when
 present, the matmul result accumulates into the existing L1 buffer
 rather than overwriting).
 
-### 4.8 `tile.gather.global.async` / `tile.profiled.access`
+### 4.8 `tile.gather.global.async` / `tile.scatter.global.async`
 
 ```mlir
 %done = tile.gather.global.async %table
     indices(%indices_l1) into %gather_dst
-    result_bytes = 128 cache_target_bytes = 65536 l1_mshr_hint = 16 {
-  tile.profiled.access id = "r0" outcome = "L1_HIT"
-      bytes = 64 line = "line0"
-  tile.profiled.access id = "r1" outcome = "HBM_MISS"
-      bytes = 64 line = "line42" merge = "line42"
-} : !tile.event<"gather_done">
+    map = #tile.indexed_map<index_scale = 8224 offset = 0 task_stride = 1024
+                            repeat = 1 stride = 0 segment = 1024>
+    window_entries = 4 scope = "owner_0" : !tile.event<"gather_done">
+%sent = tile.scatter.global.async %k_new_l1
+    indices(%append_idx_l1) into %pool
+    map = #tile.indexed_map<index_scale = 8224 offset = 960 task_stride = 1024
+                            repeat = 1 stride = 0 segment = 64>
+    window_entries = 4 scope = "owner_0" : !tile.event<"k_scattered">
 ```
 
-Deterministic profiled Gather. Operands are exactly one global-view
-formal source, one L1 indices allocation, and a different L1 destination
-allocation. The profile region is single-block, has no terminator, and
-contains only `tile.profiled.access`; it has no control flow, event, or
-side-effect op. Access properties print in fixed
-`id/outcome/bytes/line/merge` order. Outcomes are `L1_HIT`, `L2_HIT`, or
-`HBM_MISS`; `line` and `merge` are opaque profile identities, never
-addresses or bank selectors.
+Address-resolved indexed Gather and Scatter. `#tile.indexed_map` carries
+six space-separated integers in `index_scale offset task_stride repeat
+stride segment` order; all units are elements of the remote dtype. For
+index slot `i`, repeat segment `j` (0 <= j < repeat) and logical task `t`:
 
-All requests issue lookup legs concurrently. Responses may complete out
-of order, but destination L1 writes follow profile ordinal order.
-`gather_done` fires exactly once after the final destination write.
-`HBM_MISS` uses per-tile L1 MSHR plus shared TileGroup L2 MSHR; one
-non-empty merge group has one leader and waiter completions. The result
-exists only in the explicit L1 destination; Gather creates no L2 output
-and no StreamQueue token.
+```text
+remote_element = index[i] * index_scale + offset + t * task_stride + j * stride
+local_element  = (i * repeat + j) * segment
+copy_elements  = segment
+```
 
-`cache_target_bytes` is a non-negative performance hint for the shared Cache;
-it is not a minimum or a private quota and is not added across Contexts.
-Required access/bypass capability belongs in the Tile/Context resource
-contracts. Cache sizes do not infer or rewrite source-authored outcomes, and
-Gather accepts no separate minimum-cache property.
+Gather operands are one global-view formal source, one L1 `i32` indices
+allocation and a different L1 destination holding exactly `I * R * L`
+elements. Scatter swaps the ends: its source is the L1 allocation holding
+`I * R * L` elements and its destination is a global-view formal.
+`index_scale/repeat/segment` must be positive; `offset/task_stride/stride`
+must be non-negative. Negative indices, element-address overflow and
+segments past the remote view fault at run time (`indexed_address_out_of_bounds`
+/ `indexed_address_overflow`); Python negative wraparound is never applied.
+A non-empty `scope` names a host-managed page pool owner and is checked per
+resolved segment against the pages that scope currently holds.
+
+Gather looks each address up in L1 then L2 by real cache-line identity,
+merging misses through the per-tile L1 MSHR and the shared L2 MSHR; when a
+level's cache is disabled the level is bypassed (counted in
+`gather_cache_bypass_requests`) and a full line refill that would leave the
+resolved view is also bypassed. Scatter bypasses both caches, never
+allocates or dirties a line, commits overlapping segments in `(i, j)`
+ordinal order, and fires its event only after every segment reached HBM.
+
+Both forms read their index bytes through real L1 reads, so each
+`indices`/Scatter `source` allocation and each Gather `destination` must
+have had all its preceding asynchronous accesses awaited by SSA identity.
+Within one program, two indexed accesses on one global formal without an
+intervening `tile.await` need a record-domain disjointness proof, otherwise
+`tile_indexed_hazard`; a Scatter spanning tasks needs `tile_scatter_task_overlap`;
+one dispatch that both scatters and gathers one formal is
+`tile_scatter_gather_same_dispatch`. Two accesses carrying different scopes
+are statically disjoint.
+
+Cache sizes never rewrite source semantics: a Gather uses whichever levels
+the active profile enables, and the Tile/Context resource contracts declare
+required access and bypass capability. Address-resolved memory requires
+`full_memory` fidelity with input data.
 
 ### 4.9 `tile.await`
 
@@ -731,14 +755,15 @@ restrict the private execution IR's branch/stream instructions.
 - Every view dimension has non-negative offset, positive size, and stays
   inside its backing shape. V1 strides are all 1; view chains are unsupported.
   Transfer endpoints have identical derived byte counts.
-- Gather source is a current-program global formal. Indices and destination
-  are distinct live `tile.alloc` results. Its profile is non-empty and contains
-  only `tile.profiled.access`; request IDs are unique, byte counts are
-  positive/in-range, and their sum equals positive `result_bytes`.
-  `cache_target_bytes >= 0` and `l1_mshr_hint > 0`; no separate minimum-cache
-  field is accepted. Outcomes are exactly `L1_HIT`, `L2_HIT`, or `HBM_MISS`.
-  A non-empty merge group is HBM-miss-only and all members have the same
-  non-empty line token and byte size.
+- Gather source is a current-program global formal and Scatter destination is
+  one too; Gather indices/destination and Scatter indices/source are distinct
+  live `tile.alloc` results. The indexed map has positive
+  `index_scale/repeat/segment` and non-negative `offset/task_stride/stride`;
+  the local side holds exactly `I * R * L` elements and `window_entries > 0`.
+  Indices are `i32`. Unequal spans without an intervening `tile.await`, a
+  multi-task Scatter overlap, or one dispatch both scattering and gathering
+  one formal are rejected (`tile_indexed_hazard`,
+  `tile_scatter_task_overlap`, `tile_scatter_gather_same_dispatch`).
 - Actual HBM bindings are Loader inputs, not source verification data. The
   Loader rejects missing/unknown names, insufficient ranges or permissions,
   forbidden alias/overlap, ranges beyond target HBM, and violations of the
@@ -891,7 +916,8 @@ writes back into the shared template or guesses relocations from event names.
 | `tile.alloc`                           | `ALLOC_L1` with compiled buffer/layout index                  |
 | `tile.free`                            | `FREE_L1`                                                     |
 | `tile.load.async` / `tile.store.async` | `LAUNCH_MFE` + `ExecTransfer`                                 |
-| `tile.gather.global.async`             | `LAUNCH_GATHER` + immutable `ExecGatherDesc`                  |
+| `tile.gather.global.async`             | `LAUNCH_GATHER` + immutable `ExecTileGatherDesc`              |
+| `tile.scatter.global.async`            | `LAUNCH_SCATTER` + immutable `ExecTileScatterDesc`            |
 | `tile.pow.async` / `tile.evu.async`    | `LAUNCH_EVU`                                                  |
 | `tile.boa.async`                       | `LAUNCH_BOA`                                                  |
 | `tile.await`                           | `WAIT` or `WAITALL` over the original Tile events             |

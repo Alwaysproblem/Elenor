@@ -34,6 +34,7 @@ from ..dialects.elenor import (
   NestTaskRangeOp,
   NexusAwaitOp,
   NexusEvent,
+  NexusHostCallOp,
   NexusProgramOp,
   NexusReturnOp,
   NexusSharedRefOp,
@@ -50,6 +51,7 @@ from ..dialects.elenor import (
   TilePowOp,
   TileProgramDefOp,
   TileReturnOp,
+  TileScatterOp,
   TileSignalOp,
   TileStoreOp,
   TileSubviewOp,
@@ -59,27 +61,29 @@ from ..execution_ir import (
   ExecDeviceOp,
   ExecDispatchRequest,
   ExecEngineDesc,
-  ExecGatherDesc,
-  ExecGatherOutcome,
   ExecGlobalInput,
   ExecGroupAction,
   ExecGroupActionOp,
+  ExecHostAccess,
+  ExecHostCall,
+  ExecIndexedMap,
   ExecL1Buffer,
   ExecL2Buffer,
   ExecMemoryView,
   ExecModel,
-  ExecProfiledAccess,
   ExecPublishRequest,
   ExecReleaseRequest,
   ExecSharedInput,
   ExecSignalPolicy,
   ExecTaskDomain,
   ExecTileFormal,
+  ExecTileGatherDesc,
   ExecTileGroupTask,
   ExecTileInst,
   ExecTileOp,
   ExecTileProgram,
   ExecTileRoleBinding,
+  ExecTileScatterDesc,
   ExecTransfer,
 )
 from ..profiles import SourceRef
@@ -216,6 +220,28 @@ def lower_model_ir(module, *, source_name: str) -> ExecModel:
       )
     elif isinstance(body_op, NexusSharedRefOp):
       continue
+    elif isinstance(body_op, NexusHostCallOp):
+      accesses: list[ExecHostAccess] = []
+      for binding, (offset, byte_count, mode) in zip(body_op.bindings, body_op.access_list):
+        actual_index = _block_arg_index(binding, program_args)
+        if actual_index is None:
+          raise VerifyException("nexus.host.call.async binding must be a nexus.program input")
+        accesses.append(ExecHostAccess(actual_index, offset, byte_count, mode))
+      body.append(
+        ExecDeviceOp(
+          "host_call",
+          event_tag=_event_tag(body_op.result.type),
+          command=ExecHostCall(
+            body_op.host_routine.data,
+            tuple(accesses),
+            tuple(body_op.scope_list),
+          ),
+          dependencies=tuple(_event_tag(dep.type) for dep in body_op.depends_on),
+          callsite_id=f"{symbol}:host:{index}",
+          source_ref=source,
+          instruction_id=f"model:{symbol}:device:{index}:host_call",
+        )
+      )
     elif isinstance(body_op, NexusAwaitOp):
       for operand_index, event in enumerate(body_op.events):
         body.append(
@@ -595,7 +621,7 @@ def normalize_action_dependencies(
   produced: set[str] = set()
   outstanding: set[str] = set()
   ancestors: dict[str, frozenset[str]] = {}
-  global_accesses: list[tuple[str, int, int, bool, str]] = []
+  global_accesses: list[tuple[str, int, int, bool, str, str | None]] = []
   aliases = global_aliases or {}
   output: list[ExecGroupAction] = []
   for original in actions:
@@ -622,11 +648,11 @@ def normalize_action_dependencies(
       # after generated maintenance/profile fences change the frontier.
       dependencies = sorted(outstanding)
       dependency_set = set(dependencies)
-    accesses: list[tuple[ExecMemoryView, bool]] = []
+    accesses: list[tuple[ExecMemoryView, bool, str | None]] = []
     if original.op in (ExecGroupActionOp.DMA_PREFETCH, ExecGroupActionOp.DMA_STORE):
       transfer = original.args[1]
       writing = original.op is ExecGroupActionOp.DMA_STORE
-      accesses.append((transfer.dst if writing else transfer.src, writing))
+      accesses.append((transfer.dst if writing else transfer.src, writing, None))
     elif original.op is ExecGroupActionOp.DISPATCH_ROLE:
       binding = role_bindings[original.args[0].role_id]
       global_formals = [
@@ -635,18 +661,29 @@ def normalize_action_dependencies(
       actuals = dict(zip(global_formals, binding.global_actuals))
       for descriptor in binding.tile_program.descriptors.values():
         gather = descriptor.params.get("gather")
-        if isinstance(gather, ExecGatherDesc):
-          accesses.append((actuals[int(gather.source.base.removeprefix("formal:"))], False))
-    for view, writing in dict.fromkeys(accesses):
+        if isinstance(gather, ExecTileGatherDesc):
+          accesses.append(
+            (actuals[int(gather.source.base.removeprefix("formal:"))], False, gather.scope)
+          )
+        scatter = descriptor.params.get("scatter")
+        if isinstance(scatter, ExecTileScatterDesc):
+          accesses.append(
+            (actuals[int(scatter.destination.base.removeprefix("formal:"))], True, scatter.scope)
+          )
+    for view, writing, scope in dict.fromkeys(accesses):
       name = aliases.get(view.base.removeprefix("global:"), view.base.removeprefix("global:"))
       start = _view_offset_bytes(view.offsets, view.backing_dims, view.element_bytes)
       end = start + view.bytes
-      for prior_name, prior_start, prior_end, prior_write, event in global_accesses:
+      for prior_name, prior_start, prior_end, prior_write, event, prior_scope in global_accesses:
+        # Different non-empty scopes are statically disjoint page owners
+        # (plan §1), so only same-scope or unscoped pairs serialise.
+        if scope and prior_scope and scope != prior_scope:
+          continue
         if name == prior_name and start < prior_end and prior_start < end and (writing or prior_write):
           _append_unique_dependency(event, dependencies, dependency_set)
       if not original.dst:
         raise VerifyException(f"global access '{original.instruction_id}' has no completion event")
-      global_accesses.append((name, start, end, writing, original.dst))
+      global_accesses.append((name, start, end, writing, original.dst, scope))
 
     if not dependency_set <= produced:
       missing = sorted(dependency_set - produced)
@@ -769,26 +806,27 @@ def _lower_engine_descriptor(
       name, "MFE", "load" if isinstance(op, TileLoadOp) else "store", {}, ExecTransfer(src, dst, src.bytes)
     ), ExecTileOp.LAUNCH_MFE
   if isinstance(op, TileGatherOp):
-    accesses = tuple(
-      ExecProfiledAccess(
-        access.request_id.data,
-        ExecGatherOutcome(access.outcome.data),
-        int(access.bytes.value.data),
-        None if access.line_token is None else access.line_token.data,
-        None if access.merge_group is None else access.merge_group.data,
-      )
-      for access in op.profile.block.ops
-    )
-    gather = ExecGatherDesc(
+    address_map = ExecIndexedMap(*op.address_map.values)
+    gather = ExecTileGatherDesc(
       _memory_view(objects, op.source, op.name),
       _memory_view(objects, op.indices, op.name),
       _memory_view(objects, op.destination, op.name),
-      int(op.result_bytes.value.data),
-      int(op.cache_target_bytes.value.data),
-      int(op.l1_mshr_hint.value.data),
-      accesses,
+      address_map,
+      int(op.window_entries.value.data),
+      None if op.scope is None else op.scope.data,
     )
     return ExecEngineDesc(name, "MFE", "gather", {"gather": gather}), ExecTileOp.LAUNCH_GATHER
+  if isinstance(op, TileScatterOp):
+    address_map = ExecIndexedMap(*op.address_map.values)
+    scatter = ExecTileScatterDesc(
+      _memory_view(objects, op.source, op.name),
+      _memory_view(objects, op.indices, op.name),
+      _memory_view(objects, op.destination, op.name),
+      address_map,
+      int(op.window_entries.value.data),
+      None if op.scope is None else op.scope.data,
+    )
+    return ExecEngineDesc(name, "MFE", "scatter", {"scatter": scatter}), ExecTileOp.LAUNCH_SCATTER
   if isinstance(op, TilePowOp):
     return ExecEngineDesc(
       name,
@@ -903,7 +941,10 @@ def _lower_program(op: TileProgramDefOp, source_name: str, binding_id: str) -> E
         _view_bytes(dims, dtype),
         None if body_op.task_dim is None else int(body_op.task_dim.value.data),
       )
-    elif isinstance(body_op, (TileLoadOp, TileStoreOp, TileGatherOp, TilePowOp, TileEvuOp, TileBoaOp)):
+    elif isinstance(
+      body_op,
+      (TileLoadOp, TileStoreOp, TileGatherOp, TileScatterOp, TilePowOp, TileEvuOp, TileBoaOp),
+    ):
       descriptor_name = f"d{descriptor_index}"
       descriptor_index += 1
       descriptor, launch_op = _lower_engine_descriptor(body_op, descriptor_name, objects)

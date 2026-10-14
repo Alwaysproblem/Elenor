@@ -1011,6 +1011,68 @@ class TestAdmissionClassification:
 
 
 class TestDeterministicLRUCache:
+  def test_dirty_accounting_survives_refill_clean_failure_and_isolation(self):
+    cache = DeterministicLRUCache(256, 64, write_policy="write_back")
+    cache.refill("A", data=bytes(64), dirty=True)
+    cache.refill("A", data=bytes(64), dirty=True)
+    cache.refill("B", data=bytes(64))
+    cache.mark_dirty("B")
+    cache.mark_dirty("B")
+    assert cache.stats.dirty_lines == 2
+
+    with pytest.raises(MemoryInvariantError):
+      cache.reconfigure(256, 1)
+    requests = cache.begin_maintenance(None, clean=True, invalidate=False)
+    cache.complete_clean(requests[0].request_id, success=False)
+    assert cache.stats.dirty_lines == 2
+    cache.complete_clean(requests[1].request_id)
+    assert cache.stats.dirty_lines == 1
+    assert cache.contains("B")
+
+    retry = cache.begin_maintenance(None, clean=True, invalidate=True)
+    cache.complete_clean(retry[0].request_id)
+    assert cache.stats.dirty_lines == 0
+    assert not cache.contains("A")
+    assert not cache.contains("B")
+    cache.refill("C", data=bytes(64), dirty=True)
+    assert cache.reset_after_isolation(refills_quiescent=True) == 1
+    assert cache.stats.dirty_lines == 0
+    assert cache.stats.discarded_dirty_lines == 1
+    cache.reconfigure(128, 1)
+    cache.refill("D", data=bytes(64))
+    assert cache.stats.dirty_lines == 0
+
+  def test_range_maintenance_handles_nested_ranges_and_generation_boundaries(self):
+    from pipeline_validator.memory.cache import CacheRange
+
+    cache = DeterministicLRUCache(1024, 64)
+    identities = [
+      cache.seed_line(
+        allocation_id=allocation,
+        allocation_generation=generation,
+        line_offset=offset,
+        binding_name=allocation,
+        data=bytes(64),
+      )
+      for allocation, generation, offset in (
+        ("A", 0, 0), ("A", 0, 64), ("A", 0, 128),
+        ("A", 0, 192), ("A", 1, 64), ("B", 0, 64),
+      )
+    ]
+    # The long outer range must not be hidden by shorter nested ranges.
+    ranges = (
+      CacheRange("A", 0, 127, 1),
+      CacheRange("A", 0, 64, 128),
+      CacheRange("A", 0, 96, 1),
+      CacheRange("B", 1, 64, 64),
+    )
+    cache.begin_maintenance(ranges, clean=True, invalidate=True)
+    assert [cache.contains(identity) for identity in identities] == [True, False, False, True, True, True]
+    cache.begin_maintenance((), clean=True, invalidate=True)
+    assert cache.stats.resident_lines == 4
+    cache.begin_maintenance(None, clean=True, invalidate=True)
+    assert cache.stats.resident_lines == 0
+
   def test_two_line_lru_touch_preserves_recent_line(self):
     cache = DeterministicLRUCache(capacity_bytes=128, line_bytes=64)
     cache.refill("A")
@@ -1185,20 +1247,18 @@ class TestGatherTransferRoutes:
     )
 
   @pytest.mark.parametrize("full_memory", [False, True])
-  def test_six_gather_routes_have_exact_leg_sequences(self, full_memory):
+  def test_gather_routes_have_exact_leg_sequences(self, full_memory):
     from pipeline_validator.config import HardwareConfig
     from pipeline_validator.memory.transfer import TransferLegKind, TransferManager, TransferOp
 
+    # Plan §2: address-driven Gather route set.  The MISS_LOOKUP leg
+    # sequence from the profiled era is gone; lookups are standalone
+    # transactions and SCATTER_WRITE writes through both caches.
     expected = {
-      TransferOp.GATHER_L1_HIT: (TransferLegKind.L1_CACHE_LOOKUP,),
-      TransferOp.GATHER_L2_HIT: (
-        TransferLegKind.L1_CACHE_LOOKUP,
-        TransferLegKind.L2_CACHE_LOOKUP,
-        TransferLegKind.NOC_RESPONSE,
-        TransferLegKind.LOCAL_DMA,
-        TransferLegKind.L1_CACHE_FILL,
-      ),
-      TransferOp.GATHER_MISS_LOOKUP: (TransferLegKind.L1_CACHE_LOOKUP, TransferLegKind.L2_CACHE_LOOKUP),
+      TransferOp.INDEX_READ: (TransferLegKind.L1_READ,),
+      TransferOp.GATHER_L1_LOOKUP: (TransferLegKind.L1_CACHE_LOOKUP,),
+      TransferOp.GATHER_L2_LOOKUP: (TransferLegKind.L2_CACHE_LOOKUP,),
+      TransferOp.GATHER_L2_RESPONSE: (TransferLegKind.NOC_RESPONSE, TransferLegKind.LOCAL_DMA),
       TransferOp.GATHER_HBM_REFILL: (
         TransferLegKind.HBM_READ,
         TransferLegKind.NOC_RESPONSE,
@@ -1210,21 +1270,31 @@ class TestGatherTransferRoutes:
         TransferLegKind.L1_CACHE_FILL,
       ),
       TransferOp.GATHER_DEST_WRITE: (TransferLegKind.L1_WRITE,),
+      TransferOp.SCATTER_WRITE: (
+        TransferLegKind.L1_READ,
+        TransferLegKind.LOCAL_DMA,
+        TransferLegKind.NOC_REQUEST,
+        TransferLegKind.GLOBAL_DMA,
+        TransferLegKind.HBM_WRITE,
+      ),
     }
     manager = TransferManager(HardwareConfig(), full_memory=full_memory)
     for index, (op, expected_legs) in enumerate(expected.items()):
       transaction = self._transaction(f"route:{index}", op)
       manager.submit(transaction, cycle=0)
       assert tuple(leg.kind for leg in transaction.legs) == expected_legs
-      assert TransferLegKind.GLOBAL_DMA not in expected_legs
-      assert TransferLegKind.L2_WRITE not in expected_legs
+      if op is not TransferOp.SCATTER_WRITE:
+        # Scatter writes through the Global DMA to HBM (plan §2); gathers
+        # never take the Global DMA or write the L2 data path.
+        assert TransferLegKind.GLOBAL_DMA not in expected_legs
+        assert TransferLegKind.L2_WRITE not in expected_legs
 
   def test_gather_route_cannot_collapse(self):
     from pipeline_validator.config import HardwareConfig
     from pipeline_validator.memory.transfer import TransferManager, TransferOp
 
     manager = TransferManager(HardwareConfig(), full_memory=False)
-    transaction = self._transaction("no-collapse", TransferOp.GATHER_L1_HIT)
+    transaction = self._transaction("no-collapse", TransferOp.GATHER_L1_LOOKUP)
     with pytest.raises(MemoryInvariantError, match="gather route must not be collapsed"):
       manager._collapsed_leg(transaction)
 
@@ -1290,7 +1360,7 @@ class TestGatherTransferRoutes:
     manager = TransferManager(config, full_memory=True, noc=noc)
     owner = _task_owner()
 
-    lookup = self._transaction("lookup", TransferOp.GATHER_L1_HIT, owner=owner)
+    lookup = self._transaction("lookup", TransferOp.GATHER_L1_LOOKUP, owner=owner)
     manager.submit(lookup, cycle=0)
     manager.step(cycle=0)
     lookup_completion = lookup.leg_completion_cycle
@@ -1306,7 +1376,9 @@ class TestGatherTransferRoutes:
     assert manager._l1_cache_lookup[0]._holders[0] is None
 
     hbm_start = lookup_completion + 1
-    hbm = self._transaction("hbm", TransferOp.GATHER_HBM_REFILL, src=self._view("hbm", owner), owner=owner, bytes_total=128)
+    hbm = self._transaction(
+      "hbm", TransferOp.GATHER_HBM_REFILL, src=self._view("hbm", owner), owner=owner, bytes_total=128
+    )
     manager.submit(hbm, cycle=hbm_start)
     manager.step(cycle=hbm_start)
     hbm_completion = hbm.leg_completion_cycle
@@ -1795,3 +1867,44 @@ class TestExplicitL2PoolClaims:
 
     assert pool.retire_arena(reader_arena, 10)
     pool.close_l2_claims()
+
+
+def test_queued_transfer_faults_on_staleness_before_a_busy_stage_frees():
+  from pipeline_validator.config import HardwareConfig
+  from pipeline_validator.memory.transfer import (
+    MemoryTransaction,
+    TransferManager,
+    TransferOp,
+    TransferStatus,
+  )
+
+  valid = True
+  hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=200)
+  manager = TransferManager(
+    hw,
+    full_memory=True,
+    generation_validator=lambda transaction, phase: valid or transaction.transaction_id == "leader",
+  )
+  manager.configure_profile_generations({("l2", 0): 0})
+  manager.begin_run(1)
+  view = TestHBMChannelMapping._view(0)
+  transfers = [
+    MemoryTransaction(
+      name, TransferOp.PREFETCH, view.handle.owner, view, view, 64, name,
+      run_generation=1, profile_generations=(("l2", 0, 0),),
+    )
+    for name in ("leader", "queued")
+  ]
+  for transaction in transfers:
+    manager.submit(transaction, 0)
+  manager.step(0)
+  manager.step(1)
+  leader, queued = transfers
+  assert queued.leg_start_cycle == -1
+  assert manager._hbm_read.wait_cycles == 2
+  valid = False
+  manager.step(2)
+  assert queued.status is TransferStatus.FAULTED
+  assert queued.completed_cycle == 2
+  assert leader.leg_completion_cycle > 2
+  assert manager._hbm_read.wait_cycles == 2

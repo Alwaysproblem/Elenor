@@ -9,6 +9,7 @@ symbol reference (``@prog_name``).
 
 from __future__ import annotations
 
+import itertools
 from collections.abc import Sequence
 from io import StringIO
 from pathlib import Path
@@ -38,6 +39,7 @@ from .dialects.elenor import (
   NestTaskRangeOp,
   NexusAwaitOp,
   NexusEvent,
+  NexusHostCallOp,
   NexusProgramOp,
   NexusReturnOp,
   NexusSharedRefOp,
@@ -45,9 +47,9 @@ from .dialects.elenor import (
   TileEvent,
   TileGatherOp,
   TileL1Buffer,
-  TileProfiledAccessOp,
   TileProgramDefOp,
   TileResourcesAttr,
+  TileScatterOp,
   TileSignalOp,
   TileSubviewOp,
   _int_list,
@@ -272,7 +274,20 @@ def _verify_dispatch_contract(
     raise VerifyException(
       f"dispatch task range ({num_tasks}) must match placement popcount ({expected_tiles})"
     )
-  # Rule 7: tile.subview bounds at dispatch checkpoint
+  # Plan §1: indexed Scatter rules that need the dispatch task count.
+  gathers, scatters = _program_indexed_ops(prog_def)
+  if num_tasks > 1:
+    for scatter_op in scatters:
+      _verify_scatter_task_overlap(scatter_op, num_tasks)
+  scatter_formals = {
+    _formal_index(scatter_op.destination, prog_def.body.block) for scatter_op in scatters
+  }
+  gather_formals = {_formal_index(gather_op.source, prog_def.body.block) for gather_op in gathers}
+  if scatter_formals & gather_formals:
+    raise VerifyException(
+      f"tile_scatter_gather_same_dispatch: dispatch '@{prog_sym}' scatter and gather"
+      " address the same global formal"
+    )
   to_task = int(task_op.to_task.value.data)
   for i, (formal_pos, formal) in enumerate(l2_formals):
     parent = _int_list(_shape_type(formal.type).dims)
@@ -367,60 +382,190 @@ def _verify_tile_subview(op: TileSubviewOp, block: Block) -> None:
     raise VerifyException("tile.subview result type must match sizes and source dtype")
 
 
-def _verify_gather_profile(op: TileGatherOp) -> None:
-  accesses = list(op.profile.block.ops)
-  if not accesses:
-    raise VerifyException("gather profile must contain at least one tile.profiled.access")
-  if any(not isinstance(access, TileProfiledAccessOp) for access in accesses):
-    raise VerifyException("gather profile may contain only tile.profiled.access operations")
-  profiled_accesses = [cast(TileProfiledAccessOp, access) for access in accesses]
+def _indexed_map_values(op) -> tuple[int, int, int, int, int, int]:
+  return op.address_map.values
 
-  result_bytes = int(op.result_bytes.value.data)
-  cache_target_bytes = int(op.cache_target_bytes.value.data)
-  l1_mshr_hint = int(op.l1_mshr_hint.value.data)
-  if result_bytes <= 0:
-    raise VerifyException("gather result_bytes must be > 0")
-  if result_bytes > _shape_bytes(op.destination.type):
-    raise VerifyException("gather result_bytes exceeds destination extent")
-  if cache_target_bytes < 0:
-    raise VerifyException("gather cache_target_bytes must be >= 0")
-  if l1_mshr_hint <= 0:
-    raise VerifyException("gather l1_mshr_hint must be > 0")
 
-  request_ids: set[str] = set()
-  merge_contracts: dict[str, tuple[str, int]] = {}
-  profiled_bytes = 0
-  for access in profiled_accesses:
-    request_id = access.request_id.data
-    outcome = access.outcome.data
-    access_bytes = int(access.bytes.value.data)
-    line_token = None if access.line_token is None else access.line_token.data
-    merge_group = None if access.merge_group is None else access.merge_group.data
-    if not request_id.strip():
-      raise VerifyException("gather request_id must be non-empty")
-    if request_id in request_ids:
-      raise VerifyException(f"duplicate gather request_id '{request_id}'")
-    request_ids.add(request_id)
-    if access_bytes <= 0:
-      raise VerifyException(f"gather request '{request_id}' bytes must be > 0")
-    if access_bytes > _shape_bytes(op.source.type):
-      raise VerifyException(f"gather request '{request_id}' exceeds source extent")
-    if outcome not in ("L1_HIT", "L2_HIT", "HBM_MISS"):
-      raise VerifyException(f"unknown gather outcome '{outcome}'")
-    if merge_group:
-      if outcome != "HBM_MISS":
-        raise VerifyException("gather merge_group is only valid for HBM_MISS")
-      if not line_token:
-        raise VerifyException("gather merge_group requires a non-empty line_token")
-      contract = (line_token, access_bytes)
-      previous = merge_contracts.setdefault(merge_group, contract)
-      if previous != contract:
-        raise VerifyException(f"gather merge_group '{merge_group}' must use one line_token and byte size")
-    profiled_bytes += access_bytes
-  if profiled_bytes != result_bytes:
+def _verify_indexed_map(map_attr, *, owner: str) -> None:
+  index_scale, offset, task_stride, repeat, stride, segment = map_attr.values
+  if index_scale <= 0 or repeat <= 0 or segment <= 0:
+    raise VerifyException(f"{owner}: indexed_map index_scale/repeat/segment must be > 0")
+  if offset < 0 or task_stride < 0 or stride < 0:
+    raise VerifyException(f"{owner}: indexed_map offset/task_stride/stride must be >= 0")
+
+
+def _shape_elements(type_attr: Attribute) -> int:
+  shaped = _shape_type(type_attr)
+  elements = 1
+  for dim in _int_list(shaped.dims):
+    elements *= dim
+  return elements
+
+
+def _indexed_task_record_domain(op, num_tasks: int) -> list[tuple[int, int]]:
+  """Static record domain of one indexed op for task overlap checks.
+
+  The runtime span of segment (t, j) is ``[index[i]*S + O + t*P + j*T,
+  +L)``.  For the static check, drop the runtime ``index[i]*S`` shift
+  (the plan §1 rule requires pairwise disjointness for every index
+  value) and enumerate all (t, j) spans.
+  """
+  _index_scale, offset, task_stride, repeat, stride, segment = _indexed_map_values(op)
+  return [
+    (offset + t * task_stride + j * stride, segment)
+    for t in range(num_tasks)
+    for j in range(repeat)
+  ]
+
+
+def _indexed_formal_domain(op, index_count: int) -> list[tuple[int, int]]:
+  """Record domain of one op with index-slot multiplicity, index value dropped."""
+  _index_scale, offset, task_stride, repeat, stride, segment = _indexed_map_values(op)
+  return [
+    (offset + t * task_stride + j * stride, segment)
+    for t in range(1)  # single-task view; task multiplicity handled by caller
+    for j in range(repeat)
+  ] * index_count
+
+
+def _assert_pairwise_disjoint(spans: Sequence[tuple[int, int]], *, error: str) -> None:
+  ordered = sorted(spans)
+  for left, right in itertools.pairwise(ordered):
+    if right[0] < left[0] + left[1]:
+      raise VerifyException(error)
+
+
+def _record_domain_within_extent(spans: Sequence[tuple[int, int]], extent: int) -> bool:
+  return all(start >= 0 and start + length <= extent for start, length in spans)
+
+
+def _indexed_hazard(spans_a, spans_b) -> bool:
+  for start_a, length_a in spans_a:
+    end_a = start_a + length_a
+    for start_b, length_b in spans_b:
+      if start_a < start_b + length_b and start_b < end_a:
+        return True
+  return False
+
+
+def _indexed_record_spans(op) -> list[tuple[int, int]]:
+  """Per-(i,j) record-domain spans relative to ``index[i] * S``.
+
+  Task and index contributions are dropped: the program-level hazard
+  proof requires both ops' span sets to fit inside ``[0, S)`` (so the
+  ``index*S`` base cannot make two spans collide) and to be pairwise
+  disjoint in that window.
+  """
+  index_scale, offset, _task_stride, _repeat, stride, segment = _indexed_map_values(op)
+  spans = [(offset + j * stride, segment) for j in range(_repeat)]
+  if not _record_domain_within_extent(spans, index_scale):
     raise VerifyException(
-      f"gather profile bytes ({profiled_bytes}) must equal result_bytes ({result_bytes})"
+      "tile_indexed_hazard: indexed_map spans must fit in [0, index_scale)"
     )
+  return spans
+
+
+def _check_program_indexed_hazard(prev_op, prev_spans, op, spans, op_scope, prev_scope) -> None:
+  """Plan §1: two un-awaited indexed ops on one formal need a disjointness proof."""
+  if op_scope is not None and prev_scope is not None and op_scope != prev_scope:
+    return  # different scopes are statically disjoint
+  prev_scale = _indexed_map_values(prev_op)[0]
+  scale = _indexed_map_values(op)[0]
+  if prev_scale != scale:
+    raise VerifyException("tile_indexed_hazard: indexed ops on one formal must share index_scale")
+  prev_stride = _indexed_map_values(prev_op)[2]
+  stride = _indexed_map_values(op)[2]
+  if prev_stride != stride:
+    # Differing task strides cannot be statically ordered across tasks.
+    raise VerifyException(
+      "tile_indexed_hazard: un-awaited indexed ops with differing task_stride overlap"
+    )
+  if _indexed_hazard(prev_spans, spans):
+    raise VerifyException(
+      "tile_indexed_hazard: un-awaited indexed ops on one formal have overlapping spans"
+    )
+
+
+def _verify_scatter_task_overlap(op, num_tasks: int) -> None:
+  """Plan §1: all (t, j) spans of one Scatter must be pairwise disjoint in [0, S)."""
+  index_scale, offset, task_stride, repeat, stride, segment = _indexed_map_values(op)
+  spans = [
+    (offset + t * task_stride + j * stride, segment)
+    for t in range(num_tasks)
+    for j in range(repeat)
+  ]
+  if not _record_domain_within_extent(spans, index_scale):
+    raise VerifyException(
+      "tile_scatter_task_overlap: scatter spans must fit in [0, index_scale)"
+    )
+  _assert_pairwise_disjoint(spans, error="tile_scatter_task_overlap")
+
+
+def _verify_gather(op: TileGatherOp, block: Block) -> None:
+  owner = f"tile.gather.global.async '{op.result.type.tag.data}'"
+  _verify_indexed_map(op.address_map, owner=owner)
+  indices_type = _shape_type(op.indices.type)
+  destination_type = _shape_type(op.destination.type)
+  source_type = _shape_type(op.source.type)
+  if indices_type.dtype.data != "i32":
+    raise VerifyException("gather indices must be an i32 L1 buffer")
+  if destination_type.dtype.data != source_type.dtype.data:
+    raise VerifyException("gather destination dtype must match source dtype")
+  if int(op.window_entries.value.data) <= 0:
+    raise VerifyException("gather window_entries must be > 0")
+  if op.scope is not None and not op.scope.data:
+    raise VerifyException("gather scope must be a non-empty string when present")
+  index_count = _shape_elements(op.indices.type)
+  if index_count <= 0:
+    raise VerifyException("gather indices must have at least one element")
+  repeat, segment = _indexed_map_values(op)[3], _indexed_map_values(op)[5]
+  required = index_count * repeat * segment * DTYPE_BYTES[source_type.dtype.data]
+  if _shape_bytes(op.destination.type) != required:
+    raise VerifyException(
+      f"gather destination must hold exactly I*R*L elements ({required} bytes)"
+    )
+
+
+def _verify_scatter(op: TileScatterOp, block: Block) -> None:
+  owner = f"tile.scatter.global.async '{op.result.type.tag.data}'"
+  _verify_indexed_map(op.address_map, owner=owner)
+  indices_type = _shape_type(op.indices.type)
+  source_type = _shape_type(op.source.type)
+  destination_type = _shape_type(op.destination.type)
+  if indices_type.dtype.data != "i32":
+    raise VerifyException("scatter indices must be an i32 L1 buffer")
+  if source_type.dtype.data != destination_type.dtype.data:
+    raise VerifyException("scatter source dtype must match destination dtype")
+  if int(op.window_entries.value.data) <= 0:
+    raise VerifyException("scatter window_entries must be > 0")
+  if op.scope is not None and not op.scope.data:
+    raise VerifyException("scatter scope must be a non-empty string when present")
+  index_count = _shape_elements(op.indices.type)
+  if index_count <= 0:
+    raise VerifyException("scatter indices must have at least one element")
+  repeat, segment = _indexed_map_values(op)[3], _indexed_map_values(op)[5]
+  required = index_count * repeat * segment * DTYPE_BYTES[source_type.dtype.data]
+  if _shape_bytes(op.source.type) != required:
+    raise VerifyException(
+      f"scatter source must hold exactly I*R*L elements ({required} bytes)"
+    )
+
+
+def _require_l1_inputs_awaited(op, operands, awaited_events, l1_access_events, prog) -> None:
+  """Reject indexed ops whose L1 operands carry un-awaited prior accesses.
+
+  Plan §1: index reads and destination writes must observe every prior
+  asynchronous write to the touched L1 bytes, so each prior access to
+  the indices/source/destination operand must have been awaited before
+  the indexed op appears.
+  """
+  for operand in operands:
+    pending = l1_access_events.get(operand, set()) - awaited_events
+    if pending:
+      raise VerifyException(
+        f"tile program '@{prog.sym_name.data}': {op.name} operand has"
+        " un-awaited prior asynchronous accesses"
+      )
 
 
 def _formal_index(value, block) -> int | None:
@@ -914,6 +1059,15 @@ def _verify_release_graph(
     if buffer not in allocs:
       raise VerifyException("nest.dma.prefetch.async destination must be a local nest.alloc result")
 
+def _program_indexed_ops(prog: TileProgramDefOp) -> tuple[list, list]:
+  """Return (gather_ops, scatter_ops) appearing in one tile program body."""
+  from .dialects.elenor import TileGatherOp, TileScatterOp
+
+  gathers = [op for op in _body_ops(prog) if isinstance(op, TileGatherOp)]
+  scatters = [op for op in _body_ops(prog) if isinstance(op, TileScatterOp)]
+  return gathers, scatters
+
+
 def _program_subviews_of_formal(prog: TileProgramDefOp, formal_pos: int) -> list:
   """Return all TileSubviewOp ops in prog whose src is block.args[formal_pos]."""
   result = []
@@ -923,7 +1077,6 @@ def _program_subviews_of_formal(prog: TileProgramDefOp, formal_pos: int) -> list
       if _formal_index(op.src, block) == formal_pos:
         result.append(op)
   return result
-
 
 def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[int]]:
   from .dialects.elenor import (
@@ -936,6 +1089,7 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
     TileLoadOp,
     TilePowOp,
     TileReturnOp,
+    TileScatterOp,
     TileSignalOp,
     TileStoreOp,
   )
@@ -976,6 +1130,7 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
   store_events: set = set()
   read_formals: set[int] = set()
   write_formals: set[int] = set()
+  indexed_prior_by_formal: dict[int, list] = {}
   phase_counts = dict.fromkeys(TileSignalOp.PHASES, 0)
   defined_l1: set = set()
   live_l1: set = set()
@@ -1032,7 +1187,10 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
       freed_l1.add(buffer)
       continue
 
-    if isinstance(op, (TileLoadOp, TileStoreOp, TileGatherOp, TilePowOp, TileEvuOp, TileBoaOp)):
+    if isinstance(
+      op,
+      (TileLoadOp, TileStoreOp, TileGatherOp, TileScatterOp, TilePowOp, TileEvuOp, TileBoaOp),
+    ):
       if not isinstance(op.result.type, TileEvent):
         raise VerifyException(f"expected tile.event result type in '{op.name}'")
       tag = op.result.type.tag.data
@@ -1085,10 +1243,40 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
         require_live_l1(op.destination, "gather destination")
         if op.indices is op.destination:
           raise VerifyException("gather indices and destination must be different tile.alloc results")
+        _require_l1_inputs_awaited(op, (op.indices, op.destination), awaited_events, l1_access_events, prog)
+        _verify_gather(op, block)
+        for prev_op, prev_spans, prev_event, prev_scope in indexed_prior_by_formal.get(source_index, []):
+          if prev_event not in awaited_events:
+            _check_program_indexed_hazard(
+              prev_op, prev_spans, op, _indexed_record_spans(op), op.scope, prev_scope
+            )
         l1_access_events[op.indices].add(op.result)
         l1_access_events[op.destination].add(op.result)
-
-        _verify_gather_profile(op)
+        indexed_prior_by_formal.setdefault(source_index, []).append(
+          (op, _indexed_record_spans(op), op.result, op.scope)
+        )
+      elif isinstance(op, TileScatterOp):
+        destination_index = _formal_index(op.destination, block)
+        if destination_index is None or not isinstance(args[destination_index].type, NestGlobalView):
+          raise VerifyException("scatter destination must be a global formal of the current tile.program")
+        require_live_l1(op.indices, "scatter indices")
+        require_live_l1(op.source, "scatter source")
+        if op.indices is op.source:
+          raise VerifyException("scatter indices and source must be different tile.alloc results")
+        _require_l1_inputs_awaited(op, (op.indices, op.source), awaited_events, l1_access_events, prog)
+        _verify_scatter(op, block)
+        for prev_op, prev_spans, prev_event, prev_scope in indexed_prior_by_formal.get(
+          destination_index, []
+        ):
+          if prev_event not in awaited_events:
+            _check_program_indexed_hazard(
+              prev_op, prev_spans, op, _indexed_record_spans(op), op.scope, prev_scope
+            )
+        l1_access_events[op.indices].add(op.result)
+        l1_access_events[op.source].add(op.result)
+        indexed_prior_by_formal.setdefault(destination_index, []).append(
+          (op, _indexed_record_spans(op), op.result, op.scope)
+        )
       continue
 
     if isinstance(op, TileAwaitOp):
@@ -1099,6 +1287,8 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
         if operand not in defined_events:
           raise VerifyException(f"tile.await references undefined event '{tag}'")
         awaited_events.add(operand)
+        for entries in indexed_prior_by_formal.values():
+          entries[:] = [item for item in entries if item[2] is not operand]
       continue
 
     if isinstance(op, TileSignalOp):
@@ -1334,6 +1524,11 @@ def _verify_nexus_program(
           raise VerifyException(f"nexus.await references undefined event '{tag}'")
       continue
 
+    if isinstance(op, NexusHostCallOp):
+      _verify_host_call(op, block, seen_events, defined_events)
+      defined_events.add(op.result)
+      continue
+
     if isinstance(op, NexusReturnOp):
       continue
 
@@ -1341,27 +1536,177 @@ def _verify_nexus_program(
 
   _verify_shared_l2_epochs(body, contexts, consumer_producers)
   _verify_device_memory_dependencies(body, contexts, programs)
+  _verify_scope_dependencies(body, contexts, programs)
+
+
+def _verify_host_call(
+  op: NexusHostCallOp, block: Block, seen_events: set[str], defined_events: set[SSAValue]
+) -> None:
+  """Source checks for one ``nexus.host.call.async`` (plan §4)."""
+  from .dialects.elenor import NexusEvent as NexusEventType
+
+  if not op.host_routine.data.strip():
+    raise VerifyException("nexus.host.call.async routine name must be a non-empty string")
+  tag = cast(NexusEventType, op.result.type).tag.data
+  if not tag:
+    raise VerifyException("nexus.host.call.async event tag must be non-empty")
+  if tag in seen_events:
+    raise VerifyException(f"duplicate event tag '{tag}'")
+  seen_events.add(tag)
+  if len(set(op.depends_on)) != len(op.depends_on):
+    raise VerifyException("nexus.host.call.async depends_on events must be unique")
+  for dependency in op.depends_on:
+    if dependency not in defined_events:
+      dependency_tag = cast(NexusEventType, dependency.type).tag.data
+      raise VerifyException(
+        f"nexus.host.call.async depends_on references undefined event '{dependency_tag}'"
+      )
+  bindings = list(op.bindings)
+  accesses = op.access_list
+  if len(bindings) != len(accesses):
+    raise VerifyException("nexus.host.call.async bindings and accesses must pair one-to-one")
+  for scope in op.scope_list:
+    if not scope.strip():
+      raise VerifyException("nexus.host.call.async scopes must be non-empty strings")
+  ranges: dict[int, list[tuple[int, int]]] = {}
+  for index, (binding, (offset, byte_count, mode)) in enumerate(zip(bindings, accesses)):
+    formal_index = _formal_index(binding, block)
+    if formal_index is None or not isinstance(binding.type, NestGlobalMemref):
+      raise VerifyException(
+        f"nexus.host.call.async binding {index} must be a nexus.program global input"
+      )
+    if mode not in ("read", "write", "readwrite"):
+      raise VerifyException(f"nexus.host.call.async access {index} has invalid mode '{mode}'")
+    total = _shape_bytes(binding.type)
+    if offset + byte_count > total:
+      raise VerifyException(
+        f"nexus.host.call.async access {index} range [{offset}, {offset + byte_count})"
+        f" exceeds binding '{binding.name_hint or formal_index}' of {total} bytes"
+      )
+    ranges.setdefault(formal_index, []).append((offset, offset + byte_count))
+  for formal_index, spans in ranges.items():
+    spans.sort()
+    for (_, previous_end), (start, _) in itertools.pairwise(spans):
+      if start < previous_end:
+        raise VerifyException(
+          f"nexus.host.call.async accesses on input formal {formal_index} overlap"
+        )
+
+
+def _context_scopes(
+  context: NestContextOp, programs: dict[str, TileProgramDefOp]
+) -> frozenset[str]:
+  """All tile gather/scatter scopes used by any dispatch inside a context."""
+  from .dialects.elenor import NestDispatchOp
+
+  scopes: set[str] = set()
+  for op in _body_ops(context):
+    if not isinstance(op, NestDispatchOp):
+      continue
+    program = programs[op.program.data]
+    for nested in _body_ops(program):
+      if isinstance(nested, (TileGatherOp, TileScatterOp)) and nested.scope is not None:
+        scopes.add(nested.scope.data)
+  return frozenset(scopes)
+
+
+def _verify_scope_dependencies(
+  body: list, contexts: dict[str, NestContextOp], programs: dict[str, TileProgramDefOp]
+) -> None:
+  """Same-scope mutate/use and mutate/mutate must be dependency-ordered (plan §4)."""
+  ancestors: dict[SSAValue, frozenset[SSAValue]] = {}
+  awaited: set[SSAValue] = set()
+  prior: list[tuple[SSAValue, frozenset[str], str]] = []
+  for op in body:
+    if isinstance(op, NexusAwaitOp):
+      for event in op.events:
+        awaited.add(event)
+        awaited.update(ancestors.get(event, frozenset()))
+      continue
+    if isinstance(op, NexusHostCallOp):
+      closure = set(op.depends_on)
+      for dependency in op.depends_on:
+        closure.update(ancestors.get(dependency, frozenset()))
+      ordered = closure | awaited
+      for event, scopes, kind in prior:
+        sharing = set(scopes) & set(op.scope_list)
+        if sharing and event not in ordered:
+          raise VerifyException(
+            "nexus.host.call.async mutating scope"
+            f" '{sorted(sharing)[0]}' lacks a dependency on prior {kind} of that scope"
+          )
+      ancestors[op.result] = frozenset(ordered)
+      prior.append((op.result, frozenset(op.scope_list), "mutate"))
+      continue
+    if isinstance(op, NexusSubmitContextOp):
+      closure = set(awaited)
+      for event in effective_submit_dependencies(op):
+        closure.add(event)
+        closure.update(ancestors.get(event, frozenset()))
+      for event, scopes, kind in prior:
+        if kind != "mutate":
+          continue
+        sharing = set(scopes) & _context_scopes(contexts[op.context_sym.data], programs)
+        if sharing and event not in closure:
+          raise VerifyException(
+            "nexus.submit_context.async scope"
+            f" '{sorted(sharing)[0]}' access lacks a dependency on the prior host mutation"
+          )
+      ancestors[op.result] = frozenset(closure)
+      prior.append(
+        (op.result, _context_scopes(contexts[op.context_sym.data], programs), "use")
+      )
 
 
 def _context_global_accesses(
   context: NestContextOp, programs: dict[str, TileProgramDefOp]
-) -> list[tuple[int, int, int, bool]]:
-  """Conservative byte intervals for actual global reads/writes of a launch."""
-  from .dialects.elenor import NestDispatchOp, NestDMAStoreOp, NestPrefetchOp, TileGatherOp
+) -> list[tuple[int, int, int, bool, frozenset[str]]]:
+  """Conservative byte intervals and scopes for actual global accesses.
 
-  accesses: list[tuple[SSAValue, bool]] = []
+  A dispatch's intervals carry the scope set of the Gather/Scatter ops that
+  reached them (plan §1): two accesses with different, non-empty scopes are
+  statically disjoint, so the cross-submission hazard rule below skips them.
+  Unscoped or same-scope pairs stay conservative.
+  """
+  from .dialects.elenor import (
+    NestDispatchOp,
+    NestDMAStoreOp,
+    NestPrefetchOp,
+    TileGatherOp,
+    TileScatterOp,
+  )
+
+  accesses: list[tuple[SSAValue, bool, frozenset[str]]] = []
   for op in _body_ops(context):
     if isinstance(op, NestPrefetchOp):
-      accesses.append((op.src, False))
+      accesses.append((op.src, False, frozenset()))
     elif isinstance(op, NestDMAStoreOp):
-      accesses.append((op.dst, True))
+      accesses.append((op.dst, True, frozenset()))
     elif isinstance(op, NestDispatchOp):
       program = programs[op.program.data]
-      used = {nested.source for nested in _body_ops(program) if isinstance(nested, TileGatherOp)}
-      formals = (arg for arg in program.body.block.args if isinstance(arg.type, NestGlobalView))
-      accesses.extend((actual, False) for formal, actual in zip(formals, op.global_views) if formal in used)
-  intervals: list[tuple[int, int, int, bool]] = []
-  for value, writing in dict.fromkeys(accesses):
+      body_ops = _body_ops(program)
+      formals = [arg for arg in program.body.block.args if isinstance(arg.type, NestGlobalView)]
+      used_gathers = {nested.source for nested in body_ops if isinstance(nested, TileGatherOp)}
+      used_scatters = {
+        nested.destination for nested in body_ops if isinstance(nested, TileScatterOp)
+      }
+      gather_scopes = {
+        nested.source: frozenset({nested.scope.data} if nested.scope is not None else set())
+        for nested in body_ops
+        if isinstance(nested, TileGatherOp)
+      }
+      scatter_scopes = {
+        nested.destination: frozenset({nested.scope.data} if nested.scope is not None else set())
+        for nested in body_ops
+        if isinstance(nested, TileScatterOp)
+      }
+      for formal, actual in zip(formals, op.global_views):
+        if formal in used_gathers:
+          accesses.append((actual, False, gather_scopes.get(formal, frozenset())))
+        if formal in used_scatters:
+          accesses.append((actual, True, scatter_scopes.get(formal, frozenset())))
+  intervals: list[tuple[int, int, int, bool, frozenset[str]]] = []
+  for value, writing, scopes in dict.fromkeys(accesses):
     view = value.owner
     assert isinstance(view, NestSubviewOp)
     index = _formal_index(view.src, context.body.block)
@@ -1369,7 +1714,7 @@ def _context_global_accesses(
     backing = _shape_type(view.src.type)
     dims = _int_list(backing.dims)
     offset = _view_offset_bytes(_int_list(view.offsets), dims, DTYPE_BYTES[backing.dtype.data])
-    intervals.append((index, offset, offset + _shape_bytes(value.type), writing))
+    intervals.append((index, offset, offset + _shape_bytes(value.type), writing, scopes))
   return intervals
 
 
@@ -1379,12 +1724,20 @@ def _verify_device_memory_dependencies(
   accesses = {name: _context_global_accesses(context, programs) for name, context in contexts.items()}
   ancestors: dict[SSAValue, set[SSAValue]] = {}
   awaited: set[SSAValue] = set()
-  prior: list[tuple[SSAValue, list[tuple[SSAValue, int, int, bool]]]] = []
+  prior: list[tuple[SSAValue, list[tuple[SSAValue, int, int, bool, frozenset[str]]]]] = []
   for op in body:
     if isinstance(op, NexusAwaitOp):
       for event in op.events:
         awaited.add(event)
         awaited.update(ancestors[event])
+    elif isinstance(op, NexusHostCallOp):
+      # Host routines touch no global memory themselves, but their completion
+      # is an ordering event for the submit/hazard walk.
+      ordered = set(awaited)
+      for event in op.depends_on:
+        ordered.add(event)
+        ordered.update(ancestors[event])
+      ancestors[op.result] = ordered
     elif isinstance(op, NexusSubmitContextOp):
       ordered = set(awaited)
       for event in effective_submit_dependencies(op):
@@ -1392,16 +1745,20 @@ def _verify_device_memory_dependencies(
         ordered.update(ancestors[event])
       actuals = list(op.actuals)
       current = [
-        (actuals[index], start, end, writing)
-        for index, start, end, writing in accesses[op.context_sym.data]
+        (actuals[index], start, end, writing, scopes)
+        for index, start, end, writing, scopes in accesses[op.context_sym.data]
       ]
       for producer, previous in prior:
         if producer in ordered:
           continue
         if any(
-          actual is old_actual and start < old_end and old_start < end and (writing or old_write)
-          for actual, start, end, writing in current
-          for old_actual, old_start, old_end, old_write in previous
+          actual is old_actual
+          and start < old_end
+          and old_start < end
+          and (writing or old_write)
+          and not (scopes and old_scopes and scopes.isdisjoint(old_scopes))
+          for actual, start, end, writing, scopes in current
+          for old_actual, old_start, old_end, old_write, old_scopes in previous
         ):
           raise VerifyException(
             "overlapping global accesses across context submissions require"

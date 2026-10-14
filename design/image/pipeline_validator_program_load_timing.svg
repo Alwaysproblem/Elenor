@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 610" style="color:var(--fg,currentColor);font-family:sans-serif;font-size:14px" role="img" aria-labelledby="title description">
+  <title id="title">Pipeline Validator 拟补齐的 program load 时序</title>
+  <desc id="description">整段程序驻留方案的 cold 和 warm 装载时序示意，不是当前 simulator 的逐周期实现。Cold 路径经过 Host 上传、注册提交、驻留检查、DMA、校验和执行；warm 路径复用驻留程序。阶段宽度不代表耗时。</desc>
+  <defs>
+    <marker id="load-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <text x="16" y="25" font-size="18" fill="currentColor">拟补齐的 program load：整段驻留方案</text>
+  <text x="16" y="49" fill="var(--muted,currentColor)">不是当前 simulator 的逐周期实现；阶段宽度不代表耗时。I-SRAM = 程序存储。</text>
+  <path d="M180 72 H938" fill="none" stroke="currentColor" marker-end="url(#load-arrow)"/>
+  <text x="881" y="65" fill="var(--muted,currentColor)">时间 →</text>
+
+  <text x="16" y="96" fill="var(--accent,currentColor)">COLD · 首次部署 + 本 Tile 未驻留</text>
+  <g fill="none" stroke="var(--border,currentColor)" stroke-dasharray="4 4">
+    <path d="M180 145 H942 M180 205 H942 M180 265 H942 M180 325 H942 M180 385 H942"/>
+  </g>
+  <g fill="currentColor">
+    <text x="16" y="135">Host / Driver</text>
+    <text x="16" y="195">Group 控制器</text>
+    <text x="16" y="255">Code DMA</text>
+    <text x="16" y="315">Program SRAM</text>
+    <text x="16" y="375">Tile UCE</text>
+  </g>
+  <g fill="none" stroke="var(--accent,currentColor)">
+    <rect x="180" y="112" width="140" height="34" rx="4"/>
+    <rect x="326" y="112" width="89" height="34" rx="4"/>
+    <rect x="415" y="172" width="105" height="34" rx="4"/>
+    <rect x="520" y="232" width="105" height="34" rx="4"/>
+    <rect x="630" y="232" width="110" height="34" rx="4"/>
+    <rect x="740" y="292" width="102" height="34" rx="4"/>
+  </g>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="250" y="134">校验 / 上传 code</text>
+    <text x="370" y="134">注册/提交</text>
+    <text x="467" y="194">MISS / pin</text>
+    <text x="572" y="254">HBM → L2</text>
+    <text x="685" y="254">L2 → I-SRAM</text>
+    <text x="791" y="314">校验 / ACK</text>
+  </g>
+  <g fill="none" stroke="currentColor" marker-end="url(#load-arrow)">
+    <path d="M415 146 V171"/>
+    <path d="M520 206 V231"/>
+    <path d="M740 266 V291"/>
+    <path d="M842 326 V350"/>
+  </g>
+  <text x="850" y="340" fill="var(--success,currentColor)">program-ready</text>
+  <rect x="415" y="352" width="423" height="34" rx="4" fill="none" stroke="var(--warning,currentColor)" stroke-dasharray="5 4"/>
+  <text x="626" y="374" text-anchor="middle" fill="var(--warning,currentColor)">未 ready：等待，不执行该 program</text>
+  <rect x="842" y="352" width="100" height="34" rx="4" fill="none" stroke="var(--success,currentColor)"/>
+  <text x="892" y="374" text-anchor="middle" fill="currentColor">绑定 / 执行</text>
+  <text x="180" y="409" fill="var(--muted,currentColor)">本地 handle 仅在安装完成后发布；执行中 pin，完成后才允许回收程序空间。</text>
+
+  <text x="16" y="447" fill="var(--success,currentColor)">WARM · 同一 Tile 命中相同版本 / hash / epoch</text>
+  <g fill="currentColor">
+    <text x="16" y="486">Host / Driver</text>
+    <text x="16" y="526">Group 控制器</text>
+    <text x="16" y="566">Tile UCE</text>
+  </g>
+  <g fill="none" stroke="var(--success,currentColor)">
+    <rect x="180" y="464" width="140" height="32" rx="4"/>
+    <rect x="320" y="504" width="110" height="32" rx="4"/>
+    <rect x="430" y="544" width="130" height="32" rx="4"/>
+  </g>
+  <g fill="currentColor" text-anchor="middle">
+    <text x="250" y="485">patch 参数 / 提交</text>
+    <text x="375" y="525">HIT / 校验</text>
+    <text x="495" y="565">绑定 / 取指执行</text>
+  </g>
+  <g fill="none" stroke="currentColor" marker-end="url(#load-arrow)">
+    <path d="M320 496 V503"/>
+    <path d="M430 536 V543"/>
+  </g>
+  <text x="596" y="526" fill="var(--success,currentColor)">不重复上传、搬运或安装 code</text>
+  <text x="596" y="552" fill="var(--muted,currentColor)">但参数可见性、提交、绑定仍有开销</text>
+  <text x="16" y="601" fill="var(--muted,currentColor)">若 HBM 已有 code、只是本 Tile 未驻留：跳过 Host 上传，从 residency lookup 开始。</text>
+</svg>

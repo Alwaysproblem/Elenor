@@ -15,7 +15,7 @@ from types import MappingProxyType
 from typing import Protocol
 
 from .config import DeviceConfig
-from .execution_ir import ExecModel, ExecTileGroupTask, GlobalBinding
+from .execution_ir import ExecHostCall, ExecModel, ExecTileGroupTask, GlobalBinding
 from .pmu import PMUCounter
 from .profiles import MemoryMaintenanceDesc, ProfileReconfigDesc
 
@@ -74,6 +74,37 @@ class DeviceControlCompletion:
   cycle: int
 
 
+@dataclass(frozen=True)
+class DeviceHostRequest:
+  """Immutable CPU-to-host routine invocation (plan §4).
+
+  ``binding_names`` pairs one-to-one with ``command.accesses``; the CPU
+  resolves entry-global formal indices to actual binding names so the
+  host session never needs the ExecModel.
+  """
+
+  request_id: int
+  name: str
+  command: ExecHostCall
+  binding_names: tuple[str, ...]
+
+
+class HostPort(Protocol):
+  """Hardware-facing host routine port visible to the CPU model."""
+
+  def try_submit(self, request: DeviceHostRequest, cycle: int) -> bool:
+    """Accept one host routine atomically, or return ``False`` when full."""
+
+  def poll_completions(self, cycle: int) -> tuple[DeviceCompletion, ...]:
+    """Return host completions made visible by the preceding harvest."""
+
+  def step(self, cycle: int) -> None:
+    """Issue up to the configured width of host commands for this cycle."""
+
+  def abort(self, cycle: int) -> None:
+    """Freeze new work, cancel unissued commands and in-flight transfers."""
+
+
 class DevicePort(Protocol):
   """The complete hardware-facing interface visible to the CPU model."""
 
@@ -111,7 +142,8 @@ class DeviceLaunchState(StrEnum):
 
 @dataclass
 class _LaunchRecord:
-  request: DeviceLaunchRequest
+  kind: str  # "group" | "host"
+  request: DeviceLaunchRequest | DeviceHostRequest
   event_tag: str
   dependency_ids: tuple[int, ...]
   state: DeviceLaunchState
@@ -124,10 +156,11 @@ class _LaunchRecord:
 
   def snapshot(self) -> dict:
     return {
+      "kind": self.kind,
       "request_id": self.request.request_id,
-      "context": self.request.context_name,
+      "context": getattr(self.request, "context_name", "") or f"host:{self.event_tag}",
       "event": self.event_tag,
-      "group_affinity": self.request.group_affinity,
+      "group_affinity": getattr(self.request, "group_affinity", None),
       "dependencies": list(self.dependency_ids),
       "state": self.state.value,
       "status": None if self.status is None else self.status.value,
@@ -177,6 +210,8 @@ class CpuDeviceController:
     port: DevicePort,
     global_bindings: Mapping[str, GlobalBinding],
     observer: DeviceEventObserver | None = None,
+    *,
+    host_port: HostPort | None = None,
   ) -> None:
     if not isinstance(max_outstanding, int) or isinstance(max_outstanding, bool):
       raise ValueError("max_outstanding must be a positive integer")
@@ -187,6 +222,8 @@ class CpuDeviceController:
     self.config = config
     self.max_outstanding = max_outstanding
     self.port = port
+    self.host_port = host_port
+    self._active_host: dict[int, _LaunchRecord] = {}
     self.global_bindings = MappingProxyType(dict(global_bindings))
     self.observer = observer
     self.pmu = PMUCounter()
@@ -264,6 +301,22 @@ class CpuDeviceController:
         if op.event_tag not in defined or op.dependencies or op.command is not None:
           raise ValueError(f"device await event '{op.event_tag}' is invalid")
         references[op.event_tag] += 1
+      elif op.op == "host_call":
+        if not isinstance(op.command, ExecHostCall):
+          raise ValueError(f"device host_call '{op.instruction_id}' carries no host routine")
+        if not op.command.name.strip():
+          raise ValueError("device host_call requires a non-empty routine name")
+        if not op.event_tag:
+          raise ValueError("device host_call must define a non-empty event tag")
+        if op.event_tag in defined:
+          raise ValueError(f"duplicate device event tag '{op.event_tag}'")
+        if op.actual_inputs or op.ctx_name or op.binding_id:
+          raise ValueError("device host_call carries unexpected submit fields")
+        if len(op.dependencies) != len(set(op.dependencies)) or not set(op.dependencies) <= defined:
+          raise ValueError(f"device host_call '{op.instruction_id}' has invalid dependencies")
+        for dependency in op.dependencies:
+          references[dependency] += 1
+        defined.add(op.event_tag)
       elif op.op in ("profile_reconfig", "memory_maintenance"):
         expected_type = ProfileReconfigDesc if op.op == "profile_reconfig" else MemoryMaintenanceDesc
         if (
@@ -312,11 +365,12 @@ class CpuDeviceController:
   def done(self) -> bool:
     control_done = self._active_control_id is None and self._control_completion is None
     if self.faulted:
-      return not self._pending and not self._active and control_done
+      return not self._pending and not self._active and not self._active_host and control_done
     return (
       self._returned
       and not self._pending
       and not self._active
+      and not self._active_host
       and not self._completion_reserved
       and control_done
     )
@@ -347,8 +401,38 @@ class CpuDeviceController:
 
     self._sample_occupancy()
 
+  def _normalize_completion(
+    self, completion: DeviceCompletion, cycle: int
+  ) -> DeviceCompletion:
+    """Coerce a port completion to a valid terminal status at poll time."""
+    try:
+      status = DeviceCompletionStatus(completion.status)
+    except (TypeError, ValueError):
+      return DeviceCompletion(
+        request_id=completion.request_id,
+        status=DeviceCompletionStatus.ERROR,
+        reason=f"request {completion.request_id} returned an invalid completion status",
+        cycle=cycle,
+      )
+    if completion.cycle > cycle:
+      return DeviceCompletion(
+        request_id=completion.request_id,
+        status=DeviceCompletionStatus.ERROR,
+        reason=(
+          f"request {completion.request_id} completion cycle {completion.cycle} "
+          f"is later than poll cycle {cycle}"
+        ),
+        cycle=cycle,
+      )
+    return DeviceCompletion(
+      request_id=completion.request_id,
+      status=status,
+      reason=completion.reason,
+      cycle=completion.cycle,
+    )
+
   def harvest_completions(self, cycle: int) -> tuple[DeviceCompletion, ...]:
-    """Harvest launch and control completions after the Group's cycle step."""
+    """Harvest launch and host completions after the Group's cycle step."""
     completions = self.port.poll_completions(cycle)
     first_error: DeviceCompletion | None = None
     for completion in completions:
@@ -356,33 +440,24 @@ class CpuDeviceController:
       if record is None:
         self._protocol_fault(f"completion for unknown or retired request {completion.request_id}", cycle)
         continue
-      try:
-        status = DeviceCompletionStatus(completion.status)
-      except (TypeError, ValueError):
-        status = DeviceCompletionStatus.ERROR
-        completion = DeviceCompletion(
-          request_id=completion.request_id,
-          status=status,
-          reason=(f"request {completion.request_id} returned invalid completion status"),
-          cycle=cycle,
-        )
-      else:
-        completion = DeviceCompletion(
-          request_id=completion.request_id, status=status, reason=completion.reason, cycle=completion.cycle
-        )
-      if completion.cycle > cycle:
-        completion = DeviceCompletion(
-          request_id=completion.request_id,
-          status=DeviceCompletionStatus.ERROR,
-          reason=(
-            f"request {completion.request_id} completion cycle "
-            f"{completion.cycle} is later than poll cycle {cycle}"
-          ),
-          cycle=cycle,
-        )
+      completion = self._normalize_completion(completion, cycle)
       self._record_completion(record, completion)
       if completion.status is DeviceCompletionStatus.ERROR and first_error is None:
         first_error = completion
+
+    for host_completion in (
+      () if self.host_port is None else self.host_port.poll_completions(cycle)
+    ):
+      record = self._active_host.pop(host_completion.request_id, None)
+      if record is None:
+        self._protocol_fault(
+          f"host completion for unknown or retired request {host_completion.request_id}", cycle
+        )
+        continue
+      host_completion = self._normalize_completion(host_completion, cycle)
+      self._record_completion(record, host_completion)
+      if host_completion.status is DeviceCompletionStatus.ERROR and first_error is None:
+        first_error = host_completion
 
     control_error: DeviceControlCompletion | None = None
     for control_completion in self.port.poll_control_completions(cycle):
@@ -462,6 +537,7 @@ class CpuDeviceController:
         )
         state = DeviceLaunchState.WAIT_DEPS if dependency_ids else DeviceLaunchState.WAIT_ADMISSION
         record = _LaunchRecord(
+          kind="group",
           request=request,
           event_tag=op.event_tag,
           dependency_ids=dependency_ids,
@@ -518,8 +594,51 @@ class CpuDeviceController:
           },
         )
         continue
+      if op.op == "host_call":
+        assert isinstance(op.command, ExecHostCall)
+        if self.host_port is None:
+          self._enter_fault("host_call issued without a host runtime port", cycle)
+          break
+        if not self._can_accept_submit():
+          break
+        dependency_ids = tuple(self._event_handles[tag] for tag in op.dependencies)
+        host_request_id = self._next_request_id
+        self._next_request_id += 1
+        host_request = DeviceHostRequest(
+          request_id=host_request_id,
+          name=op.command.name,
+          command=op.command,
+          binding_names=tuple(
+            self.model.inputs[access.input_index].name for access in op.command.accesses
+          ),
+        )
+        state = DeviceLaunchState.WAIT_DEPS if dependency_ids else DeviceLaunchState.WAIT_ADMISSION
+        record = _LaunchRecord(
+          kind="host",
+          request=host_request,
+          event_tag=op.event_tag,
+          dependency_ids=dependency_ids,
+          state=state,
+          submit_cycle=cycle,
+          dependencies_ready_cycle=None if dependency_ids else cycle,
+        )
+        pending = _PendingLaunch(record, list(dependency_ids))
+        self._records[host_request_id] = record
+        self._pending.append(pending)
+        self._event_handles[op.event_tag] = host_request_id
+        self._event_tags_by_request[host_request_id] = op.event_tag
+        self._remaining_references[host_request_id] = self._future_references[op.event_tag]
+        self._pc += 1
+        issued += 1
+        self._counters["host_submitted"] += 1
+        self.pmu.add_event("device_host_submit")
+        self._observe("host_submit", cycle, record)
+        self._pending_peak = max(self._pending_peak, len(self._pending))
+        if not dependency_ids:
+          self._mark_dependencies_ready(record, cycle)
+        continue
       if op.op in ("profile_reconfig", "memory_maintenance"):
-        assert op.command is not None
+        assert isinstance(op.command, (ProfileReconfigDesc, MemoryMaintenanceDesc))
         command_id = op.command.command_id
         if self._active_control_id is None:
           if op.op == "memory_maintenance":
@@ -658,10 +777,12 @@ class CpuDeviceController:
       if pending.unresolved_dependencies:
         self._counters["dependency_wait_cycles"] += 1
         continue
-      if attempts >= self.config.issue_width or len(self._active) >= self.max_outstanding:
+      if attempts >= self.config.issue_width:
         break
       record = pending.record
       request_id = record.request.request_id
+      if record.kind == "group" and len(self._active) >= self.max_outstanding:
+        break
       reserve_completion = self._remaining_references[request_id] > 0
       if reserve_completion and len(self._completion_reserved) >= self.config.completion_capacity:
         self._counters["completion_backpressure_cycles"] += 1
@@ -671,7 +792,19 @@ class CpuDeviceController:
         self._completion_reserved.add(request_id)
         self._completion_peak = max(self._completion_peak, len(self._completion_reserved))
       attempts += 1
-      if not self.port.try_submit(record.request, cycle):
+      if record.kind == "host":
+        assert self.host_port is not None
+        assert isinstance(record.request, DeviceHostRequest)
+        try:
+          accepted = self.host_port.try_submit(record.request, cycle)
+        except ValueError as exc:
+          self._completion_reserved.discard(request_id)
+          self._protocol_fault(f"host routine rejected at issue: {exc}", cycle)
+          break
+      else:
+        assert isinstance(record.request, DeviceLaunchRequest)
+        accepted = self.port.try_submit(record.request, cycle)
+      if not accepted:
         self._completion_reserved.discard(request_id)
         self._counters["admission_backpressure_cycles"] += 1
         self.pmu.add_cycle("device_admission_wait")
@@ -679,6 +812,12 @@ class CpuDeviceController:
       self._pending.remove(pending)
       record.state = DeviceLaunchState.ACTIVE
       record.admission_cycle = cycle
+      if record.kind == "host":
+        self._active_host[request_id] = record
+        self._counters["host_admitted"] += 1
+        self.pmu.add_event("device_host_admit")
+        self._observe("host_admission", cycle, record)
+        continue
       self._active[request_id] = record
       self._active_peak = max(self._active_peak, len(self._active))
       self._counters["admitted"] += 1
@@ -703,13 +842,22 @@ class CpuDeviceController:
     else:
       self._retire_event_handle(completion.request_id)
     if completion.status is DeviceCompletionStatus.SUCCESS:
-      self._counters["completed"] += 1
-      self.pmu.add_event("device_launch_complete")
+      if record.kind == "host":
+        self._counters["host_completed"] += 1
+        self.pmu.add_event("device_host_complete")
+      else:
+        self._counters["completed"] += 1
+        self.pmu.add_event("device_launch_complete")
     else:
-      self._counters["failed"] += 1
-      self.pmu.add_event("device_launch_failed")
+      if record.kind == "host":
+        self._counters["host_failed"] += 1
+        self.pmu.add_event("device_host_failed")
+      else:
+        self._counters["failed"] += 1
+        self.pmu.add_event("device_launch_failed")
     self._completion_peak = max(self._completion_peak, len(self._completions))
-    self._observe("launch_completion", completion.cycle, record)
+    self._observe("launch_completion" if record.kind == "group" else "host_completion",
+                  completion.cycle, record)
 
   def _record_unadmitted_failure(
     self, record: _LaunchRecord, reason: str, cycle: int, *, dependency_failure: bool
@@ -811,7 +959,7 @@ class CpuDeviceController:
       cycle,
       {
         "request_id": record.request.request_id,
-        "context": record.request.context_name,
+        "context": getattr(record.request, "context_name", "") or f"host:{record.event_tag}",
         "event": record.event_tag,
         "state": record.state.value,
         "submit_cycle": record.submit_cycle,
@@ -831,6 +979,10 @@ class CpuDeviceController:
     """Return bounded live state plus the model's finite launch history."""
     counter_names = (
       "submitted",
+      "host_submitted",
+      "host_admitted",
+      "host_completed",
+      "host_failed",
       "dependencies_ready",
       "admitted",
       "completed",
@@ -846,6 +998,7 @@ class CpuDeviceController:
       "returns",
       "await_wait_cycles",
       "dependency_wait_cycles",
+      "control_dependency_wait_cycles",
       "pending_backpressure_cycles",
       "outstanding_backpressure_cycles",
       "completion_backpressure_cycles",
@@ -861,6 +1014,7 @@ class CpuDeviceController:
         "active": len(self._active),
         "outstanding": self.outstanding_count,
         "live_launches": len(self._pending) + len(self._active),
+        "active_host": len(self._active_host),
         "retained_completions": len(self._completions),
         "reserved_completions": len(self._completion_reserved),
         "pending_peak": self._pending_peak,

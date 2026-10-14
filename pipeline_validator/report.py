@@ -96,8 +96,13 @@ def _bounded_snapshot(value, *, name: str = ""):
 
 
 def _request_records(device: Mapping) -> list[dict]:
-  """Use the CPU controller's single lifecycle-record contract."""
-  return device.get("launch_records", [])
+  """Use the CPU controller's single lifecycle-record contract.
+
+  Plan §4: the request-timing summary covers Group launches only; host
+  routines carry ``kind="host"`` and are reported in ``host_runtime``.
+  """
+  records = device.get("launch_records", [])
+  return [record for record in records if record.get("kind", "group") == "group"]
 
 
 def _cycle(record: Mapping, name: str) -> int | None:
@@ -372,9 +377,7 @@ def build_report(wl: WorkloadInfo, result: SimResult, num_tiles: int = 4) -> Wor
     credit_invariant_ok=result.credit_invariant_ok,
     num_tiles=actual_num_tiles,
     gather_fidelity=(
-      "deterministic_profiled_not_address_or_value_accurate"
-      if pmu.events.get("gather_requests", 0) > 0
-      else None
+      "address_resolved_cache" if pmu.events.get("gather_requests", 0) > 0 else None
     ),
     memory=(
       _memory_summary(result.group_snapshot.get("memory"), scheduler_raw, arenas_raw)
@@ -607,11 +610,15 @@ def _run_checks(wl: WorkloadInfo, result: SimResult, engine_active: dict, total:
     )
 
   gather_requests = result.pmu.events.get("gather_requests", 0)
-  if gather_requests > 0:
+  scatter_segments = result.pmu.events.get("scatter_segments", 0)
+  if gather_requests > 0 or scatter_segments > 0:
+    # Plan §5: address-resolved Gather conservation adds the bypass path;
+    # Scatter exposes segment/byte and ordered-overwrite wait counters.
     l1_hits = result.pmu.events.get("gather_l1_hits", 0)
     l2_hits = result.pmu.events.get("gather_l2_hits", 0)
     hbm_misses = result.pmu.events.get("gather_hbm_misses", 0)
-    conserved = gather_requests == l1_hits + l2_hits + hbm_misses
+    bypass = result.pmu.events.get("gather_cache_bypass_requests", 0)
+    conserved = gather_requests == l1_hits + l2_hits + hbm_misses + bypass
     checks.append(
       {
         "check": "gather_request_conservation",
@@ -621,10 +628,27 @@ def _run_checks(wl: WorkloadInfo, result: SimResult, engine_active: dict, total:
           "l1_hits": l1_hits,
           "l2_hits": l2_hits,
           "hbm_misses": hbm_misses,
+          "cache_bypass": bypass,
         },
         "pass": conserved,
       }
     )
+    if scatter_segments > 0:
+      committed = result.pmu.events.get("scatter_committed_segments", scatter_segments)
+      checks.append(
+        {
+          "check": "scatter_segment_conservation",
+          "expected": True,
+          "actual": {
+            "segments": scatter_segments,
+            "committed": committed,
+            "bytes": result.pmu.events.get("scatter_bytes", 0),
+            "index_reads": result.pmu.events.get("scatter_index_reads", 0),
+            "overlap_wait_cycles": result.pmu.events.get("scatter_overlap_wait_cycles", 0),
+          },
+          "pass": committed == scatter_segments,
+        }
+      )
 
     snapshot = result.group_snapshot
     memory = snapshot.get("memory", {})

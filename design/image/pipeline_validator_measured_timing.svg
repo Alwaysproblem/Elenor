@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1150" style="font-family:sans-serif;font-size:14px;color:var(--fg,currentColor)" role="img" aria-labelledby="title desc">
+<title id="title">Pipeline Validator 实测 CPU、Group、UCE 与内存时序</title>
+<desc id="desc">device-dependency-submit，full_memory，Perfetto SQL提取并逐字段核对。上半部时间线线性，下半部A请求资源生命周期分段放大。A与B独立，C依赖A；多个UCE contexts共享一个EVU服务通道。</desc>
+<text x="20.00" y="30.00" font-size="20" fill="currentColor" text-anchor="start">实测：CPU 提交顺序 ≠ Group 启动顺序 ≠ Engine 服务顺序</text>
+<text x="20.00" y="56.00" font-size="14" fill="var(--muted,currentColor)" text-anchor="start">场景：device-dependency-submit · full_memory · 1 GHz · Tile0 上 2 UCE contexts · CPU outstanding 上限 2</text>
+<text x="20.00" y="80.00" font-size="14" fill="currentColor" text-anchor="start">CPU：cycle 0 提交 A；cycle 1 提交 C（依赖 A）；cycle 2 提交 B（独立）。其余 Tiles 未参与。</text>
+<text x="20.00" y="109.00" font-size="16" fill="currentColor" text-anchor="start" font-weight="bold">① 全局线性时轴：单位 cycle；框表示占用 / 服务区间</text>
+<path d="M190.00 133.00 L190.00 499.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="190.00" y="129.00" font-size="13" fill="currentColor" text-anchor="middle">0</text>
+<path d="M338.08 133.00 L338.08 499.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="338.08" y="129.00" font-size="13" fill="currentColor" text-anchor="middle">2500</text>
+<path d="M486.15 133.00 L486.15 499.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="486.15" y="129.00" font-size="13" fill="currentColor" text-anchor="middle">5000</text>
+<path d="M634.23 133.00 L634.23 499.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="634.23" y="129.00" font-size="13" fill="currentColor" text-anchor="middle">7500</text>
+<path d="M782.31 133.00 L782.31 499.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="782.31" y="129.00" font-size="13" fill="currentColor" text-anchor="middle">10000</text>
+<path d="M930.38 133.00 L930.38 499.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="930.38" y="129.00" font-size="13" fill="currentColor" text-anchor="middle">12500</text>
+<text x="20.00" y="170.00" font-size="14" fill="currentColor" text-anchor="start">A root / Group slot</text>
+<rect x="190.00" y="150.00" width="255.58" height="30.00" rx="4" fill="none" stroke="var(--c1,currentColor)"/>
+<text x="317.79" y="170.00" font-size="14" fill="var(--c1,currentColor)" text-anchor="middle">A  0–4315</text>
+<text x="20.00" y="217.00" font-size="14" fill="currentColor" text-anchor="start">B root / Group slot</text>
+<rect x="190.12" y="197.00" width="498.19" height="30.00" rx="4" fill="none" stroke="var(--c2,currentColor)"/>
+<text x="439.21" y="217.00" font-size="14" fill="var(--c2,currentColor)" text-anchor="middle">B  2–8413</text>
+<text x="20.00" y="264.00" font-size="14" fill="currentColor" text-anchor="start">C root / Group slot</text>
+<rect x="445.64" y="244.00" width="485.46" height="30.00" rx="4" fill="none" stroke="var(--c3,currentColor)"/>
+<text x="688.37" y="264.00" font-size="14" fill="var(--c3,currentColor)" text-anchor="middle">C  4316–12512</text>
+<rect x="190.06" y="244.00" width="255.58" height="30.00" rx="4" fill="none" stroke="var(--c3,currentColor)" stroke-dasharray="5 4"/>
+<text x="317.85" y="264.00" font-size="14" fill="var(--c3,currentColor)" text-anchor="middle">C 在 CPU 等 A；未占 Group / L2</text>
+<text x="20.00" y="314.00" font-size="14" fill="currentColor" text-anchor="start">Tile0 / UCE CTX0</text>
+<rect x="193.97" y="294.00" width="247.94" height="30.00" rx="4" fill="none" stroke="var(--c1,currentColor)"/>
+<text x="317.94" y="314.00" font-size="14" fill="var(--c1,currentColor)" text-anchor="middle">A  67–4253</text>
+<rect x="449.49" y="294.00" width="477.99" height="30.00" rx="4" fill="none" stroke="var(--c3,currentColor)"/>
+<text x="688.49" y="314.00" font-size="14" fill="var(--c3,currentColor)" text-anchor="middle">C  4381–12451</text>
+<text x="20.00" y="361.00" font-size="14" fill="currentColor" text-anchor="start">Tile0 / UCE CTX1</text>
+<rect x="195.69" y="341.00" width="489.01" height="30.00" rx="4" fill="none" stroke="var(--c2,currentColor)"/>
+<text x="440.19" y="361.00" font-size="14" fill="var(--c2,currentColor)" text-anchor="middle">B  96–8352</text>
+<text x="190.00" y="401.00" font-size="14" fill="var(--muted,currentColor)" text-anchor="start">Task 框覆盖等待、运行和本例的退休；不是每个 cycle 都在发指令。</text>
+<text x="20.00" y="450.00" font-size="14" fill="currentColor" text-anchor="start">Tile0 / EVU 服务</text>
+<rect x="197.05" y="430.00" width="242.79" height="30.00" rx="4" fill="none" stroke="var(--c1,currentColor)"/>
+<text x="318.44" y="450.00" font-size="14" fill="var(--c1,currentColor)" text-anchor="middle">A  119–4218</text>
+<rect x="439.84" y="430.00" width="242.79" height="30.00" rx="4" fill="none" stroke="var(--c2,currentColor)"/>
+<text x="561.23" y="450.00" font-size="14" fill="var(--c2,currentColor)" text-anchor="middle">B  4218–8317</text>
+<rect x="682.62" y="430.00" width="242.79" height="30.00" rx="4" fill="none" stroke="var(--c3,currentColor)"/>
+<text x="804.02" y="450.00" font-size="14" fill="var(--c3,currentColor)" text-anchor="middle">C  8317–12416</text>
+<text x="190.00" y="485.00" font-size="14" fill="var(--muted,currentColor)" text-anchor="start">UCE context 可以重叠驻留；同一个 EVU 的 A / B / C 服务严格串行。</text>
+<text x="20.00" y="527.00" font-size="16" fill="currentColor" text-anchor="start">A 完成 4315 → CPU 下一 cycle 4316 才解开 C 的依赖；B 不必等待 C。</text>
+<text x="20.00" y="554.00" font-size="14" fill="var(--muted,currentColor)" text-anchor="start">C 的 root 在 12512 完成；CPU 继续处理 await / return，模拟终止于 12515。</text>
+<path d="M20.00 577.00 L980.00 577.00" fill="none" stroke="var(--border,currentColor)"/>
+<text x="20.00" y="607.00" font-size="17" fill="currentColor" text-anchor="start" font-weight="bold">② 放大 A 的资源生命周期：分段非比例；每个标注仍是实测 cycle</text>
+<path d="M190.00 643.00 L190.00 1005.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="190.00" y="638.00" font-size="13" fill="currentColor" text-anchor="middle">0</text>
+<path d="M275.00 643.00 L275.00 1005.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="275.00" y="638.00" font-size="13" fill="currentColor" text-anchor="middle">67</text>
+<path d="M375.00 643.00 L375.00 1005.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="375.00" y="638.00" font-size="13" fill="currentColor" text-anchor="middle">118</text>
+<path d="M470.00 643.00 L470.00 1005.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="470.00" y="638.00" font-size="13" fill="currentColor" text-anchor="middle">119</text>
+<path d="M585.00 643.00 L585.00 1005.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="585.00" y="638.00" font-size="13" fill="currentColor" text-anchor="middle">4218</text>
+<path d="M710.00 643.00 L710.00 1005.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="710.00" y="638.00" font-size="13" fill="currentColor" text-anchor="middle">4253</text>
+<path d="M835.00 643.00 L835.00 1005.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="835.00" y="638.00" font-size="13" fill="currentColor" text-anchor="middle">4314</text>
+<path d="M955.00 643.00 L955.00 1005.00" fill="none" stroke="var(--border,currentColor)" stroke-dasharray="3 5"/>
+<text x="955.00" y="638.00" font-size="13" fill="currentColor" text-anchor="middle">4315</text>
+<text x="20.00" y="687.00" font-size="14" fill="currentColor" text-anchor="start">L2 input backing</text>
+<rect x="190.00" y="664.00" width="185.00" height="34.00" rx="4" fill="none" stroke="var(--c1,currentColor)"/>
+<text x="282.50" y="687.00" font-size="14" fill="var(--c1,currentColor)" text-anchor="middle">4 KiB</text>
+<text x="400.00" y="687.00" font-size="14" fill="currentColor" text-anchor="start">117 发 input_released → 118 release / 归还物理 extent</text>
+<text x="20.00" y="741.00" font-size="14" fill="currentColor" text-anchor="start">L2 output backing</text>
+<rect x="190.00" y="718.00" width="645.00" height="34.00" rx="4" fill="none" stroke="var(--c1,currentColor)"/>
+<text x="512.50" y="741.00" font-size="14" fill="var(--c1,currentColor)" text-anchor="middle">4 KiB：从 root 准入持有到 HBM store 完成并 release</text>
+<text x="20.00" y="795.00" font-size="14" fill="currentColor" text-anchor="start">L1 / Task 资源</text>
+<rect x="275.00" y="772.00" width="435.00" height="34.00" rx="4" fill="none" stroke="var(--c1,currentColor)"/>
+<text x="492.50" y="795.00" font-size="14" fill="var(--c1,currentColor)" text-anchor="middle">L1 Arena 4 KiB + Frame / context pin / R lease</text>
+<text x="20.00" y="849.00" font-size="14" fill="currentColor" text-anchor="start">EVU 服务</text>
+<rect x="470.00" y="826.00" width="115.00" height="34.00" rx="4" fill="none" stroke="var(--c1,currentColor)"/>
+<text x="527.50" y="849.00" font-size="14" fill="var(--c1,currentColor)" text-anchor="middle">计算</text>
+<text x="20.00" y="903.00" font-size="14" fill="currentColor" text-anchor="start">输出写回 HBM</text>
+<rect x="710.00" y="880.00" width="125.00" height="34.00" rx="4" fill="none" stroke="var(--c1,currentColor)"/>
+<text x="772.50" y="903.00" font-size="14" fill="var(--c1,currentColor)" text-anchor="middle">Group DMA</text>
+<text x="190.00" y="947.00" font-size="14" fill="currentColor" text-anchor="start">67：Task 准入；83：Frame bind 完成、首次 UCE issue；118：launch EVU，119 才开始服务。</text>
+<text x="190.00" y="973.00" font-size="14" fill="currentColor" text-anchor="start">4218：EVU 完成；仍要 Tile store → output_ready → Task return → HBM store，不能直接报 root done。</text>
+<text x="190.00" y="999.00" font-size="14" fill="currentColor" text-anchor="start">本例 Task terminal 与资源退休同为 4253；一般仍须满足在途访问、view 和 pin 的关闭条件。</text>
+<path d="M20.00 1022.00 L980.00 1022.00" fill="none" stroke="var(--border,currentColor)"/>
+<text x="20.00" y="1050.00" font-size="14" fill="currentColor" text-anchor="start">内存口径：单个 input/output 的逻辑 payload 是 2 KiB；跨 16 banks 对齐后各占 4 KiB。</text>
+<text x="20.00" y="1075.00" font-size="14" fill="currentColor" text-anchor="start">A 的 L2 物理占用：开始 8 KiB → input 释放后剩 4 KiB → output 释放后 0；root 仍到 4315 才闭合。</text>
+<text x="20.00" y="1100.00" font-size="14" fill="currentColor" text-anchor="start">不是“root 初始 Arena 大小 × 整个生命周期”；L2 backing 可提前归还，L1 view 释放则不等于归还 Task Arena。</text>
+<text x="20.00" y="1130.00" font-size="13" fill="var(--muted,currentColor)" text-anchor="start">证据：examples/artifacts/control_timing_20261013/ · Perfetto slice 字段与原始 trace 全量比对，零差异。</text>
+</svg>

@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" style="font-family:sans-serif;font-size:14px;color:var(--fg,currentColor)" role="img" aria-labelledby="title desc">
+  <title id="title">Pipeline Validator 当前 CPU、Group、Tile 控制与同步</title>
+  <desc id="desc">当前源码的控制分层和单 cycle 调用顺序。submit 接收、root 准入、Group action issue、Tile Task 准入和 UCE issue 是不同阶段。示意布局不代表实测时长。</desc>
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="currentColor"/></marker></defs>
+  <g fill="currentColor">
+    <text x="20" y="30" font-size="21">CPU → Group controller → Tile UCE：不是一条阻塞执行链</text>
+    <text x="20" y="56" fill="var(--muted,currentColor)">当前实现 / 正常执行路径 / 布局不按时间比例；每层独立保存控制状态，通过事件与回调推进。</text>
+  </g>
+
+  <g fill="none" stroke="var(--border,currentColor)"><path d="M20 78 H980 M20 238 H980 M20 384 H980 M20 548 H980 M20 690 H980 M20 826 H980"/></g>
+  <g fill="currentColor">
+    <text x="20" y="112" font-size="17">① CPU</text><text x="20" y="138">nexus.program</text><text x="20" y="162">request_id</text><text x="20" y="184">依赖 / completion</text>
+  </g>
+  <g fill="none" stroke="var(--accent,currentColor)"><rect x="175" y="96" width="238" height="106" rx="6"/><rect x="436" y="96" width="238" height="106" rx="6"/><rect x="697" y="96" width="283" height="106" rx="6"/></g>
+  <g fill="currentColor">
+    <text x="188" y="119" font-weight="bold">顺序解释 CPU PC</text><text x="188" y="143">submit：登记 pending 请求</text><text x="188" y="165">depends_on：先记依赖，不等完</text><text x="188" y="187">await：阻塞 PC，不阻塞已有任务</text>
+    <text x="449" y="119" font-weight="bold">扫描依赖已完成的 pending</text><text x="449" y="143">可跳过 WAIT_DEPS 的请求</text><text x="449" y="165">outstanding / completion 额度检查</text><text x="449" y="187">端口拒绝则停止本轮提交尝试</text>
+    <text x="710" y="119" font-weight="bold">GroupPort 接收 root 请求</text><text x="710" y="143">进入有限 pending metadata 队列</text><text x="710" y="165">CPU trace：launch_admission</text><text x="710" y="187">此时不保证已拿到 Group slot / L2</text>
+    <text x="175" y="224" fill="var(--muted,currentColor)">CPU 默认 issue_width=1；pending / completion 是条目预算，不是模拟出的 CPU cache 或字节 SRAM。</text>
+  </g>
+  <g fill="none" stroke="currentColor" marker-end="url(#arrow)"><path d="M413 148 H434"/><path d="M674 148 H695"/><path d="M838 203 V252"/></g>
+
+  <g fill="currentColor"><text x="20" y="280" font-size="17">② Root 准入</text><text x="20" y="307">nest.context</text><text x="20" y="331">不是 Tile Task</text></g>
+  <g fill="none" stroke="var(--accent,currentColor)"><rect x="175" y="254" width="391" height="98" rx="6"/><rect x="589" y="254" width="391" height="98" rx="6"/></g>
+  <g fill="currentColor">
+    <text x="188" y="278" font-weight="bold">GroupPort：按 profile 类别队头尝试</text><text x="188" y="301">SAME 优先，再 COMPATIBLE；分配可用 Group slot</text><text x="188" y="324">无 slot / 容量 / 事件预算：留在 pending，不半占资源</text>
+    <text x="602" y="278" font-weight="bold">完整准入：commit root 的资源</text><text x="602" y="301">L2 Arena / backing + event 预算 + sequencer 状态</text><text x="602" y="324">context_admitted 后，root 才进入 Group 调度</text>
+    <text x="175" y="373" fill="var(--muted,currentColor)">CPU port-accepted outstanding 与 Group active slots 是两个限制；不能用一个 “context 数” 混称。</text>
+  </g>
+  <path d="M566 303 H587" fill="none" stroke="currentColor" marker-end="url(#arrow)"/>
+
+  <g fill="currentColor"><text x="20" y="416" font-size="17">③ Group</text><text x="20" y="442">每 root 有游标</text><text x="20" y="466">共享一套 ISSUE</text><text x="20" y="490">Group EventTable</text></g>
+  <g fill="none" stroke="var(--accent,currentColor)"><rect x="175" y="400" width="238" height="108" rx="6"/><rect x="436" y="400" width="238" height="108" rx="6"/><rect x="697" y="400" width="283" height="108" rx="6"/></g>
+  <g fill="currentColor">
+    <text x="188" y="424" font-weight="bold">REGISTER：至多 1 action/cycle</text><text x="188" y="447">按游标登记；各 root 间 RR</text><text x="188" y="469">await / barrier / 配置形成 fence</text><text x="188" y="491">默认共享 action table 16，单 root 8</text>
+    <text x="449" y="424" font-weight="bold">有限 ready-action table</text><text x="449" y="447">默认 S1：每 cycle 最多扫描 4 项</text><text x="449" y="469">依赖未就绪 / 资源背压：跳过</text><text x="449" y="491">只能从本次扫描窗口里选 eligible</text>
+    <text x="710" y="424" font-weight="bold">ISSUE：全 Group 至多 1 action/cycle</text><text x="710" y="447">DMA / dispatch / release / signal 等</text><text x="710" y="469">异步 action 转 inflight，等 completion</text><text x="710" y="491">完成回收独立推进，不要求 action 空位</text>
+    <text x="175" y="533" fill="var(--muted,currentColor)">同 cycle 先 ISSUE 旧项，再 REGISTER 新项；S0 额外限制每 root 只能选其最早排队 action。</text>
+  </g>
+  <g fill="none" stroke="currentColor" marker-end="url(#arrow)"><path d="M413 454 H434"/><path d="M674 454 H695"/></g>
+
+  <g fill="currentColor"><text x="20" y="579" font-size="17">④ Tile</text><text x="20" y="605">Grid → Tasks</text><text x="20" y="629">每 Tile 独立准入</text></g>
+  <g fill="none" stroke="var(--accent,currentColor)"><rect x="175" y="563" width="238" height="85" rx="6"/><rect x="436" y="563" width="238" height="85" rx="6"/><rect x="697" y="563" width="283" height="85" rx="6"/></g>
+  <g fill="currentColor">
+    <text x="188" y="586" font-weight="bold">dispatch 先登记 Grid Route</text><text x="188" y="609">不是立即让所有 Tile 一起执行</text><text x="188" y="632">每 Tile 每 tick 最多 commit 1 Task</text>
+    <text x="449" y="586" font-weight="bold">Task 原子准入</text><text x="449" y="609">L1 Arena / Frame / UCE context</text><text x="449" y="632">父 L2 pins / R lease（root×Tile）</text>
+    <text x="710" y="586" font-weight="bold">准备 → Frame bind → UCE 仲裁</text><text x="710" y="609">每 context 独立 PC / events / wait</text><text x="710" y="632">共享 issue 与 engines；详见 UCE 展开图</text>
+    <text x="175" y="673" fill="var(--muted,currentColor)">“有空 UCE” 不足以保证启动：L1 分配、Frame、父数据有效性、profile 和 R 额度也必须通过。</text>
+  </g>
+  <g fill="none" stroke="currentColor" marker-end="url(#arrow)"><path d="M413 605 H434"/><path d="M674 605 H695"/></g>
+
+  <g fill="currentColor"><text x="20" y="722" font-size="17">⑤ 完成反馈</text><text x="20" y="748">不是单一 done</text><text x="20" y="772">带身份 / 代次</text></g>
+  <g fill="none" stroke="var(--success,currentColor)"><rect x="175" y="706" width="238" height="86" rx="6"/><rect x="436" y="706" width="238" height="86" rx="6"/><rect x="697" y="706" width="283" height="86" rx="6"/></g>
+  <g fill="currentColor">
+    <text x="188" y="729" font-weight="bold">Engine event → UCE wait 醒来</text><text x="188" y="752">phase signal 聚合可早于 Task 结束</text><text x="188" y="775">input_released / output_ready</text>
+    <text x="449" y="729" font-weight="bold">Task terminal → 退休闭合</text><text x="449" y="752">Task 资源释放后才记 Grid done</text><text x="449" y="775">L2 store / release 仍可能未完成</text>
+    <text x="710" y="729" font-weight="bold">Root 闭合 → DeviceCompletion</text><text x="710" y="752">根 Arena 退休 + action/job 结束</text><text x="710" y="775">CPU 收取；依赖最早下一 cycle 醒来</text>
+    <text x="175" y="817" fill="var(--muted,currentColor)">同步状态是 Python 控制表 / event records / callbacks；数据面是 HBM、L2、L1 模型，不是双写同步 RAM。</text>
+  </g>
+  <g fill="none" stroke="currentColor" marker-end="url(#arrow)"><path d="M413 749 H434"/><path d="M674 749 H695"/></g>
+
+  <text x="20" y="858" font-size="17" fill="currentColor">一个 simulator cycle 的固定推进顺序</text>
+  <g fill="none" stroke="currentColor"><rect x="20" y="878" width="140" height="50" rx="4"/><rect x="182" y="878" width="140" height="50" rx="4"/><rect x="344" y="878" width="140" height="50" rx="4"/><rect x="506" y="878" width="140" height="50" rx="4"/><rect x="668" y="878" width="140" height="50" rx="4"/><rect x="830" y="878" width="150" height="50" rx="4"/></g>
+  <g fill="currentColor" text-anchor="middle"><text x="90" y="899">CPU step</text><text x="90" y="918">依赖 / 提交</text><text x="252" y="899">NoC / transfers</text><text x="252" y="918">collective / stream</text><text x="414" y="899">Tiles</text><text x="414" y="918">engine / UCE</text><text x="576" y="899">Group ISSUE</text><text x="576" y="918">再 REGISTER</text><text x="738" y="899">Task 准入</text><text x="738" y="918">root 完成检查</text><text x="905" y="899">CPU harvest</text><text x="905" y="918">退 slot / 准入 root</text></g>
+  <g fill="none" stroke="currentColor" marker-end="url(#arrow)"><path d="M160 903 H180"/><path d="M322 903 H342"/><path d="M484 903 H504"/><path d="M646 903 H666"/><path d="M808 903 H828"/></g>
+  <g fill="var(--muted,currentColor)"><text x="20" y="954">因此：Tile 的本 cycle 完成可被随后 Group ISSUE 看见；本 cycle 新准入的 Task / root 不会倒回已经执行过的阶段。</text><text x="20" y="980">依据：simulator.py::_run_model · device.py · runtime/group_port.py · group_scheduler.py · tile_group.py</text></g>
+</svg>

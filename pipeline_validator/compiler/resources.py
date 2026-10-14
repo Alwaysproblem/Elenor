@@ -7,12 +7,11 @@ from dataclasses import replace
 from math import lcm
 
 from ..execution_ir import (
-  ExecGatherDesc,
-  ExecGatherOutcome,
   ExecGroupActionOp,
   ExecL1Buffer,
   ExecL2Buffer,
   ExecModel,
+  ExecTileGatherDesc,
   ExecTileGroupTask,
   ExecTileOp,
   ExecTileProgram,
@@ -220,52 +219,28 @@ def _check_requirement(
     raise ValueError(f"{profile.level} disabled Cache path has no permitted bypass")
 
 
-def _gathers(program: ExecTileProgram) -> tuple[ExecGatherDesc, ...]:
+def _gathers(program: ExecTileProgram) -> tuple[ExecTileGatherDesc, ...]:
   return tuple(
     gather
     for descriptor in program.descriptors.values()
-    if isinstance(gather := descriptor.params.get("gather"), ExecGatherDesc)
+    if isinstance(gather := descriptor.params.get("gather"), ExecTileGatherDesc)
   )
 
 
 def _cache_path_requirements(
-  gathers: Sequence[ExecGatherDesc], profile: MemoryProfile
+  gathers: Sequence[ExecTileGatherDesc], profile: MemoryProfile
 ) -> tuple[bool, bool, bool]:
-  """Return ``(cache_used, bypass_needed, cache_required)`` for one path."""
+  """Return ``(cache_used, bypass_needed, cache_required)`` for one path.
 
-  used = False
-  bypass_needed = False
-  required_needed = False
-  for gather in gathers:
-    for access in gather.accesses:
-      outcome = access.outcome
-      if profile.level == "l1":
-        if outcome is ExecGatherOutcome.L1_HIT:
-          used = True
-          required_needed = True
-        elif outcome in (ExecGatherOutcome.L2_HIT, ExecGatherOutcome.HBM_MISS):
-          if profile.cache_bytes:
-            used = True
-          else:
-            bypass_needed = True
-        else:
-          raise ValueError(f"program Gather has invalid outcome {outcome!r}")
-      elif profile.level == "l2":
-        if outcome is ExecGatherOutcome.L1_HIT:
-          continue
-        if outcome is ExecGatherOutcome.L2_HIT:
-          used = True
-          required_needed = True
-        elif outcome is ExecGatherOutcome.HBM_MISS:
-          if profile.cache_bytes:
-            used = True
-          else:
-            bypass_needed = True
-        else:
-          raise ValueError(f"program Gather has invalid outcome {outcome!r}")
-      else:
-        raise ValueError(f"unsupported cache level {profile.level!r}")
-  return used, bypass_needed, required_needed
+  Plan §2: a program containing a Gather uses any level whose profile
+  enables a cache; a disabled level is a bypass path.  Scatter never
+  touches the cache and needs no bypass, so it does not enter here.
+  """
+  if not gathers:
+    return False, False, False
+  if profile.cache_bytes > 0:
+    return True, False, False
+  return False, True, False
 
 
 def check_program_capabilities(
@@ -292,11 +267,7 @@ def check_program_capabilities(
   _check_requirement(
     context_contract.l2_cache, l2, used=l2_used, bypass_needed=l2_bypass, required_needed=l2_required
   )
-  for gather in gathers:
-    if gather.l1_mshr_hint > l1_mshr_entries:
-      raise ValueError(
-        f"program {program.name!r} Gather MSHR hint {gather.l1_mshr_hint} exceeds {l1_mshr_entries}"
-      )
+  del l1_mshr_entries
 
 
 def _tile_lifetimes(program: ExecTileProgram) -> dict[str, tuple[int, int]]:
@@ -470,11 +441,22 @@ def _resource_budget(task: ExecTileGroupTask) -> ResourceBudget:
     base = set(completed)
     for event in action.output_events:
       event_ancestors = set(base)
-      if action.op is ExecGroupActionOp.DISPATCH_ROLE and event == action.dst:
+      if action.op is ExecGroupActionOp.DISPATCH_ROLE:
         request = action.args[0]
-        event_ancestors.update(
-          signal for signal in (request.input_released_event, request.output_ready_event) if signal
-        )
+        if event == action.dst:
+          event_ancestors.update(
+            signal
+            for signal in (request.input_released_event, request.output_ready_event)
+            if signal
+          )
+        elif event == request.output_ready_event and action.dst is not None:
+          # Depending on a dispatch's output_ready proves that Grid already
+          # reached its retirement point, so its grid_done counts as
+          # completed.  Without this a producer/consumer chain such as the
+          # PagedAttention pipeline (block b waits on block b-4's
+          # output_ready) accumulates every dispatched Grid and reports a
+          # false live-route bound.
+          event_ancestors.add(action.dst)
       ancestors[event] = frozenset(event_ancestors)
   frame_slots = 0
   for role in task.role_bindings.values():

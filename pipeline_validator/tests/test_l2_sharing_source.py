@@ -10,7 +10,6 @@ from pipeline_validator.workload_ir import (
   print_workload_ir,
 )
 
-
 SHARED_IR = '''builtin.module {
   tile.program @read_weight(
       %task : !nest.task,

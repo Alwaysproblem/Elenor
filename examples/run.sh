@@ -8,6 +8,7 @@ usage() {
 Usage:
   bash examples/run.sh list
   bash examples/run.sh <name> [extra pipeline_validator args]
+  bash examples/run.sh fidelity-of <name>   # required fidelity, empty = any
   bash examples/run.sh file <path.mlir> [pipeline_validator args]
 
 Examples:
@@ -21,7 +22,15 @@ EOF
 list_examples() {
   cat <<'EOF'
 Runnable workloads:
-  gather                         workloads/gather_profiled.mlir
+  gather                         workloads/gather_indexed.mlir
+                                 (16 i32 index -> 16 B 段 Gather：真实地址
+                                 查 L1/L2 Cache，HBM 行回填由运行时决定)
+  indexed-memory                 workloads/indexed_gather_scatter.mlir
+                                 (独立索引对照场景：[4,4]i32 表，i32 索引
+                                 L1 读，Tile Gather -> Tile Scatter 写 OUT)
+  paged-attention-decode         workloads/paged_attention_decode_pipeline.mlir
+  paged-attention-decode-baseline
+                                 workloads/paged_attention_decode_baseline.mlir
   gather-matmul                  workloads/gather_matmul.mlir
   matmul-gather-add              workloads/matmul_gather_add.mlir
   gather-matmul-4tiles-2contexts
@@ -160,14 +169,52 @@ if [[ "$name" == "help" || "$name" == "--help" || "$name" == "-h" ]]; then
 fi
 shift
 
+# Scenarios that read a byte oracle (``--input-data``) only run under
+# full_memory; ``run_all_workload.sh`` queries this with ``fidelity-of``
+# and skips a scenario whose pin does not match the sweep.
+scenario_fidelity() {
+  case "$1" in
+    gather|gather-matmul|matmul-gather-add|gather-matmul-4tiles-2contexts|matmul-gather-add-4tiles-2contexts|indexed-memory|paged-attention-decode|paged-attention-decode-baseline)
+      echo full_memory
+      ;;
+    *)
+      echo ""
+      ;;
+  esac
+}
+
 case "$name" in
+  fidelity-of)
+    if [[ $# -lt 1 ]]; then
+      echo "error: fidelity-of requires a scenario name" >&2
+      exit 2
+    fi
+    scenario_fidelity "$1"
+    exit 0
+    ;;
   gather)
     set -- \
-      --ir-file "$ROOT_DIR/examples/workloads/gather_profiled.mlir" \
+      --ir-file "$ROOT_DIR/examples/workloads/gather_indexed.mlir" \
       --hw-override num_dma_channels=2 \
       --input-binding table=0x200000:8388608:r \
       --input-binding indices=0xA00000:4096:r \
       --input-binding output=0xB00000:256:w \
+      --input-data table="$ROOT_DIR/examples/workloads/gather_inputs/gather_indexed/table.bin" \
+      --input-data indices="$ROOT_DIR/examples/workloads/gather_inputs/gather_indexed/indices.bin" \
+      --max-cycles 200000 \
+      "$@"
+    ;;
+  indexed-memory)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/indexed_gather_scatter.mlir" \
+      --hw-override num_dma_channels=2 \
+      --input-binding DATA=0x100000:64:r \
+      --input-binding GATHER_IDX=0x200000:12:r \
+      --input-binding SCATTER_IDX=0x300000:12:r \
+      --input-binding OUT=0x400000:64:w \
+      --input-data DATA="$ROOT_DIR/examples/workloads/indexed_memory_data/data.bin" \
+      --input-data GATHER_IDX="$ROOT_DIR/examples/workloads/indexed_memory_data/gather_indices.bin" \
+      --input-data SCATTER_IDX="$ROOT_DIR/examples/workloads/indexed_memory_data/scatter_indices.bin" \
       --max-cycles 200000 \
       "$@"
     ;;
@@ -180,6 +227,12 @@ case "$name" in
       --input-binding table=0x200000:8388608:r \
       --input-binding indices=0xA00000:4096:r \
       --input-binding output=0xB00000:32768:w \
+      --input-binding acc_init=0xC00000:32768:r \
+      --input-data lhs="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul/lhs.bin" \
+      --input-data rhs="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul/rhs.bin" \
+      --input-data table="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul/table.bin" \
+      --input-data indices="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul/indices.bin" \
+      --input-data acc_init="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul/acc_init.bin" \
       --max-cycles 200000 \
       "$@"
     ;;
@@ -192,6 +245,12 @@ case "$name" in
       --input-binding table=0x200000:8388608:r \
       --input-binding indices=0xA00000:4096:r \
       --input-binding output=0xB00000:32768:w \
+      --input-binding acc_init=0xC00000:32768:r \
+      --input-data lhs="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add/lhs.bin" \
+      --input-data rhs="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add/rhs.bin" \
+      --input-data table="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add/table.bin" \
+      --input-data indices="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add/indices.bin" \
+      --input-data acc_init="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add/acc_init.bin" \
       --max-cycles 200000 \
       "$@"
     ;;
@@ -207,10 +266,21 @@ case "$name" in
       --input-binding rhs0=0x120000:65536:r \
       --input-binding indices0=0x140000:256:r \
       --input-binding output0=0xB00000:131072:w \
+      --input-binding acc_init0=0xF00000:131072:r \
       --input-binding lhs1=0x150000:65536:r \
       --input-binding rhs1=0x170000:65536:r \
       --input-binding indices1=0x190000:256:r \
       --input-binding output1=0xD00000:131072:w \
+      --input-binding acc_init1=0xF20000:131072:r \
+      --input-data table="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul_4tiles_2contexts/table.bin" \
+      --input-data lhs0="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul_4tiles_2contexts/lhs0.bin" \
+      --input-data rhs0="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul_4tiles_2contexts/rhs0.bin" \
+      --input-data indices0="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul_4tiles_2contexts/indices0.bin" \
+      --input-data acc_init0="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul_4tiles_2contexts/acc_init0.bin" \
+      --input-data lhs1="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul_4tiles_2contexts/lhs1.bin" \
+      --input-data rhs1="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul_4tiles_2contexts/rhs1.bin" \
+      --input-data indices1="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul_4tiles_2contexts/indices1.bin" \
+      --input-data acc_init1="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul_4tiles_2contexts/acc_init1.bin" \
       --max-cycles 500000 \
       "$@"
     ;;
@@ -295,10 +365,21 @@ case "$name" in
       --input-binding rhs0=0x120000:65536:r \
       --input-binding indices0=0x140000:256:r \
       --input-binding output0=0xB00000:131072:w \
+      --input-binding acc_init0=0xF00000:131072:r \
       --input-binding lhs1=0x150000:65536:r \
       --input-binding rhs1=0x170000:65536:r \
       --input-binding indices1=0x190000:256:r \
       --input-binding output1=0xD00000:131072:w \
+      --input-binding acc_init1=0xF20000:131072:r \
+      --input-data table="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add_4tiles_2contexts/table.bin" \
+      --input-data lhs0="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add_4tiles_2contexts/lhs0.bin" \
+      --input-data rhs0="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add_4tiles_2contexts/rhs0.bin" \
+      --input-data indices0="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add_4tiles_2contexts/indices0.bin" \
+      --input-data acc_init0="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add_4tiles_2contexts/acc_init0.bin" \
+      --input-data lhs1="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add_4tiles_2contexts/lhs1.bin" \
+      --input-data rhs1="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add_4tiles_2contexts/rhs1.bin" \
+      --input-data indices1="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add_4tiles_2contexts/indices1.bin" \
+      --input-data acc_init1="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add_4tiles_2contexts/acc_init1.bin" \
       --max-cycles 500000 \
       "$@"
     ;;
@@ -711,6 +792,19 @@ case "$name" in
       --input-binding K_APPEND_mc=0x3200000:512:w \
       --input-binding V_APPEND_mc=0x3201000:512:w \
       --max-cycles 400000 \
+      "$@"
+    ;;
+  paged-attention-decode|paged-attention-decode-baseline)
+    pa_variant="pipeline"
+    if [[ "$name" == "paged-attention-decode-baseline" ]]; then
+      pa_variant="baseline"
+    fi
+    set -- \
+      --scenario "$ROOT_DIR/examples/workloads/paged_attention_decode_scenario.json" \
+      --variant "$pa_variant" \
+      --context-mode 4 \
+      --device-context-mode 8 \
+      --memory-trace \
       "$@"
     ;;
   file)

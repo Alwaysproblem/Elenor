@@ -39,11 +39,13 @@ memory:
         0: { spm_bytes_per_bank: 65536, cache_bytes_per_bank: 0 }
         1: { spm_bytes_per_bank: 57344, cache_bytes_per_bank: 8192 }
         2: { spm_bytes_per_bank: 49152, cache_bytes_per_bank: 16384 }
+        3: { spm_bytes_per_bank: 32768, cache_bytes_per_bank: 32768 }
     l2:
       modes:
         0: { spm_bytes_per_bank: 524288, cache_bytes_per_bank: 0 }
         1: { spm_bytes_per_bank: 458752, cache_bytes_per_bank: 65536 }
         2: { spm_bytes_per_bank: 393216, cache_bytes_per_bank: 131072 }
+        3: { spm_bytes_per_bank: 262144, cache_bytes_per_bank: 262144 }
   cache:
     line_bytes: 64 # synthetic reference profile 40-74
 

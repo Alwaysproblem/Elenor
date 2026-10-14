@@ -34,6 +34,26 @@ bash examples/run.sh gather-matmul \
 input bindings、context 数量、memory fidelity 和必要的硬件 override。未知示例名会明确失败，
 不会选择默认模型。
 
+### 批量运行
+
+```bash
+# 默认运行 runtime；-fm / --full-memory 追加 full_memory 一轮
+bash examples/run_all_workload.sh
+
+# 选择场景，并在 -- 后追加单场景 CLI 参数
+bash examples/run_all_workload.sh -s paged-attention-decode -fm -- \
+  --max-cycles 500000 \
+  --json
+```
+
+`--` 前是批量脚本的选项：`-s / --scenarios`、`-fm / --full-memory`、
+`-h / --help`。`--` 后的参数原样追加到每个实际运行的 `examples/run.sh`
+场景命令末尾，保留带空格的参数；支持哪些参数以及同名参数的覆盖规则由对应场景
+CLI 决定。省略 `--` 或使用空 `--` 时，不传入额外参数。
+
+批量脚本仍按 fidelity 分轮运行，并跳过要求其他 fidelity 的场景；例如
+PagedAttention 在 runtime 轮跳过，在 full_memory 轮运行。
+
 ## 调度方法与代表实例
 
 这些收益是满足依赖、队列 credit、带宽与资源准入时的调度机会，不是固定加速比。
@@ -290,6 +310,101 @@ bash examples/run.sh transformer-decode-kv-multicontext --memory-trace --json
 并发检查见 [generator README](generators/README.md#单请求内-multicontext-优化)。
 Decode 的 packet/channel 放置收益必须与 UCE multicontext 收益分开；
 旧串行 KV-block II 分析公式不能直接用于 split-KV completion 顺序。
+
+## PagedAttention decode（full_memory）
+
+```bash
+bash examples/run.sh paged-attention-decode --json --report /tmp/pa.pipeline.json
+bash examples/run.sh paged-attention-decode-baseline --json --report /tmp/pa.baseline.json
+# 通过统一 CLI 覆盖 L1 mode；无需重新生成或修改 MLIR
+bash examples/run.sh paged-attention-decode --l1-mode 3 --json
+# 批量脚本在 -- 后转发同一组 CLI 参数
+bash examples/run_all_workload.sh -s paged-attention-decode -fm -- --l1-mode 3 --json
+# 输出完整 trace 时另加 --trace-json /tmp/pa.trace.json
+```
+
+两个入口都经 `run.sh` 调用统一的 `python -m pipeline_validator` CLI，
+通过 `--scenario workloads/paged_attention_decode_scenario.json` 和
+`--variant pipeline|baseline` 选择已有 MLIR、输入数据及 Host handler。
+共享几何、输入初始化和页管理逻辑位于 `pipeline_validator/paged_attention.py`；
+不再有独立 PagedAttention runner。默认启用 memory trace、4 个 Tile hardware
+contexts 和 8 个 device contexts。`full_memory` 保留真实地址、ByteStore、
+逐 cache-line Gather/Scatter、cache/MSHR、NoC 和多段 transfer；
+BOA/EVU 仍是 timing/resource 模型，不计算 attention 的数值结果。
+
+Runner 使用 scenario 声明的 `hbm_fixed_latency_cycles`、`num_dma_channels`、
+`group_policy`、`contexts_per_tile` 和 `max_cycles`，不再把记录的场景参数
+悄悄替换为硬件/仿真默认值。默认场景的 HBM latency 为 10 cycles，
+Global DMA channels 为 2。
+
+- 不指定 `--hw-config`：scenario 提供上述两个硬件 timing 参数；
+  `--hw-override KEY=VALUE` 可以覆盖它们。
+- 指定 `--hw-config`：该文件选择硬件 target（未写字段使用 bundled defaults），
+  替代 scenario 的硬件 timing 参数；`--hw-override` 最后生效。
+- 仿真配置：scenario → `--sim-override` → 专用选项
+  `--group-policy`、`--context-mode`、`--max-cycles`。
+  `run.sh` 自带的 context 选项可由后续同名命令行选项覆盖。
+- 不指定 `--l1-mode` 时，源码运行使用 scenario 的 L1/L2 reset mode。
+  `--l1-mode N` 同时覆盖内存中所有 dispatch 的 L1 请求及初始 L1 profile，
+  然后重新编译；不修改磁盘上的 MLIR、scenario 或 hash，也不扩大
+  `allowed_profiles`。
+- pipeline 的 Tile Program（L1）和 Context（L2）契约均只允许 `[1, 2, 3]`；
+  因此 `paged-attention-decode --l1-mode 0` 会在编译阶段被拒绝。
+  baseline 保留全部容量兼容的 profile，仍可用 mode 0 验证关闭 L1 cache、
+  继续使用启用的 L2 cache 的路径。
+- `--max-cycles` 只限制 simulation loop，不限制 seed/parse/compile/load 的墙钟时间。
+
+生成与运行分开：
+
+```bash
+# 生成当前仓库配置（pipeline L1 mode 3，baseline L1 mode 1）
+PYTHONPATH=. python examples/generators/generate_paged_attention_decode.py \
+  --l1-mode 3 --baseline-l1-mode 1
+
+# 通用入口直接运行已有生成物
+python -m pipeline_validator \
+  --scenario examples/workloads/paged_attention_decode_scenario.json \
+  --variant pipeline --device-context-mode 8 --json
+
+# 只编译；同时保存完整 target，供独立回放使用
+python -m pipeline_validator \
+  --scenario examples/workloads/paged_attention_decode_scenario.json \
+  --variant pipeline --l1-mode 3 --device-context-mode 8 \
+  --compile-only --compiled-output /tmp/pa.json
+
+# 回放不读取 MLIR、不导入 compiler 或 generator；scenario 提供输入和 Host 环境
+python -m pipeline_validator \
+  --scenario examples/workloads/paged_attention_decode_scenario.json \
+  --variant pipeline --compiled-file /tmp/pa.json --hw-config /tmp/pa.target.yaml \
+  --device-context-mode 8 --json
+```
+
+`--l1-mode` 是源码编译选项，不能与 `--compiled-file` 同用；
+回放使用 artifact 已冻结的 profile 和保存的 target，不重新改写执行程序。
+
+运行时间包含逐 cycle 控制与有限 lookup/HBM/DMA 资源的排队，不能用
+小尺寸 micro 测试的完成时间推断默认尺寸的运行时间。memory trace 的
+cache/MSHR 统计使用增量计数；饱和 transfer stage 的重复拒绝使用
+resource-free epoch 跳过重复 issue 计算，但每 cycle 的 generation/liveness
+检查、wait 计数、仲裁顺序和 trace 事件保持不变。
+
+本机实测的实现层 A/B（同一默认尺寸，固定旧硬件参数
+`--hw-override hbm_fixed_latency_cycles=200 --hw-override num_dma_channels=4`）：
+
+| 验证运行                                  | 原版墙钟 | 优化后墙钟 | 加速比 |
+| ----------------------------------------- | -------- | ---------- | ------ |
+| 完整 pipeline，关闭 memory trace          | 786.7 s  | 462.7 s    | 1.70×  |
+| pipeline 前 30k cycles，开启 memory trace | 98.3 s   | 29.4 s     | 3.35×  |
+
+前 30k cycles 的对照有意触发 cycle cap，不是完成时间。
+完整无 trace 运行均为 516,209 cycles，JSON report 逐字节一致；
+另一个 60k-cycle 对照的 JSON report 与完整 Chrome trace 也逐字节一致。
+墙钟数值仅供本机参考，不代表硬件性能。
+
+配置修复后的实际 `run.sh paged-attention-decode`（默认 memory trace、
+scenario 的 HBM latency=10 / DMA channels=2）在本机完成于
+374,048 cycles / 695.1 s，所有检查 PASS。这一 cycle 变化来自
+应用场景参数，与上表保持模拟结果不变的实现加速分开计算。
 
 ## 协议场景
 

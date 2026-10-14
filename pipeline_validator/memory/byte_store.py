@@ -11,10 +11,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from .allocator import AllocationHandle, ExternalOwner, MemoryInvariantError
+from .allocator import AllocationHandle, BankSegment, ExternalOwner, MemoryInvariantError
 
 if TYPE_CHECKING:
-  from .cache import CacheLineIdentity, CacheProvenance, DeterministicLRUCache
+  from .cache import CacheLineIdentity, DeterministicLRUCache
   from .transfer import ResolvedMemoryView
 
 
@@ -66,7 +66,6 @@ class ByteStore:
     self._valid: dict[tuple[str, int], bytearray] = {}
     self._bindings: dict[str, _Binding] = {}
     self._seed_ranges: list[tuple[int, int]] = []
-    self._profiled_sources: dict[tuple[str, str], int] = {}
     self._caches: dict[tuple[str, int], DeterministicLRUCache] = {}
     self._pending_cache_seeds: list[_CacheSeedSpec] = []
     self._seeded_cache_keys: set[tuple[str, int, str, int]] = set()
@@ -102,7 +101,19 @@ class ByteStore:
   def _read(self, domain: str, address: int, size: int) -> bytes:
     if type(address) is not int or type(size) is not int or address < 0 or size < 0:
       raise MemoryInvariantError("invalid byte-store read range")
-    result = bytearray()
+    data, mask = self._read_relaxed(domain, address, size)
+    first = mask.find(b"\x00")
+    if first >= 0:
+      raise MemoryInvariantError(
+        f"byte oracle read includes uninitialised bytes at {domain}:{address + first}"
+      )
+    return data
+
+  def _read_relaxed(self, domain: str, address: int, size: int) -> tuple[bytes, bytes]:
+    if type(address) is not int or type(size) is not int or address < 0 or size < 0:
+      raise MemoryInvariantError("invalid byte-store read range")
+    data = bytearray()
+    mask = bytearray()
     cursor = 0
     while cursor < size:
       absolute = address + cursor
@@ -111,20 +122,29 @@ class ByteStore:
       key = (domain, page_index)
       page = self._pages.get(key)
       valid = self._valid.get(key)
-      if (
-        page is None
-        or valid is None
-        or any(value == 0 for value in valid[page_offset : page_offset + count])
-      ):
-        raise MemoryInvariantError(f"byte oracle read includes uninitialised bytes at {domain}:{absolute}")
-      result.extend(page[page_offset : page_offset + count])
+      if page is None or valid is None:
+        data.extend(b"\x00" * count)
+        mask.extend(b"\x00" * count)
+      else:
+        data.extend(page[page_offset : page_offset + count])
+        mask.extend(valid[page_offset : page_offset + count])
       cursor += count
-    return bytes(result)
+    return bytes(data), bytes(mask)
 
   # -- HBM host/device interface -------------------------------------
 
-  def seed_hbm(self, address: int, data: bytes) -> None:
-    """Host-initialise HBM bytes without applying device permissions."""
+  def seed_hbm(self, address: int, data: bytes, *, cycle: int | None = None) -> None:
+    """Host-initialise HBM bytes without applying device permissions.
+
+    Plan §4: seeding is a cycle-0 facility.  Passing ``cycle`` other than
+    0 or None (pre-run preparation) is rejected; runtime writes must be
+    billed through ``TransferManager`` rather than silently overwriting
+    device-visible state from a host callback.
+    """
+    if cycle is not None and cycle != 0:
+      raise MemoryInvariantError(
+        "seed_hbm is a cycle-0 facility; runtime writes must be billed through transfers"
+      )
     if not isinstance(data, bytes):
       raise TypeError("seed_hbm data must be bytes")
     if type(address) is not int or address < 0:
@@ -269,6 +289,44 @@ class ByteStore:
       raise MemoryInvariantError("resolved source segments do not cover logical bytes")
     return bytes(result)
 
+  def read_view_relaxed(self, view: ResolvedMemoryView) -> tuple[bytes, bytes]:
+    """Read bytes plus a per-byte validity mask without faulting.
+
+    Plan §2: whole-line Gather refills legitimately cross uninitialised
+    bytes (page tail tokens, padding); the mask travels with the line
+    into the cache and only a destination write touching an
+    uninitialised byte faults.  HBM permission checks still apply.
+    """
+    if view.handle.memory_space == "hbm":
+      self._binding_for_view(view, "r")
+    domain = self._domain_for_view(view)
+    data = bytearray()
+    mask = bytearray()
+    for segment in view.segments:
+      page_data, page_mask = self._read_relaxed(domain, segment.address, segment.size_bytes)
+      data.extend(page_data)
+      mask.extend(page_mask)
+    if len(data) != view.size_bytes:
+      raise MemoryInvariantError("resolved source segments do not cover logical bytes")
+    return bytes(data), bytes(mask)
+
+  def write_view_checked(self, view: ResolvedMemoryView, data: bytes, validity: bytes | None) -> None:
+    """Commit bytes, refusing any uninitialised byte in the payload.
+
+    Used by the Gather destination write: a segment that covers bytes
+    the line refill carried as uninitialised faults here (plan §2).
+    """
+    if not isinstance(data, bytes) or len(data) != view.size_bytes:
+      raise MemoryInvariantError("destination byte count does not match resolved view")
+    if validity is not None and len(validity) != len(data):
+      raise MemoryInvariantError("validity mask length does not match payload")
+    if validity is not None and 0 in validity:
+      offset = validity.find(b"\x00")
+      raise MemoryInvariantError(
+        f"gather destination segment includes uninitialised bytes at offset {offset}"
+      )
+    self.write_view(view, data)
+
   def write_view(self, view: ResolvedMemoryView, data: bytes) -> None:
     if not isinstance(data, bytes) or len(data) != view.size_bytes:
       raise MemoryInvariantError("destination byte count does not match resolved view")
@@ -283,25 +341,6 @@ class ByteStore:
     if cursor != len(data):
       raise MemoryInvariantError("resolved destination segments do not cover logical bytes")
 
-  # -- profiled Gather source binding --------------------------------
-
-  def bind_profiled_source(self, binding_id: str, request_id: str, source_offset: int) -> None:
-    if not binding_id or not request_id:
-      raise ValueError("profiled source binding and request ids must be non-empty")
-    if type(source_offset) is not int or source_offset < 0:
-      raise ValueError("profiled source offset must be non-negative")
-    key = (binding_id, request_id)
-    previous = self._profiled_sources.get(key)
-    if previous is not None and previous != source_offset:
-      raise MemoryInvariantError("profiled source request rebound to another range")
-    self._profiled_sources[key] = source_offset
-
-  def profiled_source_offset(self, binding_id: str, request_id: str) -> int:
-    try:
-      return self._profiled_sources[(binding_id, request_id)]
-    except KeyError as exc:
-      raise MemoryInvariantError(f"missing profiled source binding for {binding_id}:{request_id}") from exc
-
   # -- cache test seeding ---------------------------------------------
 
   def register_cache(self, level: str, pool_id: int, cache: DeterministicLRUCache) -> None:
@@ -313,35 +352,22 @@ class ByteStore:
       raise MemoryInvariantError("cache pool registered twice")
     self._caches[key] = cache
 
-  def resolve_profiled_source(
-    self, binding_id: str, request_id: str, source: ResolvedMemoryView, request_bytes: int, line_bytes: int
-  ) -> tuple[CacheLineIdentity, CacheProvenance, int, int]:
-    """Resolve call-scoped Gather metadata in the actual source view.
+  def binding_has_cached_state(self, binding_name: str) -> bool:
+    """True when any registered cache still holds lines from ``binding_name``.
 
-    ``binding_id`` is the compiled call binding identity, never an alias for
-    an external HBM binding name.  This does not read source bytes.
+    Plan §4: the page-pool registration hook rejects a pool whose backing
+    binding still carries cache copies (``managed_pool_has_cached_state``).
+    Uses the public cache snapshot; no cache internals are touched.
     """
-    from .cache import CacheLineIdentity, CacheProvenance
-
-    if request_bytes <= 0 or line_bytes <= 0:
-      raise MemoryInvariantError("invalid profiled source byte range")
-    relative_offset = self.profiled_source_offset(binding_id, request_id)
-    if relative_offset < 0 or relative_offset + request_bytes > source.size_bytes:
-      raise MemoryInvariantError("profiled source request exceeds its actual resolved source view")
-    line_relative = relative_offset - (relative_offset % line_bytes)
-    within_line = relative_offset - line_relative
-    if within_line + request_bytes > line_bytes:
-      raise MemoryInvariantError("profiled source request crosses a cache line")
-    if line_relative + line_bytes > source.size_bytes:
-      raise MemoryInvariantError("profiled source cache line exceeds its actual resolved source view")
-    handle = source.handle
-    line_offset = source.offset_bytes + line_relative
-    identity = CacheLineIdentity(handle.allocation_id, handle.generation, line_offset)
-    binding_name = handle.owner.binding_name if isinstance(handle.owner, ExternalOwner) else ""
-    provenance = CacheProvenance(
-      binding_name, handle.allocation_id, handle.generation, line_offset, line_bytes
-    )
-    return identity, provenance, within_line, relative_offset
+    for cache in self._caches.values():
+      if not cache.enabled:
+        continue
+      snapshot = cache.snapshot()
+      lines = snapshot.get("lines", ())
+      for line in lines if isinstance(lines, tuple) else ():
+        if isinstance(line, dict) and line.get("binding_name") == binding_name:
+          return True
+    return False
 
   def seed_cache_line(
     self,
@@ -396,8 +422,82 @@ class ByteStore:
       "valid_bytes": sum(sum(bitmap) for bitmap in self._valid.values()),
       "bindings": tuple(sorted(self._bindings)),
       "seed_ranges": tuple(self._seed_ranges),
-      "profiled_sources": len(self._profiled_sources),
       "cache_pools": tuple(sorted(self._caches)),
       "pending_cache_seeds": len(self._pending_cache_seeds),
       "seeded_cache_lines": len(self._seeded_cache_keys),
     }
+
+  # ---------------------------------------------------------------------
+  # Host runtime section (plan §4, appended; oracle-only invalidation)
+  # ---------------------------------------------------------------------
+
+  def invalidate_view(self, view: ResolvedMemoryView) -> None:
+    """Clear validity bits for one resolved view range (plan §4).
+
+    Oracle-only: the bytes themselves are not cleared, tags/LRU order is
+    not touched, and no traffic is counted.  Both HBM validity bits and
+    any cache copy of the range lose validity so a former owner's cached
+    bytes can never satisfy a later read of a reallocated page.  A dirty
+    cache copy over the range still refuses invalidation (writeback
+    belongs to the maintenance protocol, not the page oracle).
+    """
+    if view.handle.memory_space != "hbm":
+      raise MemoryInvariantError("invalidate_view targets HBM page ranges only")
+    self._binding_for_view(view, "w")
+    self._clear_hbm_validity(view.handle, view.offset_bytes, view.size_bytes, view.segments)
+    self._clear_cache_validity(
+      view.handle.allocation_id, view.handle.generation, view.offset_bytes, view.size_bytes
+    )
+
+  def invalidate_binding_range(
+    self, handle: AllocationHandle, offset: int, size: int, *, binding_name: str | None = None
+  ) -> None:
+    """Clear validity for [offset, offset+size) inside one HBM binding."""
+    del binding_name  # identity comes from the handle
+    if handle.memory_space != "hbm":
+      raise MemoryInvariantError("invalidate_binding_range targets HBM ranges only")
+    if offset < 0 or size <= 0 or offset + size > handle.size_bytes:
+      raise MemoryInvariantError("invalidate range exceeds its HBM binding")
+    self._clear_hbm_validity(handle, offset, size, ())
+    self._clear_cache_validity(
+      handle.allocation_id, handle.generation, offset, size
+    )
+
+  def _clear_hbm_validity(
+    self,
+    handle: AllocationHandle,
+    offset: int,
+    size: int,
+    segments: tuple[BankSegment, ...] | tuple[()],
+  ) -> None:
+    """Zero HBM validity bits for a binding-relative byte range."""
+    if offset < 0 or offset + size > handle.size_bytes:
+      raise MemoryInvariantError("invalidate range exceeds its HBM binding")
+    physical_ranges: tuple[tuple[int, int], ...] = (
+      tuple((segment.address, segment.size_bytes) for segment in segments)
+      if segments
+      else ((handle.base_address + offset, size),)
+    )
+    for address, length in physical_ranges:
+      cursor = 0
+      while cursor < length:
+        absolute = address + cursor
+        page_index, page_offset = divmod(absolute, self.page_bytes)
+        count = min(length - cursor, self.page_bytes - page_offset)
+        valid = self._valid.get(("hbm", page_index))
+        if valid is not None:
+          valid[page_offset : page_offset + count] = b"\x00" * count
+        cursor += count
+
+  def _clear_cache_validity(
+    self, allocation_id: str, allocation_generation: int, offset: int, size: int
+  ) -> None:
+    """Drop cache copies of one binding-relative range, oracle-only."""
+    from .cache import CacheRange
+
+    if size <= 0:
+      return
+    ranges = (CacheRange(allocation_id, allocation_generation, offset, size),)
+    for cache in self._caches.values():
+      if cache.enabled:
+        cache.begin_maintenance(ranges, clean=False, invalidate=True)

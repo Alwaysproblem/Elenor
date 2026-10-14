@@ -435,31 +435,54 @@ python -m pipeline_validator --ir-file path/to/workload.mlir \
 
 # Print author source IR only; this does not compile or run.
 python -m pipeline_validator --ir-file path/to/workload.mlir --print-ir
+
+# Run a generated PagedAttention scenario through the same CLI.
+python -m pipeline_validator \
+  --scenario examples/workloads/paged_attention_decode_scenario.json \
+  --variant pipeline --l1-mode 3 --device-context-mode 8 --json
 ```
 
 Other current controls remain orthogonal to the source/artifact mode:
 
-| Option                                           | Meaning                                                                     |
-| ------------------------------------------------ | --------------------------------------------------------------------------- |
-| `-l`, `--list`                                   | list built-in workloads                                                     |
-| `-w NAME` / `-a`                                 | compile/run one or all built-ins (`-a` cannot use one explicit output path) |
-| `--hw-config PATH` / `--hw-override KEY=VALUE`   | select or override `HardwareConfig`                                         |
-| `--sim-override KEY=VALUE`                       | override `SimConfig`, including nested `device.*`/`group.*` capacities      |
-| `--group-policy s0/s1/s2`                        | select the runtime Group ready-action policy; S2 currently matches S1       |
-| `--context-mode N`                               | exact Tile UCE contexts per Tile                                            |
-| `--device-context-mode N`                        | CPU outstanding Group-launch limit                                          |
-| `--max-cycles N`                                 | execution cycle cap                                                         |
-| `--json` / `--report PATH`                       | choose report encoding/destination                                          |
-| `--detailed`                                     | include the six verbose detail sections in the text report                  |
-| `--trace-json`, `--trace-html`, `--memory-trace` | select trace outputs/detail                                                 |
+| Option                                            | Meaning                                                                        |
+| ------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `-l`, `--list`                                    | list built-in workloads                                                        |
+| `-w NAME` / `-a`                                  | compile/run one or all built-ins (`-a` cannot use one explicit output path)    |
+| `--scenario PATH` / `--variant pipeline/baseline` | load PagedAttention metadata, default bindings, input bytes, and Host handlers |
+| `--l1-mode N`                                     | source-only override of dispatch L1 requests and the initial L1 profile        |
+| `--hw-config PATH` / `--hw-override KEY=VALUE`    | select or override `HardwareConfig`                                            |
+| `--sim-override KEY=VALUE`                        | override `SimConfig`, including nested `device.*`/`group.*` capacities         |
+| `--group-policy s0/s1/s2`                         | select the runtime Group ready-action policy; S2 currently matches S1          |
+| `--context-mode N`                                | exact Tile UCE contexts per Tile                                               |
+| `--device-context-mode N`                         | CPU outstanding Group-launch limit                                             |
+| `--max-cycles N`                                  | execution cycle cap                                                            |
+| `--json` / `--report PATH`                        | choose report encoding/destination                                             |
+| `--detailed`                                      | include the six verbose detail sections in the text report                     |
+| `--trace-json`, `--trace-html`, `--memory-trace`  | select trace outputs/detail                                                    |
 
-`--compile-only`, `--compiled-output`, and `--profile-bytes` are source-mode
-options. `--compiled-file` is mutually exclusive with source input,
-`--compile-only`, `--compiled-output`, `--profile-bytes`, and `--print-ir`.
+`--compile-only`, `--compiled-output`, `--profile-bytes`, and `--l1-mode` are
+source-mode options. `--compiled-file` is mutually exclusive with source input,
+`--compile-only`, `--compiled-output`, `--profile-bytes`, `--l1-mode`, and `--print-ir`.
 Without `--compiled-output`, artifacts use
-`examples/artifacts/compiled/<artifact_hash>.json`. Existing files are reused
-only when their contents match; the CLI refuses to overwrite different
-content.
+`examples/artifacts/compiled/<artifact_hash>/<hardware_hash>.json`. The hardware
+hash covers the complete target snapshot, so runtime timing experiments can
+reuse the same executable without colliding on its `.target.yaml`. Existing files
+are reused only when their contents match; explicit output paths still refuse
+to overwrite different content.
+
+`--scenario` can select its generated source IR or supply the Host environment
+and seeded inputs for `--compiled-file` replay. Source runs verify the recorded
+fixture hash; replay does not read the `.mlir` or import compiler/generator code.
+Use the emitted `.target.yaml` for replay so its frozen entry profiles survive
+source-time `--l1-mode` overrides. The override rewrites only the in-memory
+source module and initial target profile, not source files or `allowed_profiles`;
+the compiler still rejects unsupported profiles and insufficient capacity.
+
+Scenario defaults supply `full_memory`, Group policy, Tile context count, and
+cycle cap. An explicit hardware target replaces scenario timing defaults,
+hardware overrides apply afterward, and dedicated simulation options override
+scenario defaults. Explicit input bindings replace matching scenario defaults;
+input-file bytes are seeded after the scenario's canonical initial payloads.
 
 For `review.json`, the siblings are:
 
