@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 976" role="img" aria-labelledby="title desc">
+  <title id="title">BOA 输出累加链：AM lease、engine 占用、输入释放与完成记录的生命周期</title>
+  <desc id="desc">逻辑生命周期图，不是周期测量。TRY_OPEN 原子取得物理 slot、配额、mailbox 与完成记录，并固定 bound_engine。AM lease 依次经历 RESERVED、WAIT_INPUT、RUNNING、COMMITTING、FINAL_READY、DRAINING，直到 output_visible 且旧 AM 访问结束后 slot_free，配额在 slot_free 递减。engine 的 affinity 从建立到 slot_free 不变，但 engine 占用只是各步骤从发射到 step_committed 的离散区间，等输入或等 drain 时该 engine 可服务其他已绑定链。输入引用在真实最后读取且全部读者结束后释放，独立于 C 的生命周期。完成记录自 OPEN 预留，保留到软件 reap 或按协议退休，可比物理 slot 存活更久。Task context 的 FINISHING 与 retire 安全边界另行说明。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="var(--muted, currentColor)"/></marker>
+    <marker id="arrow-s" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="var(--success, currentColor)"/></marker>
+    <pattern id="hatch" width="7" height="7" patternUnits="userSpaceOnUse">
+      <path d="M0 7 L7 0" stroke="var(--muted, currentColor)" stroke-width="1" opacity="0.35"/>
+    </pattern>
+    <style>
+      text { fill: var(--fg, currentColor); font-family: sans-serif; font-size: 15px; }
+      .title { font-size: 20px; font-weight: 700; }
+      .rtitle { font-size: 16px; font-weight: 700; }
+      .lane { font-weight: 700; }
+      .note { fill: var(--muted, currentColor); font-size: 14px; }
+      .flag { font-size: 14px; }
+      .stext { font-size: 14px; font-weight: 700; text-anchor: middle; }
+      .mid { text-anchor: middle; }
+      .end { text-anchor: end; }
+      .state { fill: none; stroke: var(--accent, currentColor); stroke-width: 1.8; }
+      .state-dash { fill: none; stroke: var(--accent, currentColor); stroke-width: 1.8; stroke-dasharray: 6 4; }
+      .occ { fill: url(#hatch); stroke: var(--accent, currentColor); stroke-width: 2.4; }
+      .inref { fill: none; stroke: var(--muted, currentColor); stroke-width: 1.6; }
+      .affline { fill: none; stroke: var(--muted, currentColor); stroke-width: 1.4; }
+      .quota { fill: none; stroke: var(--accent, currentColor); stroke-width: 2.2; }
+      .quota0 { fill: none; stroke: var(--muted, currentColor); stroke-width: 1.4; }
+      .drainline { fill: none; stroke: var(--success, currentColor); stroke-width: 3; marker-end: url(#arrow-s); }
+      .draindash { fill: none; stroke: var(--success, currentColor); stroke-width: 4; stroke-dasharray: 2 5; }
+      .evt { fill: var(--success, currentColor); }
+      .evt-hollow { fill: none; stroke: var(--success, currentColor); stroke-width: 2; }
+      .guide { stroke: var(--border, currentColor); stroke-width: 1; stroke-dasharray: 4 5; }
+      .box { fill: none; stroke: var(--border, currentColor); stroke-width: 1.2; }
+      .bracket { fill: none; stroke: var(--muted, currentColor); stroke-width: 1.4; }
+    </style>
+  </defs>
+
+  <text x="24" y="30" class="title">BOA 输出累加链：资源生命周期与完成边界</text>
+  <text x="24" y="54" class="note">逻辑生命周期图：只表达事件先后与资源归属边界，不是周期测量；水平距离非等间距，区段长度不代表持续时间；不同 context 的时间线可交错。</text>
+  <text x="24" y="84" class="rtitle">① 单条输出累加链（成功路径）：AM 区域、engine 占用、完成记录三个独立寿命</text>
+  <text x="958" y="84" class="note end">时间自左向右（非等间距，非周期）</text>
+
+  <path d="M202 118 V600 M944 118 V600" class="guide"/>
+
+  <!-- L1: AM slot lease states -->
+  <text x="18" y="150" class="lane">AM slot lease</text>
+  <text x="18" y="170" class="note">一条链独占一个物理区域</text>
+  <text x="206" y="128" class="flag">TRY_OPEN：原子取得 slot·quota·mailbox·完成记录，固定 bound_engine</text>
+  <text x="940" y="128" class="flag end">slot_free：可安全再分配</text>
+  <rect x="202" y="136" width="78" height="36" class="state"/>
+  <rect x="280" y="136" width="82" height="36" class="state"/>
+  <rect x="362" y="136" width="68" height="36" class="state"/>
+  <rect x="430" y="136" width="82" height="36" class="state"/>
+  <rect x="512" y="136" width="86" height="36" class="state-dash"/>
+  <rect x="598" y="136" width="70" height="36" class="state"/>
+  <rect x="668" y="136" width="102" height="36" class="state"/>
+  <rect x="770" y="136" width="92" height="36" class="state"/>
+  <rect x="862" y="136" width="82" height="36" class="state"/>
+  <text x="241" y="159" class="stext" textLength="70" lengthAdjust="spacingAndGlyphs">RESERVED</text>
+  <text x="321" y="159" class="stext" textLength="74" lengthAdjust="spacingAndGlyphs">WAIT_INPUT</text>
+  <text x="396" y="159" class="stext" textLength="60" lengthAdjust="spacingAndGlyphs">RUNNING</text>
+  <text x="471" y="159" class="stext" textLength="74" lengthAdjust="spacingAndGlyphs">COMMITTING</text>
+  <text x="555" y="159" class="stext" textLength="78" lengthAdjust="spacingAndGlyphs">WAIT_INPUT</text>
+  <text x="633" y="159" class="stext" textLength="62" lengthAdjust="spacingAndGlyphs">RUNNING</text>
+  <text x="719" y="159" class="stext" textLength="94" lengthAdjust="spacingAndGlyphs">COMMITTING</text>
+  <text x="816" y="159" class="stext" textLength="84" lengthAdjust="spacingAndGlyphs">FINAL_READY</text>
+  <text x="903" y="159" class="stext" textLength="74" lengthAdjust="spacingAndGlyphs">DRAINING</text>
+  <text x="208" y="190" class="note">mailbox：每链 1 个下一步描述符位；issue 须等前步 committed</text>
+  <path d="M598 177 V184 H770 V177" class="bracket"/>
+  <text x="684" y="201" class="note mid">FINAL 步（唯一 FINAL）</text>
+  <circle cx="944" cy="154" r="4.5" class="evt"/>
+
+  <!-- L2: quota -->
+  <text x="18" y="224" class="lane">used_am_slots(ctx)</text>
+  <text x="18" y="243" class="note">≤ 2，跨 engine 累计</text>
+  <path d="M186 246 H202" class="quota0"/>
+  <path d="M202 246 V222 H944 V246 H962" class="quota"/>
+  <text x="208" y="216" class="flag">+1</text>
+  <text x="208" y="241" class="note">RESERVED…DRAINING（含 FAULT_QUIESCING、one-shot）均计一次</text>
+  <text x="940" y="241" class="note end">−1 恰好一次（不等 reap）</text>
+
+  <!-- L3: engine affinity vs discrete occupancy -->
+  <text x="18" y="282" class="lane">engine 占用</text>
+  <text x="18" y="302" class="note">affinity ≠ 永久占用</text>
+  <text x="206" y="276" class="flag">bound_engine：OPEN→slot_free 不变（不迁移）</text>
+  <path d="M202 282 H944" class="affline"/>
+  <text x="282" y="311" class="note mid">等输入：可服务其他链</text>
+  <rect x="362" y="294" width="150" height="26" class="occ"/>
+  <text x="437" y="311" class="stext">step 0</text>
+  <text x="555" y="311" class="note mid">可服务他链</text>
+  <rect x="598" y="294" width="172" height="26" class="occ"/>
+  <text x="684" y="311" class="stext">FINAL step</text>
+  <text x="857" y="311" class="note mid">等 drain：可服务其他链</text>
+  <text x="362" y="344" class="flag">issue</text>
+  <text x="448" y="344" class="flag mid">compute_done</text>
+  <text x="598" y="344" class="flag">issue</text>
+  <text x="684" y="344" class="flag mid">compute_done</text>
+  <text x="512" y="362" class="note mid">step_committed：归还本步 engine 占用</text>
+  <text x="940" y="362" class="note end">step_committed（FINAL）→ 同样归还</text>
+
+  <!-- L4: FINAL drain to admitted L1 -->
+  <text x="18" y="402" class="lane">FINAL drain</text>
+  <text x="18" y="422" class="note">自动到已准入 L1</text>
+  <text x="938" y="390" class="flag end">自动 drain（无需 UCE 轮询）</text>
+  <rect x="770" y="398" width="92" height="26" class="state"/>
+  <text x="816" y="415" class="stext">等输出服务</text>
+  <path d="M862 411 H896" class="drainline"/>
+  <circle cx="902" cy="411" r="4.5" class="evt"/>
+  <path d="M906 411 H944" class="draindash"/>
+  <circle cx="928" cy="411" r="4.5" class="evt-hollow"/>
+  <text x="940" y="444" class="note end">● output_visible（已准入 L1 可见）　○ 旧 AM 访问 quiescent → 之后才 slot_free</text>
+
+  <!-- L5: input references -->
+  <text x="18" y="484" class="lane">输入引用 input_release</text>
+  <text x="18" y="504" class="note">独立于 C 的生命周期</text>
+  <text x="362" y="472" class="flag">最后一位 reader 读完、全部 reader 结束即可 release（可早于 committed）</text>
+  <rect x="362" y="478" width="90" height="24" class="inref"/>
+  <text x="407" y="494" class="stext">A/B 读取</text>
+  <circle cx="452" cy="490" r="4" class="evt"/>
+  <rect x="598" y="478" width="90" height="24" class="inref"/>
+  <text x="643" y="494" class="stext">A/B 读取</text>
+  <circle cx="688" cy="490" r="4" class="evt"/>
+  <text x="452" y="520" class="flag">release(0)</text>
+  <text x="688" y="520" class="flag">release（FINAL 步）</text>
+
+  <!-- L6: completion record -->
+  <text x="18" y="560" class="lane">完成记录</text>
+  <text x="18" y="580" class="note">寿命 &gt; AM lease</text>
+  <text x="940" y="550" class="flag end">chain_done = output_visible 且 slot 已安全释放 → SUCCESS</text>
+  <rect x="202" y="564" width="742" height="32" class="state"/>
+  <text x="210" y="584" class="flag">OPEN 时预留容量；记录区分 SUCCESS / ERROR / CANCELLED；slot 复用不清除旧记录</text>
+  <path d="M944 580 H950" class="draindash"/>
+  <circle cx="944" cy="580" r="4.5" class="evt"/>
+  <text x="938" y="614" class="note end">…保留至软件 reap / 按协议退休（配额已在 slot_free 递减，不等此处）</text>
+
+  <path d="M24 636 H958" class="guide"/>
+
+  <text x="24" y="664" class="rtitle">② 真正独立的层次与全局边界（不与上图共用时间轴）</text>
+
+  <rect x="24" y="676" width="934" height="88" class="box"/>
+  <text x="38" y="698" class="lane">Task context FINISHING / retire 安全边界（另行说明，见规格 §6.4；本图只是单链视图，不含 context 切换）</text>
+  <text x="38" y="720" class="note">· 返回时仍有已提交 FINAL/drain → FINISHING：继续接收完成、等待资源归还；收尾不依赖已返回的 context 再消费事件。</text>
+  <text x="38" y="742" class="note">· 所有命令、输入引用、AM 访问与事件引用结束或按合同退休后，context ID/epoch 才复用；正常 retire 不存在未收尾的 AM 所有权。</text>
+
+  <rect x="24" y="776" width="934" height="182" class="box"/>
+  <text x="38" y="798" class="lane">关键区别</text>
+  <text x="38" y="822" class="note">· 完成事件比 AM lease 活得久：quota 在 slot_free 恰好递减一次、不等 reap；图中各占用状态全部计入（含 one-shot）。</text>
+  <text x="38" y="846" class="note">· 安全回收不等 UCE 轮询/ACK：FINAL 自动 drain 到已准入 L1；output_visible 且旧访问 quiescent 后才 slot_free。</text>
+  <text x="38" y="870" class="note">· 固定 affinity ≠ 永久占用：占用仅为各 step 发射→committed 区间；等输入/drain 时服务其他链；同 context 两链可绑不同 engine。</text>
+  <text x="38" y="894" class="note">· compute_done（结果被接收路径接住）不晚于 step_committed（AM 更新全部完成）；下一步发射等 committed，不等 FINAL drain。</text>
+  <text x="38" y="918" class="note">· input_release 独立于 C：仅依据真实最后读取与全部 reader 结束；不是专用内部 load 完成通知，也不引入新的 load 阶段。</text>
+  <text x="38" y="942" class="note">· 失败链不产生成功 output_visible；旧访问安全结束、slot 与配额回收后记录 ERROR/CANCELLED，软件不能只等成功事件来回收。</text>
+</svg>

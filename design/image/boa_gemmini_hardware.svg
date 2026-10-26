@@ -1,0 +1,199 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 1205" role="img" aria-labelledby="title desc">
+  <title id="title">BOA 硬件组织 · 共享 AM v1（设计评审稿）</title>
+  <desc id="desc">UCE context 调度器经 OPEN/STEP 前端进入设备内共享调度状态：SharedAmAllocator、ChainTable、每链一个 next-step mailbox 与 ready 仲裁；EventTracker 持久保存完成事件并与 AM 释放区分。L1 输入经硬件转置与 feeder 进入最多四个 Gemmini 引擎（各带 ResultCapture credit），经 AmRouter 到达唯一共享逻辑 AM 池的四个 group（各两个动态 slot，局部 RMW），FINAL 自动 epilogue/drain 到已 admit 的 L1 目的地。链级固定 engine affinity，每 context 最多两个 live lease；单阵列 bring-up，V1 基线四个 engine。</desc>
+  <defs>
+    <marker id="dataArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto-start-reverse"><path d="M0 0 L8 4 L0 8 Z" fill="var(--accent, currentColor)"/></marker>
+    <marker id="ctrlArrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto-start-reverse"><path d="M0 0 L8 4 L0 8 Z" fill="var(--muted, currentColor)"/></marker>
+    <style>
+      text { fill: var(--fg, currentColor); font-family: sans-serif; font-size: 15px; }
+      .title { font-size: 21px; font-weight: 700; }
+      .heading { font-size: 15px; font-weight: 700; }
+      .note { fill: var(--muted, currentColor); font-size: 14px; }
+      .box { fill: none; stroke: var(--border, currentColor); stroke-width: 1.5; rx: 9; }
+      .inner { fill: none; stroke: var(--border, currentColor); stroke-width: 1; rx: 6; }
+      .bringup { stroke: var(--accent, currentColor); stroke-width: 2.5; }
+      .badgebox { fill: none; stroke: var(--accent, currentColor); stroke-width: 2; rx: 9; }
+      .badgetext { font-weight: 600; }
+      .shared { stroke: var(--accent, currentColor); stroke-width: 2; }
+      .data { fill: none; stroke: var(--accent, currentColor); stroke-width: 2; marker-end: url(#dataArrow); }
+      .dataline { fill: none; stroke: var(--accent, currentColor); stroke-width: 2; }
+      .control { fill: none; stroke: var(--muted, currentColor); stroke-width: 1.5; stroke-dasharray: 6 4; marker-end: url(#ctrlArrow); }
+      .ctrlline { fill: none; stroke: var(--muted, currentColor); stroke-width: 1.5; stroke-dasharray: 6 4; }
+    </style>
+  </defs>
+  <text x="30" y="28" class="title">BOA 硬件组织 · 共享 AM v1（设计评审稿）</text>
+
+  <!-- 醒目标注（顶部，避免被连线穿越） -->
+  <rect x="30" y="42" width="920" height="54" class="badgebox"/>
+  <text x="48" y="64" class="badgetext">每 context ≤ 2 个 live AM lease · 跨全部 engine 计数 · one-shot / RESERVED / DRAINING / FAULT_QUIESCING 均计入</text>
+  <text x="48" y="88" class="badgetext">全局 8 slot 动态共享（4 group × 2 slot）· 非每 context 永久预留 · 链级 affinity 固定 bound_engine 至 slot_free</text>
+
+  <!-- 第 1 行：UCE / 前端 / 持久事件 -->
+  <rect x="30" y="112" width="280" height="104" class="box"/>
+  <text x="48" y="140" class="heading">Tile UCE · Context 调度</text>
+  <text x="48" y="165">一个 hart · 4 个逻辑 context</text>
+  <text x="48" y="189">提交 OPEN/STEP · WAIT 事件</text>
+  <text x="48" y="210" class="note">context 切换不动 AM / affinity</text>
+
+  <rect x="360" y="112" width="290" height="104" class="box"/>
+  <text x="378" y="140" class="heading">设备前端 · OPEN / STEP</text>
+  <text x="378" y="165">命令 FIFO · handle/seq 校验</text>
+  <text x="378" y="189">TRY_OPEN 原子取 slot+quota+记录</text>
+  <text x="378" y="210" class="note">非阻塞：不足即 BUSY，无持久副作用</text>
+
+  <rect x="700" y="112" width="250" height="104" class="box"/>
+  <text x="718" y="140" class="heading">EventTracker · 持久事件</text>
+  <text x="718" y="165" class="note">step_committed · slot_free</text>
+  <text x="718" y="189" class="note">output_visible · chain_done</text>
+  <text x="718" y="210" class="note">记录可久于 lease · 不等 UCE</text>
+
+  <path d="M310 148 H360" class="control"/>
+  <path d="M360 180 H310" class="control"/>
+  <path d="M505 216 V240" class="control"/>
+  <path d="M835 240 V216" class="control"/>
+  <text x="845" y="232" class="note">事件登记</text>
+  <path d="M825 112 V104 H170 V112" class="control"/>
+
+  <!-- 设备内共享调度状态 -->
+  <rect x="30" y="240" width="920" height="120" class="box"/>
+  <text x="48" y="266" class="heading">设备内共享调度状态 · TRY_OPEN 原子取：slot / 配额 / 元数据 / mailbox / 完成记录</text>
+  <rect x="42" y="276" width="212" height="74" class="inner"/>
+  <text x="54" y="302" class="heading">SharedAmAllocator</text>
+  <text x="54" y="322" class="note">context 配额 · 空闲 slot</text>
+  <text x="54" y="340" class="note">generation · 线性化点</text>
+  <rect x="271" y="276" width="212" height="74" class="inner"/>
+  <text x="283" y="302" class="heading">ChainTable</text>
+  <text x="283" y="322" class="note">owner · 链级 bound_engine</text>
+  <text x="283" y="340" class="note">affinity 整链不变</text>
+  <rect x="500" y="276" width="212" height="74" class="inner"/>
+  <text x="512" y="302" class="heading">StepMailbox · 每链 1 个</text>
+  <text x="512" y="322" class="note">当前执行记录 + next-step</text>
+  <text x="512" y="340" class="note">满即 BUSY · 不扩队列</text>
+  <rect x="729" y="276" width="212" height="74" class="inner"/>
+  <text x="741" y="302" class="heading">MatrixReadyArbiter</text>
+  <text x="741" y="322" class="note">只在 bound engine 发射</text>
+  <text x="741" y="340" class="note">不绕过 affinity / 步序</text>
+
+  <text x="320" y="380" class="note">同 context 两条链可绑不同 engine，独立 ready；等输入的链不占 engine</text>
+  <text x="320" y="402" class="note">同 handle 下一步仅在 step_committed 后发射（前步 AM 提交完成后）</text>
+  <text x="320" y="424" class="note">commit 且 engine 安全边界满足即归还该步占用（不等整链 FINAL）</text>
+
+  <!-- 数据通路：L1 与转置/feeder -->
+  <rect x="30" y="448" width="240" height="134" class="box"/>
+  <text x="48" y="476" class="heading">Tile L1 SPM</text>
+  <text x="48" y="502">已 admit 的 A/B 输入缓冲</text>
+  <text x="48" y="528">已 admit 的 C 输出目的地</text>
+  <text x="48" y="554" class="note">input_release：最后读者结束</text>
+  <text x="48" y="574" class="note">（无专用 load 完成消息）</text>
+
+  <rect x="330" y="448" width="280" height="110" class="box"/>
+  <text x="348" y="476" class="heading">硬件转置 · Feeder</text>
+  <text x="348" y="502">A/B → 4 engines 供数</text>
+  <text x="348" y="528" class="note">不要求独立寄存文件层</text>
+  <text x="348" y="550" class="note">缓冲由 input_release 释放</text>
+
+  <path d="M270 493 H330" class="data"/>
+  <path d="M300 360 V690 H330" class="control"/>
+  <text x="292" y="688" class="note" transform="rotate(-90 292 688)" text-anchor="start">issue · bound engine</text>
+
+  <!-- 引擎行 -->
+  <path d="M470 558 V578" class="dataline"/>
+  <path d="M400 578 H880" class="dataline"/>
+  <path d="M400 578 V598" class="data"/>
+  <path d="M560 578 V598" class="data"/>
+  <path d="M720 578 V598" class="data"/>
+  <path d="M880 578 V598" class="data"/>
+
+  <text x="30" y="618" class="note">单阵列 bring-up：仅 Engine 0</text>
+  <text x="30" y="642" class="note">V1 多阵列基线：4 engines</text>
+  <text x="30" y="666" class="note">ResultCapture：O+R ≤ Q</text>
+  <text x="30" y="690" class="note">微块级预留，非整 output tile</text>
+  <text x="30" y="714" class="note">不假设 ready 可暂停 mesh</text>
+
+  <rect x="330" y="598" width="140" height="150" class="box bringup"/>
+  <text x="344" y="628" class="heading">Engine 0</text>
+  <text x="344" y="656">Gemmini 阵列</text>
+  <text x="344" y="682" class="note">ResultCapture</text>
+  <text x="344" y="708" class="note">credit 保障</text>
+  <text x="344" y="734" class="note">bring-up 首选</text>
+  <rect x="490" y="598" width="140" height="150" class="box"/>
+  <text x="504" y="628" class="heading">Engine 1</text>
+  <text x="504" y="656">Gemmini 阵列</text>
+  <text x="504" y="682" class="note">ResultCapture</text>
+  <text x="504" y="708" class="note">credit 保障</text>
+  <rect x="650" y="598" width="140" height="150" class="box"/>
+  <text x="664" y="628" class="heading">Engine 2</text>
+  <text x="664" y="656">Gemmini 阵列</text>
+  <text x="664" y="682" class="note">ResultCapture</text>
+  <text x="664" y="708" class="note">credit 保障</text>
+  <rect x="810" y="598" width="140" height="150" class="box"/>
+  <text x="824" y="628" class="heading">Engine 3</text>
+  <text x="824" y="656">Gemmini 阵列</text>
+  <text x="824" y="682" class="note">ResultCapture</text>
+  <text x="824" y="708" class="note">credit 保障</text>
+
+  <!-- 路由与共享 AM 池 -->
+  <path d="M400 748 V813" class="data"/>
+  <path d="M560 748 V813" class="data"/>
+  <path d="M720 748 V813" class="data"/>
+  <path d="M880 748 V813" class="data"/>
+  <rect x="330" y="813" width="620" height="45" class="box"/>
+  <text x="348" y="841" class="heading">AmRouter · 任意 engine 可达其链的合法 slot（group 不绑定 engine）</text>
+
+  <path d="M400 858 V883" class="data"/>
+  <path d="M560 858 V883" class="data"/>
+  <path d="M720 858 V883" class="data"/>
+  <path d="M880 858 V883" class="data"/>
+  <rect x="330" y="883" width="620" height="150" class="box shared"/>
+  <text x="348" y="911" class="heading">唯一共享逻辑 AM 池 · 8 动态 slot = 4 group × 2 slot</text>
+  <rect x="340" y="923" width="140" height="96" class="inner"/>
+  <text x="352" y="946" class="heading">AM group 0</text>
+  <rect x="360" y="956" width="100" height="20" class="inner"/>
+  <text x="410" y="971" class="note" text-anchor="middle">slot 0</text>
+  <rect x="360" y="982" width="100" height="20" class="inner"/>
+  <text x="410" y="997" class="note" text-anchor="middle">slot 1</text>
+  <text x="352" y="1015" class="note">local RMW</text>
+  <rect x="492" y="923" width="140" height="96" class="inner"/>
+  <text x="504" y="946" class="heading">AM group 1</text>
+  <rect x="512" y="956" width="100" height="20" class="inner"/>
+  <text x="562" y="971" class="note" text-anchor="middle">slot 0</text>
+  <rect x="512" y="982" width="100" height="20" class="inner"/>
+  <text x="562" y="997" class="note" text-anchor="middle">slot 1</text>
+  <text x="504" y="1015" class="note">local RMW</text>
+  <rect x="644" y="923" width="140" height="96" class="inner"/>
+  <text x="656" y="946" class="heading">AM group 2</text>
+  <rect x="664" y="956" width="100" height="20" class="inner"/>
+  <text x="714" y="971" class="note" text-anchor="middle">slot 0</text>
+  <rect x="664" y="982" width="100" height="20" class="inner"/>
+  <text x="714" y="997" class="note" text-anchor="middle">slot 1</text>
+  <text x="656" y="1015" class="note">local RMW</text>
+  <rect x="796" y="923" width="140" height="96" class="inner"/>
+  <text x="808" y="946" class="heading">AM group 3</text>
+  <rect x="816" y="956" width="100" height="20" class="inner"/>
+  <text x="866" y="971" class="note" text-anchor="middle">slot 0</text>
+  <rect x="816" y="982" width="100" height="20" class="inner"/>
+  <text x="866" y="997" class="note" text-anchor="middle">slot 1</text>
+  <text x="808" y="1015" class="note">local RMW</text>
+
+  <!-- drain 与释放 -->
+  <path d="M400 1033 V1063" class="data"/>
+  <path d="M560 1033 V1063" class="data"/>
+  <path d="M720 1033 V1063" class="data"/>
+  <path d="M880 1033 V1063" class="data"/>
+  <rect x="330" y="1063" width="620" height="100" class="box"/>
+  <text x="348" y="1090" class="heading">AmDrainController · final epilogue</text>
+  <text x="348" y="1114">FINAL → 自动 drain 到已 admit 的 L1 输出区域</text>
+  <text x="348" y="1137" class="note">output_visible → 旧 AM 访问 quiescent → slot_free · quota−− → chain_done</text>
+  <text x="348" y="1157" class="note">故障链：安全回收后记录 ERROR / CANCELLED</text>
+
+  <path d="M330 1110 H20 V508 H30" class="data"/>
+  <text x="40" y="1102" class="note">C（已 admit 目的地）</text>
+  <path d="M950 1110 H962 V164 H950" class="control"/>
+
+  <!-- 图例 -->
+  <path d="M30 1184 H90" class="dataline"/>
+  <text x="100" y="1189" class="note">数据路径</text>
+  <path d="M190 1184 H250" class="ctrlline"/>
+  <text x="260" y="1189" class="note">控制 / 事件</text>
+  <text x="560" y="1189" class="note">逻辑组织示意 · 非物理面积/布线 · 接口名为协议伪接口</text>
+</svg>

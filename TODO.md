@@ -171,6 +171,20 @@
 
 BOA 这类计算单元的 register file 装载需要硬件级流水设计。理论上 multi-context 要把计算单元利用率打满，BOA 内部需要指令级 pipeline。若嵌入 transpose（第 1 条），寄存器装载链路变长，需重新衡量 BOA 整体大小与功耗。
 
+而且 BOA 内部调度 micro sequence 也需要有 command FIFO 和 compete queue， 机制 queue 中 固定数量 少了会自动补齐，保证流水线的连续性。
+而且需要考虑 complete queue 和 command FIFO 的同步机制，与此同时还需要有硬件机制对于可用的OPA数量进行管理
+
+注意 （为了能够节省多次 accumulate output 的频繁访问 shared memory，当然后续需要考虑 多个 gemmini 的阵列如果采用 queue 进行异步调度）：
+1. uce 需要控制 BOA 内部的 load 并且 BOA 内部需要有 RF 来存数据 （可选 double buffer）这样的话可以很精细的控制 什么时候释放 shared memory
+2. BOA 如果采用 gemmini 阵列的话 那么 AM 需要拥有一个持续驻留的 accumulator handle (执行实例, 矩阵任务, 输出块)，或者在运行之前生成token 也就是唯一 ID。
+3. 在编译的时候 需要 k step 的计算需要聚合 并且不能够 插入其他 matmul 的操作，因为 我打算 AM 保留的区域 和 context 的数量是绑定的
+4. 假设 所有的 tiling 都是以 固定的 tile size 进行的。
+5. 如果采用多个 gemmini 整列的话，那么 AM 必须是共享的，否则就需要每个阵列拥有独立的 AM的同时 需要有ID，并且在 发射指令的时候指明采用那个 ID 的阵列进行 matmul 的计算。
+6. 如果 gemmini 自己管理自己的 load 的话 那么需要有一个 硬件接口 来通知 UCE load 完成。UCE 在收到通知后才能继续调度后续操作。
+7. 同时需要考虑多个 gemmini 阵列 的调度 queue，可以采用之前的 pipeline depth 的idea 来进行设计，依旧是说 queue 始终保持这个长度，与此同时 gemmini 完成之后不仅仅需要支持通知 UCE 还需要通知 调度queue 让其知道有阵列空闲出来了可以进行下一步调度
+
+后续可以考虑比较 K 的临界值并且让编译器可以参考这个临界值来进行tiling，小K 有些时候可能不如一个 大K 的性能表现好 因为 gemmini 阵列理论上可以算很大的K。
+
 ### 4. 子图 fusion / auto partition
 
 从 trace 观察到部分 fusion 能显著提升利用率。候选子图条件：子图内无分叉、前后为线性连接、I/O 时间占比与计算占比差异大——计算时间超过 I/O 时间的子图最能发挥当前调度模型的优势。当前只考虑静态图，if-else 等动态 branch 不在范围内。
