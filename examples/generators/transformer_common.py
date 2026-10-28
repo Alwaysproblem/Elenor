@@ -20,7 +20,7 @@ from pipeline_validator.dialects.elenor import (
   NestL2View,
   TileAllocOp,
   TileAwaitOp,
-  TileBoaOp,
+  TileBoaEstimateOp,
   TileEvuOp,
   TileLoadOp,
   TileStoreOp,
@@ -101,9 +101,10 @@ def tile_await(events):
   return TileAwaitOp(list(events))
 
 
-def boa_matmul(m: int, n: int, k: int, tag: str, accumulate: bool = False):
+def boa_estimate(m: int, n: int, k: int, tag: str):
+  """Timing-only BOA FLOP estimate; no AM chain or numerical output."""
   ops = 2 * m * n * k
-  return TileBoaOp("matmul", m, n, k, ops, tag, accumulate=accumulate)
+  return TileBoaEstimateOp("matmul", m, n, k, ops, tag)
 
 
 def evu(op_name: str, ops: int, tag: str):

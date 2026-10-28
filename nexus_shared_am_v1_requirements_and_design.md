@@ -92,15 +92,15 @@
 
 软件看到：
 
-~~~text
+```text
 ctx_key    = (tile_context_id, context_epoch)
 logical_am = 0 或 1
 acc_handle = opaque(entry_id, generation)
-~~~
+```
 
 硬件表记录：
 
-~~~text
+```text
 acc_handle ->
     owner_ctx_key
     logical_am
@@ -110,7 +110,7 @@ acc_handle ->
     bound_engine
     shape / acc_format / layout
     lifecycle_state
-~~~
+```
 
 不要求将这些字段全部逐条暴露给 ISA。实现可以压缩编码，但必须保留等价的身份区分能力。
 
@@ -126,11 +126,11 @@ acc_handle ->
 
 令 L(ctx) 表示某 context 尚未安全释放的 AM lease 集合：
 
-~~~text
+```text
 used_am_slots(ctx) = |L(ctx)|
 0 <= used_am_slots(ctx) <= 2
 sum_ctx used_am_slots(ctx) = global_live_leases <= 8
-~~~
+```
 
 这里的全局等式适用于本 V1 仅由上述 context lease 使用共享槽的基线。
 
@@ -173,10 +173,10 @@ one-shot GEMM 在本 V1 中仍经 AM，其 RESERVED 到 DRAINING 过程均计入
 
 本 V1 规定：
 
-~~~text
+```text
 一条链 -> 一个 live slot -> 一个固定 engine
 一个 context -> 最多两条 live 链
-~~~
+```
 
 所以，一个 context 同时执行其矩阵工作所占用的 engine 数至多为 2。
 
@@ -211,7 +211,7 @@ FINAL_READY/DRAINING 仍计配额，因此两个槽都被占用时，实际正�
 
 ### 5.1 顶层结构
 
-~~~mermaid
+```mermaid
 flowchart TB
     U["UCE / Context Scheduler"] --> T["共享 AM 表与设备 Ready 仲裁"]
     T --> E0["Engine 0 + 结果接收"]
@@ -232,7 +232,7 @@ flowchart TB
     A3 --> D
     D --> L["已准入的 L1 输出区域"]
     D -.-> T
-~~~
+```
 
 每个 AM group 包含 SRAM、局部 RMW 累加通路、请求控制和写回状态。group 可以内部拆分多个物理 SRAM bank，逻辑 slot 不必对应一块宏。
 
@@ -286,7 +286,7 @@ A/0 和 B/0 可以在 engine 0 上交替执行，但不能同一时刻占用同�
 
 ### 6.1 TRY_OPEN：非阻塞建立输出链
 
-~~~text
+```text
 TRY_OPEN(
     ctx_key,
     logical_am,        // 0 或 1
@@ -299,7 +299,7 @@ TRY_OPEN(
 ) -> GRANTED(handle, bound_engine, completion_token)
    | BUSY(reason, retry_event_snapshot)
    | ERROR(reason)
-~~~
+```
 
 成功的线性化点必须原子完成：
 
@@ -331,7 +331,7 @@ BUSY 的失败判断与 retry_event_snapshot 必须在同一个资源线性化�
 
 ### 6.2 TRY_SUBMIT_STEP：提交同一链的下一 K-step
 
-~~~text
+```text
 TRY_SUBMIT_STEP(
     handle,
     seq,
@@ -345,7 +345,7 @@ TRY_SUBMIT_STEP(
 ) -> ACCEPTED(step_token)
    | BUSY(mailbox_credit_event)
    | ERROR(reason)
-~~~
+```
 
 要求：
 
@@ -365,10 +365,10 @@ TRY_SUBMIT_STEP(
 
 使用现有事件系统的等价能力，不强制新增具体 ISA：
 
-~~~text
+```text
 WAIT(event_token)
 WAIT_ANY(event_tokens)
-~~~
+```
 
 等待必须原子地完成“检查是否已完成”和“登记等待者”。事件先发生、后执行 WAIT 时，WAIT 应立即满足。
 
@@ -380,14 +380,14 @@ token 必须唯一标识一个事件实例。可以使用独立 event ID，也�
 
 正常路径不要求 UCE 显式 FREE：
 
-~~~text
+```text
 FINAL step committed
     -> drain to admitted destination
     -> output visibility established
     -> old AM accesses quiescent
     -> record completion
     -> slot_free and quota decrement
-~~~
+```
 
 输出完成记录应在 OPEN 成功时已有容量保证，避免完成队列满阻止所有 slot 释放。
 
@@ -401,7 +401,7 @@ FINISHING 的硬件收尾不得依赖已经返回的原 context 再运行并亲�
 
 ### 7.1 每条链的状态
 
-~~~mermaid
+```mermaid
 stateDiagram-v2
     [*] --> FREE
     FREE --> RESERVED: TRY_OPEN granted
@@ -413,7 +413,7 @@ stateDiagram-v2
     COMMITTING --> FINAL_READY: FINAL 且全部写入提交
     FINAL_READY --> DRAINING: 输出服务可用
     DRAINING --> FREE: 输出可见且旧访问结束
-~~~
+```
 
 next-step mailbox 可以在 RUNNING/COMMITTING 时预先收到下一步。状态机里的 WAIT_STEP 表示当前链没有可发射步骤；若已有 mailbox，前步提交后可直接转 WAIT_READY。
 
@@ -432,12 +432,12 @@ next-step mailbox 可以在 RUNNING/COMMITTING 时预先收到下一步。状态
 
 ### 7.3 步骤提交条件
 
-~~~text
+```text
 step_committed =
     end_of_step_seen
     AND all_expected_results_received
     AND pending_am_updates == 0
-~~~
+```
 
 pending_am_updates 必须包含结果接收、路由、队列、RMW 流水线和待写回中的未完成更新。不能在某一周期计数恰好为零、但阵列仍会继续输出时提前完成。
 
@@ -480,7 +480,7 @@ context发生终止性错误时，停止生成新工作，通知设备按受控�
 
 一个已提交步骤可发射，至少要同时满足：
 
-~~~text
+```text
 handle有效
 AND owner/seq合法
 AND 前一步已committed
@@ -488,7 +488,7 @@ AND 输入ready
 AND 绑定engine可接收
 AND 所需AM/结果接收能力已取得
 AND 配置切换处于合法边界
-~~~
+```
 
 调度器不能绕过 affinity 去选择其他空闲 engine，也不能执行尚未提交的步骤。
 
@@ -502,9 +502,9 @@ AND 配置切换处于合法边界
 
 V1 支持的普通输出累加链在取得一个 AM slot 后，必须能够使用这同一个 slot 完成：
 
-~~~text
+```text
 INIT -> ADD ... -> FINAL -> DRAIN -> RELEASE
-~~~
+```
 
 完成该链不能依赖另一次新的 AM 申请成功。输入可以逐段到达，不要求完整 K 的全部数据同时驻留。
 
@@ -514,7 +514,7 @@ INIT -> ADD ... -> FINAL -> DRAIN -> RELEASE
 
 即使全局还有六个空槽，也可能出现：
 
-~~~text
+```text
 context A:
     open C0                  // 使用1槽
     open C1                  // 使用2槽
@@ -523,7 +523,7 @@ context A:
     blocking_open C2          // 因本context配额满而停止
     submit C0.FINAL           // 永远无法到达
     submit C1.FINAL
-~~~
+```
 
 因此，TRY_OPEN 必须返回 BUSY；调用方也不能无限重试同一个新 OPEN 而不服务已有链。
 
@@ -567,7 +567,7 @@ UCE 切换只能让其他 context 执行，不能替当前 context 生成尚未�
 
 以下是协议伪代码，可由编译器静态展开为 prologue/steady state/epilogue，不要求新增一个通用软件 DAG 调度器。
 
-~~~text
+```text
 live[0] = empty
 live[1] = empty
 
@@ -611,7 +611,7 @@ while 存在未开始输出 or 任一live位置非empty:
 
     assert wait_set不为空
     WAIT_ANY(wait_set)
-~~~
+```
 
 drive_chain_nonblocking 的职责：
 
@@ -637,9 +637,9 @@ drive_chain_nonblocking 的职责：
 
 chain_done 可以作为以下条件的便捷组合，不要求新增另一套硬件完成队列：
 
-~~~text
+```text
 chain_done = FINAL输出已可见 AND slot已安全释放
-~~~
+```
 
 如果已有事件系统能保留多代记录，可以复用它。无论采用哪种实现，物理 slot 的复用不能清掉旧完成状态。
 
@@ -655,10 +655,10 @@ chain_done = FINAL输出已可见 AND slot已安全释放
 
 推荐每个 AM group 的累加流程：
 
-~~~text
+```text
 新partial结果 -> 路由到目标group
 group内部读旧C -> 向量adder -> 写回同一AM位置
-~~~
+```
 
 旧 C 不需要回送到计算阵列。四个 group 应具有明确、可独立计量的累加吞吐。
 
@@ -718,12 +718,12 @@ group内部读旧C -> 向量adder -> 写回同一AM位置
 
 定义 E=阵列数，q=输出阶段每阵列每周期结果元素数，b=累加元素字节数。
 
-~~~text
+```text
 新结果流量     = E × q × b  B/cycle
 ACCUM旧值读取  = E × q × b  B/cycle
 ACCUM结果写回  = E × q × b  B/cycle
 最终drain读取  = 另外计入
-~~~
+```
 
 例：E=4，q=8，b=4，则新结果128 B/cycle，AM读旧值128 B/cycle、写回128 B/cycle。
 
@@ -794,7 +794,7 @@ ACCUM结果写回  = E × q × b  B/cycle
 
 以下键是语义示意，不是可以直接覆盖现有仓库的配置文件：
 
-~~~yaml
+```yaml
 matrix_group:
   num_engines: 4
 
@@ -828,7 +828,7 @@ matrix_group:
   events:
     persistent_completion: true
     atomic_check_and_wait: true
-~~~
+```
 
 以下参数必须由真实配置/建模决定，不在本文虚构固定值：
 
@@ -983,7 +983,7 @@ T10/T11/T12/T22 在只有功能模型时不能被声称完成周期/RTL验证。
 
 ## 附录A：可直接交给其他模型的任务说明
 
-~~~text
+```text
 请按《Nexus共享AM V1：需求规格与设计改造指南》修改当前项目。
 
 首先检查仓库实际结构、AGENTS.md、配置、scheduler、tile context、GEMM提交、
@@ -1013,7 +1013,7 @@ T10/T11/T12/T22 在只有功能模型时不能被声称完成周期/RTL验证。
 必须针对文档R01..R18说明实现，并按T01..T22报告实际验证结果。
 不要虚构测试通过、RTL接入或PPA数字。
 对尚未支持的项明确列出，不通过改变约束来伪造完成。
-~~~
+```
 
 ## 附录B：评审时的快速检查
 
@@ -1035,6 +1035,3 @@ T10/T11/T12/T22 在只有功能模型时不能被声称完成周期/RTL验证。
 - [ ] context退出、异常和generation复用是否等待旧访问安全结束？
 - [ ] 性能报告是否区分配额、affinity、输入、bank、credit和drain等待？
 - [ ] 是否清楚标记哪些是设计建议、哪些已实现、哪些实际验证通过？
-
-
-

@@ -189,11 +189,13 @@ builtin.module {
       window_entries = 1 scope = "owner_0" : !tile.event<"gather_v_r0_t16">
     tile.await %gather_k_r0_t16, %gather_v_r0_t16, %q_r0_t16, %state_r0_t16, %acc_r0_t16
     tile.signal input_released(%task_4)
-    %qk_r0_t16 = tile.boa.async "matmul" m = 4 n = 16 k = 64 ops = 8192 : !tile.event<"qk_r0_t16">
+    %qk_r0_t16 = tile.boa.estimate.async "matmul" m = 4 n = 16 k = 64 ops = 8192
+      : !tile.event<"qk_r0_t16">
     tile.await %qk_r0_t16
     %sm_r0_t16 = tile.evu.async "online_softmax_update" ops = 72 : !tile.event<"sm_r0_t16">
     tile.await %sm_r0_t16
-    %pv_r0_t16 = tile.boa.async "matmul" m = 4 n = 64 k = 16 ops = 8192 : !tile.event<"pv_r0_t16">
+    %pv_r0_t16 = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 16 ops = 8192
+      : !tile.event<"pv_r0_t16">
     tile.await %pv_r0_t16
     %acc_evu_r0_t16 = tile.evu.async "online_softmax_output_accumulate" ops = 512
       : !tile.event<"acc_evu_r0_t16">
@@ -249,13 +251,13 @@ builtin.module {
     tile.await %gather_k_r0_t16_final, %gather_v_r0_t16_final, %q_r0_t16_final, %state_r0_t16_final,
       %acc_r0_t16_final
     tile.signal input_released(%task_5)
-    %qk_r0_t16_final = tile.boa.async "matmul" m = 4 n = 16 k = 64 ops = 8192
+    %qk_r0_t16_final = tile.boa.estimate.async "matmul" m = 4 n = 16 k = 64 ops = 8192
       : !tile.event<"qk_r0_t16_final">
     tile.await %qk_r0_t16_final
     %sm_r0_t16_final = tile.evu.async "online_softmax_update" ops = 72
       : !tile.event<"sm_r0_t16_final">
     tile.await %sm_r0_t16_final
-    %pv_r0_t16_final = tile.boa.async "matmul" m = 4 n = 64 k = 16 ops = 8192
+    %pv_r0_t16_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 16 ops = 8192
       : !tile.event<"pv_r0_t16_final">
     tile.await %pv_r0_t16_final
     %acc_evu_r0_t16_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -316,13 +318,13 @@ builtin.module {
     tile.await %gather_k_r0_t1_final, %gather_v_r0_t1_final, %q_r0_t1_final, %state_r0_t1_final,
       %acc_r0_t1_final
     tile.signal input_released(%task_6)
-    %qk_r0_t1_final = tile.boa.async "matmul" m = 4 n = 1 k = 64 ops = 512
+    %qk_r0_t1_final = tile.boa.estimate.async "matmul" m = 4 n = 1 k = 64 ops = 512
       : !tile.event<"qk_r0_t1_final">
     tile.await %qk_r0_t1_final
     %sm_r0_t1_final = tile.evu.async "online_softmax_update" ops = 12
       : !tile.event<"sm_r0_t1_final">
     tile.await %sm_r0_t1_final
-    %pv_r0_t1_final = tile.boa.async "matmul" m = 4 n = 64 k = 1 ops = 512
+    %pv_r0_t1_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 1 ops = 512
       : !tile.event<"pv_r0_t1_final">
     tile.await %pv_r0_t1_final
     %acc_evu_r0_t1_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -383,13 +385,13 @@ builtin.module {
     tile.await %gather_k_r0_t2_final, %gather_v_r0_t2_final, %q_r0_t2_final, %state_r0_t2_final,
       %acc_r0_t2_final
     tile.signal input_released(%task_7)
-    %qk_r0_t2_final = tile.boa.async "matmul" m = 4 n = 2 k = 64 ops = 1024
+    %qk_r0_t2_final = tile.boa.estimate.async "matmul" m = 4 n = 2 k = 64 ops = 1024
       : !tile.event<"qk_r0_t2_final">
     tile.await %qk_r0_t2_final
     %sm_r0_t2_final = tile.evu.async "online_softmax_update" ops = 16
       : !tile.event<"sm_r0_t2_final">
     tile.await %sm_r0_t2_final
-    %pv_r0_t2_final = tile.boa.async "matmul" m = 4 n = 64 k = 2 ops = 1024
+    %pv_r0_t2_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 2 ops = 1024
       : !tile.event<"pv_r0_t2_final">
     tile.await %pv_r0_t2_final
     %acc_evu_r0_t2_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -450,13 +452,13 @@ builtin.module {
     tile.await %gather_k_r0_t3_final, %gather_v_r0_t3_final, %q_r0_t3_final, %state_r0_t3_final,
       %acc_r0_t3_final
     tile.signal input_released(%task_8)
-    %qk_r0_t3_final = tile.boa.async "matmul" m = 4 n = 3 k = 64 ops = 1536
+    %qk_r0_t3_final = tile.boa.estimate.async "matmul" m = 4 n = 3 k = 64 ops = 1536
       : !tile.event<"qk_r0_t3_final">
     tile.await %qk_r0_t3_final
     %sm_r0_t3_final = tile.evu.async "online_softmax_update" ops = 20
       : !tile.event<"sm_r0_t3_final">
     tile.await %sm_r0_t3_final
-    %pv_r0_t3_final = tile.boa.async "matmul" m = 4 n = 64 k = 3 ops = 1536
+    %pv_r0_t3_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 3 ops = 1536
       : !tile.event<"pv_r0_t3_final">
     tile.await %pv_r0_t3_final
     %acc_evu_r0_t3_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -664,11 +666,13 @@ builtin.module {
       window_entries = 1 scope = "owner_1" : !tile.event<"gather_v_r1_t16">
     tile.await %gather_k_r1_t16, %gather_v_r1_t16, %q_r1_t16, %state_r1_t16, %acc_r1_t16
     tile.signal input_released(%task_13)
-    %qk_r1_t16 = tile.boa.async "matmul" m = 4 n = 16 k = 64 ops = 8192 : !tile.event<"qk_r1_t16">
+    %qk_r1_t16 = tile.boa.estimate.async "matmul" m = 4 n = 16 k = 64 ops = 8192
+      : !tile.event<"qk_r1_t16">
     tile.await %qk_r1_t16
     %sm_r1_t16 = tile.evu.async "online_softmax_update" ops = 72 : !tile.event<"sm_r1_t16">
     tile.await %sm_r1_t16
-    %pv_r1_t16 = tile.boa.async "matmul" m = 4 n = 64 k = 16 ops = 8192 : !tile.event<"pv_r1_t16">
+    %pv_r1_t16 = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 16 ops = 8192
+      : !tile.event<"pv_r1_t16">
     tile.await %pv_r1_t16
     %acc_evu_r1_t16 = tile.evu.async "online_softmax_output_accumulate" ops = 512
       : !tile.event<"acc_evu_r1_t16">
@@ -724,13 +728,13 @@ builtin.module {
     tile.await %gather_k_r1_t16_final, %gather_v_r1_t16_final, %q_r1_t16_final, %state_r1_t16_final,
       %acc_r1_t16_final
     tile.signal input_released(%task_14)
-    %qk_r1_t16_final = tile.boa.async "matmul" m = 4 n = 16 k = 64 ops = 8192
+    %qk_r1_t16_final = tile.boa.estimate.async "matmul" m = 4 n = 16 k = 64 ops = 8192
       : !tile.event<"qk_r1_t16_final">
     tile.await %qk_r1_t16_final
     %sm_r1_t16_final = tile.evu.async "online_softmax_update" ops = 72
       : !tile.event<"sm_r1_t16_final">
     tile.await %sm_r1_t16_final
-    %pv_r1_t16_final = tile.boa.async "matmul" m = 4 n = 64 k = 16 ops = 8192
+    %pv_r1_t16_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 16 ops = 8192
       : !tile.event<"pv_r1_t16_final">
     tile.await %pv_r1_t16_final
     %acc_evu_r1_t16_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -792,13 +796,13 @@ builtin.module {
     tile.await %gather_k_r1_t1_final, %gather_v_r1_t1_final, %q_r1_t1_final, %state_r1_t1_final,
       %acc_r1_t1_final
     tile.signal input_released(%task_15)
-    %qk_r1_t1_final = tile.boa.async "matmul" m = 4 n = 1 k = 64 ops = 512
+    %qk_r1_t1_final = tile.boa.estimate.async "matmul" m = 4 n = 1 k = 64 ops = 512
       : !tile.event<"qk_r1_t1_final">
     tile.await %qk_r1_t1_final
     %sm_r1_t1_final = tile.evu.async "online_softmax_update" ops = 12
       : !tile.event<"sm_r1_t1_final">
     tile.await %sm_r1_t1_final
-    %pv_r1_t1_final = tile.boa.async "matmul" m = 4 n = 64 k = 1 ops = 512
+    %pv_r1_t1_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 1 ops = 512
       : !tile.event<"pv_r1_t1_final">
     tile.await %pv_r1_t1_final
     %acc_evu_r1_t1_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -859,13 +863,13 @@ builtin.module {
     tile.await %gather_k_r1_t2_final, %gather_v_r1_t2_final, %q_r1_t2_final, %state_r1_t2_final,
       %acc_r1_t2_final
     tile.signal input_released(%task_16)
-    %qk_r1_t2_final = tile.boa.async "matmul" m = 4 n = 2 k = 64 ops = 1024
+    %qk_r1_t2_final = tile.boa.estimate.async "matmul" m = 4 n = 2 k = 64 ops = 1024
       : !tile.event<"qk_r1_t2_final">
     tile.await %qk_r1_t2_final
     %sm_r1_t2_final = tile.evu.async "online_softmax_update" ops = 16
       : !tile.event<"sm_r1_t2_final">
     tile.await %sm_r1_t2_final
-    %pv_r1_t2_final = tile.boa.async "matmul" m = 4 n = 64 k = 2 ops = 1024
+    %pv_r1_t2_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 2 ops = 1024
       : !tile.event<"pv_r1_t2_final">
     tile.await %pv_r1_t2_final
     %acc_evu_r1_t2_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -926,13 +930,13 @@ builtin.module {
     tile.await %gather_k_r1_t3_final, %gather_v_r1_t3_final, %q_r1_t3_final, %state_r1_t3_final,
       %acc_r1_t3_final
     tile.signal input_released(%task_17)
-    %qk_r1_t3_final = tile.boa.async "matmul" m = 4 n = 3 k = 64 ops = 1536
+    %qk_r1_t3_final = tile.boa.estimate.async "matmul" m = 4 n = 3 k = 64 ops = 1536
       : !tile.event<"qk_r1_t3_final">
     tile.await %qk_r1_t3_final
     %sm_r1_t3_final = tile.evu.async "online_softmax_update" ops = 20
       : !tile.event<"sm_r1_t3_final">
     tile.await %sm_r1_t3_final
-    %pv_r1_t3_final = tile.boa.async "matmul" m = 4 n = 64 k = 3 ops = 1536
+    %pv_r1_t3_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 3 ops = 1536
       : !tile.event<"pv_r1_t3_final">
     tile.await %pv_r1_t3_final
     %acc_evu_r1_t3_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -1140,11 +1144,13 @@ builtin.module {
       window_entries = 1 scope = "owner_2" : !tile.event<"gather_v_r2_t16">
     tile.await %gather_k_r2_t16, %gather_v_r2_t16, %q_r2_t16, %state_r2_t16, %acc_r2_t16
     tile.signal input_released(%task_22)
-    %qk_r2_t16 = tile.boa.async "matmul" m = 4 n = 16 k = 64 ops = 8192 : !tile.event<"qk_r2_t16">
+    %qk_r2_t16 = tile.boa.estimate.async "matmul" m = 4 n = 16 k = 64 ops = 8192
+      : !tile.event<"qk_r2_t16">
     tile.await %qk_r2_t16
     %sm_r2_t16 = tile.evu.async "online_softmax_update" ops = 72 : !tile.event<"sm_r2_t16">
     tile.await %sm_r2_t16
-    %pv_r2_t16 = tile.boa.async "matmul" m = 4 n = 64 k = 16 ops = 8192 : !tile.event<"pv_r2_t16">
+    %pv_r2_t16 = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 16 ops = 8192
+      : !tile.event<"pv_r2_t16">
     tile.await %pv_r2_t16
     %acc_evu_r2_t16 = tile.evu.async "online_softmax_output_accumulate" ops = 512
       : !tile.event<"acc_evu_r2_t16">
@@ -1200,13 +1206,13 @@ builtin.module {
     tile.await %gather_k_r2_t16_final, %gather_v_r2_t16_final, %q_r2_t16_final, %state_r2_t16_final,
       %acc_r2_t16_final
     tile.signal input_released(%task_23)
-    %qk_r2_t16_final = tile.boa.async "matmul" m = 4 n = 16 k = 64 ops = 8192
+    %qk_r2_t16_final = tile.boa.estimate.async "matmul" m = 4 n = 16 k = 64 ops = 8192
       : !tile.event<"qk_r2_t16_final">
     tile.await %qk_r2_t16_final
     %sm_r2_t16_final = tile.evu.async "online_softmax_update" ops = 72
       : !tile.event<"sm_r2_t16_final">
     tile.await %sm_r2_t16_final
-    %pv_r2_t16_final = tile.boa.async "matmul" m = 4 n = 64 k = 16 ops = 8192
+    %pv_r2_t16_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 16 ops = 8192
       : !tile.event<"pv_r2_t16_final">
     tile.await %pv_r2_t16_final
     %acc_evu_r2_t16_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -1268,13 +1274,13 @@ builtin.module {
     tile.await %gather_k_r2_t1_final, %gather_v_r2_t1_final, %q_r2_t1_final, %state_r2_t1_final,
       %acc_r2_t1_final
     tile.signal input_released(%task_24)
-    %qk_r2_t1_final = tile.boa.async "matmul" m = 4 n = 1 k = 64 ops = 512
+    %qk_r2_t1_final = tile.boa.estimate.async "matmul" m = 4 n = 1 k = 64 ops = 512
       : !tile.event<"qk_r2_t1_final">
     tile.await %qk_r2_t1_final
     %sm_r2_t1_final = tile.evu.async "online_softmax_update" ops = 12
       : !tile.event<"sm_r2_t1_final">
     tile.await %sm_r2_t1_final
-    %pv_r2_t1_final = tile.boa.async "matmul" m = 4 n = 64 k = 1 ops = 512
+    %pv_r2_t1_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 1 ops = 512
       : !tile.event<"pv_r2_t1_final">
     tile.await %pv_r2_t1_final
     %acc_evu_r2_t1_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -1335,13 +1341,13 @@ builtin.module {
     tile.await %gather_k_r2_t2_final, %gather_v_r2_t2_final, %q_r2_t2_final, %state_r2_t2_final,
       %acc_r2_t2_final
     tile.signal input_released(%task_25)
-    %qk_r2_t2_final = tile.boa.async "matmul" m = 4 n = 2 k = 64 ops = 1024
+    %qk_r2_t2_final = tile.boa.estimate.async "matmul" m = 4 n = 2 k = 64 ops = 1024
       : !tile.event<"qk_r2_t2_final">
     tile.await %qk_r2_t2_final
     %sm_r2_t2_final = tile.evu.async "online_softmax_update" ops = 16
       : !tile.event<"sm_r2_t2_final">
     tile.await %sm_r2_t2_final
-    %pv_r2_t2_final = tile.boa.async "matmul" m = 4 n = 64 k = 2 ops = 1024
+    %pv_r2_t2_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 2 ops = 1024
       : !tile.event<"pv_r2_t2_final">
     tile.await %pv_r2_t2_final
     %acc_evu_r2_t2_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -1402,13 +1408,13 @@ builtin.module {
     tile.await %gather_k_r2_t3_final, %gather_v_r2_t3_final, %q_r2_t3_final, %state_r2_t3_final,
       %acc_r2_t3_final
     tile.signal input_released(%task_26)
-    %qk_r2_t3_final = tile.boa.async "matmul" m = 4 n = 3 k = 64 ops = 1536
+    %qk_r2_t3_final = tile.boa.estimate.async "matmul" m = 4 n = 3 k = 64 ops = 1536
       : !tile.event<"qk_r2_t3_final">
     tile.await %qk_r2_t3_final
     %sm_r2_t3_final = tile.evu.async "online_softmax_update" ops = 20
       : !tile.event<"sm_r2_t3_final">
     tile.await %sm_r2_t3_final
-    %pv_r2_t3_final = tile.boa.async "matmul" m = 4 n = 64 k = 3 ops = 1536
+    %pv_r2_t3_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 3 ops = 1536
       : !tile.event<"pv_r2_t3_final">
     tile.await %pv_r2_t3_final
     %acc_evu_r2_t3_final = tile.evu.async "online_softmax_output_accumulate" ops = 512

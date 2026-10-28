@@ -49,7 +49,7 @@ from pipeline_validator.dialects.elenor import (
   NexusSubmitContextOp,
   TileAllocOp,
   TileAwaitOp,
-  TileBoaOp,
+  TileBoaEstimateOp,
   TileEvuOp,
   TileGatherOp,
   TileIndexedMapAttr,
@@ -462,7 +462,7 @@ def make_short_evu_program(name: str = "ctx_short_evu") -> TileProgramDefOp:
 
 def make_boa_program(name: str) -> TileProgramDefOp:
   prog = TileProgramDefOp(name, tile_resources(), arg_types=[NestTask()], arg_names=["task"])
-  boa = TileBoaOp(op_name="matmul", m=256, n=256, k=256, boa_ops=33554432, tag="e_boa")
+  boa = TileBoaEstimateOp(op_name="matmul", m=256, n=256, k=256, boa_ops=33554432, tag="e_boa")
   prog.body.block.add_ops([boa, TileAwaitOp([boa.result]), TileReturnOp()])
   return prog
 
@@ -2096,7 +2096,7 @@ class TestL2AccessRelease:
       TileAwaitOp([gate_load_lhs.result, gate_load_rhs.result]),
     ]
     for index in range(100):
-      boa = TileBoaOp("matmul", 64, 64, 64, 524288, f"d_boa_{index}", accumulate=index > 0)
+      boa = TileBoaEstimateOp("matmul", 64, 64, 64, 524288, f"d_boa_{index}")
       d_ops.extend([boa, TileAwaitOp([boa.result])])
     shared_load_d = TileLoadOp(shared_view_d.result, shared_work.result, "d_shared_load")
     d_ops.extend(

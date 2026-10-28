@@ -19,6 +19,8 @@ from typing import NoReturn
 from .compiled_program import BindingGuard, CompiledProgram, WorkloadInfo, artifact_digest, program_digest
 from .config import HardwareConfig, SimConfig
 from .execution_ir import (
+  ExecAmBuffer,
+  ExecBoaMatmulDesc,
   ExecDeviceOp,
   ExecDispatchRequest,
   ExecEngineDesc,
@@ -81,6 +83,10 @@ _HW_TARGET_FIELDS = (
   "boa_opa_cols",
   "boa_dtype_bytes",
   "boa_acc_bytes",
+  "boa_am_slot_capacity_bytes",
+  "boa_am_group_count",
+  "boa_am_slots_per_group",
+  "boa_am_slots_per_context",
   "evu_lanes",
   "evu_dtype_bytes",
   "use_state_cache_bytes",
@@ -496,6 +502,36 @@ def _verify_program(
       _fail(f"{where} has duplicate L1 buffer {buffer.name!r}")
     l1_buffers[buffer.name] = buffer
     _verify_buffer(buffer, f"{where}.l1_buffers[{index}]")
+  am_buffers: dict[str, ExecAmBuffer] = {}
+  for index, am in enumerate(program.am_buffers):
+    if not isinstance(am, ExecAmBuffer):
+      _fail(f"{where}.am_buffers[{index}] is invalid")
+    _nonempty(am.name, f"{where}.am_buffers[{index}].name")
+    if am.name in am_buffers or am.name in l1_buffers:
+      _fail(f"{where} has duplicate AM buffer {am.name!r}")
+    if am.dtype != "f32" or am.element_bytes != 4:
+      _fail(f"{where}.am_buffers[{index}] must carry f32 AM bytes")
+    if not am.dims or any(type(dim) is not int or dim <= 0 for dim in am.dims):
+      _fail(f"{where}.am_buffers[{index}] has an invalid shape")
+    if am.bytes != _product(am.dims) * am.element_bytes:
+      _fail(f"{where}.am_buffers[{index}].bytes does not match its shape")
+    _uint(am.alignment, f"{where}.am_buffers[{index}].alignment", positive=True)
+    if am.logical_slot not in (0, 1):
+      _fail(f"{where}.am_buffers[{index}].logical_slot must be 0 or 1")
+    if am.bytes > hw.boa_am_slot_capacity_bytes:
+      _fail(
+        f"{where}.am_buffers[{index}] needs {am.bytes} bytes, "
+        f"target AM slot capacity is {hw.boa_am_slot_capacity_bytes}"
+      )
+    output = _verify_view(am.output, f"{where}.am_buffers[{index}].output", spaces={"l1"})
+    output_buffer = l1_buffers.get(output.base)
+    if output_buffer is None:
+      _fail(f"{where}.am_buffers[{index}].output references an absent L1 buffer")
+    if output.dims != am.dims or output.backing_dims != output_buffer.dims:
+      _fail(f"{where}.am_buffers[{index}].output shape mismatch")
+    if output.dtype != output_buffer.dtype or output.dtype not in ("f32", "bf16", "i8"):
+      _fail(f"{where}.am_buffers[{index}].output dtype is invalid")
+    am_buffers[am.name] = am
   for mode in contract.allowed_profiles:
     profile = registry.profile("l1", mode)
     if contract.tile_l1_spm_bytes_per_context > profile.user_spm_bytes:
@@ -562,18 +598,29 @@ def _verify_program(
       for key in required:
         _uint(descriptor.params[key], f"{where}.descriptors[{name!r}].{key}", positive=key != "exponent")
     elif descriptor.kind == "BOA":
-      if descriptor.transfer is not None or not {"m", "n", "k", "ops"} <= set(descriptor.params) <= {
-        "m",
-        "n",
-        "k",
-        "ops",
-        "accumulate",
-      }:
+      if descriptor.transfer is not None:
+        _fail(f"{where}.descriptors[{name!r}].transfer must be absent")
+      matmul = descriptor.params.get("matmul")
+      if matmul is not None:
+        if descriptor.op != "matmul":
+          _fail(f"{where}.descriptors[{name!r}] typed BOA op must be 'matmul'")
+        if set(descriptor.params) != {"matmul"}:
+          _fail(f"{where}.descriptors[{name!r}] has invalid typed matmul fields")
+        _verify_boa_matmul(
+          matmul, am_buffers, l1_buffers, f"{where}.descriptors[{name!r}].matmul"
+        )
+        effects.extend(((matmul.a, False), (matmul.b, False)))
+        if matmul.final:
+          effects.append((matmul.output, True))
+      elif descriptor.params.get("estimate") is True:
+        if set(descriptor.params) != {"m", "n", "k", "ops", "estimate"}:
+          _fail(f"{where}.descriptors[{name!r}] has invalid BOA estimate fields")
+        for key in ("m", "n", "k", "ops"):
+          _uint(descriptor.params[key], f"{where}.descriptors[{name!r}].{key}", positive=True)
+        if type(descriptor.params["estimate"]) is not bool:
+          _fail(f"{where}.descriptors[{name!r}].estimate must be bool")
+      else:
         _fail(f"{where}.descriptors[{name!r}] has invalid BOA fields")
-      for key in ("m", "n", "k", "ops"):
-        _uint(descriptor.params[key], f"{where}.descriptors[{name!r}].{key}", positive=True)
-      if "accumulate" in descriptor.params and type(descriptor.params["accumulate"]) is not bool:
-        _fail(f"{where}.descriptors[{name!r}].accumulate must be bool")
     else:
       _fail(f"{where}.descriptors[{name!r}] has unsupported engine opcode")
     for view, writing in effects:
@@ -619,6 +666,51 @@ def _verify_program(
     frozenset(scatter_formals),
     FrozenMap(gather_scopes),
   )
+
+
+def _verify_boa_matmul(
+  matmul: object,
+  am_buffers: Mapping[str, ExecAmBuffer],
+  l1_buffers: Mapping[str, ExecL1Buffer],
+  where: str,
+) -> None:
+  if type(matmul) is not ExecBoaMatmulDesc:
+    _fail(f"{where} must be an ExecBoaMatmulDesc")
+  a = _verify_view(matmul.a, f"{where}.a", spaces={"l1"})
+  b = _verify_view(matmul.b, f"{where}.b", spaces={"l1"})
+  output = _verify_view(matmul.output, f"{where}.output", spaces={"l1"})
+  _nonempty(matmul.am, f"{where}.am")
+  am = am_buffers.get(matmul.am)
+  if am is None:
+    _fail(f"{where} references an absent AM buffer")
+  for field_name in ("m", "n", "k"):
+    _uint(getattr(matmul, field_name), f"{where}.{field_name}", positive=True)
+  _uint(matmul.seq, f"{where}.seq")
+  if type(matmul.init) is not bool or type(matmul.final) is not bool:
+    _fail(f"{where} init/final must be bool")
+  if a.dtype != "bf16" or b.dtype != "bf16":
+    _fail(f"{where} inputs must be bf16 L1 views")
+  if a.dims != (matmul.m, matmul.k) or b.dims != (matmul.k, matmul.n):
+    _fail(f"{where} A/B shapes must be (m, k) and (k, n)")
+  if output.dims != (matmul.m, matmul.n) or output.dims != am.dims:
+    _fail(f"{where} output/AM shape mismatch")
+  if matmul.init != (matmul.seq == 0):
+    _fail(f"{where} init must be true exactly for seq 0")
+  if output.base != am.output.base:
+    _fail(f"{where} output differs from its AM binding")
+  if output.dtype not in ("f32", "bf16", "i8"):
+    _fail(f"{where}.output dtype is invalid")
+  if output.base in (a.base, b.base):
+    _fail(f"{where}.output must differ from its A/B input buffers")
+  for view, buffer in (
+    (a, l1_buffers.get(a.base)),
+    (b, l1_buffers.get(b.base)),
+    (output, l1_buffers.get(output.base)),
+  ):
+    if buffer is None:
+      _fail(f"{where} references an absent L1 buffer")
+    if view.dtype != buffer.dtype or view.backing_dims != buffer.dims:
+      _fail(f"{where} has an incompatible L1 view")
 
 
 def _verify_buffer(buffer: ExecL1Buffer | ExecL2Buffer, where: str) -> None:
@@ -724,9 +816,15 @@ def _verify_tile_instructions(
   where: str,
 ) -> None:
   layout_by_id = {item.buffer_id: item for item in layout.buffer_layouts}
+  am_by_id = {am.name: am for am in program.am_buffers}
   live: dict[str, BufferLayout] = {}
   allocated: set[str] = set()
   freed: set[str] = set()
+  am_live: dict[str, ExecAmBuffer] = {}
+  am_live_slots: dict[int, str] = {}
+  am_allocated: set[str] = set()
+  am_finalized: set[str] = set()
+  am_next_seq: dict[str, int] = {}
   produced: set[str] = set()
   awaited: set[str] = set()
   pending_by_buffer: dict[str, set[str]] = {name: set() for name in layout_by_id}
@@ -756,6 +854,20 @@ def _verify_tile_instructions(
           _fail(f"{item_where} overlaps a live L1 view")
       allocated.add(buffer_id)
       live[buffer_id] = item
+    elif inst.op is ExecTileOp.ALLOC_AM:
+      if len(inst.args) != 2 or not isinstance(inst.args[0], str):
+        _fail(f"{item_where} ALLOC_AM requires (am_buffer_id, logical_slot)")
+      am_id, logical_slot = inst.args
+      if am_id not in am_by_id or am_id in am_allocated:
+        _fail(f"{item_where} has inconsistent or repeated AM allocation")
+      if logical_slot != am_by_id[am_id].logical_slot:
+        _fail(f"{item_where} logical slot differs from its AM declaration")
+      if logical_slot in am_live_slots:
+        _fail(f"{item_where} reuses a live logical AM slot")
+      am_live_slots[logical_slot] = am_id
+      am_allocated.add(am_id)
+      am_live[am_id] = am_by_id[am_id]
+      am_next_seq[am_id] = 0
     elif inst.op in (
       ExecTileOp.LAUNCH_MFE,
       ExecTileOp.LAUNCH_GATHER,
@@ -782,12 +894,38 @@ def _verify_tile_instructions(
       }[descriptor.kind]
       if inst.op is not expected_op:
         _fail(f"{item_where} launch opcode does not match descriptor kind")
+      matmul = descriptor.params.get("matmul")
+      if matmul is not None:
+        am = am_live.get(matmul.am)
+        if am is None:
+          _fail(f"{item_where} uses an absent or finalized AM lease")
+        if matmul.seq != am_next_seq[matmul.am]:
+          _fail(f"{item_where} breaks the AM chain sequence")
+        if matmul.init != (matmul.seq == 0):
+          _fail(f"{item_where} breaks AM INIT/ADD ordering")
+        am_next_seq[matmul.am] += 1
+        for view in (matmul.a, matmul.b):
+          if view.base not in live:
+            _fail(f"{item_where} accesses an L1 buffer outside its live interval")
+          pending_by_buffer[view.base].add(launch_event)
+        if matmul.final:
+          if matmul.output.base not in live:
+            _fail(f"{item_where} writes an L1 output outside its live interval")
+          pending_by_buffer[matmul.output.base].add(launch_event)
+          am_live.pop(matmul.am)
+          am_finalized.add(matmul.am)
+          am_live_slots.pop(am.logical_slot, None)
+      else:
+        if descriptor.kind == "BOA" and descriptor.params.get("estimate") is True:
+          for view, _ in descriptors[inst.args[0]]:
+            if view.space == "l1":
+              _fail(f"{item_where} estimate descriptor declares an L1 access")
       for view, _ in descriptors[inst.args[0]]:
         if view.space == "l1":
           if view.base not in live:
             _fail(f"{item_where} accesses an L1 buffer outside its live interval")
           pending_by_buffer[view.base].add(launch_event)
-      if descriptor.kind in ("EVU", "BOA"):
+      if descriptor.kind == "EVU":
         opaque_events.add(launch_event)
       produced.add(launch_event)
     elif inst.op in (ExecTileOp.WAIT, ExecTileOp.WAITALL):
@@ -831,6 +969,8 @@ def _verify_tile_instructions(
     elif inst.op is ExecTileOp.RET:
       if inst.args or index != len(program.insts) - 1:
         _fail(f"{item_where} must be the unique terminal RET")
+      if am_live:
+        _fail(f"{item_where} retires an unterminated AM chain")
       # RET retires all issued work and remaining views. Explicit FREE is
       # required only for an earlier buffer lifetime end/reuse.
       freed.update(live)
@@ -844,6 +984,8 @@ def _verify_tile_instructions(
     _fail(f"{where} requires exactly one terminal RET")
   if allocated != set(layout_by_id) or freed != set(layout_by_id) or live:
     _fail(f"{where} L1 allocation lifetime is incomplete")
+  if am_allocated != set(am_by_id) or am_finalized != set(am_by_id) or am_live:
+    _fail(f"{where} AM allocation/finalization lifetime is incomplete")
   has_l2_reads = any(
     view.space == "l2" and not writing for views in descriptors.values() for view, writing in views
   )
@@ -2586,7 +2728,7 @@ def verify_compiled_program(program: CompiledProgram, hw: HardwareConfig, sim: S
   """Verify package integrity and executable semantics without graph mutation."""
   if not isinstance(program, CompiledProgram):
     _fail("expected CompiledProgram")
-  if type(program.schema_version) is not int or program.schema_version != 3 or program.compiler_abi != "v3":
+  if type(program.schema_version) is not int or program.schema_version != 4 or program.compiler_abi != "v4":
     _fail("unsupported compiled schema or compiler ABI; recompile from source")
   _fail_indexed_memory_fidelity(program, sim)
   if not _is_frozen(program):

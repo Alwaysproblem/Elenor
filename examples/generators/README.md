@@ -8,6 +8,7 @@ guide 要求的指标表。
 
 | 文件                                           | 作用                                                                                                                                                                                                           |
 | ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `generate_boa_am_matmul.py`                    | 生成 typed AM Matmul fixture `workloads/boa_am_matmul.mlir` 与 `workloads/boa_am_inputs/` 固定输入；`--existing` 同时为既有 typed Matmul fixture 生成输入                                                      |
 | `transformer_common.py`                        | 共享 emit 辅助：Arena contract 计算（`conservative_arena_bytes` + 逐 mode 放行）、`tile.*` op 构造器封装、`write_workload`（header 注释 + `print_workload_ir` + 100 列换行 `scripts.format_mlir.format_text`） |
 | `generate_transformer_prefill.py`              | 生成 `workloads/transformer_prefill_attention_pipeline.mlir`（流水版）与 `..._baseline.mlir`（逐 chunk 串行对照）                                                                                              |
 | `generate_transformer_decode.py`               | 生成 `workloads/transformer_decode_kv_pipeline.mlir`（ping/pong 流水版）与 `..._baseline.mlir`；支持 `--kv-block` / `--num-requests` 变体（写到任意输出路径）                                                  |
@@ -432,7 +433,7 @@ producer 内 software pipeline 更有效**——把 pipeline 从 producer 拆掉
 
 ## 边界
 
-Timing model only：`tile.boa.async` / `tile.evu.async` 不携带 tensor
+Timing model only：`tile.boa.estimate.async` / `tile.evu.async` 不携带 tensor
 operand、无数值执行。这些 workload 验证调度、生命周期与流量，不验证
 Transformer 数值正确性；上述性能数字是 validator 时序模型的输出，不是
 硬件性能承诺。

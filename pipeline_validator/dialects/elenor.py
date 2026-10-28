@@ -32,11 +32,14 @@ from typing import ClassVar, Self, TypeAlias, cast
 from xdsl.dialects.builtin import ArrayAttr, DictionaryAttr, IndexType, IntegerAttr, NoneAttr, StringAttr
 from xdsl.ir import Attribute, Block, Dialect, Operation, ParametrizedAttribute, Region, TypeAttribute
 from xdsl.irdl import (
+  AnyOf,
   AttrSizedOperandSegments,
+  BaseAttr,
   IRDLOperation,
   irdl_attr_definition,
   irdl_op_definition,
   operand_def,
+  opt_operand_def,
   opt_prop_def,
   prop_def,
   region_def,
@@ -232,6 +235,33 @@ class TileL1Buffer(ParametrizedAttribute, TypeAttribute):
   @staticmethod
   def of(dims: Sequence[int], dtype: str) -> TileL1Buffer:
     return TileL1Buffer(ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype))
+
+  @classmethod
+  def parse_parameters(cls, parser: AttrParser) -> list:
+    dims, dtype = _parse_dims_dtype(parser)
+    return [ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype)]
+
+  def print_parameters(self, printer: Printer) -> None:
+    _print_dims_dtype(printer, self.dims, self.dtype.data)
+
+
+@irdl_attr_definition
+class TileAmBuffer(ParametrizedAttribute, TypeAttribute):
+  """Software-managed BOA accumulator capability: ``!tile.am_buffer<64x256xf32>``.
+
+  Produced by ``tile.alloc memory_space = "am"``.  It is not a raw address
+  and never enters the L1 SlotFrame/Arena; only a successfully granted
+  lower-level lease may back a hardware access.  V1 AM carries f32 partial
+  sums only.
+  """
+
+  name = "tile.am_buffer"
+  dims: ArrayAttr
+  dtype: StringAttr
+
+  @staticmethod
+  def of(dims: Sequence[int], dtype: str) -> TileAmBuffer:
+    return TileAmBuffer(ArrayAttr([_index_attr(d) for d in dims]), StringAttr(dtype))
 
   @classmethod
   def parse_parameters(cls, parser: AttrParser) -> list:
@@ -1968,9 +1998,24 @@ class TileSubviewOp(IRDLOperation):
 
 @irdl_op_definition
 class TileAllocOp(IRDLOperation):
-  """``%l1 = tile.alloc shape = [..] dtype = "bf16" alignment = 256 : !tile.l1_buffer<..>``
+  """``%buf = tile.alloc ...`` - tile-local L1 scratch or software-managed AM.
 
-  Tile-local L1 scratch buffer.  Bytes derive from shape x dtype.
+  L1 form (memory_space omitted or ``"l1"``)::
+
+    %l1 = tile.alloc shape = [..] dtype = "bf16" alignment = 256
+        : !tile.l1_buffer<..>
+
+  AM form declares one logical accumulator chain and its final L1
+  destination::
+
+    %acc = tile.alloc memory_space = "am" logical_slot = 0 output(%out)
+        shape = [64, 256] dtype = "f32" alignment = 256
+        : !tile.am_buffer<64x256xf32>
+
+  AM allocation is a source-level request for one lower-level lease; it is
+  not a plain L1 allocation and never enters the L1 Arena/Frame.  ``%out``
+  must be defined earlier and stays reserved as the unique final write
+  destination while the chain is live.
   """
 
   name = "tile.alloc"
@@ -1978,22 +2023,68 @@ class TileAllocOp(IRDLOperation):
   shape = prop_def(ArrayAttr)
   dtype = prop_def(StringAttr)
   alignment = opt_prop_def(IntegerAttr)
+  memory_space = opt_prop_def(StringAttr)
+  logical_slot = opt_prop_def(IntegerAttr)
+  output = opt_operand_def(TileL1Buffer)
 
-  result = result_def(TileL1Buffer)
+  result = result_def(AnyOf((BaseAttr(TileL1Buffer), BaseAttr(TileAmBuffer))))
 
-  def __init__(self, shape: Sequence[int], dtype: str, alignment: int | None = None):
+  OUTPUT_DTYPES: ClassVar[tuple[str, ...]] = ("f32", "bf16", "i8")
+
+  def __init__(
+    self,
+    shape: Sequence[int],
+    dtype: str,
+    alignment: int | None = None,
+    *,
+    memory_space: str | None = None,
+    logical_slot: int | None = None,
+    output=None,
+  ):
+    if memory_space not in (None, "l1", "am"):
+      raise ValueError(f"unsupported tile.alloc memory_space '{memory_space}'")
+    if memory_space == "am":
+      if dtype != "f32":
+        raise ValueError("AM allocation dtype must be f32")
+      if logical_slot not in (0, 1):
+        raise ValueError("AM allocation logical_slot must be 0 or 1")
+      if output is None:
+        raise ValueError("AM allocation requires the bound L1 output operand")
+      output_type = output.type
+      if not isinstance(output_type, TileL1Buffer):
+        raise ValueError("AM allocation output must be an L1 buffer")
+      if tuple(_int_list(output_type.dims)) != tuple(shape):
+        raise ValueError("AM allocation shape must match its bound L1 output shape")
+      if output_type.dtype.data not in self.OUTPUT_DTYPES:
+        raise ValueError("AM output dtype must be one of " + ", ".join(self.OUTPUT_DTYPES))
+      result_type: TileL1Buffer | TileAmBuffer = TileAmBuffer.of(shape, dtype)
+    else:
+      if logical_slot is not None or output is not None:
+        raise ValueError("L1 allocation may not declare logical_slot/output")
+      result_type = TileL1Buffer.of(shape, dtype)
     super().__init__(
-      result_types=[TileL1Buffer.of(shape, dtype)],
+      operands=[output],
+      result_types=[result_type],
       properties=_props(
         {
           "shape": ArrayAttr([_index_attr(d) for d in shape]),
           "dtype": StringAttr(dtype),
           "alignment": None if alignment is None else _index_attr(alignment),
+          "memory_space": None if memory_space is None else StringAttr(memory_space),
+          "logical_slot": None if logical_slot is None else _index_attr(logical_slot),
         }
       ),
     )
 
   def print(self, printer: Printer) -> None:
+    if self.memory_space is not None:
+      _print_str_kw(printer, "memory_space", self.memory_space.data)
+    if self.logical_slot is not None:
+      _print_int_kw(printer, "logical_slot", self.logical_slot.value.data)
+    if self.output is not None:
+      printer.print_string(" output(")
+      printer.print_operand(self.output)
+      printer.print_string(")")
     _print_int_list_kw(printer, "shape", _int_list(self.shape))
     _print_str_kw(printer, "dtype", self.dtype.data)
     if self.alignment is not None:
@@ -2002,14 +2093,50 @@ class TileAllocOp(IRDLOperation):
 
   @classmethod
   def parse(cls, parser: Parser) -> Self:
+    memory_space = _parse_opt_str_kw(parser, "memory_space")
+    logical_slot = _parse_opt_int_kw(parser, "logical_slot")
+    output = None
+    if parser.parse_optional_keyword("output") is not None:
+      parser.parse_punctuation("(")
+      output = parser.parse_operand()
+      parser.parse_punctuation(")")
     shape = _parse_int_list_kw(parser, "shape")
     dtype = _parse_str_kw(parser, "dtype")
     alignment = _parse_opt_int_kw(parser, "alignment")
-    buf_type = cast(TileL1Buffer, _parse_event_type(parser, TileL1Buffer))
+    parser.parse_punctuation(":")
+    buf_type = parser.parse_attribute()
+    if not isinstance(buf_type, (TileL1Buffer, TileAmBuffer)):
+      parser.raise_error("expected !tile.l1_buffer or !tile.am_buffer type")
     buf_dims = _int_list(buf_type.dims)
+    is_am = isinstance(buf_type, TileAmBuffer)
+    if is_am != (memory_space == "am"):
+      parser.raise_error("tile.alloc memory_space and result type must agree")
     if buf_dims != shape or buf_type.dtype.data != dtype:
-      parser.raise_error("tile.alloc shape/dtype and !tile.l1_buffer type must match")
-    return cls(shape, dtype, alignment=alignment)
+      parser.raise_error(f"tile.alloc shape/dtype and {buf_type.name} type must match")
+    if is_am:
+      if dtype != "f32":
+        parser.raise_error("AM allocation dtype must be f32")
+      if logical_slot not in (0, 1):
+        parser.raise_error("AM allocation logical_slot must be 0 or 1")
+      if output is None or not isinstance(output.type, TileL1Buffer):
+        parser.raise_error("AM allocation requires the bound L1 output operand")
+      if tuple(_int_list(output.type.dims)) != tuple(shape):
+        parser.raise_error("AM allocation shape must match its bound L1 output shape")
+      if output.type.dtype.data not in cls.OUTPUT_DTYPES:
+        parser.raise_error("AM output dtype must be one of " + ", ".join(cls.OUTPUT_DTYPES))
+    elif logical_slot is not None or output is not None:
+      parser.raise_error("L1 allocation may not declare logical_slot/output")
+    try:
+      return cls(
+        shape,
+        dtype,
+        alignment=alignment,
+        memory_space=memory_space,
+        logical_slot=logical_slot,
+        output=output,
+      )
+    except ValueError as exc:
+      parser.raise_error(str(exc))
 
 
 @irdl_op_definition
@@ -2408,20 +2535,140 @@ class TileEvuOp(_TileAsyncOp):
 
 @irdl_op_definition
 class TileBoaOp(_TileAsyncOp):
-  """``%e = tile.boa.async "matmul" m = M n = N k = K ops = S : !tile.event<t>``"""
+  """``%e = tile.boa.async "matmul" ins(%a, %b) outs(%out) acc(%acc) m=.. n=.. k=.. seq=..``
+
+  Typed numerical Matmul with four explicit SSA operands: two BF16 L1
+  inputs, the L1 final destination bound by the AM allocation, and the
+  AM FP32 accumulator capability.  The only accepted op name is
+  ``"matmul"``; control-only FLOP estimates use ``tile.boa.estimate``.
+
+  Flags are orthogonal:
+
+  - no flag: INIT, ``acc := A x B``, no L1 output write;
+  - ``accumulate``: ADD, ``acc += A x B``, no L1 output write;
+  - ``output``: INIT + FINAL, one-shot GEMM, final L1 output write and
+    automatic AM release;
+  - ``accumulate output``: ADD + FINAL of this very product.
+  """
 
   name = "tile.boa.async"
+
+  op_name = prop_def(StringAttr)
+  a = operand_def(TileL1Buffer)
+  b = operand_def(TileL1Buffer)
+  out = operand_def(TileL1Buffer)
+  acc = operand_def(TileAmBuffer)
+  m = prop_def(IntegerAttr)
+  n = prop_def(IntegerAttr)
+  k = prop_def(IntegerAttr)
+  seq = prop_def(IntegerAttr)
+  accumulate = opt_prop_def(IntegerAttr)
+  output = opt_prop_def(IntegerAttr)
+
+  def __init__(
+    self,
+    a,
+    b,
+    out,
+    acc,
+    m: int,
+    n: int,
+    k: int,
+    seq: int,
+    tag: str,
+    *,
+    accumulate: bool = False,
+    output: bool = False,
+  ):
+    self._finish(
+      tag,
+      operands=[a, b, out, acc],
+      properties=_props(
+        {
+          "op_name": StringAttr("matmul"),
+          "m": _index_attr(m),
+          "n": _index_attr(n),
+          "k": _index_attr(k),
+          "seq": _index_attr(seq),
+          "accumulate": None if not accumulate else _index_attr(1),
+          "output": None if not output else _index_attr(1),
+        }
+      ),
+    )
+
+  def print(self, printer: Printer) -> None:
+    printer.print_string(" ")
+    printer.print_string_literal(self.op_name.data)
+    printer.print_string(" ins(")
+    printer.print_operand(self.a)
+    printer.print_string(", ")
+    printer.print_operand(self.b)
+    printer.print_string(") outs(")
+    printer.print_operand(self.out)
+    printer.print_string(") acc(")
+    printer.print_operand(self.acc)
+    printer.print_string(")")
+    _print_int_kw(printer, "m", self.m.value.data)
+    _print_int_kw(printer, "n", self.n.value.data)
+    _print_int_kw(printer, "k", self.k.value.data)
+    _print_int_kw(printer, "seq", self.seq.value.data)
+    if self.accumulate is not None:
+      printer.print_string(" accumulate")
+    if self.output is not None:
+      printer.print_string(" output")
+    _print_event_type(printer, self.result.type)
+
+  @classmethod
+  def parse(cls, parser: Parser) -> Self:
+    op_name = parser.parse_str_literal()
+    if op_name != "matmul":
+      parser.raise_error("typed tile.boa.async only supports \"matmul\"")
+    parser.parse_keyword("ins")
+    parser.parse_punctuation("(")
+    a = parser.parse_operand()
+    parser.parse_punctuation(",")
+    b = parser.parse_operand()
+    parser.parse_punctuation(")")
+    parser.parse_keyword("outs")
+    parser.parse_punctuation("(")
+    out = parser.parse_operand()
+    parser.parse_punctuation(")")
+    parser.parse_keyword("acc")
+    parser.parse_punctuation("(")
+    acc = parser.parse_operand()
+    parser.parse_punctuation(")")
+    m = _parse_int_kw(parser, "m")
+    n = _parse_int_kw(parser, "n")
+    k = _parse_int_kw(parser, "k")
+    seq = _parse_int_kw(parser, "seq")
+    accumulate = parser.parse_optional_keyword("accumulate") is not None
+    output = parser.parse_optional_keyword("output") is not None
+    event_type = _parse_event_type(parser, TileEvent)
+    tag = event_type.tag.data  # type: ignore[attr-defined]
+    return cls(
+      a, b, out, acc, m, n, k, seq, tag, accumulate=accumulate, output=output
+    )
+
+
+@irdl_op_definition
+class TileBoaEstimateOp(_TileAsyncOp):
+  """``%e = tile.boa.estimate.async "matmul" m=.. n=.. k=.. ops=.. : !tile.event<t>``
+
+  Timing-only FLOP/control-gate estimate.  It declares no AM computation,
+  owns no operands, produces no numerical C, and must never be used to
+  prove typed AM behaviour.  This is the explicit migration target for
+  the former operand-less BOA syntax.
+  """
+
+  name = "tile.boa.estimate.async"
 
   op_name = prop_def(StringAttr)
   m = prop_def(IntegerAttr)
   n = prop_def(IntegerAttr)
   k = prop_def(IntegerAttr)
   boa_ops = prop_def(IntegerAttr)
-  accumulate = opt_prop_def(IntegerAttr)
 
-  def __init__(
-    self, op_name: str, m: int, n: int, k: int, boa_ops: int, tag: str, accumulate: bool = False
-  ):
+  def __init__(self, op_name: str, m: int, n: int, k: int, boa_ops: int, tag: str):
     self._finish(
       tag,
       properties=_props(
@@ -2431,7 +2678,6 @@ class TileBoaOp(_TileAsyncOp):
           "n": _index_attr(n),
           "k": _index_attr(k),
           "boa_ops": _index_attr(boa_ops),
-          "accumulate": None if not accumulate else _index_attr(1),
         }
       ),
     )
@@ -2443,8 +2689,6 @@ class TileBoaOp(_TileAsyncOp):
     _print_int_kw(printer, "n", self.n.value.data)
     _print_int_kw(printer, "k", self.k.value.data)
     _print_int_kw(printer, "ops", self.boa_ops.value.data)
-    if self.accumulate is not None:
-      printer.print_string(" accumulate")
     _print_event_type(printer, self.result.type)
 
   @classmethod
@@ -2454,10 +2698,9 @@ class TileBoaOp(_TileAsyncOp):
     n = _parse_int_kw(parser, "n")
     k = _parse_int_kw(parser, "k")
     boa_ops = _parse_int_kw(parser, "ops")
-    accumulate = parser.parse_optional_keyword("accumulate") is not None
     event_type = _parse_event_type(parser, TileEvent)
     tag = event_type.tag.data  # type: ignore[attr-defined]
-    return cls(op_name, m, n, k, boa_ops, tag, accumulate=accumulate)
+    return cls(op_name, m, n, k, boa_ops, tag)
 
 
 @irdl_op_definition
@@ -2570,6 +2813,7 @@ operations: list[type[Operation]] = [
   TilePowOp,
   TileEvuOp,
   TileBoaOp,
+  TileBoaEstimateOp,
   TileAwaitOp,
   TileSignalOp,
   TileReturnOp,
@@ -2591,6 +2835,7 @@ Elenor = Dialect(
     NestGlobalView,
     NestL2View,
     TileL1Buffer,
+    TileAmBuffer,
     NestTask,
     TaskRange,
     NestAggregate,
@@ -2638,7 +2883,9 @@ __all__ = [
   "TaskRange",
   "TileActionLike",
   "TileAllocOp",
+  "TileAmBuffer",
   "TileAwaitOp",
+  "TileBoaEstimateOp",
   "TileBoaOp",
   "TileEvent",
   "TileEvuOp",

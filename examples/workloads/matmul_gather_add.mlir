@@ -5,8 +5,7 @@ builtin.module {
       %lhs_l2 : !nest.l2_buffer<128x64xbf16>,
       %rhs_l2 : !nest.l2_buffer<64x128xbf16>,
       %indices_l2 : !nest.l2_buffer<1024xi32>,
-      %output_l2 : !nest.l2_buffer<1x128x128xbf16>,
-      %acc_init_l2 : !nest.l2_buffer<1x128x128xbf16>)
+      %output_l2 : !nest.l2_buffer<1x128x128xbf16>)
                 resource_contract = #tile.resources<allowed_profiles = [1, 2],
           tile_l1_spm_bytes_per_context = 73728,
           l1_cache = {required = false, access = "read", bypass = "allowed", target_bytes = 65536},
@@ -25,9 +24,6 @@ builtin.module {
     %output_view = tile.subview %output_l2 task = %task task_dim = 0
         offsets = [0, 0, 0] sizes = [1, 128, 128] strides = [1, 1, 1]
         : !nest.l2_view<1x128x128xbf16>
-    %acc_init_view = tile.subview %acc_init_l2
-        offsets = [0, 0, 0] sizes = [1, 128, 128] strides = [1, 1, 1]
-        : !nest.l2_view<1x128x128xbf16>
     %lhs_l1 = tile.alloc shape = [128, 64] dtype = "bf16"
         alignment = 256 : !tile.l1_buffer<128x64xbf16>
     %rhs_l1 = tile.alloc shape = [64, 128] dtype = "bf16"
@@ -36,21 +32,23 @@ builtin.module {
         alignment = 64 : !tile.l1_buffer<16xi32>
     %gather_dst = tile.alloc shape = [256] dtype = "i8"
         alignment = 64 : !tile.l1_buffer<256xi8>
-    %matmul_dst = tile.alloc shape = [128, 128] dtype = "bf16"
+    %out = tile.alloc memory_space = "l1" shape = [128, 128] dtype = "bf16"
         alignment = 256 : !tile.l1_buffer<128x128xbf16>
+    %acc = tile.alloc memory_space = "am" logical_slot = 0 output(%out)
+        shape = [128, 128] dtype = "f32" alignment = 256
+        : !tile.am_buffer<128x128xf32>
     %lhs_ready = tile.load.async %lhs_view into %lhs_l1
         : !tile.event<"lhs_ready">
     %rhs_ready = tile.load.async %rhs_view into %rhs_l1
         : !tile.event<"rhs_ready">
     %indices_ready = tile.load.async %indices_view into %indices_l1
         : !tile.event<"indices_ready">
-    %acc_ready = tile.load.async %acc_init_view into %matmul_dst
-        : !tile.event<"acc_ready">
-    tile.await %lhs_ready, %rhs_ready, %indices_ready, %acc_ready
+    tile.await %lhs_ready, %rhs_ready, %indices_ready
     tile.signal input_released(%task)
 
     %matmul_done = tile.boa.async "matmul"
-        m = 128 n = 128 k = 64 ops = 2097152
+        ins(%lhs_l1, %rhs_l1) outs(%out) acc(%acc)
+        m = 128 n = 128 k = 64 seq = 0 output
         : !tile.event<"matmul_done">
     tile.await %matmul_done
 
@@ -67,7 +65,7 @@ builtin.module {
     tile.free %rhs_l1
     tile.free %indices_l1
     tile.free %gather_dst
-    %l2_store_done = tile.store.async %matmul_dst into %output_view
+    %l2_store_done = tile.store.async %out into %output_view
         : !tile.event<"l2_store_done">
     tile.await %l2_store_done
     tile.signal output_ready(%task)
@@ -79,10 +77,9 @@ builtin.module {
       %rhs : !nest.global_memref<64x128xbf16>,
       %table : !nest.global_memref<8388608xi8>,
       %indices : !nest.global_memref<1024xi32>,
-      %output : !nest.global_memref<1x128x128xbf16>,
-      %acc_init : !nest.global_memref<1x128x128xbf16>) placement = 1
+      %output : !nest.global_memref<1x128x128xbf16>) placement = 1
                 resource_contract = #nest.context_resources<l2_mode = 1, allowed_profiles = [1, 2],
-          logical_tasks = 1, l2_spm_bytes = 102400, requested_contexts_per_tile = 1,
+          logical_tasks = 1, l2_spm_bytes = 69632, requested_contexts_per_tile = 1,
           l2_cache = {
             required = false, access = "read", bypass = "allowed", target_bytes = 65536}
             > {
@@ -101,9 +98,6 @@ builtin.module {
     %output_global = nest.subview %output
         offsets = [0, 0, 0] sizes = [1, 128, 128] strides = [1, 1, 1]
         : !nest.global_view<1x128x128xbf16>
-    %acc_init_global = nest.subview %acc_init
-        offsets = [0, 0, 0] sizes = [1, 128, 128] strides = [1, 1, 1]
-        : !nest.global_view<1x128x128xbf16>
 
     %lhs_buffer = nest.alloc slot = "mga_lhs" role = "in"
         shape = [128, 64] dtype = "bf16" alignment = 256
@@ -117,9 +111,6 @@ builtin.module {
     %output_buffer = nest.alloc slot = "mga_output" role = "out"
         shape = [1, 128, 128] dtype = "bf16" alignment = 256
         : !nest.l2_buffer<1x128x128xbf16>
-    %acc_init_buffer = nest.alloc slot = "mga_acc_init" role = "in"
-        shape = [1, 128, 128] dtype = "bf16" alignment = 256
-        : !nest.l2_buffer<1x128x128xbf16>
 
     %lhs_prefetched = nest.dma.prefetch.async %lhs_global into %lhs_buffer
         : !nest.event<"lhs_prefetched">
@@ -127,27 +118,24 @@ builtin.module {
         : !nest.event<"rhs_prefetched">
     %indices_prefetched = nest.dma.prefetch.async %indices_global into %indices_buffer
         : !nest.event<"indices_prefetched">
-    %acc_prefetched = nest.dma.prefetch.async %acc_init_global into %acc_init_buffer
-        : !nest.event<"acc_prefetched">
 
     %tasks = nest.task.range from = 0 to = 1 : !nest.task_range
     %grid_done, %input_released, %output_ready =
         nest.dispatch.tasks.async @matmul_gather_add_tile l1_mode = 1
         tasks(%tasks) globals(%table_global)
-        bindings(%lhs_buffer, %rhs_buffer, %indices_buffer, %output_buffer, %acc_init_buffer)
-        ins(%lhs_buffer, %rhs_buffer, %indices_buffer, %acc_init_buffer)
+        bindings(%lhs_buffer, %rhs_buffer, %indices_buffer, %output_buffer)
+        ins(%lhs_buffer, %rhs_buffer, %indices_buffer)
         outs(%output_buffer)
         signal_policy {
           input_released = #nest.aggregate<all_tasks>,
           output_ready = #nest.aggregate<all_tasks>
         }
-        depends_on(%lhs_prefetched, %rhs_prefetched, %indices_prefetched, %acc_prefetched)
+        depends_on(%lhs_prefetched, %rhs_prefetched, %indices_prefetched)
         : (!nest.event<"grid_done">, !nest.event<"input_released">,
            !nest.event<"output_ready">)
     nest.release %lhs_buffer depends_on(%input_released, %lhs_prefetched)
     nest.release %rhs_buffer depends_on(%input_released, %rhs_prefetched)
     nest.release %indices_buffer depends_on(%input_released, %indices_prefetched)
-    nest.release %acc_init_buffer depends_on(%input_released, %acc_prefetched)
     %hbm_store_done = nest.dma.store.async %output_buffer into %output_global
         depends_on(%output_ready) : !nest.event<"hbm_store_done">
     nest.release %output_buffer depends_on(%hbm_store_done)
@@ -160,10 +148,9 @@ builtin.module {
       %rhs : !nest.global_memref<64x128xbf16>,
       %table : !nest.global_memref<8388608xi8>,
       %indices : !nest.global_memref<1024xi32>,
-      %output : !nest.global_memref<1x128x128xbf16>,
-      %acc_init : !nest.global_memref<1x128x128xbf16>) {
+      %output : !nest.global_memref<1x128x128xbf16>) {
     %done = nexus.submit_context.async
-        @matmul_gather_add_context(%lhs, %rhs, %table, %indices, %output, %acc_init)
+        @matmul_gather_add_context(%lhs, %rhs, %table, %indices, %output)
         : !nexus.event<"matmul_gather_add_done">
     nexus.await %done
     nexus.return

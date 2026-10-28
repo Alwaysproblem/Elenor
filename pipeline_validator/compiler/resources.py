@@ -296,12 +296,45 @@ def _segments_overlap(left: BufferLayout, right: BufferLayout) -> bool:
   return False
 
 
+def _am_peak_live(program: ExecTileProgram) -> int:
+  """Prove linear AM allocation/finalization and return peak live leases."""
+  live: set[str] = set()
+  peak = 0
+  for inst in program.insts:
+    if inst.op is ExecTileOp.ALLOC_AM:
+      if len(inst.args) != 2 or inst.args[0] in live:
+        raise ValueError(f"Tile Program {program.name!r} has an invalid AM allocation")
+      live.add(inst.args[0])
+      peak = max(peak, len(live))
+    elif inst.op is ExecTileOp.LAUNCH_BOA:
+      descriptor = program.descriptors.get(inst.args[0]) if inst.args else None
+      matmul = descriptor.params.get("matmul") if descriptor is not None else None
+      if matmul is not None:
+        if matmul.am not in live:
+          raise ValueError(f"Tile Program {program.name!r} finalizes an absent AM lease")
+        if matmul.final:
+          live.remove(matmul.am)
+  if live:
+    raise ValueError(f"Tile Program {program.name!r} leaves an unterminated AM chain")
+  return peak
+
+
 def _prepare_program(
-  program: ExecTileProgram, registry: ProfileRegistry, slot_capacity: int
+  program: ExecTileProgram, registry: ProfileRegistry, slot_capacity: int, hw
 ) -> ExecTileProgram:
   contract = program.resource_contract
   if not isinstance(contract, TileResources):
     raise ValueError(f"Tile Program {program.name!r} requires resource_contract")
+  for am in program.am_buffers:
+    if am.bytes > hw.boa_am_slot_capacity_bytes:
+      raise ValueError(
+        f"Tile Program {program.name!r} AM buffer {am.name!r} needs {am.bytes} bytes, "
+        f"target slot capacity is {hw.boa_am_slot_capacity_bytes}"
+      )
+  if _am_peak_live(program) > hw.boa_am_slots_per_context:
+    raise ValueError(
+      f"Tile Program {program.name!r} exceeds the per-context AM lease quota"
+    )
   layout = allowed_layouts(
     program.l1_buffers,
     registry,
@@ -537,10 +570,13 @@ def prepare_resources(
     envelopes: dict[int, list[int]] = {}
     child_modes: set[int] = set()
     l1_layout_hashes: set[str] = set()
+    am_slot_bytes: set[int] = set()
+    am_peak_live = 0
+    am_chains = 0
     for role_id, role in task.role_bindings.items():
       program = program_cache.get(id(role.tile_program))
       if program is None:
-        program = _prepare_program(role.tile_program, registry, slot_capacity)
+        program = _prepare_program(role.tile_program, registry, slot_capacity, hw)
         program_cache[id(role.tile_program)] = program
       tile_contract = program.resource_contract
       tile_layout = program.layout
@@ -548,6 +584,10 @@ def prepare_resources(
         raise ValueError(f"Tile Program {program.name!r} has incomplete prepared resources")
       child_modes.update(tile_contract.allowed_profiles)
       l1_layout_hashes.add(tile_layout.layout_hash)
+      for am in program.am_buffers:
+        am_slot_bytes.add(am.bytes)
+      am_peak_live = max(am_peak_live, _am_peak_live(program))
+      am_chains = max(am_chains, len(program.am_buffers))
       for mode in tile_contract.allowed_profiles:
         profile = registry.profile("l1", mode)
         envelope = envelopes.setdefault(mode, [0] * profile.banks)
@@ -598,6 +638,9 @@ def prepare_resources(
       "l1_layout_hashes": tuple(sorted(l1_layout_hashes)),
       "l1_modes": tuple(sorted(child_modes)),
       "l2_modes": tuple(contract.allowed_profiles),
+      "am_slot_bytes": tuple(sorted(am_slot_bytes)),
+      "am_peak_live": am_peak_live,
+      "am_chains": am_chains,
     }
   _prove_shared_l2_capacity(prepared, registry)
   if isinstance(entry, ExecModel):

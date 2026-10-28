@@ -16,7 +16,7 @@ binary ABI **尚未冻结**，不将模拟周期当器件性能。
 ```text
 source xDSL ModuleOp
   └─ compiler.compile_program(...)            # 证明 + lowering
-       └─ CompiledProgram（不可变 artifact，schema_version=2 / compiler_abi=v2）
+       └─ CompiledProgram（不可变 artifact，schema_version=4 / compiler_abi=v4）
             └─ loader.load_program(...)       # 只读加载，不导入 compiler
                  └─ LoadedProgram
                       └─ Simulator.run(LoadedProgram)   # 唯一接受的输入类型
@@ -169,7 +169,9 @@ generation, tile)` 为键约束同 Tile 共驻 Task 数，只在 Task 安全退�
 未初始化读（无隐式 zero-fill）、校验 host seed 覆盖、读腿完成时捕获源字节、写腿完成
 时才提交目标字节。没有 `ByteStore` 时，Gather 的命中序列是源码 authored 的确定性
 profile，报告中如实标注 `deterministic_profiled_not_address_or_value_accurate`——
-cache 容量从不预测命中率，BOA/EVU/USE 不计算张量数值。
+cache 容量从不预测命中率。typed `tile.boa.async` 在 `full_memory` 下执行
+真实 BF16→FP32 Matmul、AM 分步提交与 f32/BF16 最终输出；
+`tile.boa.estimate.async`、EVU、USE 仍不计算张量数值。
 
 ## 设计定位与组合创新
 
@@ -224,7 +226,7 @@ pipeline_validator/
 ├── tile_group.py        # root/Grid 准入与退役
 ├── tile.py              # 每 Tile Task 准入、UCE context、eligible-head RR
 ├── tile_group_sequencer.py
-├── engines.py           # BOA/EVU/USE Roofline 单 job 时序 + MFE 多 lane
+├── engines.py           # typed BOA 数值/commit 时序 + estimate/EVU/USE Roofline + MFE 多 lane
 ├── memory/              # arena / profile_controller / transfer / cache / allocator /
 │                        # noc / mshr / byte_store / l1_slot_frame / hbm_region / payload
 ├── stream_queue.py      # credit/backpressure/EOS 生产者-消费者契约
@@ -305,7 +307,8 @@ python -m pipeline_validator --compiled-file artifacts/review.json \
 
 BOA 目标为 dense、EVU 为 irregular/vector、MFE 为数据流、USE 为
 state/control；它们的内部硬件规格不等于 validator 中 timing
-descriptor 的张量数值实现。Edge（8–16 Tile）、Balanced（64 Tile）、
+descriptor 的完整数值实现（typed BOA 除外：其 AM Matmul 数值路径已实现，
+EVU/USE 与 estimate 仍为时序模型）。Edge（8–16 Tile）、Balanced（64 Tile）、
 High End（128 Tile）是待 PPA 验证的产品建议，不是本轮仿真规模。
 图像是历史器件组织示意；当前控制拓扑以主规格 §7 的 ASCII 图为准。
 

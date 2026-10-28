@@ -37,7 +37,8 @@ builtin.module {
     %load = tile.load.async %iv into %local : !tile.event<"load">
     tile.await %load
     tile.signal input_released(%task)
-    %compute = tile.boa.async "matmul" m = 32 n = 32 k = 32 ops = 65536 : !tile.event<"compute">
+    %compute = tile.boa.estimate.async "matmul" m = 32 n = 32 k = 32 ops = 65536
+      : !tile.event<"compute">
     tile.await %compute
     %store = tile.store.async %local into %ov : !tile.event<"store">
     tile.await %store

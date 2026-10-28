@@ -81,7 +81,9 @@ LoadedProgram → Simulator.run`；Simulator 不包含源码 lowering fallback�
 - `timing_only`/`runtime` 把普通 transfer 折叠为单腿带宽+launch 延迟，
   因而不提供逐 Bank 时序结论；但二者仍执行资源合同、Profile/维护命令、
   gate、generation 和静态预算检查。
-- BOA/EVU/USE 是 Roofline/launch 时序模型，单 job 非流水；MFE 有可配置
+- `tile.boa.async` typed Matmul 在 full_memory 下执行真实 BF16→FP32 数值、
+  AM 分步提交与最终 f32/BF16 输出；`tile.boa.estimate.async`、EVU、USE 仍是
+  Roofline/launch 时序模型，单 job 非流水；MFE 有可配置
   load/store lane，每 lane 内串行，未建模更多真实端口/仲裁细节。
 - Stream Queue 模拟 credit/backpressure/EOS，但不是 RTL FIFO/CDC 对拍。
 - `clock_mhz` 与 CPU `issue_width` 都是模拟参数，不是实测 Fmax 或 CPU IPC。
@@ -118,7 +120,7 @@ LoadedProgram → Simulator.run`；Simulator 不包含源码 lowering fallback�
 
 ## 数值与 Cache 证明边界
 
-- 默认模拟不执行 BOA/EVU/USE tensor 算术；这些 op 的 bytes/ops 只驱动
+- `tile.boa.estimate.async` 与 EVU/USE 不执行 tensor 算术；这些 op 的 bytes/ops 只驱动
   时序与资源模型。
 - Gather 仍由源码 `tile.profiled.access` 显式给出
   `L1_HIT`/`L2_HIT`/`HBM_MISS`。Cache 容量不会推导命中率，也不会把 hit
@@ -129,7 +131,7 @@ LoadedProgram → Simulator.run`；Simulator 不包含源码 lowering fallback�
 - 可选 `ByteStore` 只在 `full_memory` 下提供稀疏、逐字节有效性 oracle：
   host seed 必须落在实际 binding，未初始化读取报错，read leg 完成时捕获
   bytes，write leg 完成时才提交目的。它能证明真实 copy 路径和显式绑定
-  source range 的 Gather/Cache 维护结果，但不会把 BOA/EVU/USE 升级成
+  source range 的 Gather/Cache 维护结果，但不会把 estimate/EVU/USE 升级成
   tensor 数值模拟。
 - 非 oracle Gather 的 Cache provenance 是 allocation-qualified 的保守
   whole-view 范围；oracle Gather 必须逐调用

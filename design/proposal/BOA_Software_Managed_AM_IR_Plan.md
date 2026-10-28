@@ -1,6 +1,6 @@
 # 软件管理 AM 与 BOA Matmul IR 改造计划（硬件实现前置）
 
-- 状态：**独立中文实施计划，待 review；按最新范围，本次不增加源级分支/重试 MLIR，未修改实现代码。**
+- 状态：**已按本计划完成硬件前置软件 gate；§3.4 源级分支/重试 MLIR 仍不在本次范围。实施记录见 [实施报告](BOA_Software_Managed_AM_IR_Implementation_Report.md)。**
 - 范围：先完成当前 pipeline validator 的 AM/Matmul 源语义、compiler、artifact、资源/数值/周期模型和调用方迁移；具体分支与重试处理留给更低层 IR／执行协议后续考虑，不作为本次软件 gate。
 - 依据：[共享 AM V1](../../nexus_shared_am_v1_requirements_and_design.md)、[硬件与系统 proposal](BOA_Gemmini_Integration_Design.md)，以及本轮软件管理 AM 的用户确认。
 - 本计划只展开软件/IR 前置任务；不是整个硬件任务的实施授权。下文新语法、类型、类名、测试和生成器均为**拟实现接口**，不是当前仓库已支持的能力。
@@ -26,18 +26,18 @@
 
 ## 2. 当前仓库事实与改造入口
 
-| 层         | 当前入口与行为                                                                                                                                                    | 需要改变                                                                          |
-| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| 源类型     | [elenor.py](../../pipeline_validator/dialects/elenor.py) `TileL1Buffer`，222–242 行                                                                               | 增加独立 AM 类型，不复用 L1 冒充 AM；本次不增加 TRY 状态/重试 token 类型          |
-| allocation | 同文件 `TileAllocOp`，1970–2012 行，只有 shape/dtype/alignment，结果固定 TileL1Buffer                                                                             | 按显式 memory_space 分派，AM 走动态租约，L1 原路径保留                            |
-| Matmul     | 同文件 `TileBoaOp`，2410–2460 行，只有 m/n/k/ops/accumulate，无 operand                                                                                           | 增加 A/B/out/acc、seq、output 和明确内存 effect；源级仍返回一个完成事件           |
-| Tile 控制  | `TileProgramDefOp.body=region_def("single_block")`；[workload_ir.py](../../pipeline_validator/workload_ir.py) `_body_ops` 同样要求单 block                        | 本次保持该约定，不新增 branch、label、循环或源级重试控制                          |
-| lowering   | [lowering.py](../../pipeline_validator/compiler/lowering.py) 845–854、892–927 行                                                                                  | AM 不再进入 ExecL1Buffer、L1 Arena 或 ALLOC_L1；Matmul 生成 typed descriptor      |
-| layout     | [resources.py](../../pipeline_validator/compiler/resources.py) `layout_buffers`、`conservative_arena_bytes`                                                       | 分别核算 L1 buffer 与 AM 动态 slot 需求，不给所有 context 永久预留两槽            |
-| 执行/codec | [execution_ir.py](../../pipeline_validator/execution_ir.py) `ExecTileProgram/ExecEngineDesc`；[compiled_program.py](../../pipeline_validator/compiled_program.py) | 增加 typed AM/Matmul 数据和闭合 codec；不为本次新增控制流 opcode；当前严格 v3/v3  |
-| 独立验证   | [execution_verifier.py](../../pipeline_validator/execution_verifier.py) 738–846 行                                                                                | 在现有线性检查上补 AM/operand/模式/生命周期验证；CFG 与路径敏感分析不在此次范围   |
-| runtime    | [tile.py](../../pipeline_validator/tile.py) ALLOC_L1、launch queue、local event、RET；[engines.py](../../pipeline_validator/engines.py) `BOAEngine`               | 新增真实 AM 所有权、非阻塞申请/提交、多完成边界、自动 drain；BOA 当前仍是延迟模型 |
-| 事件       | [event_table.py](../../pipeline_validator/runtime/event_table.py) owner/generation/consumer_refs；Tile-local id 为 `ctx{ctx_id}:{local_name}`                     | 复用事件管理，但新增动态尝试/链/步骤实例身份，防止重试、slot 和 context 重用误投  |
+| 层         | 当前入口与行为                                                                                                                                                    | 需要改变                                                                                     |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| 源类型     | [elenor.py](../../pipeline_validator/dialects/elenor.py) `TileL1Buffer`，222–242 行                                                                               | 增加独立 AM 类型，不复用 L1 冒充 AM；本次不增加 TRY 状态/重试 token 类型                     |
+| allocation | 同文件 `TileAllocOp`，1970–2012 行，只有 shape/dtype/alignment，结果固定 TileL1Buffer                                                                             | 按显式 memory_space 分派，AM 走动态租约，L1 原路径保留                                       |
+| Matmul     | 同文件 `TileBoaOp`，2410–2460 行，只有 m/n/k/ops/accumulate，无 operand                                                                                           | 增加 A/B/out/acc、seq、output 和明确内存 effect；源级仍返回一个完成事件                      |
+| Tile 控制  | `TileProgramDefOp.body=region_def("single_block")`；[workload_ir.py](../../pipeline_validator/workload_ir.py) `_body_ops` 同样要求单 block                        | 本次保持该约定，不新增 branch、label、循环或源级重试控制                                     |
+| lowering   | [lowering.py](../../pipeline_validator/compiler/lowering.py) 845–854、892–927 行                                                                                  | AM 不再进入 ExecL1Buffer、L1 Arena 或 ALLOC_L1；Matmul 生成 typed descriptor                 |
+| layout     | [resources.py](../../pipeline_validator/compiler/resources.py) `layout_buffers`、`conservative_arena_bytes`                                                       | 分别核算 L1 buffer 与 AM 动态 slot 需求，不给所有 context 永久预留两槽                       |
+| 执行/codec | [execution_ir.py](../../pipeline_validator/execution_ir.py) `ExecTileProgram/ExecEngineDesc`；[compiled_program.py](../../pipeline_validator/compiled_program.py) | 增加 typed AM/Matmul 数据和闭合 codec；不为本次新增控制流 opcode；当前严格 v4/v4（本次实现） |
+| 独立验证   | [execution_verifier.py](../../pipeline_validator/execution_verifier.py) 738–846 行                                                                                | 在现有线性检查上补 AM/operand/模式/生命周期验证；CFG 与路径敏感分析不在此次范围              |
+| runtime    | [tile.py](../../pipeline_validator/tile.py) ALLOC_L1、launch queue、local event、RET；[engines.py](../../pipeline_validator/engines.py) `BOAEngine`               | 新增真实 AM 所有权、非阻塞申请/提交、多完成边界、自动 drain；BOA 当前仍是延迟模型            |
+| 事件       | [event_table.py](../../pipeline_validator/runtime/event_table.py) owner/generation/consumer_refs；Tile-local id 为 `ctx{ctx_id}:{local_name}`                     | 复用事件管理，但新增动态尝试/链/步骤实例身份，防止重试、slot 和 context 重用误投             |
 
 当前正式源 IR 是单 block，独立 verifier 拒绝 label，WAIT arity=1、WAITALL 为 all；**本次保持这些控制流边界**。这不是 AM 类型和 Matmul operand 改造必须先补齐的 CFG 缺口；相关低层分支与重试设计保留在 §3.4，后续再考虑。
 

@@ -1081,7 +1081,9 @@ def _program_subviews_of_formal(prog: TileProgramDefOp, formal_pos: int) -> list
 def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[int]]:
   from .dialects.elenor import (
     TileAllocOp,
+    TileAmBuffer,
     TileAwaitOp,
+    TileBoaEstimateOp,
     TileBoaOp,
     TileEvuOp,
     TileFreeOp,
@@ -1137,6 +1139,11 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
   freed_l1: set = set()
   l1_access_events: dict = {}
   opaque_compute_events: set = set()
+  # AM capabilities are not L1 buffers: they own a separate linear
+  # lifetime (allocation -> INIT -> ADD* -> one FINAL) and a reserved L1
+  # output binding that must stay live until that FINAL completes.
+  am_live: dict = {}
+  am_bound_outputs: dict = {}
 
   def require_live_l1(buffer, operand_description: str) -> None:
     owner = buffer.owner
@@ -1155,6 +1162,21 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
         f"{operand_description} must be an earlier tile.alloc result from the current tile.program"
       )
 
+  def require_live_am(buffer, operand_description: str) -> dict:
+    info = am_live.get(buffer)
+    if info is None:
+      raise VerifyException(
+        f"{operand_description} must be an earlier, not yet finalized AM allocation"
+        " from the current tile.program"
+      )
+    return info
+
+  def require_matmul_shape(buffer, dims: tuple[int, ...], dtype: str, description: str) -> None:
+    if tuple(_int_list(buffer.type.dims)) != dims or buffer.type.dtype.data != dtype:
+      raise VerifyException(
+        f"{description} must be {dims} of type {dtype}"
+      )
+
   for op in body:
     if isinstance(op, TileSubviewOp):
       _verify_tile_subview(op, block)
@@ -1162,6 +1184,11 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
 
     if isinstance(op, TileFreeOp):
       buffer = op.buffer
+      if buffer in am_live or buffer in am_bound_outputs:
+        raise VerifyException(
+          f"tile.free in '@{prog.sym_name.data}' may not release a live AM capability"
+          " or its bound final L1 output"
+        )
       owner = buffer.owner
       if not isinstance(owner, TileAllocOp) or owner not in body or buffer not in defined_l1:
         raise VerifyException(
@@ -1189,7 +1216,16 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
 
     if isinstance(
       op,
-      (TileLoadOp, TileStoreOp, TileGatherOp, TileScatterOp, TilePowOp, TileEvuOp, TileBoaOp),
+      (
+        TileLoadOp,
+        TileStoreOp,
+        TileGatherOp,
+        TileScatterOp,
+        TilePowOp,
+        TileEvuOp,
+        TileBoaOp,
+        TileBoaEstimateOp,
+      ),
     ):
       if not isinstance(op.result.type, TileEvent):
         raise VerifyException(f"expected tile.event result type in '{op.name}'")
@@ -1198,7 +1234,7 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
         raise VerifyException(f"duplicate event tag '{tag}' in tile program '@{prog.sym_name.data}'")
       seen_events.add(tag)
       defined_events.add(op.result)
-      if isinstance(op, (TilePowOp, TileEvuOp, TileBoaOp)):
+      if isinstance(op, (TilePowOp, TileEvuOp, TileBoaEstimateOp)):
         opaque_compute_events.add(op.result)
       # Rule 9: transfer byte equality (load/store only)
       if isinstance(op, TileLoadOp):
@@ -1277,6 +1313,63 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
         indexed_prior_by_formal.setdefault(destination_index, []).append(
           (op, _indexed_record_spans(op), op.result, op.scope)
         )
+      elif isinstance(op, TileBoaOp):
+        if op.op_name.data != "matmul":
+          raise VerifyException(
+            f"tile.boa.async in '@{prog.sym_name.data}' only supports \"matmul\";"
+            " use tile.boa.estimate.async for timing-only FLOPs"
+          )
+        m, n, k = (int(op.m.value.data), int(op.n.value.data), int(op.k.value.data))
+        seq = int(op.seq.value.data)
+        if m <= 0 or n <= 0 or k <= 0:
+          raise VerifyException("tile.boa.async m/n/k must be positive")
+        if seq < 0:
+          raise VerifyException("tile.boa.async seq must be non-negative")
+        if op.accumulate is not None and int(op.accumulate.value.data) != 1:
+          raise VerifyException("tile.boa.async accumulate flag must be present exactly once")
+        if op.output is not None and int(op.output.value.data) != 1:
+          raise VerifyException("tile.boa.async output flag must be present exactly once")
+        info = require_live_am(op.acc, "tile.boa.async accumulator")
+        if op.out is not info["output"]:
+          raise VerifyException(
+            "tile.boa.async outs operand must be the L1 output bound by its AM allocation"
+          )
+        require_live_l1(op.a, "tile.boa.async A input")
+        require_live_l1(op.b, "tile.boa.async B input")
+        require_live_l1(op.out, "tile.boa.async L1 output")
+        if op.out is op.a or op.out is op.b:
+          raise VerifyException(
+            "tile.boa.async L1 output must differ from its A/B input buffers"
+          )
+        require_matmul_shape(op.a, (m, k), "bf16", "tile.boa.async A input")
+        require_matmul_shape(op.b, (k, n), "bf16", "tile.boa.async B input")
+        require_matmul_shape(op.acc, (m, n), "f32", "tile.boa.async AM accumulator")
+        if op.out.type.dtype.data not in TileAllocOp.OUTPUT_DTYPES:
+          raise VerifyException(
+            "tile.boa.async L1 output dtype must be one of "
+            + ", ".join(TileAllocOp.OUTPUT_DTYPES)
+          )
+        if tuple(_int_list(op.out.type.dims)) != (m, n):
+          raise VerifyException("tile.boa.async L1 output shape must be (m, n)")
+        _require_l1_inputs_awaited(op, (op.a, op.b), awaited_events, l1_access_events, prog)
+        if seq != info["next_seq"]:
+          raise VerifyException(
+            f"tile.boa.async seq must be {info['next_seq']} for this AM chain"
+          )
+        if info["next_seq"] == 0 and op.accumulate is not None:
+          raise VerifyException("the first tile.boa.async step of an AM chain must INIT")
+        if info["next_seq"] > 0 and op.accumulate is None:
+          raise VerifyException(
+            "every tile.boa.async step after INIT must use accumulate"
+          )
+        info["next_seq"] += 1
+        l1_access_events[op.a].add(op.result)
+        l1_access_events[op.b].add(op.result)
+        if op.output is not None:
+          info["final"] = True
+          l1_access_events[op.out].add(op.result)
+          am_live.pop(op.acc)
+          am_bound_outputs.pop(op.out, None)
       continue
 
     if isinstance(op, TileAwaitOp):
@@ -1313,6 +1406,44 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
       continue
 
     if isinstance(op, TileAllocOp):
+      if isinstance(op.result.type, TileAmBuffer):
+        if op.memory_space is None or op.memory_space.data != "am":
+          raise VerifyException("AM allocation must declare memory_space = \"am\"")
+        output = op.output
+        if output is None:
+          raise VerifyException("AM allocation requires the bound L1 output operand")
+        require_live_l1(output, "AM allocation bound L1 output")
+        if output in am_bound_outputs:
+          raise VerifyException("L1 buffer is already bound to another live AM chain")
+        logical_slot = op.logical_slot.value.data if op.logical_slot is not None else None
+        if logical_slot not in (0, 1):
+          raise VerifyException("AM allocation logical_slot must be 0 or 1")
+        if any(info["logical_slot"] == logical_slot for info in am_live.values()):
+          raise VerifyException(
+            f"logical AM slot {logical_slot} is already live in this tile.program"
+          )
+        output_type = output.type
+        if not isinstance(output_type, TileL1Buffer):
+          raise VerifyException("AM allocation output must be an L1 buffer")
+        output_dims = tuple(_int_list(output_type.dims))
+        if any(info["dims"] != output_dims for info in am_live.values()):
+          raise VerifyException("live AM chains in one tile.program must use matching shapes")
+        result_type = op.result.type
+        if not isinstance(result_type, TileAmBuffer) or result_type.dtype.data != "f32":
+          raise VerifyException("AM allocation dtype must be f32")
+        am_live[op.result] = {
+          "output": output,
+          "dims": output_dims,
+          "logical_slot": logical_slot,
+          "next_seq": 0,
+          "final": False,
+        }
+        am_bound_outputs[output] = op.result
+        continue
+      if op.memory_space is not None and op.memory_space.data != "l1":
+        raise VerifyException("tile.alloc memory_space and result type must agree")
+      if op.output is not None or op.logical_slot is not None:
+        raise VerifyException("L1 allocation may not declare logical_slot/output")
       defined_l1.add(op.result)
       live_l1.add(op.result)
       l1_access_events[op.result] = set()
@@ -1322,6 +1453,12 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
       continue
 
     raise VerifyException(f"unexpected tile program body op '{op.name}'")
+
+  if am_live:
+    raise VerifyException(
+      f"AM chain(s) in '@{prog.sym_name.data}' must terminate with one output/"
+      " accumulate output step before tile.return"
+    )
 
   if read_formals and phase_counts["input_released"] != 1:
     raise VerifyException(

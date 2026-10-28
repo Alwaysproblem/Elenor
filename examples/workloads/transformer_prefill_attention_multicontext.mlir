@@ -30,7 +30,7 @@
 // independent final row stores launch together, then share a completion frontier.
 // Every buffer reuse is gated by the preceding consumers/stores; Arena sizes are unchanged.
 //
-// TIMING MODEL ONLY: tile.boa.async / tile.evu.async carry no tensor operands and
+// TIMING MODEL ONLY: tile.boa.estimate.async / tile.evu.async carry no tensor operands and
 // execute no numerics. This source validates scheduling, resources and traffic, not
 // numerical correctness or hardware performance guarantees.
 // Generate: PYTHONPATH=. python examples/generators/generate_transformer_prefill_multicontext.py
@@ -79,13 +79,16 @@ builtin.module {
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %x_loaded = tile.load.async %3 into %x_buf : !tile.event<"x_loaded_0">
     tile.await %x_loaded
-    %q_boa = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 : !tile.event<"q_boa_0">
+    %q_boa = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 128 ops = 4194304
+      : !tile.event<"q_boa_0">
     tile.await %q_boa
     %q_stored = tile.store.async %q_acc into %4 : !tile.event<"q_stored_0">
-    %k_boa = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"k_boa_0">
+    %k_boa = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+      : !tile.event<"k_boa_0">
     tile.await %k_boa
     %k_stored = tile.store.async %k_acc into %5 : !tile.event<"k_stored_0">
-    %v_boa = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"v_boa_0">
+    %v_boa = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+      : !tile.event<"v_boa_0">
     tile.await %v_boa
     %v_stored = tile.store.async %v_acc into %6 : !tile.event<"v_stored_0">
     tile.await %q_stored, %k_stored, %v_stored
@@ -99,13 +102,16 @@ builtin.module {
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %x_loaded_1 = tile.load.async %7 into %x_buf : !tile.event<"x_loaded_1">
     tile.await %x_loaded_1
-    %q_boa_1 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 : !tile.event<"q_boa_1">
+    %q_boa_1 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 128 ops = 4194304
+      : !tile.event<"q_boa_1">
     tile.await %q_boa_1
     %q_stored_1 = tile.store.async %q_acc into %8 : !tile.event<"q_stored_1">
-    %k_boa_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"k_boa_1">
+    %k_boa_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+      : !tile.event<"k_boa_1">
     tile.await %k_boa_1
     %k_stored_1 = tile.store.async %k_acc into %9 : !tile.event<"k_stored_1">
-    %v_boa_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"v_boa_1">
+    %v_boa_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+      : !tile.event<"v_boa_1">
     tile.await %v_boa_1
     %v_stored_1 = tile.store.async %v_acc into %10 : !tile.event<"v_stored_1">
     tile.await %q_stored_1, %k_stored_1, %v_stored_1
@@ -119,13 +125,16 @@ builtin.module {
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %x_loaded_2 = tile.load.async %11 into %x_buf : !tile.event<"x_loaded_2">
     tile.await %x_loaded_2
-    %q_boa_2 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 : !tile.event<"q_boa_2">
+    %q_boa_2 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 128 ops = 4194304
+      : !tile.event<"q_boa_2">
     tile.await %q_boa_2
     %q_stored_2 = tile.store.async %q_acc into %12 : !tile.event<"q_stored_2">
-    %k_boa_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"k_boa_2">
+    %k_boa_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+      : !tile.event<"k_boa_2">
     tile.await %k_boa_2
     %k_stored_2 = tile.store.async %k_acc into %13 : !tile.event<"k_stored_2">
-    %v_boa_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"v_boa_2">
+    %v_boa_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+      : !tile.event<"v_boa_2">
     tile.await %v_boa_2
     %v_stored_2 = tile.store.async %v_acc into %14 : !tile.event<"v_stored_2">
     tile.await %q_stored_2, %k_stored_2, %v_stored_2
@@ -139,13 +148,16 @@ builtin.module {
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %x_loaded_3 = tile.load.async %15 into %x_buf : !tile.event<"x_loaded_3">
     tile.await %x_loaded_3
-    %q_boa_3 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 : !tile.event<"q_boa_3">
+    %q_boa_3 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 128 ops = 4194304
+      : !tile.event<"q_boa_3">
     tile.await %q_boa_3
     %q_stored_3 = tile.store.async %q_acc into %16 : !tile.event<"q_stored_3">
-    %k_boa_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"k_boa_3">
+    %k_boa_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+      : !tile.event<"k_boa_3">
     tile.await %k_boa_3
     %k_stored_3 = tile.store.async %k_acc into %17 : !tile.event<"k_stored_3">
-    %v_boa_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"v_boa_3">
+    %v_boa_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+      : !tile.event<"v_boa_3">
     tile.await %v_boa_3
     %v_stored_3 = tile.store.async %v_acc into %18 : !tile.event<"v_stored_3">
     tile.await %q_stored_3, %k_stored_3, %v_stored_3
@@ -159,13 +171,16 @@ builtin.module {
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %x_loaded_4 = tile.load.async %19 into %x_buf : !tile.event<"x_loaded_4">
     tile.await %x_loaded_4
-    %q_boa_4 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 : !tile.event<"q_boa_4">
+    %q_boa_4 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 128 ops = 4194304
+      : !tile.event<"q_boa_4">
     tile.await %q_boa_4
     %q_stored_4 = tile.store.async %q_acc into %20 : !tile.event<"q_stored_4">
-    %k_boa_4 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"k_boa_4">
+    %k_boa_4 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+      : !tile.event<"k_boa_4">
     tile.await %k_boa_4
     %k_stored_4 = tile.store.async %k_acc into %21 : !tile.event<"k_stored_4">
-    %v_boa_4 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"v_boa_4">
+    %v_boa_4 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+      : !tile.event<"v_boa_4">
     tile.await %v_boa_4
     %v_stored_4 = tile.store.async %v_acc into %22 : !tile.event<"v_stored_4">
     tile.await %q_stored_4, %k_stored_4, %v_stored_4
@@ -179,13 +194,16 @@ builtin.module {
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %x_loaded_5 = tile.load.async %23 into %x_buf : !tile.event<"x_loaded_5">
     tile.await %x_loaded_5
-    %q_boa_5 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 : !tile.event<"q_boa_5">
+    %q_boa_5 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 128 ops = 4194304
+      : !tile.event<"q_boa_5">
     tile.await %q_boa_5
     %q_stored_5 = tile.store.async %q_acc into %24 : !tile.event<"q_stored_5">
-    %k_boa_5 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"k_boa_5">
+    %k_boa_5 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+      : !tile.event<"k_boa_5">
     tile.await %k_boa_5
     %k_stored_5 = tile.store.async %k_acc into %25 : !tile.event<"k_stored_5">
-    %v_boa_5 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"v_boa_5">
+    %v_boa_5 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+      : !tile.event<"v_boa_5">
     tile.await %v_boa_5
     %v_stored_5 = tile.store.async %v_acc into %26 : !tile.event<"v_stored_5">
     tile.await %q_stored_5, %k_stored_5, %v_stored_5
@@ -199,13 +217,16 @@ builtin.module {
       strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>
     %x_loaded_6 = tile.load.async %27 into %x_buf : !tile.event<"x_loaded_6">
     tile.await %x_loaded_6
-    %q_boa_6 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 : !tile.event<"q_boa_6">
+    %q_boa_6 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 128 ops = 4194304
+      : !tile.event<"q_boa_6">
     tile.await %q_boa_6
     %q_stored_6 = tile.store.async %q_acc into %28 : !tile.event<"q_stored_6">
-    %k_boa_6 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"k_boa_6">
+    %k_boa_6 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+      : !tile.event<"k_boa_6">
     tile.await %k_boa_6
     %k_stored_6 = tile.store.async %k_acc into %29 : !tile.event<"k_stored_6">
-    %v_boa_6 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"v_boa_6">
+    %v_boa_6 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+      : !tile.event<"v_boa_6">
     tile.await %v_boa_6
     %v_stored_6 = tile.store.async %v_acc into %30 : !tile.event<"v_stored_6">
     tile.await %q_stored_6, %k_stored_6, %v_stored_6
@@ -220,13 +241,16 @@ builtin.module {
     %x_loaded_7 = tile.load.async %31 into %x_buf : !tile.event<"x_loaded_7">
     tile.await %x_loaded_7
     tile.signal input_released(%task)
-    %q_boa_7 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 : !tile.event<"q_boa_7">
+    %q_boa_7 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 128 ops = 4194304
+      : !tile.event<"q_boa_7">
     tile.await %q_boa_7
     %q_stored_7 = tile.store.async %q_acc into %32 : !tile.event<"q_stored_7">
-    %k_boa_7 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"k_boa_7">
+    %k_boa_7 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+      : !tile.event<"k_boa_7">
     tile.await %k_boa_7
     %k_stored_7 = tile.store.async %k_acc into %33 : !tile.event<"k_stored_7">
-    %v_boa_7 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 : !tile.event<"v_boa_7">
+    %v_boa_7 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+      : !tile.event<"v_boa_7">
     tile.await %v_boa_7
     %v_stored_7 = tile.store.async %v_acc into %34 : !tile.event<"v_stored_7">
     tile.await %q_stored_7, %k_stored_7, %v_stored_7
@@ -284,15 +308,15 @@ builtin.module {
     %k_partial_loaded = tile.load.async %40 into %k_acc_1 : !tile.event<"k_partial_loaded_0">
     %v_partial_loaded = tile.load.async %41 into %v_acc_1 : !tile.event<"v_partial_loaded_0">
     tile.await %x_loaded_8, %q_partial_loaded, %k_partial_loaded, %v_partial_loaded
-    %q_boa_8 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 accumulate
+    %q_boa_8 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 128 ops = 4194304
       : !tile.event<"q_boa_0">
     tile.await %q_boa_8
     %q_stored_8 = tile.store.async %q_acc_1 into %39 : !tile.event<"q_stored_0">
-    %k_boa_8 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %k_boa_8 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"k_boa_0">
     tile.await %k_boa_8
     %k_stored_8 = tile.store.async %k_acc_1 into %40 : !tile.event<"k_stored_0">
-    %v_boa_8 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %v_boa_8 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"v_boa_0">
     tile.await %v_boa_8
     %v_stored_8 = tile.store.async %v_acc_1 into %41 : !tile.event<"v_stored_0">
@@ -310,15 +334,15 @@ builtin.module {
     %k_partial_loaded_1 = tile.load.async %44 into %k_acc_1 : !tile.event<"k_partial_loaded_1">
     %v_partial_loaded_1 = tile.load.async %45 into %v_acc_1 : !tile.event<"v_partial_loaded_1">
     tile.await %x_loaded_9, %q_partial_loaded_1, %k_partial_loaded_1, %v_partial_loaded_1
-    %q_boa_9 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 accumulate
+    %q_boa_9 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 128 ops = 4194304
       : !tile.event<"q_boa_1">
     tile.await %q_boa_9
     %q_stored_9 = tile.store.async %q_acc_1 into %43 : !tile.event<"q_stored_1">
-    %k_boa_9 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %k_boa_9 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"k_boa_1">
     tile.await %k_boa_9
     %k_stored_9 = tile.store.async %k_acc_1 into %44 : !tile.event<"k_stored_1">
-    %v_boa_9 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %v_boa_9 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"v_boa_1">
     tile.await %v_boa_9
     %v_stored_9 = tile.store.async %v_acc_1 into %45 : !tile.event<"v_stored_1">
@@ -336,15 +360,15 @@ builtin.module {
     %k_partial_loaded_2 = tile.load.async %48 into %k_acc_1 : !tile.event<"k_partial_loaded_2">
     %v_partial_loaded_2 = tile.load.async %49 into %v_acc_1 : !tile.event<"v_partial_loaded_2">
     tile.await %x_loaded_10, %q_partial_loaded_2, %k_partial_loaded_2, %v_partial_loaded_2
-    %q_boa_10 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 accumulate
+    %q_boa_10 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 128 ops = 4194304
       : !tile.event<"q_boa_2">
     tile.await %q_boa_10
     %q_stored_10 = tile.store.async %q_acc_1 into %47 : !tile.event<"q_stored_2">
-    %k_boa_10 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %k_boa_10 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"k_boa_2">
     tile.await %k_boa_10
     %k_stored_10 = tile.store.async %k_acc_1 into %48 : !tile.event<"k_stored_2">
-    %v_boa_10 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %v_boa_10 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"v_boa_2">
     tile.await %v_boa_10
     %v_stored_10 = tile.store.async %v_acc_1 into %49 : !tile.event<"v_stored_2">
@@ -362,15 +386,15 @@ builtin.module {
     %k_partial_loaded_3 = tile.load.async %52 into %k_acc_1 : !tile.event<"k_partial_loaded_3">
     %v_partial_loaded_3 = tile.load.async %53 into %v_acc_1 : !tile.event<"v_partial_loaded_3">
     tile.await %x_loaded_11, %q_partial_loaded_3, %k_partial_loaded_3, %v_partial_loaded_3
-    %q_boa_11 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 accumulate
+    %q_boa_11 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 128 ops = 4194304
       : !tile.event<"q_boa_3">
     tile.await %q_boa_11
     %q_stored_11 = tile.store.async %q_acc_1 into %51 : !tile.event<"q_stored_3">
-    %k_boa_11 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %k_boa_11 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"k_boa_3">
     tile.await %k_boa_11
     %k_stored_11 = tile.store.async %k_acc_1 into %52 : !tile.event<"k_stored_3">
-    %v_boa_11 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %v_boa_11 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"v_boa_3">
     tile.await %v_boa_11
     %v_stored_11 = tile.store.async %v_acc_1 into %53 : !tile.event<"v_stored_3">
@@ -388,15 +412,15 @@ builtin.module {
     %k_partial_loaded_4 = tile.load.async %56 into %k_acc_1 : !tile.event<"k_partial_loaded_4">
     %v_partial_loaded_4 = tile.load.async %57 into %v_acc_1 : !tile.event<"v_partial_loaded_4">
     tile.await %x_loaded_12, %q_partial_loaded_4, %k_partial_loaded_4, %v_partial_loaded_4
-    %q_boa_12 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 accumulate
+    %q_boa_12 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 128 ops = 4194304
       : !tile.event<"q_boa_4">
     tile.await %q_boa_12
     %q_stored_12 = tile.store.async %q_acc_1 into %55 : !tile.event<"q_stored_4">
-    %k_boa_12 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %k_boa_12 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"k_boa_4">
     tile.await %k_boa_12
     %k_stored_12 = tile.store.async %k_acc_1 into %56 : !tile.event<"k_stored_4">
-    %v_boa_12 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %v_boa_12 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"v_boa_4">
     tile.await %v_boa_12
     %v_stored_12 = tile.store.async %v_acc_1 into %57 : !tile.event<"v_stored_4">
@@ -414,15 +438,15 @@ builtin.module {
     %k_partial_loaded_5 = tile.load.async %60 into %k_acc_1 : !tile.event<"k_partial_loaded_5">
     %v_partial_loaded_5 = tile.load.async %61 into %v_acc_1 : !tile.event<"v_partial_loaded_5">
     tile.await %x_loaded_13, %q_partial_loaded_5, %k_partial_loaded_5, %v_partial_loaded_5
-    %q_boa_13 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 accumulate
+    %q_boa_13 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 128 ops = 4194304
       : !tile.event<"q_boa_5">
     tile.await %q_boa_13
     %q_stored_13 = tile.store.async %q_acc_1 into %59 : !tile.event<"q_stored_5">
-    %k_boa_13 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %k_boa_13 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"k_boa_5">
     tile.await %k_boa_13
     %k_stored_13 = tile.store.async %k_acc_1 into %60 : !tile.event<"k_stored_5">
-    %v_boa_13 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %v_boa_13 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"v_boa_5">
     tile.await %v_boa_13
     %v_stored_13 = tile.store.async %v_acc_1 into %61 : !tile.event<"v_stored_5">
@@ -440,15 +464,15 @@ builtin.module {
     %k_partial_loaded_6 = tile.load.async %64 into %k_acc_1 : !tile.event<"k_partial_loaded_6">
     %v_partial_loaded_6 = tile.load.async %65 into %v_acc_1 : !tile.event<"v_partial_loaded_6">
     tile.await %x_loaded_14, %q_partial_loaded_6, %k_partial_loaded_6, %v_partial_loaded_6
-    %q_boa_14 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 accumulate
+    %q_boa_14 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 128 ops = 4194304
       : !tile.event<"q_boa_6">
     tile.await %q_boa_14
     %q_stored_14 = tile.store.async %q_acc_1 into %63 : !tile.event<"q_stored_6">
-    %k_boa_14 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %k_boa_14 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"k_boa_6">
     tile.await %k_boa_14
     %k_stored_14 = tile.store.async %k_acc_1 into %64 : !tile.event<"k_stored_6">
-    %v_boa_14 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %v_boa_14 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"v_boa_6">
     tile.await %v_boa_14
     %v_stored_14 = tile.store.async %v_acc_1 into %65 : !tile.event<"v_stored_6">
@@ -467,15 +491,15 @@ builtin.module {
     %v_partial_loaded_7 = tile.load.async %69 into %v_acc_1 : !tile.event<"v_partial_loaded_7">
     tile.await %x_loaded_15, %q_partial_loaded_7, %k_partial_loaded_7, %v_partial_loaded_7
     tile.signal input_released(%task_1)
-    %q_boa_15 = tile.boa.async "matmul" m = 64 n = 256 k = 128 ops = 4194304 accumulate
+    %q_boa_15 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 128 ops = 4194304
       : !tile.event<"q_boa_7">
     tile.await %q_boa_15
     %q_stored_15 = tile.store.async %q_acc_1 into %67 : !tile.event<"q_stored_7">
-    %k_boa_15 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %k_boa_15 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"k_boa_7">
     tile.await %k_boa_15
     %k_stored_15 = tile.store.async %k_acc_1 into %68 : !tile.event<"k_stored_7">
-    %v_boa_15 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %v_boa_15 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"v_boa_7">
     tile.await %v_boa_15
     %v_stored_15 = tile.store.async %v_acc_1 into %69 : !tile.event<"v_stored_7">
@@ -532,68 +556,68 @@ builtin.module {
     %v1_loaded = tile.load.async %75 into %v1 : !tile.event<"v1_loaded">
     tile.await %q0_loaded, %q1_loaded
     tile.await %k0_loaded, %v0_loaded
-    %qk0_p0_h0 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p0_h0 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p0_h0">
     tile.await %qk0_p0_h0
     %sm0_p0_h0 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p0_h0">
     tile.await %sm0_p0_h0
-    %pv0_p0_h0 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p0_h0 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p0_h0">
     tile.await %pv0_p0_h0
-    %qk0_p0_h1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p0_h1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p0_h1">
     tile.await %qk0_p0_h1
     %sm0_p0_h1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p0_h1">
     tile.await %sm0_p0_h1
-    %pv0_p0_h1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p0_h1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p0_h1">
     tile.await %pv0_p0_h1
-    %qk0_p0_h2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p0_h2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p0_h2">
     tile.await %qk0_p0_h2
     %sm0_p0_h2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p0_h2">
     tile.await %sm0_p0_h2
-    %pv0_p0_h2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p0_h2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p0_h2">
     tile.await %pv0_p0_h2
-    %qk0_p0_h3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p0_h3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p0_h3">
     tile.await %qk0_p0_h3
     %sm0_p0_h3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p0_h3">
     tile.await %sm0_p0_h3
-    %pv0_p0_h3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p0_h3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p0_h3">
     tile.await %pv0_p0_h3
-    %qk0_p1_h0 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p1_h0 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p1_h0">
     tile.await %qk0_p1_h0
     %sm0_p1_h0 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p1_h0">
     tile.await %sm0_p1_h0
-    %pv0_p1_h0 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p1_h0 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p1_h0">
     tile.await %pv0_p1_h0
-    %qk0_p1_h1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p1_h1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p1_h1">
     tile.await %qk0_p1_h1
     %sm0_p1_h1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p1_h1">
     tile.await %sm0_p1_h1
-    %pv0_p1_h1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p1_h1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p1_h1">
     tile.await %pv0_p1_h1
-    %qk0_p1_h2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p1_h2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p1_h2">
     tile.await %qk0_p1_h2
     %sm0_p1_h2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p1_h2">
     tile.await %sm0_p1_h2
-    %pv0_p1_h2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p1_h2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p1_h2">
     tile.await %pv0_p1_h2
-    %qk0_p1_h3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p1_h3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p1_h3">
     tile.await %qk0_p1_h3
     %sm0_p1_h3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p1_h3">
     tile.await %sm0_p1_h3
-    %pv0_p1_h3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p1_h3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p1_h3">
     tile.await %pv0_p1_h3
     %76 = tile.subview %k_l2_2 task = %task_2 task_dim = 0 offsets = [0, 256, 0]
@@ -603,68 +627,68 @@ builtin.module {
     %k2_loaded = tile.load.async %76 into %k0 : !tile.event<"k2_loaded">
     %v2_loaded = tile.load.async %77 into %v0 : !tile.event<"v2_loaded">
     tile.await %k1_loaded, %v1_loaded
-    %qk1_p0_h0 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p0_h0 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p0_h0">
     tile.await %qk1_p0_h0
     %sm1_p0_h0 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p0_h0">
     tile.await %sm1_p0_h0
-    %pv1_p0_h0 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p0_h0 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p0_h0">
     tile.await %pv1_p0_h0
-    %qk1_p0_h1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p0_h1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p0_h1">
     tile.await %qk1_p0_h1
     %sm1_p0_h1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p0_h1">
     tile.await %sm1_p0_h1
-    %pv1_p0_h1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p0_h1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p0_h1">
     tile.await %pv1_p0_h1
-    %qk1_p0_h2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p0_h2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p0_h2">
     tile.await %qk1_p0_h2
     %sm1_p0_h2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p0_h2">
     tile.await %sm1_p0_h2
-    %pv1_p0_h2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p0_h2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p0_h2">
     tile.await %pv1_p0_h2
-    %qk1_p0_h3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p0_h3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p0_h3">
     tile.await %qk1_p0_h3
     %sm1_p0_h3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p0_h3">
     tile.await %sm1_p0_h3
-    %pv1_p0_h3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p0_h3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p0_h3">
     tile.await %pv1_p0_h3
-    %qk1_p1_h0 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p1_h0 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p1_h0">
     tile.await %qk1_p1_h0
     %sm1_p1_h0 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p1_h0">
     tile.await %sm1_p1_h0
-    %pv1_p1_h0 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p1_h0 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p1_h0">
     tile.await %pv1_p1_h0
-    %qk1_p1_h1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p1_h1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p1_h1">
     tile.await %qk1_p1_h1
     %sm1_p1_h1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p1_h1">
     tile.await %sm1_p1_h1
-    %pv1_p1_h1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p1_h1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p1_h1">
     tile.await %pv1_p1_h1
-    %qk1_p1_h2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p1_h2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p1_h2">
     tile.await %qk1_p1_h2
     %sm1_p1_h2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p1_h2">
     tile.await %sm1_p1_h2
-    %pv1_p1_h2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p1_h2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p1_h2">
     tile.await %pv1_p1_h2
-    %qk1_p1_h3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p1_h3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p1_h3">
     tile.await %qk1_p1_h3
     %sm1_p1_h3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p1_h3">
     tile.await %sm1_p1_h3
-    %pv1_p1_h3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p1_h3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p1_h3">
     tile.await %pv1_p1_h3
     %78 = tile.subview %k_l2_2 task = %task_2 task_dim = 0 offsets = [0, 384, 0]
@@ -674,134 +698,134 @@ builtin.module {
     %k3_loaded = tile.load.async %78 into %k1 : !tile.event<"k3_loaded">
     %v3_loaded = tile.load.async %79 into %v1 : !tile.event<"v3_loaded">
     tile.await %k2_loaded, %v2_loaded
-    %qk2_p0_h0 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p0_h0 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p0_h0">
     tile.await %qk2_p0_h0
     %sm2_p0_h0 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p0_h0">
     tile.await %sm2_p0_h0
-    %pv2_p0_h0 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p0_h0 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p0_h0">
     tile.await %pv2_p0_h0
-    %qk2_p0_h1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p0_h1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p0_h1">
     tile.await %qk2_p0_h1
     %sm2_p0_h1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p0_h1">
     tile.await %sm2_p0_h1
-    %pv2_p0_h1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p0_h1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p0_h1">
     tile.await %pv2_p0_h1
-    %qk2_p0_h2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p0_h2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p0_h2">
     tile.await %qk2_p0_h2
     %sm2_p0_h2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p0_h2">
     tile.await %sm2_p0_h2
-    %pv2_p0_h2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p0_h2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p0_h2">
     tile.await %pv2_p0_h2
-    %qk2_p0_h3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p0_h3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p0_h3">
     tile.await %qk2_p0_h3
     %sm2_p0_h3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p0_h3">
     tile.await %sm2_p0_h3
-    %pv2_p0_h3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p0_h3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p0_h3">
     tile.await %pv2_p0_h3
-    %qk2_p1_h0 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p1_h0 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p1_h0">
     tile.await %qk2_p1_h0
     %sm2_p1_h0 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p1_h0">
     tile.await %sm2_p1_h0
-    %pv2_p1_h0 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p1_h0 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p1_h0">
     tile.await %pv2_p1_h0
-    %qk2_p1_h1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p1_h1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p1_h1">
     tile.await %qk2_p1_h1
     %sm2_p1_h1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p1_h1">
     tile.await %sm2_p1_h1
-    %pv2_p1_h1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p1_h1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p1_h1">
     tile.await %pv2_p1_h1
-    %qk2_p1_h2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p1_h2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p1_h2">
     tile.await %qk2_p1_h2
     %sm2_p1_h2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p1_h2">
     tile.await %sm2_p1_h2
-    %pv2_p1_h2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p1_h2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p1_h2">
     tile.await %pv2_p1_h2
-    %qk2_p1_h3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p1_h3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p1_h3">
     tile.await %qk2_p1_h3
     %sm2_p1_h3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p1_h3">
     tile.await %sm2_p1_h3
-    %pv2_p1_h3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p1_h3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p1_h3">
     tile.await %pv2_p1_h3
     tile.await %k3_loaded, %v3_loaded
     tile.signal input_released(%task_2)
-    %qk3_p0_h0 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p0_h0 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p0_h0">
     tile.await %qk3_p0_h0
     %sm3_p0_h0 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p0_h0">
     tile.await %sm3_p0_h0
-    %pv3_p0_h0 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p0_h0 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p0_h0">
     tile.await %pv3_p0_h0
-    %qk3_p0_h1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p0_h1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p0_h1">
     tile.await %qk3_p0_h1
     %sm3_p0_h1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p0_h1">
     tile.await %sm3_p0_h1
-    %pv3_p0_h1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p0_h1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p0_h1">
     tile.await %pv3_p0_h1
-    %qk3_p0_h2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p0_h2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p0_h2">
     tile.await %qk3_p0_h2
     %sm3_p0_h2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p0_h2">
     tile.await %sm3_p0_h2
-    %pv3_p0_h2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p0_h2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p0_h2">
     tile.await %pv3_p0_h2
-    %qk3_p0_h3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p0_h3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p0_h3">
     tile.await %qk3_p0_h3
     %sm3_p0_h3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p0_h3">
     tile.await %sm3_p0_h3
-    %pv3_p0_h3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p0_h3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p0_h3">
     tile.await %pv3_p0_h3
-    %qk3_p1_h0 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p1_h0 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p1_h0">
     tile.await %qk3_p1_h0
     %sm3_p1_h0 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p1_h0">
     tile.await %sm3_p1_h0
-    %pv3_p1_h0 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p1_h0 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p1_h0">
     tile.await %pv3_p1_h0
-    %qk3_p1_h1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p1_h1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p1_h1">
     tile.await %qk3_p1_h1
     %sm3_p1_h1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p1_h1">
     tile.await %sm3_p1_h1
-    %pv3_p1_h1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p1_h1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p1_h1">
     tile.await %pv3_p1_h1
-    %qk3_p1_h2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p1_h2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p1_h2">
     tile.await %qk3_p1_h2
     %sm3_p1_h2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p1_h2">
     tile.await %sm3_p1_h2
-    %pv3_p1_h2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p1_h2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p1_h2">
     tile.await %pv3_p1_h2
-    %qk3_p1_h3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p1_h3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p1_h3">
     tile.await %qk3_p1_h3
     %sm3_p1_h3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p1_h3">
     tile.await %sm3_p1_h3
-    %pv3_p1_h3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p1_h3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p1_h3">
     tile.await %pv3_p1_h3
     %80 = tile.subview %o_l2 task = %task_2 task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 256]
@@ -875,68 +899,68 @@ builtin.module {
     %v1_loaded_1 = tile.load.async %87 into %v1_1 : !tile.event<"v1_loaded">
     tile.await %q0_loaded_1, %q1_loaded_1
     tile.await %k0_loaded_1, %v0_loaded_1
-    %qk0_p0_h0_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p0_h0_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p0_h0">
     tile.await %qk0_p0_h0_1
     %sm0_p0_h0_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p0_h0">
     tile.await %sm0_p0_h0_1
-    %pv0_p0_h0_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p0_h0_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p0_h0">
     tile.await %pv0_p0_h0_1
-    %qk0_p0_h1_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p0_h1_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p0_h1">
     tile.await %qk0_p0_h1_1
     %sm0_p0_h1_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p0_h1">
     tile.await %sm0_p0_h1_1
-    %pv0_p0_h1_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p0_h1_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p0_h1">
     tile.await %pv0_p0_h1_1
-    %qk0_p0_h2_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p0_h2_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p0_h2">
     tile.await %qk0_p0_h2_1
     %sm0_p0_h2_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p0_h2">
     tile.await %sm0_p0_h2_1
-    %pv0_p0_h2_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p0_h2_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p0_h2">
     tile.await %pv0_p0_h2_1
-    %qk0_p0_h3_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p0_h3_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p0_h3">
     tile.await %qk0_p0_h3_1
     %sm0_p0_h3_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p0_h3">
     tile.await %sm0_p0_h3_1
-    %pv0_p0_h3_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p0_h3_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p0_h3">
     tile.await %pv0_p0_h3_1
-    %qk0_p1_h0_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p1_h0_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p1_h0">
     tile.await %qk0_p1_h0_1
     %sm0_p1_h0_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p1_h0">
     tile.await %sm0_p1_h0_1
-    %pv0_p1_h0_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p1_h0_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p1_h0">
     tile.await %pv0_p1_h0_1
-    %qk0_p1_h1_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p1_h1_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p1_h1">
     tile.await %qk0_p1_h1_1
     %sm0_p1_h1_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p1_h1">
     tile.await %sm0_p1_h1_1
-    %pv0_p1_h1_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p1_h1_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p1_h1">
     tile.await %pv0_p1_h1_1
-    %qk0_p1_h2_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p1_h2_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p1_h2">
     tile.await %qk0_p1_h2_1
     %sm0_p1_h2_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p1_h2">
     tile.await %sm0_p1_h2_1
-    %pv0_p1_h2_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p1_h2_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p1_h2">
     tile.await %pv0_p1_h2_1
-    %qk0_p1_h3_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p1_h3_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p1_h3">
     tile.await %qk0_p1_h3_1
     %sm0_p1_h3_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p1_h3">
     tile.await %sm0_p1_h3_1
-    %pv0_p1_h3_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p1_h3_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p1_h3">
     tile.await %pv0_p1_h3_1
     %88 = tile.subview %k_l2_3 task = %task_3 task_dim = 0 offsets = [0, 256, 0]
@@ -946,68 +970,68 @@ builtin.module {
     %k2_loaded_1 = tile.load.async %88 into %k0_1 : !tile.event<"k2_loaded">
     %v2_loaded_1 = tile.load.async %89 into %v0_1 : !tile.event<"v2_loaded">
     tile.await %k1_loaded_1, %v1_loaded_1
-    %qk1_p0_h0_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p0_h0_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p0_h0">
     tile.await %qk1_p0_h0_1
     %sm1_p0_h0_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p0_h0">
     tile.await %sm1_p0_h0_1
-    %pv1_p0_h0_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p0_h0_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p0_h0">
     tile.await %pv1_p0_h0_1
-    %qk1_p0_h1_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p0_h1_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p0_h1">
     tile.await %qk1_p0_h1_1
     %sm1_p0_h1_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p0_h1">
     tile.await %sm1_p0_h1_1
-    %pv1_p0_h1_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p0_h1_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p0_h1">
     tile.await %pv1_p0_h1_1
-    %qk1_p0_h2_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p0_h2_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p0_h2">
     tile.await %qk1_p0_h2_1
     %sm1_p0_h2_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p0_h2">
     tile.await %sm1_p0_h2_1
-    %pv1_p0_h2_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p0_h2_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p0_h2">
     tile.await %pv1_p0_h2_1
-    %qk1_p0_h3_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p0_h3_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p0_h3">
     tile.await %qk1_p0_h3_1
     %sm1_p0_h3_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p0_h3">
     tile.await %sm1_p0_h3_1
-    %pv1_p0_h3_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p0_h3_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p0_h3">
     tile.await %pv1_p0_h3_1
-    %qk1_p1_h0_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p1_h0_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p1_h0">
     tile.await %qk1_p1_h0_1
     %sm1_p1_h0_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p1_h0">
     tile.await %sm1_p1_h0_1
-    %pv1_p1_h0_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p1_h0_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p1_h0">
     tile.await %pv1_p1_h0_1
-    %qk1_p1_h1_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p1_h1_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p1_h1">
     tile.await %qk1_p1_h1_1
     %sm1_p1_h1_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p1_h1">
     tile.await %sm1_p1_h1_1
-    %pv1_p1_h1_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p1_h1_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p1_h1">
     tile.await %pv1_p1_h1_1
-    %qk1_p1_h2_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p1_h2_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p1_h2">
     tile.await %qk1_p1_h2_1
     %sm1_p1_h2_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p1_h2">
     tile.await %sm1_p1_h2_1
-    %pv1_p1_h2_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p1_h2_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p1_h2">
     tile.await %pv1_p1_h2_1
-    %qk1_p1_h3_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p1_h3_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p1_h3">
     tile.await %qk1_p1_h3_1
     %sm1_p1_h3_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p1_h3">
     tile.await %sm1_p1_h3_1
-    %pv1_p1_h3_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p1_h3_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p1_h3">
     tile.await %pv1_p1_h3_1
     %90 = tile.subview %k_l2_3 task = %task_3 task_dim = 0 offsets = [0, 384, 0]
@@ -1017,134 +1041,134 @@ builtin.module {
     %k3_loaded_1 = tile.load.async %90 into %k1_1 : !tile.event<"k3_loaded">
     %v3_loaded_1 = tile.load.async %91 into %v1_1 : !tile.event<"v3_loaded">
     tile.await %k2_loaded_1, %v2_loaded_1
-    %qk2_p0_h0_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p0_h0_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p0_h0">
     tile.await %qk2_p0_h0_1
     %sm2_p0_h0_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p0_h0">
     tile.await %sm2_p0_h0_1
-    %pv2_p0_h0_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p0_h0_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p0_h0">
     tile.await %pv2_p0_h0_1
-    %qk2_p0_h1_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p0_h1_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p0_h1">
     tile.await %qk2_p0_h1_1
     %sm2_p0_h1_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p0_h1">
     tile.await %sm2_p0_h1_1
-    %pv2_p0_h1_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p0_h1_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p0_h1">
     tile.await %pv2_p0_h1_1
-    %qk2_p0_h2_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p0_h2_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p0_h2">
     tile.await %qk2_p0_h2_1
     %sm2_p0_h2_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p0_h2">
     tile.await %sm2_p0_h2_1
-    %pv2_p0_h2_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p0_h2_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p0_h2">
     tile.await %pv2_p0_h2_1
-    %qk2_p0_h3_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p0_h3_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p0_h3">
     tile.await %qk2_p0_h3_1
     %sm2_p0_h3_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p0_h3">
     tile.await %sm2_p0_h3_1
-    %pv2_p0_h3_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p0_h3_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p0_h3">
     tile.await %pv2_p0_h3_1
-    %qk2_p1_h0_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p1_h0_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p1_h0">
     tile.await %qk2_p1_h0_1
     %sm2_p1_h0_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p1_h0">
     tile.await %sm2_p1_h0_1
-    %pv2_p1_h0_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p1_h0_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p1_h0">
     tile.await %pv2_p1_h0_1
-    %qk2_p1_h1_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p1_h1_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p1_h1">
     tile.await %qk2_p1_h1_1
     %sm2_p1_h1_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p1_h1">
     tile.await %sm2_p1_h1_1
-    %pv2_p1_h1_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p1_h1_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p1_h1">
     tile.await %pv2_p1_h1_1
-    %qk2_p1_h2_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p1_h2_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p1_h2">
     tile.await %qk2_p1_h2_1
     %sm2_p1_h2_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p1_h2">
     tile.await %sm2_p1_h2_1
-    %pv2_p1_h2_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p1_h2_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p1_h2">
     tile.await %pv2_p1_h2_1
-    %qk2_p1_h3_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p1_h3_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p1_h3">
     tile.await %qk2_p1_h3_1
     %sm2_p1_h3_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p1_h3">
     tile.await %sm2_p1_h3_1
-    %pv2_p1_h3_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p1_h3_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p1_h3">
     tile.await %pv2_p1_h3_1
     tile.await %k3_loaded_1, %v3_loaded_1
     tile.signal input_released(%task_3)
-    %qk3_p0_h0_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p0_h0_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p0_h0">
     tile.await %qk3_p0_h0_1
     %sm3_p0_h0_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p0_h0">
     tile.await %sm3_p0_h0_1
-    %pv3_p0_h0_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p0_h0_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p0_h0">
     tile.await %pv3_p0_h0_1
-    %qk3_p0_h1_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p0_h1_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p0_h1">
     tile.await %qk3_p0_h1_1
     %sm3_p0_h1_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p0_h1">
     tile.await %sm3_p0_h1_1
-    %pv3_p0_h1_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p0_h1_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p0_h1">
     tile.await %pv3_p0_h1_1
-    %qk3_p0_h2_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p0_h2_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p0_h2">
     tile.await %qk3_p0_h2_1
     %sm3_p0_h2_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p0_h2">
     tile.await %sm3_p0_h2_1
-    %pv3_p0_h2_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p0_h2_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p0_h2">
     tile.await %pv3_p0_h2_1
-    %qk3_p0_h3_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p0_h3_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p0_h3">
     tile.await %qk3_p0_h3_1
     %sm3_p0_h3_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p0_h3">
     tile.await %sm3_p0_h3_1
-    %pv3_p0_h3_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p0_h3_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p0_h3">
     tile.await %pv3_p0_h3_1
-    %qk3_p1_h0_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p1_h0_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p1_h0">
     tile.await %qk3_p1_h0_1
     %sm3_p1_h0_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p1_h0">
     tile.await %sm3_p1_h0_1
-    %pv3_p1_h0_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p1_h0_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p1_h0">
     tile.await %pv3_p1_h0_1
-    %qk3_p1_h1_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p1_h1_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p1_h1">
     tile.await %qk3_p1_h1_1
     %sm3_p1_h1_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p1_h1">
     tile.await %sm3_p1_h1_1
-    %pv3_p1_h1_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p1_h1_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p1_h1">
     tile.await %pv3_p1_h1_1
-    %qk3_p1_h2_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p1_h2_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p1_h2">
     tile.await %qk3_p1_h2_1
     %sm3_p1_h2_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p1_h2">
     tile.await %sm3_p1_h2_1
-    %pv3_p1_h2_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p1_h2_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p1_h2">
     tile.await %pv3_p1_h2_1
-    %qk3_p1_h3_1 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p1_h3_1 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p1_h3">
     tile.await %qk3_p1_h3_1
     %sm3_p1_h3_1 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p1_h3">
     tile.await %sm3_p1_h3_1
-    %pv3_p1_h3_1 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p1_h3_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p1_h3">
     tile.await %pv3_p1_h3_1
     %92 = tile.subview %o_l2_1 task = %task_3 task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 256]
@@ -1218,68 +1242,68 @@ builtin.module {
     %v1_loaded_2 = tile.load.async %99 into %v1_2 : !tile.event<"v1_loaded">
     tile.await %q0_loaded_2, %q1_loaded_2
     tile.await %k0_loaded_2, %v0_loaded_2
-    %qk0_p0_h0_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p0_h0_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p0_h0">
     tile.await %qk0_p0_h0_2
     %sm0_p0_h0_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p0_h0">
     tile.await %sm0_p0_h0_2
-    %pv0_p0_h0_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p0_h0_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p0_h0">
     tile.await %pv0_p0_h0_2
-    %qk0_p0_h1_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p0_h1_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p0_h1">
     tile.await %qk0_p0_h1_2
     %sm0_p0_h1_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p0_h1">
     tile.await %sm0_p0_h1_2
-    %pv0_p0_h1_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p0_h1_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p0_h1">
     tile.await %pv0_p0_h1_2
-    %qk0_p0_h2_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p0_h2_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p0_h2">
     tile.await %qk0_p0_h2_2
     %sm0_p0_h2_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p0_h2">
     tile.await %sm0_p0_h2_2
-    %pv0_p0_h2_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p0_h2_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p0_h2">
     tile.await %pv0_p0_h2_2
-    %qk0_p0_h3_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p0_h3_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p0_h3">
     tile.await %qk0_p0_h3_2
     %sm0_p0_h3_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p0_h3">
     tile.await %sm0_p0_h3_2
-    %pv0_p0_h3_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p0_h3_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p0_h3">
     tile.await %pv0_p0_h3_2
-    %qk0_p1_h0_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p1_h0_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p1_h0">
     tile.await %qk0_p1_h0_2
     %sm0_p1_h0_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p1_h0">
     tile.await %sm0_p1_h0_2
-    %pv0_p1_h0_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p1_h0_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p1_h0">
     tile.await %pv0_p1_h0_2
-    %qk0_p1_h1_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p1_h1_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p1_h1">
     tile.await %qk0_p1_h1_2
     %sm0_p1_h1_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p1_h1">
     tile.await %sm0_p1_h1_2
-    %pv0_p1_h1_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p1_h1_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p1_h1">
     tile.await %pv0_p1_h1_2
-    %qk0_p1_h2_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p1_h2_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p1_h2">
     tile.await %qk0_p1_h2_2
     %sm0_p1_h2_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p1_h2">
     tile.await %sm0_p1_h2_2
-    %pv0_p1_h2_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p1_h2_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p1_h2">
     tile.await %pv0_p1_h2_2
-    %qk0_p1_h3_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p1_h3_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p1_h3">
     tile.await %qk0_p1_h3_2
     %sm0_p1_h3_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p1_h3">
     tile.await %sm0_p1_h3_2
-    %pv0_p1_h3_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p1_h3_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p1_h3">
     tile.await %pv0_p1_h3_2
     %100 = tile.subview %k_l2_4 task = %task_4 task_dim = 0 offsets = [0, 256, 0]
@@ -1289,68 +1313,68 @@ builtin.module {
     %k2_loaded_2 = tile.load.async %100 into %k0_2 : !tile.event<"k2_loaded">
     %v2_loaded_2 = tile.load.async %101 into %v0_2 : !tile.event<"v2_loaded">
     tile.await %k1_loaded_2, %v1_loaded_2
-    %qk1_p0_h0_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p0_h0_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p0_h0">
     tile.await %qk1_p0_h0_2
     %sm1_p0_h0_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p0_h0">
     tile.await %sm1_p0_h0_2
-    %pv1_p0_h0_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p0_h0_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p0_h0">
     tile.await %pv1_p0_h0_2
-    %qk1_p0_h1_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p0_h1_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p0_h1">
     tile.await %qk1_p0_h1_2
     %sm1_p0_h1_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p0_h1">
     tile.await %sm1_p0_h1_2
-    %pv1_p0_h1_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p0_h1_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p0_h1">
     tile.await %pv1_p0_h1_2
-    %qk1_p0_h2_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p0_h2_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p0_h2">
     tile.await %qk1_p0_h2_2
     %sm1_p0_h2_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p0_h2">
     tile.await %sm1_p0_h2_2
-    %pv1_p0_h2_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p0_h2_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p0_h2">
     tile.await %pv1_p0_h2_2
-    %qk1_p0_h3_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p0_h3_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p0_h3">
     tile.await %qk1_p0_h3_2
     %sm1_p0_h3_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p0_h3">
     tile.await %sm1_p0_h3_2
-    %pv1_p0_h3_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p0_h3_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p0_h3">
     tile.await %pv1_p0_h3_2
-    %qk1_p1_h0_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p1_h0_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p1_h0">
     tile.await %qk1_p1_h0_2
     %sm1_p1_h0_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p1_h0">
     tile.await %sm1_p1_h0_2
-    %pv1_p1_h0_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p1_h0_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p1_h0">
     tile.await %pv1_p1_h0_2
-    %qk1_p1_h1_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p1_h1_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p1_h1">
     tile.await %qk1_p1_h1_2
     %sm1_p1_h1_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p1_h1">
     tile.await %sm1_p1_h1_2
-    %pv1_p1_h1_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p1_h1_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p1_h1">
     tile.await %pv1_p1_h1_2
-    %qk1_p1_h2_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p1_h2_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p1_h2">
     tile.await %qk1_p1_h2_2
     %sm1_p1_h2_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p1_h2">
     tile.await %sm1_p1_h2_2
-    %pv1_p1_h2_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p1_h2_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p1_h2">
     tile.await %pv1_p1_h2_2
-    %qk1_p1_h3_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p1_h3_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p1_h3">
     tile.await %qk1_p1_h3_2
     %sm1_p1_h3_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p1_h3">
     tile.await %sm1_p1_h3_2
-    %pv1_p1_h3_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p1_h3_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p1_h3">
     tile.await %pv1_p1_h3_2
     %102 = tile.subview %k_l2_4 task = %task_4 task_dim = 0 offsets = [0, 384, 0]
@@ -1360,134 +1384,134 @@ builtin.module {
     %k3_loaded_2 = tile.load.async %102 into %k1_2 : !tile.event<"k3_loaded">
     %v3_loaded_2 = tile.load.async %103 into %v1_2 : !tile.event<"v3_loaded">
     tile.await %k2_loaded_2, %v2_loaded_2
-    %qk2_p0_h0_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p0_h0_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p0_h0">
     tile.await %qk2_p0_h0_2
     %sm2_p0_h0_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p0_h0">
     tile.await %sm2_p0_h0_2
-    %pv2_p0_h0_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p0_h0_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p0_h0">
     tile.await %pv2_p0_h0_2
-    %qk2_p0_h1_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p0_h1_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p0_h1">
     tile.await %qk2_p0_h1_2
     %sm2_p0_h1_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p0_h1">
     tile.await %sm2_p0_h1_2
-    %pv2_p0_h1_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p0_h1_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p0_h1">
     tile.await %pv2_p0_h1_2
-    %qk2_p0_h2_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p0_h2_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p0_h2">
     tile.await %qk2_p0_h2_2
     %sm2_p0_h2_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p0_h2">
     tile.await %sm2_p0_h2_2
-    %pv2_p0_h2_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p0_h2_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p0_h2">
     tile.await %pv2_p0_h2_2
-    %qk2_p0_h3_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p0_h3_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p0_h3">
     tile.await %qk2_p0_h3_2
     %sm2_p0_h3_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p0_h3">
     tile.await %sm2_p0_h3_2
-    %pv2_p0_h3_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p0_h3_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p0_h3">
     tile.await %pv2_p0_h3_2
-    %qk2_p1_h0_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p1_h0_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p1_h0">
     tile.await %qk2_p1_h0_2
     %sm2_p1_h0_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p1_h0">
     tile.await %sm2_p1_h0_2
-    %pv2_p1_h0_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p1_h0_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p1_h0">
     tile.await %pv2_p1_h0_2
-    %qk2_p1_h1_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p1_h1_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p1_h1">
     tile.await %qk2_p1_h1_2
     %sm2_p1_h1_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p1_h1">
     tile.await %sm2_p1_h1_2
-    %pv2_p1_h1_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p1_h1_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p1_h1">
     tile.await %pv2_p1_h1_2
-    %qk2_p1_h2_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p1_h2_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p1_h2">
     tile.await %qk2_p1_h2_2
     %sm2_p1_h2_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p1_h2">
     tile.await %sm2_p1_h2_2
-    %pv2_p1_h2_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p1_h2_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p1_h2">
     tile.await %pv2_p1_h2_2
-    %qk2_p1_h3_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p1_h3_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p1_h3">
     tile.await %qk2_p1_h3_2
     %sm2_p1_h3_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p1_h3">
     tile.await %sm2_p1_h3_2
-    %pv2_p1_h3_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p1_h3_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p1_h3">
     tile.await %pv2_p1_h3_2
     tile.await %k3_loaded_2, %v3_loaded_2
     tile.signal input_released(%task_4)
-    %qk3_p0_h0_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p0_h0_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p0_h0">
     tile.await %qk3_p0_h0_2
     %sm3_p0_h0_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p0_h0">
     tile.await %sm3_p0_h0_2
-    %pv3_p0_h0_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p0_h0_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p0_h0">
     tile.await %pv3_p0_h0_2
-    %qk3_p0_h1_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p0_h1_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p0_h1">
     tile.await %qk3_p0_h1_2
     %sm3_p0_h1_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p0_h1">
     tile.await %sm3_p0_h1_2
-    %pv3_p0_h1_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p0_h1_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p0_h1">
     tile.await %pv3_p0_h1_2
-    %qk3_p0_h2_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p0_h2_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p0_h2">
     tile.await %qk3_p0_h2_2
     %sm3_p0_h2_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p0_h2">
     tile.await %sm3_p0_h2_2
-    %pv3_p0_h2_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p0_h2_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p0_h2">
     tile.await %pv3_p0_h2_2
-    %qk3_p0_h3_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p0_h3_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p0_h3">
     tile.await %qk3_p0_h3_2
     %sm3_p0_h3_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p0_h3">
     tile.await %sm3_p0_h3_2
-    %pv3_p0_h3_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p0_h3_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p0_h3">
     tile.await %pv3_p0_h3_2
-    %qk3_p1_h0_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p1_h0_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p1_h0">
     tile.await %qk3_p1_h0_2
     %sm3_p1_h0_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p1_h0">
     tile.await %sm3_p1_h0_2
-    %pv3_p1_h0_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p1_h0_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p1_h0">
     tile.await %pv3_p1_h0_2
-    %qk3_p1_h1_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p1_h1_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p1_h1">
     tile.await %qk3_p1_h1_2
     %sm3_p1_h1_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p1_h1">
     tile.await %sm3_p1_h1_2
-    %pv3_p1_h1_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p1_h1_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p1_h1">
     tile.await %pv3_p1_h1_2
-    %qk3_p1_h2_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p1_h2_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p1_h2">
     tile.await %qk3_p1_h2_2
     %sm3_p1_h2_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p1_h2">
     tile.await %sm3_p1_h2_2
-    %pv3_p1_h2_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p1_h2_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p1_h2">
     tile.await %pv3_p1_h2_2
-    %qk3_p1_h3_2 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p1_h3_2 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p1_h3">
     tile.await %qk3_p1_h3_2
     %sm3_p1_h3_2 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p1_h3">
     tile.await %sm3_p1_h3_2
-    %pv3_p1_h3_2 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p1_h3_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p1_h3">
     tile.await %pv3_p1_h3_2
     %104 = tile.subview %o_l2_2 task = %task_4 task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 256]
@@ -1561,68 +1585,68 @@ builtin.module {
     %v1_loaded_3 = tile.load.async %111 into %v1_3 : !tile.event<"v1_loaded">
     tile.await %q0_loaded_3, %q1_loaded_3
     tile.await %k0_loaded_3, %v0_loaded_3
-    %qk0_p0_h0_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p0_h0_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p0_h0">
     tile.await %qk0_p0_h0_3
     %sm0_p0_h0_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p0_h0">
     tile.await %sm0_p0_h0_3
-    %pv0_p0_h0_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p0_h0_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p0_h0">
     tile.await %pv0_p0_h0_3
-    %qk0_p0_h1_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p0_h1_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p0_h1">
     tile.await %qk0_p0_h1_3
     %sm0_p0_h1_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p0_h1">
     tile.await %sm0_p0_h1_3
-    %pv0_p0_h1_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p0_h1_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p0_h1">
     tile.await %pv0_p0_h1_3
-    %qk0_p0_h2_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p0_h2_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p0_h2">
     tile.await %qk0_p0_h2_3
     %sm0_p0_h2_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p0_h2">
     tile.await %sm0_p0_h2_3
-    %pv0_p0_h2_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p0_h2_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p0_h2">
     tile.await %pv0_p0_h2_3
-    %qk0_p0_h3_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p0_h3_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p0_h3">
     tile.await %qk0_p0_h3_3
     %sm0_p0_h3_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p0_h3">
     tile.await %sm0_p0_h3_3
-    %pv0_p0_h3_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p0_h3_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p0_h3">
     tile.await %pv0_p0_h3_3
-    %qk0_p1_h0_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p1_h0_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p1_h0">
     tile.await %qk0_p1_h0_3
     %sm0_p1_h0_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p1_h0">
     tile.await %sm0_p1_h0_3
-    %pv0_p1_h0_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p1_h0_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p1_h0">
     tile.await %pv0_p1_h0_3
-    %qk0_p1_h1_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p1_h1_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p1_h1">
     tile.await %qk0_p1_h1_3
     %sm0_p1_h1_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p1_h1">
     tile.await %sm0_p1_h1_3
-    %pv0_p1_h1_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p1_h1_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p1_h1">
     tile.await %pv0_p1_h1_3
-    %qk0_p1_h2_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p1_h2_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p1_h2">
     tile.await %qk0_p1_h2_3
     %sm0_p1_h2_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p1_h2">
     tile.await %sm0_p1_h2_3
-    %pv0_p1_h2_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p1_h2_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p1_h2">
     tile.await %pv0_p1_h2_3
-    %qk0_p1_h3_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk0_p1_h3_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk0_p1_h3">
     tile.await %qk0_p1_h3_3
     %sm0_p1_h3_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm0_p1_h3">
     tile.await %sm0_p1_h3_3
-    %pv0_p1_h3_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
+    %pv0_p1_h3_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv0_p1_h3">
     tile.await %pv0_p1_h3_3
     %112 = tile.subview %k_l2_5 task = %task_5 task_dim = 0 offsets = [0, 256, 0]
@@ -1632,68 +1656,68 @@ builtin.module {
     %k2_loaded_3 = tile.load.async %112 into %k0_3 : !tile.event<"k2_loaded">
     %v2_loaded_3 = tile.load.async %113 into %v0_3 : !tile.event<"v2_loaded">
     tile.await %k1_loaded_3, %v1_loaded_3
-    %qk1_p0_h0_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p0_h0_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p0_h0">
     tile.await %qk1_p0_h0_3
     %sm1_p0_h0_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p0_h0">
     tile.await %sm1_p0_h0_3
-    %pv1_p0_h0_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p0_h0_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p0_h0">
     tile.await %pv1_p0_h0_3
-    %qk1_p0_h1_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p0_h1_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p0_h1">
     tile.await %qk1_p0_h1_3
     %sm1_p0_h1_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p0_h1">
     tile.await %sm1_p0_h1_3
-    %pv1_p0_h1_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p0_h1_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p0_h1">
     tile.await %pv1_p0_h1_3
-    %qk1_p0_h2_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p0_h2_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p0_h2">
     tile.await %qk1_p0_h2_3
     %sm1_p0_h2_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p0_h2">
     tile.await %sm1_p0_h2_3
-    %pv1_p0_h2_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p0_h2_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p0_h2">
     tile.await %pv1_p0_h2_3
-    %qk1_p0_h3_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p0_h3_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p0_h3">
     tile.await %qk1_p0_h3_3
     %sm1_p0_h3_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p0_h3">
     tile.await %sm1_p0_h3_3
-    %pv1_p0_h3_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p0_h3_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p0_h3">
     tile.await %pv1_p0_h3_3
-    %qk1_p1_h0_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p1_h0_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p1_h0">
     tile.await %qk1_p1_h0_3
     %sm1_p1_h0_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p1_h0">
     tile.await %sm1_p1_h0_3
-    %pv1_p1_h0_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p1_h0_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p1_h0">
     tile.await %pv1_p1_h0_3
-    %qk1_p1_h1_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p1_h1_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p1_h1">
     tile.await %qk1_p1_h1_3
     %sm1_p1_h1_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p1_h1">
     tile.await %sm1_p1_h1_3
-    %pv1_p1_h1_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p1_h1_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p1_h1">
     tile.await %pv1_p1_h1_3
-    %qk1_p1_h2_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p1_h2_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p1_h2">
     tile.await %qk1_p1_h2_3
     %sm1_p1_h2_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p1_h2">
     tile.await %sm1_p1_h2_3
-    %pv1_p1_h2_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p1_h2_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p1_h2">
     tile.await %pv1_p1_h2_3
-    %qk1_p1_h3_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk1_p1_h3_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk1_p1_h3">
     tile.await %qk1_p1_h3_3
     %sm1_p1_h3_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm1_p1_h3">
     tile.await %sm1_p1_h3_3
-    %pv1_p1_h3_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv1_p1_h3_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv1_p1_h3">
     tile.await %pv1_p1_h3_3
     %114 = tile.subview %k_l2_5 task = %task_5 task_dim = 0 offsets = [0, 384, 0]
@@ -1703,134 +1727,134 @@ builtin.module {
     %k3_loaded_3 = tile.load.async %114 into %k1_3 : !tile.event<"k3_loaded">
     %v3_loaded_3 = tile.load.async %115 into %v1_3 : !tile.event<"v3_loaded">
     tile.await %k2_loaded_3, %v2_loaded_3
-    %qk2_p0_h0_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p0_h0_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p0_h0">
     tile.await %qk2_p0_h0_3
     %sm2_p0_h0_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p0_h0">
     tile.await %sm2_p0_h0_3
-    %pv2_p0_h0_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p0_h0_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p0_h0">
     tile.await %pv2_p0_h0_3
-    %qk2_p0_h1_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p0_h1_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p0_h1">
     tile.await %qk2_p0_h1_3
     %sm2_p0_h1_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p0_h1">
     tile.await %sm2_p0_h1_3
-    %pv2_p0_h1_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p0_h1_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p0_h1">
     tile.await %pv2_p0_h1_3
-    %qk2_p0_h2_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p0_h2_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p0_h2">
     tile.await %qk2_p0_h2_3
     %sm2_p0_h2_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p0_h2">
     tile.await %sm2_p0_h2_3
-    %pv2_p0_h2_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p0_h2_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p0_h2">
     tile.await %pv2_p0_h2_3
-    %qk2_p0_h3_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p0_h3_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p0_h3">
     tile.await %qk2_p0_h3_3
     %sm2_p0_h3_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p0_h3">
     tile.await %sm2_p0_h3_3
-    %pv2_p0_h3_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p0_h3_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p0_h3">
     tile.await %pv2_p0_h3_3
-    %qk2_p1_h0_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p1_h0_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p1_h0">
     tile.await %qk2_p1_h0_3
     %sm2_p1_h0_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p1_h0">
     tile.await %sm2_p1_h0_3
-    %pv2_p1_h0_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p1_h0_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p1_h0">
     tile.await %pv2_p1_h0_3
-    %qk2_p1_h1_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p1_h1_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p1_h1">
     tile.await %qk2_p1_h1_3
     %sm2_p1_h1_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p1_h1">
     tile.await %sm2_p1_h1_3
-    %pv2_p1_h1_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p1_h1_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p1_h1">
     tile.await %pv2_p1_h1_3
-    %qk2_p1_h2_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p1_h2_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p1_h2">
     tile.await %qk2_p1_h2_3
     %sm2_p1_h2_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p1_h2">
     tile.await %sm2_p1_h2_3
-    %pv2_p1_h2_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p1_h2_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p1_h2">
     tile.await %pv2_p1_h2_3
-    %qk2_p1_h3_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk2_p1_h3_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk2_p1_h3">
     tile.await %qk2_p1_h3_3
     %sm2_p1_h3_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm2_p1_h3">
     tile.await %sm2_p1_h3_3
-    %pv2_p1_h3_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv2_p1_h3_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv2_p1_h3">
     tile.await %pv2_p1_h3_3
     tile.await %k3_loaded_3, %v3_loaded_3
     tile.signal input_released(%task_5)
-    %qk3_p0_h0_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p0_h0_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p0_h0">
     tile.await %qk3_p0_h0_3
     %sm3_p0_h0_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p0_h0">
     tile.await %sm3_p0_h0_3
-    %pv3_p0_h0_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p0_h0_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p0_h0">
     tile.await %pv3_p0_h0_3
-    %qk3_p0_h1_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p0_h1_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p0_h1">
     tile.await %qk3_p0_h1_3
     %sm3_p0_h1_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p0_h1">
     tile.await %sm3_p0_h1_3
-    %pv3_p0_h1_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p0_h1_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p0_h1">
     tile.await %pv3_p0_h1_3
-    %qk3_p0_h2_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p0_h2_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p0_h2">
     tile.await %qk3_p0_h2_3
     %sm3_p0_h2_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p0_h2">
     tile.await %sm3_p0_h2_3
-    %pv3_p0_h2_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p0_h2_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p0_h2">
     tile.await %pv3_p0_h2_3
-    %qk3_p0_h3_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p0_h3_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p0_h3">
     tile.await %qk3_p0_h3_3
     %sm3_p0_h3_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p0_h3">
     tile.await %sm3_p0_h3_3
-    %pv3_p0_h3_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p0_h3_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p0_h3">
     tile.await %pv3_p0_h3_3
-    %qk3_p1_h0_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p1_h0_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p1_h0">
     tile.await %qk3_p1_h0_3
     %sm3_p1_h0_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p1_h0">
     tile.await %sm3_p1_h0_3
-    %pv3_p1_h0_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p1_h0_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p1_h0">
     tile.await %pv3_p1_h0_3
-    %qk3_p1_h1_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p1_h1_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p1_h1">
     tile.await %qk3_p1_h1_3
     %sm3_p1_h1_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p1_h1">
     tile.await %sm3_p1_h1_3
-    %pv3_p1_h1_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p1_h1_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p1_h1">
     tile.await %pv3_p1_h1_3
-    %qk3_p1_h2_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p1_h2_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p1_h2">
     tile.await %qk3_p1_h2_3
     %sm3_p1_h2_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p1_h2">
     tile.await %sm3_p1_h2_3
-    %pv3_p1_h2_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p1_h2_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p1_h2">
     tile.await %pv3_p1_h2_3
-    %qk3_p1_h3_3 = tile.boa.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    %qk3_p1_h3_3 = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
       : !tile.event<"qk3_p1_h3">
     tile.await %qk3_p1_h3_3
     %sm3_p1_h3_3 = tile.evu.async "online_softmax_update" ops = 12416 : !tile.event<"sm3_p1_h3">
     tile.await %sm3_p1_h3_3
-    %pv3_p1_h3_3 = tile.boa.async "matmul" m = 64 n = 64 k = 128 ops = 1048576 accumulate
+    %pv3_p1_h3_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 128 ops = 1048576
       : !tile.event<"pv3_p1_h3">
     tile.await %pv3_p1_h3_3
     %116 = tile.subview %o_l2_3 task = %task_5 task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 256]
@@ -1880,40 +1904,40 @@ builtin.module {
       strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w0_0_loaded = tile.load.async %120 into %w_buf : !tile.event<"w0_0_loaded">
     tile.await %w0_0_loaded
-    %outproj0_0_p0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
+    %outproj0_0_p0 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj0_0_p0">
     tile.await %outproj0_0_p0
-    %outproj0_0_p1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
+    %outproj0_0_p1 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj0_0_p1">
     tile.await %outproj0_0_p1
     %121 = tile.subview %wo_l2 task = %task_6 task_dim = 0 offsets = [0, 64, 0] sizes = [1, 64, 256]
       strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w0_1_loaded = tile.load.async %121 into %w_buf : !tile.event<"w0_1_loaded">
     tile.await %w0_1_loaded
-    %outproj0_1_p0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj0_1_p0 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj0_1_p0">
     tile.await %outproj0_1_p0
-    %outproj0_1_p1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj0_1_p1 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj0_1_p1">
     tile.await %outproj0_1_p1
     %122 = tile.subview %wo_l2 task = %task_6 task_dim = 0 offsets = [0, 128, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w0_2_loaded = tile.load.async %122 into %w_buf : !tile.event<"w0_2_loaded">
     tile.await %w0_2_loaded
-    %outproj0_2_p0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj0_2_p0 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj0_2_p0">
     tile.await %outproj0_2_p0
-    %outproj0_2_p1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj0_2_p1 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj0_2_p1">
     tile.await %outproj0_2_p1
     %123 = tile.subview %wo_l2 task = %task_6 task_dim = 0 offsets = [0, 192, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w0_3_loaded = tile.load.async %123 into %w_buf : !tile.event<"w0_3_loaded">
     tile.await %w0_3_loaded
-    %outproj0_3_p0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj0_3_p0 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj0_3_p0">
     tile.await %outproj0_3_p0
-    %outproj0_3_p1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj0_3_p1 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj0_3_p1">
     tile.await %outproj0_3_p1
     %124 = tile.subview %o_l2_4 offsets = [1, 0, 0] sizes = [1, 64, 256] strides = [1, 1, 1]
@@ -1927,40 +1951,40 @@ builtin.module {
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w1_0_loaded = tile.load.async %126 into %w_buf : !tile.event<"w1_0_loaded">
     tile.await %w1_0_loaded
-    %outproj1_0_p0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj1_0_p0 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj1_0_p0">
     tile.await %outproj1_0_p0
-    %outproj1_0_p1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj1_0_p1 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj1_0_p1">
     tile.await %outproj1_0_p1
     %127 = tile.subview %wo_l2 task = %task_6 task_dim = 0 offsets = [0, 320, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w1_1_loaded = tile.load.async %127 into %w_buf : !tile.event<"w1_1_loaded">
     tile.await %w1_1_loaded
-    %outproj1_1_p0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj1_1_p0 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj1_1_p0">
     tile.await %outproj1_1_p0
-    %outproj1_1_p1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj1_1_p1 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj1_1_p1">
     tile.await %outproj1_1_p1
     %128 = tile.subview %wo_l2 task = %task_6 task_dim = 0 offsets = [0, 384, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w1_2_loaded = tile.load.async %128 into %w_buf : !tile.event<"w1_2_loaded">
     tile.await %w1_2_loaded
-    %outproj1_2_p0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj1_2_p0 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj1_2_p0">
     tile.await %outproj1_2_p0
-    %outproj1_2_p1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj1_2_p1 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj1_2_p1">
     tile.await %outproj1_2_p1
     %129 = tile.subview %wo_l2 task = %task_6 task_dim = 0 offsets = [0, 448, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w1_3_loaded = tile.load.async %129 into %w_buf : !tile.event<"w1_3_loaded">
     tile.await %w1_3_loaded
-    %outproj1_3_p0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj1_3_p0 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj1_3_p0">
     tile.await %outproj1_3_p0
-    %outproj1_3_p1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj1_3_p1 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj1_3_p1">
     tile.await %outproj1_3_p1
     %130 = tile.subview %o_l2_4 offsets = [2, 0, 0] sizes = [1, 64, 256] strides = [1, 1, 1]
@@ -1974,40 +1998,40 @@ builtin.module {
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w2_0_loaded = tile.load.async %132 into %w_buf : !tile.event<"w2_0_loaded">
     tile.await %w2_0_loaded
-    %outproj2_0_p0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj2_0_p0 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj2_0_p0">
     tile.await %outproj2_0_p0
-    %outproj2_0_p1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj2_0_p1 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj2_0_p1">
     tile.await %outproj2_0_p1
     %133 = tile.subview %wo_l2 task = %task_6 task_dim = 0 offsets = [0, 576, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w2_1_loaded = tile.load.async %133 into %w_buf : !tile.event<"w2_1_loaded">
     tile.await %w2_1_loaded
-    %outproj2_1_p0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj2_1_p0 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj2_1_p0">
     tile.await %outproj2_1_p0
-    %outproj2_1_p1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj2_1_p1 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj2_1_p1">
     tile.await %outproj2_1_p1
     %134 = tile.subview %wo_l2 task = %task_6 task_dim = 0 offsets = [0, 640, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w2_2_loaded = tile.load.async %134 into %w_buf : !tile.event<"w2_2_loaded">
     tile.await %w2_2_loaded
-    %outproj2_2_p0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj2_2_p0 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj2_2_p0">
     tile.await %outproj2_2_p0
-    %outproj2_2_p1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj2_2_p1 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj2_2_p1">
     tile.await %outproj2_2_p1
     %135 = tile.subview %wo_l2 task = %task_6 task_dim = 0 offsets = [0, 704, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w2_3_loaded = tile.load.async %135 into %w_buf : !tile.event<"w2_3_loaded">
     tile.await %w2_3_loaded
-    %outproj2_3_p0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj2_3_p0 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj2_3_p0">
     tile.await %outproj2_3_p0
-    %outproj2_3_p1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj2_3_p1 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj2_3_p1">
     tile.await %outproj2_3_p1
     %136 = tile.subview %o_l2_4 offsets = [3, 0, 0] sizes = [1, 64, 256] strides = [1, 1, 1]
@@ -2021,30 +2045,30 @@ builtin.module {
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w3_0_loaded = tile.load.async %138 into %w_buf : !tile.event<"w3_0_loaded">
     tile.await %w3_0_loaded
-    %outproj3_0_p0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj3_0_p0 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj3_0_p0">
     tile.await %outproj3_0_p0
-    %outproj3_0_p1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj3_0_p1 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj3_0_p1">
     tile.await %outproj3_0_p1
     %139 = tile.subview %wo_l2 task = %task_6 task_dim = 0 offsets = [0, 832, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w3_1_loaded = tile.load.async %139 into %w_buf : !tile.event<"w3_1_loaded">
     tile.await %w3_1_loaded
-    %outproj3_1_p0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj3_1_p0 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj3_1_p0">
     tile.await %outproj3_1_p0
-    %outproj3_1_p1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj3_1_p1 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj3_1_p1">
     tile.await %outproj3_1_p1
     %140 = tile.subview %wo_l2 task = %task_6 task_dim = 0 offsets = [0, 896, 0]
       sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>
     %w3_2_loaded = tile.load.async %140 into %w_buf : !tile.event<"w3_2_loaded">
     tile.await %w3_2_loaded
-    %outproj3_2_p0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj3_2_p0 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj3_2_p0">
     tile.await %outproj3_2_p0
-    %outproj3_2_p1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj3_2_p1 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj3_2_p1">
     tile.await %outproj3_2_p1
     %141 = tile.subview %wo_l2 task = %task_6 task_dim = 0 offsets = [0, 960, 0]
@@ -2052,10 +2076,10 @@ builtin.module {
     %w3_3_loaded = tile.load.async %141 into %w_buf : !tile.event<"w3_3_loaded">
     tile.await %w3_3_loaded
     tile.signal input_released(%task_6)
-    %outproj3_3_p0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj3_3_p0 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj3_3_p0">
     tile.await %outproj3_3_p0
-    %outproj3_3_p1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152 accumulate
+    %outproj3_3_p1 = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
       : !tile.event<"outproj3_3_p1">
     tile.await %outproj3_3_p1
     %142 = tile.subview %out_l2 task = %task_6 task_dim = 0 offsets = [0, 0, 0] sizes = [1, 64, 256]

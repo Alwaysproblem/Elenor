@@ -1,0 +1,856 @@
+"""Software gate for software-managed AM and typed BOA Matmul.
+
+Covers the plan's IR01-IR17 items that are in scope before hardware:
+source semantics, AM/L1 separation, capacity, four modes, numeric bytes,
+lease quota/affinity, bounded commit timing, v4 replay and resealed tamper
+rejection.  Concrete low-level retry CFG and RTL are intentionally absent.
+"""
+
+from __future__ import annotations
+
+import struct
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+from xdsl.parser import Parser
+from xdsl.utils.exceptions import ParseError, VerifyException
+
+from pipeline_validator.compiler import compile_program
+from pipeline_validator.compiled_program import (
+  parse_compiled_program,
+  seal_program,
+  serialize_compiled_program,
+)
+from pipeline_validator.config import HardwareConfig, SimConfig
+from pipeline_validator.execution_ir import ExecTileOp, GlobalBinding
+from pipeline_validator.loader import load_program
+from pipeline_validator.memory.byte_store import ByteStore
+from pipeline_validator.runtime.shared_am import AmOwner, SharedAmManager
+from pipeline_validator.simulator import Simulator
+from pipeline_validator.workload_ir import make_elenor_context, parse_workload_ir
+
+ROOT = Path(__file__).resolve().parents[2]
+FIXTURE = ROOT / "examples" / "workloads" / "boa_am_matmul.mlir"
+INPUTS = ROOT / "examples" / "workloads" / "boa_am_inputs" / "boa_am_matmul"
+
+
+def _hw(capacity: int = 65536) -> HardwareConfig:
+  return HardwareConfig().with_overrides(boa_am_slot_capacity_bytes=capacity)
+
+
+def _sim() -> SimConfig:
+  return SimConfig(fidelity="full_memory", context_count=1)
+
+
+def _bindings(a_bytes: int, b_bytes: int) -> dict[str, GlobalBinding]:
+  return {
+    "A": GlobalBinding("A", 0x100000, a_bytes, "r"),
+    "B": GlobalBinding("B", 0x200000, b_bytes, "r"),
+    "C": GlobalBinding("C", 0x300000, 65536, "w"),
+  }
+
+
+def _bf16_value(data: bytes, offset: int) -> float:
+  bits = int.from_bytes(data[offset : offset + 2], "little")
+  return struct.unpack("<f", struct.pack("<I", bits << 16))[0]
+
+
+def _oracle(a: bytes, b: bytes) -> list[float]:
+  a_values = [_bf16_value(a, index * 2) for index in range(2 * 64 * 64)]
+  b_values = [_bf16_value(b, index * 2) for index in range(2 * 64 * 256)]
+  result = [0.0] * (64 * 256)
+  for step in range(2):
+    a_base = step * 64 * 64
+    b_base = step * 64 * 256
+    for row in range(64):
+      for kk in range(64):
+        avalue = a_values[a_base + row * 64 + kk]
+        for col in range(256):
+          result[row * 256 + col] += avalue * b_values[b_base + kk * 256 + col]
+  return result
+
+
+def _compile_and_run(
+  text: str | None = None,
+  *,
+  capacity: int = 65536,
+  c_bytes: int = 65536,
+  block_until: int | None = None,
+):
+  a = (INPUTS / "A.bin").read_bytes()
+  b = (INPUTS / "B.bin").read_bytes()
+  bindings = _bindings(len(a), len(b))
+  bindings["C"] = GlobalBinding("C", 0x300000, c_bytes, "w")
+  hw = _hw(capacity)
+  sim_cfg = _sim()
+  module = parse_workload_ir(text) if text is not None else parse_workload_ir(FIXTURE.read_text())
+  artifact = compile_program(
+    module,
+    hw,
+    sim_cfg,
+    binding_assumptions=bindings,
+    source_name=str(FIXTURE),
+  )
+  loaded = load_program(artifact, hw, sim_cfg, actual_bindings=bindings)
+  store = ByteStore()
+  store.seed_hbm(0x100000, a)
+  store.seed_hbm(0x200000, b)
+  simulator = Simulator(hw, sim_cfg, byte_store=store)
+  if block_until is not None:
+    simulator.group.tiles[0].boa_results.set_output_blocked(True, until_cycle=block_until)
+  result = simulator.run(loaded)
+  return artifact, simulator, store, result
+
+
+def _first_program(artifact):
+  task = next(iter(artifact.entry.tasks.values()))
+  return next(iter(task.role_bindings.values())).tile_program
+
+
+def _fixture_text() -> str:
+  return FIXTURE.read_text()
+
+
+def _tile_program_text(body: str) -> str:
+  return f'''builtin.module {{
+  tile.program @p(%task : !nest.task)
+      resource_contract = #tile.resources<allowed_profiles = [0, 1],
+          tile_l1_spm_bytes_per_context = 147456> {{
+    %a = tile.alloc shape = [64, 64] dtype = "bf16"
+        alignment = 256 : !tile.l1_buffer<64x64xbf16>
+    %b = tile.alloc shape = [64, 256] dtype = "bf16"
+        alignment = 256 : !tile.l1_buffer<64x256xbf16>
+    %out = tile.alloc memory_space = "l1" shape = [64, 256] dtype = "f32"
+        alignment = 256 : !tile.l1_buffer<64x256xf32>
+    %acc = tile.alloc memory_space = "am" logical_slot = 0 output(%out)
+        shape = [64, 256] dtype = "f32" alignment = 256
+        : !tile.am_buffer<64x256xf32>
+{body}
+    tile.return
+  }}
+}}
+'''
+
+
+def _verify_program_text(text: str):
+  module = Parser(make_elenor_context(), text).parse_module()
+  from pipeline_validator.dialects.elenor import TileProgramDefOp
+  from pipeline_validator.workload_ir import _verify_program
+
+  program = next(op for op in module.body.block.ops if isinstance(op, TileProgramDefOp))
+  return _verify_program(program)
+
+
+# ---------------------------------------------------------------------------
+# IR01/IR02: AM is not L1; explicit capacity is enforced
+# ---------------------------------------------------------------------------
+
+
+def test_ir01_am_declaration_is_not_in_l1_arena():
+  artifact, simulator, _store, result = _compile_and_run()
+  program = _first_program(artifact)
+  assert result.completed
+  assert [am.name for am in program.am_buffers] == ["am:0"]
+  assert all(buffer.name.startswith("l1:") for buffer in program.l1_buffers)
+  assert len(program.l1_buffers) == 5
+  assert all(item.buffer_id != "am:0" for item in program.layout.buffer_layouts)
+  assert ExecTileOp.ALLOC_AM in [inst.op for inst in program.insts]
+  assert simulator.group.shared_am.snapshot()["acquire_count"] == 1
+
+
+def test_ir02_am_capacity_is_explicit_and_not_grown():
+  with pytest.raises(ValueError, match="AM buffer"):
+    _compile_and_run(capacity=32768)
+  artifact, simulator, _store, _result = _compile_and_run(capacity=65536)
+  assert _first_program(artifact).am_buffers[0].bytes == 65536
+  assert simulator.group.shared_am.snapshot()["slot_capacity_bytes"] == 65536
+  large = _hw(262144)
+  small = _hw(65536)
+  from pipeline_validator.execution_verifier import target_fingerprint
+
+  assert target_fingerprint(large, _sim()) != target_fingerprint(small, _sim())
+
+
+# ---------------------------------------------------------------------------
+# IR03/IR05/IR07/IR14: real numerical bytes, automatic final release
+# ---------------------------------------------------------------------------
+
+
+def test_ir03_05_07_f32_output_matches_independent_oracle():
+  _artifact, simulator, store, result = _compile_and_run()
+  a = (INPUTS / "A.bin").read_bytes()
+  b = (INPUTS / "B.bin").read_bytes()
+  expected = struct.pack("<16384f", *_oracle(a, b))
+  actual = store.read_hbm(0x300000, 65536)
+  assert result.completed
+  assert actual == expected
+  snapshot = simulator.group.shared_am.snapshot()
+  assert snapshot["live_leases"] == 0
+  assert snapshot["free_slots"] == snapshot["total_slots"] == 8
+  assert snapshot["terminals"][-1]["kind"] == "chain_done"
+  assert snapshot["terminals"][-1]["success"] is True
+
+
+def _bf16_bytes(value: float) -> bytes:
+  bits = struct.unpack("<I", struct.pack("<f", value))[0]
+  if bits & 0x7F800000 == 0x7F800000 and bits & 0x007FFFFF:
+    return struct.pack("<H", 0x7FC0 | ((bits >> 16) & 0x8000))
+  rounded = bits + 0x7FFF + ((bits >> 16) & 1)
+  return struct.pack("<H", (rounded >> 16) & 0xFFFF)
+
+
+def test_ir07_bf16_output_is_converted_only_at_final():
+  text = (
+    _fixture_text()
+    .replace(
+      '%out = tile.alloc memory_space = "l1" shape = [64, 256] dtype = "f32"',
+      '%out = tile.alloc memory_space = "l1" shape = [64, 256] dtype = "bf16"',
+    )
+    .replace("!tile.l1_buffer<64x256xf32>", "!tile.l1_buffer<64x256xbf16>")
+    .replace("!nest.l2_buffer<64x256xf32>", "!nest.l2_buffer<64x256xbf16>")
+    .replace("!nest.l2_view<64x256xf32>", "!nest.l2_view<64x256xbf16>")
+    .replace("!nest.global_memref<64x256xf32>", "!nest.global_memref<64x256xbf16>")
+    .replace("!nest.global_view<64x256xf32>", "!nest.global_view<64x256xbf16>")
+    .replace(
+      '%c_l2_1 = nest.alloc slot = "c" role = "out" shape = [64, 256] dtype = "f32"',
+      '%c_l2_1 = nest.alloc slot = "c" role = "out" shape = [64, 256] dtype = "bf16"',
+    )
+  )
+  _artifact, _simulator, store, result = _compile_and_run(text, c_bytes=32768)
+  a = (INPUTS / "A.bin").read_bytes()
+  b = (INPUTS / "B.bin").read_bytes()
+  expected = b"".join(_bf16_bytes(value) for value in _oracle(a, b))
+  assert result.completed
+  assert store.read_hbm(0x300000, 32768) == expected
+
+
+# ---------------------------------------------------------------------------
+# IR09/IR10: quota, busy without side effect, affinity/engine handles
+# ---------------------------------------------------------------------------
+
+
+def test_ir09_third_lease_is_busy_without_side_effect():
+  manager = SharedAmManager(
+    slot_capacity_bytes=65536,
+    group_count=4,
+    slots_per_group=2,
+    slots_per_context=2,
+  )
+  owner = AmOwner("ctx", 1, 0)
+  first = manager.try_acquire(
+    owner,
+    buffer_name="a",
+    logical_slot=0,
+    dims=(64, 256),
+    byte_count=65536,
+    output_base="l1:0",
+    cycle=0,
+  )
+  second = manager.try_acquire(
+    owner,
+    buffer_name="b",
+    logical_slot=1,
+    dims=(64, 256),
+    byte_count=65536,
+    output_base="l1:1",
+    cycle=0,
+  )
+  assert first is not None and second is not None
+  before = manager.snapshot()
+  third = manager.try_acquire(
+    owner,
+    buffer_name="c",
+    logical_slot=0,
+    dims=(64, 256),
+    byte_count=65536,
+    output_base="l1:2",
+    cycle=1,
+  )
+  after = manager.snapshot()
+  assert third is None
+  assert after["live_leases"] == before["live_leases"] == 2
+  assert after["slots"] == before["slots"]
+  assert after["busy_count"] == 1
+
+  manager.abort_lease(first.lease_id, 2, "test")
+  fourth = manager.try_acquire(
+    owner,
+    buffer_name="d",
+    logical_slot=0,
+    dims=(64, 256),
+    byte_count=65536,
+    output_base="l1:3",
+    cycle=3,
+  )
+  assert fourth is not None
+
+
+def test_ir10_affinity_is_fixed_and_one_engine_serves_many_handles():
+  manager = SharedAmManager(
+    slot_capacity_bytes=65536,
+    group_count=4,
+    slots_per_group=2,
+    slots_per_context=2,
+  )
+  owner = AmOwner("ctx", 1, 0)
+  engines = []
+  for index in range(6):
+    lease = manager.try_acquire(
+      owner,
+      buffer_name=f"a{index}",
+      logical_slot=index % 2,
+      dims=(64, 256),
+      byte_count=65536,
+      output_base=f"l1:{index}",
+      cycle=index,
+    )
+    assert lease is not None
+    engines.append(lease.bound_engine)
+    manager.abort_lease(lease.lease_id, index + 1, "test")
+  assert engines[:2] == [0, 0]
+  assert manager.snapshot()["engine_handle_counts"][0] >= 3
+
+
+# ---------------------------------------------------------------------------
+# IR11: the completion event is a commit, not raw compute-done
+# ---------------------------------------------------------------------------
+
+
+def test_ir11_typed_boa_commit_is_after_compute_and_drain():
+  artifact, simulator, _store, result = _compile_and_run()
+  program = _first_program(artifact)
+  typed = [
+    descriptor
+    for descriptor in program.descriptors.values()
+    if descriptor.params.get("matmul") is not None
+  ]
+  assert len(typed) == 2
+  service = simulator.group.tiles[0].boa_results.snapshot()
+  finals = [record for record in service["records"] if record["final"]]
+  assert len(finals) == 1
+  record = finals[0]
+  assert record["compute_done_cycle"] >= 0
+  assert record["commit_cycle"] >= record["compute_done_cycle"]
+  assert record["output_cycle"] is not None
+  assert record["output_cycle"] >= record["compute_done_cycle"]
+  assert record["event_cycle"] >= record["output_cycle"]
+  assert service["release_count"] == 1
+  assert service["output_write_count"] == 1
+  assert service["credits"] == service["credit_capacity"]
+  terminal = simulator.group.shared_am.snapshot()["terminals"][-1]
+  assert terminal["cycle"] == record["commit_cycle"]
+  assert result.cycles >= record["event_cycle"]
+
+
+# ---------------------------------------------------------------------------
+# IR12/IR13: source linear lifetime and descriptor snapshot semantics
+# ---------------------------------------------------------------------------
+
+
+def test_ir15_missing_final_is_rejected():
+  text = _tile_program_text(
+    '''    %k0 = tile.boa.async "matmul" ins(%a, %b) outs(%out) acc(%acc)
+        m = 64 n = 256 k = 64 seq = 0 : !tile.event<"k0">
+    tile.await %k0'''
+  )
+  with pytest.raises(VerifyException, match="must terminate with one output"):
+    _verify_program_text(text)
+
+
+def test_ir08_wrong_seq_and_extra_final_are_rejected():
+  wrong_seq = _tile_program_text(
+    '''    %k0 = tile.boa.async "matmul" ins(%a, %b) outs(%out) acc(%acc)
+        m = 64 n = 256 k = 64 seq = 2 : !tile.event<"k0">
+    tile.await %k0'''
+  )
+  with pytest.raises(VerifyException, match="seq must be 0"):
+    _verify_program_text(wrong_seq)
+  extra_final = _tile_program_text(
+    '''    %k0 = tile.boa.async "matmul" ins(%a, %b) outs(%out) acc(%acc)
+        m = 64 n = 256 k = 64 seq = 0 output : !tile.event<"k0">
+    tile.await %k0
+    %k1 = tile.boa.async "matmul" ins(%a, %b) outs(%out) acc(%acc)
+        m = 64 n = 256 k = 64 seq = 1 accumulate output : !tile.event<"k1">
+    tile.await %k1'''
+  )
+  with pytest.raises(VerifyException, match=r"not yet finalized|finalized"):
+    _verify_program_text(extra_final)
+
+
+def test_am_cannot_be_freed_or_loaded_as_l1():
+  free_am = _tile_program_text(
+    '''    %k0 = tile.boa.async "matmul" ins(%a, %b) outs(%out) acc(%acc)
+        m = 64 n = 256 k = 64 seq = 0 output : !tile.event<"k0">
+    tile.await %k0
+    tile.free %acc'''
+  )
+  with pytest.raises((ParseError, VerifyException)):
+    _verify_program_text(free_am)
+
+  am_operand = _tile_program_text(
+    '''    %k0 = tile.load.async %a_view into %acc : !tile.event<"k0">
+    tile.await %k0'''
+  )
+  with pytest.raises((ParseError, VerifyException)):
+    _verify_program_text(am_operand)
+
+
+def test_two_independent_chains_are_expressible():
+  text = '''builtin.module {
+  tile.program @p(%task : !nest.task,
+      %a0_l2 : !nest.l2_buffer<64x64xbf16>,
+      %b0_l2 : !nest.l2_buffer<64x256xbf16>,
+      %a1_l2 : !nest.l2_buffer<64x64xbf16>,
+      %b1_l2 : !nest.l2_buffer<64x256xbf16>)
+      resource_contract = #tile.resources<allowed_profiles = [0, 1],
+          tile_l1_spm_bytes_per_context = 294912> {
+    %a0v = tile.subview %a0_l2 offsets = [0, 0] sizes = [64, 64] strides = [1, 1]
+        : !nest.l2_view<64x64xbf16>
+    %b0v = tile.subview %b0_l2 offsets = [0, 0] sizes = [64, 256] strides = [1, 1]
+        : !nest.l2_view<64x256xbf16>
+    %a1v = tile.subview %a1_l2 offsets = [0, 0] sizes = [64, 64] strides = [1, 1]
+        : !nest.l2_view<64x64xbf16>
+    %b1v = tile.subview %b1_l2 offsets = [0, 0] sizes = [64, 256] strides = [1, 1]
+        : !nest.l2_view<64x256xbf16>
+    %a0 = tile.alloc shape = [64, 64] dtype = "bf16"
+        alignment = 256 : !tile.l1_buffer<64x64xbf16>
+    %b0 = tile.alloc shape = [64, 256] dtype = "bf16"
+        alignment = 256 : !tile.l1_buffer<64x256xbf16>
+    %a1 = tile.alloc shape = [64, 64] dtype = "bf16"
+        alignment = 256 : !tile.l1_buffer<64x64xbf16>
+    %b1 = tile.alloc shape = [64, 256] dtype = "bf16"
+        alignment = 256 : !tile.l1_buffer<64x256xbf16>
+    %out0 = tile.alloc memory_space = "l1" shape = [64, 256] dtype = "f32"
+        alignment = 256 : !tile.l1_buffer<64x256xf32>
+    %out1 = tile.alloc memory_space = "l1" shape = [64, 256] dtype = "f32"
+        alignment = 256 : !tile.l1_buffer<64x256xf32>
+    %acc0 = tile.alloc memory_space = "am" logical_slot = 0 output(%out0)
+        shape = [64, 256] dtype = "f32" alignment = 256 : !tile.am_buffer<64x256xf32>
+    %acc1 = tile.alloc memory_space = "am" logical_slot = 1 output(%out1)
+        shape = [64, 256] dtype = "f32" alignment = 256 : !tile.am_buffer<64x256xf32>
+    %la0 = tile.load.async %a0v into %a0 : !tile.event<"la0">
+    %lb0 = tile.load.async %b0v into %b0 : !tile.event<"lb0">
+    %la1 = tile.load.async %a1v into %a1 : !tile.event<"la1">
+    %lb1 = tile.load.async %b1v into %b1 : !tile.event<"lb1">
+    tile.await %la0, %lb0, %la1, %lb1
+    tile.signal input_released(%task)
+    %k0 = tile.boa.async "matmul" ins(%a0, %b0) outs(%out0) acc(%acc0)
+        m = 64 n = 256 k = 64 seq = 0 : !tile.event<"k0">
+    %k1 = tile.boa.async "matmul" ins(%a1, %b1) outs(%out1) acc(%acc1)
+        m = 64 n = 256 k = 64 seq = 0 : !tile.event<"k1">
+    tile.await %k0
+    tile.await %k1
+    %d0 = tile.boa.async "matmul" ins(%a0, %b0) outs(%out0) acc(%acc0)
+        m = 64 n = 256 k = 64 seq = 1 accumulate output : !tile.event<"d0">
+    %d1 = tile.boa.async "matmul" ins(%a1, %b1) outs(%out1) acc(%acc1)
+        m = 64 n = 256 k = 64 seq = 1 accumulate output : !tile.event<"d1">
+    tile.await %d0, %d1
+    tile.return
+  }
+}
+'''
+  _verify_program_text(text)
+
+
+# ---------------------------------------------------------------------------
+# IR16: v4 replay and resealed tamper rejection
+# ---------------------------------------------------------------------------
+
+
+def test_ir16_v4_artifact_replays_without_source():
+  artifact, _simulator, _store, _result = _compile_and_run()
+  assert artifact.schema_version == 4
+  assert artifact.compiler_abi == "v4"
+  text = serialize_compiled_program(artifact)
+  replay = parse_compiled_program(text)
+  assert replay.artifact_hash == artifact.artifact_hash
+  assert parse_compiled_program(text).entry == artifact.entry
+
+
+def test_ir16_resealed_tampered_am_binding_is_rejected():
+  artifact, _simulator, _store, _result = _compile_and_run()
+  task = next(iter(artifact.entry.tasks.values()))
+  binding = next(iter(task.role_bindings.values()))
+  program = binding.tile_program
+  descriptors = dict(program.descriptors)
+  name = next(
+    key for key, desc in descriptors.items() if desc.params.get("matmul") is not None
+  )
+  descriptor = descriptors[name]
+  matmul = descriptor.params["matmul"]
+  from pipeline_validator.immutable import FrozenMap
+
+  descriptors[name] = replace(
+    descriptor,
+    params=FrozenMap({"matmul": replace(matmul, seq=1, init=False)}),
+  )
+  tampered_program = replace(
+    program,
+    descriptors=descriptors,
+    program_hash=0,
+  )
+  from pipeline_validator.compiled_program import program_digest
+
+  tampered_program = replace(
+    tampered_program, program_hash=program_digest(tampered_program)
+  )
+  tampered_binding = replace(binding, tile_program=tampered_program)
+  tampered_task = replace(task, role_bindings={binding.role_id: tampered_binding})
+  tampered_entry = replace(
+    artifact.entry, tasks={task.binding_id: tampered_task}
+  )
+  tampered = seal_program(replace(artifact, entry=tampered_entry))
+  with pytest.raises(ValueError, match="AM chain sequence|INIT/ADD"):
+    load_program(tampered, _hw(), _sim())
+
+  # An absent AM reference is caught even earlier by the strict codec.
+  descriptors[name] = replace(
+    descriptor, params=FrozenMap({"matmul": replace(matmul, am="am:missing")})
+  )
+  bad_program = replace(
+    program, descriptors=descriptors, program_hash=0
+  )
+  bad_program = replace(bad_program, program_hash=program_digest(bad_program))
+  bad_entry = replace(
+    artifact.entry,
+    tasks={
+      task.binding_id: replace(
+        task,
+        role_bindings={
+          binding.role_id: replace(binding, tile_program=bad_program)
+        },
+      )
+    },
+  )
+  with pytest.raises(ValueError, match="absent AM buffer"):
+    seal_program(replace(artifact, entry=bad_entry))
+
+
+def test_ir17_estimate_is_explicit_and_not_an_am_chain():
+  from pipeline_validator.dialects.elenor import TileBoaEstimateOp
+
+  op = TileBoaEstimateOp("matmul", 64, 64, 64, 524288, "e")
+  assert op.name == "tile.boa.estimate.async"
+  assert not hasattr(op, "acc")
+  text = _tile_program_text(
+    '''    %e = tile.boa.estimate.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
+        : !tile.event<"e">
+    tile.await %e'''
+  )
+  # The AM declaration in the helper remains unterminated; the estimate is
+  # not allowed to stand in for its FINAL.
+  with pytest.raises(VerifyException, match="must terminate with one output"):
+    _verify_program_text(text)
+
+
+def test_am_slot_reuse_increments_generation_and_keeps_terminal():
+  manager = SharedAmManager(
+    slot_capacity_bytes=65536,
+    group_count=1,
+    slots_per_group=1,
+    slots_per_context=1,
+  )
+  owner = AmOwner("ctx", 1, 0)
+  first = manager.try_acquire(
+    owner,
+    buffer_name="a",
+    logical_slot=0,
+    dims=(64, 128),
+    byte_count=32768,
+    output_base="l1:0",
+    cycle=0,
+  )
+  assert first is not None
+  payload = b"\x00" * (64 * 128 * 4)
+  manager.begin_step(first.lease_id, seq=0, init=True, final=False, cycle=1)
+  manager.commit_step(first.lease_id, seq=0, data=payload, final=True, cycle=2)
+  manager.release_final(first.lease_id, 3)
+  second = manager.try_acquire(
+    owner,
+    buffer_name="b",
+    logical_slot=0,
+    dims=(64, 128),
+    byte_count=32768,
+    output_base="l1:1",
+    cycle=4,
+  )
+  assert second is not None
+  assert second.generation == first.generation + 1
+  snapshot = manager.snapshot()
+  assert snapshot["terminals"][0]["kind"] == "chain_done"
+  assert snapshot["terminals"][0]["generation"] == first.generation
+
+
+def test_am_release_before_final_and_fault_cleanup():
+  manager = SharedAmManager(
+    slot_capacity_bytes=65536,
+    group_count=1,
+    slots_per_group=2,
+    slots_per_context=2,
+  )
+  owner = AmOwner("ctx", 1, 0)
+  lease = manager.try_acquire(
+    owner,
+    buffer_name="a",
+    logical_slot=0,
+    dims=(64, 256),
+    byte_count=65536,
+    output_base="l1:0",
+    cycle=0,
+  )
+  assert lease is not None
+  manager.begin_step(lease.lease_id, seq=0, init=True, final=False, cycle=1)
+  with pytest.raises(ValueError, match="not ready for final release"):
+    manager.release_final(lease.lease_id, 2)
+  manager.abort_owner(owner, 3, "fault")
+  snapshot = manager.snapshot()
+  assert snapshot["live_leases"] == 0
+  assert snapshot["fault_count"] == 1
+  assert snapshot["terminals"][-1]["kind"] == "fault"
+  assert snapshot["free_slots"] == snapshot["total_slots"]
+
+
+def test_old_operandless_boa_syntax_is_rejected():
+  text = _tile_program_text(
+    '''    %k0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
+        : !tile.event<"k0">
+    tile.await %k0'''
+  )
+  with pytest.raises((ParseError, VerifyException)):
+    _verify_program_text(text)
+
+
+def test_am_i8_output_is_accepted_by_source_but_rejected_numerically():
+  text = _fixture_text().replace(
+    '%out = tile.alloc memory_space = "l1" shape = [64, 256] dtype = "f32"',
+    '%out = tile.alloc memory_space = "l1" shape = [64, 256] dtype = "i8"',
+  )
+  text = text.replace("!tile.l1_buffer<64x256xf32>", "!tile.l1_buffer<64x256xi8>", 1)
+  text = (
+    text.replace("!nest.l2_buffer<64x256xf32>", "!nest.l2_buffer<64x256xi8>")
+    .replace("!nest.l2_view<64x256xf32>", "!nest.l2_view<64x256xi8>")
+    .replace("!nest.global_memref<64x256xf32>", "!nest.global_memref<64x256xi8>")
+    .replace("!nest.global_view<64x256xf32>", "!nest.global_view<64x256xi8>")
+    .replace(
+      '%c_l2_1 = nest.alloc slot = "c" role = "out" shape = [64, 256] dtype = "f32"',
+      '%c_l2_1 = nest.alloc slot = "c" role = "out" shape = [64, 256] dtype = "i8"',
+    )
+  )
+  _artifact, simulator, _store, result = _compile_and_run(text, c_bytes=16384)
+  assert not result.completed
+  assert "INT8 AM output conversion policy" in result.reason
+  snapshot = simulator.group.shared_am.snapshot()
+  assert snapshot["fault_count"] == 1
+  assert snapshot["live_leases"] == 0
+
+
+def test_missing_output_binding_is_rejected():
+  text = '''builtin.module {
+  tile.program @p(%task : !nest.task)
+      resource_contract = #tile.resources<allowed_profiles = [0, 1],
+          tile_l1_spm_bytes_per_context = 131072> {
+    %acc = tile.alloc memory_space = "am" logical_slot = 0
+        shape = [64, 256] dtype = "f32" alignment = 256
+        : !tile.am_buffer<64x256xf32>
+    tile.return
+  }
+}
+'''
+  with pytest.raises((ParseError, VerifyException)):
+    _verify_program_text(text)
+
+
+def test_eight_contexts_with_one_lease_each_fill_all_slots():
+  manager = SharedAmManager(
+    slot_capacity_bytes=65536,
+    group_count=4,
+    slots_per_group=2,
+    slots_per_context=2,
+  )
+  leases = []
+  for index in range(8):
+    lease = manager.try_acquire(
+      AmOwner("ctx", 1, index),
+      buffer_name="a",
+      logical_slot=0,
+      dims=(64, 256),
+      byte_count=65536,
+      output_base=f"l1:{index}",
+      cycle=index,
+    )
+    assert lease is not None
+    leases.append(lease)
+  assert manager.snapshot()["free_slots"] == 0
+  ninth = manager.try_acquire(
+    AmOwner("ctx", 1, 8),
+    buffer_name="a",
+    logical_slot=0,
+    dims=(64, 256),
+    byte_count=65536,
+    output_base="l1:8",
+    cycle=9,
+  )
+  assert ninth is None
+  assert manager.snapshot()["live_leases"] == 8
+  for lease in leases:
+    manager.abort_lease(lease.lease_id, 10, "test")
+  assert manager.snapshot()["free_slots"] == 8
+
+
+def _prepared_final(manager, lease_id, *, final: bool, events: list):
+  from types import SimpleNamespace
+  from typing import cast
+
+  from pipeline_validator.execution_ir import ExecBoaMatmulDesc
+  from pipeline_validator.runtime.boa_result import BoaPreparedResult
+
+  payload = b"\x01" * (64 * 256 * 4)
+  matmul = cast(
+    ExecBoaMatmulDesc,
+    SimpleNamespace(am="am:0", final=final, seq=0, init=True),
+  )
+
+  def commit(cycle: int) -> None:
+    manager.commit_step(lease_id, seq=0, data=payload, final=False, cycle=cycle)
+    events.append(("commit", cycle))
+
+  def write_output(cycle: int) -> None:
+    events.append(("write", cycle))
+
+  def commit_final(cycle: int) -> None:
+    manager.commit_step(lease_id, seq=0, data=payload, final=True, cycle=cycle)
+    events.append(("commit_final", cycle))
+
+  def release(cycle: int) -> None:
+    manager.release_final(lease_id, cycle)
+    events.append(("release", cycle))
+
+  def abort(cycle: int, reason: str) -> None:
+    manager.abort_lease(lease_id, cycle, reason)
+    events.append(("abort", cycle))
+
+  return BoaPreparedResult(
+    matmul, payload, final, commit, commit_final, write_output, release, abort
+  )
+
+
+def _pending_job():
+  from pipeline_validator.engines import EngineJob
+
+  job = EngineJob(
+    desc=None,  # type: ignore[arg-type]
+    start_cycle=0,
+    finish_cycle=0,
+    event_id="e",
+  )
+  job.compute_done_cycle = 0
+  return job
+
+
+def test_ir11_nonfinal_result_commits_in_a_later_stage():
+  from pipeline_validator.runtime.boa_result import BoaResultService
+
+  manager = SharedAmManager(
+    slot_capacity_bytes=65536,
+    group_count=1,
+    slots_per_group=1,
+    slots_per_context=1,
+  )
+  owner = AmOwner("ctx", 1, 0)
+  lease = manager.try_acquire(
+    owner,
+    buffer_name="a",
+    logical_slot=0,
+    dims=(64, 256),
+    byte_count=65536,
+    output_base="l1:0",
+    cycle=0,
+  )
+  assert lease is not None
+  manager.begin_step(lease.lease_id, seq=0, init=True, final=False, cycle=0)
+  service = BoaResultService(_hw())
+  events: list[tuple[str, int]] = []
+  job = _pending_job()
+  service.submit(job, _prepared_final(manager, lease.lease_id, final=False, events=events), 0)
+  assert service.advance(0) == []
+  assert service.advance(1) == []
+  assert manager.lease(lease.lease_id).partial is None
+  ready = service.advance(2)
+  assert ready == [job]
+  assert events == [("commit", 2)]
+  assert job.event_cycle == 2
+  assert manager.lease(lease.lease_id).state.value == "running"
+  assert manager.snapshot()["live_leases"] == 1
+  assert service.snapshot()["event_count"] == 1
+
+
+def test_ir14_final_output_backpressure_defers_release_and_event():
+  from pipeline_validator.runtime.boa_result import BoaResultService
+
+  manager = SharedAmManager(
+    slot_capacity_bytes=65536,
+    group_count=1,
+    slots_per_group=1,
+    slots_per_context=1,
+  )
+  owner = AmOwner("ctx", 1, 0)
+  lease = manager.try_acquire(
+    owner,
+    buffer_name="a",
+    logical_slot=0,
+    dims=(64, 256),
+    byte_count=65536,
+    output_base="l1:0",
+    cycle=0,
+  )
+  assert lease is not None
+  manager.begin_step(lease.lease_id, seq=0, init=True, final=True, cycle=0)
+  service = BoaResultService(_hw())
+  service.set_output_blocked(True)
+  events: list[tuple[str, int]] = []
+  job = _pending_job()
+  service.submit(job, _prepared_final(manager, lease.lease_id, final=True, events=events), 0)
+  assert service.advance(1) == []
+  assert service.advance(2) == []
+  assert service.advance(50) == []
+  snapshot = service.snapshot()
+  assert snapshot["states"]["wait_output"] == 1
+  assert snapshot["blocked_cycles"] > 0
+  assert manager.snapshot()["live_leases"] == 1
+  assert manager.snapshot()["free_slots"] == 0
+  assert events == []
+  assert job.event_cycle is None
+
+  service.set_output_blocked(False)
+  ready = []
+  for cycle in range(51, 70):
+    ready.extend(service.advance(cycle))
+  assert ready == [job]
+  assert [name for name, _ in events] == ["write", "commit_final", "release"]
+  assert events[0][1] >= 51
+  assert events[0][1] <= events[1][1] <= events[2][1]
+  assert job.event_cycle == events[2][1]
+  assert manager.snapshot()["live_leases"] == 0
+  assert manager.snapshot()["terminals"][-1]["kind"] == "chain_done"
+  record = service.snapshot()["records"][-1]
+  assert record["compute_done_cycle"] == 0
+  assert record["output_cycle"] is not None
+  assert record["event_cycle"] >= record["output_cycle"]
+
+
+def test_ir14_runtime_final_output_backpressure_recovers_without_polling():
+  _artifact, simulator, store, result = _compile_and_run(block_until=3000)
+  assert result.completed
+  service = simulator.group.tiles[0].boa_results.snapshot()
+  finals = [record for record in service["records"] if record["final"]]
+  assert len(finals) == 1
+  record = finals[0]
+  assert service["blocked_cycles"] > 0
+  assert record["output_cycle"] >= 3000
+  assert record["event_cycle"] >= record["output_cycle"]
+  assert simulator.group.shared_am.snapshot()["live_leases"] == 0
+  assert simulator.group.shared_am.snapshot()["terminals"][-1]["kind"] == "chain_done"
+  a = (INPUTS / "A.bin").read_bytes()
+  b = (INPUTS / "B.bin").read_bytes()
+  assert store.read_hbm(0x300000, 65536) == struct.pack("<16384f", *_oracle(a, b))

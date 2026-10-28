@@ -67,6 +67,15 @@ _HW_YAML_PATH_TO_FIELD = {
   "engines.boa.dtype.input_bytes": "boa_dtype_bytes",
   "engines.boa.dtype.accumulator_bytes": "boa_acc_bytes",
   "engines.boa.launch_cycles": "boa_launch_cycles",
+  "engines.boa.am.slot_capacity_bytes": "boa_am_slot_capacity_bytes",
+  "engines.boa.am.group_count": "boa_am_group_count",
+  "engines.boa.am.slots_per_group": "boa_am_slots_per_group",
+  "engines.boa.am.slots_per_context": "boa_am_slots_per_context",
+  "engines.boa.result_fifo_depth": "boa_result_fifo_depth",
+  "engines.boa.commit_cycles": "boa_commit_cycles",
+  "engines.boa.output_drain_cycles": "boa_output_drain_cycles",
+  "engines.boa.l1_output_credits": "boa_l1_output_credits",
+  "engines.boa.am_credit_capacity": "boa_am_credit_capacity",
   "engines.evu.lanes": "evu_lanes",
   "engines.evu.clock_multiplier": "evu_clock_multiplier",
   "engines.evu.dtype_bytes": "evu_dtype_bytes",
@@ -251,6 +260,18 @@ class HardwareConfig:
   # Peak TOPS computed in boa_peak tops() from OPA geometry + dtype.
   boa_dtype_bytes: int = _HW_DEFAULTS["boa_dtype_bytes"]  # BF16 input
   boa_acc_bytes: int = _HW_DEFAULTS["boa_acc_bytes"]  # INT32 / BF16 accumulate
+  # Software-managed AM: 4 groups x 2 physical slots, at most 2 live
+  # leases per Tile context.  Capacity is per physical slot; a context
+  # never reserves slots statically.
+  boa_am_slot_capacity_bytes: int = _HW_DEFAULTS["boa_am_slot_capacity_bytes"]
+  boa_am_group_count: int = _HW_DEFAULTS["boa_am_group_count"]
+  boa_am_slots_per_group: int = _HW_DEFAULTS["boa_am_slots_per_group"]
+  boa_am_slots_per_context: int = _HW_DEFAULTS["boa_am_slots_per_context"]
+  boa_result_fifo_depth: int = _HW_DEFAULTS["boa_result_fifo_depth"]
+  boa_commit_cycles: int = _HW_DEFAULTS["boa_commit_cycles"]
+  boa_output_drain_cycles: int = _HW_DEFAULTS["boa_output_drain_cycles"]
+  boa_l1_output_credits: int = _HW_DEFAULTS["boa_l1_output_credits"]
+  boa_am_credit_capacity: int = _HW_DEFAULTS["boa_am_credit_capacity"]
 
   # --- EVU --------------------------------------------------------------
   # 9.x: 32-lane predicated vector unit.
@@ -361,6 +382,24 @@ class HardwareConfig:
       raise ValueError("l2_mshr_entries must be > 0")
     if self.l1_mshr_entries <= 0:
       raise ValueError("l1_mshr_entries must be > 0")
+    if self.boa_am_slot_capacity_bytes < 1:
+      raise ValueError("boa_am_slot_capacity_bytes must be >= 1")
+    if self.boa_am_group_count < 1:
+      raise ValueError("boa_am_group_count must be >= 1")
+    if self.boa_am_slots_per_group < 1:
+      raise ValueError("boa_am_slots_per_group must be >= 1")
+    if self.boa_am_slots_per_context < 1:
+      raise ValueError("boa_am_slots_per_context must be >= 1")
+    if self.boa_am_slots_per_context > self.boa_am_group_count * self.boa_am_slots_per_group:
+      raise ValueError("boa_am_slots_per_context exceeds total physical AM slots")
+    if self.boa_result_fifo_depth < 1:
+      raise ValueError("boa_result_fifo_depth must be >= 1")
+    if self.boa_commit_cycles < 0 or self.boa_output_drain_cycles < 0:
+      raise ValueError("BOA commit/drain cycles must be non-negative")
+    if self.boa_am_credit_capacity < 2:
+      raise ValueError("boa_am_credit_capacity must be >= 2")
+    if self.boa_l1_output_credits < 1:
+      raise ValueError("boa_l1_output_credits must be >= 1")
     build_registry(self)
 
   def cycle_ns(self) -> float:

@@ -50,6 +50,7 @@ class ExecTileOp(Enum):
   SIGNAL_PHASE = "signal.phase"
   FREE_L1 = "free.l1"
   ALLOC_L1 = "alloc.l1"
+  ALLOC_AM = "alloc.am"
 
 
 @dataclass(frozen=True)
@@ -263,6 +264,46 @@ class ExecL1Buffer:
 
 
 @dataclass(frozen=True)
+class ExecAmBuffer:
+  """Software-managed BOA accumulator capability, never an L1 heap object.
+
+  ``logical_slot`` is the software-selected 0/1 position; the runtime
+  chooses the physical group/slot and bound engine only when the lease is
+  actually granted.  ``output`` is the reserved final L1 destination view.
+  """
+
+  name: str
+  dims: tuple[int, ...]
+  dtype: str  # V1 AM always carries f32 partial sums
+  element_bytes: int
+  alignment: int
+  bytes: int
+  logical_slot: int
+  output: ExecMemoryView
+
+
+@dataclass(frozen=True)
+class ExecBoaMatmulDesc:
+  """One typed numerical Matmul step on an AM accumulator chain.
+
+  ``init`` is true for the first step (``acc := A x B``); otherwise the
+  step adds into the existing partial.  ``final`` is the single step that
+  writes the bound L1 output and releases the AM lease.
+  """
+
+  a: ExecMemoryView
+  b: ExecMemoryView
+  output: ExecMemoryView
+  am: str
+  m: int
+  n: int
+  k: int
+  seq: int
+  init: bool
+  final: bool
+
+
+@dataclass(frozen=True)
 class ExecTileFormal:
   """Tile program formal parameter descriptor."""
 
@@ -432,6 +473,7 @@ class ExecTileProgram(FrozenRecord):
   resource_contract: TileResources | None = None
   layout: ArenaLayout | None = None
   text_bytes: int = 0
+  am_buffers: tuple[ExecAmBuffer, ...] = ()
 
   def label_index(self, label: str) -> int:
     return self.labels[label]

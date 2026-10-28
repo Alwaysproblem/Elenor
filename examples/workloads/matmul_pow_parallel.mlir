@@ -52,8 +52,11 @@ builtin.module {
         alignment = 256 : !tile.l1_buffer<32x256xbf16>
     %b_k1_l1 = tile.alloc shape = [32, 256] dtype = "bf16"
         alignment = 256 : !tile.l1_buffer<32x256xbf16>
-    %acc = tile.alloc shape = [256, 256] dtype = "bf16"
+    %out = tile.alloc memory_space = "l1" shape = [256, 256] dtype = "bf16"
         alignment = 256 : !tile.l1_buffer<256x256xbf16>
+    %acc = tile.alloc memory_space = "am" logical_slot = 0 output(%out)
+        shape = [256, 256] dtype = "f32" alignment = 256
+        : !tile.am_buffer<256x256xf32>
     %a_k0_loaded = tile.load.async %a_k0 into %a_k0_l1
         : !tile.event<"a_k0_loaded">
     %b_k0_loaded = tile.load.async %b_k0 into %b_k0_l1
@@ -64,20 +67,22 @@ builtin.module {
         : !tile.event<"b_k1_loaded">
     tile.await %a_k0_loaded, %b_k0_loaded
     %boa_k0_done = tile.boa.async "matmul"
-        m = 256 n = 256 k = 32 ops = 4194304
+        ins(%a_k0_l1, %b_k0_l1) outs(%out) acc(%acc)
+        m = 256 n = 256 k = 32 seq = 0
         : !tile.event<"boa_k0_done">
     tile.await %a_k1_loaded, %b_k1_loaded
     tile.signal input_released(%task)
     tile.await %boa_k0_done
     %boa_k1_done = tile.boa.async "matmul"
-        m = 256 n = 256 k = 32 ops = 4194304 accumulate
+        ins(%a_k1_l1, %b_k1_l1) outs(%out) acc(%acc)
+        m = 256 n = 256 k = 32 seq = 1 accumulate output
         : !tile.event<"boa_k1_done">
     tile.await %boa_k1_done
     tile.free %a_k0_l1
     tile.free %a_k1_l1
     tile.free %b_k0_l1
     tile.free %b_k1_l1
-    %c_stored = tile.store.async %acc into %c_tile
+    %c_stored = tile.store.async %out into %c_tile
         : !tile.event<"c_stored">
     tile.await %c_stored
     tile.signal output_ready(%task)

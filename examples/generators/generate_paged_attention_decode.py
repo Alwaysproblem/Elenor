@@ -68,7 +68,7 @@ from pipeline_validator.dialects.elenor import (
   NexusSubmitContextOp,
   TileAllocOp,
   TileAwaitOp,
-  TileBoaOp,
+  TileBoaEstimateOp,
   TileEvuOp,
   TileFreeOp,
   TileGatherOp,
@@ -328,9 +328,9 @@ def build_attention_program(
     window_entries=1,
     scope=scn.scope(request),
   )
-  qk = TileBoaOp("matmul", hpk, tokens, d, 2 * hpk * tokens * d, f"qk_{suffix}")
+  qk = TileBoaEstimateOp("matmul", hpk, tokens, d, 2 * hpk * tokens * d, f"qk_{suffix}")
   sm = TileEvuOp("online_softmax_update", 4 * (tokens + 2), f"sm_{suffix}")
-  pv = TileBoaOp("matmul", hpk, d, tokens, 2 * hpk * d * tokens, f"pv_{suffix}")
+  pv = TileBoaEstimateOp("matmul", hpk, d, tokens, 2 * hpk * d * tokens, f"pv_{suffix}")
   acc_evu = TileEvuOp(
     "online_softmax_output_accumulate", 2 * hpk * d, f"acc_evu_{suffix}"
   )

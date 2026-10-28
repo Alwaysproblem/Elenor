@@ -132,34 +132,34 @@ builtin.module {
     %load_0_1 = tile.load.async %v1 into %l1 : !tile.event<"load_0_1">
     tile.await %load_0_0, %load_0_1
     tile.signal input_released(%task)
-    %compute_0 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288
+    %compute_0 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"compute_0">
     tile.await %compute_0
-    %compute_1 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %compute_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"compute_1">
     tile.await %compute_1
-    %compute_2 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %compute_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"compute_2">
     tile.await %compute_2
-    %compute_3 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %compute_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"compute_3">
     tile.await %compute_3
-    %compute_4 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %compute_4 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"compute_4">
     tile.await %compute_4
-    %compute_5 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %compute_5 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"compute_5">
     tile.await %compute_5
-    %compute_6 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %compute_6 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"compute_6">
     tile.await %compute_6
-    %compute_7 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %compute_7 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"compute_7">
     tile.await %compute_7
-    %compute_8 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %compute_8 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"compute_8">
     tile.await %compute_8
-    %compute_9 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %compute_9 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"compute_9">
     tile.await %compute_9
     tile.free %l0

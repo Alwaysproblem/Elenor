@@ -13,7 +13,7 @@ after the producer root retires (IR_SPEC 7.2), while the guide requires
 attention and the Wo prefetch to start from ``output_ready`` /
 ``input_released`` of the projection dispatches, i.e. before ``grid_done``.
 
-Timing model only: ``tile.boa.async`` / ``tile.evu.async`` carry no tensor
+Timing model only: ``tile.boa.estimate.async`` / ``tile.evu.async`` carry no tensor
 operands and execute no numerics.  The workload validates scheduling,
 lifetimes and traffic -- not Transformer numerical correctness.
 """
@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from transformer_common import (
-  boa_matmul,
+  boa_estimate,
   contract_bytes,
   evu,
   l1_alloc,
@@ -197,7 +197,7 @@ def _qkv_chunk_program(cfg: PrefillConfig, hw: HardwareConfig, accumulate: bool)
     ("v", hd, wv_buf, v_acc, v_v),
   ):
     del weight
-    boa = boa_matmul(seq, n_dim, chunk, f"{tag}_boa", accumulate=accumulate)
+    boa = boa_estimate(seq, n_dim, chunk, f"{tag}_boa")
     body.append(boa)
     body.append(TileAwaitOp([boa]))
     stored = l1_store(acc_buf, view, f"{tag}_stored")
@@ -270,10 +270,10 @@ def _attention_program(cfg: PrefillConfig, hw: HardwareConfig, pipelined: bool) 
     return l2_view(o_l2, task, 0, [0, b * qb, 0], [1, qb, q_slice], [1, qb, q_slice], "bf16")
 
   def qk_heads(step):
-    return [boa_matmul(qb, kb, hd, f"qk{step}_h{h}") for h in range(4)]
+    return [boa_estimate(qb, kb, hd, f"qk{step}_h{h}") for h in range(4)]
 
   def pv_heads(step):
-    return [boa_matmul(qb, hd, kb, f"pv{step}_h{h}", accumulate=step > 0) for h in range(4)]
+    return [boa_estimate(qb, hd, kb, f"pv{step}_h{h}") for h in range(4)]
 
   def softmax(step):
     return evu("online_softmax_update", sm_ops, f"sm{step}")
@@ -444,7 +444,7 @@ def _outproj_program(cfg: PrefillConfig, hw: HardwareConfig, pipelined: bool) ->
     body += [ov, wv, ol, wl]
     loads[0] = [ol, wl]
     for s in range(steps):
-      boa = boa_matmul(seq, q_slice, q_slice, f"pj{s}", accumulate=s > 0)
+      boa = boa_estimate(seq, q_slice, q_slice, f"pj{s}")
       body.append(TileAwaitOp(loads[s]))
       body.append(boa)
       pending_o = None
@@ -470,7 +470,7 @@ def _outproj_program(cfg: PrefillConfig, hw: HardwareConfig, pipelined: bool) ->
       wl = l1_load(wv, w_bufs[0], f"w{s}_loaded")
       body += [ol, wl]
       body.append(TileAwaitOp([ol, wl]))
-      boa = boa_matmul(seq, q_slice, q_slice, f"pj{s}", accumulate=s > 0)
+      boa = boa_estimate(seq, q_slice, q_slice, f"pj{s}")
       body.append(boa)
       body.append(TileAwaitOp([boa]))
   body.append(TileSignalOp("input_released", task))
@@ -784,7 +784,7 @@ def main() -> None:
     "QUERY_BLOCK=128, KV_BLOCK=128, QKV projection K-chunk=128.",
     "Tile t (placement 15) owns KV head t and Q heads 4t..4t+3.",
     "",
-    "TIMING MODEL ONLY: tile.boa.async / tile.evu.async carry no tensor",
+    "TIMING MODEL ONLY: tile.boa.estimate.async / tile.evu.async carry no tensor",
     "operands and execute no numerics.  This workload validates Group",
     "ready-action scheduling, L2 lifetimes (input_released / output_ready),",
     "HBM->L2->L1 streaming and BOA/EVU/MFE overlap -- NOT numerical",

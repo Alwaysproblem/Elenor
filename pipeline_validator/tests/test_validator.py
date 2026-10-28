@@ -45,7 +45,7 @@ from pipeline_validator.dialects.elenor import (
   TaskRange,
   TileAllocOp,
   TileAwaitOp,
-  TileBoaOp,
+  TileBoaEstimateOp,
   TileEvent,
   TileEvuOp,
   TileGatherOp,
@@ -513,7 +513,7 @@ class TestXDSLIR:
     load = TileLoadOp(view.result, l1.result, "load")
     pow_op = TilePowOp(bytes_total=256, exponent=2, pow_ops=32, tag="pow")
     evu = TileEvuOp(op_name="relu", evu_ops=16, tag="evu")
-    boa = TileBoaOp(op_name="matmul", m=1, n=1, k=1, boa_ops=2, tag="boa")
+    boa = TileBoaEstimateOp(op_name="matmul", m=1, n=1, k=1, boa_ops=2, tag="boa")
     store = TileStoreOp(l1.result, view.result, "store")
     prog.body.block.add_ops(
       [

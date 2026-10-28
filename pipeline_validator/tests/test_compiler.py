@@ -153,8 +153,8 @@ class TestExplicitCompileLoadReplay:
       simulator.run(workload.module)
 
     text = serialize_compiled_program(artifact)
-    assert artifact.schema_version == 3
-    assert artifact.compiler_abi == "v3"
+    assert artifact.schema_version == 4
+    assert artifact.compiler_abi == "v4"
     # Plan §1: v3 clean cutover - every earlier schema/ABI pair is rejected
     # with a recompile hint; no upgrade shim exists.
     for schema_version, compiler_abi in (
@@ -740,8 +740,8 @@ class TestIndependentSharedArtifactVerification:
 
     loaded = load_program(replay, hw, sim, actual_bindings=bindings)
 
-    assert loaded.compiled.schema_version == 3
-    assert loaded.compiled.compiler_abi == "v3"
+    assert loaded.compiled.schema_version == 4
+    assert loaded.compiled.compiler_abi == "v4"
     assert serialize_compiled_program(loaded.compiled) == text
 
 

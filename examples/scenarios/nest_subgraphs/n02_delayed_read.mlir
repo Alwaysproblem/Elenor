@@ -158,304 +158,304 @@ builtin.module {
     %load_gate0 = tile.load.async %vg into %lg0 : !tile.event<"load_gate0">
     %load_gate1 = tile.load.async %vg into %lg1 : !tile.event<"load_gate1">
     tile.await %load_gate0, %load_gate1
-    %gate_compute_0 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288
+    %gate_compute_0 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_0">
     tile.await %gate_compute_0
-    %gate_compute_1 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_1 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_1">
     tile.await %gate_compute_1
-    %gate_compute_2 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_2 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_2">
     tile.await %gate_compute_2
-    %gate_compute_3 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_3 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_3">
     tile.await %gate_compute_3
-    %gate_compute_4 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_4 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_4">
     tile.await %gate_compute_4
-    %gate_compute_5 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_5 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_5">
     tile.await %gate_compute_5
-    %gate_compute_6 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_6 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_6">
     tile.await %gate_compute_6
-    %gate_compute_7 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_7 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_7">
     tile.await %gate_compute_7
-    %gate_compute_8 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_8 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_8">
     tile.await %gate_compute_8
-    %gate_compute_9 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_9 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_9">
     tile.await %gate_compute_9
-    %gate_compute_10 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_10 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_10">
     tile.await %gate_compute_10
-    %gate_compute_11 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_11 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_11">
     tile.await %gate_compute_11
-    %gate_compute_12 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_12 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_12">
     tile.await %gate_compute_12
-    %gate_compute_13 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_13 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_13">
     tile.await %gate_compute_13
-    %gate_compute_14 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_14 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_14">
     tile.await %gate_compute_14
-    %gate_compute_15 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_15 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_15">
     tile.await %gate_compute_15
-    %gate_compute_16 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_16 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_16">
     tile.await %gate_compute_16
-    %gate_compute_17 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_17 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_17">
     tile.await %gate_compute_17
-    %gate_compute_18 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_18 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_18">
     tile.await %gate_compute_18
-    %gate_compute_19 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_19 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_19">
     tile.await %gate_compute_19
-    %gate_compute_20 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_20 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_20">
     tile.await %gate_compute_20
-    %gate_compute_21 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_21 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_21">
     tile.await %gate_compute_21
-    %gate_compute_22 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_22 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_22">
     tile.await %gate_compute_22
-    %gate_compute_23 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_23 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_23">
     tile.await %gate_compute_23
-    %gate_compute_24 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_24 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_24">
     tile.await %gate_compute_24
-    %gate_compute_25 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_25 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_25">
     tile.await %gate_compute_25
-    %gate_compute_26 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_26 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_26">
     tile.await %gate_compute_26
-    %gate_compute_27 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_27 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_27">
     tile.await %gate_compute_27
-    %gate_compute_28 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_28 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_28">
     tile.await %gate_compute_28
-    %gate_compute_29 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_29 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_29">
     tile.await %gate_compute_29
-    %gate_compute_30 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_30 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_30">
     tile.await %gate_compute_30
-    %gate_compute_31 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_31 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_31">
     tile.await %gate_compute_31
-    %gate_compute_32 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_32 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_32">
     tile.await %gate_compute_32
-    %gate_compute_33 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_33 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_33">
     tile.await %gate_compute_33
-    %gate_compute_34 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_34 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_34">
     tile.await %gate_compute_34
-    %gate_compute_35 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_35 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_35">
     tile.await %gate_compute_35
-    %gate_compute_36 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_36 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_36">
     tile.await %gate_compute_36
-    %gate_compute_37 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_37 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_37">
     tile.await %gate_compute_37
-    %gate_compute_38 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_38 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_38">
     tile.await %gate_compute_38
-    %gate_compute_39 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_39 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_39">
     tile.await %gate_compute_39
-    %gate_compute_40 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_40 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_40">
     tile.await %gate_compute_40
-    %gate_compute_41 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_41 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_41">
     tile.await %gate_compute_41
-    %gate_compute_42 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_42 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_42">
     tile.await %gate_compute_42
-    %gate_compute_43 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_43 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_43">
     tile.await %gate_compute_43
-    %gate_compute_44 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_44 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_44">
     tile.await %gate_compute_44
-    %gate_compute_45 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_45 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_45">
     tile.await %gate_compute_45
-    %gate_compute_46 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_46 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_46">
     tile.await %gate_compute_46
-    %gate_compute_47 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_47 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_47">
     tile.await %gate_compute_47
-    %gate_compute_48 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_48 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_48">
     tile.await %gate_compute_48
-    %gate_compute_49 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_49 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_49">
     tile.await %gate_compute_49
-    %gate_compute_50 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_50 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_50">
     tile.await %gate_compute_50
-    %gate_compute_51 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_51 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_51">
     tile.await %gate_compute_51
-    %gate_compute_52 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_52 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_52">
     tile.await %gate_compute_52
-    %gate_compute_53 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_53 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_53">
     tile.await %gate_compute_53
-    %gate_compute_54 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_54 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_54">
     tile.await %gate_compute_54
-    %gate_compute_55 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_55 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_55">
     tile.await %gate_compute_55
-    %gate_compute_56 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_56 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_56">
     tile.await %gate_compute_56
-    %gate_compute_57 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_57 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_57">
     tile.await %gate_compute_57
-    %gate_compute_58 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_58 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_58">
     tile.await %gate_compute_58
-    %gate_compute_59 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_59 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_59">
     tile.await %gate_compute_59
-    %gate_compute_60 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_60 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_60">
     tile.await %gate_compute_60
-    %gate_compute_61 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_61 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_61">
     tile.await %gate_compute_61
-    %gate_compute_62 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_62 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_62">
     tile.await %gate_compute_62
-    %gate_compute_63 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_63 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_63">
     tile.await %gate_compute_63
-    %gate_compute_64 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_64 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_64">
     tile.await %gate_compute_64
-    %gate_compute_65 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_65 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_65">
     tile.await %gate_compute_65
-    %gate_compute_66 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_66 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_66">
     tile.await %gate_compute_66
-    %gate_compute_67 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_67 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_67">
     tile.await %gate_compute_67
-    %gate_compute_68 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_68 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_68">
     tile.await %gate_compute_68
-    %gate_compute_69 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_69 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_69">
     tile.await %gate_compute_69
-    %gate_compute_70 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_70 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_70">
     tile.await %gate_compute_70
-    %gate_compute_71 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_71 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_71">
     tile.await %gate_compute_71
-    %gate_compute_72 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_72 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_72">
     tile.await %gate_compute_72
-    %gate_compute_73 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_73 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_73">
     tile.await %gate_compute_73
-    %gate_compute_74 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_74 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_74">
     tile.await %gate_compute_74
-    %gate_compute_75 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_75 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_75">
     tile.await %gate_compute_75
-    %gate_compute_76 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_76 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_76">
     tile.await %gate_compute_76
-    %gate_compute_77 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_77 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_77">
     tile.await %gate_compute_77
-    %gate_compute_78 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_78 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_78">
     tile.await %gate_compute_78
-    %gate_compute_79 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_79 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_79">
     tile.await %gate_compute_79
-    %gate_compute_80 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_80 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_80">
     tile.await %gate_compute_80
-    %gate_compute_81 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_81 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_81">
     tile.await %gate_compute_81
-    %gate_compute_82 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_82 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_82">
     tile.await %gate_compute_82
-    %gate_compute_83 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_83 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_83">
     tile.await %gate_compute_83
-    %gate_compute_84 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_84 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_84">
     tile.await %gate_compute_84
-    %gate_compute_85 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_85 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_85">
     tile.await %gate_compute_85
-    %gate_compute_86 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_86 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_86">
     tile.await %gate_compute_86
-    %gate_compute_87 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_87 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_87">
     tile.await %gate_compute_87
-    %gate_compute_88 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_88 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_88">
     tile.await %gate_compute_88
-    %gate_compute_89 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_89 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_89">
     tile.await %gate_compute_89
-    %gate_compute_90 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_90 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_90">
     tile.await %gate_compute_90
-    %gate_compute_91 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_91 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_91">
     tile.await %gate_compute_91
-    %gate_compute_92 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_92 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_92">
     tile.await %gate_compute_92
-    %gate_compute_93 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_93 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_93">
     tile.await %gate_compute_93
-    %gate_compute_94 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_94 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_94">
     tile.await %gate_compute_94
-    %gate_compute_95 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_95 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_95">
     tile.await %gate_compute_95
-    %gate_compute_96 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_96 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_96">
     tile.await %gate_compute_96
-    %gate_compute_97 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_97 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_97">
     tile.await %gate_compute_97
-    %gate_compute_98 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_98 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_98">
     tile.await %gate_compute_98
-    %gate_compute_99 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288 accumulate
+    %gate_compute_99 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"gate_compute_99">
     tile.await %gate_compute_99
     %load_x = tile.load.async %vx into %lx : !tile.event<"load_x">

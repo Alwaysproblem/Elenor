@@ -68,6 +68,7 @@ from .runtime import (
 )
 from .runtime.relocation import relocate_task
 from .runtime.reset_domain import ResetState
+from .runtime.shared_am import SharedAmManager
 from .stream_queue import EOSPolicy, QueueKind, StreamQueue
 from .tile import ComputeTile, TileAdmission, _UCETerminalEvent
 from .tile_group_sequencer import TileGroupSequencer
@@ -259,6 +260,14 @@ class TileGroup:
       pool_id=0,
     )
     self.l2_mshr = MshrTable(cfg.l2_mshr_entries)
+    self.shared_am = SharedAmManager(
+      slot_capacity_bytes=cfg.boa_am_slot_capacity_bytes,
+      group_count=cfg.boa_am_group_count,
+      slots_per_group=cfg.boa_am_slots_per_group,
+      slots_per_context=cfg.boa_am_slots_per_context,
+      tile_id=0,
+      tracer=self.tracer,
+    )
     self.tiles: list[ComputeTile] = [
       ComputeTile(
         i,
@@ -271,6 +280,7 @@ class TileGroup:
         l2_cache=self.l2_cache,
         l2_mshr=self.l2_mshr,
         memory_trace=self.memory_trace,
+        shared_am=self.shared_am,
       )
       for i in range(cfg.num_tiles)
     ]
@@ -2258,6 +2268,7 @@ class TileGroup:
       cycle += 1
     for tile in self.tiles:
       tile.reset()
+    self.shared_am.reset(cycle)
     self.event_table.clear()
     self.scheduler.reset()
     self.program_table.invalidate_group()
@@ -2307,6 +2318,7 @@ class TileGroup:
       "task_submission_pc": self.sequencer.submission_pc,
       "scheduler": self._scheduler_snapshot(),
       "event_table": self.event_table.snapshot(),
+      "shared_am": self.shared_am.snapshot(),
       "queues": {qid: q.snapshot() for qid, q in self.queues.items()},
       "tiles": [t.snapshot() for t in self.tiles],
       "memory": {

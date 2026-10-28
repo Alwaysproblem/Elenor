@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from transformer_common import (
-  boa_matmul,
+  boa_estimate,
   contract_bytes,
   evu,
   l1_alloc,
@@ -293,7 +293,7 @@ def _qkv_program(
       body.append(TileSignalOp("input_released", task))
     for tag, width, acc_buf, dest in dests:
       dv = l2_view(dest, task, 0, [0, row, 0], [1, rows, width], [1, rows, width], "bf16")
-      boa = boa_matmul(rows, width, chunk, f"{tag}_boa_{row_block}", accumulate=accumulate)
+      boa = boa_estimate(rows, width, chunk, f"{tag}_boa_{row_block}")
       # RAW accumulator: the store issues only after its own BOA has been
       # awaited, then overlaps the next chunk's independent fills.
       body += [dv, boa, TileAwaitOp([boa])]
@@ -376,11 +376,11 @@ def _attention_program(
       body.append(TileSignalOp("input_released", task))
     for part in range(microblocks):
       for head in range(4):
-        qk = boa_matmul(rows, kb, hd, f"qk{step}_p{part}_h{head}")
+        qk = boa_estimate(rows, kb, hd, f"qk{step}_p{part}_h{head}")
         body += [qk, TileAwaitOp([qk])]
         sm = evu("online_softmax_update", sm_ops, f"sm{step}_p{part}_h{head}")
         body += [sm, TileAwaitOp([sm])]
-        pv = boa_matmul(rows, hd, kb, f"pv{step}_p{part}_h{head}", accumulate=step > 0)
+        pv = boa_estimate(rows, hd, kb, f"pv{step}_p{part}_h{head}")
         body += [pv, TileAwaitOp([pv])]
     if step + 2 < cfg.kv_blocks:
       next_step = step + 2
@@ -460,12 +460,11 @@ def _outproj_program(
       body.append(TileAwaitOp(gate))
       if head_block == cfg.kv_heads - 1 and chunk_index == chunks - 1:
         body.append(TileSignalOp("input_released", task))
-      boa = boa_matmul(
+      boa = boa_estimate(
         rows,
         q_slice,
         k_chunk,
         f"outproj{head_block}_{chunk_index}",
-        accumulate=head_block > 0 or chunk_index > 0,
       )
       body += [boa, TileAwaitOp([boa])]
 
@@ -843,7 +842,7 @@ def main() -> None:
     "grows (20 -> 28 Grids).  A GRID_WINDOW=8 retirement throttle keeps the live",
     "Grid routes inside the 16-entry Group table without any --sim-override.",
     "",
-    "TIMING MODEL ONLY: tile.boa.async / tile.evu.async carry no tensor operands and",
+    "TIMING MODEL ONLY: tile.boa.estimate.async / tile.evu.async carry no tensor operands and",
     "execute no numerics.  This source validates scheduling, resources and traffic, not",
     "numerical correctness or hardware performance guarantees.",
     "Generate: PYTHONPATH=. python",

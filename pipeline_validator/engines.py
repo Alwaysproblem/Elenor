@@ -25,11 +25,12 @@ programs issuing back-to-back loads without UCE stalls.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
 from .config import HardwareConfig
-from .execution_ir import ExecEngineDesc, ExecTileGatherDesc, ExecTileScatterDesc
+from .execution_ir import ExecBoaMatmulDesc, ExecEngineDesc, ExecTileGatherDesc, ExecTileScatterDesc
 from .memory import (
   DeterministicLRUCache,
   MemoryInvariantError,
@@ -47,6 +48,7 @@ from .memory.cache import CacheLineIdentity, CacheProvenance
 from .memory.transfer import MemoryTransaction, TransferOp, TransferStatus
 from .pmu import PMUCounter, StallReason
 from .profiles import build_registry
+from .runtime.boa_result import BoaResultService
 from .trace import Tracer
 
 
@@ -66,6 +68,14 @@ class EngineJob:
   finish_cycle: int
   event_id: str
   pmu: PMUCounter = field(default_factory=PMUCounter)
+  completion: Callable[[EngineJob], object] | None = None
+  payload: object | None = None
+  error: Exception | None = None
+  compute_done_cycle: int | None = None
+  commit_cycle: int | None = None
+  output_cycle: int | None = None
+  event_cycle: int | None = None
+  result_reserved: bool = False
 
 
 class Engine:
@@ -117,13 +127,21 @@ class Engine:
   def has_accepted_jobs(self) -> bool:
     return self.accepted_count > 0
 
-  def launch(self, desc: ExecEngineDesc, cycle: int, event_id: str, transaction=None) -> object | None:
+  def launch(
+    self,
+    desc: ExecEngineDesc,
+    cycle: int,
+    event_id: str,
+    transaction=None,
+    completion: Callable[[EngineJob], object] | None = None,
+  ) -> object | None:
     """Launch a descriptor.  Returns None if the engine cannot accept
     (queue full); the caller retries next cycle.
 
     For pipelined engines the returned job may not start immediately —
     ``start_cycle`` reflects actual service-start, chained after
-    earlier jobs.
+    earlier jobs.  ``completion`` runs when the job commits, before the
+    UCE observes the completion event.
     """
     if self.is_busy:
       return None
@@ -137,6 +155,7 @@ class Engine:
       finish_cycle=service_start + lat,
       event_id=event_id,
       pmu=PMUCounter(),
+      completion=completion,
     )
     self._queue.append(job)
     if self._running is None:
@@ -177,6 +196,11 @@ class Engine:
     idle_key = f"{self.kind.lower()}_idle"
     if self._running is not None and cycle >= self._running.finish_cycle:
       done = self._running
+      if done.completion is not None:
+        try:
+          done.payload = done.completion(done)
+        except Exception as exc:  # surfaced as a context fault by the caller
+          done.error = exc
       self.pmu.add_event("complete")
       self.pmu.add_cycle(active_key, 1)
       self.pmu.add(StallReason.NONE, 1)
@@ -202,23 +226,88 @@ class Engine:
 class BOAEngine(Engine):
   """Block Outer-product Accelerator — dense compute.
 
-  latency = launch_overhead + ceil(ops / peak_macs)
-  peak_macs = num_opa * opa_rows * opa_cols (MACs/cycle).
+  Estimate descriptors keep the legacy FLOP latency model.  Typed Matmul
+  steps add explicit A/B/AM bytes, a bounded result FIFO, a commit stage
+  and (for FINAL) an output-drain stage: the UCE completion event is only
+  observed after the commit, never at the raw compute-done boundary.
   """
 
   kind = "BOA"
 
-  def latency(self, desc: ExecEngineDesc) -> int:
-    ops = desc.params.get("ops", 0)
-    macs = ops // 2 if ops else 0
+  def __init__(self, cfg: HardwareConfig, tile_id: int, tracer: Tracer | None = None):
+    super().__init__(cfg, tile_id, tracer, pipeline_depth=1)
+    self.result_service: BoaResultService | None = None
+
+  def _matmul(self, desc: ExecEngineDesc):
+    matmul = desc.params.get("matmul")
+    if isinstance(matmul, ExecBoaMatmulDesc):
+      return matmul
+    return None
+
+  def breakdown(self, desc: ExecEngineDesc) -> tuple[int, int, int]:
+    """Return ``(compute_cycles, commit_cycles, drain_cycles)``."""
+    matmul = self._matmul(desc)
+    if matmul is None:
+      ops = desc.params.get("ops", 0)
+      macs = ops // 2 if ops else 0
+      peak_macs = self.cfg.boa_num_opa * self.cfg.boa_opa_rows * self.cfg.boa_opa_cols
+      compute = (macs + peak_macs - 1) // peak_macs if peak_macs else 0
+      bytes_per_op = desc.params.get("bytes", 0)
+      sram_bw_bytes_per_cycle = self.cfg.tile_l1_bandwidth_gbs * 1e9 / (self.cfg.clock_mhz * 1e6)
+      bw_cycles = 0
+      if sram_bw_bytes_per_cycle > 0 and bytes_per_op > 0:
+        bw_cycles = int((bytes_per_op + sram_bw_bytes_per_cycle - 1) // sram_bw_bytes_per_cycle)
+      return max(compute, bw_cycles), 0, 0
+    macs = matmul.m * matmul.n * matmul.k
     peak_macs = self.cfg.boa_num_opa * self.cfg.boa_opa_rows * self.cfg.boa_opa_cols
     compute = (macs + peak_macs - 1) // peak_macs if peak_macs else 0
-    bytes_per_op = desc.params.get("bytes", 0)
+    touched = matmul.m * matmul.k * 2 + matmul.k * matmul.n * 2
+    touched += matmul.m * matmul.n * 4  # AM partial read / write
     sram_bw_bytes_per_cycle = self.cfg.tile_l1_bandwidth_gbs * 1e9 / (self.cfg.clock_mhz * 1e6)
-    bw_cycles = 0
-    if sram_bw_bytes_per_cycle > 0 and bytes_per_op > 0:
-      bw_cycles = int((bytes_per_op + sram_bw_bytes_per_cycle - 1) // sram_bw_bytes_per_cycle)
-    return self.cfg.boa_launch_cycles + max(compute, bw_cycles)
+    bw_cycles = (
+      int((touched + sram_bw_bytes_per_cycle - 1) // sram_bw_bytes_per_cycle)
+      if sram_bw_bytes_per_cycle > 0
+      else 0
+    )
+    return (
+      max(compute, bw_cycles),
+      self.cfg.boa_commit_cycles,
+      self.cfg.boa_output_drain_cycles if matmul.final else 0,
+    )
+
+  def latency(self, desc: ExecEngineDesc) -> int:
+    compute, _commit, _drain = self.breakdown(desc)
+    return self.cfg.boa_launch_cycles + compute
+
+  def launch(
+    self,
+    desc: ExecEngineDesc,
+    cycle: int,
+    event_id: str,
+    transaction=None,
+    completion: Callable[[EngineJob], object] | None = None,
+  ) -> object | None:
+    typed = self._matmul(desc) is not None
+    service = self.result_service
+    reserved = False
+    try:
+      if typed and service is not None:
+        if not service.reserve():
+          return None
+        reserved = True
+      job = super().launch(desc, cycle, event_id, transaction, completion=completion)
+    except Exception:
+      if reserved and service is not None:
+        service.cancel_reservation()
+      raise
+    if job is None:
+      if reserved and service is not None:
+        service.cancel_reservation()
+      return None
+    assert isinstance(job, EngineJob)
+    job.compute_done_cycle = job.finish_cycle
+    job.result_reserved = reserved
+    return job
 
 
 class EVUEngine(Engine):
@@ -502,9 +591,16 @@ class MFEEngine(Engine):
     return self.accepted_count > 0
 
   def launch(
-    self, desc: ExecEngineDesc, cycle: int, event_id: str, transaction: MemoryTransaction | None = None
+    self,
+    desc: ExecEngineDesc,
+    cycle: int,
+    event_id: str,
+    transaction: MemoryTransaction | None = None,
+    completion: Callable[[EngineJob], object] | None = None,
   ) -> EngineJob | _MFETransferJob | None:
     """Route a descriptor to a first-free lane of its direction class."""
+    if completion is not None:
+      raise ValueError("MFE lanes do not accept commit callbacks")
     self._validate_stream_buffer(desc)
     lanes = self._store_lanes if desc.op in self._STORE_OPS else self._load_lanes
     free = next((lane for lane in lanes if lane.running is None), None)

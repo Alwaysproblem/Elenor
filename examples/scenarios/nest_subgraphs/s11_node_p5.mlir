@@ -326,7 +326,7 @@ builtin.module {
     %load_0_1 = tile.load.async %v1 into %l1 : !tile.event<"load_0_1">
     tile.await %load_0_0, %load_0_1
     tile.signal input_released(%task)
-    %compute_0 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288
+    %compute_0 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"compute_0">
     tile.await %compute_0
     tile.free %l0
@@ -354,7 +354,7 @@ builtin.module {
     %load_0_1 = tile.load.async %v1 into %l1 : !tile.event<"load_0_1">
     tile.await %load_0_0, %load_0_1
     tile.signal input_released(%task)
-    %compute_0 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288
+    %compute_0 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"compute_0">
     tile.await %compute_0
     tile.free %l0
@@ -382,7 +382,7 @@ builtin.module {
     %load_0_1 = tile.load.async %v1 into %l1 : !tile.event<"load_0_1">
     tile.await %load_0_0, %load_0_1
     tile.signal input_released(%task)
-    %compute_0 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288
+    %compute_0 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"compute_0">
     tile.await %compute_0
     tile.free %l0
@@ -410,7 +410,7 @@ builtin.module {
     %load_0_1 = tile.load.async %v1 into %l1 : !tile.event<"load_0_1">
     tile.await %load_0_0, %load_0_1
     tile.signal input_released(%task)
-    %compute_0 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288
+    %compute_0 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"compute_0">
     tile.await %compute_0
     tile.free %l0
@@ -438,7 +438,7 @@ builtin.module {
     %load_0_1 = tile.load.async %v1 into %l1 : !tile.event<"load_0_1">
     tile.await %load_0_0, %load_0_1
     tile.signal input_released(%task)
-    %compute_0 = tile.boa.async "matmul" m = 64 n = 64 k = 64 ops = 524288
+    %compute_0 = tile.boa.estimate.async "matmul" m = 64 n = 64 k = 64 ops = 524288
       : !tile.event<"compute_0">
     tile.await %compute_0
     tile.free %l0

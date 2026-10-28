@@ -1615,7 +1615,7 @@ source xDSL ModuleOp
 ```
 
 源 ModuleOp 不改写；Loader 不导入 compiler，不补依赖或现场选择 Profile。
-`CompiledProgram` 软件持久化 schema_version=2 / compiler_abi="v2"；
+`CompiledProgram` 软件持久化 schema_version=4 / compiler_abi="v4"；
 hardware YAML schema 2、Registry/hash、硬件 command/event ABI v0
 属于不同命名空间，不能把 Python DTO/JSON codec 称作硬件二进制编码。
 
@@ -2219,8 +2219,8 @@ codegen 仍是未实施的上游/器件计划。
 
 当前 `compile_program` 按调用点 lower 已编写的 Task 模板，证明
 layout、allowed Profile、R 包络、事件依赖/共享 hazard、控制预算、
-Store visibility 与配置事务，封印 `schema_version=2` /
-`compiler_abi="v2"` 后调用独立 verifier；`load_program` 只读核对
+Store visibility 与配置事务，封印 `schema_version=4` /
+`compiler_abi="v4"` 后调用独立 verifier；`load_program` 只读核对
 artifact/target/actual bindings，不做二次 lowering。
 
 高层图自动切分、engine codegen、真实 binary descriptor emission

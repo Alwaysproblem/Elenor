@@ -1,6 +1,6 @@
 # Scala BOA / Gemmini BF16 Matmul 与 pipeline validator 集成设计
 
-- 状态：**总体设计评审稿 v0.4；本次源 IR 不增加分支/重试控制，具体低层展开后续考虑；尚未开始实现。**
+- 状态：**总体设计评审稿 v0.4；硬件实现尚未开始；软件前置 gate（源语义/typed executable/AM 资源与数值模型/调用方迁移）已按独立计划实现，见 [实施报告](BOA_Software_Managed_AM_IR_Implementation_Report.md)。源 IR 仍不增加分支/重试控制。**
 - 需求优先级：用户最新修改 > [共享 AM V1 需求规格](../../nexus_shared_am_v1_requirements_and_design.md) > [prompt.md](../../prompt.md) 与此前确认中仍适用的内容。
 - 阅读顺序：§1 范围 → §4.4 源 IR → [软件管理 AM/IR 独立计划](BOA_Software_Managed_AM_IR_Plan.md) → §3/§5 硬件与系统合同 → §8 验收。
 - 本轮同步两份文档，保留软件计划 §3.4 并标记本次不实现；既有图示和共享 AM/自动释放合同不变，不修改实现代码或系统环境。
@@ -352,9 +352,9 @@ Matmul 为 `%done = tile.boa.async "matmul" ins(%a,%b) outs(%out) acc(%acc)`，�
 
 **本次保持单 block 源 IR，不增加 `tile.try_branch`、`tile.await_any`、`tile.fail`、`cf.br` 或 status/retry 源类型，不放宽 branch/label 白名单，也不实现 CFG verifier。** 具体分支、重试、等待登记和恢复编码留给更低层 IR／执行协议后续设计；共享 AM 的配额、未受理无副作用和安全释放合同仍有效。
 
-旧无 operand Matmul 签名仍需迁移；真正只有 FLOPs/控制门的用途改为显式 `tile.boa.estimate.async`。数值/RTL backend 不静默执行 estimate，不保留旧别名或默认空 operand。
+旧无 operand Matmul 签名已迁移；真正只有 FLOPs/控制门的用途已改为显式 `tile.boa.estimate.async`。数值 backend 不静默执行 estimate，不保留旧别名或默认空 operand。
 
-本次迁移范围是源语义、typed executable、codec、线性独立 verifier、AM 资源/数值/周期模型、既有 UCE/事件接线和调用方。当前产物 v3/v3，目标仍为 v4/v4，受影响 artifact 重生成。64×256 f32 的 64 KiB 单槽需求与新 L1 output 预算分开计算，不承诺 L1 自动减少相同容量。
+本次迁移范围是源语义、typed executable、codec、线性独立 verifier、AM 资源/数值/周期模型、既有 UCE/事件接线和调用方。当前产物与本次实现均为 v4/v4，受影响 artifact 已重生成。64×256 f32 的 64 KiB 单槽需求与新 L1 output 预算分开计算，不承诺 L1 自动减少相同容量。
 
 ### 4.5 Rocket / RoCC UCE
 

@@ -23,7 +23,7 @@ Future device-side loop support may turn the append offset into a runtime
 loop-carried value; the current IR has no dynamic addresses, so the
 position is static and no token-generation loop is modeled.
 
-Timing model only: tile.boa.async / tile.evu.async carry no tensor
+Timing model only: tile.boa.estimate.async / tile.evu.async carry no tensor
 operands and execute no numerics; the workload measures KV-block
 pipelining, not numerical correctness.
 """
@@ -62,7 +62,7 @@ from pipeline_validator.dialects.elenor import (
   NexusSubmitContextOp,
   TileAllocOp,
   TileAwaitOp,
-  TileBoaOp,
+  TileBoaEstimateOp,
   TileEvuOp,
   TileFreeOp,
   TileLoadOp,
@@ -160,11 +160,11 @@ def _decode_block_program(cfg: DecodeConfig, hw: HardwareConfig) -> TileProgramD
   # All inputs are in tile-local storage: the L2 block buffers are free.
   body.append(TileSignalOp("input_released", task))
 
-  qk = TileBoaOp("matmul", heads, kb, hd, 2 * heads * kb * hd, "qk_boa")
+  qk = TileBoaEstimateOp("matmul", heads, kb, hd, 2 * heads * kb * hd, "qk_boa")
   body += [qk, TileAwaitOp([qk])]
   sm = TileEvuOp("online_softmax_update", sm_ops, "sm_update")
   body += [sm, TileAwaitOp([sm])]
-  pv = TileBoaOp("matmul", heads, hd, kb, 2 * heads * hd * kb, "pv_boa")
+  pv = TileBoaEstimateOp("matmul", heads, hd, kb, 2 * heads * hd * kb, "pv_boa")
   body += [pv, TileAwaitOp([pv])]
 
   st = TileStoreOp(state_l1.result, state_v.result, "state_stored")
@@ -239,10 +239,10 @@ def _append_program(cfg: DecodeConfig, hw: HardwareConfig) -> TileProgramDefOp:
   body += loads
   body.append(TileAwaitOp(loads))
   body.append(TileSignalOp("input_released", task))
-  bk = TileBoaOp("matmul", 1, hd, hidden, 2 * hd * hidden, "k_new_boa")
+  bk = TileBoaEstimateOp("matmul", 1, hd, hidden, 2 * hd * hidden, "k_new_boa")
   body += [bk, TileAwaitOp([bk])]
   ks = TileStoreOp(kn.result, kn_v.result, "k_new_stored")
-  bv = TileBoaOp("matmul", 1, hd, hidden, 2 * hd * hidden, "v_new_boa")
+  bv = TileBoaEstimateOp("matmul", 1, hd, hidden, 2 * hd * hidden, "v_new_boa")
   body += [bv, TileAwaitOp([bv])]
   vs = TileStoreOp(vn.result, vn_v.result, "v_new_stored")
   body += [ks, TileAwaitOp([ks]), vs, TileAwaitOp([vs])]
@@ -561,7 +561,7 @@ def main() -> None:
     "runtime loop-carried value; the current IR has no dynamic addresses",
     "and no token-generation loop.",
     "",
-    "TIMING MODEL ONLY: tile.boa.async / tile.evu.async carry no tensor",
+    "TIMING MODEL ONLY: tile.boa.estimate.async / tile.evu.async carry no tensor",
     "operands and execute no numerics.  The workload measures KV-block",
     "initiation interval, buffer lifetimes and dependency stalls -- NOT",
     "numerical correctness.",

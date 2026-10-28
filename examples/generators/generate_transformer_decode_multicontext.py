@@ -43,7 +43,7 @@ from pipeline_validator.dialects.elenor import (
   NexusSubmitContextOp,
   TileAllocOp,
   TileAwaitOp,
-  TileBoaOp,
+  TileBoaEstimateOp,
   TileEvuOp,
   TileFreeOp,
   TileLoadOp,
@@ -153,13 +153,13 @@ def _decode_program(hw: HardwareConfig, contexts_per_tile: int) -> TileProgramDe
   body.add_ops(loads)
   body.add_op(TileAwaitOp(loads))
   body.add_op(TileSignalOp("input_released", task))
-  qk = TileBoaOp(
+  qk = TileBoaEstimateOp(
     "matmul", HEADS_PER_KV, KV_BLOCK, HEAD_DIM, 2 * HEADS_PER_KV * KV_BLOCK * HEAD_DIM, "qk_boa"
   )
   body.add_ops([qk, TileAwaitOp([qk])])
   score_update = TileEvuOp("online_softmax_score_update", HEADS_PER_KV * (KV_BLOCK + 2), "score_update")
   body.add_ops([score_update, TileAwaitOp([score_update])])
-  pv = TileBoaOp(
+  pv = TileBoaEstimateOp(
     "matmul", HEADS_PER_KV, HEAD_DIM, KV_BLOCK, 2 * HEADS_PER_KV * HEAD_DIM * KV_BLOCK, "pv_boa"
   )
   body.add_op(pv)
@@ -296,7 +296,7 @@ def _append_program(hw: HardwareConfig, contexts_per_tile: int, projection: str)
   ]
   body.add_ops(loads)
   body.add_op(TileAwaitOp(loads))
-  boa = TileBoaOp("matmul", 1, HEAD_DIM, HIDDEN, 2 * HEAD_DIM * HIDDEN, f"{projection}_new_boa")
+  boa = TileBoaEstimateOp("matmul", 1, HEAD_DIM, HIDDEN, 2 * HEAD_DIM * HIDDEN, f"{projection}_new_boa")
   body.add_ops([boa, TileAwaitOp([boa])])
   store = TileStoreOp(result_l1.result, result_view.result, f"{projection}_append_stored")
   body.add_ops([store, TileAwaitOp([store])])

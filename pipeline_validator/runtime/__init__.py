@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .boa_result import BoaPreparedResult, BoaResultRecord, BoaResultService, BoaResultState
 from .event_table import EventEntry, EventStatus, EventTable
 from .fault_ring import FaultCode, FaultDomain, FaultRecord, FaultRing
 from .firmware import FirmwareRuntime
@@ -11,6 +12,10 @@ from .program_table import ProgramResidencyManager, ProgramTableEntry, Residency
 from .reset_domain import ResetDomain, ResetRequest
 
 __all__ = [
+  "BoaPreparedResult",
+  "BoaResultRecord",
+  "BoaResultService",
+  "BoaResultState",
   "EventEntry",
   "EventStatus",
   "EventTable",

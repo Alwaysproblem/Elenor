@@ -15,6 +15,7 @@ from enum import Enum
 from .config import MAX_CONTEXT_COUNT, HardwareConfig
 from .engines import BOAEngine, Engine, EngineJob, EngineState, EVUEngine, MFEEngine, USEEngine
 from .execution_ir import (
+  ExecBoaMatmulDesc,
   ExecEngineDesc,
   ExecTileGatherDesc,
   ExecTileInst,
@@ -37,6 +38,8 @@ from .memory.arena import ArenaHandle, ArenaPlan, ArenaPool
 from .memory.l1_slot_frame import SlotFrame
 from .pmu import PMUCounter, StallReason
 from .profiles import build_registry
+from .runtime.boa_result import BoaPreparedResult, BoaResultService
+from .runtime.shared_am import AmOwner, SharedAmManager
 from .stream_queue import StreamQueue, StreamToken
 from .trace import Tracer
 
@@ -60,6 +63,7 @@ class _UCEContextState(Enum):
   WAIT_EVENT = "wait_event"
   WAIT_STREAM = "wait_stream"
   WAIT_ENGINE_QUEUE = "wait_engine_queue"
+  WAIT_AM = "wait_am"
   DONE = "done"
   FAULT = "fault"
 
@@ -69,6 +73,7 @@ class _UCEHeadStatus(Enum):
   WAIT_EVENT = "wait_event"
   WAIT_ENGINE_QUEUE = "wait_engine_queue"
   WAIT_STREAM = "wait_stream"
+  WAIT_AM = "wait_am"
   FAULT = "fault"
 
 
@@ -119,6 +124,8 @@ class _UCEContext:
   memory: _TileContextMemory | None = None  # PR 2: per-context memory state
   task_identity: TaskIdentity | None = None  # PR 3: dispatch grid + logical task
   l1_live_names: set[str] = field(default_factory=set)
+  am_leases: dict[str, int] = field(default_factory=dict)
+  epoch: int = 0
 
 
 @dataclass
@@ -173,6 +180,8 @@ class _EngineQueueEntry:
   op: ExecTileOp
   engine_kind: str
   launch_params: dict = field(default_factory=dict)
+  am_lease_id: int | None = None
+  matmul: ExecBoaMatmulDesc | None = None
 
 
 @dataclass(frozen=True)
@@ -188,6 +197,7 @@ _ACTIVE_CONTEXT_STATES = {
   _UCEContextState.WAIT_EVENT,
   _UCEContextState.WAIT_STREAM,
   _UCEContextState.WAIT_ENGINE_QUEUE,
+  _UCEContextState.WAIT_AM,
 }
 
 
@@ -214,6 +224,7 @@ class TileUCE:
     # Owning ComputeTile (injected by ComputeTile.__init__); carries the
     # group-bound precise Scatter-write recorder (plan §2).
     self.host_tile = host_tile
+    self.shared_am: SharedAmManager | None = None
     self.contexts = [_UCEContext(ctx_id=i) for i in range(context_count)]
     self._current_ctx: int = 0
     self._rr_next_ctx: int = 0
@@ -267,6 +278,10 @@ class TileUCE:
       if not self._context_available(ctx):
         continue
       self._unregister_context_events(ctx)
+      if ctx.am_leases and self.shared_am is not None:
+        self.shared_am.abort_owner(self._am_owner(ctx), 0, "context rebind")
+      ctx.epoch += 1
+      ctx.am_leases.clear()
       ctx.program = program
       ctx.pc = 0
       ctx.role_id = role_id
@@ -361,6 +376,31 @@ class TileUCE:
       self._external_events_done.add(runtime_id)
       return
     self.pmu.add_event("uce_unknown_event")
+
+  def notify_engine_failure(self, runtime_id: str, reason: str, cycle: int) -> None:
+    """Fault the context whose engine commit callback failed."""
+    ref = self._local_event_owner.get(runtime_id)
+    if ref is None or ref.owner_ctx is None:
+      self.pmu.add_event("uce_unknown_event")
+      return
+    ctx = self.contexts[ref.owner_ctx]
+    self._drop_context_engine_queues(ctx.ctx_id, cycle)
+    self._fault_context(ctx, f"engine completion failed: {reason}", cycle)
+
+  def _drop_context_engine_queues(self, ctx_id: int, cycle: int) -> None:
+    for key, fifo in self._engine_queues.items():
+      kept: deque[_EngineQueueEntry] = deque()
+      for entry in fifo:
+        if entry.ctx_id != ctx_id:
+          kept.append(entry)
+          continue
+        if entry.am_lease_id is not None and self.shared_am is not None:
+          try:
+            self.shared_am.abort_lease(entry.am_lease_id, cycle, "context fault")
+          except ValueError:
+            pass
+        self._drop_event_ref(entry.event_ref)
+      self._engine_queues[key] = kept
 
   def retire_external_events(self, events: set[str] | tuple[str, ...]) -> None:
     """Discard completed external events owned by a retired launch."""
@@ -593,6 +633,7 @@ class TileUCE:
       _UCEContextState.WAIT_EVENT,
       _UCEContextState.WAIT_STREAM,
       _UCEContextState.WAIT_ENGINE_QUEUE,
+      _UCEContextState.WAIT_AM,
     ):
       return None
     if ctx.program is None:
@@ -605,6 +646,8 @@ class TileUCE:
     ins = ctx.program.insts[ctx.pc]
     if ins.op in (ExecTileOp.WAIT, ExecTileOp.WAITALL):
       return self._probe_wait_instruction(ctx, ins)
+    if ins.op is ExecTileOp.ALLOC_AM:
+      return _UCEHeadProbe(_UCEHeadStatus.ELIGIBLE)
     if ins.op in _LAUNCH_OPS:
       try:
         self._assert_launch_l1_live(ctx, ins)
@@ -615,6 +658,10 @@ class TileUCE:
         return _UCEHeadProbe(_UCEHeadStatus.FAULT, "engine launch has no completion event")
       if ins.dst in ctx.event_records:
         return _UCEHeadProbe(_UCEHeadStatus.FAULT, f"duplicate completion event '{ins.dst}'")
+      descriptor = ctx.program.descriptors.get(ins.args[0]) if ins.args else None
+      matmul = descriptor.params.get("matmul") if descriptor is not None else None
+      if matmul is not None and matmul.am not in ctx.am_leases:
+        return _UCEHeadProbe(_UCEHeadStatus.FAULT, f"no live AM lease for {matmul.am!r}")
       if len(self._engine_queues[queue_key]) >= self._engine_queue_depths[queue_key]:
         return _UCEHeadProbe(_UCEHeadStatus.WAIT_ENGINE_QUEUE)
       return _UCEHeadProbe(_UCEHeadStatus.ELIGIBLE)
@@ -656,6 +703,7 @@ class TileUCE:
     state_by_status = {
       _UCEHeadStatus.WAIT_ENGINE_QUEUE: _UCEContextState.WAIT_ENGINE_QUEUE,
       _UCEHeadStatus.WAIT_STREAM: _UCEContextState.WAIT_STREAM,
+      _UCEHeadStatus.WAIT_AM: _UCEContextState.WAIT_AM,
     }
     for ctx, probe in probes:
       if ctx.state == _UCEContextState.WAIT_EVENT and self._wait_refs_ready(ctx):
@@ -674,6 +722,7 @@ class TileUCE:
       _UCEContextState.WAIT_EVENT,
       _UCEContextState.WAIT_STREAM,
       _UCEContextState.WAIT_ENGINE_QUEUE,
+      _UCEContextState.WAIT_AM,
     ):
       self._set_context_state(ctx, _UCEContextState.READY, cycle)
 
@@ -791,6 +840,8 @@ class TileUCE:
         self._fault_context(ctx, f"tile.free: {exc}", cycle)
       else:
         ctx.pc += 1
+    elif op == ExecTileOp.ALLOC_AM:
+      self._issue_am_alloc(ctx, ins, cycle)
     elif op in _LAUNCH_OPS:
       try:
         self._assert_launch_l1_live(ctx, ins)
@@ -848,6 +899,54 @@ class TileUCE:
     else:
       ctx.pc += 1
 
+  def _am_owner(self, ctx: _UCEContext) -> AmOwner:
+    task = ctx.task_identity
+    if task is not None:
+      grid = task.grid
+      return AmOwner(grid.context_name, grid.launch_generation, ctx.ctx_id, ctx.epoch)
+    name = ""
+    if ctx.memory is not None:
+      name = ctx.memory.binding_id
+    if not name:
+      name = ctx.role_event_id or f"tile{self.tile_id}"
+    return AmOwner(name, 0, ctx.ctx_id, ctx.epoch)
+
+  def _issue_am_alloc(self, ctx: _UCEContext, ins: ExecTileInst, cycle: int) -> None:
+    manager = self.shared_am
+    if manager is None or ctx.program is None:
+      self._fault_context(ctx, "AM allocation has no SharedAmManager", cycle)
+      return
+    if len(ins.args) != 2 or not isinstance(ins.args[0], str):
+      self._fault_context(ctx, "alloc.am requires (am_buffer_id, logical_slot)", cycle)
+      return
+    am = next((item for item in ctx.program.am_buffers if item.name == ins.args[0]), None)
+    if am is None:
+      self._fault_context(ctx, f"alloc.am references unknown buffer {ins.args[0]!r}", cycle)
+      return
+    if ins.args[1] != am.logical_slot:
+      self._fault_context(ctx, "alloc.am logical slot differs from its declaration", cycle)
+      return
+    if am.name in ctx.am_leases:
+      self._fault_context(ctx, f"AM buffer {am.name!r} already has a live lease", cycle)
+      return
+    lease = manager.try_acquire(
+      self._am_owner(ctx),
+      buffer_name=am.name,
+      logical_slot=am.logical_slot,
+      dims=am.dims,
+      byte_count=am.bytes,
+      output_base=am.output.base,
+      cycle=cycle,
+    )
+    if lease is None:
+      self.pmu.add(StallReason.WAIT_OPERAND, 1)
+      self.pmu.add_cycle("am_busy", 1)
+      self._set_context_state(ctx, _UCEContextState.WAIT_AM, cycle)
+      return
+    ctx.am_leases[am.name] = lease.lease_id
+    self.pmu.add_event("am_allocate")
+    ctx.pc += 1
+
   @staticmethod
   def _descriptor_l1_bases(program: ExecTileProgram, desc_ref: str) -> tuple[frozenset[str], bool]:
     """Return explicit L1 bases and whether a descriptor is opaque."""
@@ -875,6 +974,16 @@ class TileUCE:
       return frozenset(bases), False
     if desc.op in ("gather", "scatter"):
       raise MemoryInvariantError(f"{desc.op} descriptor is missing")
+    matmul = desc.params.get("matmul")
+    if isinstance(matmul, ExecBoaMatmulDesc):
+      for view in (matmul.a, matmul.b):
+        if view.space == "l1":
+          bases.add(view.base)
+      if matmul.final and matmul.output.space == "l1":
+        bases.add(matmul.output.base)
+      return frozenset(bases), False
+    if desc.params.get("estimate") is True:
+      return frozenset(), False
     return frozenset(), True
 
   def _assert_launch_l1_live(self, ctx: _UCEContext, ins: ExecTileInst) -> None:
@@ -1027,17 +1136,46 @@ class TileUCE:
       self.pmu.add_cycle("engine_queue_full", 1)
       return False
     assert ins.dst is not None
+    desc_ref = ins.args[0] if ins.args else ""
+    descriptor = ctx.program.descriptors.get(desc_ref) if ctx.program is not None else None
+    matmul = descriptor.params.get("matmul") if descriptor is not None else None
+    am_lease_id: int | None = None
+    if matmul is not None:
+      manager = self.shared_am
+      am_lease_id = ctx.am_leases.get(matmul.am)
+      if manager is None or am_lease_id is None:
+        self._fault_context(ctx, f"typed matmul has no live AM lease for {matmul.am!r}", cycle)
+        return True
+      try:
+        manager.begin_step(
+          am_lease_id,
+          seq=matmul.seq,
+          init=matmul.init,
+          final=matmul.final,
+          cycle=cycle,
+        )
+      except ValueError as exc:
+        self._fault_context(ctx, f"AM step rejected: {exc}", cycle)
+        return True
     local_name = ins.dst
     event_ref = self._make_local_event_ref(ctx, local_name)
     ctx.event_records[local_name] = event_ref
     self._local_event_owner[event_ref.runtime_id] = event_ref
-    desc_ref = ins.args[0] if ins.args else ""
     launch_params: dict = {}
     engine_kind = (
       "MFE" if queue_key in ("MFE_LOAD", "MFE_GATHER", "MFE_SCATTER", "MFE_STORE") else queue_key
     )
     fifo.append(
-      _EngineQueueEntry(ctx.ctx_id, event_ref, desc_ref, ins.op, engine_kind, launch_params=launch_params)
+      _EngineQueueEntry(
+        ctx.ctx_id,
+        event_ref,
+        desc_ref,
+        ins.op,
+        engine_kind,
+        launch_params=launch_params,
+        am_lease_id=am_lease_id,
+        matmul=matmul,
+      )
     )
     if self.tracer is not None:
       self.tracer.instant(
@@ -1072,6 +1210,9 @@ class TileUCE:
       engine = self._engine_for_queue(tile, queue_key)
       try:
         resolved = self._build_engine_launch(ctx, entry, tile)
+        completion = None
+        if entry.matmul is not None:
+          completion = self._make_boa_completion(ctx, entry, tile, resolved)
         job: object | None
         if queue_key == "MFE_GATHER":
           job = tile.mfe.launch_gather(
@@ -1083,12 +1224,20 @@ class TileUCE:
           )
         else:
           is_mfe = queue_key in ("MFE_LOAD", "MFE_STORE")
-          job = engine.launch(
-            resolved.desc,
-            cycle,
-            entry.event_ref.runtime_id,
-            transaction=resolved.transaction if is_mfe else None,
-          )
+          if queue_key == "BOA":
+            job = engine.launch(
+              resolved.desc,
+              cycle,
+              entry.event_ref.runtime_id,
+              completion=completion,
+            )
+          else:
+            job = engine.launch(
+              resolved.desc,
+              cycle,
+              entry.event_ref.runtime_id,
+              transaction=resolved.transaction if is_mfe else None,
+            )
       except (ValueError, MemoryInvariantError) as exc:
         fifo.popleft()
         self._drop_event_ref(entry.event_ref)
@@ -1098,6 +1247,71 @@ class TileUCE:
       if job is None:
         continue
       fifo.popleft()
+
+  def _make_boa_completion(self, ctx: _UCEContext, entry: _EngineQueueEntry, tile, resolved):
+    from . import boa_numeric
+
+    matmul = entry.matmul
+    lease_id = entry.am_lease_id
+    views = resolved.launch_params.get("matmul_views")
+    manager = self.shared_am
+    transfer_manager = tile.mfe.transfer_manager
+
+    def completion(job: EngineJob) -> BoaPreparedResult:
+      if manager is None or matmul is None or lease_id is None or views is None:
+        raise ValueError("typed matmul completion is missing AM state")
+      store = transfer_manager.byte_store if transfer_manager is not None else None
+      if store is None:
+        raise ValueError("typed matmul requires full_memory ByteStore data")
+      a_view, b_view, out_view = views
+      lease = manager.lease(lease_id)
+      partial = boa_numeric.matmul_f32(
+        store.read_view(a_view),
+        store.read_view(b_view),
+        m=matmul.m,
+        n=matmul.n,
+        k=matmul.k,
+        accumulate=not matmul.init,
+        partial=lease.partial,
+      )
+      out_bytes = (
+        boa_numeric.convert_output(boa_numeric.decode_f32(partial), matmul.output.dtype)
+        if matmul.final
+        else None
+      )
+
+      def commit(cycle: int) -> None:
+        manager.commit_step(lease_id, seq=matmul.seq, data=partial, final=False, cycle=cycle)
+
+      def write_output(cycle: int) -> None:
+        assert out_bytes is not None
+        store.write_view(out_view, out_bytes)
+
+      def commit_final(cycle: int) -> None:
+        manager.commit_step(lease_id, seq=matmul.seq, data=partial, final=True, cycle=cycle)
+
+      def release(cycle: int) -> None:
+        manager.release_final(lease_id, cycle)
+        ctx.am_leases.pop(matmul.am, None)
+
+      def abort(cycle: int, reason: str) -> None:
+        try:
+          manager.abort_lease(lease_id, cycle, reason)
+        finally:
+          ctx.am_leases.pop(matmul.am, None)
+
+      return BoaPreparedResult(
+        matmul,
+        partial,
+        matmul.final,
+        commit,
+        commit_final,
+        write_output,
+        release,
+        abort,
+      )
+
+    return completion
 
   def _engine_for_queue(self, tile: ComputeTile, queue_key: str) -> Engine:
     if queue_key == "BOA":
@@ -1127,6 +1341,14 @@ class TileUCE:
     if base.transfer is not None:
       params["bytes"] = base.transfer.bytes
       transaction = self._build_tile_transaction(ctx, base.transfer, entry, tile)
+    elif entry.matmul is not None:
+      if ctx.memory is None:
+        raise ValueError("typed matmul context memory is missing")
+      launch_params["matmul_views"] = (
+        self._resolve_tile_view(entry.matmul.a, ctx.memory, tile),
+        self._resolve_tile_view(entry.matmul.b, ctx.memory, tile),
+        self._resolve_tile_view(entry.matmul.output, ctx.memory, tile),
+      )
     elif base.op in ("gather", "scatter"):
       indexed = base.params.get(base.op)
       if base.op == "gather" and isinstance(indexed, ExecTileGatherDesc):
@@ -1298,6 +1520,9 @@ class TileUCE:
   def _complete_context(self, ctx: _UCEContext, cycle: int) -> None:
     if ctx.state in (_UCEContextState.DONE, _UCEContextState.FAULT):
       return
+    if ctx.am_leases:
+      self._fault_context(ctx, "tile.return with an unterminated AM lease", cycle)
+      return
     if any(
       reference.scope is _UCEEventScope.LOCAL and name not in ctx.events_done
       for name, reference in ctx.event_records.items()
@@ -1323,6 +1548,9 @@ class TileUCE:
     ctx.wait_refs = ()
     ctx.wait_all = False
     ctx.fault_reason = reason
+    if self.shared_am is not None:
+      self.shared_am.abort_owner(self._am_owner(ctx), cycle, reason)
+    ctx.am_leases.clear()
     self.pmu.add_event("tile_fault")
     self._terminal_events.append(
       _UCETerminalEvent(
@@ -1346,10 +1574,20 @@ class TileUCE:
     owner.events_done.discard(ref.local_name)
     owner.wait_refs = tuple(r for r in owner.wait_refs if r.runtime_id != ref.runtime_id)
 
-  def _clear_engine_queues(self, unregister: bool) -> None:
+  def _clear_engine_queues(self, unregister: bool, cycle: int = 0) -> None:
     for fifo in self._engine_queues.values():
       while fifo:
         entry = fifo.popleft()
+        if entry.am_lease_id is not None and self.shared_am is not None:
+          try:
+            self.shared_am.abort_lease(
+              entry.am_lease_id, cycle, "queued AM step discarded"
+            )
+          except ValueError:
+            pass
+          self.contexts[entry.ctx_id].am_leases.pop(
+            entry.matmul.am if entry.matmul is not None else "", None
+          )
         if unregister:
           self._drop_event_ref(entry.event_ref)
 
@@ -1365,6 +1603,10 @@ class TileUCE:
     ctx.wait_all = False
 
   def _reset_context(self, ctx: _UCEContext) -> None:
+    if self.shared_am is not None:
+      self.shared_am.abort_owner(self._am_owner(ctx), 0, "context reset")
+    ctx.epoch += 1
+    ctx.am_leases.clear()
     ctx.state = _UCEContextState.EMPTY
     ctx.program = None
     ctx.pc = 0
@@ -1395,6 +1637,7 @@ class TileUCE:
       _UCEContextState.WAIT_EVENT: "WAIT_EVENT",
       _UCEContextState.WAIT_STREAM: "WAIT_STREAM",
       _UCEContextState.WAIT_ENGINE_QUEUE: "WAIT_ENGINE_QUEUE",
+      _UCEContextState.WAIT_AM: "WAIT_AM",
       _UCEContextState.DONE: "DONE",
       _UCEContextState.FAULT: "FAULT",
     }[ctx.state]
@@ -1480,6 +1723,7 @@ class ComputeTile:
     l2_cache=None,
     l2_mshr=None,
     memory_trace=None,
+    shared_am: SharedAmManager | None = None,
   ):
     self.tile_id = tile_id
     self.cfg = cfg
@@ -1487,10 +1731,21 @@ class ComputeTile:
     self.memory_trace = memory_trace
     self.runtime_enabled = runtime_enabled
     self.memory_enabled = memory_enabled
+    self.shared_am = shared_am or SharedAmManager(
+      slot_capacity_bytes=cfg.boa_am_slot_capacity_bytes,
+      group_count=cfg.boa_am_group_count,
+      slots_per_group=cfg.boa_am_slots_per_group,
+      slots_per_context=cfg.boa_am_slots_per_context,
+      tile_id=tile_id,
+      tracer=tracer,
+    )
     self.uce = TileUCE(
       tile_id, cfg, tracer, context_count=context_count, runtime_enabled=runtime_enabled, host_tile=self
     )
+    self.uce.shared_am = self.shared_am
+    self.boa_results = BoaResultService(cfg, tile_id=tile_id, tracer=tracer)
     self.boa = BOAEngine(cfg, tile_id, tracer)
+    self.boa.result_service = self.boa_results
     self.evu = EVUEngine(cfg, tile_id, tracer)
     from .memory import DeterministicLRUCache, MshrTable
 
@@ -1692,7 +1947,30 @@ class ComputeTile:
       jobs = eng.tick(cycle, start_queued=not freeze_new_work) if eng is self.mfe else eng.tick(cycle)
       for job in jobs:
         completed = job
-        self.uce.notify_event(job.event_id)
+        if getattr(job, "error", None) is not None:
+          if getattr(job, "result_reserved", False):
+            self.boa_results.cancel_reservation()
+          self.uce.notify_engine_failure(job.event_id, str(job.error), cycle)
+        elif isinstance(job.payload, BoaPreparedResult):
+          try:
+            self.boa_results.submit(
+              job, job.payload, cycle, reserved=getattr(job, "result_reserved", False)
+            )
+          except ValueError as exc:
+            if getattr(job, "result_reserved", False):
+              self.boa_results.cancel_reservation()
+            self.uce.notify_engine_failure(job.event_id, str(exc), cycle)
+        elif getattr(job, "result_reserved", False):
+          self.boa_results.cancel_reservation()
+          self.uce.notify_engine_failure(job.event_id, "typed BOA result payload is missing", cycle)
+        else:
+          self.uce.notify_event(job.event_id)
+    for ready_job in self.boa_results.advance(cycle):
+      event_id = getattr(ready_job, "event_id", None)
+      if isinstance(event_id, str):
+        self.uce.notify_event(event_id)
+    for event_id, reason in self.boa_results.pop_failures():
+      self.uce.notify_engine_failure(event_id, reason, cycle)
     self.uce.step(cycle, self, freeze_new_work=freeze_new_work)
     self._aggregate_pmu()
     return completed
@@ -1706,12 +1984,18 @@ class ComputeTile:
 
   @property
   def done(self) -> bool:
-    return not self.uce.has_active_contexts() and all(
-      eng.state in (EngineState.IDLE, EngineState.DONE) for eng in (self.boa, self.evu, self.mfe, self.use)
+    return (
+      not self.uce.has_active_contexts()
+      and self.boa_results.pending_count == 0
+      and all(
+        eng.state in (EngineState.IDLE, EngineState.DONE)
+        for eng in (self.boa, self.evu, self.mfe, self.use)
+      )
     )
 
   def reset(self) -> None:
     self.uce.reset()
+    self.boa_results.reset()
     for eng in (self.boa, self.evu, self.mfe, self.use):
       eng.reset()
     self.pmu.reset()
@@ -1726,6 +2010,7 @@ class ComputeTile:
       "faulted": self.uce.faulted,
       "fault_reason": self.uce.fault_reason,
       "boa_state": self.boa.state.name,
+      "boa_results": self.boa_results.snapshot(),
       "evu_state": self.evu.state.name,
       "mfe_state": self.mfe.state.name,
       "use_state": self.use.state.name,

@@ -10,7 +10,6 @@ bindings; each binding gets one ``<binding>.bin`` under
 - ``table`` bindings get only their first 4096 bytes seeded, byte value
   ``offset % 251`` (the gather row addresses stay inside that prefix);
 - ``lhs``/``rhs`` bindings are filled entirely with ``offset % 251``;
-- ``acc_init`` bindings are all zero (the accumulator initialiser);
 - output bindings are write-only and are not generated.
 """
 
@@ -72,6 +71,19 @@ def _seed_modulo(size: int, limit: int | None = None) -> bytes:
   return bytes(offset % SEED_MODULUS for offset in range(span))
 
 
+def _seed_bf16(size: int) -> bytes:
+  """Deterministic finite BF16 values, never arbitrary bit patterns."""
+  if size % 2:
+    raise ValueError("BF16 seed size must be even")
+  result = bytearray()
+  for index in range(size // 2):
+    value = float((index * 7) % 5 - 2)
+    bits = struct.unpack("<I", struct.pack("<f", value))[0]
+    rounded = (bits + 0x7FFF + ((bits >> 16) & 1)) >> 16
+    result += struct.pack("<H", rounded & 0xFFFF)
+  return bytes(result)
+
+
 def _binding_payload(name: str, size: int) -> bytes | None:
   """Return the input bytes for one binding, or ``None`` when unseeded."""
   if "output" in name or name == "out":
@@ -81,9 +93,7 @@ def _binding_payload(name: str, size: int) -> bytes | None:
   if name.startswith("table"):
     return _seed_modulo(size, limit=TABLE_PREFIX_BYTES)
   if name.startswith("lhs") or name.startswith("rhs"):
-    return _seed_modulo(size)
-  if "acc_init" in name:
-    return b"\x00" * size
+    return _seed_bf16(size)
   raise ValueError(f"no seeding rule for gather fixture binding '{name}'")
 
 

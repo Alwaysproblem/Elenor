@@ -35,6 +35,10 @@ Runnable workloads:
   matmul-gather-add              workloads/matmul_gather_add.mlir
   gather-matmul-4tiles-2contexts
                                  workloads/gather_matmul_4tiles_2contexts.mlir
+  boa-am-matmul                 workloads/boa_am_matmul.mlir
+                                 (typed software-managed AM：A[64,128]bf16 x
+                                 B[128,256]bf16 -> C[64,256]f32，K 两步 64；
+                                 首步 INIT，末步 accumulate output；64 KiB AM）
   matmul-2048x512-boa256          workloads/matmul_2048x512x64_boa256x256x32.mlir
                                  (2048x512x64 matmul, BOA 256x256x32, K tile 内
                                  展开, 4 context x placement=15 x 4 task)
@@ -174,7 +178,7 @@ shift
 # and skips a scenario whose pin does not match the sweep.
 scenario_fidelity() {
   case "$1" in
-    gather|gather-matmul|matmul-gather-add|gather-matmul-4tiles-2contexts|matmul-gather-add-4tiles-2contexts|indexed-memory|paged-attention-decode|paged-attention-decode-baseline)
+    gather|gather-matmul|matmul-gather-add|gather-matmul-4tiles-2contexts|matmul-gather-add-4tiles-2contexts|indexed-memory|paged-attention-decode|paged-attention-decode-baseline|matmul-2048x512-boa256|matmul-pow-parallel|matmul-pow-free-slot|matmul-pow-data-dep|matmul17-pow-tail-overlap|matmul-splitk-pipeline|matmul-splitk-multicontext-pipeline|boa-am-matmul)
       echo full_memory
       ;;
     *)
@@ -227,12 +231,10 @@ case "$name" in
       --input-binding table=0x200000:8388608:r \
       --input-binding indices=0xA00000:4096:r \
       --input-binding output=0xB00000:32768:w \
-      --input-binding acc_init=0xC00000:32768:r \
       --input-data lhs="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul/lhs.bin" \
       --input-data rhs="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul/rhs.bin" \
       --input-data table="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul/table.bin" \
       --input-data indices="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul/indices.bin" \
-      --input-data acc_init="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul/acc_init.bin" \
       --max-cycles 200000 \
       "$@"
     ;;
@@ -245,12 +247,10 @@ case "$name" in
       --input-binding table=0x200000:8388608:r \
       --input-binding indices=0xA00000:4096:r \
       --input-binding output=0xB00000:32768:w \
-      --input-binding acc_init=0xC00000:32768:r \
       --input-data lhs="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add/lhs.bin" \
       --input-data rhs="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add/rhs.bin" \
       --input-data table="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add/table.bin" \
       --input-data indices="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add/indices.bin" \
-      --input-data acc_init="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add/acc_init.bin" \
       --max-cycles 200000 \
       "$@"
     ;;
@@ -266,27 +266,37 @@ case "$name" in
       --input-binding rhs0=0x120000:65536:r \
       --input-binding indices0=0x140000:256:r \
       --input-binding output0=0xB00000:131072:w \
-      --input-binding acc_init0=0xF00000:131072:r \
       --input-binding lhs1=0x150000:65536:r \
       --input-binding rhs1=0x170000:65536:r \
       --input-binding indices1=0x190000:256:r \
       --input-binding output1=0xD00000:131072:w \
-      --input-binding acc_init1=0xF20000:131072:r \
       --input-data table="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul_4tiles_2contexts/table.bin" \
       --input-data lhs0="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul_4tiles_2contexts/lhs0.bin" \
       --input-data rhs0="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul_4tiles_2contexts/rhs0.bin" \
       --input-data indices0="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul_4tiles_2contexts/indices0.bin" \
-      --input-data acc_init0="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul_4tiles_2contexts/acc_init0.bin" \
       --input-data lhs1="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul_4tiles_2contexts/lhs1.bin" \
       --input-data rhs1="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul_4tiles_2contexts/rhs1.bin" \
       --input-data indices1="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul_4tiles_2contexts/indices1.bin" \
-      --input-data acc_init1="$ROOT_DIR/examples/workloads/gather_inputs/gather_matmul_4tiles_2contexts/acc_init1.bin" \
       --max-cycles 500000 \
+      "$@"
+    ;;
+  boa-am-matmul)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/boa_am_matmul.mlir" \
+      --hw-override boa_am_slot_capacity_bytes=65536 \
+      --input-binding A=0x100000:16384:r \
+      --input-binding B=0x200000:65536:r \
+      --input-binding C=0x300000:65536:w \
+      --input-data A="$ROOT_DIR/examples/workloads/boa_am_inputs/boa_am_matmul/A.bin" \
+      --input-data B="$ROOT_DIR/examples/workloads/boa_am_inputs/boa_am_matmul/B.bin" \
+      --max-cycles 200000 \
       "$@"
     ;;
   matmul-2048x512-boa256)
     set -- \
       --ir-file "$ROOT_DIR/examples/workloads/matmul_2048x512x64_boa256x256x32.mlir" \
+      --input-data A="$ROOT_DIR/examples/workloads/boa_am_inputs/matmul_2048x512x64_boa256x256x32/A.bin" \
+      --input-data B="$ROOT_DIR/examples/workloads/boa_am_inputs/matmul_2048x512x64_boa256x256x32/B.bin" \
       --hw-override num_dma_channels=2 \
       --hw-override hbm_fixed_latency_cycles=10 \
       --context-mode 4 \
@@ -300,6 +310,10 @@ case "$name" in
   matmul-pow-parallel)
     set -- \
       --ir-file "$ROOT_DIR/examples/workloads/matmul_pow_parallel.mlir" \
+      --input-data A="$ROOT_DIR/examples/workloads/boa_am_inputs/matmul_pow_parallel/A.bin" \
+      --input-data B="$ROOT_DIR/examples/workloads/boa_am_inputs/matmul_pow_parallel/B.bin" \
+      --input-data Y0="$ROOT_DIR/examples/workloads/boa_am_inputs/matmul_pow_parallel/Y0.bin" \
+      --input-data Y1="$ROOT_DIR/examples/workloads/boa_am_inputs/matmul_pow_parallel/Y1.bin" \
       --hw-override num_dma_channels=2 \
       --hw-override hbm_fixed_latency_cycles=10 \
       --context-mode 4 \
@@ -315,6 +329,10 @@ case "$name" in
   matmul-pow-free-slot)
     set -- \
       --ir-file "$ROOT_DIR/examples/workloads/matmul_pow_free_slot.mlir" \
+      --input-data A="$ROOT_DIR/examples/workloads/boa_am_inputs/matmul_pow_free_slot/A.bin" \
+      --input-data B="$ROOT_DIR/examples/workloads/boa_am_inputs/matmul_pow_free_slot/B.bin" \
+      --input-data Y0="$ROOT_DIR/examples/workloads/boa_am_inputs/matmul_pow_free_slot/Y0.bin" \
+      --input-data Y1="$ROOT_DIR/examples/workloads/boa_am_inputs/matmul_pow_free_slot/Y1.bin" \
       --hw-override num_dma_channels=2 \
       --hw-override hbm_fixed_latency_cycles=10 \
       --context-mode 4 \
@@ -330,6 +348,8 @@ case "$name" in
   matmul-pow-data-dep)
     set -- \
       --ir-file "$ROOT_DIR/examples/workloads/matmul_pow_data_dep.mlir" \
+      --input-data A="$ROOT_DIR/examples/workloads/boa_am_inputs/matmul_pow_data_dep/A.bin" \
+      --input-data B="$ROOT_DIR/examples/workloads/boa_am_inputs/matmul_pow_data_dep/B.bin" \
       --hw-override num_dma_channels=2 \
       --hw-override hbm_fixed_latency_cycles=10 \
       --context-mode 4 \
@@ -343,6 +363,8 @@ case "$name" in
   matmul17-pow-tail-overlap)
     set -- \
       --ir-file "$ROOT_DIR/examples/workloads/matmul17_pow_tail_overlap.mlir" \
+      --input-data A="$ROOT_DIR/examples/workloads/boa_am_inputs/matmul17_pow_tail_overlap/A.bin" \
+      --input-data B="$ROOT_DIR/examples/workloads/boa_am_inputs/matmul17_pow_tail_overlap/B.bin" \
       --hw-override num_dma_channels=2 \
       --hw-override hbm_fixed_latency_cycles=10 \
       --context-mode 5 \
@@ -365,21 +387,17 @@ case "$name" in
       --input-binding rhs0=0x120000:65536:r \
       --input-binding indices0=0x140000:256:r \
       --input-binding output0=0xB00000:131072:w \
-      --input-binding acc_init0=0xF00000:131072:r \
       --input-binding lhs1=0x150000:65536:r \
       --input-binding rhs1=0x170000:65536:r \
       --input-binding indices1=0x190000:256:r \
       --input-binding output1=0xD00000:131072:w \
-      --input-binding acc_init1=0xF20000:131072:r \
       --input-data table="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add_4tiles_2contexts/table.bin" \
       --input-data lhs0="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add_4tiles_2contexts/lhs0.bin" \
       --input-data rhs0="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add_4tiles_2contexts/rhs0.bin" \
       --input-data indices0="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add_4tiles_2contexts/indices0.bin" \
-      --input-data acc_init0="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add_4tiles_2contexts/acc_init0.bin" \
       --input-data lhs1="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add_4tiles_2contexts/lhs1.bin" \
       --input-data rhs1="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add_4tiles_2contexts/rhs1.bin" \
       --input-data indices1="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add_4tiles_2contexts/indices1.bin" \
-      --input-data acc_init1="$ROOT_DIR/examples/workloads/gather_inputs/matmul_gather_add_4tiles_2contexts/acc_init1.bin" \
       --max-cycles 500000 \
       "$@"
     ;;
@@ -477,6 +495,8 @@ case "$name" in
   matmul-splitk-pipeline)
     set -- \
       --ir-file "$ROOT_DIR/examples/workloads/matmul_splitk_pipeline.mlir" \
+      --input-data A="$ROOT_DIR/examples/workloads/boa_am_inputs/matmul_splitk_pipeline/A.bin" \
+      --input-data B="$ROOT_DIR/examples/workloads/boa_am_inputs/matmul_splitk_pipeline/B.bin" \
       --hw-override num_dma_channels=2 \
       --hw-override hbm_fixed_latency_cycles=10 \
       --context-mode 4 \
@@ -490,6 +510,8 @@ case "$name" in
   matmul-splitk-multicontext-pipeline)
     set -- \
       --ir-file "$ROOT_DIR/examples/workloads/matmul_splitk_multicontext_pipeline.mlir" \
+      --input-data A="$ROOT_DIR/examples/workloads/boa_am_inputs/matmul_splitk_multicontext_pipeline/A.bin" \
+      --input-data B="$ROOT_DIR/examples/workloads/boa_am_inputs/matmul_splitk_multicontext_pipeline/B.bin" \
       --hw-override num_dma_channels=2 \
       --hw-override hbm_fixed_latency_cycles=10 \
       --context-mode 4 \

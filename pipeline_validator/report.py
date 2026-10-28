@@ -45,6 +45,8 @@ class WorkloadReport:
   profile: dict = field(default_factory=dict)
   arenas: dict = field(default_factory=dict)
   task_leases: dict = field(default_factory=dict)
+  shared_am: dict = field(default_factory=dict)
+  boa_results: dict = field(default_factory=dict)
   traffic: dict = field(default_factory=dict)  # per-interface completed bytes
   stall_categories: dict = field(default_factory=dict)  # guide KPI grouping
 
@@ -355,6 +357,17 @@ def build_report(wl: WorkloadInfo, result: SimResult, num_tiles: int = 4) -> Wor
   task_leases_raw = result.group_snapshot.get("task_leases")
   if not isinstance(task_leases_raw, Mapping):
     task_leases_raw = {}
+  shared_am_raw = result.group_snapshot.get("shared_am")
+  if not isinstance(shared_am_raw, Mapping):
+    shared_am_raw = {}
+  boa_results_raw: dict = {}
+  tiles_raw = result.group_snapshot.get("tiles")
+  if isinstance(tiles_raw, (list, tuple)):
+    for tile in tiles_raw:
+      if isinstance(tile, Mapping):
+        service = tile.get("boa_results")
+        if isinstance(service, Mapping) and service.get("enqueued_count", 0):
+          boa_results_raw[tile.get("tile_id", len(boa_results_raw))] = service
   compiled_artifact_hash = result.group_snapshot.get("compiled_artifact_hash")
   if not isinstance(compiled_artifact_hash, str):
     compiled_artifact_hash = None
@@ -394,6 +407,8 @@ def build_report(wl: WorkloadInfo, result: SimResult, num_tiles: int = 4) -> Wor
     profile=_bounded_snapshot(profile_raw, name="profile"),
     arenas=_bounded_snapshot(arenas_raw, name="arenas"),
     task_leases=_bounded_snapshot(task_leases_raw, name="task_leases"),
+    shared_am=_bounded_snapshot(shared_am_raw, name="shared_am"),
+    boa_results=boa_results_raw,
     traffic=traffic,
     stall_categories=stall_categories,
   )
@@ -468,6 +483,30 @@ def _run_checks(wl: WorkloadInfo, result: SimResult, engine_active: dict, total:
       "pass": result.credit_invariant_ok,
     }
   )
+  shared_am = result.group_snapshot.get("shared_am")
+  if isinstance(shared_am, Mapping) and shared_am.get("acquire_count", 0) > 0:
+    zero_leak = (
+      shared_am.get("live_leases", 0) == 0
+      and shared_am.get("free_slots") == shared_am.get("total_slots")
+    )
+    checks.append(
+      {
+        "check": "am_slot_zero_leak",
+        "expected": True,
+        "actual": zero_leak,
+        "pass": zero_leak,
+      }
+    )
+    if not exp.get("am_fault_expected"):
+      no_fault = shared_am.get("fault_count", 0) == 0
+      checks.append(
+        {
+          "check": "am_chain_success",
+          "expected": True,
+          "actual": no_fault,
+          "pass": no_fault,
+        }
+      )
 
   boa_ratio = engine_active.get("BOA", 0) / total if total else 0
   evu_ratio = engine_active.get("EVU", 0) / total if total else 0
@@ -737,6 +776,23 @@ def report_to_text(r: WorkloadReport, *, detailed: bool = False) -> str:
   lines.append(f"  Completed:       {r.completed}  ({r.reason})")
   lines.append(f"  Utilization:     {r.utilization:.1%}")
   lines.append(f"  Credit inv OK:   {r.credit_invariant_ok}")
+  if r.shared_am.get("acquire_count", 0):
+    lines.append(
+      "  Shared AM:       "
+      f"leases={r.shared_am.get('live_leases', 0)} "
+      f"free={r.shared_am.get('free_slots', 0)}/{r.shared_am.get('total_slots', 0)} "
+      f"acquire={r.shared_am.get('acquire_count', 0)} "
+      f"final={r.shared_am.get('final_count', 0)} "
+      f"fault={r.shared_am.get('fault_count', 0)}"
+    )
+  if r.boa_results:
+    services = [item for item in r.boa_results.values() if isinstance(item, Mapping)]
+    pending = sum(item.get("pending", 0) for item in services)
+    blocked = sum(item.get("blocked_cycles", 0) for item in services)
+    events = sum(item.get("event_count", 0) for item in services)
+    lines.append(
+      f"  BOA results:     pending={pending} blocked_output_cycles={blocked} events={events}"
+    )
   if r.gather_fidelity is not None:
     lines.append(f"  Gather fidelity: {r.gather_fidelity}")
   if r.compiled_artifact_hash is not None:
@@ -848,6 +904,8 @@ def report_to_json(r: WorkloadReport) -> str:
       "profile": r.profile,
       "arenas": r.arenas,
       "task_leases": r.task_leases,
+      "shared_am": r.shared_am,
+      "boa_results": r.boa_results,
       "checks": r.checks,
     },
     indent=2,

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from transformer_common import (
-  boa_matmul,
+  boa_estimate,
   contract_bytes,
   evu,
   l1_alloc,
@@ -231,7 +231,7 @@ def _qkv_chunk_program(
       ("k", hd, k_acc, k_v),
       ("v", hd, v_acc, v_v),
     ):
-      boa = boa_matmul(rows, n_dim, chunk, f"{tag}_boa_{row_block}", accumulate=accumulate)
+      boa = boa_estimate(rows, n_dim, chunk, f"{tag}_boa_{row_block}")
       body += [boa, TileAwaitOp([boa])]
       stored = l1_store(acc_buf, view, f"{tag}_stored_{row_block}")
       body.append(stored)
@@ -314,11 +314,11 @@ def _attention_program(
       body.append(TileSignalOp("input_released", task))
     for part in range(microblocks):
       for head in range(4):
-        qk = boa_matmul(rows, kb, hd, f"qk{step}_p{part}_h{head}")
+        qk = boa_estimate(rows, kb, hd, f"qk{step}_p{part}_h{head}")
         body += [qk, TileAwaitOp([qk])]
         sm = evu("online_softmax_update", sm_ops, f"sm{step}_p{part}_h{head}")
         body += [sm, TileAwaitOp([sm])]
-        pv = boa_matmul(rows, hd, kb, f"pv{step}_p{part}_h{head}", accumulate=step > 0)
+        pv = boa_estimate(rows, hd, kb, f"pv{step}_p{part}_h{head}")
         body += [pv, TileAwaitOp([pv])]
     if step + 2 < cfg.kv_blocks:
       next_step = step + 2
@@ -388,12 +388,11 @@ def _outproj_program(
       if head_block == cfg.kv_heads - 1 and chunk_index == chunks - 1:
         body.append(TileSignalOp("input_released", task))
       for part in range(microblocks):
-        boa = boa_matmul(
+        boa = boa_estimate(
           rows,
           q_slice,
           k_chunk,
           f"outproj{head_block}_{chunk_index}_p{part}",
-          accumulate=head_block > 0 or chunk_index > 0,
         )
         body += [boa, TileAwaitOp([boa])]
 
@@ -716,7 +715,7 @@ def main() -> None:
     "independent final row stores launch together, then share a completion frontier.",
     "Every buffer reuse is gated by the preceding consumers/stores; Arena sizes are unchanged.",
     "",
-    "TIMING MODEL ONLY: tile.boa.async / tile.evu.async carry no tensor operands and",
+    "TIMING MODEL ONLY: tile.boa.estimate.async / tile.evu.async carry no tensor operands and",
     "execute no numerics. This source validates scheduling, resources and traffic, not",
     "numerical correctness or hardware performance guarantees.",
     "Generate: PYTHONPATH=. python examples/generators/generate_transformer_prefill_multicontext.py",

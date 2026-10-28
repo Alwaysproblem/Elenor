@@ -189,11 +189,13 @@ builtin.module {
       window_entries = 1 scope = "owner_0" : !tile.event<"gather_v_r0_t16">
     tile.await %gather_k_r0_t16, %gather_v_r0_t16, %q_r0_t16, %state_r0_t16, %acc_r0_t16
     tile.signal input_released(%task_4)
-    %qk_r0_t16 = tile.boa.async "matmul" m = 4 n = 16 k = 64 ops = 8192 : !tile.event<"qk_r0_t16">
+    %qk_r0_t16 = tile.boa.estimate.async "matmul" m = 4 n = 16 k = 64 ops = 8192
+      : !tile.event<"qk_r0_t16">
     tile.await %qk_r0_t16
     %sm_r0_t16 = tile.evu.async "online_softmax_update" ops = 72 : !tile.event<"sm_r0_t16">
     tile.await %sm_r0_t16
-    %pv_r0_t16 = tile.boa.async "matmul" m = 4 n = 64 k = 16 ops = 8192 : !tile.event<"pv_r0_t16">
+    %pv_r0_t16 = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 16 ops = 8192
+      : !tile.event<"pv_r0_t16">
     tile.await %pv_r0_t16
     %acc_evu_r0_t16 = tile.evu.async "online_softmax_output_accumulate" ops = 512
       : !tile.event<"acc_evu_r0_t16">
@@ -249,13 +251,13 @@ builtin.module {
     tile.await %gather_k_r0_t16_final, %gather_v_r0_t16_final, %q_r0_t16_final, %state_r0_t16_final,
       %acc_r0_t16_final
     tile.signal input_released(%task_5)
-    %qk_r0_t16_final = tile.boa.async "matmul" m = 4 n = 16 k = 64 ops = 8192
+    %qk_r0_t16_final = tile.boa.estimate.async "matmul" m = 4 n = 16 k = 64 ops = 8192
       : !tile.event<"qk_r0_t16_final">
     tile.await %qk_r0_t16_final
     %sm_r0_t16_final = tile.evu.async "online_softmax_update" ops = 72
       : !tile.event<"sm_r0_t16_final">
     tile.await %sm_r0_t16_final
-    %pv_r0_t16_final = tile.boa.async "matmul" m = 4 n = 64 k = 16 ops = 8192
+    %pv_r0_t16_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 16 ops = 8192
       : !tile.event<"pv_r0_t16_final">
     tile.await %pv_r0_t16_final
     %acc_evu_r0_t16_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -316,13 +318,13 @@ builtin.module {
     tile.await %gather_k_r0_t1_final, %gather_v_r0_t1_final, %q_r0_t1_final, %state_r0_t1_final,
       %acc_r0_t1_final
     tile.signal input_released(%task_6)
-    %qk_r0_t1_final = tile.boa.async "matmul" m = 4 n = 1 k = 64 ops = 512
+    %qk_r0_t1_final = tile.boa.estimate.async "matmul" m = 4 n = 1 k = 64 ops = 512
       : !tile.event<"qk_r0_t1_final">
     tile.await %qk_r0_t1_final
     %sm_r0_t1_final = tile.evu.async "online_softmax_update" ops = 12
       : !tile.event<"sm_r0_t1_final">
     tile.await %sm_r0_t1_final
-    %pv_r0_t1_final = tile.boa.async "matmul" m = 4 n = 64 k = 1 ops = 512
+    %pv_r0_t1_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 1 ops = 512
       : !tile.event<"pv_r0_t1_final">
     tile.await %pv_r0_t1_final
     %acc_evu_r0_t1_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -383,13 +385,13 @@ builtin.module {
     tile.await %gather_k_r0_t2_final, %gather_v_r0_t2_final, %q_r0_t2_final, %state_r0_t2_final,
       %acc_r0_t2_final
     tile.signal input_released(%task_7)
-    %qk_r0_t2_final = tile.boa.async "matmul" m = 4 n = 2 k = 64 ops = 1024
+    %qk_r0_t2_final = tile.boa.estimate.async "matmul" m = 4 n = 2 k = 64 ops = 1024
       : !tile.event<"qk_r0_t2_final">
     tile.await %qk_r0_t2_final
     %sm_r0_t2_final = tile.evu.async "online_softmax_update" ops = 16
       : !tile.event<"sm_r0_t2_final">
     tile.await %sm_r0_t2_final
-    %pv_r0_t2_final = tile.boa.async "matmul" m = 4 n = 64 k = 2 ops = 1024
+    %pv_r0_t2_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 2 ops = 1024
       : !tile.event<"pv_r0_t2_final">
     tile.await %pv_r0_t2_final
     %acc_evu_r0_t2_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -450,13 +452,13 @@ builtin.module {
     tile.await %gather_k_r0_t3_final, %gather_v_r0_t3_final, %q_r0_t3_final, %state_r0_t3_final,
       %acc_r0_t3_final
     tile.signal input_released(%task_8)
-    %qk_r0_t3_final = tile.boa.async "matmul" m = 4 n = 3 k = 64 ops = 1536
+    %qk_r0_t3_final = tile.boa.estimate.async "matmul" m = 4 n = 3 k = 64 ops = 1536
       : !tile.event<"qk_r0_t3_final">
     tile.await %qk_r0_t3_final
     %sm_r0_t3_final = tile.evu.async "online_softmax_update" ops = 20
       : !tile.event<"sm_r0_t3_final">
     tile.await %sm_r0_t3_final
-    %pv_r0_t3_final = tile.boa.async "matmul" m = 4 n = 64 k = 3 ops = 1536
+    %pv_r0_t3_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 3 ops = 1536
       : !tile.event<"pv_r0_t3_final">
     tile.await %pv_r0_t3_final
     %acc_evu_r0_t3_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -664,11 +666,13 @@ builtin.module {
       window_entries = 1 scope = "owner_1" : !tile.event<"gather_v_r1_t16">
     tile.await %gather_k_r1_t16, %gather_v_r1_t16, %q_r1_t16, %state_r1_t16, %acc_r1_t16
     tile.signal input_released(%task_13)
-    %qk_r1_t16 = tile.boa.async "matmul" m = 4 n = 16 k = 64 ops = 8192 : !tile.event<"qk_r1_t16">
+    %qk_r1_t16 = tile.boa.estimate.async "matmul" m = 4 n = 16 k = 64 ops = 8192
+      : !tile.event<"qk_r1_t16">
     tile.await %qk_r1_t16
     %sm_r1_t16 = tile.evu.async "online_softmax_update" ops = 72 : !tile.event<"sm_r1_t16">
     tile.await %sm_r1_t16
-    %pv_r1_t16 = tile.boa.async "matmul" m = 4 n = 64 k = 16 ops = 8192 : !tile.event<"pv_r1_t16">
+    %pv_r1_t16 = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 16 ops = 8192
+      : !tile.event<"pv_r1_t16">
     tile.await %pv_r1_t16
     %acc_evu_r1_t16 = tile.evu.async "online_softmax_output_accumulate" ops = 512
       : !tile.event<"acc_evu_r1_t16">
@@ -724,13 +728,13 @@ builtin.module {
     tile.await %gather_k_r1_t16_final, %gather_v_r1_t16_final, %q_r1_t16_final, %state_r1_t16_final,
       %acc_r1_t16_final
     tile.signal input_released(%task_14)
-    %qk_r1_t16_final = tile.boa.async "matmul" m = 4 n = 16 k = 64 ops = 8192
+    %qk_r1_t16_final = tile.boa.estimate.async "matmul" m = 4 n = 16 k = 64 ops = 8192
       : !tile.event<"qk_r1_t16_final">
     tile.await %qk_r1_t16_final
     %sm_r1_t16_final = tile.evu.async "online_softmax_update" ops = 72
       : !tile.event<"sm_r1_t16_final">
     tile.await %sm_r1_t16_final
-    %pv_r1_t16_final = tile.boa.async "matmul" m = 4 n = 64 k = 16 ops = 8192
+    %pv_r1_t16_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 16 ops = 8192
       : !tile.event<"pv_r1_t16_final">
     tile.await %pv_r1_t16_final
     %acc_evu_r1_t16_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -792,13 +796,13 @@ builtin.module {
     tile.await %gather_k_r1_t1_final, %gather_v_r1_t1_final, %q_r1_t1_final, %state_r1_t1_final,
       %acc_r1_t1_final
     tile.signal input_released(%task_15)
-    %qk_r1_t1_final = tile.boa.async "matmul" m = 4 n = 1 k = 64 ops = 512
+    %qk_r1_t1_final = tile.boa.estimate.async "matmul" m = 4 n = 1 k = 64 ops = 512
       : !tile.event<"qk_r1_t1_final">
     tile.await %qk_r1_t1_final
     %sm_r1_t1_final = tile.evu.async "online_softmax_update" ops = 12
       : !tile.event<"sm_r1_t1_final">
     tile.await %sm_r1_t1_final
-    %pv_r1_t1_final = tile.boa.async "matmul" m = 4 n = 64 k = 1 ops = 512
+    %pv_r1_t1_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 1 ops = 512
       : !tile.event<"pv_r1_t1_final">
     tile.await %pv_r1_t1_final
     %acc_evu_r1_t1_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -859,13 +863,13 @@ builtin.module {
     tile.await %gather_k_r1_t2_final, %gather_v_r1_t2_final, %q_r1_t2_final, %state_r1_t2_final,
       %acc_r1_t2_final
     tile.signal input_released(%task_16)
-    %qk_r1_t2_final = tile.boa.async "matmul" m = 4 n = 2 k = 64 ops = 1024
+    %qk_r1_t2_final = tile.boa.estimate.async "matmul" m = 4 n = 2 k = 64 ops = 1024
       : !tile.event<"qk_r1_t2_final">
     tile.await %qk_r1_t2_final
     %sm_r1_t2_final = tile.evu.async "online_softmax_update" ops = 16
       : !tile.event<"sm_r1_t2_final">
     tile.await %sm_r1_t2_final
-    %pv_r1_t2_final = tile.boa.async "matmul" m = 4 n = 64 k = 2 ops = 1024
+    %pv_r1_t2_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 2 ops = 1024
       : !tile.event<"pv_r1_t2_final">
     tile.await %pv_r1_t2_final
     %acc_evu_r1_t2_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -926,13 +930,13 @@ builtin.module {
     tile.await %gather_k_r1_t3_final, %gather_v_r1_t3_final, %q_r1_t3_final, %state_r1_t3_final,
       %acc_r1_t3_final
     tile.signal input_released(%task_17)
-    %qk_r1_t3_final = tile.boa.async "matmul" m = 4 n = 3 k = 64 ops = 1536
+    %qk_r1_t3_final = tile.boa.estimate.async "matmul" m = 4 n = 3 k = 64 ops = 1536
       : !tile.event<"qk_r1_t3_final">
     tile.await %qk_r1_t3_final
     %sm_r1_t3_final = tile.evu.async "online_softmax_update" ops = 20
       : !tile.event<"sm_r1_t3_final">
     tile.await %sm_r1_t3_final
-    %pv_r1_t3_final = tile.boa.async "matmul" m = 4 n = 64 k = 3 ops = 1536
+    %pv_r1_t3_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 3 ops = 1536
       : !tile.event<"pv_r1_t3_final">
     tile.await %pv_r1_t3_final
     %acc_evu_r1_t3_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -1140,11 +1144,13 @@ builtin.module {
       window_entries = 1 scope = "owner_2" : !tile.event<"gather_v_r2_t16">
     tile.await %gather_k_r2_t16, %gather_v_r2_t16, %q_r2_t16, %state_r2_t16, %acc_r2_t16
     tile.signal input_released(%task_22)
-    %qk_r2_t16 = tile.boa.async "matmul" m = 4 n = 16 k = 64 ops = 8192 : !tile.event<"qk_r2_t16">
+    %qk_r2_t16 = tile.boa.estimate.async "matmul" m = 4 n = 16 k = 64 ops = 8192
+      : !tile.event<"qk_r2_t16">
     tile.await %qk_r2_t16
     %sm_r2_t16 = tile.evu.async "online_softmax_update" ops = 72 : !tile.event<"sm_r2_t16">
     tile.await %sm_r2_t16
-    %pv_r2_t16 = tile.boa.async "matmul" m = 4 n = 64 k = 16 ops = 8192 : !tile.event<"pv_r2_t16">
+    %pv_r2_t16 = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 16 ops = 8192
+      : !tile.event<"pv_r2_t16">
     tile.await %pv_r2_t16
     %acc_evu_r2_t16 = tile.evu.async "online_softmax_output_accumulate" ops = 512
       : !tile.event<"acc_evu_r2_t16">
@@ -1200,13 +1206,13 @@ builtin.module {
     tile.await %gather_k_r2_t16_final, %gather_v_r2_t16_final, %q_r2_t16_final, %state_r2_t16_final,
       %acc_r2_t16_final
     tile.signal input_released(%task_23)
-    %qk_r2_t16_final = tile.boa.async "matmul" m = 4 n = 16 k = 64 ops = 8192
+    %qk_r2_t16_final = tile.boa.estimate.async "matmul" m = 4 n = 16 k = 64 ops = 8192
       : !tile.event<"qk_r2_t16_final">
     tile.await %qk_r2_t16_final
     %sm_r2_t16_final = tile.evu.async "online_softmax_update" ops = 72
       : !tile.event<"sm_r2_t16_final">
     tile.await %sm_r2_t16_final
-    %pv_r2_t16_final = tile.boa.async "matmul" m = 4 n = 64 k = 16 ops = 8192
+    %pv_r2_t16_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 16 ops = 8192
       : !tile.event<"pv_r2_t16_final">
     tile.await %pv_r2_t16_final
     %acc_evu_r2_t16_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -1268,13 +1274,13 @@ builtin.module {
     tile.await %gather_k_r2_t1_final, %gather_v_r2_t1_final, %q_r2_t1_final, %state_r2_t1_final,
       %acc_r2_t1_final
     tile.signal input_released(%task_24)
-    %qk_r2_t1_final = tile.boa.async "matmul" m = 4 n = 1 k = 64 ops = 512
+    %qk_r2_t1_final = tile.boa.estimate.async "matmul" m = 4 n = 1 k = 64 ops = 512
       : !tile.event<"qk_r2_t1_final">
     tile.await %qk_r2_t1_final
     %sm_r2_t1_final = tile.evu.async "online_softmax_update" ops = 12
       : !tile.event<"sm_r2_t1_final">
     tile.await %sm_r2_t1_final
-    %pv_r2_t1_final = tile.boa.async "matmul" m = 4 n = 64 k = 1 ops = 512
+    %pv_r2_t1_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 1 ops = 512
       : !tile.event<"pv_r2_t1_final">
     tile.await %pv_r2_t1_final
     %acc_evu_r2_t1_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -1335,13 +1341,13 @@ builtin.module {
     tile.await %gather_k_r2_t2_final, %gather_v_r2_t2_final, %q_r2_t2_final, %state_r2_t2_final,
       %acc_r2_t2_final
     tile.signal input_released(%task_25)
-    %qk_r2_t2_final = tile.boa.async "matmul" m = 4 n = 2 k = 64 ops = 1024
+    %qk_r2_t2_final = tile.boa.estimate.async "matmul" m = 4 n = 2 k = 64 ops = 1024
       : !tile.event<"qk_r2_t2_final">
     tile.await %qk_r2_t2_final
     %sm_r2_t2_final = tile.evu.async "online_softmax_update" ops = 16
       : !tile.event<"sm_r2_t2_final">
     tile.await %sm_r2_t2_final
-    %pv_r2_t2_final = tile.boa.async "matmul" m = 4 n = 64 k = 2 ops = 1024
+    %pv_r2_t2_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 2 ops = 1024
       : !tile.event<"pv_r2_t2_final">
     tile.await %pv_r2_t2_final
     %acc_evu_r2_t2_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -1402,13 +1408,13 @@ builtin.module {
     tile.await %gather_k_r2_t3_final, %gather_v_r2_t3_final, %q_r2_t3_final, %state_r2_t3_final,
       %acc_r2_t3_final
     tile.signal input_released(%task_26)
-    %qk_r2_t3_final = tile.boa.async "matmul" m = 4 n = 3 k = 64 ops = 1536
+    %qk_r2_t3_final = tile.boa.estimate.async "matmul" m = 4 n = 3 k = 64 ops = 1536
       : !tile.event<"qk_r2_t3_final">
     tile.await %qk_r2_t3_final
     %sm_r2_t3_final = tile.evu.async "online_softmax_update" ops = 20
       : !tile.event<"sm_r2_t3_final">
     tile.await %sm_r2_t3_final
-    %pv_r2_t3_final = tile.boa.async "matmul" m = 4 n = 64 k = 3 ops = 1536
+    %pv_r2_t3_final = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 3 ops = 1536
       : !tile.event<"pv_r2_t3_final">
     tile.await %pv_r2_t3_final
     %acc_evu_r2_t3_final = tile.evu.async "online_softmax_output_accumulate" ops = 512
@@ -1614,7 +1620,7 @@ builtin.module {
     %pf_acc_p3_r0_s0 = nest.dma.prefetch.async %279 into %acc_p3_1 : !nest.event<"pf_acc_p3_r0_s0">
     %296 = nest.task.range from = 0 to = 4 : !nest.task_range
     %append_grid_r0_s0, %append_inrel_r0_s0, %297 =
-      nest.dispatch.tasks.async @paged_attention_append_r0_tip15 l1_mode = 3 tasks(%296)
+      nest.dispatch.tasks.async @paged_attention_append_r0_tip15 l1_mode = 1 tasks(%296)
       globals(%267) bindings(%k_new, %v_new, %append_idx) ins(%k_new, %v_new, %append_idx) outs()
       signal_policy {
         input_released = #nest.aggregate<all_tasks>
@@ -1623,7 +1629,7 @@ builtin.module {
     %pf_bidx0_r0_s0 = nest.dma.prefetch.async %281 into %block_idx_p0
       : !nest.event<"pf_bidx0_r0_s0">
     %att0_grid_r0_s0, %att0_inrel_r0_s0, %att0_out_r0_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%296) globals(%267)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%296) globals(%267)
       bindings(%block_idx_p0, %q_l2_15, %state_p0_1, %acc_p0_1)
       ins(%block_idx_p0, %q_l2_15, %state_p0_1, %acc_p0_1) outs(%state_p0_1, %acc_p0_1)
       signal_policy {
@@ -1635,7 +1641,7 @@ builtin.module {
     %pf_bidx1_r0_s0 = nest.dma.prefetch.async %282 into %block_idx_p1
       : !nest.event<"pf_bidx1_r0_s0">
     %att1_grid_r0_s0, %att1_inrel_r0_s0, %att1_out_r0_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%296) globals(%267)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%296) globals(%267)
       bindings(%block_idx_p1, %q_l2_15, %state_p1_1, %acc_p1_1)
       ins(%block_idx_p1, %q_l2_15, %state_p1_1, %acc_p1_1) outs(%state_p1_1, %acc_p1_1)
       signal_policy {
@@ -1647,7 +1653,7 @@ builtin.module {
     %pf_bidx2_r0_s0 = nest.dma.prefetch.async %283 into %block_idx_p0 depends_on(%att0_inrel_r0_s0)
       : !nest.event<"pf_bidx2_r0_s0">
     %att2_grid_r0_s0, %att2_inrel_r0_s0, %att2_out_r0_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%296) globals(%267)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%296) globals(%267)
       bindings(%block_idx_p0, %q_l2_15, %state_p2_1, %acc_p2_1)
       ins(%block_idx_p0, %q_l2_15, %state_p2_1, %acc_p2_1) outs(%state_p2_1, %acc_p2_1)
       signal_policy {
@@ -1659,7 +1665,7 @@ builtin.module {
     %pf_bidx3_r0_s0 = nest.dma.prefetch.async %284 into %block_idx_p1 depends_on(%att1_inrel_r0_s0)
       : !nest.event<"pf_bidx3_r0_s0">
     %att3_grid_r0_s0, %att3_inrel_r0_s0, %att3_out_r0_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%296) globals(%267)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%296) globals(%267)
       bindings(%block_idx_p1, %q_l2_15, %state_p3_1, %acc_p3_1)
       ins(%block_idx_p1, %q_l2_15, %state_p3_1, %acc_p3_1) outs(%state_p3_1, %acc_p3_1)
       signal_policy {
@@ -1671,7 +1677,7 @@ builtin.module {
     %pf_bidx4_r0_s0 = nest.dma.prefetch.async %285 into %block_idx_p0 depends_on(%att2_inrel_r0_s0)
       : !nest.event<"pf_bidx4_r0_s0">
     %att4_grid_r0_s0, %att4_inrel_r0_s0, %att4_out_r0_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%296) globals(%267)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%296) globals(%267)
       bindings(%block_idx_p0, %q_l2_15, %state_p0_1, %acc_p0_1)
       ins(%block_idx_p0, %q_l2_15, %state_p0_1, %acc_p0_1) outs(%state_p0_1, %acc_p0_1)
       signal_policy {
@@ -1685,7 +1691,7 @@ builtin.module {
     %pf_bidx5_r0_s0 = nest.dma.prefetch.async %286 into %block_idx_p1 depends_on(%att3_inrel_r0_s0)
       : !nest.event<"pf_bidx5_r0_s0">
     %att5_grid_r0_s0, %att5_inrel_r0_s0, %att5_out_r0_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%296) globals(%267)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%296) globals(%267)
       bindings(%block_idx_p1, %q_l2_15, %state_p1_1, %acc_p1_1)
       ins(%block_idx_p1, %q_l2_15, %state_p1_1, %acc_p1_1) outs(%state_p1_1, %acc_p1_1)
       signal_policy {
@@ -1699,7 +1705,7 @@ builtin.module {
     %pf_bidx6_r0_s0 = nest.dma.prefetch.async %287 into %block_idx_p0 depends_on(%att4_inrel_r0_s0)
       : !nest.event<"pf_bidx6_r0_s0">
     %att6_grid_r0_s0, %att6_inrel_r0_s0, %att6_out_r0_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%296) globals(%267)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%296) globals(%267)
       bindings(%block_idx_p0, %q_l2_15, %state_p2_1, %acc_p2_1)
       ins(%block_idx_p0, %q_l2_15, %state_p2_1, %acc_p2_1) outs(%state_p2_1, %acc_p2_1)
       signal_policy {
@@ -1713,7 +1719,7 @@ builtin.module {
     %pf_bidx7_r0_s0 = nest.dma.prefetch.async %288 into %block_idx_p1 depends_on(%att5_inrel_r0_s0)
       : !nest.event<"pf_bidx7_r0_s0">
     %att7_grid_r0_s0, %att7_inrel_r0_s0, %att7_out_r0_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%296) globals(%267)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%296) globals(%267)
       bindings(%block_idx_p1, %q_l2_15, %state_p3_1, %acc_p3_1)
       ins(%block_idx_p1, %q_l2_15, %state_p3_1, %acc_p3_1) outs(%state_p3_1, %acc_p3_1)
       signal_policy {
@@ -1727,7 +1733,7 @@ builtin.module {
     %pf_bidx8_r0_s0 = nest.dma.prefetch.async %289 into %block_idx_p0 depends_on(%att6_inrel_r0_s0)
       : !nest.event<"pf_bidx8_r0_s0">
     %att8_grid_r0_s0, %att8_inrel_r0_s0, %att8_out_r0_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%296) globals(%267)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%296) globals(%267)
       bindings(%block_idx_p0, %q_l2_15, %state_p0_1, %acc_p0_1)
       ins(%block_idx_p0, %q_l2_15, %state_p0_1, %acc_p0_1) outs(%state_p0_1, %acc_p0_1)
       signal_policy {
@@ -1741,7 +1747,7 @@ builtin.module {
     %pf_bidx9_r0_s0 = nest.dma.prefetch.async %290 into %block_idx_p1 depends_on(%att7_inrel_r0_s0)
       : !nest.event<"pf_bidx9_r0_s0">
     %att9_grid_r0_s0, %att9_inrel_r0_s0, %att9_out_r0_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%296) globals(%267)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%296) globals(%267)
       bindings(%block_idx_p1, %q_l2_15, %state_p1_1, %acc_p1_1)
       ins(%block_idx_p1, %q_l2_15, %state_p1_1, %acc_p1_1) outs(%state_p1_1, %acc_p1_1)
       signal_policy {
@@ -1755,7 +1761,7 @@ builtin.module {
     %pf_bidx10_r0_s0 = nest.dma.prefetch.async %291 into %block_idx_p0 depends_on(%att8_inrel_r0_s0)
       : !nest.event<"pf_bidx10_r0_s0">
     %att10_grid_r0_s0, %att10_inrel_r0_s0, %att10_out_r0_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%296) globals(%267)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%296) globals(%267)
       bindings(%block_idx_p0, %q_l2_15, %state_p2_1, %acc_p2_1)
       ins(%block_idx_p0, %q_l2_15, %state_p2_1, %acc_p2_1) outs(%state_p2_1, %acc_p2_1)
       signal_policy {
@@ -1769,7 +1775,7 @@ builtin.module {
     %pf_bidx11_r0_s0 = nest.dma.prefetch.async %292 into %block_idx_p1 depends_on(%att9_inrel_r0_s0)
       : !nest.event<"pf_bidx11_r0_s0">
     %att11_grid_r0_s0, %att11_inrel_r0_s0, %att11_out_r0_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%296) globals(%267)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%296) globals(%267)
       bindings(%block_idx_p1, %q_l2_15, %state_p3_1, %acc_p3_1)
       ins(%block_idx_p1, %q_l2_15, %state_p3_1, %acc_p3_1) outs(%state_p3_1, %acc_p3_1)
       signal_policy {
@@ -1783,7 +1789,7 @@ builtin.module {
     %pf_bidx12_r0_s0 = nest.dma.prefetch.async %293 into %block_idx_p0
       depends_on(%att10_inrel_r0_s0) : !nest.event<"pf_bidx12_r0_s0">
     %att12_grid_r0_s0, %att12_inrel_r0_s0, %att12_out_r0_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%296) globals(%267)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%296) globals(%267)
       bindings(%block_idx_p0, %q_l2_15, %state_p0_1, %acc_p0_1)
       ins(%block_idx_p0, %q_l2_15, %state_p0_1, %acc_p0_1) outs(%state_p0_1, %acc_p0_1)
       signal_policy {
@@ -1797,7 +1803,7 @@ builtin.module {
     %pf_bidx13_r0_s0 = nest.dma.prefetch.async %294 into %block_idx_p1
       depends_on(%att11_inrel_r0_s0) : !nest.event<"pf_bidx13_r0_s0">
     %att13_grid_r0_s0, %att13_inrel_r0_s0, %att13_out_r0_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%296) globals(%267)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%296) globals(%267)
       bindings(%block_idx_p1, %q_l2_15, %state_p1_1, %acc_p1_1)
       ins(%block_idx_p1, %q_l2_15, %state_p1_1, %acc_p1_1) outs(%state_p1_1, %acc_p1_1)
       signal_policy {
@@ -1811,7 +1817,7 @@ builtin.module {
     %pf_bidx14_r0_s0 = nest.dma.prefetch.async %295 into %block_idx_p0
       depends_on(%att12_inrel_r0_s0) : !nest.event<"pf_bidx14_r0_s0">
     %att14_grid_r0_s0, %att14_inrel_r0_s0, %att14_out_r0_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%296) globals(%267)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%296) globals(%267)
       bindings(%block_idx_p0, %q_l2_15, %state_p2_1, %acc_p2_1)
       ins(%block_idx_p0, %q_l2_15, %state_p2_1, %acc_p2_1) outs(%state_p2_1, %acc_p2_1)
       signal_policy {
@@ -1823,7 +1829,7 @@ builtin.module {
         !nest.event<"att14_grid_r0_s0">, !nest.event<"att14_inrel_r0_s0">,
         !nest.event<"att14_out_r0_s0">)
     %att15_grid_r0_s0, %att15_inrel_r0_s0, %att15_out_r0_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_final_r0 l1_mode = 3 tasks(%296) globals(%267)
+      nest.dispatch.tasks.async @paged_attention_t16_final_r0 l1_mode = 1 tasks(%296) globals(%267)
       bindings(%append_idx, %q_l2_15, %state_p3_1, %acc_p3_1)
       ins(%append_idx, %q_l2_15, %state_p3_1, %acc_p3_1) outs(%state_p3_1, %acc_p3_1)
       signal_policy {
@@ -1836,7 +1842,7 @@ builtin.module {
         !nest.event<"att15_grid_r0_s0">, !nest.event<"att15_inrel_r0_s0">,
         !nest.event<"att15_out_r0_s0">)
     %merge_grid_r0_s0, %merge_inrel_r0_s0, %merge_out_r0_s0 =
-      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 3 tasks(%296) globals()
+      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 1 tasks(%296) globals()
       bindings(
         %state_p0_1, %state_p1_1, %state_p2_1, %state_p3_1, %acc_p0_1, %acc_p1_1, %acc_p2_1,
         %acc_p3_1, %out_l2_1)
@@ -2024,7 +2030,7 @@ builtin.module {
     %pf_acc_p3_r0_s1 = nest.dma.prefetch.async %310 into %acc_p3_2 : !nest.event<"pf_acc_p3_r0_s1">
     %328 = nest.task.range from = 0 to = 4 : !nest.task_range
     %append_grid_r0_s1, %append_inrel_r0_s1, %329 =
-      nest.dispatch.tasks.async @paged_attention_append_r0_tip0 l1_mode = 3 tasks(%328)
+      nest.dispatch.tasks.async @paged_attention_append_r0_tip0 l1_mode = 1 tasks(%328)
       globals(%298) bindings(%k_new_1, %v_new_1, %append_idx_1)
       ins(%k_new_1, %v_new_1, %append_idx_1) outs()
       signal_policy {
@@ -2034,7 +2040,7 @@ builtin.module {
     %pf_bidx0_r0_s1 = nest.dma.prefetch.async %312 into %block_idx_p0_1
       : !nest.event<"pf_bidx0_r0_s1">
     %att0_grid_r0_s1, %att0_inrel_r0_s1, %att0_out_r0_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%328) globals(%298)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%328) globals(%298)
       bindings(%block_idx_p0_1, %q_l2_16, %state_p0_2, %acc_p0_2)
       ins(%block_idx_p0_1, %q_l2_16, %state_p0_2, %acc_p0_2) outs(%state_p0_2, %acc_p0_2)
       signal_policy {
@@ -2046,7 +2052,7 @@ builtin.module {
     %pf_bidx1_r0_s1 = nest.dma.prefetch.async %313 into %block_idx_p1_1
       : !nest.event<"pf_bidx1_r0_s1">
     %att1_grid_r0_s1, %att1_inrel_r0_s1, %att1_out_r0_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%328) globals(%298)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%328) globals(%298)
       bindings(%block_idx_p1_1, %q_l2_16, %state_p1_2, %acc_p1_2)
       ins(%block_idx_p1_1, %q_l2_16, %state_p1_2, %acc_p1_2) outs(%state_p1_2, %acc_p1_2)
       signal_policy {
@@ -2058,7 +2064,7 @@ builtin.module {
     %pf_bidx2_r0_s1 = nest.dma.prefetch.async %314 into %block_idx_p0_1
       depends_on(%att0_inrel_r0_s1) : !nest.event<"pf_bidx2_r0_s1">
     %att2_grid_r0_s1, %att2_inrel_r0_s1, %att2_out_r0_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%328) globals(%298)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%328) globals(%298)
       bindings(%block_idx_p0_1, %q_l2_16, %state_p2_2, %acc_p2_2)
       ins(%block_idx_p0_1, %q_l2_16, %state_p2_2, %acc_p2_2) outs(%state_p2_2, %acc_p2_2)
       signal_policy {
@@ -2070,7 +2076,7 @@ builtin.module {
     %pf_bidx3_r0_s1 = nest.dma.prefetch.async %315 into %block_idx_p1_1
       depends_on(%att1_inrel_r0_s1) : !nest.event<"pf_bidx3_r0_s1">
     %att3_grid_r0_s1, %att3_inrel_r0_s1, %att3_out_r0_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%328) globals(%298)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%328) globals(%298)
       bindings(%block_idx_p1_1, %q_l2_16, %state_p3_2, %acc_p3_2)
       ins(%block_idx_p1_1, %q_l2_16, %state_p3_2, %acc_p3_2) outs(%state_p3_2, %acc_p3_2)
       signal_policy {
@@ -2082,7 +2088,7 @@ builtin.module {
     %pf_bidx4_r0_s1 = nest.dma.prefetch.async %316 into %block_idx_p0_1
       depends_on(%att2_inrel_r0_s1) : !nest.event<"pf_bidx4_r0_s1">
     %att4_grid_r0_s1, %att4_inrel_r0_s1, %att4_out_r0_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%328) globals(%298)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%328) globals(%298)
       bindings(%block_idx_p0_1, %q_l2_16, %state_p0_2, %acc_p0_2)
       ins(%block_idx_p0_1, %q_l2_16, %state_p0_2, %acc_p0_2) outs(%state_p0_2, %acc_p0_2)
       signal_policy {
@@ -2096,7 +2102,7 @@ builtin.module {
     %pf_bidx5_r0_s1 = nest.dma.prefetch.async %317 into %block_idx_p1_1
       depends_on(%att3_inrel_r0_s1) : !nest.event<"pf_bidx5_r0_s1">
     %att5_grid_r0_s1, %att5_inrel_r0_s1, %att5_out_r0_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%328) globals(%298)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%328) globals(%298)
       bindings(%block_idx_p1_1, %q_l2_16, %state_p1_2, %acc_p1_2)
       ins(%block_idx_p1_1, %q_l2_16, %state_p1_2, %acc_p1_2) outs(%state_p1_2, %acc_p1_2)
       signal_policy {
@@ -2110,7 +2116,7 @@ builtin.module {
     %pf_bidx6_r0_s1 = nest.dma.prefetch.async %318 into %block_idx_p0_1
       depends_on(%att4_inrel_r0_s1) : !nest.event<"pf_bidx6_r0_s1">
     %att6_grid_r0_s1, %att6_inrel_r0_s1, %att6_out_r0_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%328) globals(%298)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%328) globals(%298)
       bindings(%block_idx_p0_1, %q_l2_16, %state_p2_2, %acc_p2_2)
       ins(%block_idx_p0_1, %q_l2_16, %state_p2_2, %acc_p2_2) outs(%state_p2_2, %acc_p2_2)
       signal_policy {
@@ -2124,7 +2130,7 @@ builtin.module {
     %pf_bidx7_r0_s1 = nest.dma.prefetch.async %319 into %block_idx_p1_1
       depends_on(%att5_inrel_r0_s1) : !nest.event<"pf_bidx7_r0_s1">
     %att7_grid_r0_s1, %att7_inrel_r0_s1, %att7_out_r0_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%328) globals(%298)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%328) globals(%298)
       bindings(%block_idx_p1_1, %q_l2_16, %state_p3_2, %acc_p3_2)
       ins(%block_idx_p1_1, %q_l2_16, %state_p3_2, %acc_p3_2) outs(%state_p3_2, %acc_p3_2)
       signal_policy {
@@ -2138,7 +2144,7 @@ builtin.module {
     %pf_bidx8_r0_s1 = nest.dma.prefetch.async %320 into %block_idx_p0_1
       depends_on(%att6_inrel_r0_s1) : !nest.event<"pf_bidx8_r0_s1">
     %att8_grid_r0_s1, %att8_inrel_r0_s1, %att8_out_r0_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%328) globals(%298)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%328) globals(%298)
       bindings(%block_idx_p0_1, %q_l2_16, %state_p0_2, %acc_p0_2)
       ins(%block_idx_p0_1, %q_l2_16, %state_p0_2, %acc_p0_2) outs(%state_p0_2, %acc_p0_2)
       signal_policy {
@@ -2152,7 +2158,7 @@ builtin.module {
     %pf_bidx9_r0_s1 = nest.dma.prefetch.async %321 into %block_idx_p1_1
       depends_on(%att7_inrel_r0_s1) : !nest.event<"pf_bidx9_r0_s1">
     %att9_grid_r0_s1, %att9_inrel_r0_s1, %att9_out_r0_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%328) globals(%298)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%328) globals(%298)
       bindings(%block_idx_p1_1, %q_l2_16, %state_p1_2, %acc_p1_2)
       ins(%block_idx_p1_1, %q_l2_16, %state_p1_2, %acc_p1_2) outs(%state_p1_2, %acc_p1_2)
       signal_policy {
@@ -2166,7 +2172,7 @@ builtin.module {
     %pf_bidx10_r0_s1 = nest.dma.prefetch.async %322 into %block_idx_p0_1
       depends_on(%att8_inrel_r0_s1) : !nest.event<"pf_bidx10_r0_s1">
     %att10_grid_r0_s1, %att10_inrel_r0_s1, %att10_out_r0_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%328) globals(%298)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%328) globals(%298)
       bindings(%block_idx_p0_1, %q_l2_16, %state_p2_2, %acc_p2_2)
       ins(%block_idx_p0_1, %q_l2_16, %state_p2_2, %acc_p2_2) outs(%state_p2_2, %acc_p2_2)
       signal_policy {
@@ -2180,7 +2186,7 @@ builtin.module {
     %pf_bidx11_r0_s1 = nest.dma.prefetch.async %323 into %block_idx_p1_1
       depends_on(%att9_inrel_r0_s1) : !nest.event<"pf_bidx11_r0_s1">
     %att11_grid_r0_s1, %att11_inrel_r0_s1, %att11_out_r0_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%328) globals(%298)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%328) globals(%298)
       bindings(%block_idx_p1_1, %q_l2_16, %state_p3_2, %acc_p3_2)
       ins(%block_idx_p1_1, %q_l2_16, %state_p3_2, %acc_p3_2) outs(%state_p3_2, %acc_p3_2)
       signal_policy {
@@ -2194,7 +2200,7 @@ builtin.module {
     %pf_bidx12_r0_s1 = nest.dma.prefetch.async %324 into %block_idx_p0_1
       depends_on(%att10_inrel_r0_s1) : !nest.event<"pf_bidx12_r0_s1">
     %att12_grid_r0_s1, %att12_inrel_r0_s1, %att12_out_r0_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%328) globals(%298)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%328) globals(%298)
       bindings(%block_idx_p0_1, %q_l2_16, %state_p0_2, %acc_p0_2)
       ins(%block_idx_p0_1, %q_l2_16, %state_p0_2, %acc_p0_2) outs(%state_p0_2, %acc_p0_2)
       signal_policy {
@@ -2208,7 +2214,7 @@ builtin.module {
     %pf_bidx13_r0_s1 = nest.dma.prefetch.async %325 into %block_idx_p1_1
       depends_on(%att11_inrel_r0_s1) : !nest.event<"pf_bidx13_r0_s1">
     %att13_grid_r0_s1, %att13_inrel_r0_s1, %att13_out_r0_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%328) globals(%298)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%328) globals(%298)
       bindings(%block_idx_p1_1, %q_l2_16, %state_p1_2, %acc_p1_2)
       ins(%block_idx_p1_1, %q_l2_16, %state_p1_2, %acc_p1_2) outs(%state_p1_2, %acc_p1_2)
       signal_policy {
@@ -2222,7 +2228,7 @@ builtin.module {
     %pf_bidx14_r0_s1 = nest.dma.prefetch.async %326 into %block_idx_p0_1
       depends_on(%att12_inrel_r0_s1) : !nest.event<"pf_bidx14_r0_s1">
     %att14_grid_r0_s1, %att14_inrel_r0_s1, %att14_out_r0_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%328) globals(%298)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%328) globals(%298)
       bindings(%block_idx_p0_1, %q_l2_16, %state_p2_2, %acc_p2_2)
       ins(%block_idx_p0_1, %q_l2_16, %state_p2_2, %acc_p2_2) outs(%state_p2_2, %acc_p2_2)
       signal_policy {
@@ -2236,7 +2242,7 @@ builtin.module {
     %pf_bidx15_r0_s1 = nest.dma.prefetch.async %327 into %block_idx_p1_1
       depends_on(%att13_inrel_r0_s1) : !nest.event<"pf_bidx15_r0_s1">
     %att15_grid_r0_s1, %att15_inrel_r0_s1, %att15_out_r0_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%328) globals(%298)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%328) globals(%298)
       bindings(%block_idx_p1_1, %q_l2_16, %state_p3_2, %acc_p3_2)
       ins(%block_idx_p1_1, %q_l2_16, %state_p3_2, %acc_p3_2) outs(%state_p3_2, %acc_p3_2)
       signal_policy {
@@ -2248,7 +2254,7 @@ builtin.module {
         !nest.event<"att15_grid_r0_s1">, !nest.event<"att15_inrel_r0_s1">,
         !nest.event<"att15_out_r0_s1">)
     %att16_grid_r0_s1, %att16_inrel_r0_s1, %att16_out_r0_s1 =
-      nest.dispatch.tasks.async @paged_attention_t1_final_r0 l1_mode = 3 tasks(%328) globals(%298)
+      nest.dispatch.tasks.async @paged_attention_t1_final_r0 l1_mode = 1 tasks(%328) globals(%298)
       bindings(%append_idx_1, %q_l2_16, %state_p0_2, %acc_p0_2)
       ins(%append_idx_1, %q_l2_16, %state_p0_2, %acc_p0_2) outs(%state_p0_2, %acc_p0_2)
       signal_policy {
@@ -2261,7 +2267,7 @@ builtin.module {
         !nest.event<"att16_grid_r0_s1">, !nest.event<"att16_inrel_r0_s1">,
         !nest.event<"att16_out_r0_s1">)
     %merge_grid_r0_s1, %merge_inrel_r0_s1, %merge_out_r0_s1 =
-      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 3 tasks(%328) globals()
+      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 1 tasks(%328) globals()
       bindings(
         %state_p0_2, %state_p1_2, %state_p2_2, %state_p3_2, %acc_p0_2, %acc_p1_2, %acc_p2_2,
         %acc_p3_2, %out_l2_2)
@@ -2451,7 +2457,7 @@ builtin.module {
     %pf_acc_p3_r0_s2 = nest.dma.prefetch.async %342 into %acc_p3_3 : !nest.event<"pf_acc_p3_r0_s2">
     %360 = nest.task.range from = 0 to = 4 : !nest.task_range
     %append_grid_r0_s2, %append_inrel_r0_s2, %361 =
-      nest.dispatch.tasks.async @paged_attention_append_r0_tip1 l1_mode = 3 tasks(%360)
+      nest.dispatch.tasks.async @paged_attention_append_r0_tip1 l1_mode = 1 tasks(%360)
       globals(%330) bindings(%k_new_2, %v_new_2, %append_idx_2)
       ins(%k_new_2, %v_new_2, %append_idx_2) outs()
       signal_policy {
@@ -2461,7 +2467,7 @@ builtin.module {
     %pf_bidx0_r0_s2 = nest.dma.prefetch.async %344 into %block_idx_p0_2
       : !nest.event<"pf_bidx0_r0_s2">
     %att0_grid_r0_s2, %att0_inrel_r0_s2, %att0_out_r0_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%360) globals(%330)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%360) globals(%330)
       bindings(%block_idx_p0_2, %q_l2_17, %state_p0_3, %acc_p0_3)
       ins(%block_idx_p0_2, %q_l2_17, %state_p0_3, %acc_p0_3) outs(%state_p0_3, %acc_p0_3)
       signal_policy {
@@ -2473,7 +2479,7 @@ builtin.module {
     %pf_bidx1_r0_s2 = nest.dma.prefetch.async %345 into %block_idx_p1_2
       : !nest.event<"pf_bidx1_r0_s2">
     %att1_grid_r0_s2, %att1_inrel_r0_s2, %att1_out_r0_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%360) globals(%330)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%360) globals(%330)
       bindings(%block_idx_p1_2, %q_l2_17, %state_p1_3, %acc_p1_3)
       ins(%block_idx_p1_2, %q_l2_17, %state_p1_3, %acc_p1_3) outs(%state_p1_3, %acc_p1_3)
       signal_policy {
@@ -2485,7 +2491,7 @@ builtin.module {
     %pf_bidx2_r0_s2 = nest.dma.prefetch.async %346 into %block_idx_p0_2
       depends_on(%att0_inrel_r0_s2) : !nest.event<"pf_bidx2_r0_s2">
     %att2_grid_r0_s2, %att2_inrel_r0_s2, %att2_out_r0_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%360) globals(%330)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%360) globals(%330)
       bindings(%block_idx_p0_2, %q_l2_17, %state_p2_3, %acc_p2_3)
       ins(%block_idx_p0_2, %q_l2_17, %state_p2_3, %acc_p2_3) outs(%state_p2_3, %acc_p2_3)
       signal_policy {
@@ -2497,7 +2503,7 @@ builtin.module {
     %pf_bidx3_r0_s2 = nest.dma.prefetch.async %347 into %block_idx_p1_2
       depends_on(%att1_inrel_r0_s2) : !nest.event<"pf_bidx3_r0_s2">
     %att3_grid_r0_s2, %att3_inrel_r0_s2, %att3_out_r0_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%360) globals(%330)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%360) globals(%330)
       bindings(%block_idx_p1_2, %q_l2_17, %state_p3_3, %acc_p3_3)
       ins(%block_idx_p1_2, %q_l2_17, %state_p3_3, %acc_p3_3) outs(%state_p3_3, %acc_p3_3)
       signal_policy {
@@ -2509,7 +2515,7 @@ builtin.module {
     %pf_bidx4_r0_s2 = nest.dma.prefetch.async %348 into %block_idx_p0_2
       depends_on(%att2_inrel_r0_s2) : !nest.event<"pf_bidx4_r0_s2">
     %att4_grid_r0_s2, %att4_inrel_r0_s2, %att4_out_r0_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%360) globals(%330)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%360) globals(%330)
       bindings(%block_idx_p0_2, %q_l2_17, %state_p0_3, %acc_p0_3)
       ins(%block_idx_p0_2, %q_l2_17, %state_p0_3, %acc_p0_3) outs(%state_p0_3, %acc_p0_3)
       signal_policy {
@@ -2523,7 +2529,7 @@ builtin.module {
     %pf_bidx5_r0_s2 = nest.dma.prefetch.async %349 into %block_idx_p1_2
       depends_on(%att3_inrel_r0_s2) : !nest.event<"pf_bidx5_r0_s2">
     %att5_grid_r0_s2, %att5_inrel_r0_s2, %att5_out_r0_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%360) globals(%330)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%360) globals(%330)
       bindings(%block_idx_p1_2, %q_l2_17, %state_p1_3, %acc_p1_3)
       ins(%block_idx_p1_2, %q_l2_17, %state_p1_3, %acc_p1_3) outs(%state_p1_3, %acc_p1_3)
       signal_policy {
@@ -2537,7 +2543,7 @@ builtin.module {
     %pf_bidx6_r0_s2 = nest.dma.prefetch.async %350 into %block_idx_p0_2
       depends_on(%att4_inrel_r0_s2) : !nest.event<"pf_bidx6_r0_s2">
     %att6_grid_r0_s2, %att6_inrel_r0_s2, %att6_out_r0_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%360) globals(%330)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%360) globals(%330)
       bindings(%block_idx_p0_2, %q_l2_17, %state_p2_3, %acc_p2_3)
       ins(%block_idx_p0_2, %q_l2_17, %state_p2_3, %acc_p2_3) outs(%state_p2_3, %acc_p2_3)
       signal_policy {
@@ -2551,7 +2557,7 @@ builtin.module {
     %pf_bidx7_r0_s2 = nest.dma.prefetch.async %351 into %block_idx_p1_2
       depends_on(%att5_inrel_r0_s2) : !nest.event<"pf_bidx7_r0_s2">
     %att7_grid_r0_s2, %att7_inrel_r0_s2, %att7_out_r0_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%360) globals(%330)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%360) globals(%330)
       bindings(%block_idx_p1_2, %q_l2_17, %state_p3_3, %acc_p3_3)
       ins(%block_idx_p1_2, %q_l2_17, %state_p3_3, %acc_p3_3) outs(%state_p3_3, %acc_p3_3)
       signal_policy {
@@ -2565,7 +2571,7 @@ builtin.module {
     %pf_bidx8_r0_s2 = nest.dma.prefetch.async %352 into %block_idx_p0_2
       depends_on(%att6_inrel_r0_s2) : !nest.event<"pf_bidx8_r0_s2">
     %att8_grid_r0_s2, %att8_inrel_r0_s2, %att8_out_r0_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%360) globals(%330)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%360) globals(%330)
       bindings(%block_idx_p0_2, %q_l2_17, %state_p0_3, %acc_p0_3)
       ins(%block_idx_p0_2, %q_l2_17, %state_p0_3, %acc_p0_3) outs(%state_p0_3, %acc_p0_3)
       signal_policy {
@@ -2579,7 +2585,7 @@ builtin.module {
     %pf_bidx9_r0_s2 = nest.dma.prefetch.async %353 into %block_idx_p1_2
       depends_on(%att7_inrel_r0_s2) : !nest.event<"pf_bidx9_r0_s2">
     %att9_grid_r0_s2, %att9_inrel_r0_s2, %att9_out_r0_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%360) globals(%330)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%360) globals(%330)
       bindings(%block_idx_p1_2, %q_l2_17, %state_p1_3, %acc_p1_3)
       ins(%block_idx_p1_2, %q_l2_17, %state_p1_3, %acc_p1_3) outs(%state_p1_3, %acc_p1_3)
       signal_policy {
@@ -2593,7 +2599,7 @@ builtin.module {
     %pf_bidx10_r0_s2 = nest.dma.prefetch.async %354 into %block_idx_p0_2
       depends_on(%att8_inrel_r0_s2) : !nest.event<"pf_bidx10_r0_s2">
     %att10_grid_r0_s2, %att10_inrel_r0_s2, %att10_out_r0_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%360) globals(%330)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%360) globals(%330)
       bindings(%block_idx_p0_2, %q_l2_17, %state_p2_3, %acc_p2_3)
       ins(%block_idx_p0_2, %q_l2_17, %state_p2_3, %acc_p2_3) outs(%state_p2_3, %acc_p2_3)
       signal_policy {
@@ -2607,7 +2613,7 @@ builtin.module {
     %pf_bidx11_r0_s2 = nest.dma.prefetch.async %355 into %block_idx_p1_2
       depends_on(%att9_inrel_r0_s2) : !nest.event<"pf_bidx11_r0_s2">
     %att11_grid_r0_s2, %att11_inrel_r0_s2, %att11_out_r0_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%360) globals(%330)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%360) globals(%330)
       bindings(%block_idx_p1_2, %q_l2_17, %state_p3_3, %acc_p3_3)
       ins(%block_idx_p1_2, %q_l2_17, %state_p3_3, %acc_p3_3) outs(%state_p3_3, %acc_p3_3)
       signal_policy {
@@ -2621,7 +2627,7 @@ builtin.module {
     %pf_bidx12_r0_s2 = nest.dma.prefetch.async %356 into %block_idx_p0_2
       depends_on(%att10_inrel_r0_s2) : !nest.event<"pf_bidx12_r0_s2">
     %att12_grid_r0_s2, %att12_inrel_r0_s2, %att12_out_r0_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%360) globals(%330)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%360) globals(%330)
       bindings(%block_idx_p0_2, %q_l2_17, %state_p0_3, %acc_p0_3)
       ins(%block_idx_p0_2, %q_l2_17, %state_p0_3, %acc_p0_3) outs(%state_p0_3, %acc_p0_3)
       signal_policy {
@@ -2635,7 +2641,7 @@ builtin.module {
     %pf_bidx13_r0_s2 = nest.dma.prefetch.async %357 into %block_idx_p1_2
       depends_on(%att11_inrel_r0_s2) : !nest.event<"pf_bidx13_r0_s2">
     %att13_grid_r0_s2, %att13_inrel_r0_s2, %att13_out_r0_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%360) globals(%330)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%360) globals(%330)
       bindings(%block_idx_p1_2, %q_l2_17, %state_p1_3, %acc_p1_3)
       ins(%block_idx_p1_2, %q_l2_17, %state_p1_3, %acc_p1_3) outs(%state_p1_3, %acc_p1_3)
       signal_policy {
@@ -2649,7 +2655,7 @@ builtin.module {
     %pf_bidx14_r0_s2 = nest.dma.prefetch.async %358 into %block_idx_p0_2
       depends_on(%att12_inrel_r0_s2) : !nest.event<"pf_bidx14_r0_s2">
     %att14_grid_r0_s2, %att14_inrel_r0_s2, %att14_out_r0_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%360) globals(%330)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%360) globals(%330)
       bindings(%block_idx_p0_2, %q_l2_17, %state_p2_3, %acc_p2_3)
       ins(%block_idx_p0_2, %q_l2_17, %state_p2_3, %acc_p2_3) outs(%state_p2_3, %acc_p2_3)
       signal_policy {
@@ -2663,7 +2669,7 @@ builtin.module {
     %pf_bidx15_r0_s2 = nest.dma.prefetch.async %359 into %block_idx_p1_2
       depends_on(%att13_inrel_r0_s2) : !nest.event<"pf_bidx15_r0_s2">
     %att15_grid_r0_s2, %att15_inrel_r0_s2, %att15_out_r0_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%360) globals(%330)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%360) globals(%330)
       bindings(%block_idx_p1_2, %q_l2_17, %state_p3_3, %acc_p3_3)
       ins(%block_idx_p1_2, %q_l2_17, %state_p3_3, %acc_p3_3) outs(%state_p3_3, %acc_p3_3)
       signal_policy {
@@ -2675,7 +2681,7 @@ builtin.module {
         !nest.event<"att15_grid_r0_s2">, !nest.event<"att15_inrel_r0_s2">,
         !nest.event<"att15_out_r0_s2">)
     %att16_grid_r0_s2, %att16_inrel_r0_s2, %att16_out_r0_s2 =
-      nest.dispatch.tasks.async @paged_attention_t2_final_r0 l1_mode = 3 tasks(%360) globals(%330)
+      nest.dispatch.tasks.async @paged_attention_t2_final_r0 l1_mode = 1 tasks(%360) globals(%330)
       bindings(%append_idx_2, %q_l2_17, %state_p0_3, %acc_p0_3)
       ins(%append_idx_2, %q_l2_17, %state_p0_3, %acc_p0_3) outs(%state_p0_3, %acc_p0_3)
       signal_policy {
@@ -2688,7 +2694,7 @@ builtin.module {
         !nest.event<"att16_grid_r0_s2">, !nest.event<"att16_inrel_r0_s2">,
         !nest.event<"att16_out_r0_s2">)
     %merge_grid_r0_s2, %merge_inrel_r0_s2, %merge_out_r0_s2 =
-      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 3 tasks(%360) globals()
+      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 1 tasks(%360) globals()
       bindings(
         %state_p0_3, %state_p1_3, %state_p2_3, %state_p3_3, %acc_p0_3, %acc_p1_3, %acc_p2_3,
         %acc_p3_3, %out_l2_3)
@@ -2878,7 +2884,7 @@ builtin.module {
     %pf_acc_p3_r0_s3 = nest.dma.prefetch.async %374 into %acc_p3_4 : !nest.event<"pf_acc_p3_r0_s3">
     %392 = nest.task.range from = 0 to = 4 : !nest.task_range
     %append_grid_r0_s3, %append_inrel_r0_s3, %393 =
-      nest.dispatch.tasks.async @paged_attention_append_r0_tip2 l1_mode = 3 tasks(%392)
+      nest.dispatch.tasks.async @paged_attention_append_r0_tip2 l1_mode = 1 tasks(%392)
       globals(%362) bindings(%k_new_3, %v_new_3, %append_idx_3)
       ins(%k_new_3, %v_new_3, %append_idx_3) outs()
       signal_policy {
@@ -2888,7 +2894,7 @@ builtin.module {
     %pf_bidx0_r0_s3 = nest.dma.prefetch.async %376 into %block_idx_p0_3
       : !nest.event<"pf_bidx0_r0_s3">
     %att0_grid_r0_s3, %att0_inrel_r0_s3, %att0_out_r0_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%392) globals(%362)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%392) globals(%362)
       bindings(%block_idx_p0_3, %q_l2_18, %state_p0_4, %acc_p0_4)
       ins(%block_idx_p0_3, %q_l2_18, %state_p0_4, %acc_p0_4) outs(%state_p0_4, %acc_p0_4)
       signal_policy {
@@ -2900,7 +2906,7 @@ builtin.module {
     %pf_bidx1_r0_s3 = nest.dma.prefetch.async %377 into %block_idx_p1_3
       : !nest.event<"pf_bidx1_r0_s3">
     %att1_grid_r0_s3, %att1_inrel_r0_s3, %att1_out_r0_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%392) globals(%362)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%392) globals(%362)
       bindings(%block_idx_p1_3, %q_l2_18, %state_p1_4, %acc_p1_4)
       ins(%block_idx_p1_3, %q_l2_18, %state_p1_4, %acc_p1_4) outs(%state_p1_4, %acc_p1_4)
       signal_policy {
@@ -2912,7 +2918,7 @@ builtin.module {
     %pf_bidx2_r0_s3 = nest.dma.prefetch.async %378 into %block_idx_p0_3
       depends_on(%att0_inrel_r0_s3) : !nest.event<"pf_bidx2_r0_s3">
     %att2_grid_r0_s3, %att2_inrel_r0_s3, %att2_out_r0_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%392) globals(%362)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%392) globals(%362)
       bindings(%block_idx_p0_3, %q_l2_18, %state_p2_4, %acc_p2_4)
       ins(%block_idx_p0_3, %q_l2_18, %state_p2_4, %acc_p2_4) outs(%state_p2_4, %acc_p2_4)
       signal_policy {
@@ -2924,7 +2930,7 @@ builtin.module {
     %pf_bidx3_r0_s3 = nest.dma.prefetch.async %379 into %block_idx_p1_3
       depends_on(%att1_inrel_r0_s3) : !nest.event<"pf_bidx3_r0_s3">
     %att3_grid_r0_s3, %att3_inrel_r0_s3, %att3_out_r0_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%392) globals(%362)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%392) globals(%362)
       bindings(%block_idx_p1_3, %q_l2_18, %state_p3_4, %acc_p3_4)
       ins(%block_idx_p1_3, %q_l2_18, %state_p3_4, %acc_p3_4) outs(%state_p3_4, %acc_p3_4)
       signal_policy {
@@ -2936,7 +2942,7 @@ builtin.module {
     %pf_bidx4_r0_s3 = nest.dma.prefetch.async %380 into %block_idx_p0_3
       depends_on(%att2_inrel_r0_s3) : !nest.event<"pf_bidx4_r0_s3">
     %att4_grid_r0_s3, %att4_inrel_r0_s3, %att4_out_r0_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%392) globals(%362)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%392) globals(%362)
       bindings(%block_idx_p0_3, %q_l2_18, %state_p0_4, %acc_p0_4)
       ins(%block_idx_p0_3, %q_l2_18, %state_p0_4, %acc_p0_4) outs(%state_p0_4, %acc_p0_4)
       signal_policy {
@@ -2950,7 +2956,7 @@ builtin.module {
     %pf_bidx5_r0_s3 = nest.dma.prefetch.async %381 into %block_idx_p1_3
       depends_on(%att3_inrel_r0_s3) : !nest.event<"pf_bidx5_r0_s3">
     %att5_grid_r0_s3, %att5_inrel_r0_s3, %att5_out_r0_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%392) globals(%362)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%392) globals(%362)
       bindings(%block_idx_p1_3, %q_l2_18, %state_p1_4, %acc_p1_4)
       ins(%block_idx_p1_3, %q_l2_18, %state_p1_4, %acc_p1_4) outs(%state_p1_4, %acc_p1_4)
       signal_policy {
@@ -2964,7 +2970,7 @@ builtin.module {
     %pf_bidx6_r0_s3 = nest.dma.prefetch.async %382 into %block_idx_p0_3
       depends_on(%att4_inrel_r0_s3) : !nest.event<"pf_bidx6_r0_s3">
     %att6_grid_r0_s3, %att6_inrel_r0_s3, %att6_out_r0_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%392) globals(%362)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%392) globals(%362)
       bindings(%block_idx_p0_3, %q_l2_18, %state_p2_4, %acc_p2_4)
       ins(%block_idx_p0_3, %q_l2_18, %state_p2_4, %acc_p2_4) outs(%state_p2_4, %acc_p2_4)
       signal_policy {
@@ -2978,7 +2984,7 @@ builtin.module {
     %pf_bidx7_r0_s3 = nest.dma.prefetch.async %383 into %block_idx_p1_3
       depends_on(%att5_inrel_r0_s3) : !nest.event<"pf_bidx7_r0_s3">
     %att7_grid_r0_s3, %att7_inrel_r0_s3, %att7_out_r0_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%392) globals(%362)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%392) globals(%362)
       bindings(%block_idx_p1_3, %q_l2_18, %state_p3_4, %acc_p3_4)
       ins(%block_idx_p1_3, %q_l2_18, %state_p3_4, %acc_p3_4) outs(%state_p3_4, %acc_p3_4)
       signal_policy {
@@ -2992,7 +2998,7 @@ builtin.module {
     %pf_bidx8_r0_s3 = nest.dma.prefetch.async %384 into %block_idx_p0_3
       depends_on(%att6_inrel_r0_s3) : !nest.event<"pf_bidx8_r0_s3">
     %att8_grid_r0_s3, %att8_inrel_r0_s3, %att8_out_r0_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%392) globals(%362)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%392) globals(%362)
       bindings(%block_idx_p0_3, %q_l2_18, %state_p0_4, %acc_p0_4)
       ins(%block_idx_p0_3, %q_l2_18, %state_p0_4, %acc_p0_4) outs(%state_p0_4, %acc_p0_4)
       signal_policy {
@@ -3006,7 +3012,7 @@ builtin.module {
     %pf_bidx9_r0_s3 = nest.dma.prefetch.async %385 into %block_idx_p1_3
       depends_on(%att7_inrel_r0_s3) : !nest.event<"pf_bidx9_r0_s3">
     %att9_grid_r0_s3, %att9_inrel_r0_s3, %att9_out_r0_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%392) globals(%362)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%392) globals(%362)
       bindings(%block_idx_p1_3, %q_l2_18, %state_p1_4, %acc_p1_4)
       ins(%block_idx_p1_3, %q_l2_18, %state_p1_4, %acc_p1_4) outs(%state_p1_4, %acc_p1_4)
       signal_policy {
@@ -3020,7 +3026,7 @@ builtin.module {
     %pf_bidx10_r0_s3 = nest.dma.prefetch.async %386 into %block_idx_p0_3
       depends_on(%att8_inrel_r0_s3) : !nest.event<"pf_bidx10_r0_s3">
     %att10_grid_r0_s3, %att10_inrel_r0_s3, %att10_out_r0_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%392) globals(%362)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%392) globals(%362)
       bindings(%block_idx_p0_3, %q_l2_18, %state_p2_4, %acc_p2_4)
       ins(%block_idx_p0_3, %q_l2_18, %state_p2_4, %acc_p2_4) outs(%state_p2_4, %acc_p2_4)
       signal_policy {
@@ -3034,7 +3040,7 @@ builtin.module {
     %pf_bidx11_r0_s3 = nest.dma.prefetch.async %387 into %block_idx_p1_3
       depends_on(%att9_inrel_r0_s3) : !nest.event<"pf_bidx11_r0_s3">
     %att11_grid_r0_s3, %att11_inrel_r0_s3, %att11_out_r0_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%392) globals(%362)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%392) globals(%362)
       bindings(%block_idx_p1_3, %q_l2_18, %state_p3_4, %acc_p3_4)
       ins(%block_idx_p1_3, %q_l2_18, %state_p3_4, %acc_p3_4) outs(%state_p3_4, %acc_p3_4)
       signal_policy {
@@ -3048,7 +3054,7 @@ builtin.module {
     %pf_bidx12_r0_s3 = nest.dma.prefetch.async %388 into %block_idx_p0_3
       depends_on(%att10_inrel_r0_s3) : !nest.event<"pf_bidx12_r0_s3">
     %att12_grid_r0_s3, %att12_inrel_r0_s3, %att12_out_r0_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%392) globals(%362)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%392) globals(%362)
       bindings(%block_idx_p0_3, %q_l2_18, %state_p0_4, %acc_p0_4)
       ins(%block_idx_p0_3, %q_l2_18, %state_p0_4, %acc_p0_4) outs(%state_p0_4, %acc_p0_4)
       signal_policy {
@@ -3062,7 +3068,7 @@ builtin.module {
     %pf_bidx13_r0_s3 = nest.dma.prefetch.async %389 into %block_idx_p1_3
       depends_on(%att11_inrel_r0_s3) : !nest.event<"pf_bidx13_r0_s3">
     %att13_grid_r0_s3, %att13_inrel_r0_s3, %att13_out_r0_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%392) globals(%362)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%392) globals(%362)
       bindings(%block_idx_p1_3, %q_l2_18, %state_p1_4, %acc_p1_4)
       ins(%block_idx_p1_3, %q_l2_18, %state_p1_4, %acc_p1_4) outs(%state_p1_4, %acc_p1_4)
       signal_policy {
@@ -3076,7 +3082,7 @@ builtin.module {
     %pf_bidx14_r0_s3 = nest.dma.prefetch.async %390 into %block_idx_p0_3
       depends_on(%att12_inrel_r0_s3) : !nest.event<"pf_bidx14_r0_s3">
     %att14_grid_r0_s3, %att14_inrel_r0_s3, %att14_out_r0_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%392) globals(%362)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%392) globals(%362)
       bindings(%block_idx_p0_3, %q_l2_18, %state_p2_4, %acc_p2_4)
       ins(%block_idx_p0_3, %q_l2_18, %state_p2_4, %acc_p2_4) outs(%state_p2_4, %acc_p2_4)
       signal_policy {
@@ -3090,7 +3096,7 @@ builtin.module {
     %pf_bidx15_r0_s3 = nest.dma.prefetch.async %391 into %block_idx_p1_3
       depends_on(%att13_inrel_r0_s3) : !nest.event<"pf_bidx15_r0_s3">
     %att15_grid_r0_s3, %att15_inrel_r0_s3, %att15_out_r0_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 3 tasks(%392) globals(%362)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r0 l1_mode = 1 tasks(%392) globals(%362)
       bindings(%block_idx_p1_3, %q_l2_18, %state_p3_4, %acc_p3_4)
       ins(%block_idx_p1_3, %q_l2_18, %state_p3_4, %acc_p3_4) outs(%state_p3_4, %acc_p3_4)
       signal_policy {
@@ -3102,7 +3108,7 @@ builtin.module {
         !nest.event<"att15_grid_r0_s3">, !nest.event<"att15_inrel_r0_s3">,
         !nest.event<"att15_out_r0_s3">)
     %att16_grid_r0_s3, %att16_inrel_r0_s3, %att16_out_r0_s3 =
-      nest.dispatch.tasks.async @paged_attention_t3_final_r0 l1_mode = 3 tasks(%392) globals(%362)
+      nest.dispatch.tasks.async @paged_attention_t3_final_r0 l1_mode = 1 tasks(%392) globals(%362)
       bindings(%append_idx_3, %q_l2_18, %state_p0_4, %acc_p0_4)
       ins(%append_idx_3, %q_l2_18, %state_p0_4, %acc_p0_4) outs(%state_p0_4, %acc_p0_4)
       signal_policy {
@@ -3115,7 +3121,7 @@ builtin.module {
         !nest.event<"att16_grid_r0_s3">, !nest.event<"att16_inrel_r0_s3">,
         !nest.event<"att16_out_r0_s3">)
     %merge_grid_r0_s3, %merge_inrel_r0_s3, %merge_out_r0_s3 =
-      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 3 tasks(%392) globals()
+      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 1 tasks(%392) globals()
       bindings(
         %state_p0_4, %state_p1_4, %state_p2_4, %state_p3_4, %acc_p0_4, %acc_p1_4, %acc_p2_4,
         %acc_p3_4, %out_l2_4)
@@ -3335,7 +3341,7 @@ builtin.module {
     %pf_acc_p3_r1_s0 = nest.dma.prefetch.async %406 into %acc_p3_5 : !nest.event<"pf_acc_p3_r1_s0">
     %439 = nest.task.range from = 0 to = 4 : !nest.task_range
     %append_grid_r1_s0, %append_inrel_r1_s0, %440 =
-      nest.dispatch.tasks.async @paged_attention_append_r1_tip15 l1_mode = 3 tasks(%439)
+      nest.dispatch.tasks.async @paged_attention_append_r1_tip15 l1_mode = 1 tasks(%439)
       globals(%394) bindings(%k_new_4, %v_new_4, %append_idx_4)
       ins(%k_new_4, %v_new_4, %append_idx_4) outs()
       signal_policy {
@@ -3345,7 +3351,7 @@ builtin.module {
     %pf_bidx0_r1_s0 = nest.dma.prefetch.async %408 into %block_idx_p0_4
       : !nest.event<"pf_bidx0_r1_s0">
     %att0_grid_r1_s0, %att0_inrel_r1_s0, %att0_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p0_4, %q_l2_19, %state_p0_5, %acc_p0_5)
       ins(%block_idx_p0_4, %q_l2_19, %state_p0_5, %acc_p0_5) outs(%state_p0_5, %acc_p0_5)
       signal_policy {
@@ -3357,7 +3363,7 @@ builtin.module {
     %pf_bidx1_r1_s0 = nest.dma.prefetch.async %409 into %block_idx_p1_4
       : !nest.event<"pf_bidx1_r1_s0">
     %att1_grid_r1_s0, %att1_inrel_r1_s0, %att1_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p1_4, %q_l2_19, %state_p1_5, %acc_p1_5)
       ins(%block_idx_p1_4, %q_l2_19, %state_p1_5, %acc_p1_5) outs(%state_p1_5, %acc_p1_5)
       signal_policy {
@@ -3369,7 +3375,7 @@ builtin.module {
     %pf_bidx2_r1_s0 = nest.dma.prefetch.async %410 into %block_idx_p0_4
       depends_on(%att0_inrel_r1_s0) : !nest.event<"pf_bidx2_r1_s0">
     %att2_grid_r1_s0, %att2_inrel_r1_s0, %att2_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p0_4, %q_l2_19, %state_p2_5, %acc_p2_5)
       ins(%block_idx_p0_4, %q_l2_19, %state_p2_5, %acc_p2_5) outs(%state_p2_5, %acc_p2_5)
       signal_policy {
@@ -3381,7 +3387,7 @@ builtin.module {
     %pf_bidx3_r1_s0 = nest.dma.prefetch.async %411 into %block_idx_p1_4
       depends_on(%att1_inrel_r1_s0) : !nest.event<"pf_bidx3_r1_s0">
     %att3_grid_r1_s0, %att3_inrel_r1_s0, %att3_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p1_4, %q_l2_19, %state_p3_5, %acc_p3_5)
       ins(%block_idx_p1_4, %q_l2_19, %state_p3_5, %acc_p3_5) outs(%state_p3_5, %acc_p3_5)
       signal_policy {
@@ -3393,7 +3399,7 @@ builtin.module {
     %pf_bidx4_r1_s0 = nest.dma.prefetch.async %412 into %block_idx_p0_4
       depends_on(%att2_inrel_r1_s0) : !nest.event<"pf_bidx4_r1_s0">
     %att4_grid_r1_s0, %att4_inrel_r1_s0, %att4_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p0_4, %q_l2_19, %state_p0_5, %acc_p0_5)
       ins(%block_idx_p0_4, %q_l2_19, %state_p0_5, %acc_p0_5) outs(%state_p0_5, %acc_p0_5)
       signal_policy {
@@ -3407,7 +3413,7 @@ builtin.module {
     %pf_bidx5_r1_s0 = nest.dma.prefetch.async %413 into %block_idx_p1_4
       depends_on(%att3_inrel_r1_s0) : !nest.event<"pf_bidx5_r1_s0">
     %att5_grid_r1_s0, %att5_inrel_r1_s0, %att5_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p1_4, %q_l2_19, %state_p1_5, %acc_p1_5)
       ins(%block_idx_p1_4, %q_l2_19, %state_p1_5, %acc_p1_5) outs(%state_p1_5, %acc_p1_5)
       signal_policy {
@@ -3421,7 +3427,7 @@ builtin.module {
     %pf_bidx6_r1_s0 = nest.dma.prefetch.async %414 into %block_idx_p0_4
       depends_on(%att4_inrel_r1_s0) : !nest.event<"pf_bidx6_r1_s0">
     %att6_grid_r1_s0, %att6_inrel_r1_s0, %att6_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p0_4, %q_l2_19, %state_p2_5, %acc_p2_5)
       ins(%block_idx_p0_4, %q_l2_19, %state_p2_5, %acc_p2_5) outs(%state_p2_5, %acc_p2_5)
       signal_policy {
@@ -3435,7 +3441,7 @@ builtin.module {
     %pf_bidx7_r1_s0 = nest.dma.prefetch.async %415 into %block_idx_p1_4
       depends_on(%att5_inrel_r1_s0) : !nest.event<"pf_bidx7_r1_s0">
     %att7_grid_r1_s0, %att7_inrel_r1_s0, %att7_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p1_4, %q_l2_19, %state_p3_5, %acc_p3_5)
       ins(%block_idx_p1_4, %q_l2_19, %state_p3_5, %acc_p3_5) outs(%state_p3_5, %acc_p3_5)
       signal_policy {
@@ -3449,7 +3455,7 @@ builtin.module {
     %pf_bidx8_r1_s0 = nest.dma.prefetch.async %416 into %block_idx_p0_4
       depends_on(%att6_inrel_r1_s0) : !nest.event<"pf_bidx8_r1_s0">
     %att8_grid_r1_s0, %att8_inrel_r1_s0, %att8_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p0_4, %q_l2_19, %state_p0_5, %acc_p0_5)
       ins(%block_idx_p0_4, %q_l2_19, %state_p0_5, %acc_p0_5) outs(%state_p0_5, %acc_p0_5)
       signal_policy {
@@ -3463,7 +3469,7 @@ builtin.module {
     %pf_bidx9_r1_s0 = nest.dma.prefetch.async %417 into %block_idx_p1_4
       depends_on(%att7_inrel_r1_s0) : !nest.event<"pf_bidx9_r1_s0">
     %att9_grid_r1_s0, %att9_inrel_r1_s0, %att9_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p1_4, %q_l2_19, %state_p1_5, %acc_p1_5)
       ins(%block_idx_p1_4, %q_l2_19, %state_p1_5, %acc_p1_5) outs(%state_p1_5, %acc_p1_5)
       signal_policy {
@@ -3477,7 +3483,7 @@ builtin.module {
     %pf_bidx10_r1_s0 = nest.dma.prefetch.async %418 into %block_idx_p0_4
       depends_on(%att8_inrel_r1_s0) : !nest.event<"pf_bidx10_r1_s0">
     %att10_grid_r1_s0, %att10_inrel_r1_s0, %att10_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p0_4, %q_l2_19, %state_p2_5, %acc_p2_5)
       ins(%block_idx_p0_4, %q_l2_19, %state_p2_5, %acc_p2_5) outs(%state_p2_5, %acc_p2_5)
       signal_policy {
@@ -3491,7 +3497,7 @@ builtin.module {
     %pf_bidx11_r1_s0 = nest.dma.prefetch.async %419 into %block_idx_p1_4
       depends_on(%att9_inrel_r1_s0) : !nest.event<"pf_bidx11_r1_s0">
     %att11_grid_r1_s0, %att11_inrel_r1_s0, %att11_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p1_4, %q_l2_19, %state_p3_5, %acc_p3_5)
       ins(%block_idx_p1_4, %q_l2_19, %state_p3_5, %acc_p3_5) outs(%state_p3_5, %acc_p3_5)
       signal_policy {
@@ -3505,7 +3511,7 @@ builtin.module {
     %pf_bidx12_r1_s0 = nest.dma.prefetch.async %420 into %block_idx_p0_4
       depends_on(%att10_inrel_r1_s0) : !nest.event<"pf_bidx12_r1_s0">
     %att12_grid_r1_s0, %att12_inrel_r1_s0, %att12_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p0_4, %q_l2_19, %state_p0_5, %acc_p0_5)
       ins(%block_idx_p0_4, %q_l2_19, %state_p0_5, %acc_p0_5) outs(%state_p0_5, %acc_p0_5)
       signal_policy {
@@ -3519,7 +3525,7 @@ builtin.module {
     %pf_bidx13_r1_s0 = nest.dma.prefetch.async %421 into %block_idx_p1_4
       depends_on(%att11_inrel_r1_s0) : !nest.event<"pf_bidx13_r1_s0">
     %att13_grid_r1_s0, %att13_inrel_r1_s0, %att13_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p1_4, %q_l2_19, %state_p1_5, %acc_p1_5)
       ins(%block_idx_p1_4, %q_l2_19, %state_p1_5, %acc_p1_5) outs(%state_p1_5, %acc_p1_5)
       signal_policy {
@@ -3533,7 +3539,7 @@ builtin.module {
     %pf_bidx14_r1_s0 = nest.dma.prefetch.async %422 into %block_idx_p0_4
       depends_on(%att12_inrel_r1_s0) : !nest.event<"pf_bidx14_r1_s0">
     %att14_grid_r1_s0, %att14_inrel_r1_s0, %att14_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p0_4, %q_l2_19, %state_p2_5, %acc_p2_5)
       ins(%block_idx_p0_4, %q_l2_19, %state_p2_5, %acc_p2_5) outs(%state_p2_5, %acc_p2_5)
       signal_policy {
@@ -3547,7 +3553,7 @@ builtin.module {
     %pf_bidx15_r1_s0 = nest.dma.prefetch.async %423 into %block_idx_p1_4
       depends_on(%att13_inrel_r1_s0) : !nest.event<"pf_bidx15_r1_s0">
     %att15_grid_r1_s0, %att15_inrel_r1_s0, %att15_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p1_4, %q_l2_19, %state_p3_5, %acc_p3_5)
       ins(%block_idx_p1_4, %q_l2_19, %state_p3_5, %acc_p3_5) outs(%state_p3_5, %acc_p3_5)
       signal_policy {
@@ -3561,7 +3567,7 @@ builtin.module {
     %pf_bidx16_r1_s0 = nest.dma.prefetch.async %424 into %block_idx_p0_4
       depends_on(%att14_inrel_r1_s0) : !nest.event<"pf_bidx16_r1_s0">
     %att16_grid_r1_s0, %att16_inrel_r1_s0, %att16_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p0_4, %q_l2_19, %state_p0_5, %acc_p0_5)
       ins(%block_idx_p0_4, %q_l2_19, %state_p0_5, %acc_p0_5) outs(%state_p0_5, %acc_p0_5)
       signal_policy {
@@ -3575,7 +3581,7 @@ builtin.module {
     %pf_bidx17_r1_s0 = nest.dma.prefetch.async %425 into %block_idx_p1_4
       depends_on(%att15_inrel_r1_s0) : !nest.event<"pf_bidx17_r1_s0">
     %att17_grid_r1_s0, %att17_inrel_r1_s0, %att17_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p1_4, %q_l2_19, %state_p1_5, %acc_p1_5)
       ins(%block_idx_p1_4, %q_l2_19, %state_p1_5, %acc_p1_5) outs(%state_p1_5, %acc_p1_5)
       signal_policy {
@@ -3589,7 +3595,7 @@ builtin.module {
     %pf_bidx18_r1_s0 = nest.dma.prefetch.async %426 into %block_idx_p0_4
       depends_on(%att16_inrel_r1_s0) : !nest.event<"pf_bidx18_r1_s0">
     %att18_grid_r1_s0, %att18_inrel_r1_s0, %att18_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p0_4, %q_l2_19, %state_p2_5, %acc_p2_5)
       ins(%block_idx_p0_4, %q_l2_19, %state_p2_5, %acc_p2_5) outs(%state_p2_5, %acc_p2_5)
       signal_policy {
@@ -3603,7 +3609,7 @@ builtin.module {
     %pf_bidx19_r1_s0 = nest.dma.prefetch.async %427 into %block_idx_p1_4
       depends_on(%att17_inrel_r1_s0) : !nest.event<"pf_bidx19_r1_s0">
     %att19_grid_r1_s0, %att19_inrel_r1_s0, %att19_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p1_4, %q_l2_19, %state_p3_5, %acc_p3_5)
       ins(%block_idx_p1_4, %q_l2_19, %state_p3_5, %acc_p3_5) outs(%state_p3_5, %acc_p3_5)
       signal_policy {
@@ -3617,7 +3623,7 @@ builtin.module {
     %pf_bidx20_r1_s0 = nest.dma.prefetch.async %428 into %block_idx_p0_4
       depends_on(%att18_inrel_r1_s0) : !nest.event<"pf_bidx20_r1_s0">
     %att20_grid_r1_s0, %att20_inrel_r1_s0, %att20_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p0_4, %q_l2_19, %state_p0_5, %acc_p0_5)
       ins(%block_idx_p0_4, %q_l2_19, %state_p0_5, %acc_p0_5) outs(%state_p0_5, %acc_p0_5)
       signal_policy {
@@ -3631,7 +3637,7 @@ builtin.module {
     %pf_bidx21_r1_s0 = nest.dma.prefetch.async %429 into %block_idx_p1_4
       depends_on(%att19_inrel_r1_s0) : !nest.event<"pf_bidx21_r1_s0">
     %att21_grid_r1_s0, %att21_inrel_r1_s0, %att21_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p1_4, %q_l2_19, %state_p1_5, %acc_p1_5)
       ins(%block_idx_p1_4, %q_l2_19, %state_p1_5, %acc_p1_5) outs(%state_p1_5, %acc_p1_5)
       signal_policy {
@@ -3645,7 +3651,7 @@ builtin.module {
     %pf_bidx22_r1_s0 = nest.dma.prefetch.async %430 into %block_idx_p0_4
       depends_on(%att20_inrel_r1_s0) : !nest.event<"pf_bidx22_r1_s0">
     %att22_grid_r1_s0, %att22_inrel_r1_s0, %att22_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p0_4, %q_l2_19, %state_p2_5, %acc_p2_5)
       ins(%block_idx_p0_4, %q_l2_19, %state_p2_5, %acc_p2_5) outs(%state_p2_5, %acc_p2_5)
       signal_policy {
@@ -3659,7 +3665,7 @@ builtin.module {
     %pf_bidx23_r1_s0 = nest.dma.prefetch.async %431 into %block_idx_p1_4
       depends_on(%att21_inrel_r1_s0) : !nest.event<"pf_bidx23_r1_s0">
     %att23_grid_r1_s0, %att23_inrel_r1_s0, %att23_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p1_4, %q_l2_19, %state_p3_5, %acc_p3_5)
       ins(%block_idx_p1_4, %q_l2_19, %state_p3_5, %acc_p3_5) outs(%state_p3_5, %acc_p3_5)
       signal_policy {
@@ -3673,7 +3679,7 @@ builtin.module {
     %pf_bidx24_r1_s0 = nest.dma.prefetch.async %432 into %block_idx_p0_4
       depends_on(%att22_inrel_r1_s0) : !nest.event<"pf_bidx24_r1_s0">
     %att24_grid_r1_s0, %att24_inrel_r1_s0, %att24_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p0_4, %q_l2_19, %state_p0_5, %acc_p0_5)
       ins(%block_idx_p0_4, %q_l2_19, %state_p0_5, %acc_p0_5) outs(%state_p0_5, %acc_p0_5)
       signal_policy {
@@ -3687,7 +3693,7 @@ builtin.module {
     %pf_bidx25_r1_s0 = nest.dma.prefetch.async %433 into %block_idx_p1_4
       depends_on(%att23_inrel_r1_s0) : !nest.event<"pf_bidx25_r1_s0">
     %att25_grid_r1_s0, %att25_inrel_r1_s0, %att25_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p1_4, %q_l2_19, %state_p1_5, %acc_p1_5)
       ins(%block_idx_p1_4, %q_l2_19, %state_p1_5, %acc_p1_5) outs(%state_p1_5, %acc_p1_5)
       signal_policy {
@@ -3701,7 +3707,7 @@ builtin.module {
     %pf_bidx26_r1_s0 = nest.dma.prefetch.async %434 into %block_idx_p0_4
       depends_on(%att24_inrel_r1_s0) : !nest.event<"pf_bidx26_r1_s0">
     %att26_grid_r1_s0, %att26_inrel_r1_s0, %att26_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p0_4, %q_l2_19, %state_p2_5, %acc_p2_5)
       ins(%block_idx_p0_4, %q_l2_19, %state_p2_5, %acc_p2_5) outs(%state_p2_5, %acc_p2_5)
       signal_policy {
@@ -3715,7 +3721,7 @@ builtin.module {
     %pf_bidx27_r1_s0 = nest.dma.prefetch.async %435 into %block_idx_p1_4
       depends_on(%att25_inrel_r1_s0) : !nest.event<"pf_bidx27_r1_s0">
     %att27_grid_r1_s0, %att27_inrel_r1_s0, %att27_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p1_4, %q_l2_19, %state_p3_5, %acc_p3_5)
       ins(%block_idx_p1_4, %q_l2_19, %state_p3_5, %acc_p3_5) outs(%state_p3_5, %acc_p3_5)
       signal_policy {
@@ -3729,7 +3735,7 @@ builtin.module {
     %pf_bidx28_r1_s0 = nest.dma.prefetch.async %436 into %block_idx_p0_4
       depends_on(%att26_inrel_r1_s0) : !nest.event<"pf_bidx28_r1_s0">
     %att28_grid_r1_s0, %att28_inrel_r1_s0, %att28_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p0_4, %q_l2_19, %state_p0_5, %acc_p0_5)
       ins(%block_idx_p0_4, %q_l2_19, %state_p0_5, %acc_p0_5) outs(%state_p0_5, %acc_p0_5)
       signal_policy {
@@ -3743,7 +3749,7 @@ builtin.module {
     %pf_bidx29_r1_s0 = nest.dma.prefetch.async %437 into %block_idx_p1_4
       depends_on(%att27_inrel_r1_s0) : !nest.event<"pf_bidx29_r1_s0">
     %att29_grid_r1_s0, %att29_inrel_r1_s0, %att29_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p1_4, %q_l2_19, %state_p1_5, %acc_p1_5)
       ins(%block_idx_p1_4, %q_l2_19, %state_p1_5, %acc_p1_5) outs(%state_p1_5, %acc_p1_5)
       signal_policy {
@@ -3757,7 +3763,7 @@ builtin.module {
     %pf_bidx30_r1_s0 = nest.dma.prefetch.async %438 into %block_idx_p0_4
       depends_on(%att28_inrel_r1_s0) : !nest.event<"pf_bidx30_r1_s0">
     %att30_grid_r1_s0, %att30_inrel_r1_s0, %att30_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%block_idx_p0_4, %q_l2_19, %state_p2_5, %acc_p2_5)
       ins(%block_idx_p0_4, %q_l2_19, %state_p2_5, %acc_p2_5) outs(%state_p2_5, %acc_p2_5)
       signal_policy {
@@ -3769,7 +3775,7 @@ builtin.module {
         !nest.event<"att30_grid_r1_s0">, !nest.event<"att30_inrel_r1_s0">,
         !nest.event<"att30_out_r1_s0">)
     %att31_grid_r1_s0, %att31_inrel_r1_s0, %att31_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_final_r1 l1_mode = 3 tasks(%439) globals(%394)
+      nest.dispatch.tasks.async @paged_attention_t16_final_r1 l1_mode = 1 tasks(%439) globals(%394)
       bindings(%append_idx_4, %q_l2_19, %state_p3_5, %acc_p3_5)
       ins(%append_idx_4, %q_l2_19, %state_p3_5, %acc_p3_5) outs(%state_p3_5, %acc_p3_5)
       signal_policy {
@@ -3782,7 +3788,7 @@ builtin.module {
         !nest.event<"att31_grid_r1_s0">, !nest.event<"att31_inrel_r1_s0">,
         !nest.event<"att31_out_r1_s0">)
     %merge_grid_r1_s0, %merge_inrel_r1_s0, %merge_out_r1_s0 =
-      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 3 tasks(%439) globals()
+      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 1 tasks(%439) globals()
       bindings(
         %state_p0_5, %state_p1_5, %state_p2_5, %state_p3_5, %acc_p0_5, %acc_p1_5, %acc_p2_5,
         %acc_p3_5, %out_l2_5)
@@ -4022,7 +4028,7 @@ builtin.module {
     %pf_acc_p3_r1_s1 = nest.dma.prefetch.async %453 into %acc_p3_6 : !nest.event<"pf_acc_p3_r1_s1">
     %487 = nest.task.range from = 0 to = 4 : !nest.task_range
     %append_grid_r1_s1, %append_inrel_r1_s1, %488 =
-      nest.dispatch.tasks.async @paged_attention_append_r1_tip0 l1_mode = 3 tasks(%487)
+      nest.dispatch.tasks.async @paged_attention_append_r1_tip0 l1_mode = 1 tasks(%487)
       globals(%441) bindings(%k_new_5, %v_new_5, %append_idx_5)
       ins(%k_new_5, %v_new_5, %append_idx_5) outs()
       signal_policy {
@@ -4032,7 +4038,7 @@ builtin.module {
     %pf_bidx0_r1_s1 = nest.dma.prefetch.async %455 into %block_idx_p0_5
       : !nest.event<"pf_bidx0_r1_s1">
     %att0_grid_r1_s1, %att0_inrel_r1_s1, %att0_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p0_5, %q_l2_20, %state_p0_6, %acc_p0_6)
       ins(%block_idx_p0_5, %q_l2_20, %state_p0_6, %acc_p0_6) outs(%state_p0_6, %acc_p0_6)
       signal_policy {
@@ -4044,7 +4050,7 @@ builtin.module {
     %pf_bidx1_r1_s1 = nest.dma.prefetch.async %456 into %block_idx_p1_5
       : !nest.event<"pf_bidx1_r1_s1">
     %att1_grid_r1_s1, %att1_inrel_r1_s1, %att1_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p1_5, %q_l2_20, %state_p1_6, %acc_p1_6)
       ins(%block_idx_p1_5, %q_l2_20, %state_p1_6, %acc_p1_6) outs(%state_p1_6, %acc_p1_6)
       signal_policy {
@@ -4056,7 +4062,7 @@ builtin.module {
     %pf_bidx2_r1_s1 = nest.dma.prefetch.async %457 into %block_idx_p0_5
       depends_on(%att0_inrel_r1_s1) : !nest.event<"pf_bidx2_r1_s1">
     %att2_grid_r1_s1, %att2_inrel_r1_s1, %att2_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p0_5, %q_l2_20, %state_p2_6, %acc_p2_6)
       ins(%block_idx_p0_5, %q_l2_20, %state_p2_6, %acc_p2_6) outs(%state_p2_6, %acc_p2_6)
       signal_policy {
@@ -4068,7 +4074,7 @@ builtin.module {
     %pf_bidx3_r1_s1 = nest.dma.prefetch.async %458 into %block_idx_p1_5
       depends_on(%att1_inrel_r1_s1) : !nest.event<"pf_bidx3_r1_s1">
     %att3_grid_r1_s1, %att3_inrel_r1_s1, %att3_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p1_5, %q_l2_20, %state_p3_6, %acc_p3_6)
       ins(%block_idx_p1_5, %q_l2_20, %state_p3_6, %acc_p3_6) outs(%state_p3_6, %acc_p3_6)
       signal_policy {
@@ -4080,7 +4086,7 @@ builtin.module {
     %pf_bidx4_r1_s1 = nest.dma.prefetch.async %459 into %block_idx_p0_5
       depends_on(%att2_inrel_r1_s1) : !nest.event<"pf_bidx4_r1_s1">
     %att4_grid_r1_s1, %att4_inrel_r1_s1, %att4_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p0_5, %q_l2_20, %state_p0_6, %acc_p0_6)
       ins(%block_idx_p0_5, %q_l2_20, %state_p0_6, %acc_p0_6) outs(%state_p0_6, %acc_p0_6)
       signal_policy {
@@ -4094,7 +4100,7 @@ builtin.module {
     %pf_bidx5_r1_s1 = nest.dma.prefetch.async %460 into %block_idx_p1_5
       depends_on(%att3_inrel_r1_s1) : !nest.event<"pf_bidx5_r1_s1">
     %att5_grid_r1_s1, %att5_inrel_r1_s1, %att5_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p1_5, %q_l2_20, %state_p1_6, %acc_p1_6)
       ins(%block_idx_p1_5, %q_l2_20, %state_p1_6, %acc_p1_6) outs(%state_p1_6, %acc_p1_6)
       signal_policy {
@@ -4108,7 +4114,7 @@ builtin.module {
     %pf_bidx6_r1_s1 = nest.dma.prefetch.async %461 into %block_idx_p0_5
       depends_on(%att4_inrel_r1_s1) : !nest.event<"pf_bidx6_r1_s1">
     %att6_grid_r1_s1, %att6_inrel_r1_s1, %att6_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p0_5, %q_l2_20, %state_p2_6, %acc_p2_6)
       ins(%block_idx_p0_5, %q_l2_20, %state_p2_6, %acc_p2_6) outs(%state_p2_6, %acc_p2_6)
       signal_policy {
@@ -4122,7 +4128,7 @@ builtin.module {
     %pf_bidx7_r1_s1 = nest.dma.prefetch.async %462 into %block_idx_p1_5
       depends_on(%att5_inrel_r1_s1) : !nest.event<"pf_bidx7_r1_s1">
     %att7_grid_r1_s1, %att7_inrel_r1_s1, %att7_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p1_5, %q_l2_20, %state_p3_6, %acc_p3_6)
       ins(%block_idx_p1_5, %q_l2_20, %state_p3_6, %acc_p3_6) outs(%state_p3_6, %acc_p3_6)
       signal_policy {
@@ -4136,7 +4142,7 @@ builtin.module {
     %pf_bidx8_r1_s1 = nest.dma.prefetch.async %463 into %block_idx_p0_5
       depends_on(%att6_inrel_r1_s1) : !nest.event<"pf_bidx8_r1_s1">
     %att8_grid_r1_s1, %att8_inrel_r1_s1, %att8_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p0_5, %q_l2_20, %state_p0_6, %acc_p0_6)
       ins(%block_idx_p0_5, %q_l2_20, %state_p0_6, %acc_p0_6) outs(%state_p0_6, %acc_p0_6)
       signal_policy {
@@ -4150,7 +4156,7 @@ builtin.module {
     %pf_bidx9_r1_s1 = nest.dma.prefetch.async %464 into %block_idx_p1_5
       depends_on(%att7_inrel_r1_s1) : !nest.event<"pf_bidx9_r1_s1">
     %att9_grid_r1_s1, %att9_inrel_r1_s1, %att9_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p1_5, %q_l2_20, %state_p1_6, %acc_p1_6)
       ins(%block_idx_p1_5, %q_l2_20, %state_p1_6, %acc_p1_6) outs(%state_p1_6, %acc_p1_6)
       signal_policy {
@@ -4164,7 +4170,7 @@ builtin.module {
     %pf_bidx10_r1_s1 = nest.dma.prefetch.async %465 into %block_idx_p0_5
       depends_on(%att8_inrel_r1_s1) : !nest.event<"pf_bidx10_r1_s1">
     %att10_grid_r1_s1, %att10_inrel_r1_s1, %att10_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p0_5, %q_l2_20, %state_p2_6, %acc_p2_6)
       ins(%block_idx_p0_5, %q_l2_20, %state_p2_6, %acc_p2_6) outs(%state_p2_6, %acc_p2_6)
       signal_policy {
@@ -4178,7 +4184,7 @@ builtin.module {
     %pf_bidx11_r1_s1 = nest.dma.prefetch.async %466 into %block_idx_p1_5
       depends_on(%att9_inrel_r1_s1) : !nest.event<"pf_bidx11_r1_s1">
     %att11_grid_r1_s1, %att11_inrel_r1_s1, %att11_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p1_5, %q_l2_20, %state_p3_6, %acc_p3_6)
       ins(%block_idx_p1_5, %q_l2_20, %state_p3_6, %acc_p3_6) outs(%state_p3_6, %acc_p3_6)
       signal_policy {
@@ -4192,7 +4198,7 @@ builtin.module {
     %pf_bidx12_r1_s1 = nest.dma.prefetch.async %467 into %block_idx_p0_5
       depends_on(%att10_inrel_r1_s1) : !nest.event<"pf_bidx12_r1_s1">
     %att12_grid_r1_s1, %att12_inrel_r1_s1, %att12_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p0_5, %q_l2_20, %state_p0_6, %acc_p0_6)
       ins(%block_idx_p0_5, %q_l2_20, %state_p0_6, %acc_p0_6) outs(%state_p0_6, %acc_p0_6)
       signal_policy {
@@ -4206,7 +4212,7 @@ builtin.module {
     %pf_bidx13_r1_s1 = nest.dma.prefetch.async %468 into %block_idx_p1_5
       depends_on(%att11_inrel_r1_s1) : !nest.event<"pf_bidx13_r1_s1">
     %att13_grid_r1_s1, %att13_inrel_r1_s1, %att13_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p1_5, %q_l2_20, %state_p1_6, %acc_p1_6)
       ins(%block_idx_p1_5, %q_l2_20, %state_p1_6, %acc_p1_6) outs(%state_p1_6, %acc_p1_6)
       signal_policy {
@@ -4220,7 +4226,7 @@ builtin.module {
     %pf_bidx14_r1_s1 = nest.dma.prefetch.async %469 into %block_idx_p0_5
       depends_on(%att12_inrel_r1_s1) : !nest.event<"pf_bidx14_r1_s1">
     %att14_grid_r1_s1, %att14_inrel_r1_s1, %att14_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p0_5, %q_l2_20, %state_p2_6, %acc_p2_6)
       ins(%block_idx_p0_5, %q_l2_20, %state_p2_6, %acc_p2_6) outs(%state_p2_6, %acc_p2_6)
       signal_policy {
@@ -4234,7 +4240,7 @@ builtin.module {
     %pf_bidx15_r1_s1 = nest.dma.prefetch.async %470 into %block_idx_p1_5
       depends_on(%att13_inrel_r1_s1) : !nest.event<"pf_bidx15_r1_s1">
     %att15_grid_r1_s1, %att15_inrel_r1_s1, %att15_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p1_5, %q_l2_20, %state_p3_6, %acc_p3_6)
       ins(%block_idx_p1_5, %q_l2_20, %state_p3_6, %acc_p3_6) outs(%state_p3_6, %acc_p3_6)
       signal_policy {
@@ -4248,7 +4254,7 @@ builtin.module {
     %pf_bidx16_r1_s1 = nest.dma.prefetch.async %471 into %block_idx_p0_5
       depends_on(%att14_inrel_r1_s1) : !nest.event<"pf_bidx16_r1_s1">
     %att16_grid_r1_s1, %att16_inrel_r1_s1, %att16_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p0_5, %q_l2_20, %state_p0_6, %acc_p0_6)
       ins(%block_idx_p0_5, %q_l2_20, %state_p0_6, %acc_p0_6) outs(%state_p0_6, %acc_p0_6)
       signal_policy {
@@ -4262,7 +4268,7 @@ builtin.module {
     %pf_bidx17_r1_s1 = nest.dma.prefetch.async %472 into %block_idx_p1_5
       depends_on(%att15_inrel_r1_s1) : !nest.event<"pf_bidx17_r1_s1">
     %att17_grid_r1_s1, %att17_inrel_r1_s1, %att17_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p1_5, %q_l2_20, %state_p1_6, %acc_p1_6)
       ins(%block_idx_p1_5, %q_l2_20, %state_p1_6, %acc_p1_6) outs(%state_p1_6, %acc_p1_6)
       signal_policy {
@@ -4276,7 +4282,7 @@ builtin.module {
     %pf_bidx18_r1_s1 = nest.dma.prefetch.async %473 into %block_idx_p0_5
       depends_on(%att16_inrel_r1_s1) : !nest.event<"pf_bidx18_r1_s1">
     %att18_grid_r1_s1, %att18_inrel_r1_s1, %att18_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p0_5, %q_l2_20, %state_p2_6, %acc_p2_6)
       ins(%block_idx_p0_5, %q_l2_20, %state_p2_6, %acc_p2_6) outs(%state_p2_6, %acc_p2_6)
       signal_policy {
@@ -4290,7 +4296,7 @@ builtin.module {
     %pf_bidx19_r1_s1 = nest.dma.prefetch.async %474 into %block_idx_p1_5
       depends_on(%att17_inrel_r1_s1) : !nest.event<"pf_bidx19_r1_s1">
     %att19_grid_r1_s1, %att19_inrel_r1_s1, %att19_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p1_5, %q_l2_20, %state_p3_6, %acc_p3_6)
       ins(%block_idx_p1_5, %q_l2_20, %state_p3_6, %acc_p3_6) outs(%state_p3_6, %acc_p3_6)
       signal_policy {
@@ -4304,7 +4310,7 @@ builtin.module {
     %pf_bidx20_r1_s1 = nest.dma.prefetch.async %475 into %block_idx_p0_5
       depends_on(%att18_inrel_r1_s1) : !nest.event<"pf_bidx20_r1_s1">
     %att20_grid_r1_s1, %att20_inrel_r1_s1, %att20_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p0_5, %q_l2_20, %state_p0_6, %acc_p0_6)
       ins(%block_idx_p0_5, %q_l2_20, %state_p0_6, %acc_p0_6) outs(%state_p0_6, %acc_p0_6)
       signal_policy {
@@ -4318,7 +4324,7 @@ builtin.module {
     %pf_bidx21_r1_s1 = nest.dma.prefetch.async %476 into %block_idx_p1_5
       depends_on(%att19_inrel_r1_s1) : !nest.event<"pf_bidx21_r1_s1">
     %att21_grid_r1_s1, %att21_inrel_r1_s1, %att21_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p1_5, %q_l2_20, %state_p1_6, %acc_p1_6)
       ins(%block_idx_p1_5, %q_l2_20, %state_p1_6, %acc_p1_6) outs(%state_p1_6, %acc_p1_6)
       signal_policy {
@@ -4332,7 +4338,7 @@ builtin.module {
     %pf_bidx22_r1_s1 = nest.dma.prefetch.async %477 into %block_idx_p0_5
       depends_on(%att20_inrel_r1_s1) : !nest.event<"pf_bidx22_r1_s1">
     %att22_grid_r1_s1, %att22_inrel_r1_s1, %att22_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p0_5, %q_l2_20, %state_p2_6, %acc_p2_6)
       ins(%block_idx_p0_5, %q_l2_20, %state_p2_6, %acc_p2_6) outs(%state_p2_6, %acc_p2_6)
       signal_policy {
@@ -4346,7 +4352,7 @@ builtin.module {
     %pf_bidx23_r1_s1 = nest.dma.prefetch.async %478 into %block_idx_p1_5
       depends_on(%att21_inrel_r1_s1) : !nest.event<"pf_bidx23_r1_s1">
     %att23_grid_r1_s1, %att23_inrel_r1_s1, %att23_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p1_5, %q_l2_20, %state_p3_6, %acc_p3_6)
       ins(%block_idx_p1_5, %q_l2_20, %state_p3_6, %acc_p3_6) outs(%state_p3_6, %acc_p3_6)
       signal_policy {
@@ -4360,7 +4366,7 @@ builtin.module {
     %pf_bidx24_r1_s1 = nest.dma.prefetch.async %479 into %block_idx_p0_5
       depends_on(%att22_inrel_r1_s1) : !nest.event<"pf_bidx24_r1_s1">
     %att24_grid_r1_s1, %att24_inrel_r1_s1, %att24_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p0_5, %q_l2_20, %state_p0_6, %acc_p0_6)
       ins(%block_idx_p0_5, %q_l2_20, %state_p0_6, %acc_p0_6) outs(%state_p0_6, %acc_p0_6)
       signal_policy {
@@ -4374,7 +4380,7 @@ builtin.module {
     %pf_bidx25_r1_s1 = nest.dma.prefetch.async %480 into %block_idx_p1_5
       depends_on(%att23_inrel_r1_s1) : !nest.event<"pf_bidx25_r1_s1">
     %att25_grid_r1_s1, %att25_inrel_r1_s1, %att25_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p1_5, %q_l2_20, %state_p1_6, %acc_p1_6)
       ins(%block_idx_p1_5, %q_l2_20, %state_p1_6, %acc_p1_6) outs(%state_p1_6, %acc_p1_6)
       signal_policy {
@@ -4388,7 +4394,7 @@ builtin.module {
     %pf_bidx26_r1_s1 = nest.dma.prefetch.async %481 into %block_idx_p0_5
       depends_on(%att24_inrel_r1_s1) : !nest.event<"pf_bidx26_r1_s1">
     %att26_grid_r1_s1, %att26_inrel_r1_s1, %att26_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p0_5, %q_l2_20, %state_p2_6, %acc_p2_6)
       ins(%block_idx_p0_5, %q_l2_20, %state_p2_6, %acc_p2_6) outs(%state_p2_6, %acc_p2_6)
       signal_policy {
@@ -4402,7 +4408,7 @@ builtin.module {
     %pf_bidx27_r1_s1 = nest.dma.prefetch.async %482 into %block_idx_p1_5
       depends_on(%att25_inrel_r1_s1) : !nest.event<"pf_bidx27_r1_s1">
     %att27_grid_r1_s1, %att27_inrel_r1_s1, %att27_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p1_5, %q_l2_20, %state_p3_6, %acc_p3_6)
       ins(%block_idx_p1_5, %q_l2_20, %state_p3_6, %acc_p3_6) outs(%state_p3_6, %acc_p3_6)
       signal_policy {
@@ -4416,7 +4422,7 @@ builtin.module {
     %pf_bidx28_r1_s1 = nest.dma.prefetch.async %483 into %block_idx_p0_5
       depends_on(%att26_inrel_r1_s1) : !nest.event<"pf_bidx28_r1_s1">
     %att28_grid_r1_s1, %att28_inrel_r1_s1, %att28_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p0_5, %q_l2_20, %state_p0_6, %acc_p0_6)
       ins(%block_idx_p0_5, %q_l2_20, %state_p0_6, %acc_p0_6) outs(%state_p0_6, %acc_p0_6)
       signal_policy {
@@ -4430,7 +4436,7 @@ builtin.module {
     %pf_bidx29_r1_s1 = nest.dma.prefetch.async %484 into %block_idx_p1_5
       depends_on(%att27_inrel_r1_s1) : !nest.event<"pf_bidx29_r1_s1">
     %att29_grid_r1_s1, %att29_inrel_r1_s1, %att29_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p1_5, %q_l2_20, %state_p1_6, %acc_p1_6)
       ins(%block_idx_p1_5, %q_l2_20, %state_p1_6, %acc_p1_6) outs(%state_p1_6, %acc_p1_6)
       signal_policy {
@@ -4444,7 +4450,7 @@ builtin.module {
     %pf_bidx30_r1_s1 = nest.dma.prefetch.async %485 into %block_idx_p0_5
       depends_on(%att28_inrel_r1_s1) : !nest.event<"pf_bidx30_r1_s1">
     %att30_grid_r1_s1, %att30_inrel_r1_s1, %att30_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p0_5, %q_l2_20, %state_p2_6, %acc_p2_6)
       ins(%block_idx_p0_5, %q_l2_20, %state_p2_6, %acc_p2_6) outs(%state_p2_6, %acc_p2_6)
       signal_policy {
@@ -4458,7 +4464,7 @@ builtin.module {
     %pf_bidx31_r1_s1 = nest.dma.prefetch.async %486 into %block_idx_p1_5
       depends_on(%att29_inrel_r1_s1) : !nest.event<"pf_bidx31_r1_s1">
     %att31_grid_r1_s1, %att31_inrel_r1_s1, %att31_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%block_idx_p1_5, %q_l2_20, %state_p3_6, %acc_p3_6)
       ins(%block_idx_p1_5, %q_l2_20, %state_p3_6, %acc_p3_6) outs(%state_p3_6, %acc_p3_6)
       signal_policy {
@@ -4470,7 +4476,7 @@ builtin.module {
         !nest.event<"att31_grid_r1_s1">, !nest.event<"att31_inrel_r1_s1">,
         !nest.event<"att31_out_r1_s1">)
     %att32_grid_r1_s1, %att32_inrel_r1_s1, %att32_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_t1_final_r1 l1_mode = 3 tasks(%487) globals(%441)
+      nest.dispatch.tasks.async @paged_attention_t1_final_r1 l1_mode = 1 tasks(%487) globals(%441)
       bindings(%append_idx_5, %q_l2_20, %state_p0_6, %acc_p0_6)
       ins(%append_idx_5, %q_l2_20, %state_p0_6, %acc_p0_6) outs(%state_p0_6, %acc_p0_6)
       signal_policy {
@@ -4483,7 +4489,7 @@ builtin.module {
         !nest.event<"att32_grid_r1_s1">, !nest.event<"att32_inrel_r1_s1">,
         !nest.event<"att32_out_r1_s1">)
     %merge_grid_r1_s1, %merge_inrel_r1_s1, %merge_out_r1_s1 =
-      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 3 tasks(%487) globals()
+      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 1 tasks(%487) globals()
       bindings(
         %state_p0_6, %state_p1_6, %state_p2_6, %state_p3_6, %acc_p0_6, %acc_p1_6, %acc_p2_6,
         %acc_p3_6, %out_l2_6)
@@ -4727,7 +4733,7 @@ builtin.module {
     %pf_acc_p3_r1_s2 = nest.dma.prefetch.async %501 into %acc_p3_7 : !nest.event<"pf_acc_p3_r1_s2">
     %535 = nest.task.range from = 0 to = 4 : !nest.task_range
     %append_grid_r1_s2, %append_inrel_r1_s2, %536 =
-      nest.dispatch.tasks.async @paged_attention_append_r1_tip1 l1_mode = 3 tasks(%535)
+      nest.dispatch.tasks.async @paged_attention_append_r1_tip1 l1_mode = 1 tasks(%535)
       globals(%489) bindings(%k_new_6, %v_new_6, %append_idx_6)
       ins(%k_new_6, %v_new_6, %append_idx_6) outs()
       signal_policy {
@@ -4737,7 +4743,7 @@ builtin.module {
     %pf_bidx0_r1_s2 = nest.dma.prefetch.async %503 into %block_idx_p0_6
       : !nest.event<"pf_bidx0_r1_s2">
     %att0_grid_r1_s2, %att0_inrel_r1_s2, %att0_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p0_6, %q_l2_21, %state_p0_7, %acc_p0_7)
       ins(%block_idx_p0_6, %q_l2_21, %state_p0_7, %acc_p0_7) outs(%state_p0_7, %acc_p0_7)
       signal_policy {
@@ -4749,7 +4755,7 @@ builtin.module {
     %pf_bidx1_r1_s2 = nest.dma.prefetch.async %504 into %block_idx_p1_6
       : !nest.event<"pf_bidx1_r1_s2">
     %att1_grid_r1_s2, %att1_inrel_r1_s2, %att1_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p1_6, %q_l2_21, %state_p1_7, %acc_p1_7)
       ins(%block_idx_p1_6, %q_l2_21, %state_p1_7, %acc_p1_7) outs(%state_p1_7, %acc_p1_7)
       signal_policy {
@@ -4761,7 +4767,7 @@ builtin.module {
     %pf_bidx2_r1_s2 = nest.dma.prefetch.async %505 into %block_idx_p0_6
       depends_on(%att0_inrel_r1_s2) : !nest.event<"pf_bidx2_r1_s2">
     %att2_grid_r1_s2, %att2_inrel_r1_s2, %att2_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p0_6, %q_l2_21, %state_p2_7, %acc_p2_7)
       ins(%block_idx_p0_6, %q_l2_21, %state_p2_7, %acc_p2_7) outs(%state_p2_7, %acc_p2_7)
       signal_policy {
@@ -4773,7 +4779,7 @@ builtin.module {
     %pf_bidx3_r1_s2 = nest.dma.prefetch.async %506 into %block_idx_p1_6
       depends_on(%att1_inrel_r1_s2) : !nest.event<"pf_bidx3_r1_s2">
     %att3_grid_r1_s2, %att3_inrel_r1_s2, %att3_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p1_6, %q_l2_21, %state_p3_7, %acc_p3_7)
       ins(%block_idx_p1_6, %q_l2_21, %state_p3_7, %acc_p3_7) outs(%state_p3_7, %acc_p3_7)
       signal_policy {
@@ -4785,7 +4791,7 @@ builtin.module {
     %pf_bidx4_r1_s2 = nest.dma.prefetch.async %507 into %block_idx_p0_6
       depends_on(%att2_inrel_r1_s2) : !nest.event<"pf_bidx4_r1_s2">
     %att4_grid_r1_s2, %att4_inrel_r1_s2, %att4_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p0_6, %q_l2_21, %state_p0_7, %acc_p0_7)
       ins(%block_idx_p0_6, %q_l2_21, %state_p0_7, %acc_p0_7) outs(%state_p0_7, %acc_p0_7)
       signal_policy {
@@ -4799,7 +4805,7 @@ builtin.module {
     %pf_bidx5_r1_s2 = nest.dma.prefetch.async %508 into %block_idx_p1_6
       depends_on(%att3_inrel_r1_s2) : !nest.event<"pf_bidx5_r1_s2">
     %att5_grid_r1_s2, %att5_inrel_r1_s2, %att5_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p1_6, %q_l2_21, %state_p1_7, %acc_p1_7)
       ins(%block_idx_p1_6, %q_l2_21, %state_p1_7, %acc_p1_7) outs(%state_p1_7, %acc_p1_7)
       signal_policy {
@@ -4813,7 +4819,7 @@ builtin.module {
     %pf_bidx6_r1_s2 = nest.dma.prefetch.async %509 into %block_idx_p0_6
       depends_on(%att4_inrel_r1_s2) : !nest.event<"pf_bidx6_r1_s2">
     %att6_grid_r1_s2, %att6_inrel_r1_s2, %att6_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p0_6, %q_l2_21, %state_p2_7, %acc_p2_7)
       ins(%block_idx_p0_6, %q_l2_21, %state_p2_7, %acc_p2_7) outs(%state_p2_7, %acc_p2_7)
       signal_policy {
@@ -4827,7 +4833,7 @@ builtin.module {
     %pf_bidx7_r1_s2 = nest.dma.prefetch.async %510 into %block_idx_p1_6
       depends_on(%att5_inrel_r1_s2) : !nest.event<"pf_bidx7_r1_s2">
     %att7_grid_r1_s2, %att7_inrel_r1_s2, %att7_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p1_6, %q_l2_21, %state_p3_7, %acc_p3_7)
       ins(%block_idx_p1_6, %q_l2_21, %state_p3_7, %acc_p3_7) outs(%state_p3_7, %acc_p3_7)
       signal_policy {
@@ -4841,7 +4847,7 @@ builtin.module {
     %pf_bidx8_r1_s2 = nest.dma.prefetch.async %511 into %block_idx_p0_6
       depends_on(%att6_inrel_r1_s2) : !nest.event<"pf_bidx8_r1_s2">
     %att8_grid_r1_s2, %att8_inrel_r1_s2, %att8_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p0_6, %q_l2_21, %state_p0_7, %acc_p0_7)
       ins(%block_idx_p0_6, %q_l2_21, %state_p0_7, %acc_p0_7) outs(%state_p0_7, %acc_p0_7)
       signal_policy {
@@ -4855,7 +4861,7 @@ builtin.module {
     %pf_bidx9_r1_s2 = nest.dma.prefetch.async %512 into %block_idx_p1_6
       depends_on(%att7_inrel_r1_s2) : !nest.event<"pf_bidx9_r1_s2">
     %att9_grid_r1_s2, %att9_inrel_r1_s2, %att9_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p1_6, %q_l2_21, %state_p1_7, %acc_p1_7)
       ins(%block_idx_p1_6, %q_l2_21, %state_p1_7, %acc_p1_7) outs(%state_p1_7, %acc_p1_7)
       signal_policy {
@@ -4869,7 +4875,7 @@ builtin.module {
     %pf_bidx10_r1_s2 = nest.dma.prefetch.async %513 into %block_idx_p0_6
       depends_on(%att8_inrel_r1_s2) : !nest.event<"pf_bidx10_r1_s2">
     %att10_grid_r1_s2, %att10_inrel_r1_s2, %att10_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p0_6, %q_l2_21, %state_p2_7, %acc_p2_7)
       ins(%block_idx_p0_6, %q_l2_21, %state_p2_7, %acc_p2_7) outs(%state_p2_7, %acc_p2_7)
       signal_policy {
@@ -4883,7 +4889,7 @@ builtin.module {
     %pf_bidx11_r1_s2 = nest.dma.prefetch.async %514 into %block_idx_p1_6
       depends_on(%att9_inrel_r1_s2) : !nest.event<"pf_bidx11_r1_s2">
     %att11_grid_r1_s2, %att11_inrel_r1_s2, %att11_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p1_6, %q_l2_21, %state_p3_7, %acc_p3_7)
       ins(%block_idx_p1_6, %q_l2_21, %state_p3_7, %acc_p3_7) outs(%state_p3_7, %acc_p3_7)
       signal_policy {
@@ -4897,7 +4903,7 @@ builtin.module {
     %pf_bidx12_r1_s2 = nest.dma.prefetch.async %515 into %block_idx_p0_6
       depends_on(%att10_inrel_r1_s2) : !nest.event<"pf_bidx12_r1_s2">
     %att12_grid_r1_s2, %att12_inrel_r1_s2, %att12_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p0_6, %q_l2_21, %state_p0_7, %acc_p0_7)
       ins(%block_idx_p0_6, %q_l2_21, %state_p0_7, %acc_p0_7) outs(%state_p0_7, %acc_p0_7)
       signal_policy {
@@ -4911,7 +4917,7 @@ builtin.module {
     %pf_bidx13_r1_s2 = nest.dma.prefetch.async %516 into %block_idx_p1_6
       depends_on(%att11_inrel_r1_s2) : !nest.event<"pf_bidx13_r1_s2">
     %att13_grid_r1_s2, %att13_inrel_r1_s2, %att13_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p1_6, %q_l2_21, %state_p1_7, %acc_p1_7)
       ins(%block_idx_p1_6, %q_l2_21, %state_p1_7, %acc_p1_7) outs(%state_p1_7, %acc_p1_7)
       signal_policy {
@@ -4925,7 +4931,7 @@ builtin.module {
     %pf_bidx14_r1_s2 = nest.dma.prefetch.async %517 into %block_idx_p0_6
       depends_on(%att12_inrel_r1_s2) : !nest.event<"pf_bidx14_r1_s2">
     %att14_grid_r1_s2, %att14_inrel_r1_s2, %att14_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p0_6, %q_l2_21, %state_p2_7, %acc_p2_7)
       ins(%block_idx_p0_6, %q_l2_21, %state_p2_7, %acc_p2_7) outs(%state_p2_7, %acc_p2_7)
       signal_policy {
@@ -4939,7 +4945,7 @@ builtin.module {
     %pf_bidx15_r1_s2 = nest.dma.prefetch.async %518 into %block_idx_p1_6
       depends_on(%att13_inrel_r1_s2) : !nest.event<"pf_bidx15_r1_s2">
     %att15_grid_r1_s2, %att15_inrel_r1_s2, %att15_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p1_6, %q_l2_21, %state_p3_7, %acc_p3_7)
       ins(%block_idx_p1_6, %q_l2_21, %state_p3_7, %acc_p3_7) outs(%state_p3_7, %acc_p3_7)
       signal_policy {
@@ -4953,7 +4959,7 @@ builtin.module {
     %pf_bidx16_r1_s2 = nest.dma.prefetch.async %519 into %block_idx_p0_6
       depends_on(%att14_inrel_r1_s2) : !nest.event<"pf_bidx16_r1_s2">
     %att16_grid_r1_s2, %att16_inrel_r1_s2, %att16_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p0_6, %q_l2_21, %state_p0_7, %acc_p0_7)
       ins(%block_idx_p0_6, %q_l2_21, %state_p0_7, %acc_p0_7) outs(%state_p0_7, %acc_p0_7)
       signal_policy {
@@ -4967,7 +4973,7 @@ builtin.module {
     %pf_bidx17_r1_s2 = nest.dma.prefetch.async %520 into %block_idx_p1_6
       depends_on(%att15_inrel_r1_s2) : !nest.event<"pf_bidx17_r1_s2">
     %att17_grid_r1_s2, %att17_inrel_r1_s2, %att17_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p1_6, %q_l2_21, %state_p1_7, %acc_p1_7)
       ins(%block_idx_p1_6, %q_l2_21, %state_p1_7, %acc_p1_7) outs(%state_p1_7, %acc_p1_7)
       signal_policy {
@@ -4981,7 +4987,7 @@ builtin.module {
     %pf_bidx18_r1_s2 = nest.dma.prefetch.async %521 into %block_idx_p0_6
       depends_on(%att16_inrel_r1_s2) : !nest.event<"pf_bidx18_r1_s2">
     %att18_grid_r1_s2, %att18_inrel_r1_s2, %att18_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p0_6, %q_l2_21, %state_p2_7, %acc_p2_7)
       ins(%block_idx_p0_6, %q_l2_21, %state_p2_7, %acc_p2_7) outs(%state_p2_7, %acc_p2_7)
       signal_policy {
@@ -4995,7 +5001,7 @@ builtin.module {
     %pf_bidx19_r1_s2 = nest.dma.prefetch.async %522 into %block_idx_p1_6
       depends_on(%att17_inrel_r1_s2) : !nest.event<"pf_bidx19_r1_s2">
     %att19_grid_r1_s2, %att19_inrel_r1_s2, %att19_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p1_6, %q_l2_21, %state_p3_7, %acc_p3_7)
       ins(%block_idx_p1_6, %q_l2_21, %state_p3_7, %acc_p3_7) outs(%state_p3_7, %acc_p3_7)
       signal_policy {
@@ -5009,7 +5015,7 @@ builtin.module {
     %pf_bidx20_r1_s2 = nest.dma.prefetch.async %523 into %block_idx_p0_6
       depends_on(%att18_inrel_r1_s2) : !nest.event<"pf_bidx20_r1_s2">
     %att20_grid_r1_s2, %att20_inrel_r1_s2, %att20_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p0_6, %q_l2_21, %state_p0_7, %acc_p0_7)
       ins(%block_idx_p0_6, %q_l2_21, %state_p0_7, %acc_p0_7) outs(%state_p0_7, %acc_p0_7)
       signal_policy {
@@ -5023,7 +5029,7 @@ builtin.module {
     %pf_bidx21_r1_s2 = nest.dma.prefetch.async %524 into %block_idx_p1_6
       depends_on(%att19_inrel_r1_s2) : !nest.event<"pf_bidx21_r1_s2">
     %att21_grid_r1_s2, %att21_inrel_r1_s2, %att21_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p1_6, %q_l2_21, %state_p1_7, %acc_p1_7)
       ins(%block_idx_p1_6, %q_l2_21, %state_p1_7, %acc_p1_7) outs(%state_p1_7, %acc_p1_7)
       signal_policy {
@@ -5037,7 +5043,7 @@ builtin.module {
     %pf_bidx22_r1_s2 = nest.dma.prefetch.async %525 into %block_idx_p0_6
       depends_on(%att20_inrel_r1_s2) : !nest.event<"pf_bidx22_r1_s2">
     %att22_grid_r1_s2, %att22_inrel_r1_s2, %att22_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p0_6, %q_l2_21, %state_p2_7, %acc_p2_7)
       ins(%block_idx_p0_6, %q_l2_21, %state_p2_7, %acc_p2_7) outs(%state_p2_7, %acc_p2_7)
       signal_policy {
@@ -5051,7 +5057,7 @@ builtin.module {
     %pf_bidx23_r1_s2 = nest.dma.prefetch.async %526 into %block_idx_p1_6
       depends_on(%att21_inrel_r1_s2) : !nest.event<"pf_bidx23_r1_s2">
     %att23_grid_r1_s2, %att23_inrel_r1_s2, %att23_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p1_6, %q_l2_21, %state_p3_7, %acc_p3_7)
       ins(%block_idx_p1_6, %q_l2_21, %state_p3_7, %acc_p3_7) outs(%state_p3_7, %acc_p3_7)
       signal_policy {
@@ -5065,7 +5071,7 @@ builtin.module {
     %pf_bidx24_r1_s2 = nest.dma.prefetch.async %527 into %block_idx_p0_6
       depends_on(%att22_inrel_r1_s2) : !nest.event<"pf_bidx24_r1_s2">
     %att24_grid_r1_s2, %att24_inrel_r1_s2, %att24_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p0_6, %q_l2_21, %state_p0_7, %acc_p0_7)
       ins(%block_idx_p0_6, %q_l2_21, %state_p0_7, %acc_p0_7) outs(%state_p0_7, %acc_p0_7)
       signal_policy {
@@ -5079,7 +5085,7 @@ builtin.module {
     %pf_bidx25_r1_s2 = nest.dma.prefetch.async %528 into %block_idx_p1_6
       depends_on(%att23_inrel_r1_s2) : !nest.event<"pf_bidx25_r1_s2">
     %att25_grid_r1_s2, %att25_inrel_r1_s2, %att25_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p1_6, %q_l2_21, %state_p1_7, %acc_p1_7)
       ins(%block_idx_p1_6, %q_l2_21, %state_p1_7, %acc_p1_7) outs(%state_p1_7, %acc_p1_7)
       signal_policy {
@@ -5093,7 +5099,7 @@ builtin.module {
     %pf_bidx26_r1_s2 = nest.dma.prefetch.async %529 into %block_idx_p0_6
       depends_on(%att24_inrel_r1_s2) : !nest.event<"pf_bidx26_r1_s2">
     %att26_grid_r1_s2, %att26_inrel_r1_s2, %att26_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p0_6, %q_l2_21, %state_p2_7, %acc_p2_7)
       ins(%block_idx_p0_6, %q_l2_21, %state_p2_7, %acc_p2_7) outs(%state_p2_7, %acc_p2_7)
       signal_policy {
@@ -5107,7 +5113,7 @@ builtin.module {
     %pf_bidx27_r1_s2 = nest.dma.prefetch.async %530 into %block_idx_p1_6
       depends_on(%att25_inrel_r1_s2) : !nest.event<"pf_bidx27_r1_s2">
     %att27_grid_r1_s2, %att27_inrel_r1_s2, %att27_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p1_6, %q_l2_21, %state_p3_7, %acc_p3_7)
       ins(%block_idx_p1_6, %q_l2_21, %state_p3_7, %acc_p3_7) outs(%state_p3_7, %acc_p3_7)
       signal_policy {
@@ -5121,7 +5127,7 @@ builtin.module {
     %pf_bidx28_r1_s2 = nest.dma.prefetch.async %531 into %block_idx_p0_6
       depends_on(%att26_inrel_r1_s2) : !nest.event<"pf_bidx28_r1_s2">
     %att28_grid_r1_s2, %att28_inrel_r1_s2, %att28_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p0_6, %q_l2_21, %state_p0_7, %acc_p0_7)
       ins(%block_idx_p0_6, %q_l2_21, %state_p0_7, %acc_p0_7) outs(%state_p0_7, %acc_p0_7)
       signal_policy {
@@ -5135,7 +5141,7 @@ builtin.module {
     %pf_bidx29_r1_s2 = nest.dma.prefetch.async %532 into %block_idx_p1_6
       depends_on(%att27_inrel_r1_s2) : !nest.event<"pf_bidx29_r1_s2">
     %att29_grid_r1_s2, %att29_inrel_r1_s2, %att29_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p1_6, %q_l2_21, %state_p1_7, %acc_p1_7)
       ins(%block_idx_p1_6, %q_l2_21, %state_p1_7, %acc_p1_7) outs(%state_p1_7, %acc_p1_7)
       signal_policy {
@@ -5149,7 +5155,7 @@ builtin.module {
     %pf_bidx30_r1_s2 = nest.dma.prefetch.async %533 into %block_idx_p0_6
       depends_on(%att28_inrel_r1_s2) : !nest.event<"pf_bidx30_r1_s2">
     %att30_grid_r1_s2, %att30_inrel_r1_s2, %att30_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p0_6, %q_l2_21, %state_p2_7, %acc_p2_7)
       ins(%block_idx_p0_6, %q_l2_21, %state_p2_7, %acc_p2_7) outs(%state_p2_7, %acc_p2_7)
       signal_policy {
@@ -5163,7 +5169,7 @@ builtin.module {
     %pf_bidx31_r1_s2 = nest.dma.prefetch.async %534 into %block_idx_p1_6
       depends_on(%att29_inrel_r1_s2) : !nest.event<"pf_bidx31_r1_s2">
     %att31_grid_r1_s2, %att31_inrel_r1_s2, %att31_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%block_idx_p1_6, %q_l2_21, %state_p3_7, %acc_p3_7)
       ins(%block_idx_p1_6, %q_l2_21, %state_p3_7, %acc_p3_7) outs(%state_p3_7, %acc_p3_7)
       signal_policy {
@@ -5175,7 +5181,7 @@ builtin.module {
         !nest.event<"att31_grid_r1_s2">, !nest.event<"att31_inrel_r1_s2">,
         !nest.event<"att31_out_r1_s2">)
     %att32_grid_r1_s2, %att32_inrel_r1_s2, %att32_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_t2_final_r1 l1_mode = 3 tasks(%535) globals(%489)
+      nest.dispatch.tasks.async @paged_attention_t2_final_r1 l1_mode = 1 tasks(%535) globals(%489)
       bindings(%append_idx_6, %q_l2_21, %state_p0_7, %acc_p0_7)
       ins(%append_idx_6, %q_l2_21, %state_p0_7, %acc_p0_7) outs(%state_p0_7, %acc_p0_7)
       signal_policy {
@@ -5188,7 +5194,7 @@ builtin.module {
         !nest.event<"att32_grid_r1_s2">, !nest.event<"att32_inrel_r1_s2">,
         !nest.event<"att32_out_r1_s2">)
     %merge_grid_r1_s2, %merge_inrel_r1_s2, %merge_out_r1_s2 =
-      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 3 tasks(%535) globals()
+      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 1 tasks(%535) globals()
       bindings(
         %state_p0_7, %state_p1_7, %state_p2_7, %state_p3_7, %acc_p0_7, %acc_p1_7, %acc_p2_7,
         %acc_p3_7, %out_l2_7)
@@ -5432,7 +5438,7 @@ builtin.module {
     %pf_acc_p3_r1_s3 = nest.dma.prefetch.async %549 into %acc_p3_8 : !nest.event<"pf_acc_p3_r1_s3">
     %583 = nest.task.range from = 0 to = 4 : !nest.task_range
     %append_grid_r1_s3, %append_inrel_r1_s3, %584 =
-      nest.dispatch.tasks.async @paged_attention_append_r1_tip2 l1_mode = 3 tasks(%583)
+      nest.dispatch.tasks.async @paged_attention_append_r1_tip2 l1_mode = 1 tasks(%583)
       globals(%537) bindings(%k_new_7, %v_new_7, %append_idx_7)
       ins(%k_new_7, %v_new_7, %append_idx_7) outs()
       signal_policy {
@@ -5442,7 +5448,7 @@ builtin.module {
     %pf_bidx0_r1_s3 = nest.dma.prefetch.async %551 into %block_idx_p0_7
       : !nest.event<"pf_bidx0_r1_s3">
     %att0_grid_r1_s3, %att0_inrel_r1_s3, %att0_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p0_7, %q_l2_22, %state_p0_8, %acc_p0_8)
       ins(%block_idx_p0_7, %q_l2_22, %state_p0_8, %acc_p0_8) outs(%state_p0_8, %acc_p0_8)
       signal_policy {
@@ -5454,7 +5460,7 @@ builtin.module {
     %pf_bidx1_r1_s3 = nest.dma.prefetch.async %552 into %block_idx_p1_7
       : !nest.event<"pf_bidx1_r1_s3">
     %att1_grid_r1_s3, %att1_inrel_r1_s3, %att1_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p1_7, %q_l2_22, %state_p1_8, %acc_p1_8)
       ins(%block_idx_p1_7, %q_l2_22, %state_p1_8, %acc_p1_8) outs(%state_p1_8, %acc_p1_8)
       signal_policy {
@@ -5466,7 +5472,7 @@ builtin.module {
     %pf_bidx2_r1_s3 = nest.dma.prefetch.async %553 into %block_idx_p0_7
       depends_on(%att0_inrel_r1_s3) : !nest.event<"pf_bidx2_r1_s3">
     %att2_grid_r1_s3, %att2_inrel_r1_s3, %att2_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p0_7, %q_l2_22, %state_p2_8, %acc_p2_8)
       ins(%block_idx_p0_7, %q_l2_22, %state_p2_8, %acc_p2_8) outs(%state_p2_8, %acc_p2_8)
       signal_policy {
@@ -5478,7 +5484,7 @@ builtin.module {
     %pf_bidx3_r1_s3 = nest.dma.prefetch.async %554 into %block_idx_p1_7
       depends_on(%att1_inrel_r1_s3) : !nest.event<"pf_bidx3_r1_s3">
     %att3_grid_r1_s3, %att3_inrel_r1_s3, %att3_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p1_7, %q_l2_22, %state_p3_8, %acc_p3_8)
       ins(%block_idx_p1_7, %q_l2_22, %state_p3_8, %acc_p3_8) outs(%state_p3_8, %acc_p3_8)
       signal_policy {
@@ -5490,7 +5496,7 @@ builtin.module {
     %pf_bidx4_r1_s3 = nest.dma.prefetch.async %555 into %block_idx_p0_7
       depends_on(%att2_inrel_r1_s3) : !nest.event<"pf_bidx4_r1_s3">
     %att4_grid_r1_s3, %att4_inrel_r1_s3, %att4_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p0_7, %q_l2_22, %state_p0_8, %acc_p0_8)
       ins(%block_idx_p0_7, %q_l2_22, %state_p0_8, %acc_p0_8) outs(%state_p0_8, %acc_p0_8)
       signal_policy {
@@ -5504,7 +5510,7 @@ builtin.module {
     %pf_bidx5_r1_s3 = nest.dma.prefetch.async %556 into %block_idx_p1_7
       depends_on(%att3_inrel_r1_s3) : !nest.event<"pf_bidx5_r1_s3">
     %att5_grid_r1_s3, %att5_inrel_r1_s3, %att5_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p1_7, %q_l2_22, %state_p1_8, %acc_p1_8)
       ins(%block_idx_p1_7, %q_l2_22, %state_p1_8, %acc_p1_8) outs(%state_p1_8, %acc_p1_8)
       signal_policy {
@@ -5518,7 +5524,7 @@ builtin.module {
     %pf_bidx6_r1_s3 = nest.dma.prefetch.async %557 into %block_idx_p0_7
       depends_on(%att4_inrel_r1_s3) : !nest.event<"pf_bidx6_r1_s3">
     %att6_grid_r1_s3, %att6_inrel_r1_s3, %att6_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p0_7, %q_l2_22, %state_p2_8, %acc_p2_8)
       ins(%block_idx_p0_7, %q_l2_22, %state_p2_8, %acc_p2_8) outs(%state_p2_8, %acc_p2_8)
       signal_policy {
@@ -5532,7 +5538,7 @@ builtin.module {
     %pf_bidx7_r1_s3 = nest.dma.prefetch.async %558 into %block_idx_p1_7
       depends_on(%att5_inrel_r1_s3) : !nest.event<"pf_bidx7_r1_s3">
     %att7_grid_r1_s3, %att7_inrel_r1_s3, %att7_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p1_7, %q_l2_22, %state_p3_8, %acc_p3_8)
       ins(%block_idx_p1_7, %q_l2_22, %state_p3_8, %acc_p3_8) outs(%state_p3_8, %acc_p3_8)
       signal_policy {
@@ -5546,7 +5552,7 @@ builtin.module {
     %pf_bidx8_r1_s3 = nest.dma.prefetch.async %559 into %block_idx_p0_7
       depends_on(%att6_inrel_r1_s3) : !nest.event<"pf_bidx8_r1_s3">
     %att8_grid_r1_s3, %att8_inrel_r1_s3, %att8_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p0_7, %q_l2_22, %state_p0_8, %acc_p0_8)
       ins(%block_idx_p0_7, %q_l2_22, %state_p0_8, %acc_p0_8) outs(%state_p0_8, %acc_p0_8)
       signal_policy {
@@ -5560,7 +5566,7 @@ builtin.module {
     %pf_bidx9_r1_s3 = nest.dma.prefetch.async %560 into %block_idx_p1_7
       depends_on(%att7_inrel_r1_s3) : !nest.event<"pf_bidx9_r1_s3">
     %att9_grid_r1_s3, %att9_inrel_r1_s3, %att9_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p1_7, %q_l2_22, %state_p1_8, %acc_p1_8)
       ins(%block_idx_p1_7, %q_l2_22, %state_p1_8, %acc_p1_8) outs(%state_p1_8, %acc_p1_8)
       signal_policy {
@@ -5574,7 +5580,7 @@ builtin.module {
     %pf_bidx10_r1_s3 = nest.dma.prefetch.async %561 into %block_idx_p0_7
       depends_on(%att8_inrel_r1_s3) : !nest.event<"pf_bidx10_r1_s3">
     %att10_grid_r1_s3, %att10_inrel_r1_s3, %att10_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p0_7, %q_l2_22, %state_p2_8, %acc_p2_8)
       ins(%block_idx_p0_7, %q_l2_22, %state_p2_8, %acc_p2_8) outs(%state_p2_8, %acc_p2_8)
       signal_policy {
@@ -5588,7 +5594,7 @@ builtin.module {
     %pf_bidx11_r1_s3 = nest.dma.prefetch.async %562 into %block_idx_p1_7
       depends_on(%att9_inrel_r1_s3) : !nest.event<"pf_bidx11_r1_s3">
     %att11_grid_r1_s3, %att11_inrel_r1_s3, %att11_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p1_7, %q_l2_22, %state_p3_8, %acc_p3_8)
       ins(%block_idx_p1_7, %q_l2_22, %state_p3_8, %acc_p3_8) outs(%state_p3_8, %acc_p3_8)
       signal_policy {
@@ -5602,7 +5608,7 @@ builtin.module {
     %pf_bidx12_r1_s3 = nest.dma.prefetch.async %563 into %block_idx_p0_7
       depends_on(%att10_inrel_r1_s3) : !nest.event<"pf_bidx12_r1_s3">
     %att12_grid_r1_s3, %att12_inrel_r1_s3, %att12_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p0_7, %q_l2_22, %state_p0_8, %acc_p0_8)
       ins(%block_idx_p0_7, %q_l2_22, %state_p0_8, %acc_p0_8) outs(%state_p0_8, %acc_p0_8)
       signal_policy {
@@ -5616,7 +5622,7 @@ builtin.module {
     %pf_bidx13_r1_s3 = nest.dma.prefetch.async %564 into %block_idx_p1_7
       depends_on(%att11_inrel_r1_s3) : !nest.event<"pf_bidx13_r1_s3">
     %att13_grid_r1_s3, %att13_inrel_r1_s3, %att13_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p1_7, %q_l2_22, %state_p1_8, %acc_p1_8)
       ins(%block_idx_p1_7, %q_l2_22, %state_p1_8, %acc_p1_8) outs(%state_p1_8, %acc_p1_8)
       signal_policy {
@@ -5630,7 +5636,7 @@ builtin.module {
     %pf_bidx14_r1_s3 = nest.dma.prefetch.async %565 into %block_idx_p0_7
       depends_on(%att12_inrel_r1_s3) : !nest.event<"pf_bidx14_r1_s3">
     %att14_grid_r1_s3, %att14_inrel_r1_s3, %att14_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p0_7, %q_l2_22, %state_p2_8, %acc_p2_8)
       ins(%block_idx_p0_7, %q_l2_22, %state_p2_8, %acc_p2_8) outs(%state_p2_8, %acc_p2_8)
       signal_policy {
@@ -5644,7 +5650,7 @@ builtin.module {
     %pf_bidx15_r1_s3 = nest.dma.prefetch.async %566 into %block_idx_p1_7
       depends_on(%att13_inrel_r1_s3) : !nest.event<"pf_bidx15_r1_s3">
     %att15_grid_r1_s3, %att15_inrel_r1_s3, %att15_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p1_7, %q_l2_22, %state_p3_8, %acc_p3_8)
       ins(%block_idx_p1_7, %q_l2_22, %state_p3_8, %acc_p3_8) outs(%state_p3_8, %acc_p3_8)
       signal_policy {
@@ -5658,7 +5664,7 @@ builtin.module {
     %pf_bidx16_r1_s3 = nest.dma.prefetch.async %567 into %block_idx_p0_7
       depends_on(%att14_inrel_r1_s3) : !nest.event<"pf_bidx16_r1_s3">
     %att16_grid_r1_s3, %att16_inrel_r1_s3, %att16_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p0_7, %q_l2_22, %state_p0_8, %acc_p0_8)
       ins(%block_idx_p0_7, %q_l2_22, %state_p0_8, %acc_p0_8) outs(%state_p0_8, %acc_p0_8)
       signal_policy {
@@ -5672,7 +5678,7 @@ builtin.module {
     %pf_bidx17_r1_s3 = nest.dma.prefetch.async %568 into %block_idx_p1_7
       depends_on(%att15_inrel_r1_s3) : !nest.event<"pf_bidx17_r1_s3">
     %att17_grid_r1_s3, %att17_inrel_r1_s3, %att17_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p1_7, %q_l2_22, %state_p1_8, %acc_p1_8)
       ins(%block_idx_p1_7, %q_l2_22, %state_p1_8, %acc_p1_8) outs(%state_p1_8, %acc_p1_8)
       signal_policy {
@@ -5686,7 +5692,7 @@ builtin.module {
     %pf_bidx18_r1_s3 = nest.dma.prefetch.async %569 into %block_idx_p0_7
       depends_on(%att16_inrel_r1_s3) : !nest.event<"pf_bidx18_r1_s3">
     %att18_grid_r1_s3, %att18_inrel_r1_s3, %att18_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p0_7, %q_l2_22, %state_p2_8, %acc_p2_8)
       ins(%block_idx_p0_7, %q_l2_22, %state_p2_8, %acc_p2_8) outs(%state_p2_8, %acc_p2_8)
       signal_policy {
@@ -5700,7 +5706,7 @@ builtin.module {
     %pf_bidx19_r1_s3 = nest.dma.prefetch.async %570 into %block_idx_p1_7
       depends_on(%att17_inrel_r1_s3) : !nest.event<"pf_bidx19_r1_s3">
     %att19_grid_r1_s3, %att19_inrel_r1_s3, %att19_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p1_7, %q_l2_22, %state_p3_8, %acc_p3_8)
       ins(%block_idx_p1_7, %q_l2_22, %state_p3_8, %acc_p3_8) outs(%state_p3_8, %acc_p3_8)
       signal_policy {
@@ -5714,7 +5720,7 @@ builtin.module {
     %pf_bidx20_r1_s3 = nest.dma.prefetch.async %571 into %block_idx_p0_7
       depends_on(%att18_inrel_r1_s3) : !nest.event<"pf_bidx20_r1_s3">
     %att20_grid_r1_s3, %att20_inrel_r1_s3, %att20_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p0_7, %q_l2_22, %state_p0_8, %acc_p0_8)
       ins(%block_idx_p0_7, %q_l2_22, %state_p0_8, %acc_p0_8) outs(%state_p0_8, %acc_p0_8)
       signal_policy {
@@ -5728,7 +5734,7 @@ builtin.module {
     %pf_bidx21_r1_s3 = nest.dma.prefetch.async %572 into %block_idx_p1_7
       depends_on(%att19_inrel_r1_s3) : !nest.event<"pf_bidx21_r1_s3">
     %att21_grid_r1_s3, %att21_inrel_r1_s3, %att21_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p1_7, %q_l2_22, %state_p1_8, %acc_p1_8)
       ins(%block_idx_p1_7, %q_l2_22, %state_p1_8, %acc_p1_8) outs(%state_p1_8, %acc_p1_8)
       signal_policy {
@@ -5742,7 +5748,7 @@ builtin.module {
     %pf_bidx22_r1_s3 = nest.dma.prefetch.async %573 into %block_idx_p0_7
       depends_on(%att20_inrel_r1_s3) : !nest.event<"pf_bidx22_r1_s3">
     %att22_grid_r1_s3, %att22_inrel_r1_s3, %att22_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p0_7, %q_l2_22, %state_p2_8, %acc_p2_8)
       ins(%block_idx_p0_7, %q_l2_22, %state_p2_8, %acc_p2_8) outs(%state_p2_8, %acc_p2_8)
       signal_policy {
@@ -5756,7 +5762,7 @@ builtin.module {
     %pf_bidx23_r1_s3 = nest.dma.prefetch.async %574 into %block_idx_p1_7
       depends_on(%att21_inrel_r1_s3) : !nest.event<"pf_bidx23_r1_s3">
     %att23_grid_r1_s3, %att23_inrel_r1_s3, %att23_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p1_7, %q_l2_22, %state_p3_8, %acc_p3_8)
       ins(%block_idx_p1_7, %q_l2_22, %state_p3_8, %acc_p3_8) outs(%state_p3_8, %acc_p3_8)
       signal_policy {
@@ -5770,7 +5776,7 @@ builtin.module {
     %pf_bidx24_r1_s3 = nest.dma.prefetch.async %575 into %block_idx_p0_7
       depends_on(%att22_inrel_r1_s3) : !nest.event<"pf_bidx24_r1_s3">
     %att24_grid_r1_s3, %att24_inrel_r1_s3, %att24_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p0_7, %q_l2_22, %state_p0_8, %acc_p0_8)
       ins(%block_idx_p0_7, %q_l2_22, %state_p0_8, %acc_p0_8) outs(%state_p0_8, %acc_p0_8)
       signal_policy {
@@ -5784,7 +5790,7 @@ builtin.module {
     %pf_bidx25_r1_s3 = nest.dma.prefetch.async %576 into %block_idx_p1_7
       depends_on(%att23_inrel_r1_s3) : !nest.event<"pf_bidx25_r1_s3">
     %att25_grid_r1_s3, %att25_inrel_r1_s3, %att25_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p1_7, %q_l2_22, %state_p1_8, %acc_p1_8)
       ins(%block_idx_p1_7, %q_l2_22, %state_p1_8, %acc_p1_8) outs(%state_p1_8, %acc_p1_8)
       signal_policy {
@@ -5798,7 +5804,7 @@ builtin.module {
     %pf_bidx26_r1_s3 = nest.dma.prefetch.async %577 into %block_idx_p0_7
       depends_on(%att24_inrel_r1_s3) : !nest.event<"pf_bidx26_r1_s3">
     %att26_grid_r1_s3, %att26_inrel_r1_s3, %att26_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p0_7, %q_l2_22, %state_p2_8, %acc_p2_8)
       ins(%block_idx_p0_7, %q_l2_22, %state_p2_8, %acc_p2_8) outs(%state_p2_8, %acc_p2_8)
       signal_policy {
@@ -5812,7 +5818,7 @@ builtin.module {
     %pf_bidx27_r1_s3 = nest.dma.prefetch.async %578 into %block_idx_p1_7
       depends_on(%att25_inrel_r1_s3) : !nest.event<"pf_bidx27_r1_s3">
     %att27_grid_r1_s3, %att27_inrel_r1_s3, %att27_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p1_7, %q_l2_22, %state_p3_8, %acc_p3_8)
       ins(%block_idx_p1_7, %q_l2_22, %state_p3_8, %acc_p3_8) outs(%state_p3_8, %acc_p3_8)
       signal_policy {
@@ -5826,7 +5832,7 @@ builtin.module {
     %pf_bidx28_r1_s3 = nest.dma.prefetch.async %579 into %block_idx_p0_7
       depends_on(%att26_inrel_r1_s3) : !nest.event<"pf_bidx28_r1_s3">
     %att28_grid_r1_s3, %att28_inrel_r1_s3, %att28_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p0_7, %q_l2_22, %state_p0_8, %acc_p0_8)
       ins(%block_idx_p0_7, %q_l2_22, %state_p0_8, %acc_p0_8) outs(%state_p0_8, %acc_p0_8)
       signal_policy {
@@ -5840,7 +5846,7 @@ builtin.module {
     %pf_bidx29_r1_s3 = nest.dma.prefetch.async %580 into %block_idx_p1_7
       depends_on(%att27_inrel_r1_s3) : !nest.event<"pf_bidx29_r1_s3">
     %att29_grid_r1_s3, %att29_inrel_r1_s3, %att29_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p1_7, %q_l2_22, %state_p1_8, %acc_p1_8)
       ins(%block_idx_p1_7, %q_l2_22, %state_p1_8, %acc_p1_8) outs(%state_p1_8, %acc_p1_8)
       signal_policy {
@@ -5854,7 +5860,7 @@ builtin.module {
     %pf_bidx30_r1_s3 = nest.dma.prefetch.async %581 into %block_idx_p0_7
       depends_on(%att28_inrel_r1_s3) : !nest.event<"pf_bidx30_r1_s3">
     %att30_grid_r1_s3, %att30_inrel_r1_s3, %att30_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p0_7, %q_l2_22, %state_p2_8, %acc_p2_8)
       ins(%block_idx_p0_7, %q_l2_22, %state_p2_8, %acc_p2_8) outs(%state_p2_8, %acc_p2_8)
       signal_policy {
@@ -5868,7 +5874,7 @@ builtin.module {
     %pf_bidx31_r1_s3 = nest.dma.prefetch.async %582 into %block_idx_p1_7
       depends_on(%att29_inrel_r1_s3) : !nest.event<"pf_bidx31_r1_s3">
     %att31_grid_r1_s3, %att31_inrel_r1_s3, %att31_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%block_idx_p1_7, %q_l2_22, %state_p3_8, %acc_p3_8)
       ins(%block_idx_p1_7, %q_l2_22, %state_p3_8, %acc_p3_8) outs(%state_p3_8, %acc_p3_8)
       signal_policy {
@@ -5880,7 +5886,7 @@ builtin.module {
         !nest.event<"att31_grid_r1_s3">, !nest.event<"att31_inrel_r1_s3">,
         !nest.event<"att31_out_r1_s3">)
     %att32_grid_r1_s3, %att32_inrel_r1_s3, %att32_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_t3_final_r1 l1_mode = 3 tasks(%583) globals(%537)
+      nest.dispatch.tasks.async @paged_attention_t3_final_r1 l1_mode = 1 tasks(%583) globals(%537)
       bindings(%append_idx_7, %q_l2_22, %state_p0_8, %acc_p0_8)
       ins(%append_idx_7, %q_l2_22, %state_p0_8, %acc_p0_8) outs(%state_p0_8, %acc_p0_8)
       signal_policy {
@@ -5893,7 +5899,7 @@ builtin.module {
         !nest.event<"att32_grid_r1_s3">, !nest.event<"att32_inrel_r1_s3">,
         !nest.event<"att32_out_r1_s3">)
     %merge_grid_r1_s3, %merge_inrel_r1_s3, %merge_out_r1_s3 =
-      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 3 tasks(%583) globals()
+      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 1 tasks(%583) globals()
       bindings(
         %state_p0_8, %state_p1_8, %state_p2_8, %state_p3_8, %acc_p0_8, %acc_p1_8, %acc_p2_8,
         %acc_p3_8, %out_l2_8)
@@ -6167,7 +6173,7 @@ builtin.module {
     %pf_acc_p3_r2_s0 = nest.dma.prefetch.async %597 into %acc_p3_9 : !nest.event<"pf_acc_p3_r2_s0">
     %646 = nest.task.range from = 0 to = 4 : !nest.task_range
     %append_grid_r2_s0, %append_inrel_r2_s0, %647 =
-      nest.dispatch.tasks.async @paged_attention_append_r2_tip15 l1_mode = 3 tasks(%646)
+      nest.dispatch.tasks.async @paged_attention_append_r2_tip15 l1_mode = 1 tasks(%646)
       globals(%585) bindings(%k_new_8, %v_new_8, %append_idx_8)
       ins(%k_new_8, %v_new_8, %append_idx_8) outs()
       signal_policy {
@@ -6177,7 +6183,7 @@ builtin.module {
     %pf_bidx0_r2_s0 = nest.dma.prefetch.async %599 into %block_idx_p0_8
       : !nest.event<"pf_bidx0_r2_s0">
     %att0_grid_r2_s0, %att0_inrel_r2_s0, %att0_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9) outs(%state_p0_9, %acc_p0_9)
       signal_policy {
@@ -6189,7 +6195,7 @@ builtin.module {
     %pf_bidx1_r2_s0 = nest.dma.prefetch.async %600 into %block_idx_p1_8
       : !nest.event<"pf_bidx1_r2_s0">
     %att1_grid_r2_s0, %att1_inrel_r2_s0, %att1_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9) outs(%state_p1_9, %acc_p1_9)
       signal_policy {
@@ -6201,7 +6207,7 @@ builtin.module {
     %pf_bidx2_r2_s0 = nest.dma.prefetch.async %601 into %block_idx_p0_8
       depends_on(%att0_inrel_r2_s0) : !nest.event<"pf_bidx2_r2_s0">
     %att2_grid_r2_s0, %att2_inrel_r2_s0, %att2_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9) outs(%state_p2_9, %acc_p2_9)
       signal_policy {
@@ -6213,7 +6219,7 @@ builtin.module {
     %pf_bidx3_r2_s0 = nest.dma.prefetch.async %602 into %block_idx_p1_8
       depends_on(%att1_inrel_r2_s0) : !nest.event<"pf_bidx3_r2_s0">
     %att3_grid_r2_s0, %att3_inrel_r2_s0, %att3_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9) outs(%state_p3_9, %acc_p3_9)
       signal_policy {
@@ -6225,7 +6231,7 @@ builtin.module {
     %pf_bidx4_r2_s0 = nest.dma.prefetch.async %603 into %block_idx_p0_8
       depends_on(%att2_inrel_r2_s0) : !nest.event<"pf_bidx4_r2_s0">
     %att4_grid_r2_s0, %att4_inrel_r2_s0, %att4_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9) outs(%state_p0_9, %acc_p0_9)
       signal_policy {
@@ -6239,7 +6245,7 @@ builtin.module {
     %pf_bidx5_r2_s0 = nest.dma.prefetch.async %604 into %block_idx_p1_8
       depends_on(%att3_inrel_r2_s0) : !nest.event<"pf_bidx5_r2_s0">
     %att5_grid_r2_s0, %att5_inrel_r2_s0, %att5_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9) outs(%state_p1_9, %acc_p1_9)
       signal_policy {
@@ -6253,7 +6259,7 @@ builtin.module {
     %pf_bidx6_r2_s0 = nest.dma.prefetch.async %605 into %block_idx_p0_8
       depends_on(%att4_inrel_r2_s0) : !nest.event<"pf_bidx6_r2_s0">
     %att6_grid_r2_s0, %att6_inrel_r2_s0, %att6_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9) outs(%state_p2_9, %acc_p2_9)
       signal_policy {
@@ -6267,7 +6273,7 @@ builtin.module {
     %pf_bidx7_r2_s0 = nest.dma.prefetch.async %606 into %block_idx_p1_8
       depends_on(%att5_inrel_r2_s0) : !nest.event<"pf_bidx7_r2_s0">
     %att7_grid_r2_s0, %att7_inrel_r2_s0, %att7_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9) outs(%state_p3_9, %acc_p3_9)
       signal_policy {
@@ -6281,7 +6287,7 @@ builtin.module {
     %pf_bidx8_r2_s0 = nest.dma.prefetch.async %607 into %block_idx_p0_8
       depends_on(%att6_inrel_r2_s0) : !nest.event<"pf_bidx8_r2_s0">
     %att8_grid_r2_s0, %att8_inrel_r2_s0, %att8_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9) outs(%state_p0_9, %acc_p0_9)
       signal_policy {
@@ -6295,7 +6301,7 @@ builtin.module {
     %pf_bidx9_r2_s0 = nest.dma.prefetch.async %608 into %block_idx_p1_8
       depends_on(%att7_inrel_r2_s0) : !nest.event<"pf_bidx9_r2_s0">
     %att9_grid_r2_s0, %att9_inrel_r2_s0, %att9_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9) outs(%state_p1_9, %acc_p1_9)
       signal_policy {
@@ -6309,7 +6315,7 @@ builtin.module {
     %pf_bidx10_r2_s0 = nest.dma.prefetch.async %609 into %block_idx_p0_8
       depends_on(%att8_inrel_r2_s0) : !nest.event<"pf_bidx10_r2_s0">
     %att10_grid_r2_s0, %att10_inrel_r2_s0, %att10_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9) outs(%state_p2_9, %acc_p2_9)
       signal_policy {
@@ -6323,7 +6329,7 @@ builtin.module {
     %pf_bidx11_r2_s0 = nest.dma.prefetch.async %610 into %block_idx_p1_8
       depends_on(%att9_inrel_r2_s0) : !nest.event<"pf_bidx11_r2_s0">
     %att11_grid_r2_s0, %att11_inrel_r2_s0, %att11_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9) outs(%state_p3_9, %acc_p3_9)
       signal_policy {
@@ -6337,7 +6343,7 @@ builtin.module {
     %pf_bidx12_r2_s0 = nest.dma.prefetch.async %611 into %block_idx_p0_8
       depends_on(%att10_inrel_r2_s0) : !nest.event<"pf_bidx12_r2_s0">
     %att12_grid_r2_s0, %att12_inrel_r2_s0, %att12_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9) outs(%state_p0_9, %acc_p0_9)
       signal_policy {
@@ -6351,7 +6357,7 @@ builtin.module {
     %pf_bidx13_r2_s0 = nest.dma.prefetch.async %612 into %block_idx_p1_8
       depends_on(%att11_inrel_r2_s0) : !nest.event<"pf_bidx13_r2_s0">
     %att13_grid_r2_s0, %att13_inrel_r2_s0, %att13_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9) outs(%state_p1_9, %acc_p1_9)
       signal_policy {
@@ -6365,7 +6371,7 @@ builtin.module {
     %pf_bidx14_r2_s0 = nest.dma.prefetch.async %613 into %block_idx_p0_8
       depends_on(%att12_inrel_r2_s0) : !nest.event<"pf_bidx14_r2_s0">
     %att14_grid_r2_s0, %att14_inrel_r2_s0, %att14_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9) outs(%state_p2_9, %acc_p2_9)
       signal_policy {
@@ -6379,7 +6385,7 @@ builtin.module {
     %pf_bidx15_r2_s0 = nest.dma.prefetch.async %614 into %block_idx_p1_8
       depends_on(%att13_inrel_r2_s0) : !nest.event<"pf_bidx15_r2_s0">
     %att15_grid_r2_s0, %att15_inrel_r2_s0, %att15_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9) outs(%state_p3_9, %acc_p3_9)
       signal_policy {
@@ -6393,7 +6399,7 @@ builtin.module {
     %pf_bidx16_r2_s0 = nest.dma.prefetch.async %615 into %block_idx_p0_8
       depends_on(%att14_inrel_r2_s0) : !nest.event<"pf_bidx16_r2_s0">
     %att16_grid_r2_s0, %att16_inrel_r2_s0, %att16_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9) outs(%state_p0_9, %acc_p0_9)
       signal_policy {
@@ -6407,7 +6413,7 @@ builtin.module {
     %pf_bidx17_r2_s0 = nest.dma.prefetch.async %616 into %block_idx_p1_8
       depends_on(%att15_inrel_r2_s0) : !nest.event<"pf_bidx17_r2_s0">
     %att17_grid_r2_s0, %att17_inrel_r2_s0, %att17_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9) outs(%state_p1_9, %acc_p1_9)
       signal_policy {
@@ -6421,7 +6427,7 @@ builtin.module {
     %pf_bidx18_r2_s0 = nest.dma.prefetch.async %617 into %block_idx_p0_8
       depends_on(%att16_inrel_r2_s0) : !nest.event<"pf_bidx18_r2_s0">
     %att18_grid_r2_s0, %att18_inrel_r2_s0, %att18_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9) outs(%state_p2_9, %acc_p2_9)
       signal_policy {
@@ -6435,7 +6441,7 @@ builtin.module {
     %pf_bidx19_r2_s0 = nest.dma.prefetch.async %618 into %block_idx_p1_8
       depends_on(%att17_inrel_r2_s0) : !nest.event<"pf_bidx19_r2_s0">
     %att19_grid_r2_s0, %att19_inrel_r2_s0, %att19_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9) outs(%state_p3_9, %acc_p3_9)
       signal_policy {
@@ -6449,7 +6455,7 @@ builtin.module {
     %pf_bidx20_r2_s0 = nest.dma.prefetch.async %619 into %block_idx_p0_8
       depends_on(%att18_inrel_r2_s0) : !nest.event<"pf_bidx20_r2_s0">
     %att20_grid_r2_s0, %att20_inrel_r2_s0, %att20_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9) outs(%state_p0_9, %acc_p0_9)
       signal_policy {
@@ -6463,7 +6469,7 @@ builtin.module {
     %pf_bidx21_r2_s0 = nest.dma.prefetch.async %620 into %block_idx_p1_8
       depends_on(%att19_inrel_r2_s0) : !nest.event<"pf_bidx21_r2_s0">
     %att21_grid_r2_s0, %att21_inrel_r2_s0, %att21_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9) outs(%state_p1_9, %acc_p1_9)
       signal_policy {
@@ -6477,7 +6483,7 @@ builtin.module {
     %pf_bidx22_r2_s0 = nest.dma.prefetch.async %621 into %block_idx_p0_8
       depends_on(%att20_inrel_r2_s0) : !nest.event<"pf_bidx22_r2_s0">
     %att22_grid_r2_s0, %att22_inrel_r2_s0, %att22_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9) outs(%state_p2_9, %acc_p2_9)
       signal_policy {
@@ -6491,7 +6497,7 @@ builtin.module {
     %pf_bidx23_r2_s0 = nest.dma.prefetch.async %622 into %block_idx_p1_8
       depends_on(%att21_inrel_r2_s0) : !nest.event<"pf_bidx23_r2_s0">
     %att23_grid_r2_s0, %att23_inrel_r2_s0, %att23_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9) outs(%state_p3_9, %acc_p3_9)
       signal_policy {
@@ -6505,7 +6511,7 @@ builtin.module {
     %pf_bidx24_r2_s0 = nest.dma.prefetch.async %623 into %block_idx_p0_8
       depends_on(%att22_inrel_r2_s0) : !nest.event<"pf_bidx24_r2_s0">
     %att24_grid_r2_s0, %att24_inrel_r2_s0, %att24_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9) outs(%state_p0_9, %acc_p0_9)
       signal_policy {
@@ -6519,7 +6525,7 @@ builtin.module {
     %pf_bidx25_r2_s0 = nest.dma.prefetch.async %624 into %block_idx_p1_8
       depends_on(%att23_inrel_r2_s0) : !nest.event<"pf_bidx25_r2_s0">
     %att25_grid_r2_s0, %att25_inrel_r2_s0, %att25_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9) outs(%state_p1_9, %acc_p1_9)
       signal_policy {
@@ -6533,7 +6539,7 @@ builtin.module {
     %pf_bidx26_r2_s0 = nest.dma.prefetch.async %625 into %block_idx_p0_8
       depends_on(%att24_inrel_r2_s0) : !nest.event<"pf_bidx26_r2_s0">
     %att26_grid_r2_s0, %att26_inrel_r2_s0, %att26_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9) outs(%state_p2_9, %acc_p2_9)
       signal_policy {
@@ -6547,7 +6553,7 @@ builtin.module {
     %pf_bidx27_r2_s0 = nest.dma.prefetch.async %626 into %block_idx_p1_8
       depends_on(%att25_inrel_r2_s0) : !nest.event<"pf_bidx27_r2_s0">
     %att27_grid_r2_s0, %att27_inrel_r2_s0, %att27_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9) outs(%state_p3_9, %acc_p3_9)
       signal_policy {
@@ -6561,7 +6567,7 @@ builtin.module {
     %pf_bidx28_r2_s0 = nest.dma.prefetch.async %627 into %block_idx_p0_8
       depends_on(%att26_inrel_r2_s0) : !nest.event<"pf_bidx28_r2_s0">
     %att28_grid_r2_s0, %att28_inrel_r2_s0, %att28_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9) outs(%state_p0_9, %acc_p0_9)
       signal_policy {
@@ -6575,7 +6581,7 @@ builtin.module {
     %pf_bidx29_r2_s0 = nest.dma.prefetch.async %628 into %block_idx_p1_8
       depends_on(%att27_inrel_r2_s0) : !nest.event<"pf_bidx29_r2_s0">
     %att29_grid_r2_s0, %att29_inrel_r2_s0, %att29_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9) outs(%state_p1_9, %acc_p1_9)
       signal_policy {
@@ -6589,7 +6595,7 @@ builtin.module {
     %pf_bidx30_r2_s0 = nest.dma.prefetch.async %629 into %block_idx_p0_8
       depends_on(%att28_inrel_r2_s0) : !nest.event<"pf_bidx30_r2_s0">
     %att30_grid_r2_s0, %att30_inrel_r2_s0, %att30_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9) outs(%state_p2_9, %acc_p2_9)
       signal_policy {
@@ -6603,7 +6609,7 @@ builtin.module {
     %pf_bidx31_r2_s0 = nest.dma.prefetch.async %630 into %block_idx_p1_8
       depends_on(%att29_inrel_r2_s0) : !nest.event<"pf_bidx31_r2_s0">
     %att31_grid_r2_s0, %att31_inrel_r2_s0, %att31_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9) outs(%state_p3_9, %acc_p3_9)
       signal_policy {
@@ -6617,7 +6623,7 @@ builtin.module {
     %pf_bidx32_r2_s0 = nest.dma.prefetch.async %631 into %block_idx_p0_8
       depends_on(%att30_inrel_r2_s0) : !nest.event<"pf_bidx32_r2_s0">
     %att32_grid_r2_s0, %att32_inrel_r2_s0, %att32_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9) outs(%state_p0_9, %acc_p0_9)
       signal_policy {
@@ -6631,7 +6637,7 @@ builtin.module {
     %pf_bidx33_r2_s0 = nest.dma.prefetch.async %632 into %block_idx_p1_8
       depends_on(%att31_inrel_r2_s0) : !nest.event<"pf_bidx33_r2_s0">
     %att33_grid_r2_s0, %att33_inrel_r2_s0, %att33_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9) outs(%state_p1_9, %acc_p1_9)
       signal_policy {
@@ -6645,7 +6651,7 @@ builtin.module {
     %pf_bidx34_r2_s0 = nest.dma.prefetch.async %633 into %block_idx_p0_8
       depends_on(%att32_inrel_r2_s0) : !nest.event<"pf_bidx34_r2_s0">
     %att34_grid_r2_s0, %att34_inrel_r2_s0, %att34_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9) outs(%state_p2_9, %acc_p2_9)
       signal_policy {
@@ -6659,7 +6665,7 @@ builtin.module {
     %pf_bidx35_r2_s0 = nest.dma.prefetch.async %634 into %block_idx_p1_8
       depends_on(%att33_inrel_r2_s0) : !nest.event<"pf_bidx35_r2_s0">
     %att35_grid_r2_s0, %att35_inrel_r2_s0, %att35_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9) outs(%state_p3_9, %acc_p3_9)
       signal_policy {
@@ -6673,7 +6679,7 @@ builtin.module {
     %pf_bidx36_r2_s0 = nest.dma.prefetch.async %635 into %block_idx_p0_8
       depends_on(%att34_inrel_r2_s0) : !nest.event<"pf_bidx36_r2_s0">
     %att36_grid_r2_s0, %att36_inrel_r2_s0, %att36_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9) outs(%state_p0_9, %acc_p0_9)
       signal_policy {
@@ -6687,7 +6693,7 @@ builtin.module {
     %pf_bidx37_r2_s0 = nest.dma.prefetch.async %636 into %block_idx_p1_8
       depends_on(%att35_inrel_r2_s0) : !nest.event<"pf_bidx37_r2_s0">
     %att37_grid_r2_s0, %att37_inrel_r2_s0, %att37_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9) outs(%state_p1_9, %acc_p1_9)
       signal_policy {
@@ -6701,7 +6707,7 @@ builtin.module {
     %pf_bidx38_r2_s0 = nest.dma.prefetch.async %637 into %block_idx_p0_8
       depends_on(%att36_inrel_r2_s0) : !nest.event<"pf_bidx38_r2_s0">
     %att38_grid_r2_s0, %att38_inrel_r2_s0, %att38_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9) outs(%state_p2_9, %acc_p2_9)
       signal_policy {
@@ -6715,7 +6721,7 @@ builtin.module {
     %pf_bidx39_r2_s0 = nest.dma.prefetch.async %638 into %block_idx_p1_8
       depends_on(%att37_inrel_r2_s0) : !nest.event<"pf_bidx39_r2_s0">
     %att39_grid_r2_s0, %att39_inrel_r2_s0, %att39_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9) outs(%state_p3_9, %acc_p3_9)
       signal_policy {
@@ -6729,7 +6735,7 @@ builtin.module {
     %pf_bidx40_r2_s0 = nest.dma.prefetch.async %639 into %block_idx_p0_8
       depends_on(%att38_inrel_r2_s0) : !nest.event<"pf_bidx40_r2_s0">
     %att40_grid_r2_s0, %att40_inrel_r2_s0, %att40_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9) outs(%state_p0_9, %acc_p0_9)
       signal_policy {
@@ -6743,7 +6749,7 @@ builtin.module {
     %pf_bidx41_r2_s0 = nest.dma.prefetch.async %640 into %block_idx_p1_8
       depends_on(%att39_inrel_r2_s0) : !nest.event<"pf_bidx41_r2_s0">
     %att41_grid_r2_s0, %att41_inrel_r2_s0, %att41_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9) outs(%state_p1_9, %acc_p1_9)
       signal_policy {
@@ -6757,7 +6763,7 @@ builtin.module {
     %pf_bidx42_r2_s0 = nest.dma.prefetch.async %641 into %block_idx_p0_8
       depends_on(%att40_inrel_r2_s0) : !nest.event<"pf_bidx42_r2_s0">
     %att42_grid_r2_s0, %att42_inrel_r2_s0, %att42_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9) outs(%state_p2_9, %acc_p2_9)
       signal_policy {
@@ -6771,7 +6777,7 @@ builtin.module {
     %pf_bidx43_r2_s0 = nest.dma.prefetch.async %642 into %block_idx_p1_8
       depends_on(%att41_inrel_r2_s0) : !nest.event<"pf_bidx43_r2_s0">
     %att43_grid_r2_s0, %att43_inrel_r2_s0, %att43_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p3_9, %acc_p3_9) outs(%state_p3_9, %acc_p3_9)
       signal_policy {
@@ -6785,7 +6791,7 @@ builtin.module {
     %pf_bidx44_r2_s0 = nest.dma.prefetch.async %643 into %block_idx_p0_8
       depends_on(%att42_inrel_r2_s0) : !nest.event<"pf_bidx44_r2_s0">
     %att44_grid_r2_s0, %att44_inrel_r2_s0, %att44_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p0_9, %acc_p0_9) outs(%state_p0_9, %acc_p0_9)
       signal_policy {
@@ -6799,7 +6805,7 @@ builtin.module {
     %pf_bidx45_r2_s0 = nest.dma.prefetch.async %644 into %block_idx_p1_8
       depends_on(%att43_inrel_r2_s0) : !nest.event<"pf_bidx45_r2_s0">
     %att45_grid_r2_s0, %att45_inrel_r2_s0, %att45_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9)
       ins(%block_idx_p1_8, %q_l2_23, %state_p1_9, %acc_p1_9) outs(%state_p1_9, %acc_p1_9)
       signal_policy {
@@ -6813,7 +6819,7 @@ builtin.module {
     %pf_bidx46_r2_s0 = nest.dma.prefetch.async %645 into %block_idx_p0_8
       depends_on(%att44_inrel_r2_s0) : !nest.event<"pf_bidx46_r2_s0">
     %att46_grid_r2_s0, %att46_inrel_r2_s0, %att46_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9)
       ins(%block_idx_p0_8, %q_l2_23, %state_p2_9, %acc_p2_9) outs(%state_p2_9, %acc_p2_9)
       signal_policy {
@@ -6825,7 +6831,7 @@ builtin.module {
         !nest.event<"att46_grid_r2_s0">, !nest.event<"att46_inrel_r2_s0">,
         !nest.event<"att46_out_r2_s0">)
     %att47_grid_r2_s0, %att47_inrel_r2_s0, %att47_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_t16_final_r2 l1_mode = 3 tasks(%646) globals(%585)
+      nest.dispatch.tasks.async @paged_attention_t16_final_r2 l1_mode = 1 tasks(%646) globals(%585)
       bindings(%append_idx_8, %q_l2_23, %state_p3_9, %acc_p3_9)
       ins(%append_idx_8, %q_l2_23, %state_p3_9, %acc_p3_9) outs(%state_p3_9, %acc_p3_9)
       signal_policy {
@@ -6838,7 +6844,7 @@ builtin.module {
         !nest.event<"att47_grid_r2_s0">, !nest.event<"att47_inrel_r2_s0">,
         !nest.event<"att47_out_r2_s0">)
     %merge_grid_r2_s0, %merge_inrel_r2_s0, %merge_out_r2_s0 =
-      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 3 tasks(%646) globals()
+      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 1 tasks(%646) globals()
       bindings(
         %state_p0_9, %state_p1_9, %state_p2_9, %state_p3_9, %acc_p0_9, %acc_p1_9, %acc_p2_9,
         %acc_p3_9, %out_l2_9)
@@ -7137,7 +7143,7 @@ builtin.module {
     %pf_acc_p3_r2_s1 = nest.dma.prefetch.async %660 into %acc_p3_10 : !nest.event<"pf_acc_p3_r2_s1">
     %710 = nest.task.range from = 0 to = 4 : !nest.task_range
     %append_grid_r2_s1, %append_inrel_r2_s1, %711 =
-      nest.dispatch.tasks.async @paged_attention_append_r2_tip0 l1_mode = 3 tasks(%710)
+      nest.dispatch.tasks.async @paged_attention_append_r2_tip0 l1_mode = 1 tasks(%710)
       globals(%648) bindings(%k_new_9, %v_new_9, %append_idx_9)
       ins(%k_new_9, %v_new_9, %append_idx_9) outs()
       signal_policy {
@@ -7147,7 +7153,7 @@ builtin.module {
     %pf_bidx0_r2_s1 = nest.dma.prefetch.async %662 into %block_idx_p0_9
       : !nest.event<"pf_bidx0_r2_s1">
     %att0_grid_r2_s1, %att0_inrel_r2_s1, %att0_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10) outs(%state_p0_10, %acc_p0_10)
       signal_policy {
@@ -7159,7 +7165,7 @@ builtin.module {
     %pf_bidx1_r2_s1 = nest.dma.prefetch.async %663 into %block_idx_p1_9
       : !nest.event<"pf_bidx1_r2_s1">
     %att1_grid_r2_s1, %att1_inrel_r2_s1, %att1_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10) outs(%state_p1_10, %acc_p1_10)
       signal_policy {
@@ -7171,7 +7177,7 @@ builtin.module {
     %pf_bidx2_r2_s1 = nest.dma.prefetch.async %664 into %block_idx_p0_9
       depends_on(%att0_inrel_r2_s1) : !nest.event<"pf_bidx2_r2_s1">
     %att2_grid_r2_s1, %att2_inrel_r2_s1, %att2_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10) outs(%state_p2_10, %acc_p2_10)
       signal_policy {
@@ -7183,7 +7189,7 @@ builtin.module {
     %pf_bidx3_r2_s1 = nest.dma.prefetch.async %665 into %block_idx_p1_9
       depends_on(%att1_inrel_r2_s1) : !nest.event<"pf_bidx3_r2_s1">
     %att3_grid_r2_s1, %att3_inrel_r2_s1, %att3_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10) outs(%state_p3_10, %acc_p3_10)
       signal_policy {
@@ -7195,7 +7201,7 @@ builtin.module {
     %pf_bidx4_r2_s1 = nest.dma.prefetch.async %666 into %block_idx_p0_9
       depends_on(%att2_inrel_r2_s1) : !nest.event<"pf_bidx4_r2_s1">
     %att4_grid_r2_s1, %att4_inrel_r2_s1, %att4_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10) outs(%state_p0_10, %acc_p0_10)
       signal_policy {
@@ -7209,7 +7215,7 @@ builtin.module {
     %pf_bidx5_r2_s1 = nest.dma.prefetch.async %667 into %block_idx_p1_9
       depends_on(%att3_inrel_r2_s1) : !nest.event<"pf_bidx5_r2_s1">
     %att5_grid_r2_s1, %att5_inrel_r2_s1, %att5_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10) outs(%state_p1_10, %acc_p1_10)
       signal_policy {
@@ -7223,7 +7229,7 @@ builtin.module {
     %pf_bidx6_r2_s1 = nest.dma.prefetch.async %668 into %block_idx_p0_9
       depends_on(%att4_inrel_r2_s1) : !nest.event<"pf_bidx6_r2_s1">
     %att6_grid_r2_s1, %att6_inrel_r2_s1, %att6_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10) outs(%state_p2_10, %acc_p2_10)
       signal_policy {
@@ -7237,7 +7243,7 @@ builtin.module {
     %pf_bidx7_r2_s1 = nest.dma.prefetch.async %669 into %block_idx_p1_9
       depends_on(%att5_inrel_r2_s1) : !nest.event<"pf_bidx7_r2_s1">
     %att7_grid_r2_s1, %att7_inrel_r2_s1, %att7_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10) outs(%state_p3_10, %acc_p3_10)
       signal_policy {
@@ -7251,7 +7257,7 @@ builtin.module {
     %pf_bidx8_r2_s1 = nest.dma.prefetch.async %670 into %block_idx_p0_9
       depends_on(%att6_inrel_r2_s1) : !nest.event<"pf_bidx8_r2_s1">
     %att8_grid_r2_s1, %att8_inrel_r2_s1, %att8_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10) outs(%state_p0_10, %acc_p0_10)
       signal_policy {
@@ -7265,7 +7271,7 @@ builtin.module {
     %pf_bidx9_r2_s1 = nest.dma.prefetch.async %671 into %block_idx_p1_9
       depends_on(%att7_inrel_r2_s1) : !nest.event<"pf_bidx9_r2_s1">
     %att9_grid_r2_s1, %att9_inrel_r2_s1, %att9_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10) outs(%state_p1_10, %acc_p1_10)
       signal_policy {
@@ -7279,7 +7285,7 @@ builtin.module {
     %pf_bidx10_r2_s1 = nest.dma.prefetch.async %672 into %block_idx_p0_9
       depends_on(%att8_inrel_r2_s1) : !nest.event<"pf_bidx10_r2_s1">
     %att10_grid_r2_s1, %att10_inrel_r2_s1, %att10_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10) outs(%state_p2_10, %acc_p2_10)
       signal_policy {
@@ -7293,7 +7299,7 @@ builtin.module {
     %pf_bidx11_r2_s1 = nest.dma.prefetch.async %673 into %block_idx_p1_9
       depends_on(%att9_inrel_r2_s1) : !nest.event<"pf_bidx11_r2_s1">
     %att11_grid_r2_s1, %att11_inrel_r2_s1, %att11_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10) outs(%state_p3_10, %acc_p3_10)
       signal_policy {
@@ -7307,7 +7313,7 @@ builtin.module {
     %pf_bidx12_r2_s1 = nest.dma.prefetch.async %674 into %block_idx_p0_9
       depends_on(%att10_inrel_r2_s1) : !nest.event<"pf_bidx12_r2_s1">
     %att12_grid_r2_s1, %att12_inrel_r2_s1, %att12_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10) outs(%state_p0_10, %acc_p0_10)
       signal_policy {
@@ -7321,7 +7327,7 @@ builtin.module {
     %pf_bidx13_r2_s1 = nest.dma.prefetch.async %675 into %block_idx_p1_9
       depends_on(%att11_inrel_r2_s1) : !nest.event<"pf_bidx13_r2_s1">
     %att13_grid_r2_s1, %att13_inrel_r2_s1, %att13_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10) outs(%state_p1_10, %acc_p1_10)
       signal_policy {
@@ -7335,7 +7341,7 @@ builtin.module {
     %pf_bidx14_r2_s1 = nest.dma.prefetch.async %676 into %block_idx_p0_9
       depends_on(%att12_inrel_r2_s1) : !nest.event<"pf_bidx14_r2_s1">
     %att14_grid_r2_s1, %att14_inrel_r2_s1, %att14_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10) outs(%state_p2_10, %acc_p2_10)
       signal_policy {
@@ -7349,7 +7355,7 @@ builtin.module {
     %pf_bidx15_r2_s1 = nest.dma.prefetch.async %677 into %block_idx_p1_9
       depends_on(%att13_inrel_r2_s1) : !nest.event<"pf_bidx15_r2_s1">
     %att15_grid_r2_s1, %att15_inrel_r2_s1, %att15_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10) outs(%state_p3_10, %acc_p3_10)
       signal_policy {
@@ -7363,7 +7369,7 @@ builtin.module {
     %pf_bidx16_r2_s1 = nest.dma.prefetch.async %678 into %block_idx_p0_9
       depends_on(%att14_inrel_r2_s1) : !nest.event<"pf_bidx16_r2_s1">
     %att16_grid_r2_s1, %att16_inrel_r2_s1, %att16_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10) outs(%state_p0_10, %acc_p0_10)
       signal_policy {
@@ -7377,7 +7383,7 @@ builtin.module {
     %pf_bidx17_r2_s1 = nest.dma.prefetch.async %679 into %block_idx_p1_9
       depends_on(%att15_inrel_r2_s1) : !nest.event<"pf_bidx17_r2_s1">
     %att17_grid_r2_s1, %att17_inrel_r2_s1, %att17_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10) outs(%state_p1_10, %acc_p1_10)
       signal_policy {
@@ -7391,7 +7397,7 @@ builtin.module {
     %pf_bidx18_r2_s1 = nest.dma.prefetch.async %680 into %block_idx_p0_9
       depends_on(%att16_inrel_r2_s1) : !nest.event<"pf_bidx18_r2_s1">
     %att18_grid_r2_s1, %att18_inrel_r2_s1, %att18_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10) outs(%state_p2_10, %acc_p2_10)
       signal_policy {
@@ -7405,7 +7411,7 @@ builtin.module {
     %pf_bidx19_r2_s1 = nest.dma.prefetch.async %681 into %block_idx_p1_9
       depends_on(%att17_inrel_r2_s1) : !nest.event<"pf_bidx19_r2_s1">
     %att19_grid_r2_s1, %att19_inrel_r2_s1, %att19_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10) outs(%state_p3_10, %acc_p3_10)
       signal_policy {
@@ -7419,7 +7425,7 @@ builtin.module {
     %pf_bidx20_r2_s1 = nest.dma.prefetch.async %682 into %block_idx_p0_9
       depends_on(%att18_inrel_r2_s1) : !nest.event<"pf_bidx20_r2_s1">
     %att20_grid_r2_s1, %att20_inrel_r2_s1, %att20_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10) outs(%state_p0_10, %acc_p0_10)
       signal_policy {
@@ -7433,7 +7439,7 @@ builtin.module {
     %pf_bidx21_r2_s1 = nest.dma.prefetch.async %683 into %block_idx_p1_9
       depends_on(%att19_inrel_r2_s1) : !nest.event<"pf_bidx21_r2_s1">
     %att21_grid_r2_s1, %att21_inrel_r2_s1, %att21_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10) outs(%state_p1_10, %acc_p1_10)
       signal_policy {
@@ -7447,7 +7453,7 @@ builtin.module {
     %pf_bidx22_r2_s1 = nest.dma.prefetch.async %684 into %block_idx_p0_9
       depends_on(%att20_inrel_r2_s1) : !nest.event<"pf_bidx22_r2_s1">
     %att22_grid_r2_s1, %att22_inrel_r2_s1, %att22_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10) outs(%state_p2_10, %acc_p2_10)
       signal_policy {
@@ -7461,7 +7467,7 @@ builtin.module {
     %pf_bidx23_r2_s1 = nest.dma.prefetch.async %685 into %block_idx_p1_9
       depends_on(%att21_inrel_r2_s1) : !nest.event<"pf_bidx23_r2_s1">
     %att23_grid_r2_s1, %att23_inrel_r2_s1, %att23_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10) outs(%state_p3_10, %acc_p3_10)
       signal_policy {
@@ -7475,7 +7481,7 @@ builtin.module {
     %pf_bidx24_r2_s1 = nest.dma.prefetch.async %686 into %block_idx_p0_9
       depends_on(%att22_inrel_r2_s1) : !nest.event<"pf_bidx24_r2_s1">
     %att24_grid_r2_s1, %att24_inrel_r2_s1, %att24_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10) outs(%state_p0_10, %acc_p0_10)
       signal_policy {
@@ -7489,7 +7495,7 @@ builtin.module {
     %pf_bidx25_r2_s1 = nest.dma.prefetch.async %687 into %block_idx_p1_9
       depends_on(%att23_inrel_r2_s1) : !nest.event<"pf_bidx25_r2_s1">
     %att25_grid_r2_s1, %att25_inrel_r2_s1, %att25_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10) outs(%state_p1_10, %acc_p1_10)
       signal_policy {
@@ -7503,7 +7509,7 @@ builtin.module {
     %pf_bidx26_r2_s1 = nest.dma.prefetch.async %688 into %block_idx_p0_9
       depends_on(%att24_inrel_r2_s1) : !nest.event<"pf_bidx26_r2_s1">
     %att26_grid_r2_s1, %att26_inrel_r2_s1, %att26_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10) outs(%state_p2_10, %acc_p2_10)
       signal_policy {
@@ -7517,7 +7523,7 @@ builtin.module {
     %pf_bidx27_r2_s1 = nest.dma.prefetch.async %689 into %block_idx_p1_9
       depends_on(%att25_inrel_r2_s1) : !nest.event<"pf_bidx27_r2_s1">
     %att27_grid_r2_s1, %att27_inrel_r2_s1, %att27_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10) outs(%state_p3_10, %acc_p3_10)
       signal_policy {
@@ -7531,7 +7537,7 @@ builtin.module {
     %pf_bidx28_r2_s1 = nest.dma.prefetch.async %690 into %block_idx_p0_9
       depends_on(%att26_inrel_r2_s1) : !nest.event<"pf_bidx28_r2_s1">
     %att28_grid_r2_s1, %att28_inrel_r2_s1, %att28_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10) outs(%state_p0_10, %acc_p0_10)
       signal_policy {
@@ -7545,7 +7551,7 @@ builtin.module {
     %pf_bidx29_r2_s1 = nest.dma.prefetch.async %691 into %block_idx_p1_9
       depends_on(%att27_inrel_r2_s1) : !nest.event<"pf_bidx29_r2_s1">
     %att29_grid_r2_s1, %att29_inrel_r2_s1, %att29_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10) outs(%state_p1_10, %acc_p1_10)
       signal_policy {
@@ -7559,7 +7565,7 @@ builtin.module {
     %pf_bidx30_r2_s1 = nest.dma.prefetch.async %692 into %block_idx_p0_9
       depends_on(%att28_inrel_r2_s1) : !nest.event<"pf_bidx30_r2_s1">
     %att30_grid_r2_s1, %att30_inrel_r2_s1, %att30_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10) outs(%state_p2_10, %acc_p2_10)
       signal_policy {
@@ -7573,7 +7579,7 @@ builtin.module {
     %pf_bidx31_r2_s1 = nest.dma.prefetch.async %693 into %block_idx_p1_9
       depends_on(%att29_inrel_r2_s1) : !nest.event<"pf_bidx31_r2_s1">
     %att31_grid_r2_s1, %att31_inrel_r2_s1, %att31_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10) outs(%state_p3_10, %acc_p3_10)
       signal_policy {
@@ -7587,7 +7593,7 @@ builtin.module {
     %pf_bidx32_r2_s1 = nest.dma.prefetch.async %694 into %block_idx_p0_9
       depends_on(%att30_inrel_r2_s1) : !nest.event<"pf_bidx32_r2_s1">
     %att32_grid_r2_s1, %att32_inrel_r2_s1, %att32_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10) outs(%state_p0_10, %acc_p0_10)
       signal_policy {
@@ -7601,7 +7607,7 @@ builtin.module {
     %pf_bidx33_r2_s1 = nest.dma.prefetch.async %695 into %block_idx_p1_9
       depends_on(%att31_inrel_r2_s1) : !nest.event<"pf_bidx33_r2_s1">
     %att33_grid_r2_s1, %att33_inrel_r2_s1, %att33_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10) outs(%state_p1_10, %acc_p1_10)
       signal_policy {
@@ -7615,7 +7621,7 @@ builtin.module {
     %pf_bidx34_r2_s1 = nest.dma.prefetch.async %696 into %block_idx_p0_9
       depends_on(%att32_inrel_r2_s1) : !nest.event<"pf_bidx34_r2_s1">
     %att34_grid_r2_s1, %att34_inrel_r2_s1, %att34_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10) outs(%state_p2_10, %acc_p2_10)
       signal_policy {
@@ -7629,7 +7635,7 @@ builtin.module {
     %pf_bidx35_r2_s1 = nest.dma.prefetch.async %697 into %block_idx_p1_9
       depends_on(%att33_inrel_r2_s1) : !nest.event<"pf_bidx35_r2_s1">
     %att35_grid_r2_s1, %att35_inrel_r2_s1, %att35_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10) outs(%state_p3_10, %acc_p3_10)
       signal_policy {
@@ -7643,7 +7649,7 @@ builtin.module {
     %pf_bidx36_r2_s1 = nest.dma.prefetch.async %698 into %block_idx_p0_9
       depends_on(%att34_inrel_r2_s1) : !nest.event<"pf_bidx36_r2_s1">
     %att36_grid_r2_s1, %att36_inrel_r2_s1, %att36_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10) outs(%state_p0_10, %acc_p0_10)
       signal_policy {
@@ -7657,7 +7663,7 @@ builtin.module {
     %pf_bidx37_r2_s1 = nest.dma.prefetch.async %699 into %block_idx_p1_9
       depends_on(%att35_inrel_r2_s1) : !nest.event<"pf_bidx37_r2_s1">
     %att37_grid_r2_s1, %att37_inrel_r2_s1, %att37_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10) outs(%state_p1_10, %acc_p1_10)
       signal_policy {
@@ -7671,7 +7677,7 @@ builtin.module {
     %pf_bidx38_r2_s1 = nest.dma.prefetch.async %700 into %block_idx_p0_9
       depends_on(%att36_inrel_r2_s1) : !nest.event<"pf_bidx38_r2_s1">
     %att38_grid_r2_s1, %att38_inrel_r2_s1, %att38_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10) outs(%state_p2_10, %acc_p2_10)
       signal_policy {
@@ -7685,7 +7691,7 @@ builtin.module {
     %pf_bidx39_r2_s1 = nest.dma.prefetch.async %701 into %block_idx_p1_9
       depends_on(%att37_inrel_r2_s1) : !nest.event<"pf_bidx39_r2_s1">
     %att39_grid_r2_s1, %att39_inrel_r2_s1, %att39_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10) outs(%state_p3_10, %acc_p3_10)
       signal_policy {
@@ -7699,7 +7705,7 @@ builtin.module {
     %pf_bidx40_r2_s1 = nest.dma.prefetch.async %702 into %block_idx_p0_9
       depends_on(%att38_inrel_r2_s1) : !nest.event<"pf_bidx40_r2_s1">
     %att40_grid_r2_s1, %att40_inrel_r2_s1, %att40_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10) outs(%state_p0_10, %acc_p0_10)
       signal_policy {
@@ -7713,7 +7719,7 @@ builtin.module {
     %pf_bidx41_r2_s1 = nest.dma.prefetch.async %703 into %block_idx_p1_9
       depends_on(%att39_inrel_r2_s1) : !nest.event<"pf_bidx41_r2_s1">
     %att41_grid_r2_s1, %att41_inrel_r2_s1, %att41_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10) outs(%state_p1_10, %acc_p1_10)
       signal_policy {
@@ -7727,7 +7733,7 @@ builtin.module {
     %pf_bidx42_r2_s1 = nest.dma.prefetch.async %704 into %block_idx_p0_9
       depends_on(%att40_inrel_r2_s1) : !nest.event<"pf_bidx42_r2_s1">
     %att42_grid_r2_s1, %att42_inrel_r2_s1, %att42_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10) outs(%state_p2_10, %acc_p2_10)
       signal_policy {
@@ -7741,7 +7747,7 @@ builtin.module {
     %pf_bidx43_r2_s1 = nest.dma.prefetch.async %705 into %block_idx_p1_9
       depends_on(%att41_inrel_r2_s1) : !nest.event<"pf_bidx43_r2_s1">
     %att43_grid_r2_s1, %att43_inrel_r2_s1, %att43_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10) outs(%state_p3_10, %acc_p3_10)
       signal_policy {
@@ -7755,7 +7761,7 @@ builtin.module {
     %pf_bidx44_r2_s1 = nest.dma.prefetch.async %706 into %block_idx_p0_9
       depends_on(%att42_inrel_r2_s1) : !nest.event<"pf_bidx44_r2_s1">
     %att44_grid_r2_s1, %att44_inrel_r2_s1, %att44_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p0_10, %acc_p0_10) outs(%state_p0_10, %acc_p0_10)
       signal_policy {
@@ -7769,7 +7775,7 @@ builtin.module {
     %pf_bidx45_r2_s1 = nest.dma.prefetch.async %707 into %block_idx_p1_9
       depends_on(%att43_inrel_r2_s1) : !nest.event<"pf_bidx45_r2_s1">
     %att45_grid_r2_s1, %att45_inrel_r2_s1, %att45_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p1_10, %acc_p1_10) outs(%state_p1_10, %acc_p1_10)
       signal_policy {
@@ -7783,7 +7789,7 @@ builtin.module {
     %pf_bidx46_r2_s1 = nest.dma.prefetch.async %708 into %block_idx_p0_9
       depends_on(%att44_inrel_r2_s1) : !nest.event<"pf_bidx46_r2_s1">
     %att46_grid_r2_s1, %att46_inrel_r2_s1, %att46_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10)
       ins(%block_idx_p0_9, %q_l2_24, %state_p2_10, %acc_p2_10) outs(%state_p2_10, %acc_p2_10)
       signal_policy {
@@ -7797,7 +7803,7 @@ builtin.module {
     %pf_bidx47_r2_s1 = nest.dma.prefetch.async %709 into %block_idx_p1_9
       depends_on(%att45_inrel_r2_s1) : !nest.event<"pf_bidx47_r2_s1">
     %att47_grid_r2_s1, %att47_inrel_r2_s1, %att47_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10)
       ins(%block_idx_p1_9, %q_l2_24, %state_p3_10, %acc_p3_10) outs(%state_p3_10, %acc_p3_10)
       signal_policy {
@@ -7809,7 +7815,7 @@ builtin.module {
         !nest.event<"att47_grid_r2_s1">, !nest.event<"att47_inrel_r2_s1">,
         !nest.event<"att47_out_r2_s1">)
     %att48_grid_r2_s1, %att48_inrel_r2_s1, %att48_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_t1_final_r2 l1_mode = 3 tasks(%710) globals(%648)
+      nest.dispatch.tasks.async @paged_attention_t1_final_r2 l1_mode = 1 tasks(%710) globals(%648)
       bindings(%append_idx_9, %q_l2_24, %state_p0_10, %acc_p0_10)
       ins(%append_idx_9, %q_l2_24, %state_p0_10, %acc_p0_10) outs(%state_p0_10, %acc_p0_10)
       signal_policy {
@@ -7822,7 +7828,7 @@ builtin.module {
         !nest.event<"att48_grid_r2_s1">, !nest.event<"att48_inrel_r2_s1">,
         !nest.event<"att48_out_r2_s1">)
     %merge_grid_r2_s1, %merge_inrel_r2_s1, %merge_out_r2_s1 =
-      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 3 tasks(%710) globals()
+      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 1 tasks(%710) globals()
       bindings(
         %state_p0_10, %state_p1_10, %state_p2_10, %state_p3_10, %acc_p0_10, %acc_p1_10,
         %acc_p2_10, %acc_p3_10, %out_l2_10)
@@ -8125,7 +8131,7 @@ builtin.module {
     %pf_acc_p3_r2_s2 = nest.dma.prefetch.async %724 into %acc_p3_11 : !nest.event<"pf_acc_p3_r2_s2">
     %774 = nest.task.range from = 0 to = 4 : !nest.task_range
     %append_grid_r2_s2, %append_inrel_r2_s2, %775 =
-      nest.dispatch.tasks.async @paged_attention_append_r2_tip1 l1_mode = 3 tasks(%774)
+      nest.dispatch.tasks.async @paged_attention_append_r2_tip1 l1_mode = 1 tasks(%774)
       globals(%712) bindings(%k_new_10, %v_new_10, %append_idx_10)
       ins(%k_new_10, %v_new_10, %append_idx_10) outs()
       signal_policy {
@@ -8135,7 +8141,7 @@ builtin.module {
     %pf_bidx0_r2_s2 = nest.dma.prefetch.async %726 into %block_idx_p0_10
       : !nest.event<"pf_bidx0_r2_s2">
     %att0_grid_r2_s2, %att0_inrel_r2_s2, %att0_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11) outs(%state_p0_11, %acc_p0_11)
       signal_policy {
@@ -8147,7 +8153,7 @@ builtin.module {
     %pf_bidx1_r2_s2 = nest.dma.prefetch.async %727 into %block_idx_p1_10
       : !nest.event<"pf_bidx1_r2_s2">
     %att1_grid_r2_s2, %att1_inrel_r2_s2, %att1_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11) outs(%state_p1_11, %acc_p1_11)
       signal_policy {
@@ -8159,7 +8165,7 @@ builtin.module {
     %pf_bidx2_r2_s2 = nest.dma.prefetch.async %728 into %block_idx_p0_10
       depends_on(%att0_inrel_r2_s2) : !nest.event<"pf_bidx2_r2_s2">
     %att2_grid_r2_s2, %att2_inrel_r2_s2, %att2_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11) outs(%state_p2_11, %acc_p2_11)
       signal_policy {
@@ -8171,7 +8177,7 @@ builtin.module {
     %pf_bidx3_r2_s2 = nest.dma.prefetch.async %729 into %block_idx_p1_10
       depends_on(%att1_inrel_r2_s2) : !nest.event<"pf_bidx3_r2_s2">
     %att3_grid_r2_s2, %att3_inrel_r2_s2, %att3_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11) outs(%state_p3_11, %acc_p3_11)
       signal_policy {
@@ -8183,7 +8189,7 @@ builtin.module {
     %pf_bidx4_r2_s2 = nest.dma.prefetch.async %730 into %block_idx_p0_10
       depends_on(%att2_inrel_r2_s2) : !nest.event<"pf_bidx4_r2_s2">
     %att4_grid_r2_s2, %att4_inrel_r2_s2, %att4_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11) outs(%state_p0_11, %acc_p0_11)
       signal_policy {
@@ -8197,7 +8203,7 @@ builtin.module {
     %pf_bidx5_r2_s2 = nest.dma.prefetch.async %731 into %block_idx_p1_10
       depends_on(%att3_inrel_r2_s2) : !nest.event<"pf_bidx5_r2_s2">
     %att5_grid_r2_s2, %att5_inrel_r2_s2, %att5_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11) outs(%state_p1_11, %acc_p1_11)
       signal_policy {
@@ -8211,7 +8217,7 @@ builtin.module {
     %pf_bidx6_r2_s2 = nest.dma.prefetch.async %732 into %block_idx_p0_10
       depends_on(%att4_inrel_r2_s2) : !nest.event<"pf_bidx6_r2_s2">
     %att6_grid_r2_s2, %att6_inrel_r2_s2, %att6_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11) outs(%state_p2_11, %acc_p2_11)
       signal_policy {
@@ -8225,7 +8231,7 @@ builtin.module {
     %pf_bidx7_r2_s2 = nest.dma.prefetch.async %733 into %block_idx_p1_10
       depends_on(%att5_inrel_r2_s2) : !nest.event<"pf_bidx7_r2_s2">
     %att7_grid_r2_s2, %att7_inrel_r2_s2, %att7_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11) outs(%state_p3_11, %acc_p3_11)
       signal_policy {
@@ -8239,7 +8245,7 @@ builtin.module {
     %pf_bidx8_r2_s2 = nest.dma.prefetch.async %734 into %block_idx_p0_10
       depends_on(%att6_inrel_r2_s2) : !nest.event<"pf_bidx8_r2_s2">
     %att8_grid_r2_s2, %att8_inrel_r2_s2, %att8_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11) outs(%state_p0_11, %acc_p0_11)
       signal_policy {
@@ -8253,7 +8259,7 @@ builtin.module {
     %pf_bidx9_r2_s2 = nest.dma.prefetch.async %735 into %block_idx_p1_10
       depends_on(%att7_inrel_r2_s2) : !nest.event<"pf_bidx9_r2_s2">
     %att9_grid_r2_s2, %att9_inrel_r2_s2, %att9_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11) outs(%state_p1_11, %acc_p1_11)
       signal_policy {
@@ -8267,7 +8273,7 @@ builtin.module {
     %pf_bidx10_r2_s2 = nest.dma.prefetch.async %736 into %block_idx_p0_10
       depends_on(%att8_inrel_r2_s2) : !nest.event<"pf_bidx10_r2_s2">
     %att10_grid_r2_s2, %att10_inrel_r2_s2, %att10_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11) outs(%state_p2_11, %acc_p2_11)
       signal_policy {
@@ -8281,7 +8287,7 @@ builtin.module {
     %pf_bidx11_r2_s2 = nest.dma.prefetch.async %737 into %block_idx_p1_10
       depends_on(%att9_inrel_r2_s2) : !nest.event<"pf_bidx11_r2_s2">
     %att11_grid_r2_s2, %att11_inrel_r2_s2, %att11_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11) outs(%state_p3_11, %acc_p3_11)
       signal_policy {
@@ -8295,7 +8301,7 @@ builtin.module {
     %pf_bidx12_r2_s2 = nest.dma.prefetch.async %738 into %block_idx_p0_10
       depends_on(%att10_inrel_r2_s2) : !nest.event<"pf_bidx12_r2_s2">
     %att12_grid_r2_s2, %att12_inrel_r2_s2, %att12_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11) outs(%state_p0_11, %acc_p0_11)
       signal_policy {
@@ -8309,7 +8315,7 @@ builtin.module {
     %pf_bidx13_r2_s2 = nest.dma.prefetch.async %739 into %block_idx_p1_10
       depends_on(%att11_inrel_r2_s2) : !nest.event<"pf_bidx13_r2_s2">
     %att13_grid_r2_s2, %att13_inrel_r2_s2, %att13_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11) outs(%state_p1_11, %acc_p1_11)
       signal_policy {
@@ -8323,7 +8329,7 @@ builtin.module {
     %pf_bidx14_r2_s2 = nest.dma.prefetch.async %740 into %block_idx_p0_10
       depends_on(%att12_inrel_r2_s2) : !nest.event<"pf_bidx14_r2_s2">
     %att14_grid_r2_s2, %att14_inrel_r2_s2, %att14_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11) outs(%state_p2_11, %acc_p2_11)
       signal_policy {
@@ -8337,7 +8343,7 @@ builtin.module {
     %pf_bidx15_r2_s2 = nest.dma.prefetch.async %741 into %block_idx_p1_10
       depends_on(%att13_inrel_r2_s2) : !nest.event<"pf_bidx15_r2_s2">
     %att15_grid_r2_s2, %att15_inrel_r2_s2, %att15_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11) outs(%state_p3_11, %acc_p3_11)
       signal_policy {
@@ -8351,7 +8357,7 @@ builtin.module {
     %pf_bidx16_r2_s2 = nest.dma.prefetch.async %742 into %block_idx_p0_10
       depends_on(%att14_inrel_r2_s2) : !nest.event<"pf_bidx16_r2_s2">
     %att16_grid_r2_s2, %att16_inrel_r2_s2, %att16_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11) outs(%state_p0_11, %acc_p0_11)
       signal_policy {
@@ -8365,7 +8371,7 @@ builtin.module {
     %pf_bidx17_r2_s2 = nest.dma.prefetch.async %743 into %block_idx_p1_10
       depends_on(%att15_inrel_r2_s2) : !nest.event<"pf_bidx17_r2_s2">
     %att17_grid_r2_s2, %att17_inrel_r2_s2, %att17_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11) outs(%state_p1_11, %acc_p1_11)
       signal_policy {
@@ -8379,7 +8385,7 @@ builtin.module {
     %pf_bidx18_r2_s2 = nest.dma.prefetch.async %744 into %block_idx_p0_10
       depends_on(%att16_inrel_r2_s2) : !nest.event<"pf_bidx18_r2_s2">
     %att18_grid_r2_s2, %att18_inrel_r2_s2, %att18_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11) outs(%state_p2_11, %acc_p2_11)
       signal_policy {
@@ -8393,7 +8399,7 @@ builtin.module {
     %pf_bidx19_r2_s2 = nest.dma.prefetch.async %745 into %block_idx_p1_10
       depends_on(%att17_inrel_r2_s2) : !nest.event<"pf_bidx19_r2_s2">
     %att19_grid_r2_s2, %att19_inrel_r2_s2, %att19_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11) outs(%state_p3_11, %acc_p3_11)
       signal_policy {
@@ -8407,7 +8413,7 @@ builtin.module {
     %pf_bidx20_r2_s2 = nest.dma.prefetch.async %746 into %block_idx_p0_10
       depends_on(%att18_inrel_r2_s2) : !nest.event<"pf_bidx20_r2_s2">
     %att20_grid_r2_s2, %att20_inrel_r2_s2, %att20_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11) outs(%state_p0_11, %acc_p0_11)
       signal_policy {
@@ -8421,7 +8427,7 @@ builtin.module {
     %pf_bidx21_r2_s2 = nest.dma.prefetch.async %747 into %block_idx_p1_10
       depends_on(%att19_inrel_r2_s2) : !nest.event<"pf_bidx21_r2_s2">
     %att21_grid_r2_s2, %att21_inrel_r2_s2, %att21_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11) outs(%state_p1_11, %acc_p1_11)
       signal_policy {
@@ -8435,7 +8441,7 @@ builtin.module {
     %pf_bidx22_r2_s2 = nest.dma.prefetch.async %748 into %block_idx_p0_10
       depends_on(%att20_inrel_r2_s2) : !nest.event<"pf_bidx22_r2_s2">
     %att22_grid_r2_s2, %att22_inrel_r2_s2, %att22_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11) outs(%state_p2_11, %acc_p2_11)
       signal_policy {
@@ -8449,7 +8455,7 @@ builtin.module {
     %pf_bidx23_r2_s2 = nest.dma.prefetch.async %749 into %block_idx_p1_10
       depends_on(%att21_inrel_r2_s2) : !nest.event<"pf_bidx23_r2_s2">
     %att23_grid_r2_s2, %att23_inrel_r2_s2, %att23_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11) outs(%state_p3_11, %acc_p3_11)
       signal_policy {
@@ -8463,7 +8469,7 @@ builtin.module {
     %pf_bidx24_r2_s2 = nest.dma.prefetch.async %750 into %block_idx_p0_10
       depends_on(%att22_inrel_r2_s2) : !nest.event<"pf_bidx24_r2_s2">
     %att24_grid_r2_s2, %att24_inrel_r2_s2, %att24_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11) outs(%state_p0_11, %acc_p0_11)
       signal_policy {
@@ -8477,7 +8483,7 @@ builtin.module {
     %pf_bidx25_r2_s2 = nest.dma.prefetch.async %751 into %block_idx_p1_10
       depends_on(%att23_inrel_r2_s2) : !nest.event<"pf_bidx25_r2_s2">
     %att25_grid_r2_s2, %att25_inrel_r2_s2, %att25_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11) outs(%state_p1_11, %acc_p1_11)
       signal_policy {
@@ -8491,7 +8497,7 @@ builtin.module {
     %pf_bidx26_r2_s2 = nest.dma.prefetch.async %752 into %block_idx_p0_10
       depends_on(%att24_inrel_r2_s2) : !nest.event<"pf_bidx26_r2_s2">
     %att26_grid_r2_s2, %att26_inrel_r2_s2, %att26_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11) outs(%state_p2_11, %acc_p2_11)
       signal_policy {
@@ -8505,7 +8511,7 @@ builtin.module {
     %pf_bidx27_r2_s2 = nest.dma.prefetch.async %753 into %block_idx_p1_10
       depends_on(%att25_inrel_r2_s2) : !nest.event<"pf_bidx27_r2_s2">
     %att27_grid_r2_s2, %att27_inrel_r2_s2, %att27_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11) outs(%state_p3_11, %acc_p3_11)
       signal_policy {
@@ -8519,7 +8525,7 @@ builtin.module {
     %pf_bidx28_r2_s2 = nest.dma.prefetch.async %754 into %block_idx_p0_10
       depends_on(%att26_inrel_r2_s2) : !nest.event<"pf_bidx28_r2_s2">
     %att28_grid_r2_s2, %att28_inrel_r2_s2, %att28_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11) outs(%state_p0_11, %acc_p0_11)
       signal_policy {
@@ -8533,7 +8539,7 @@ builtin.module {
     %pf_bidx29_r2_s2 = nest.dma.prefetch.async %755 into %block_idx_p1_10
       depends_on(%att27_inrel_r2_s2) : !nest.event<"pf_bidx29_r2_s2">
     %att29_grid_r2_s2, %att29_inrel_r2_s2, %att29_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11) outs(%state_p1_11, %acc_p1_11)
       signal_policy {
@@ -8547,7 +8553,7 @@ builtin.module {
     %pf_bidx30_r2_s2 = nest.dma.prefetch.async %756 into %block_idx_p0_10
       depends_on(%att28_inrel_r2_s2) : !nest.event<"pf_bidx30_r2_s2">
     %att30_grid_r2_s2, %att30_inrel_r2_s2, %att30_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11) outs(%state_p2_11, %acc_p2_11)
       signal_policy {
@@ -8561,7 +8567,7 @@ builtin.module {
     %pf_bidx31_r2_s2 = nest.dma.prefetch.async %757 into %block_idx_p1_10
       depends_on(%att29_inrel_r2_s2) : !nest.event<"pf_bidx31_r2_s2">
     %att31_grid_r2_s2, %att31_inrel_r2_s2, %att31_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11) outs(%state_p3_11, %acc_p3_11)
       signal_policy {
@@ -8575,7 +8581,7 @@ builtin.module {
     %pf_bidx32_r2_s2 = nest.dma.prefetch.async %758 into %block_idx_p0_10
       depends_on(%att30_inrel_r2_s2) : !nest.event<"pf_bidx32_r2_s2">
     %att32_grid_r2_s2, %att32_inrel_r2_s2, %att32_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11) outs(%state_p0_11, %acc_p0_11)
       signal_policy {
@@ -8589,7 +8595,7 @@ builtin.module {
     %pf_bidx33_r2_s2 = nest.dma.prefetch.async %759 into %block_idx_p1_10
       depends_on(%att31_inrel_r2_s2) : !nest.event<"pf_bidx33_r2_s2">
     %att33_grid_r2_s2, %att33_inrel_r2_s2, %att33_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11) outs(%state_p1_11, %acc_p1_11)
       signal_policy {
@@ -8603,7 +8609,7 @@ builtin.module {
     %pf_bidx34_r2_s2 = nest.dma.prefetch.async %760 into %block_idx_p0_10
       depends_on(%att32_inrel_r2_s2) : !nest.event<"pf_bidx34_r2_s2">
     %att34_grid_r2_s2, %att34_inrel_r2_s2, %att34_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11) outs(%state_p2_11, %acc_p2_11)
       signal_policy {
@@ -8617,7 +8623,7 @@ builtin.module {
     %pf_bidx35_r2_s2 = nest.dma.prefetch.async %761 into %block_idx_p1_10
       depends_on(%att33_inrel_r2_s2) : !nest.event<"pf_bidx35_r2_s2">
     %att35_grid_r2_s2, %att35_inrel_r2_s2, %att35_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11) outs(%state_p3_11, %acc_p3_11)
       signal_policy {
@@ -8631,7 +8637,7 @@ builtin.module {
     %pf_bidx36_r2_s2 = nest.dma.prefetch.async %762 into %block_idx_p0_10
       depends_on(%att34_inrel_r2_s2) : !nest.event<"pf_bidx36_r2_s2">
     %att36_grid_r2_s2, %att36_inrel_r2_s2, %att36_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11) outs(%state_p0_11, %acc_p0_11)
       signal_policy {
@@ -8645,7 +8651,7 @@ builtin.module {
     %pf_bidx37_r2_s2 = nest.dma.prefetch.async %763 into %block_idx_p1_10
       depends_on(%att35_inrel_r2_s2) : !nest.event<"pf_bidx37_r2_s2">
     %att37_grid_r2_s2, %att37_inrel_r2_s2, %att37_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11) outs(%state_p1_11, %acc_p1_11)
       signal_policy {
@@ -8659,7 +8665,7 @@ builtin.module {
     %pf_bidx38_r2_s2 = nest.dma.prefetch.async %764 into %block_idx_p0_10
       depends_on(%att36_inrel_r2_s2) : !nest.event<"pf_bidx38_r2_s2">
     %att38_grid_r2_s2, %att38_inrel_r2_s2, %att38_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11) outs(%state_p2_11, %acc_p2_11)
       signal_policy {
@@ -8673,7 +8679,7 @@ builtin.module {
     %pf_bidx39_r2_s2 = nest.dma.prefetch.async %765 into %block_idx_p1_10
       depends_on(%att37_inrel_r2_s2) : !nest.event<"pf_bidx39_r2_s2">
     %att39_grid_r2_s2, %att39_inrel_r2_s2, %att39_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11) outs(%state_p3_11, %acc_p3_11)
       signal_policy {
@@ -8687,7 +8693,7 @@ builtin.module {
     %pf_bidx40_r2_s2 = nest.dma.prefetch.async %766 into %block_idx_p0_10
       depends_on(%att38_inrel_r2_s2) : !nest.event<"pf_bidx40_r2_s2">
     %att40_grid_r2_s2, %att40_inrel_r2_s2, %att40_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11) outs(%state_p0_11, %acc_p0_11)
       signal_policy {
@@ -8701,7 +8707,7 @@ builtin.module {
     %pf_bidx41_r2_s2 = nest.dma.prefetch.async %767 into %block_idx_p1_10
       depends_on(%att39_inrel_r2_s2) : !nest.event<"pf_bidx41_r2_s2">
     %att41_grid_r2_s2, %att41_inrel_r2_s2, %att41_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11) outs(%state_p1_11, %acc_p1_11)
       signal_policy {
@@ -8715,7 +8721,7 @@ builtin.module {
     %pf_bidx42_r2_s2 = nest.dma.prefetch.async %768 into %block_idx_p0_10
       depends_on(%att40_inrel_r2_s2) : !nest.event<"pf_bidx42_r2_s2">
     %att42_grid_r2_s2, %att42_inrel_r2_s2, %att42_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11) outs(%state_p2_11, %acc_p2_11)
       signal_policy {
@@ -8729,7 +8735,7 @@ builtin.module {
     %pf_bidx43_r2_s2 = nest.dma.prefetch.async %769 into %block_idx_p1_10
       depends_on(%att41_inrel_r2_s2) : !nest.event<"pf_bidx43_r2_s2">
     %att43_grid_r2_s2, %att43_inrel_r2_s2, %att43_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11) outs(%state_p3_11, %acc_p3_11)
       signal_policy {
@@ -8743,7 +8749,7 @@ builtin.module {
     %pf_bidx44_r2_s2 = nest.dma.prefetch.async %770 into %block_idx_p0_10
       depends_on(%att42_inrel_r2_s2) : !nest.event<"pf_bidx44_r2_s2">
     %att44_grid_r2_s2, %att44_inrel_r2_s2, %att44_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p0_11, %acc_p0_11) outs(%state_p0_11, %acc_p0_11)
       signal_policy {
@@ -8757,7 +8763,7 @@ builtin.module {
     %pf_bidx45_r2_s2 = nest.dma.prefetch.async %771 into %block_idx_p1_10
       depends_on(%att43_inrel_r2_s2) : !nest.event<"pf_bidx45_r2_s2">
     %att45_grid_r2_s2, %att45_inrel_r2_s2, %att45_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p1_11, %acc_p1_11) outs(%state_p1_11, %acc_p1_11)
       signal_policy {
@@ -8771,7 +8777,7 @@ builtin.module {
     %pf_bidx46_r2_s2 = nest.dma.prefetch.async %772 into %block_idx_p0_10
       depends_on(%att44_inrel_r2_s2) : !nest.event<"pf_bidx46_r2_s2">
     %att46_grid_r2_s2, %att46_inrel_r2_s2, %att46_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11)
       ins(%block_idx_p0_10, %q_l2_25, %state_p2_11, %acc_p2_11) outs(%state_p2_11, %acc_p2_11)
       signal_policy {
@@ -8785,7 +8791,7 @@ builtin.module {
     %pf_bidx47_r2_s2 = nest.dma.prefetch.async %773 into %block_idx_p1_10
       depends_on(%att45_inrel_r2_s2) : !nest.event<"pf_bidx47_r2_s2">
     %att47_grid_r2_s2, %att47_inrel_r2_s2, %att47_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11)
       ins(%block_idx_p1_10, %q_l2_25, %state_p3_11, %acc_p3_11) outs(%state_p3_11, %acc_p3_11)
       signal_policy {
@@ -8797,7 +8803,7 @@ builtin.module {
         !nest.event<"att47_grid_r2_s2">, !nest.event<"att47_inrel_r2_s2">,
         !nest.event<"att47_out_r2_s2">)
     %att48_grid_r2_s2, %att48_inrel_r2_s2, %att48_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_t2_final_r2 l1_mode = 3 tasks(%774) globals(%712)
+      nest.dispatch.tasks.async @paged_attention_t2_final_r2 l1_mode = 1 tasks(%774) globals(%712)
       bindings(%append_idx_10, %q_l2_25, %state_p0_11, %acc_p0_11)
       ins(%append_idx_10, %q_l2_25, %state_p0_11, %acc_p0_11) outs(%state_p0_11, %acc_p0_11)
       signal_policy {
@@ -8810,7 +8816,7 @@ builtin.module {
         !nest.event<"att48_grid_r2_s2">, !nest.event<"att48_inrel_r2_s2">,
         !nest.event<"att48_out_r2_s2">)
     %merge_grid_r2_s2, %merge_inrel_r2_s2, %merge_out_r2_s2 =
-      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 3 tasks(%774) globals()
+      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 1 tasks(%774) globals()
       bindings(
         %state_p0_11, %state_p1_11, %state_p2_11, %state_p3_11, %acc_p0_11, %acc_p1_11,
         %acc_p2_11, %acc_p3_11, %out_l2_11)
@@ -9113,7 +9119,7 @@ builtin.module {
     %pf_acc_p3_r2_s3 = nest.dma.prefetch.async %788 into %acc_p3_12 : !nest.event<"pf_acc_p3_r2_s3">
     %838 = nest.task.range from = 0 to = 4 : !nest.task_range
     %append_grid_r2_s3, %append_inrel_r2_s3, %839 =
-      nest.dispatch.tasks.async @paged_attention_append_r2_tip2 l1_mode = 3 tasks(%838)
+      nest.dispatch.tasks.async @paged_attention_append_r2_tip2 l1_mode = 1 tasks(%838)
       globals(%776) bindings(%k_new_11, %v_new_11, %append_idx_11)
       ins(%k_new_11, %v_new_11, %append_idx_11) outs()
       signal_policy {
@@ -9123,7 +9129,7 @@ builtin.module {
     %pf_bidx0_r2_s3 = nest.dma.prefetch.async %790 into %block_idx_p0_11
       : !nest.event<"pf_bidx0_r2_s3">
     %att0_grid_r2_s3, %att0_inrel_r2_s3, %att0_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12) outs(%state_p0_12, %acc_p0_12)
       signal_policy {
@@ -9135,7 +9141,7 @@ builtin.module {
     %pf_bidx1_r2_s3 = nest.dma.prefetch.async %791 into %block_idx_p1_11
       : !nest.event<"pf_bidx1_r2_s3">
     %att1_grid_r2_s3, %att1_inrel_r2_s3, %att1_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12) outs(%state_p1_12, %acc_p1_12)
       signal_policy {
@@ -9147,7 +9153,7 @@ builtin.module {
     %pf_bidx2_r2_s3 = nest.dma.prefetch.async %792 into %block_idx_p0_11
       depends_on(%att0_inrel_r2_s3) : !nest.event<"pf_bidx2_r2_s3">
     %att2_grid_r2_s3, %att2_inrel_r2_s3, %att2_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12) outs(%state_p2_12, %acc_p2_12)
       signal_policy {
@@ -9159,7 +9165,7 @@ builtin.module {
     %pf_bidx3_r2_s3 = nest.dma.prefetch.async %793 into %block_idx_p1_11
       depends_on(%att1_inrel_r2_s3) : !nest.event<"pf_bidx3_r2_s3">
     %att3_grid_r2_s3, %att3_inrel_r2_s3, %att3_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12) outs(%state_p3_12, %acc_p3_12)
       signal_policy {
@@ -9171,7 +9177,7 @@ builtin.module {
     %pf_bidx4_r2_s3 = nest.dma.prefetch.async %794 into %block_idx_p0_11
       depends_on(%att2_inrel_r2_s3) : !nest.event<"pf_bidx4_r2_s3">
     %att4_grid_r2_s3, %att4_inrel_r2_s3, %att4_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12) outs(%state_p0_12, %acc_p0_12)
       signal_policy {
@@ -9185,7 +9191,7 @@ builtin.module {
     %pf_bidx5_r2_s3 = nest.dma.prefetch.async %795 into %block_idx_p1_11
       depends_on(%att3_inrel_r2_s3) : !nest.event<"pf_bidx5_r2_s3">
     %att5_grid_r2_s3, %att5_inrel_r2_s3, %att5_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12) outs(%state_p1_12, %acc_p1_12)
       signal_policy {
@@ -9199,7 +9205,7 @@ builtin.module {
     %pf_bidx6_r2_s3 = nest.dma.prefetch.async %796 into %block_idx_p0_11
       depends_on(%att4_inrel_r2_s3) : !nest.event<"pf_bidx6_r2_s3">
     %att6_grid_r2_s3, %att6_inrel_r2_s3, %att6_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12) outs(%state_p2_12, %acc_p2_12)
       signal_policy {
@@ -9213,7 +9219,7 @@ builtin.module {
     %pf_bidx7_r2_s3 = nest.dma.prefetch.async %797 into %block_idx_p1_11
       depends_on(%att5_inrel_r2_s3) : !nest.event<"pf_bidx7_r2_s3">
     %att7_grid_r2_s3, %att7_inrel_r2_s3, %att7_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12) outs(%state_p3_12, %acc_p3_12)
       signal_policy {
@@ -9227,7 +9233,7 @@ builtin.module {
     %pf_bidx8_r2_s3 = nest.dma.prefetch.async %798 into %block_idx_p0_11
       depends_on(%att6_inrel_r2_s3) : !nest.event<"pf_bidx8_r2_s3">
     %att8_grid_r2_s3, %att8_inrel_r2_s3, %att8_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12) outs(%state_p0_12, %acc_p0_12)
       signal_policy {
@@ -9241,7 +9247,7 @@ builtin.module {
     %pf_bidx9_r2_s3 = nest.dma.prefetch.async %799 into %block_idx_p1_11
       depends_on(%att7_inrel_r2_s3) : !nest.event<"pf_bidx9_r2_s3">
     %att9_grid_r2_s3, %att9_inrel_r2_s3, %att9_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12) outs(%state_p1_12, %acc_p1_12)
       signal_policy {
@@ -9255,7 +9261,7 @@ builtin.module {
     %pf_bidx10_r2_s3 = nest.dma.prefetch.async %800 into %block_idx_p0_11
       depends_on(%att8_inrel_r2_s3) : !nest.event<"pf_bidx10_r2_s3">
     %att10_grid_r2_s3, %att10_inrel_r2_s3, %att10_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12) outs(%state_p2_12, %acc_p2_12)
       signal_policy {
@@ -9269,7 +9275,7 @@ builtin.module {
     %pf_bidx11_r2_s3 = nest.dma.prefetch.async %801 into %block_idx_p1_11
       depends_on(%att9_inrel_r2_s3) : !nest.event<"pf_bidx11_r2_s3">
     %att11_grid_r2_s3, %att11_inrel_r2_s3, %att11_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12) outs(%state_p3_12, %acc_p3_12)
       signal_policy {
@@ -9283,7 +9289,7 @@ builtin.module {
     %pf_bidx12_r2_s3 = nest.dma.prefetch.async %802 into %block_idx_p0_11
       depends_on(%att10_inrel_r2_s3) : !nest.event<"pf_bidx12_r2_s3">
     %att12_grid_r2_s3, %att12_inrel_r2_s3, %att12_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12) outs(%state_p0_12, %acc_p0_12)
       signal_policy {
@@ -9297,7 +9303,7 @@ builtin.module {
     %pf_bidx13_r2_s3 = nest.dma.prefetch.async %803 into %block_idx_p1_11
       depends_on(%att11_inrel_r2_s3) : !nest.event<"pf_bidx13_r2_s3">
     %att13_grid_r2_s3, %att13_inrel_r2_s3, %att13_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12) outs(%state_p1_12, %acc_p1_12)
       signal_policy {
@@ -9311,7 +9317,7 @@ builtin.module {
     %pf_bidx14_r2_s3 = nest.dma.prefetch.async %804 into %block_idx_p0_11
       depends_on(%att12_inrel_r2_s3) : !nest.event<"pf_bidx14_r2_s3">
     %att14_grid_r2_s3, %att14_inrel_r2_s3, %att14_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12) outs(%state_p2_12, %acc_p2_12)
       signal_policy {
@@ -9325,7 +9331,7 @@ builtin.module {
     %pf_bidx15_r2_s3 = nest.dma.prefetch.async %805 into %block_idx_p1_11
       depends_on(%att13_inrel_r2_s3) : !nest.event<"pf_bidx15_r2_s3">
     %att15_grid_r2_s3, %att15_inrel_r2_s3, %att15_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12) outs(%state_p3_12, %acc_p3_12)
       signal_policy {
@@ -9339,7 +9345,7 @@ builtin.module {
     %pf_bidx16_r2_s3 = nest.dma.prefetch.async %806 into %block_idx_p0_11
       depends_on(%att14_inrel_r2_s3) : !nest.event<"pf_bidx16_r2_s3">
     %att16_grid_r2_s3, %att16_inrel_r2_s3, %att16_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12) outs(%state_p0_12, %acc_p0_12)
       signal_policy {
@@ -9353,7 +9359,7 @@ builtin.module {
     %pf_bidx17_r2_s3 = nest.dma.prefetch.async %807 into %block_idx_p1_11
       depends_on(%att15_inrel_r2_s3) : !nest.event<"pf_bidx17_r2_s3">
     %att17_grid_r2_s3, %att17_inrel_r2_s3, %att17_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12) outs(%state_p1_12, %acc_p1_12)
       signal_policy {
@@ -9367,7 +9373,7 @@ builtin.module {
     %pf_bidx18_r2_s3 = nest.dma.prefetch.async %808 into %block_idx_p0_11
       depends_on(%att16_inrel_r2_s3) : !nest.event<"pf_bidx18_r2_s3">
     %att18_grid_r2_s3, %att18_inrel_r2_s3, %att18_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12) outs(%state_p2_12, %acc_p2_12)
       signal_policy {
@@ -9381,7 +9387,7 @@ builtin.module {
     %pf_bidx19_r2_s3 = nest.dma.prefetch.async %809 into %block_idx_p1_11
       depends_on(%att17_inrel_r2_s3) : !nest.event<"pf_bidx19_r2_s3">
     %att19_grid_r2_s3, %att19_inrel_r2_s3, %att19_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12) outs(%state_p3_12, %acc_p3_12)
       signal_policy {
@@ -9395,7 +9401,7 @@ builtin.module {
     %pf_bidx20_r2_s3 = nest.dma.prefetch.async %810 into %block_idx_p0_11
       depends_on(%att18_inrel_r2_s3) : !nest.event<"pf_bidx20_r2_s3">
     %att20_grid_r2_s3, %att20_inrel_r2_s3, %att20_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12) outs(%state_p0_12, %acc_p0_12)
       signal_policy {
@@ -9409,7 +9415,7 @@ builtin.module {
     %pf_bidx21_r2_s3 = nest.dma.prefetch.async %811 into %block_idx_p1_11
       depends_on(%att19_inrel_r2_s3) : !nest.event<"pf_bidx21_r2_s3">
     %att21_grid_r2_s3, %att21_inrel_r2_s3, %att21_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12) outs(%state_p1_12, %acc_p1_12)
       signal_policy {
@@ -9423,7 +9429,7 @@ builtin.module {
     %pf_bidx22_r2_s3 = nest.dma.prefetch.async %812 into %block_idx_p0_11
       depends_on(%att20_inrel_r2_s3) : !nest.event<"pf_bidx22_r2_s3">
     %att22_grid_r2_s3, %att22_inrel_r2_s3, %att22_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12) outs(%state_p2_12, %acc_p2_12)
       signal_policy {
@@ -9437,7 +9443,7 @@ builtin.module {
     %pf_bidx23_r2_s3 = nest.dma.prefetch.async %813 into %block_idx_p1_11
       depends_on(%att21_inrel_r2_s3) : !nest.event<"pf_bidx23_r2_s3">
     %att23_grid_r2_s3, %att23_inrel_r2_s3, %att23_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12) outs(%state_p3_12, %acc_p3_12)
       signal_policy {
@@ -9451,7 +9457,7 @@ builtin.module {
     %pf_bidx24_r2_s3 = nest.dma.prefetch.async %814 into %block_idx_p0_11
       depends_on(%att22_inrel_r2_s3) : !nest.event<"pf_bidx24_r2_s3">
     %att24_grid_r2_s3, %att24_inrel_r2_s3, %att24_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12) outs(%state_p0_12, %acc_p0_12)
       signal_policy {
@@ -9465,7 +9471,7 @@ builtin.module {
     %pf_bidx25_r2_s3 = nest.dma.prefetch.async %815 into %block_idx_p1_11
       depends_on(%att23_inrel_r2_s3) : !nest.event<"pf_bidx25_r2_s3">
     %att25_grid_r2_s3, %att25_inrel_r2_s3, %att25_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12) outs(%state_p1_12, %acc_p1_12)
       signal_policy {
@@ -9479,7 +9485,7 @@ builtin.module {
     %pf_bidx26_r2_s3 = nest.dma.prefetch.async %816 into %block_idx_p0_11
       depends_on(%att24_inrel_r2_s3) : !nest.event<"pf_bidx26_r2_s3">
     %att26_grid_r2_s3, %att26_inrel_r2_s3, %att26_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12) outs(%state_p2_12, %acc_p2_12)
       signal_policy {
@@ -9493,7 +9499,7 @@ builtin.module {
     %pf_bidx27_r2_s3 = nest.dma.prefetch.async %817 into %block_idx_p1_11
       depends_on(%att25_inrel_r2_s3) : !nest.event<"pf_bidx27_r2_s3">
     %att27_grid_r2_s3, %att27_inrel_r2_s3, %att27_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12) outs(%state_p3_12, %acc_p3_12)
       signal_policy {
@@ -9507,7 +9513,7 @@ builtin.module {
     %pf_bidx28_r2_s3 = nest.dma.prefetch.async %818 into %block_idx_p0_11
       depends_on(%att26_inrel_r2_s3) : !nest.event<"pf_bidx28_r2_s3">
     %att28_grid_r2_s3, %att28_inrel_r2_s3, %att28_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12) outs(%state_p0_12, %acc_p0_12)
       signal_policy {
@@ -9521,7 +9527,7 @@ builtin.module {
     %pf_bidx29_r2_s3 = nest.dma.prefetch.async %819 into %block_idx_p1_11
       depends_on(%att27_inrel_r2_s3) : !nest.event<"pf_bidx29_r2_s3">
     %att29_grid_r2_s3, %att29_inrel_r2_s3, %att29_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12) outs(%state_p1_12, %acc_p1_12)
       signal_policy {
@@ -9535,7 +9541,7 @@ builtin.module {
     %pf_bidx30_r2_s3 = nest.dma.prefetch.async %820 into %block_idx_p0_11
       depends_on(%att28_inrel_r2_s3) : !nest.event<"pf_bidx30_r2_s3">
     %att30_grid_r2_s3, %att30_inrel_r2_s3, %att30_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12) outs(%state_p2_12, %acc_p2_12)
       signal_policy {
@@ -9549,7 +9555,7 @@ builtin.module {
     %pf_bidx31_r2_s3 = nest.dma.prefetch.async %821 into %block_idx_p1_11
       depends_on(%att29_inrel_r2_s3) : !nest.event<"pf_bidx31_r2_s3">
     %att31_grid_r2_s3, %att31_inrel_r2_s3, %att31_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12) outs(%state_p3_12, %acc_p3_12)
       signal_policy {
@@ -9563,7 +9569,7 @@ builtin.module {
     %pf_bidx32_r2_s3 = nest.dma.prefetch.async %822 into %block_idx_p0_11
       depends_on(%att30_inrel_r2_s3) : !nest.event<"pf_bidx32_r2_s3">
     %att32_grid_r2_s3, %att32_inrel_r2_s3, %att32_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12) outs(%state_p0_12, %acc_p0_12)
       signal_policy {
@@ -9577,7 +9583,7 @@ builtin.module {
     %pf_bidx33_r2_s3 = nest.dma.prefetch.async %823 into %block_idx_p1_11
       depends_on(%att31_inrel_r2_s3) : !nest.event<"pf_bidx33_r2_s3">
     %att33_grid_r2_s3, %att33_inrel_r2_s3, %att33_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12) outs(%state_p1_12, %acc_p1_12)
       signal_policy {
@@ -9591,7 +9597,7 @@ builtin.module {
     %pf_bidx34_r2_s3 = nest.dma.prefetch.async %824 into %block_idx_p0_11
       depends_on(%att32_inrel_r2_s3) : !nest.event<"pf_bidx34_r2_s3">
     %att34_grid_r2_s3, %att34_inrel_r2_s3, %att34_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12) outs(%state_p2_12, %acc_p2_12)
       signal_policy {
@@ -9605,7 +9611,7 @@ builtin.module {
     %pf_bidx35_r2_s3 = nest.dma.prefetch.async %825 into %block_idx_p1_11
       depends_on(%att33_inrel_r2_s3) : !nest.event<"pf_bidx35_r2_s3">
     %att35_grid_r2_s3, %att35_inrel_r2_s3, %att35_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12) outs(%state_p3_12, %acc_p3_12)
       signal_policy {
@@ -9619,7 +9625,7 @@ builtin.module {
     %pf_bidx36_r2_s3 = nest.dma.prefetch.async %826 into %block_idx_p0_11
       depends_on(%att34_inrel_r2_s3) : !nest.event<"pf_bidx36_r2_s3">
     %att36_grid_r2_s3, %att36_inrel_r2_s3, %att36_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12) outs(%state_p0_12, %acc_p0_12)
       signal_policy {
@@ -9633,7 +9639,7 @@ builtin.module {
     %pf_bidx37_r2_s3 = nest.dma.prefetch.async %827 into %block_idx_p1_11
       depends_on(%att35_inrel_r2_s3) : !nest.event<"pf_bidx37_r2_s3">
     %att37_grid_r2_s3, %att37_inrel_r2_s3, %att37_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12) outs(%state_p1_12, %acc_p1_12)
       signal_policy {
@@ -9647,7 +9653,7 @@ builtin.module {
     %pf_bidx38_r2_s3 = nest.dma.prefetch.async %828 into %block_idx_p0_11
       depends_on(%att36_inrel_r2_s3) : !nest.event<"pf_bidx38_r2_s3">
     %att38_grid_r2_s3, %att38_inrel_r2_s3, %att38_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12) outs(%state_p2_12, %acc_p2_12)
       signal_policy {
@@ -9661,7 +9667,7 @@ builtin.module {
     %pf_bidx39_r2_s3 = nest.dma.prefetch.async %829 into %block_idx_p1_11
       depends_on(%att37_inrel_r2_s3) : !nest.event<"pf_bidx39_r2_s3">
     %att39_grid_r2_s3, %att39_inrel_r2_s3, %att39_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12) outs(%state_p3_12, %acc_p3_12)
       signal_policy {
@@ -9675,7 +9681,7 @@ builtin.module {
     %pf_bidx40_r2_s3 = nest.dma.prefetch.async %830 into %block_idx_p0_11
       depends_on(%att38_inrel_r2_s3) : !nest.event<"pf_bidx40_r2_s3">
     %att40_grid_r2_s3, %att40_inrel_r2_s3, %att40_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12) outs(%state_p0_12, %acc_p0_12)
       signal_policy {
@@ -9689,7 +9695,7 @@ builtin.module {
     %pf_bidx41_r2_s3 = nest.dma.prefetch.async %831 into %block_idx_p1_11
       depends_on(%att39_inrel_r2_s3) : !nest.event<"pf_bidx41_r2_s3">
     %att41_grid_r2_s3, %att41_inrel_r2_s3, %att41_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12) outs(%state_p1_12, %acc_p1_12)
       signal_policy {
@@ -9703,7 +9709,7 @@ builtin.module {
     %pf_bidx42_r2_s3 = nest.dma.prefetch.async %832 into %block_idx_p0_11
       depends_on(%att40_inrel_r2_s3) : !nest.event<"pf_bidx42_r2_s3">
     %att42_grid_r2_s3, %att42_inrel_r2_s3, %att42_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12) outs(%state_p2_12, %acc_p2_12)
       signal_policy {
@@ -9717,7 +9723,7 @@ builtin.module {
     %pf_bidx43_r2_s3 = nest.dma.prefetch.async %833 into %block_idx_p1_11
       depends_on(%att41_inrel_r2_s3) : !nest.event<"pf_bidx43_r2_s3">
     %att43_grid_r2_s3, %att43_inrel_r2_s3, %att43_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12) outs(%state_p3_12, %acc_p3_12)
       signal_policy {
@@ -9731,7 +9737,7 @@ builtin.module {
     %pf_bidx44_r2_s3 = nest.dma.prefetch.async %834 into %block_idx_p0_11
       depends_on(%att42_inrel_r2_s3) : !nest.event<"pf_bidx44_r2_s3">
     %att44_grid_r2_s3, %att44_inrel_r2_s3, %att44_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p0_12, %acc_p0_12) outs(%state_p0_12, %acc_p0_12)
       signal_policy {
@@ -9745,7 +9751,7 @@ builtin.module {
     %pf_bidx45_r2_s3 = nest.dma.prefetch.async %835 into %block_idx_p1_11
       depends_on(%att43_inrel_r2_s3) : !nest.event<"pf_bidx45_r2_s3">
     %att45_grid_r2_s3, %att45_inrel_r2_s3, %att45_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p1_12, %acc_p1_12) outs(%state_p1_12, %acc_p1_12)
       signal_policy {
@@ -9759,7 +9765,7 @@ builtin.module {
     %pf_bidx46_r2_s3 = nest.dma.prefetch.async %836 into %block_idx_p0_11
       depends_on(%att44_inrel_r2_s3) : !nest.event<"pf_bidx46_r2_s3">
     %att46_grid_r2_s3, %att46_inrel_r2_s3, %att46_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12)
       ins(%block_idx_p0_11, %q_l2_26, %state_p2_12, %acc_p2_12) outs(%state_p2_12, %acc_p2_12)
       signal_policy {
@@ -9773,7 +9779,7 @@ builtin.module {
     %pf_bidx47_r2_s3 = nest.dma.prefetch.async %837 into %block_idx_p1_11
       depends_on(%att45_inrel_r2_s3) : !nest.event<"pf_bidx47_r2_s3">
     %att47_grid_r2_s3, %att47_inrel_r2_s3, %att47_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t16_step_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12)
       ins(%block_idx_p1_11, %q_l2_26, %state_p3_12, %acc_p3_12) outs(%state_p3_12, %acc_p3_12)
       signal_policy {
@@ -9785,7 +9791,7 @@ builtin.module {
         !nest.event<"att47_grid_r2_s3">, !nest.event<"att47_inrel_r2_s3">,
         !nest.event<"att47_out_r2_s3">)
     %att48_grid_r2_s3, %att48_inrel_r2_s3, %att48_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_t3_final_r2 l1_mode = 3 tasks(%838) globals(%776)
+      nest.dispatch.tasks.async @paged_attention_t3_final_r2 l1_mode = 1 tasks(%838) globals(%776)
       bindings(%append_idx_11, %q_l2_26, %state_p0_12, %acc_p0_12)
       ins(%append_idx_11, %q_l2_26, %state_p0_12, %acc_p0_12) outs(%state_p0_12, %acc_p0_12)
       signal_policy {
@@ -9798,7 +9804,7 @@ builtin.module {
         !nest.event<"att48_grid_r2_s3">, !nest.event<"att48_inrel_r2_s3">,
         !nest.event<"att48_out_r2_s3">)
     %merge_grid_r2_s3, %merge_inrel_r2_s3, %merge_out_r2_s3 =
-      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 3 tasks(%838) globals()
+      nest.dispatch.tasks.async @paged_attention_merge_p4 l1_mode = 1 tasks(%838) globals()
       bindings(
         %state_p0_12, %state_p1_12, %state_p2_12, %state_p3_12, %acc_p0_12, %acc_p1_12,
         %acc_p2_12, %acc_p3_12, %out_l2_12)

@@ -40,7 +40,9 @@ from ..dialects.elenor import (
   NexusSharedRefOp,
   NexusSubmitContextOp,
   TileAllocOp,
+  TileAmBuffer,
   TileAwaitOp,
+  TileBoaEstimateOp,
   TileBoaOp,
   TileEvent,
   TileEvuOp,
@@ -58,6 +60,8 @@ from ..dialects.elenor import (
   _int_list,
 )
 from ..execution_ir import (
+  ExecAmBuffer,
+  ExecBoaMatmulDesc,
   ExecDeviceOp,
   ExecDispatchRequest,
   ExecEngineDesc,
@@ -797,7 +801,7 @@ def _register_role(
 
 
 def _lower_engine_descriptor(
-  op, name: str, objects: Mapping[SSAValue, ExecMemoryView]
+  op, name: str, objects: Mapping[SSAValue, ExecMemoryView], am_objects: Mapping[SSAValue, str]
 ) -> tuple[ExecEngineDesc, ExecTileOp]:
   if isinstance(op, (TileLoadOp, TileStoreOp)):
     src = _memory_view(objects, op.src, op.name)
@@ -843,15 +847,35 @@ def _lower_engine_descriptor(
       name, "EVU", op.op_name.data, {"ops": int(op.evu_ops.value.data)}
     ), ExecTileOp.LAUNCH_EVU
   if isinstance(op, TileBoaOp):
-    params = {
-      "m": int(op.m.value.data),
-      "n": int(op.n.value.data),
-      "k": int(op.k.value.data),
-      "ops": int(op.boa_ops.value.data),
-    }
-    if op.accumulate is not None:
-      params["accumulate"] = True
-    return ExecEngineDesc(name, "BOA", op.op_name.data, params), ExecTileOp.LAUNCH_BOA
+    am_name = am_objects.get(op.acc)
+    if am_name is None:
+      raise VerifyException("tile.boa.async accumulator is not a lowered AM allocation")
+    matmul = ExecBoaMatmulDesc(
+      _memory_view(objects, op.a, op.name),
+      _memory_view(objects, op.b, op.name),
+      _memory_view(objects, op.out, op.name),
+      am_name,
+      int(op.m.value.data),
+      int(op.n.value.data),
+      int(op.k.value.data),
+      int(op.seq.value.data),
+      op.accumulate is None,
+      op.output is not None,
+    )
+    return ExecEngineDesc(name, "BOA", "matmul", {"matmul": matmul}), ExecTileOp.LAUNCH_BOA
+  if isinstance(op, TileBoaEstimateOp):
+    return ExecEngineDesc(
+      name,
+      "BOA",
+      op.op_name.data,
+      {
+        "m": int(op.m.value.data),
+        "n": int(op.n.value.data),
+        "k": int(op.k.value.data),
+        "ops": int(op.boa_ops.value.data),
+        "estimate": True,
+      },
+    ), ExecTileOp.LAUNCH_BOA
   raise VerifyException(f"unexpected tile program body op '{op.name}'")
 
 
@@ -859,7 +883,9 @@ def _lower_program(op: TileProgramDefOp, source_name: str, binding_id: str) -> E
   descriptors: dict[str, ExecEngineDesc] = {}
   insts: list[ExecTileInst] = []
   l1_buffers: list[ExecL1Buffer] = []
+  am_buffers: list[ExecAmBuffer] = []
   objects: dict[SSAValue, ExecMemoryView] = {}
+  am_objects: dict[SSAValue, str] = {}
   formals: list[ExecTileFormal] = []
   for index, arg in enumerate(op.body.block.args):
     if index == 0:
@@ -892,6 +918,37 @@ def _lower_program(op: TileProgramDefOp, source_name: str, binding_id: str) -> E
     if isinstance(body_op, TileAllocOp):
       dims, dtype = _dims_dtype(body_op.result.type)
       alignment = int(body_op.alignment.value.data) if body_op.alignment is not None else 1
+      if isinstance(body_op.result.type, TileAmBuffer):
+        output = body_op.output
+        if output is None:
+          raise VerifyException("AM allocation is missing its L1 output operand")
+        output_view = _memory_view(objects, output, body_op.name)
+        if output_view.space != "l1":
+          raise VerifyException("AM allocation output is not an L1 view")
+        name = f"am:{len(am_buffers)}"
+        logical_slot = int(body_op.logical_slot.value.data) if body_op.logical_slot is not None else -1
+        am_buffers.append(
+          ExecAmBuffer(
+            name,
+            dims,
+            dtype,
+            DTYPE_BYTES[dtype],
+            alignment,
+            _view_bytes(dims, dtype),
+            logical_slot,
+            output_view,
+          )
+        )
+        am_objects[body_op.result] = name
+        insts.append(
+          ExecTileInst(
+            ExecTileOp.ALLOC_AM,
+            args=(name, logical_slot),
+            source_ref=source,
+            instruction_id=f"{instruction_id}:alloc_am",
+          )
+        )
+        continue
       name = f"l1:{len(l1_buffers)}"
       l1_buffers.append(
         ExecL1Buffer(name, dims, dtype, DTYPE_BYTES[dtype], alignment, _view_bytes(dims, dtype))
@@ -943,11 +1000,22 @@ def _lower_program(op: TileProgramDefOp, source_name: str, binding_id: str) -> E
       )
     elif isinstance(
       body_op,
-      (TileLoadOp, TileStoreOp, TileGatherOp, TileScatterOp, TilePowOp, TileEvuOp, TileBoaOp),
+      (
+        TileLoadOp,
+        TileStoreOp,
+        TileGatherOp,
+        TileScatterOp,
+        TilePowOp,
+        TileEvuOp,
+        TileBoaOp,
+        TileBoaEstimateOp,
+      ),
     ):
       descriptor_name = f"d{descriptor_index}"
       descriptor_index += 1
-      descriptor, launch_op = _lower_engine_descriptor(body_op, descriptor_name, objects)
+      descriptor, launch_op = _lower_engine_descriptor(
+        body_op, descriptor_name, objects, am_objects
+      )
       descriptors[descriptor_name] = descriptor
       insts.append(
         ExecTileInst(
@@ -1000,6 +1068,7 @@ def _lower_program(op: TileProgramDefOp, source_name: str, binding_id: str) -> E
     tuple(l1_buffers),
     op.resource_contract.to_contract(),
     None,
+    am_buffers=tuple(am_buffers),
   )
 
 
@@ -1010,7 +1079,9 @@ def _event_tag(event_type) -> str:
 
 
 def _dims_dtype(type_attr: Attribute) -> tuple[tuple[int, ...], str]:
-  if not isinstance(type_attr, (NestBuffer, NestGlobalMemref, NestGlobalView, NestL2View, TileL1Buffer)):
+  if not isinstance(
+    type_attr, (NestBuffer, NestGlobalMemref, NestGlobalView, NestL2View, TileL1Buffer, TileAmBuffer)
+  ):
     raise VerifyException(f"expected shape-typed memory attribute, got {type(type_attr).__name__}")
   return tuple(_int_list(type_attr.dims)), type_attr.dtype.data
 

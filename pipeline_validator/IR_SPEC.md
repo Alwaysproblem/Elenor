@@ -182,7 +182,7 @@ event id used by the simulator and the trace. Produced by:
 Tile-level async event. Same semantics as `!nest.event` but scoped to a
 single tile. Produced by: `tile.load.async`, `tile.store.async`,
 `tile.gather.global.async`, `tile.pow.async`, `tile.evu.async`,
-`tile.boa.async`.
+`tile.boa.async`, `tile.boa.estimate.async`.
 
 ### 2.3 `!nest.l2_buffer<DxDx...xdtype>`
 
@@ -214,6 +214,16 @@ the L2 side of `tile.load.async`/`tile.store.async`.
 Tile-local L1 buffer, shape-typed: e.g.
 `!tile.l1_buffer<128x128xbf16>`. Produced by `tile.alloc`; consumed by
 `tile.load.async`/`tile.store.async`, Gather indices/destination, and `tile.free`.
+
+### 2.7a `!tile.am_buffer<DxDx...xdtype>`
+
+Software-managed BOA accumulator capability, e.g.
+`!tile.am_buffer<64x256xf32>`. Produced only by
+`tile.alloc memory_space = "am"`. It is **not** a raw address, never enters
+the L1 Arena/SlotFrame, and cannot be passed to load/store/Gather/Scatter or
+EVU. V1 AM carries f32 partial sums; the bound L1 output may be f32, bf16, or
+i8. A successful FINAL output consumes the chain and releases the lease
+automatically; `tile.free` on an AM value is a type error.
 
 ### 2.8 `!nest.task_range`
 
@@ -531,14 +541,26 @@ dtype must match the source.
 ```mlir
 %l1 = tile.alloc shape = [128, 128] dtype = "bf16" alignment = 256
     : !tile.l1_buffer<128x128xbf16>
+%acc = tile.alloc memory_space = "am" logical_slot = 0 output(%out)
+    shape = [64, 256] dtype = "f32" alignment = 256
+    : !tile.am_buffer<64x256xf32>
 ```
 
-Declares a Tile-local L1 buffer. `shape`/`dtype` must match the result type;
-`alignment` is optional. The compiler places all declarations in the Task's
-striped `ArenaLayout`, with proven non-overlapping lifetimes eligible for
-static Slot/offset reuse. Task admission reserves the whole Arena atomically.
-When the Tile PC reaches `tile.alloc`, `ALLOC_L1` binds that buffer's
-valid-byte view to its compiled Slot. This is not a dynamic pool allocation.
+The L1 form (`memory_space` omitted or `"l1"`) declares a Tile-local L1
+buffer. `shape`/`dtype` must match the result type; `alignment` is optional.
+The compiler places all L1 declarations in the Task's striped `ArenaLayout`,
+with proven non-overlapping lifetimes eligible for static Slot/offset reuse.
+Task admission reserves the whole Arena atomically. When the Tile PC reaches
+`tile.alloc`, `ALLOC_L1` binds that buffer's valid-byte view to its compiled
+Slot. This is not a dynamic pool allocation.
+
+The AM form declares one logical accumulator chain. `dtype` must be `f32`,
+`logical_slot` is software's 0/1 position, and `output(%out)` binds the L1
+final destination (same shape, dtype f32/bf16/i8). `%out` must be defined
+earlier and stays reserved while the chain is live. Lowering emits
+`ALLOC_AM` with a compiled `ExecAmBuffer`; the buffer does not enter the L1
+Arena. The runtime grants a physical slot/engine only on a successful lease;
+a third live lease for one context is BUSY with no side effect.
 
 #### 4.2.1 `tile.free`
 
@@ -558,8 +580,11 @@ capacity merely because one local view was freed.
 Before free, every preceding load destination, Store source, Gather
 indices/destination, or Scatter indices/source access to that allocation
 must have been awaited by SSA event identity. Unrelated asynchronous memory operations do not block it.
-BOA/EVU/Pow currently have opaque timing descriptors without L1 operands, so
-all preceding such compute events must also have been awaited. Later explicit
+Typed BOA has explicit A/B/L1-output effects, so free checks those accesses
+precisely. EVU/Pow and `tile.boa.estimate.async` have opaque timing
+descriptors without L1 operands, so all preceding such compute events must
+still have been awaited. AM is never freed by `tile.free`; its binding output
+cannot be freed while the chain is live. Later explicit
 load/store/Gather use, double free, forward/foreign references, and L2/global
 operands are rejected. Freeing an unused local allocation is legal.
 
@@ -607,16 +632,36 @@ EVU elementwise pow. `bytes` is the chunk size, `exponent` is the power,
 Generic EVU op (softmax, norm, relu, etc.). `op_name` is the engine op,
 `ops` is the total op count.
 
-### 4.7 `tile.boa.async`
+### 4.7 `tile.boa.async` / `tile.boa.estimate.async`
 
 ```mlir
-%ev = tile.boa.async "matmul" m = 128 n = 128 k = 64 ops = 2097152 : !tile.event<"e_mm">
-%ev = tile.boa.async "matmul" m = 128 n = 128 k = 64 ops = 2097152 accumulate : !tile.event<"e_mm">
+%ev = tile.boa.async "matmul" ins(%a, %b) outs(%out) acc(%acc)
+    m = 64 n = 256 k = 64 seq = 0 : !tile.event<"e_k0">
+%ev = tile.boa.async "matmul" ins(%a, %b) outs(%out) acc(%acc)
+    m = 64 n = 256 k = 64 seq = 1 accumulate output : !tile.event<"e_done">
+%ev = tile.boa.estimate.async "matmul" m = 64 n = 128 k = 64 ops = 1048576
+    : !tile.event<"e_est">
 ```
 
-BOA dense compute op. `accumulate` is optional (default false; when
-present, the matmul result accumulates into the existing L1 buffer
-rather than overwriting).
+Typed `tile.boa.async` is the only numerical Matmul form. `ins` are two BF16
+L1 views, `outs` is the L1 destination bound by the AM allocation, and `acc`
+is the AM capability. Flags are orthogonal: no flag = INIT; `accumulate` =
+ADD; `output` = INIT+FINAL; `accumulate output` = ADD+FINAL including this
+product. The first step must INIT (`seq = 0`); later steps must `accumulate`
+with consecutive `seq`; exactly one step must be FINAL. `ops` is derived as
+`2*m*n*k`. The event means step_committed for non-final steps and chain_done
+for FINAL (output visible, AM lease released).
+
+`tile.boa.estimate.async` is an explicit timing-only FLOP estimate. It owns no
+operands, declares no AM computation, produces no numerical C, and must not be
+used to prove typed AM behaviour. It exists so control/timing gates do not
+have to invent fake tensor operands.
+
+Runtime stages for typed BOA are explicit: compute_done enters a finite result
+FIFO/O+R credits, an AM commit stage runs, and a FINAL result waits for a
+bounded L1 output credit, writes/drains, then releases the AM lease and only
+then produces the tile event. L1 output backpressure leaves the lease live in
+WAIT_OUTPUT/DRAINING; recovery is autonomous and does not require UCE polling.
 
 ### 4.8 `tile.gather.global.async` / `tile.scatter.global.async`
 
@@ -854,7 +899,7 @@ compile_program(
 ) -> CompiledProgram
 ```
 
-The result has compiled schema 2 and compiler ABI `v2`. It contains canonical
+The result has compiled schema 4 and compiler ABI `v4`. It contains canonical
 `source_ir`/`source_hash`, embedded `ProfileRegistry`/`registry_hash`, static
 `target_hash`, `artifact_hash`, `"standalone"|"model"` entry kind, immutable
 entry/prefix, call bindings, explicit relocations, instruction source map,
@@ -913,13 +958,15 @@ writes back into the shared template or guesses relocations from event names.
 | `nest.await`                           | one `WAIT_EVENT` per operand                                  |
 | `nest.barrier`                         | `BARRIER_GROUP`                                               |
 | `nest.return`                          | `SIGNAL_EVENT`                                                |
-| `tile.alloc`                           | `ALLOC_L1` with compiled buffer/layout index                  |
+| `tile.alloc` (L1)                      | `ALLOC_L1` with compiled buffer/layout index                  |
+| `tile.alloc memory_space = "am"`       | `ALLOC_AM` + immutable `ExecAmBuffer`                         |
 | `tile.free`                            | `FREE_L1`                                                     |
 | `tile.load.async` / `tile.store.async` | `LAUNCH_MFE` + `ExecTransfer`                                 |
 | `tile.gather.global.async`             | `LAUNCH_GATHER` + immutable `ExecTileGatherDesc`              |
 | `tile.scatter.global.async`            | `LAUNCH_SCATTER` + immutable `ExecTileScatterDesc`            |
 | `tile.pow.async` / `tile.evu.async`    | `LAUNCH_EVU`                                                  |
-| `tile.boa.async`                       | `LAUNCH_BOA`                                                  |
+| `tile.boa.async`                       | `LAUNCH_BOA` + typed `ExecBoaMatmulDesc`                      |
+| `tile.boa.estimate.async`              | `LAUNCH_BOA` + timing-estimate descriptor                     |
 | `tile.await`                           | `WAIT` or `WAITALL` over the original Tile events             |
 | `tile.signal`                          | `SIGNAL_PHASE`                                                |
 | `tile.return`                          | `RET`                                                         |

@@ -16,7 +16,7 @@
 // runtime loop-carried value; the current IR has no dynamic addresses
 // and no token-generation loop.
 //
-// TIMING MODEL ONLY: tile.boa.async / tile.evu.async carry no tensor
+// TIMING MODEL ONLY: tile.boa.estimate.async / tile.evu.async carry no tensor
 // operands and execute no numerics.  The workload measures KV-block
 // initiation interval, buffer lifetimes and dependency stalls -- NOT
 // numerical correctness.
@@ -35,7 +35,7 @@ builtin.module {
     %task: !nest.task, %q_l2: !nest.l2_buffer<4x4x64xbf16>, %k_l2: !nest.l2_buffer<4x256x64xbf16>,
     %v_l2: !nest.l2_buffer<4x256x64xbf16>, %state: !nest.l2_buffer<4x4x66xf32>,
     %out_l2: !nest.l2_buffer<4x4x64xf32>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 77824> {
     %0 = tile.subview %q_l2 task = %task task_dim = 0 offsets = [0, 0, 0] sizes = [1, 4, 64]
       strides = [1, 1, 1] : !nest.l2_view<1x4x64xbf16>
@@ -58,11 +58,13 @@ builtin.module {
     %state_loaded = tile.load.async %3 into %8 : !tile.event<"state_loaded">
     tile.await %q_loaded, %k_loaded, %v_loaded, %state_loaded
     tile.signal input_released(%task)
-    %qk_boa = tile.boa.async "matmul" m = 4 n = 256 k = 64 ops = 131072 : !tile.event<"qk_boa">
+    %qk_boa = tile.boa.estimate.async "matmul" m = 4 n = 256 k = 64 ops = 131072
+      : !tile.event<"qk_boa">
     tile.await %qk_boa
     %sm_update = tile.evu.async "online_softmax_update" ops = 1288 : !tile.event<"sm_update">
     tile.await %sm_update
-    %pv_boa = tile.boa.async "matmul" m = 4 n = 64 k = 256 ops = 131072 : !tile.event<"pv_boa">
+    %pv_boa = tile.boa.estimate.async "matmul" m = 4 n = 64 k = 256 ops = 131072
+      : !tile.event<"pv_boa">
     tile.await %pv_boa
     %state_stored = tile.store.async %8 into %3 : !tile.event<"state_stored">
     tile.await %state_stored
@@ -80,7 +82,7 @@ builtin.module {
     %task_1: !nest.task, %h_l2: !nest.l2_buffer<1024xbf16>,
     %wk_l2: !nest.l2_buffer<4x1024x64xbf16>, %wv_l2: !nest.l2_buffer<4x1024x64xbf16>,
     %kn_l2: !nest.l2_buffer<4x1x64xbf16>, %vn_l2: !nest.l2_buffer<4x1x64xbf16>)
-        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2],
+        resource_contract = #tile.resources<allowed_profiles = [0, 1, 2, 3],
       tile_l1_spm_bytes_per_context = 274432> {
     %10 = tile.subview %h_l2 offsets = [0] sizes = [1024] strides = [1] : !nest.l2_view<1024xbf16>
     %11 = tile.subview %wk_l2 task = %task_1 task_dim = 0 offsets = [0, 0, 0] sizes = [1, 1024, 64]
@@ -103,10 +105,10 @@ builtin.module {
     %wv_loaded = tile.load.async %12 into %17 : !tile.event<"wv_loaded">
     tile.await %h_loaded, %wk_loaded, %wv_loaded
     tile.signal input_released(%task_1)
-    %k_new_boa = tile.boa.async "matmul" m = 1 n = 64 k = 1024 ops = 131072
+    %k_new_boa = tile.boa.estimate.async "matmul" m = 1 n = 64 k = 1024 ops = 131072
       : !tile.event<"k_new_boa">
     tile.await %k_new_boa
-    %v_new_boa = tile.boa.async "matmul" m = 1 n = 64 k = 1024 ops = 131072
+    %v_new_boa = tile.boa.estimate.async "matmul" m = 1 n = 64 k = 1024 ops = 131072
       : !tile.event<"v_new_boa">
     tile.await %v_new_boa
     %k_new_stored = tile.store.async %18 into %13 : !tile.event<"k_new_stored">
@@ -129,7 +131,7 @@ builtin.module {
     %WV_A: !nest.global_memref<4x1024x64xbf16>, %K_APPEND: !nest.global_memref<4x1x64xbf16>,
     %V_APPEND: !nest.global_memref<4x1x64xbf16>)
     placement = 15
-        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2],
+        resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2, 3],
       logical_tasks = 36, l2_spm_bytes = 1601536, requested_contexts_per_tile = 1> {
     %k_p0 = nest.alloc slot = "k_p0" role = "in" shape = [4, 256, 64] dtype = "bf16" alignment = 256
       : !nest.l2_buffer<4x256x64xbf16>

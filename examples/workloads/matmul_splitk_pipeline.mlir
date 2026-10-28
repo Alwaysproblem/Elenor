@@ -32,15 +32,15 @@
 // 不满足）。L2 Arena contract：A + B + 4 partial + 4 scratch 读回 +
 // Y = 2,883,584 B。
 //
-// 数值边界：本 validator 是时间模型。`tile.boa.async` / `tile.evu.async`
-// 不携带 buffer operand、不执行任何数值运算，`accumulate` 标记只是循环
-// 携带依赖意图。输入 bf16、C 累加器与输出 f32（FP32 accumulate，见
-// ELENOR_EVU_Design），仅为类型意图，无数值检查。本例验证 tiling 结构、
-// 搬运字节数、依赖/生命周期与时序，不证明 tensor 数值正确性。
+// 数值边界：leaf 的 `tile.boa.async` 是 typed AM Matmul，在 full_memory 下
+// 执行真实 BF16→FP32 累加、AM 分步提交和最终 f32 输出；`tile.evu.async`
+// combine 仍是 timing descriptor，不写 `%acc` 字节，因此最终 C 字节不是
+// EVU 求和结果。本例验证 tiling 结构、搬运字节数、依赖/生命周期、AM 资源
+// 与 BOA 部分和时序，不宣称 EVU 整图数值正确。
 //
 // 验证点（trace / report）：
 //   - BOA 切片 32 = 4 leaf x 4 task x 2 k_sub；每步 ops = 2097152
-//     （2 x 64 x 256 x 64）；每 task 首步无 accumulate、第二步 accumulate；
+//     （2 x 64 x 256 x 64）；每 task 首步 INIT、第二步 accumulate output；
 //   - EVU 切片 8 = 1 个 combine dispatch x 4 task x 2 阶段
 //     （每阶段 ops = 32768，两阶段完成 4 x 16384 元素求和）；
 //   - MFE_LD0 切片 80 = 4 leaf x 4 task x (2 A 8 KiB + 2 B 32 KiB)
@@ -85,13 +85,17 @@ builtin.module {
         alignment = 256 : !tile.l1_buffer<64x256xbf16>
     %bbuf1 = tile.alloc shape = [64, 256] dtype = "bf16"
         alignment = 256 : !tile.l1_buffer<64x256xbf16>
-    %acc = tile.alloc shape = [64, 256] dtype = "f32"
+    %out = tile.alloc memory_space = "l1" shape = [64, 256] dtype = "f32"
         alignment = 256 : !tile.l1_buffer<64x256xf32>
+    %acc = tile.alloc memory_space = "am" logical_slot = 0 output(%out)
+        shape = [64, 256] dtype = "f32" alignment = 256
+        : !tile.am_buffer<64x256xf32>
     // k_sub 0：BOA 首步覆写 acc。
     %la0 = tile.load.async %a0 into %abuf0 : !tile.event<"la0">
     %lb0 = tile.load.async %b0 into %bbuf0 : !tile.event<"lb0">
     tile.await %la0, %lb0
-    %g0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
+    %g0 = tile.boa.async "matmul" ins(%abuf0, %bbuf0) outs(%out) acc(%acc)
+        m = 64 n = 256 k = 64 seq = 0
         : !tile.event<"g0">
     // k_sub 1 的 load 与 k_sub 0 的 BOA 重叠。
     %la1 = tile.load.async %a1 into %abuf1 : !tile.event<"la1">
@@ -100,14 +104,15 @@ builtin.module {
     // 最后一次真实 load 完成后才 input_released。
     tile.await %la1, %lb1
     tile.signal input_released(%task)
-    %g1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
-        accumulate : !tile.event<"g1">
+    %g1 = tile.boa.async "matmul" ins(%abuf1, %bbuf1) outs(%out) acc(%acc)
+        m = 64 n = 256 k = 64 seq = 1 accumulate output
+        : !tile.event<"g1">
     tile.await %g1
     tile.free %abuf0
     tile.free %abuf1
     tile.free %bbuf0
     tile.free %bbuf1
-    %c_stored = tile.store.async %acc into %c_v : !tile.event<"c_stored">
+    %c_stored = tile.store.async %out into %c_v : !tile.event<"c_stored">
     tile.await %c_stored
     tile.signal output_ready(%task)
     tile.return
@@ -144,26 +149,31 @@ builtin.module {
         alignment = 256 : !tile.l1_buffer<64x256xbf16>
     %bbuf1 = tile.alloc shape = [64, 256] dtype = "bf16"
         alignment = 256 : !tile.l1_buffer<64x256xbf16>
-    %acc = tile.alloc shape = [64, 256] dtype = "f32"
+    %out = tile.alloc memory_space = "l1" shape = [64, 256] dtype = "f32"
         alignment = 256 : !tile.l1_buffer<64x256xf32>
+    %acc = tile.alloc memory_space = "am" logical_slot = 0 output(%out)
+        shape = [64, 256] dtype = "f32" alignment = 256
+        : !tile.am_buffer<64x256xf32>
     %la0 = tile.load.async %a0 into %abuf0 : !tile.event<"la0">
     %lb0 = tile.load.async %b0 into %bbuf0 : !tile.event<"lb0">
     tile.await %la0, %lb0
-    %g0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
+    %g0 = tile.boa.async "matmul" ins(%abuf0, %bbuf0) outs(%out) acc(%acc)
+        m = 64 n = 256 k = 64 seq = 0
         : !tile.event<"g0">
     %la1 = tile.load.async %a1 into %abuf1 : !tile.event<"la1">
     %lb1 = tile.load.async %b1 into %bbuf1 : !tile.event<"lb1">
     tile.await %g0
     tile.await %la1, %lb1
     tile.signal input_released(%task)
-    %g1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
-        accumulate : !tile.event<"g1">
+    %g1 = tile.boa.async "matmul" ins(%abuf1, %bbuf1) outs(%out) acc(%acc)
+        m = 64 n = 256 k = 64 seq = 1 accumulate output
+        : !tile.event<"g1">
     tile.await %g1
     tile.free %abuf0
     tile.free %abuf1
     tile.free %bbuf0
     tile.free %bbuf1
-    %c_stored = tile.store.async %acc into %c_v : !tile.event<"c_stored">
+    %c_stored = tile.store.async %out into %c_v : !tile.event<"c_stored">
     tile.await %c_stored
     tile.signal output_ready(%task)
     tile.return
@@ -200,26 +210,31 @@ builtin.module {
         alignment = 256 : !tile.l1_buffer<64x256xbf16>
     %bbuf1 = tile.alloc shape = [64, 256] dtype = "bf16"
         alignment = 256 : !tile.l1_buffer<64x256xbf16>
-    %acc = tile.alloc shape = [64, 256] dtype = "f32"
+    %out = tile.alloc memory_space = "l1" shape = [64, 256] dtype = "f32"
         alignment = 256 : !tile.l1_buffer<64x256xf32>
+    %acc = tile.alloc memory_space = "am" logical_slot = 0 output(%out)
+        shape = [64, 256] dtype = "f32" alignment = 256
+        : !tile.am_buffer<64x256xf32>
     %la0 = tile.load.async %a0 into %abuf0 : !tile.event<"la0">
     %lb0 = tile.load.async %b0 into %bbuf0 : !tile.event<"lb0">
     tile.await %la0, %lb0
-    %g0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
+    %g0 = tile.boa.async "matmul" ins(%abuf0, %bbuf0) outs(%out) acc(%acc)
+        m = 64 n = 256 k = 64 seq = 0
         : !tile.event<"g0">
     %la1 = tile.load.async %a1 into %abuf1 : !tile.event<"la1">
     %lb1 = tile.load.async %b1 into %bbuf1 : !tile.event<"lb1">
     tile.await %g0
     tile.await %la1, %lb1
     tile.signal input_released(%task)
-    %g1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
-        accumulate : !tile.event<"g1">
+    %g1 = tile.boa.async "matmul" ins(%abuf1, %bbuf1) outs(%out) acc(%acc)
+        m = 64 n = 256 k = 64 seq = 1 accumulate output
+        : !tile.event<"g1">
     tile.await %g1
     tile.free %abuf0
     tile.free %abuf1
     tile.free %bbuf0
     tile.free %bbuf1
-    %c_stored = tile.store.async %acc into %c_v : !tile.event<"c_stored">
+    %c_stored = tile.store.async %out into %c_v : !tile.event<"c_stored">
     tile.await %c_stored
     tile.signal output_ready(%task)
     tile.return
@@ -256,26 +271,31 @@ builtin.module {
         alignment = 256 : !tile.l1_buffer<64x256xbf16>
     %bbuf1 = tile.alloc shape = [64, 256] dtype = "bf16"
         alignment = 256 : !tile.l1_buffer<64x256xbf16>
-    %acc = tile.alloc shape = [64, 256] dtype = "f32"
+    %out = tile.alloc memory_space = "l1" shape = [64, 256] dtype = "f32"
         alignment = 256 : !tile.l1_buffer<64x256xf32>
+    %acc = tile.alloc memory_space = "am" logical_slot = 0 output(%out)
+        shape = [64, 256] dtype = "f32" alignment = 256
+        : !tile.am_buffer<64x256xf32>
     %la0 = tile.load.async %a0 into %abuf0 : !tile.event<"la0">
     %lb0 = tile.load.async %b0 into %bbuf0 : !tile.event<"lb0">
     tile.await %la0, %lb0
-    %g0 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
+    %g0 = tile.boa.async "matmul" ins(%abuf0, %bbuf0) outs(%out) acc(%acc)
+        m = 64 n = 256 k = 64 seq = 0
         : !tile.event<"g0">
     %la1 = tile.load.async %a1 into %abuf1 : !tile.event<"la1">
     %lb1 = tile.load.async %b1 into %bbuf1 : !tile.event<"lb1">
     tile.await %g0
     tile.await %la1, %lb1
     tile.signal input_released(%task)
-    %g1 = tile.boa.async "matmul" m = 64 n = 256 k = 64 ops = 2097152
-        accumulate : !tile.event<"g1">
+    %g1 = tile.boa.async "matmul" ins(%abuf1, %bbuf1) outs(%out) acc(%acc)
+        m = 64 n = 256 k = 64 seq = 1 accumulate output
+        : !tile.event<"g1">
     tile.await %g1
     tile.free %abuf0
     tile.free %abuf1
     tile.free %bbuf0
     tile.free %bbuf1
-    %c_stored = tile.store.async %acc into %c_v : !tile.event<"c_stored">
+    %c_stored = tile.store.async %out into %c_v : !tile.event<"c_stored">
     tile.await %c_stored
     tile.signal output_ready(%task)
     tile.return
@@ -311,7 +331,7 @@ builtin.module {
     %acc = tile.alloc shape = [64, 256] dtype = "f32"
         alignment = 256 : !tile.l1_buffer<64x256xf32>
     // 顺序累加：acc = q0；acc += q1；acc += q2；acc += q3（单一 scratch buffer）。
-    %qa = tile.load.async %q0_v into %qabuf0 : !tile.event<"qa">
+    %qa = tile.load.async %q0_v into %acc : !tile.event<"qa">
     tile.await %qa
     %cc0 = tile.evu.async "add" ops = 16384 : !tile.event<"cc0">
     tile.await %cc0

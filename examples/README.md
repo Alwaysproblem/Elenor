@@ -92,7 +92,8 @@ PagedAttention 在 runtime 轮跳过，在 full_memory 轮运行。
 | `matmul-pow-data-dep`                        | `workloads/matmul_pow_data_dep.mlir`                        | pow 消费 matmul 输出 C，只等生产者、不过早也不过度串行                                                                                                                                              |
 | `matmul17-pow-tail-overlap`                  | `workloads/matmul17_pow_tail_overlap.mlir`                  | 17 个 tile context（4 x placement15 + 1 x placement1），pow 与尾 context 重叠                                                                                                                       |
 | `pow-sequential-contexts`                    | `workloads/pow_sequential_contexts.mlir`                    | 两个 context 串行提交                                                                                                                                                                               |
-| `matmul-2048x512-boa256`                     | `workloads/matmul_2048x512x64_boa256x256x32.mlir`           | 2048x512x64 matmul，BOA 256x256x32，K tile 内展开，4 context                                                                                                                                        |
+| `boa-am-matmul`                              | `workloads/boa_am_matmul.mlir`                              | typed AM：A[64,128]bf16 × B[128,256]bf16 → C[64,256]f32，K 两步，64 KiB AM                                                                                                                          |
+| `matmul-2048x512-boa256`                     | `workloads/matmul_2048x512x64_boa256x256x32.mlir`           | 2048x512x64 matmul，BOA 256x256x32，K tile 内展开，4 context，typed AM                                                                                                                              |
 | `reduce-sum-single-context`                  | `workloads/reduce_sum_ktiled_single_context.mlir`           | 256x4096 Reduce-Sum，单 context：1 dispatch 4 task，K chunk 双缓冲 + f32 acc                                                                                                                        |
 | `reduce-sum-splitk-multicontext`             | `workloads/reduce_sum_splitk_multicontext.mlir`             | 256x16384 Reduce-Sum，split-K 跨 8 context 分区 + HBM 部分和 combine                                                                                                                                |
 | `reduce-sum-multiuce`                        | `workloads/reduce_sum_multiuce.mlir`                        | 512x4096 Reduce-Sum，UCE supertile × task 行块两级 M 分工，全 tile 4 context（--context-mode 4）                                                                                                    |
@@ -123,9 +124,12 @@ bash examples/run.sh matmul-gather-add-4tiles-2contexts \
 `matmul-2048x512-boa256` 展示 2048x512x64 bf16 matmul 按 BOA shape 256x256x32 的切分方式
 （placement 全 15 ⇒ 每 dispatch 4 task ⇒ 4 context x 4 task = 16 个输出块）：
 
-- **K tiling 在一个 tile 内完成**：K=64 展开为 2 个静态 `tile.boa.async`（k=32），
-  第二个带 `accumulate`，无任何循环；两个 K-step 的输入 load 一次性发射，
-  MFE 与 BOA 流水重叠。BOA 描述符严格保持 256x256x32。
+- **K tiling 在一个 tile 内完成**：K=64 展开为 2 个静态 typed `tile.boa.async`
+  （k=32），第二步 `accumulate output`，无任何循环；两个 K-step 的输入 load
+  一次性发射，MFE 与 BOA 流水重叠。BOA 描述符严格保持 256x256x32。
+  本类示例在 full_memory 下执行真实 BF16→FP32 数值，需要
+  `examples/workloads/boa_am_inputs/<fixture>/` 下的固定输入；生成器
+  `generate_boa_am_matmul.py --existing` 可确定性重建。
 - **M/N tiling 在不同 context 下完成**：context 网格 2x2（`@mm_m0n0`..`@mm_m1n1`，
   m_sup/n_sup 超块），每个 context 的 `task.range 0..4` 沿 M 把超块切成 4x256 行。
 - **全部 `placement = 15`**：每个 context 的 4-task grid 铺满全组 4 tiles；
@@ -191,7 +195,7 @@ bash examples/run.sh reduce-sum-splitk-multiuce --trace-json /tmp/rs5.json --jso
 `matmul-splitk-pipeline` 展示 matmul 的 **HBM→L2→L1 三级流水**（每级都有显式 IR）：
 
 - **三级结构**：第 1 级 HBM→L2 一次整块 prefetch；第 2 级 L2→L1 双缓冲 load（下一 k_sub 的
-  load 与当前 BOA compute 重叠）；第 3 级 BOA 在 L1 逐步 `accumulate` 进常驻 f32 C acc。
+  load 与当前 BOA compute 重叠）；第 3 级 BOA 在 AM 中分步累加（首步 INIT、末步 `accumulate output`），末步写回常驻 L1 f32 out。
 - **`matmul-splitk-pipeline`**（A[256,512] × B[512,256] → C[256,256]）：
   reduce axis split-K——4 个 leaf dispatch（4 task，UCE pin 0..3，
   `--context-mode 4`）各规约 K quarter {2d, 2d+1}（每 task 2 个
@@ -202,9 +206,9 @@ bash examples/run.sh reduce-sum-splitk-multiuce --trace-json /tmp/rs5.json --jso
   multicontext 变体的 combine contract 也是 131072 B。原输入文件头的
   196608 B 说法与实际 `tile.resources` / 编译产物不一致，不作为合同。
 
-- **数值边界**：validator 为时间模型，`tile.boa.async`/`tile.evu.async`
-  无 operand、不执行数值运算，`accumulate` 仅为意图标注；输入 bf16、
-  C 累加器/输出 f32（FP32 accumulate，见
+- **数值边界**：`tile.boa.async` 在 full_memory 下执行真实 BF16→FP32
+  Matmul、AM 分步提交与最终 f32/BF16 输出；`tile.evu.async` 仍是时间模型，
+  不写 C 字节。输入 bf16、C 累加器/输出 f32（FP32 accumulate，见
   [ELENOR_EVU_Design.md](../design/elenor_evu/ELENOR_EVU_Design.md)）。
 
 ```bash
@@ -273,8 +277,11 @@ final L1 buffer
 `workloads/transformer_*.mlir` 由 `generators/generate_transformer_prefill.py`
 / `generate_transformer_decode.py` 生成（生成器确定性；不要手改生成的
 MLIR，改参数后重新生成）。文件顶部注明：validator 是 timing/resource
-模型，`tile.boa.async`/`tile.evu.async` 不携带 tensor operand，不验证
-数值正确性。
+模型：生成的 Transformer/PagedAttention 使用 `tile.boa.estimate.async` /
+`tile.evu.async`，不携带 tensor operand，不验证张量数值正确性。
+但 **PagedAttention 不能因此当作 timing_only 示例**：它的 Gather/Scatter
+和 scenario oracle 需要 ByteStore，`run.sh` 把两个 paged 变体固定为
+full_memory；estimate BOA 不消除 Gather/Scatter 的字节要求。
 
 - **Prefill**（seq=512, GQA 16:4, BF16）：单 root。QKV 投影按 K=128 分 8 个
   chunk，L2 ping/pong prefetch 与 BOA accumulate 流水；attention 每 tile
@@ -468,10 +475,11 @@ bash examples/run.sh file /tmp/my_gather.mlir \
 以下 [2026-09-11 历史 tile.free 审计](artifacts/tile_free/run-20260911-final/verification.json)
 仅对应当时的输入、合同和模型，不代表当前 corpus 的容量、生命周期或验收。
 
-当前 `tile.boa.async` 和 `tile.evu.async` 是 timing descriptor，没有显式 L1
-operand/result。组合示例沿用 Pow 的隐式 L1 原地约定：`%matmul_dst` 作为最终工作
-buffer，并在最后一个 engine event 完成后显式 Store。该路径是 output lifecycle /
-timing accurate，不是 tensor value accurate。
+当前 `tile.boa.estimate.async` 和 `tile.evu.async` 是 timing descriptor，没有显式 L1
+operand/result；typed `tile.boa.async` 则显式声明 A/B/out/AM。EVU 组合示例仍沿用
+Pow 的隐式原地约定：typed Matmul 的 `%out` 作为最终工作 buffer，并在最后一个
+engine event 完成后显式 Store。EVU 路径是 output lifecycle / timing accurate，
+不是 tensor value accurate。
 
 ## 全量 MLIR 的 free 历史审查（2026-09-12）
 
@@ -487,7 +495,7 @@ timing accurate，不是 tensor value accurate。
 | 没有 L1 allocation       |    4 | 不伪造 free                                            |
 | 历史方言文件             |    4 | 逐份人工检查后保留；当前 parser 不支持，不声称运行通过 |
 
-放置规则不是“最后一次 load 后就 free”：当前 BOA/EVU/Pow 不声明 L1 operands，
+放置规则不是“最后一次 load 后就 free”：当前 estimate/EVU/Pow 不声明 L1 operands，
 因此自动审查将程序中的所有此类计算视为潜在使用者，等全部相关事件已由现有
 `tile.await` 等待后才考虑释放。`matmul_gather_add` 的 `gather_dst` 保留到
 后续 `add_done`；多 chunk matmul 的共享输入、权重保留到最后一个 chunk。

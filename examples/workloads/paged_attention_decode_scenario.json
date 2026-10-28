@@ -6,8 +6,8 @@
   "physical_pages": 128,
   "page_padding_bytes": 64,
   "contexts_per_tile": 4,
-  "l1_mode": 3,
-  "baseline_l1_mode": 1,
+  "l1_mode": 1,
+  "baseline_l1_mode": null,
   "l2_mode": 1,
   "seed": 0,
   "initial_mapping": {
@@ -25,8 +25,8 @@
     ]
   },
   "source_hashes": {
-    "pipeline": "3bd6eda9a1d32f00a4f61be325dfb3656c11489db52a0731dc1a556f4bf94333",
-    "baseline": "1756bbf6d51b2fcf555d9c2e7bde47784a9fb200b30d438d3e9fff65678ea770"
+    "pipeline": "0f2e7cc78390c900624d1b5d915b29125fd0556f515392593e52aa5e54fc5d9c",
+    "baseline": "fa8b4ed2e73099731f511857a67ee6cc132af9f16d77284e200554c22a9d45a0"
   },
   "num_requests": 3,
   "kv_heads": 4,

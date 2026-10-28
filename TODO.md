@@ -144,7 +144,7 @@
 3. 一个element 的 mul 或者 div 的 运算 是否需要增加立即数生成器 来减少带宽的搬运？ 这部分需要和 tile 这种算子一起考虑
 4. 是否考虑加入随机数生成器 来增加对 sample 和 概率分布的支持？
 5. topk 这类算子未纳入当前模拟器的考虑范围之内，需要考虑具体的算法
-6. 当前值考虑了 data  和 pipeline 的效率 并没有考虑 program load 相关的 pipeline
+6. 当前值考虑了 data 和 pipeline 的效率 并没有考虑 program load 相关的 pipeline
 7. 需要探寻 当前的 tile program 和 nest 的 控制 之间的通讯 是 共同的 sram 来共享任务状态 还是 通过 类似dma 这种 任务状态 需要 实时 广播 同步？ 还有如何处理 任务同步这部分内存的 原子性？
 8. 当前的 input release 或者 output release 在 tile program 中粒度是在太粗是不是适合硬件设计需要考量，还有考虑是否需要按照 buffer 的名字进行 release
 9. 当前并没有 对 l1 到 rf 之间的带宽做建模
@@ -175,6 +175,7 @@ BOA 这类计算单元的 register file 装载需要硬件级流水设计。理�
 而且需要考虑 complete queue 和 command FIFO 的同步机制，与此同时还需要有硬件机制对于可用的OPA数量进行管理
 
 注意 （为了能够节省多次 accumulate output 的频繁访问 shared memory，当然后续需要考虑 多个 gemmini 的阵列如果采用 queue 进行异步调度）：
+
 1. uce 需要控制 BOA 内部的 load 并且 BOA 内部需要有 RF 来存数据 （可选 double buffer）这样的话可以很精细的控制 什么时候释放 shared memory
 2. BOA 如果采用 gemmini 阵列的话 那么 AM 需要拥有一个持续驻留的 accumulator handle (执行实例, 矩阵任务, 输出块)，或者在运行之前生成token 也就是唯一 ID。
 3. 在编译的时候 需要 k step 的计算需要聚合 并且不能够 插入其他 matmul 的操作，因为 我打算 AM 保留的区域 和 context 的数量是绑定的

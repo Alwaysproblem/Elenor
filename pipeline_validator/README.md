@@ -60,9 +60,9 @@ result = Simulator(hw, sim).run(loaded)
 Registry, target/artifact hashes, frozen executable, call bindings,
 relocations, source map, dependency proofs, readonly import references, entry/exit
 Profiles, resource budgets, binding guards, and workload metadata. The compiled
-package format currently has `schema_version=2` and `compiler_abi="v2"`; this is
-distinct from hardware YAML schema 2. Schema 1 and ABI `v0`/`v1` artifacts are
-rejected and must be rebuilt from source. Parsing uses an explicit type/opcode
+package format currently has `schema_version=4` and `compiler_abi="v4"`; this is
+distinct from hardware YAML schema 2. Older schema/ABI artifacts (including
+`v2` and `v3`) are rejected and must be rebuilt from source. Parsing uses an explicit type/opcode
 allowlist and rejects unknown fields/types, duplicate JSON keys, non-finite
 numbers, unknown versions, and a mismatched artifact hash.
 
@@ -115,7 +115,8 @@ arbitration layers; neither guarantees global starvation freedom. A
 `nest.barrier` waits that Context's earlier actions, not all roots.
 `note_completion` reclaims credits even when the action table is full.
 
-Representative runnable comparisons: [Tile-SPMD matmul](../examples/workloads/matmul_2048x512x64_boa256x256x32.mlir),
+Representative runnable comparisons: [typed AM Matmul](../examples/workloads/boa_am_matmul.mlir),
+[Tile-SPMD matmul](../examples/workloads/matmul_2048x512x64_boa256x256x32.mlir),
 [K-chunk double buffering](../examples/workloads/reduce_sum_ktiled_single_context.mlir),
 [S0/S1 branch](../examples/scenarios/ready_action_branch.mlir),
 [context-local split-K](../examples/workloads/matmul_splitk_multicontext_pipeline.mlir),
@@ -371,8 +372,26 @@ For byte-checked profiled Gather, each request additionally needs
 `bind_profiled_source(binding_id, request_id, source_offset)`. Cache test
 seeding is available through `seed_cache_line(...)`. Without `ByteStore`,
 Gather remains a deterministic source-authored `L1_HIT`/`L2_HIT`/`HBM_MISS`
-timing profile. Cache capacity never predicts a hit rate, and BOA/EVU/USE do
-not compute tensor values.
+timing profile. Cache capacity never predicts a hit rate. Typed
+`tile.boa.async` executes BF16→FP32 arithmetic and f32/BF16 final conversion
+in `full_memory`; `tile.boa.estimate.async` and EVU/USE remain timing models
+and do not compute tensor values. Estimate BOA alone does not make a workload
+timing-only: PagedAttention still requires `full_memory` for its Gather/Scatter
+address/value oracle and scenario HostEnvironment.
+
+Software-managed AM is a separate capability, not an L1 heap: `tile.alloc
+memory_space = "am"` declares a logical chain and its bound L1 output; typed
+`tile.boa.async` carries `ins/outs/acc` and an explicit `seq`; the FINAL step
+writes the L1 output and releases the lease automatically. The runtime models
+4 groups x 2 physical slots (8 dynamic leases), at most 2 live leases per Tile
+context, fixed engine affinity and generation-safe terminal records. A lease
+request that cannot be granted is BUSY with no slot/quota side effect.
+
+Compute completion is not the UCE event: a typed result enters a finite
+`BoaResultService` FIFO, consumes O/R credits, takes a commit stage, and for a
+FINAL output waits for a bounded L1 output credit, writes/drains, and only then
+releases AM and signals the event. L1 output backpressure leaves the lease live
+in `WAIT_OUTPUT`/`DRAINING`; recovery needs no UCE polling.
 
 ## Hardware YAML schema 2 and default experimental modes
 

@@ -91,6 +91,26 @@ engines:
       input_bytes: 2 # BF16 input
       accumulator_bytes: 4 # INT32 / BF16 accumulate
 
+    # Software-managed accumulator memory (shared AM V1).  4 groups x 2
+    # physical slots = 8 dynamic slots; per-context live lease quota is 2.
+    # slot_capacity_bytes is a numeric capacity lower bound for one logical
+    # output block; padding/ECC/stride overhead is not included.
+    am:
+      slot_capacity_bytes: 262144 # 256 KiB f32, 由后续规格冻结
+      group_count: 4
+      slots_per_group: 2
+      slots_per_context: 2
+
+    # Result FIFO / commit / output drain are separate from compute; the
+    # UCE completion event fires only after the commit (and drain for a
+    # final output).  Credits bound outstanding A/B reads plus AM RMW
+    # writes (2 per typed step).
+    result_fifo_depth: 4
+    commit_cycles: 2
+    output_drain_cycles: 1
+    am_credit_capacity: 8
+    l1_output_credits: 1
+
     launch_cycles: 4
 
   evu:

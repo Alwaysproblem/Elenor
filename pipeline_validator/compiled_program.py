@@ -264,6 +264,8 @@ _CLASSES = (
   execution.ExecTransfer,
   execution.ExecL2Buffer,
   execution.ExecL1Buffer,
+  execution.ExecAmBuffer,
+  execution.ExecBoaMatmulDesc,
   execution.ExecTileFormal,
   execution.ExecTaskDomain,
   execution.ExecSignalPolicy,
@@ -358,11 +360,13 @@ def _validate_source_ref(value: object, name: str) -> None:
     raise ValueError(f"{name} requires SourceRef")
 
 
-def _validate_view(view: object, name: str) -> None:
+def _validate_view(view: object, name: str, *, spaces: set[str] | None = None) -> None:
   if type(view) is not execution.ExecMemoryView:
     raise ValueError(f"{name} must be ExecMemoryView")
   if view.space not in ("global", "l2", "l1"):
     raise ValueError(f"{name}.space is invalid")
+  if spaces is not None and view.space not in spaces:
+    raise ValueError(f"{name}.space must be one of {sorted(spaces)}")
   _text(view.base, f"{name}.base")
   backing = _shape(view.backing_dims, f"{name}.backing_dims")
   dims = _shape(view.dims, f"{name}.dims")
@@ -442,6 +446,13 @@ def _validate_instruction(inst: execution.ExecTileInst, name: str) -> None:
       raise ValueError(f"{name} has invalid alloc.l1 arguments")
     _text(args[0], f"{name}.buffer_id")
     _uint(args[1], f"{name}.layout_index")
+  elif inst.op is execution.ExecTileOp.ALLOC_AM:
+    if len(args) != 2:
+      raise ValueError(f"{name} has invalid alloc.am arguments")
+    _text(args[0], f"{name}.am_buffer_id")
+    _uint(args[1], f"{name}.logical_slot")
+    if args[1] not in (0, 1):
+      raise ValueError(f"{name}.logical_slot must be 0 or 1")
   elif inst.op is execution.ExecTileOp.FREE_L1:
     if len(args) != 1:
       raise ValueError(f"{name} has invalid free.l1 arguments")
@@ -502,18 +513,24 @@ def _validate_engine(desc: execution.ExecEngineDesc, name: str) -> None:
       else:
         _uint(desc.params[key], f"{name}.{key}", positive=True)
   elif desc.kind == "BOA":
-    if desc.transfer is not None or not {"m", "n", "k", "ops"} <= set(desc.params) <= {
-      "m",
-      "n",
-      "k",
-      "ops",
-      "accumulate",
-    }:
+    if desc.transfer is not None:
+      raise ValueError(f"{name}.transfer must be absent")
+    matmul = desc.params.get("matmul")
+    if matmul is not None:
+      if desc.op != "matmul":
+        raise ValueError(f"{name} typed BOA op must be 'matmul'")
+      if set(desc.params) != {"matmul"} or type(matmul) is not execution.ExecBoaMatmulDesc:
+        raise ValueError(f"{name} has invalid typed matmul fields")
+      _validate_executable_value(matmul, f"{name}.matmul")
+    elif desc.params.get("estimate") is True:
+      if set(desc.params) != {"m", "n", "k", "ops", "estimate"}:
+        raise ValueError(f"{name} has invalid BOA estimate parameters")
+      for key in ("m", "n", "k", "ops"):
+        _uint(desc.params[key], f"{name}.{key}", positive=True)
+      if type(desc.params["estimate"]) is not bool:
+        raise ValueError(f"{name}.estimate must be bool")
+    else:
       raise ValueError(f"{name} has invalid BOA parameters")
-    for key in ("m", "n", "k", "ops"):
-      _uint(desc.params[key], f"{name}.{key}", positive=True)
-    if "accumulate" in desc.params and type(desc.params["accumulate"]) is not bool:
-      raise ValueError(f"{name}.accumulate must be bool")
   else:
     raise ValueError(f"{name} has an unsupported engine opcode")
 
@@ -665,6 +682,41 @@ def _validate_executable_value(value: object, name: str) -> None:
   if kind in (execution.ExecL1Buffer, execution.ExecL2Buffer):
     _validate_buffer(value, name)
     return
+  if _is_exact_type(value, execution.ExecAmBuffer):
+    _text(value.name, f"{name}.name")
+    dims = _shape(value.dims, f"{name}.dims")
+    if value.dtype != "f32" or value.element_bytes != 4:
+      raise ValueError(f"{name} must carry f32 AM bytes")
+    if value.bytes != math.prod(dims) * value.element_bytes:
+      raise ValueError(f"{name}.bytes does not conserve its shape")
+    _uint(value.alignment, f"{name}.alignment", positive=True)
+    if value.logical_slot not in (0, 1):
+      raise ValueError(f"{name}.logical_slot must be 0 or 1")
+    _validate_view(value.output, f"{name}.output", spaces={"l1"})
+    if value.output.dims != dims:
+      raise ValueError(f"{name}.output shape must match the AM shape")
+    if value.output.dtype not in ("f32", "bf16", "i8"):
+      raise ValueError(f"{name}.output dtype is invalid")
+    return
+  if _is_exact_type(value, execution.ExecBoaMatmulDesc):
+    _validate_view(value.a, f"{name}.a", spaces={"l1"})
+    _validate_view(value.b, f"{name}.b", spaces={"l1"})
+    _validate_view(value.output, f"{name}.output", spaces={"l1"})
+    _text(value.am, f"{name}.am")
+    for field_name in ("m", "n", "k"):
+      _uint(getattr(value, field_name), f"{name}.{field_name}", positive=True)
+    _uint(value.seq, f"{name}.seq")
+    if type(value.init) is not bool or type(value.final) is not bool:
+      raise ValueError(f"{name} init/final must be bool")
+    if value.a.dtype != "bf16" or value.b.dtype != "bf16":
+      raise ValueError(f"{name} inputs must be bf16 L1 views")
+    if value.a.dims != (value.m, value.k) or value.b.dims != (value.k, value.n):
+      raise ValueError(f"{name} A/B shapes must be (m, k) and (k, n)")
+    if value.output.dims != (value.m, value.n):
+      raise ValueError(f"{name}.output shape must be (m, n)")
+    if value.output.dtype not in ("f32", "bf16", "i8"):
+      raise ValueError(f"{name}.output dtype is invalid")
+    return
   if _is_exact_type(value, execution.ExecTileFormal):
     if value.space not in ("task", "global", "l2"):
       raise ValueError(f"{name}.space is invalid")
@@ -779,6 +831,46 @@ def _validate_executable_value(value: object, name: str) -> None:
     _typed_tuple(value.l1_buffers, execution.ExecL1Buffer, f"{name}.l1_buffers")
     for index, item in enumerate(value.l1_buffers):
       _validate_buffer(item, f"{name}.l1_buffers[{index}]")
+    l1_by_name = {buffer.name: buffer for buffer in value.l1_buffers}
+    _typed_tuple(value.am_buffers, execution.ExecAmBuffer, f"{name}.am_buffers")
+    am_by_name: dict[str, execution.ExecAmBuffer] = {}
+    for index, item in enumerate(value.am_buffers):
+      _validate_executable_value(item, f"{name}.am_buffers[{index}]")
+      if item.name in am_by_name or item.name in l1_by_name:
+        raise ValueError(f"{name} has duplicate AM buffer {item.name!r}")
+      am_by_name[item.name] = item
+      output_buffer = l1_by_name.get(item.output.base)
+      if output_buffer is None:
+        raise ValueError(f"{name} AM output references an absent L1 buffer")
+      if (
+        output_buffer.dims != item.output.backing_dims
+        or output_buffer.dtype != item.output.dtype
+      ):
+        raise ValueError(f"{name} AM output view does not match its L1 buffer")
+    for index, item in enumerate(value.am_buffers):
+      if item.logical_slot not in (0, 1):
+        raise ValueError(f"{name}.am_buffers[{index}] has an invalid logical slot")
+    allocated_am = [
+      inst.args[0]
+      for inst in insts
+      if inst.op is execution.ExecTileOp.ALLOC_AM and inst.args
+    ]
+    if len(allocated_am) != len(set(allocated_am)) or set(allocated_am) != set(am_by_name):
+      raise ValueError(f"{name} AM allocation instructions are incomplete or repeated")
+    for descriptor in value.descriptors.values():
+      matmul = descriptor.params.get("matmul")
+      if matmul is None:
+        continue
+      am_buffer = am_by_name.get(matmul.am)
+      if am_buffer is None:
+        raise ValueError(f"{name} typed matmul references an absent AM buffer")
+      if matmul.output.base != am_buffer.output.base:
+        raise ValueError(f"{name} typed matmul output differs from its AM binding")
+      if (matmul.m, matmul.n) != am_buffer.dims:
+        raise ValueError(f"{name} typed matmul shape differs from its AM buffer")
+      for view in (matmul.a, matmul.b, matmul.output):
+        if view.base not in l1_by_name:
+          raise ValueError(f"{name} typed matmul references an absent L1 buffer")
     if type(value.resource_contract) is not profiles.TileResources:
       raise ValueError(f"{name}.resource_contract is invalid")
     if type(value.layout) is not profiles.ArenaLayout:
@@ -891,7 +983,7 @@ def _validate_executable_value(value: object, name: str) -> None:
 
 
 def _validate_compiled_program_value(program: CompiledProgram, *, allow_unsealed: bool) -> None:
-  if type(program.schema_version) is not int or program.schema_version != 3 or program.compiler_abi != "v3":
+  if type(program.schema_version) is not int or program.schema_version != 4 or program.compiler_abi != "v4":
     raise ValueError("unsupported compiled schema or ABI; recompile the source with this compiler")
   _text(program.source_ir, "source_ir")
   _digest_text(program.source_hash, "source_hash")
@@ -1086,7 +1178,7 @@ def parse_compiled_program(text: str) -> CompiledProgram:
     if (
       isinstance(encoded, dict)
       and encoded.get("$type") == "CompiledProgram"
-      and (encoded.get("schema_version") != 3 or encoded.get("compiler_abi") != "v3")
+      and (encoded.get("schema_version") != 4 or encoded.get("compiler_abi") != "v4")
     ):
       raise ValueError("unsupported compiled schema or ABI; recompile from source")
     program = _decode(encoded)

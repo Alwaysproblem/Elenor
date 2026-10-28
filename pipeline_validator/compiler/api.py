@@ -68,7 +68,12 @@ def _finalize_program_identities(
       role = task.role_bindings[role_id]
       program = finalized_objects.get(id(role.tile_program))
       if program is None:
-        text_bytes = max(len(role.tile_program.insts) * 4 + len(role.tile_program.descriptors) * 16, 1024)
+        text_bytes = max(
+            len(role.tile_program.insts) * 4
+            + len(role.tile_program.descriptors) * 16
+            + len(role.tile_program.am_buffers) * 16,
+            1024,
+        )
         if text_bytes > hw.tile_program_sram_bytes:
           raise ValueError(
             f"Tile Program {role.tile_program.name!r} text requires {text_bytes} bytes, "
@@ -409,8 +414,8 @@ def compile_program(
   from ..execution_verifier import target_fingerprint, verify_compiled_program
 
   program = CompiledProgram(
-    3,
-    "v3",
+    4,
+    "v4",
     source_hash,
     source_ir,
     registry,

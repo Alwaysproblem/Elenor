@@ -36,10 +36,10 @@
 //   Y_part   [8, 4, 64]         = (k_part, m_task, R)               8 KiB f32
 //   Y        [4, 64]            = (m_task, R)                       1 KiB f32
 //
-// 数值边界：本 validator 是时间模型。`tile.evu.async` / `tile.boa.async`
-// 不携带 buffer operand、不执行任何数值运算，也没有 accumulate 语义，
+// 数值边界：本 validator 是时间模型。`tile.evu.async` / `tile.boa.estimate.async`
+// 不携带 buffer operand、不执行任何数值运算，也没有 语义，
 // `%acc` 的"累加"只是 IR 上的循环携带依赖意图。输入 chunk 为 bf16，
-// 累加器与输出为 f32（BF16 reduction 使用 FP32 accumulate，见
+// 累加器与输出为 f32（BF16 reduction 使用 FP32，见
 // ELENOR_EVU_Design），仅为类型意图，无数值检查。本例验证 tiling 结构、
 // 搬运字节数、依赖/生命周期与时序，不证明 tensor 数值正确性。
 //
