@@ -4,15 +4,35 @@ The manager owns the only mutable AM state: physical slots, per-context
 lease quota, fixed engine affinity, slot generations and terminal records.
 It never chooses software logical slots and never exposes AM as an L1
 address: a caller must first obtain a lease, then commit typed Matmul steps
-through that lease.  A failed request has no persistent side effect.
+through that lease.
 
 Physical layout is ``group_count x slots_per_group`` dynamic slots.  A
 lease counts against its owner's quota from the successful grant until
 ``slot_free`` -- not until software awaits an event or reaps a record.
+
+Allocation is one request + blocking wait + event wake-up.  ``ALLOC_AM`` is
+issued exactly once; a request that cannot be granted is parked here, not
+retried by the issuer, and the issuer is woken by ``slot_free``.  To keep
+blocking deadlock-free, every owner has a *bundle* (its Tile Program's
+static peak of simultaneously live chains, at most ``slots_per_context``):
+
+* a fresh owner (no live lease) is granted only when its whole bundle fits
+  in unreserved free slots; the rest of the bundle stays reserved for it;
+* a continuation request (owner already holds leases) is served from that
+  reservation, or waits only for one of the owner's own finalized leases to
+  drain -- never for another owner's slot;
+* the bundle is returned to the pool once the owner has no live lease and
+  no parked request.
+
+So no owner ever waits on another owner while holding AM, and because
+``bundle <= slots_per_context <= total slots`` every parked fresh request
+eventually fits.  Fresh requests are granted in FIFO order.
 """
 
 from __future__ import annotations
 
+from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
@@ -31,11 +51,12 @@ class AmLeaseState(Enum):
 
 @dataclass(frozen=True)
 class AmOwner:
-  """One Tile UCE context incarnation identity."""
+  """One physical Tile UCE context incarnation identity."""
 
   context_name: str
   launch_generation: int
   ctx_id: int
+  tile_id: int
   epoch: int = 0
 
 
@@ -57,6 +78,7 @@ class AmLease:
   next_seq: int = 0
   last_seq: int = -1
   partial: bytes | None = None
+  final_issued: bool = False
 
 
 @dataclass(frozen=True)
@@ -70,6 +92,22 @@ class AmTerminalRecord:
   success: bool
   detail: str
   cycle: int
+
+
+@dataclass
+class AmRequest:
+  """One parked ALLOC_AM request; woken exactly once on grant."""
+
+  request_id: int
+  owner: AmOwner
+  buffer_name: str
+  logical_slot: int
+  dims: tuple[int, ...]
+  byte_count: int
+  output_base: str
+  bundle_slots: int
+  wake: Callable[[AmLease, int], None]
+  enqueue_cycle: int = 0
 
 
 @dataclass
@@ -121,8 +159,16 @@ class SharedAmManager:
     self._next_lease_id = 1
     self._next_chain_id = 0
     self._terminals: list[AmTerminalRecord] = []
+    self._pending_requests: deque[AmRequest] = deque()
+    self._bundles: dict[AmOwner, int] = {}
+    self._granting_pending = False
+    self._next_request_id = 1
+    self.peak_pending = 0
+    self.request_count = 0
+    self.wake_count = 0
+    self.cancelled_request_count = 0
     self.peak_live = 0
-    self.busy_count = 0
+    self.parked_count = 0
     self.acquire_count = 0
     self.commit_count = 0
     self.final_count = 0
@@ -157,7 +203,203 @@ class SharedAmManager:
 
   # -- acquisition ---------------------------------------------------
 
-  def try_acquire(
+  def request(
+    self,
+    owner: AmOwner,
+    *,
+    buffer_name: str,
+    logical_slot: int,
+    dims: tuple[int, ...],
+    byte_count: int,
+    output_base: str,
+    bundle_slots: int,
+    cycle: int,
+    wake: Callable[[AmLease, int], None],
+  ) -> AmLease | None:
+    """Issue ALLOC_AM exactly once.
+
+    Returns the lease when granted now.  Otherwise the request is parked
+    with no slot/quota/generation side effect and ``wake(lease, cycle)``
+    runs exactly once when ``slot_free`` makes it grantable; the issuer
+    must not re-issue it.  Permanent contract violations raise: waiting
+    could never satisfy them and would block the context forever.
+    """
+    if logical_slot not in (0, 1):
+      raise ValueError("AM logical slot must be 0 or 1")
+    if byte_count < 1 or byte_count > self.slot_capacity_bytes:
+      raise ValueError("AM byte request exceeds physical slot capacity")
+    if not 1 <= bundle_slots <= self.slots_per_context:
+      raise ValueError("AM bundle exceeds the per-context lease quota")
+    if any(item.owner == owner for item in self._pending_requests):
+      raise ValueError("AM owner already has a parked request")
+    if any(
+      lease.owner == owner and lease.logical_slot == logical_slot and not lease.final_issued
+      for lease in self._leases.values()
+    ):
+      raise ValueError("AM logical slot is already live for an unfinished chain")
+    bundle = self._bundles.get(owner)
+    if bundle is not None and bundle != bundle_slots:
+      raise ValueError("AM owner changed its bundle while holding leases")
+    unfinished = sum(
+      lease.owner == owner and not lease.final_issued for lease in self._leases.values()
+    )
+    if unfinished >= bundle_slots:
+      # Every unfinished chain needs more UCE instructions to reach FINAL;
+      # waiting here for one of them would be a self-deadlock.
+      raise ValueError("AM allocation exceeds the context's declared bundle")
+
+    request = AmRequest(
+      request_id=self._next_request_id,
+      owner=owner,
+      buffer_name=buffer_name,
+      logical_slot=logical_slot,
+      dims=tuple(dims),
+      byte_count=byte_count,
+      output_base=output_base,
+      bundle_slots=bundle_slots,
+      wake=wake,
+      enqueue_cycle=cycle,
+    )
+    self._next_request_id += 1
+    self.request_count += 1
+    fresh_waiting = any(item.owner not in self._bundles for item in self._pending_requests)
+    if (bundle is not None or not fresh_waiting) and self._grantable(request):
+      return self._grant(request, cycle)
+    self._pending_requests.append(request)
+    self.parked_count += 1
+    self.peak_pending = max(self.peak_pending, len(self._pending_requests))
+    self._trace(
+      cycle,
+      "am_request_parked",
+      {
+        "request_id": request.request_id,
+        "owner": owner.context_name,
+        "ctx_id": owner.ctx_id,
+        "tile_id": owner.tile_id,
+        "buffer": buffer_name,
+        "bundle_slots": bundle_slots,
+        "kind": "continuation" if bundle is not None else "fresh",
+        "free_slots": self._free_slot_count(),
+        "reserved_slots": self._reserved_slot_count(),
+      },
+    )
+    return None
+
+  def cancel_requests(self, owner: AmOwner, cycle: int, reason: str = "request cancelled") -> int:
+    """Drop one owner's parked request without waking it."""
+    cancelled = [item for item in self._pending_requests if item.owner == owner]
+    if not cancelled:
+      return 0
+    self._pending_requests = deque(item for item in self._pending_requests if item.owner != owner)
+    self.cancelled_request_count += len(cancelled)
+    for item in cancelled:
+      self._trace(
+        cycle,
+        "am_request_cancelled",
+        {
+          "request_id": item.request_id,
+          "owner": owner.context_name,
+          "ctx_id": owner.ctx_id,
+          "tile_id": owner.tile_id,
+          "reason": reason,
+        },
+      )
+    self._drop_idle_bundle(owner)
+    self._grant_pending(cycle)
+    return len(cancelled)
+
+  def _free_slot_count(self) -> int:
+    return sum(slot.lease_id is None for slot in self._slots)
+
+  def _reserved_for(self, owner: AmOwner) -> int:
+    bundle = self._bundles.get(owner)
+    if bundle is None:
+      return 0
+    return max(0, bundle - self.live_for_owner(owner))
+
+  def _reserved_slot_count(self) -> int:
+    return sum(self._reserved_for(owner) for owner in self._bundles)
+
+  def _grantable(self, request: AmRequest) -> bool:
+    """Fresh: whole bundle fits in unreserved free slots.  Continuation:
+    the owner's own reservation still has a free slot."""
+    # FINAL acceptance ends source liveness, not the physical lease.  A
+    # finalized slot/quota conflict is transient until autonomous slot_free.
+    if self.live_for_owner(request.owner) >= self.slots_per_context or any(
+      lease.owner == request.owner and lease.logical_slot == request.logical_slot
+      for lease in self._leases.values()
+    ):
+      return False
+    if request.owner in self._bundles:
+      return self._reserved_for(request.owner) >= 1
+    return self._free_slot_count() - self._reserved_slot_count() >= request.bundle_slots
+
+  def _grant(self, request: AmRequest, cycle: int) -> AmLease:
+    self._bundles.setdefault(request.owner, request.bundle_slots)
+    lease = self._allocate_lease(
+      request.owner,
+      buffer_name=request.buffer_name,
+      logical_slot=request.logical_slot,
+      dims=request.dims,
+      byte_count=request.byte_count,
+      output_base=request.output_base,
+      cycle=cycle,
+    )
+    if lease is None:
+      raise ValueError("AM reservation accounting lost a free slot")
+    return lease
+
+  def _drop_idle_bundle(self, owner: AmOwner) -> None:
+    if owner in self._bundles and self.live_for_owner(owner) == 0 and not any(
+      item.owner == owner for item in self._pending_requests
+    ):
+      del self._bundles[owner]
+
+  def _grant_pending(self, cycle: int) -> None:
+    if self._granting_pending:
+      return
+    self._granting_pending = True
+    try:
+      self._grant_pending_locked(cycle)
+    finally:
+      self._granting_pending = False
+
+  def _grant_pending_locked(self, cycle: int) -> None:
+    """Wake grantable parked requests: continuations whenever their own
+    reservation frees, fresh requests strictly FIFO (no overtaking, so a
+    large bundle cannot starve)."""
+    progressed = True
+    while progressed:
+      progressed = False
+      fresh_blocked = False
+      for request in tuple(self._pending_requests):
+        fresh = request.owner not in self._bundles
+        if fresh and fresh_blocked:
+          continue
+        if not self._grantable(request):
+          fresh_blocked = fresh_blocked or fresh
+          continue
+        self._pending_requests.remove(request)
+        lease = self._grant(request, cycle)
+        self.wake_count += 1
+        self._trace(
+          cycle,
+          "am_request_wake",
+          {
+            "request_id": request.request_id,
+            "lease_id": lease.lease_id,
+            "owner": request.owner.context_name,
+            "ctx_id": request.owner.ctx_id,
+            "tile_id": request.owner.tile_id,
+            "buffer": request.buffer_name,
+            "waited_cycles": cycle - request.enqueue_cycle,
+          },
+        )
+        request.wake(lease, cycle)
+        progressed = True
+        break
+
+  def _allocate_lease(
     self,
     owner: AmOwner,
     *,
@@ -168,43 +410,8 @@ class SharedAmManager:
     output_base: str,
     cycle: int,
   ) -> AmLease | None:
-    """Atomically grant one lease or return ``None`` with no side effect."""
-    if logical_slot not in (0, 1):
-      raise ValueError("AM logical slot must be 0 or 1")
-    if byte_count < 1 or byte_count > self.slot_capacity_bytes:
-      raise ValueError("AM byte request exceeds physical slot capacity")
-    if self.live_for_owner(owner) >= self.slots_per_context or any(
-      lease.owner == owner and lease.logical_slot == logical_slot
-      for lease in self._leases.values()
-    ):
-      self.busy_count += 1
-      self._trace(
-        cycle,
-        "am_busy",
-        {
-          "owner": owner.context_name,
-          "ctx_id": owner.ctx_id,
-          "buffer": buffer_name,
-          "reason": "quota",
-          "live": self.live_for_owner(owner),
-        },
-      )
-      return None
-    # Deterministic first-free physical slot; software logical_slot never
-    # selects a physical group or slot.
     slot = next((item for item in self._slots if item.lease_id is None), None)
     if slot is None:
-      self.busy_count += 1
-      self._trace(
-        cycle,
-        "am_busy",
-        {
-          "owner": owner.context_name,
-          "ctx_id": owner.ctx_id,
-          "buffer": buffer_name,
-          "reason": "capacity",
-        },
-      )
       return None
     slot.generation += 1
     self._next_chain_id += 1
@@ -237,6 +444,7 @@ class SharedAmManager:
         "chain_id": lease.chain_id,
         "owner": owner.context_name,
         "ctx_id": owner.ctx_id,
+        "tile_id": owner.tile_id,
         "buffer": buffer_name,
         "slot": f"{lease.group}.{lease.slot}",
         "generation": lease.generation,
@@ -264,6 +472,9 @@ class SharedAmManager:
     if final and seq == 0 and not init:
       raise ValueError("AM FINAL without a prior INIT is invalid")
     lease.state = AmLeaseState.RUNNING
+    # An accepted FINAL drains and frees the slot with no further UCE
+    # instruction, so the owner may already wait on it for a new chain.
+    lease.final_issued = final
     self._trace(
       cycle,
       "am_step",
@@ -336,7 +547,7 @@ class SharedAmManager:
     return lease
 
   def abort_owner(self, owner: AmOwner, cycle: int, reason: str = "context abort") -> int:
-    count = 0
+    count = self.cancel_requests(owner, cycle, reason)
     for lease in tuple(self._leases.values()):
       if lease.owner == owner:
         self.abort_lease(lease.lease_id, cycle, reason)
@@ -344,8 +555,10 @@ class SharedAmManager:
     return count
 
   def reset(self, cycle: int = 0) -> None:
+    self._pending_requests.clear()
     for lease in tuple(self._leases.values()):
       self.abort_lease(lease.lease_id, cycle, "reset")
+    self._bundles.clear()
     self._terminals.clear()
     for slot in self._slots:
       slot.generation += 1
@@ -377,6 +590,7 @@ class SharedAmManager:
     slot.lease_id = None
     lease.state = AmLeaseState.FREE
     self._leases.pop(lease.lease_id, None)
+    self._drop_idle_bundle(lease.owner)
     self.slot_free_count += 1
     self._trace(
       cycle,
@@ -386,11 +600,13 @@ class SharedAmManager:
         "chain_id": lease.chain_id,
         "owner": lease.owner.context_name,
         "ctx_id": lease.owner.ctx_id,
+        "tile_id": lease.owner.tile_id,
         "slot": f"{lease.group}.{lease.slot}",
         "generation": lease.generation,
         "reason": reason,
       },
     )
+    self._grant_pending(cycle)
 
   # -- snapshots -----------------------------------------------------
 
@@ -404,7 +620,23 @@ class SharedAmManager:
       "free_slots": sum(slot.lease_id is None for slot in self._slots),
       "live_leases": self.live_lease_count,
       "peak_live": self.peak_live,
-      "busy_count": self.busy_count,
+      "parked_count": self.parked_count,
+      "pending_requests": len(self._pending_requests),
+      "peak_pending": self.peak_pending,
+      "request_count": self.request_count,
+      "wake_count": self.wake_count,
+      "cancelled_request_count": self.cancelled_request_count,
+      "reserved_slots": self._reserved_slot_count(),
+      "bundles": [
+        {
+          "owner": owner.context_name,
+          "ctx_id": owner.ctx_id,
+          "tile_id": owner.tile_id,
+          "bundle_slots": bundle,
+          "live": self.live_for_owner(owner),
+        }
+        for owner, bundle in self._bundles.items()
+      ],
       "acquire_count": self.acquire_count,
       "commit_count": self.commit_count,
       "final_count": self.final_count,
@@ -418,6 +650,19 @@ class SharedAmManager:
           "lease_id": slot.lease_id,
         }
         for slot in self._slots
+      ],
+      "requests": [
+        {
+          "request_id": item.request_id,
+          "owner": item.owner.context_name,
+          "ctx_id": item.owner.ctx_id,
+          "tile_id": item.owner.tile_id,
+          "buffer": item.buffer_name,
+          "logical_slot": item.logical_slot,
+          "bundle_slots": item.bundle_slots,
+          "enqueue_cycle": item.enqueue_cycle,
+        }
+        for item in self._pending_requests
       ],
       "leases": [
         {

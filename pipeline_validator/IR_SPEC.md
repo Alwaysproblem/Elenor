@@ -559,8 +559,21 @@ The AM form declares one logical accumulator chain. `dtype` must be `f32`,
 final destination (same shape, dtype f32/bf16/i8). `%out` must be defined
 earlier and stays reserved while the chain is live. Lowering emits
 `ALLOC_AM` with a compiled `ExecAmBuffer`; the buffer does not enter the L1
-Arena. The runtime grants a physical slot/engine only on a successful lease;
-a third live lease for one context is BUSY with no side effect.
+Arena. The runtime grants a physical slot/engine only on a successful lease.
+
+`ALLOC_AM` is one request + blocking wait + event wake-up: the UCE issues it
+exactly once; if it cannot be granted the request parks in the AM manager with
+no slot/quota/generation side effect, the context sits in `WAIT_AM` (other
+contexts keep running, nothing re-issues or polls), and `slot_free` wakes it
+with the granted lease. Blocking stays deadlock-free because each context
+declares a static bundle = peak simultaneously live chains of its Tile Program,
+which the compiler and the executable verifier require to be
+`<= boa_am_slots_per_context` (2): a fresh context is granted only when its
+whole bundle fits in unreserved free slots (the rest stays reserved for its
+later chains); a continuation allocation uses that reservation or waits only
+for its own FINAL-issued chain to drain; fresh requests are FIFO. A request
+while all unfinished chains of the context still need UCE instructions is a
+contract fault, never a wait.
 
 #### 4.2.1 `tile.free`
 

@@ -384,8 +384,12 @@ memory_space = "am"` declares a logical chain and its bound L1 output; typed
 `tile.boa.async` carries `ins/outs/acc` and an explicit `seq`; the FINAL step
 writes the L1 output and releases the lease automatically. The runtime models
 4 groups x 2 physical slots (8 dynamic leases), at most 2 live leases per Tile
-context, fixed engine affinity and generation-safe terminal records. A lease
-request that cannot be granted is BUSY with no slot/quota side effect.
+context, fixed engine affinity and generation-safe terminal records.
+`ALLOC_AM` is issued once; an ungranted request parks without slot/quota side
+effect, the context blocks in `WAIT_AM`, and `slot_free` wakes it with the
+lease (no retry/polling). Each context's static bundle (peak live chains,
+compiler-checked `<= 2`) is reserved on its first grant, so no context holds
+AM while waiting on another context's slot.
 
 Compute completion is not the UCE event: a typed result enters a finite
 `BoaResultService` FIFO, consumes O/R credits, takes a commit stage, and for a

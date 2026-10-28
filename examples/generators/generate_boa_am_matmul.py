@@ -180,18 +180,18 @@ def _seed_bf16(count: int, modulus: int = 7) -> bytes:
     return bytes(values)
 
 
-def _entry_bindings(path: Path) -> list[tuple[str, object]]:
+def _entry_bindings(path: Path) -> list[tuple[str, NestGlobalMemref]]:
     module = load_workload_ir(path)
     entry = next(
         (op for op in module.body.block.ops if isinstance(op, NexusProgramOp)), None
     ) or next((op for op in module.body.block.ops if isinstance(op, NestContextOp)), None)
     if entry is None:
         raise ValueError(f"{path}: no nexus.program or nest.context entry")
-    return [
-        (arg.name_hint or "", arg.type)
-        for arg in entry.body.block.args
-        if isinstance(arg.type, NestGlobalMemref)
-    ]
+    bindings: list[tuple[str, NestGlobalMemref]] = []
+    for arg in entry.body.block.args:
+      if isinstance(arg.type, NestGlobalMemref):
+        bindings.append((arg.name_hint or "", arg.type))
+    return bindings
 
 
 def _write_binding_inputs(path: Path) -> int:

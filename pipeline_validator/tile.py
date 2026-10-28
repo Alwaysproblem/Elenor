@@ -39,7 +39,7 @@ from .memory.l1_slot_frame import SlotFrame
 from .pmu import PMUCounter, StallReason
 from .profiles import build_registry
 from .runtime.boa_result import BoaPreparedResult, BoaResultService
-from .runtime.shared_am import AmOwner, SharedAmManager
+from .runtime.shared_am import AmLease, AmOwner, SharedAmManager
 from .stream_queue import StreamQueue, StreamToken
 from .trace import Tracer
 
@@ -125,6 +125,8 @@ class _UCEContext:
   task_identity: TaskIdentity | None = None  # PR 3: dispatch grid + logical task
   l1_live_names: set[str] = field(default_factory=set)
   am_leases: dict[str, int] = field(default_factory=dict)
+  am_waiting: str | None = None  # AM buffer of the one parked ALLOC_AM
+  am_bundle: int = 0  # static peak of simultaneously live AM chains
   epoch: int = 0
 
 
@@ -278,10 +280,12 @@ class TileUCE:
       if not self._context_available(ctx):
         continue
       self._unregister_context_events(ctx)
-      if ctx.am_leases and self.shared_am is not None:
+      if self.shared_am is not None:
         self.shared_am.abort_owner(self._am_owner(ctx), 0, "context rebind")
       ctx.epoch += 1
       ctx.am_leases.clear()
+      ctx.am_waiting = None
+      ctx.am_bundle = self._program_am_bundle(program)
       ctx.program = program
       ctx.pc = 0
       ctx.role_id = role_id
@@ -361,6 +365,9 @@ class TileUCE:
     elif _UCEHeadStatus.WAIT_STREAM in statuses:
       self.pmu.add(StallReason.STREAM_CREDIT, 1)
       self.pmu.add_cycle("wait_stream", 1)
+    elif _UCEHeadStatus.WAIT_AM in statuses:
+      self.pmu.add(StallReason.WAIT_OPERAND, 1)
+      self.pmu.add_cycle("am_wait", 1)
     elif self.has_active_contexts():
       self.pmu.add(StallReason.NONE, 1)
     else:
@@ -459,6 +466,7 @@ class TileUCE:
           "state": ctx.state.value,
           "program": ctx.program.name if ctx.program is not None else None,
           "pc": ctx.pc,
+          "am_waiting": ctx.am_waiting,
           "role_id": ctx.role_id,
           "role_event_id": ctx.role_event_id,
           "wait_refs": [
@@ -640,6 +648,8 @@ class TileUCE:
       return _UCEHeadProbe(_UCEHeadStatus.FAULT, "active context has no tile program")
     if ctx.state == _UCEContextState.WAIT_EVENT and not self._wait_refs_ready(ctx):
       return _UCEHeadProbe(_UCEHeadStatus.WAIT_EVENT)
+    if ctx.am_waiting is not None:
+      return _UCEHeadProbe(_UCEHeadStatus.WAIT_AM)
     if ctx.pc >= len(ctx.program.insts):
       return _UCEHeadProbe(_UCEHeadStatus.ELIGIBLE)
 
@@ -722,8 +732,9 @@ class TileUCE:
       _UCEContextState.WAIT_EVENT,
       _UCEContextState.WAIT_STREAM,
       _UCEContextState.WAIT_ENGINE_QUEUE,
-      _UCEContextState.WAIT_AM,
     ):
+      self._set_context_state(ctx, _UCEContextState.READY, cycle)
+    if ctx.state is _UCEContextState.WAIT_AM and ctx.am_waiting is None:
       self._set_context_state(ctx, _UCEContextState.READY, cycle)
 
   def _trace_issue(self, ctx: _UCEContext, ins: ExecTileInst, cycle: int) -> None:
@@ -903,13 +914,13 @@ class TileUCE:
     task = ctx.task_identity
     if task is not None:
       grid = task.grid
-      return AmOwner(grid.context_name, grid.launch_generation, ctx.ctx_id, ctx.epoch)
+      return AmOwner(grid.context_name, grid.launch_generation, ctx.ctx_id, self.tile_id, ctx.epoch)
     name = ""
     if ctx.memory is not None:
       name = ctx.memory.binding_id
     if not name:
       name = ctx.role_event_id or f"tile{self.tile_id}"
-    return AmOwner(name, 0, ctx.ctx_id, ctx.epoch)
+    return AmOwner(name, 0, ctx.ctx_id, self.tile_id, ctx.epoch)
 
   def _issue_am_alloc(self, ctx: _UCEContext, ins: ExecTileInst, cycle: int) -> None:
     manager = self.shared_am
@@ -929,23 +940,96 @@ class TileUCE:
     if am.name in ctx.am_leases:
       self._fault_context(ctx, f"AM buffer {am.name!r} already has a live lease", cycle)
       return
-    lease = manager.try_acquire(
-      self._am_owner(ctx),
-      buffer_name=am.name,
-      logical_slot=am.logical_slot,
-      dims=am.dims,
-      byte_count=am.bytes,
-      output_base=am.output.base,
-      cycle=cycle,
-    )
+    owner = self._am_owner(ctx)
+    expected_epoch = ctx.epoch
+
+    def wake(lease: AmLease, grant_cycle: int) -> None:
+      self._wake_am_request(ctx, owner, expected_epoch, am.name, lease, grant_cycle)
+
+    try:
+      lease = manager.request(
+        owner,
+        buffer_name=am.name,
+        logical_slot=am.logical_slot,
+        dims=am.dims,
+        byte_count=am.bytes,
+        output_base=am.output.base,
+        bundle_slots=ctx.am_bundle,
+        cycle=cycle,
+        wake=wake,
+      )
+    except ValueError as exc:
+      self._fault_context(ctx, f"AM allocation rejected: {exc}", cycle)
+      return
     if lease is None:
-      self.pmu.add(StallReason.WAIT_OPERAND, 1)
-      self.pmu.add_cycle("am_busy", 1)
+      # Issued once; the context now blocks until the manager's slot_free
+      # wake-up grants it.  It is never re-issued or polled.
+      ctx.am_waiting = am.name
+      self.pmu.add_event("am_request_parked")
       self._set_context_state(ctx, _UCEContextState.WAIT_AM, cycle)
       return
     ctx.am_leases[am.name] = lease.lease_id
     self.pmu.add_event("am_allocate")
     ctx.pc += 1
+
+  @staticmethod
+  def _program_am_bundle(program: ExecTileProgram) -> int:
+    """Static peak of simultaneously live AM chains (compiler-checked to
+    fit ``boa_am_slots_per_context``); 0 when the program uses no AM."""
+    live: set[str] = set()
+    peak = 0
+    for inst in program.insts:
+      if inst.op is ExecTileOp.ALLOC_AM and inst.args:
+        live.add(inst.args[0])
+        peak = max(peak, len(live))
+      elif inst.op is ExecTileOp.LAUNCH_BOA and inst.args:
+        descriptor = program.descriptors.get(inst.args[0])
+        matmul = descriptor.params.get("matmul") if descriptor is not None else None
+        if isinstance(matmul, ExecBoaMatmulDesc) and matmul.final:
+          live.discard(matmul.am)
+    return peak
+
+  def _wake_am_request(
+    self,
+    ctx: _UCEContext,
+    owner: AmOwner,
+    expected_epoch: int,
+    buffer_name: str,
+    lease: AmLease,
+    cycle: int,
+  ) -> None:
+    """Grant callback for one parked ALLOC_AM request."""
+    manager = self.shared_am
+    if manager is None:
+      return
+    if (
+      ctx.epoch != expected_epoch
+      or self._am_owner(ctx) != owner
+      or ctx.program is None
+      or ctx.am_waiting != buffer_name
+    ):
+      manager.abort_lease(lease.lease_id, cycle, "stale AM request owner")
+      return
+    ctx.am_waiting = None
+    ctx.am_leases[buffer_name] = lease.lease_id
+    ctx.pc += 1
+    self.pmu.add_event("am_allocate")
+    self.pmu.add_event("am_request_wake")
+    self._set_context_state(ctx, _UCEContextState.READY, cycle)
+    if self.tracer is not None:
+      self.tracer.instant(
+        f"Tile{self.tile_id}",
+        f"UCE CTX{ctx.ctx_id}",
+        "am_request_wake",
+        cycle,
+        {
+          "ctx_id": ctx.ctx_id,
+          "buffer": buffer_name,
+          "lease_id": lease.lease_id,
+          "pc": ctx.pc,
+          "tile_id": self.tile_id,
+        },
+      )
 
   @staticmethod
   def _descriptor_l1_bases(program: ExecTileProgram, desc_ref: str) -> tuple[frozenset[str], bool]:
@@ -1551,6 +1635,7 @@ class TileUCE:
     if self.shared_am is not None:
       self.shared_am.abort_owner(self._am_owner(ctx), cycle, reason)
     ctx.am_leases.clear()
+    ctx.am_waiting = None
     self.pmu.add_event("tile_fault")
     self._terminal_events.append(
       _UCETerminalEvent(
@@ -1607,6 +1692,7 @@ class TileUCE:
       self.shared_am.abort_owner(self._am_owner(ctx), 0, "context reset")
     ctx.epoch += 1
     ctx.am_leases.clear()
+    ctx.am_waiting = None
     ctx.state = _UCEContextState.EMPTY
     ctx.program = None
     ctx.pc = 0

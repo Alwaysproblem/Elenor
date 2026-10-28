@@ -654,7 +654,14 @@ def _verify_program(
     descriptor_views[name] = tuple(effects)
 
   _verify_cache_contract(program, registry, where)
-  _verify_tile_instructions(program, descriptor_views, layout, where)
+  am_peak = _verify_tile_instructions(program, descriptor_views, layout, where)
+  if am_peak > hw.boa_am_slots_per_context:
+    # A blocking ALLOC_AM is deadlock-free only when every chain the
+    # context may hold at once fits its quota (shared AM V1 §9).
+    _fail(
+      f"{where} holds {am_peak} live AM chains, "
+      f"target per-context quota is {hw.boa_am_slots_per_context}"
+    )
   return _ProgramEffects(
     FrozenMap(descriptor_views),
     tuple(dict.fromkeys(l2_reads)),
@@ -814,7 +821,8 @@ def _verify_tile_instructions(
   descriptors: Mapping[str, tuple[tuple[ExecMemoryView, bool], ...]],
   layout: ArenaLayout,
   where: str,
-) -> None:
+) -> int:
+  """Verify linear Tile instructions; return the peak live AM chain count."""
   layout_by_id = {item.buffer_id: item for item in layout.buffer_layouts}
   am_by_id = {am.name: am for am in program.am_buffers}
   live: dict[str, BufferLayout] = {}
@@ -825,6 +833,7 @@ def _verify_tile_instructions(
   am_allocated: set[str] = set()
   am_finalized: set[str] = set()
   am_next_seq: dict[str, int] = {}
+  am_peak = 0
   produced: set[str] = set()
   awaited: set[str] = set()
   pending_by_buffer: dict[str, set[str]] = {name: set() for name in layout_by_id}
@@ -867,6 +876,7 @@ def _verify_tile_instructions(
       am_live_slots[logical_slot] = am_id
       am_allocated.add(am_id)
       am_live[am_id] = am_by_id[am_id]
+      am_peak = max(am_peak, len(am_live))
       am_next_seq[am_id] = 0
     elif inst.op in (
       ExecTileOp.LAUNCH_MFE,
@@ -994,6 +1004,7 @@ def _verify_tile_instructions(
   )
   if input_signal != int(has_l2_reads) or output_signal != int(has_l2_writes):
     _fail(f"{where} has incomplete or duplicate L2 lifetime signals")
+  return am_peak
 
 
 def _descriptor_launch_events(program: ExecTileProgram, descriptor_name: str) -> tuple[str, ...]:

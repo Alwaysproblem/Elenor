@@ -133,6 +133,15 @@ def _tile_program_text(body: str) -> str:
 '''
 
 
+def _never_woken(lease, cycle):
+  raise AssertionError(f"unexpected AM wake for lease {lease.lease_id} at {cycle}")
+
+
+def _acquire(manager, owner, *, bundle_slots: int = 1, wake=_never_woken, **kwargs):
+  """Issue one ALLOC_AM request; ``None`` means parked until ``wake``."""
+  return manager.request(owner, bundle_slots=bundle_slots, wake=wake, **kwargs)
+
+
 def _verify_program_text(text: str):
   module = Parser(make_elenor_context(), text).parse_module()
   from pipeline_validator.dialects.elenor import TileProgramDefOp
@@ -230,59 +239,48 @@ def test_ir07_bf16_output_is_converted_only_at_final():
 # ---------------------------------------------------------------------------
 
 
-def test_ir09_third_lease_is_busy_without_side_effect():
+def _request_kwargs(name: str, logical_slot: int, cycle: int) -> dict:
+  return {
+    "buffer_name": name,
+    "logical_slot": logical_slot,
+    "dims": (64, 256),
+    "byte_count": 65536,
+    "output_base": f"l1:{name}",
+    "cycle": cycle,
+  }
+
+
+def _finish_chain(manager, lease, cycle: int) -> None:
+  """Drive one granted chain through INIT+FINAL, commit and slot_free."""
+  payload = b"\x00" * (64 * 256 * 4)
+  manager.begin_step(lease.lease_id, seq=0, init=True, final=True, cycle=cycle)
+  manager.commit_step(lease.lease_id, seq=0, data=payload, final=True, cycle=cycle + 1)
+  manager.release_final(lease.lease_id, cycle + 2)
+
+
+def test_ir09_allocation_beyond_bundle_is_rejected_without_side_effect():
   manager = SharedAmManager(
     slot_capacity_bytes=65536,
     group_count=4,
     slots_per_group=2,
     slots_per_context=2,
   )
-  owner = AmOwner("ctx", 1, 0)
-  first = manager.try_acquire(
-    owner,
-    buffer_name="a",
-    logical_slot=0,
-    dims=(64, 256),
-    byte_count=65536,
-    output_base="l1:0",
-    cycle=0,
-  )
-  second = manager.try_acquire(
-    owner,
-    buffer_name="b",
-    logical_slot=1,
-    dims=(64, 256),
-    byte_count=65536,
-    output_base="l1:1",
-    cycle=0,
-  )
+  owner = AmOwner("ctx", 1, 0, 0)
+  first = _acquire(manager, owner, bundle_slots=2, **_request_kwargs("a", 0, 0))
+  second = _acquire(manager, owner, bundle_slots=2, **_request_kwargs("b", 1, 0))
   assert first is not None and second is not None
   before = manager.snapshot()
-  third = manager.try_acquire(
-    owner,
-    buffer_name="c",
-    logical_slot=0,
-    dims=(64, 256),
-    byte_count=65536,
-    output_base="l1:2",
-    cycle=1,
-  )
+  # Both chains still need UCE instructions to reach FINAL: blocking a third
+  # request on them would self-deadlock, so it is a contract error, not a wait.
+  with pytest.raises(ValueError):
+    _acquire(manager, owner, bundle_slots=2, **_request_kwargs("c", 0, 1))
   after = manager.snapshot()
-  assert third is None
   assert after["live_leases"] == before["live_leases"] == 2
   assert after["slots"] == before["slots"]
-  assert after["busy_count"] == 1
+  assert after["pending_requests"] == 0
 
   manager.abort_lease(first.lease_id, 2, "test")
-  fourth = manager.try_acquire(
-    owner,
-    buffer_name="d",
-    logical_slot=0,
-    dims=(64, 256),
-    byte_count=65536,
-    output_base="l1:3",
-    cycle=3,
-  )
+  fourth = _acquire(manager, owner, bundle_slots=2, **_request_kwargs("d", 0, 3))
   assert fourth is not None
 
 
@@ -293,10 +291,11 @@ def test_ir10_affinity_is_fixed_and_one_engine_serves_many_handles():
     slots_per_group=2,
     slots_per_context=2,
   )
-  owner = AmOwner("ctx", 1, 0)
+  owner = AmOwner("ctx", 1, 0, 0)
   engines = []
   for index in range(6):
-    lease = manager.try_acquire(
+    lease = _acquire(
+    manager,
       owner,
       buffer_name=f"a{index}",
       logical_slot=index % 2,
@@ -551,8 +550,9 @@ def test_am_slot_reuse_increments_generation_and_keeps_terminal():
     slots_per_group=1,
     slots_per_context=1,
   )
-  owner = AmOwner("ctx", 1, 0)
-  first = manager.try_acquire(
+  owner = AmOwner("ctx", 1, 0, 0)
+  first = _acquire(
+    manager,
     owner,
     buffer_name="a",
     logical_slot=0,
@@ -566,7 +566,8 @@ def test_am_slot_reuse_increments_generation_and_keeps_terminal():
   manager.begin_step(first.lease_id, seq=0, init=True, final=False, cycle=1)
   manager.commit_step(first.lease_id, seq=0, data=payload, final=True, cycle=2)
   manager.release_final(first.lease_id, 3)
-  second = manager.try_acquire(
+  second = _acquire(
+    manager,
     owner,
     buffer_name="b",
     logical_slot=0,
@@ -589,8 +590,9 @@ def test_am_release_before_final_and_fault_cleanup():
     slots_per_group=2,
     slots_per_context=2,
   )
-  owner = AmOwner("ctx", 1, 0)
-  lease = manager.try_acquire(
+  owner = AmOwner("ctx", 1, 0, 0)
+  lease = _acquire(
+    manager,
     owner,
     buffer_name="a",
     logical_slot=0,
@@ -670,8 +672,9 @@ def test_eight_contexts_with_one_lease_each_fill_all_slots():
   )
   leases = []
   for index in range(8):
-    lease = manager.try_acquire(
-      AmOwner("ctx", 1, index),
+    lease = _acquire(
+    manager,
+      AmOwner("ctx", 1, index, index),
       buffer_name="a",
       logical_slot=0,
       dims=(64, 256),
@@ -682,19 +685,22 @@ def test_eight_contexts_with_one_lease_each_fill_all_slots():
     assert lease is not None
     leases.append(lease)
   assert manager.snapshot()["free_slots"] == 0
-  ninth = manager.try_acquire(
-    AmOwner("ctx", 1, 8),
-    buffer_name="a",
-    logical_slot=0,
-    dims=(64, 256),
-    byte_count=65536,
-    output_base="l1:8",
-    cycle=9,
+  woken: list = []
+  ninth = _acquire(
+    manager,
+    AmOwner("ctx", 1, 8, 8),
+    wake=lambda lease, cycle: woken.append((lease, cycle)),
+    **_request_kwargs("a", 0, 9),
   )
   assert ninth is None
   assert manager.snapshot()["live_leases"] == 8
-  for lease in leases:
-    manager.abort_lease(lease.lease_id, 10, "test")
+  assert manager.snapshot()["pending_requests"] == 1
+  manager.abort_lease(leases[0].lease_id, 10, "test")
+  assert len(woken) == 1 and woken[0][1] == 10
+  assert woken[0][0].owner == AmOwner("ctx", 1, 8, 8)
+  for lease in leases[1:]:
+    manager.abort_lease(lease.lease_id, 11, "test")
+  manager.abort_lease(woken[0][0].lease_id, 12, "test")
   assert manager.snapshot()["free_slots"] == 8
 
 
@@ -757,8 +763,9 @@ def test_ir11_nonfinal_result_commits_in_a_later_stage():
     slots_per_group=1,
     slots_per_context=1,
   )
-  owner = AmOwner("ctx", 1, 0)
-  lease = manager.try_acquire(
+  owner = AmOwner("ctx", 1, 0, 0)
+  lease = _acquire(
+    manager,
     owner,
     buffer_name="a",
     logical_slot=0,
@@ -794,8 +801,9 @@ def test_ir14_final_output_backpressure_defers_release_and_event():
     slots_per_group=1,
     slots_per_context=1,
   )
-  owner = AmOwner("ctx", 1, 0)
-  lease = manager.try_acquire(
+  owner = AmOwner("ctx", 1, 0, 0)
+  lease = _acquire(
+    manager,
     owner,
     buffer_name="a",
     logical_slot=0,
@@ -853,4 +861,273 @@ def test_ir14_runtime_final_output_backpressure_recovers_without_polling():
   assert simulator.group.shared_am.snapshot()["terminals"][-1]["kind"] == "chain_done"
   a = (INPUTS / "A.bin").read_bytes()
   b = (INPUTS / "B.bin").read_bytes()
+  assert store.read_hbm(0x300000, 65536) == struct.pack("<16384f", *_oracle(a, b))
+
+
+def test_am_owner_uses_physical_tile_identity():
+  manager = SharedAmManager(
+    slot_capacity_bytes=65536,
+    group_count=2,
+    slots_per_group=1,
+    slots_per_context=1,
+  )
+  tile0_ctx0 = AmOwner("mm", 1, 0, 0)
+  tile1_ctx0 = AmOwner("mm", 1, 0, 1)
+  first = _acquire(
+    manager,
+    tile0_ctx0,
+    buffer_name="a",
+    logical_slot=0,
+    dims=(64, 256),
+    byte_count=65536,
+    output_base="l1:0",
+    cycle=0,
+  )
+  second = _acquire(
+    manager,
+    tile1_ctx0,
+    buffer_name="a",
+    logical_slot=0,
+    dims=(64, 256),
+    byte_count=65536,
+    output_base="l1:0",
+    cycle=1,
+  )
+  assert first is not None
+  assert second is not None
+  assert first.owner != second.owner
+  assert manager.snapshot()["free_slots"] == 0
+
+
+def test_am_fault_isolation_by_physical_tile():
+  manager = SharedAmManager(
+    slot_capacity_bytes=65536,
+    group_count=2,
+    slots_per_group=1,
+    slots_per_context=1,
+  )
+  tile0 = AmOwner("mm", 1, 0, 0)
+  tile1 = AmOwner("mm", 1, 0, 1)
+  lease0 = _acquire(
+    manager,
+    tile0,
+    buffer_name="a",
+    logical_slot=0,
+    dims=(64, 256),
+    byte_count=65536,
+    output_base="l1:0",
+    cycle=0,
+  )
+  lease1 = _acquire(
+    manager,
+    tile1,
+    buffer_name="a",
+    logical_slot=0,
+    dims=(64, 256),
+    byte_count=65536,
+    output_base="l1:0",
+    cycle=1,
+  )
+  assert lease0 is not None and lease1 is not None
+  manager.abort_owner(tile0, 2, "fault")
+  assert manager.snapshot()["live_leases"] == 1
+  assert manager.lease(lease1.lease_id) is lease1
+
+
+
+def test_am_request_parks_once_and_wakes_on_slot_free():
+  manager = SharedAmManager(
+    slot_capacity_bytes=65536, group_count=1, slots_per_group=1, slots_per_context=1
+  )
+  holder = AmOwner("holder", 1, 0, 0)
+  waiter = AmOwner("waiter", 1, 0, 1)
+  first = _acquire(manager, holder, **_request_kwargs("a", 0, 0))
+  assert first is not None
+  wakes: list = []
+  parked = _acquire(
+    manager,
+    waiter,
+    wake=lambda lease, cycle: wakes.append((lease.owner, lease.generation, cycle)),
+    **_request_kwargs("a", 0, 1),
+  )
+  assert parked is None
+  before = manager.snapshot()
+  assert before["pending_requests"] == 1 and before["parked_count"] == 1
+  assert before["slots"][0]["generation"] == first.generation
+  # Nothing re-issues the request while it waits; the parked count stays 1.
+  _finish_chain(manager, first, 100)
+  assert wakes == [(waiter, first.generation + 1, 102)]
+  after = manager.snapshot()
+  assert after["pending_requests"] == 0
+  assert after["parked_count"] == 1 and after["request_count"] == 2
+  assert manager.live_for_owner(waiter) == 1
+
+
+def test_am_bundle_reserves_continuation_and_prevents_hold_and_wait():
+  manager = SharedAmManager(
+    slot_capacity_bytes=65536, group_count=2, slots_per_group=1, slots_per_context=2
+  )
+  owner_a = AmOwner("a", 1, 0, 0)
+  owner_b = AmOwner("b", 1, 0, 1)
+  owner_c = AmOwner("c", 1, 0, 2)
+  first_a = _acquire(manager, owner_a, bundle_slots=2, **_request_kwargs("a0", 0, 0))
+  assert first_a is not None
+  assert manager.snapshot()["reserved_slots"] == 1
+  b_woken: list = []
+  # The second physical slot is free but reserved for A's continuation, so
+  # B parks instead of creating an A-holds-1/B-holds-1 hold-and-wait cycle.
+  assert (
+    _acquire(
+      manager, owner_b, wake=lambda lease, cycle: b_woken.append(lease), **_request_kwargs("b0", 0, 1)
+    )
+    is None
+  )
+  second_a = _acquire(manager, owner_a, bundle_slots=2, **_request_kwargs("a1", 1, 2))
+  assert second_a is not None
+  assert manager.snapshot()["reserved_slots"] == 0
+  # A fresh request may not overtake the FIFO head.
+  assert _acquire(manager, owner_c, wake=lambda lease, cycle: None, **_request_kwargs("c0", 0, 3)) is None
+  _finish_chain(manager, second_a, 10)
+  # A still holds a0 and keeps its bundle: the freed slot returns to A's
+  # reservation, not to B, until A has no live lease.
+  assert b_woken == []
+  assert manager.snapshot()["reserved_slots"] == 1
+  _finish_chain(manager, first_a, 20)
+  assert len(b_woken) == 1
+  assert manager.snapshot()["pending_requests"] == 0
+  assert manager.live_for_owner(owner_c) == 1
+
+
+def test_am_continuation_waits_only_for_own_draining_final():
+  manager = SharedAmManager(
+    slot_capacity_bytes=65536, group_count=2, slots_per_group=1, slots_per_context=2
+  )
+  owner = AmOwner("a", 1, 0, 0)
+  other = AmOwner("b", 1, 0, 1)
+  first = _acquire(manager, owner, bundle_slots=1, **_request_kwargs("a0", 0, 0))
+  assert first is not None
+  other_lease = _acquire(manager, other, **_request_kwargs("b0", 0, 0))
+  assert other_lease is not None
+  with pytest.raises(ValueError, match="bundle"):
+    _acquire(manager, owner, bundle_slots=1, **_request_kwargs("a1", 1, 1))
+  payload = b"\x00" * (64 * 256 * 4)
+  manager.begin_step(first.lease_id, seq=0, init=True, final=True, cycle=2)
+  woken: list = []
+  # FINAL accepted: the chain drains autonomously, so the next chain may
+  # block on this owner's own slot without a self-deadlock.
+  assert (
+    _acquire(
+      manager,
+      owner,
+      bundle_slots=1,
+      wake=lambda lease, cycle: woken.append(cycle),
+      **_request_kwargs("a1", 1, 3),
+    )
+    is None
+  )
+  manager.commit_step(first.lease_id, seq=0, data=payload, final=True, cycle=4)
+  manager.release_final(first.lease_id, 5)
+  assert woken == [5]
+  assert manager.live_for_owner(owner) == 1
+
+
+@pytest.mark.parametrize("quota", [1, 2])
+def test_am_same_slot_reuse_waits_for_final_release(quota: int):
+  manager = SharedAmManager(
+    slot_capacity_bytes=65536, group_count=1, slots_per_group=quota, slots_per_context=quota
+  )
+  owner = AmOwner("reuse", 1, 0, 0)
+  first = _acquire(manager, owner, bundle_slots=quota, **_request_kwargs("old", 0, 0))
+  assert first is not None
+  manager.begin_step(first.lease_id, seq=0, init=True, final=True, cycle=1)
+  before = manager.snapshot()
+  wakes: list = []
+  assert (
+    _acquire(
+      manager,
+      owner,
+      bundle_slots=quota,
+      wake=lambda lease, cycle: wakes.append((lease, cycle)),
+      **_request_kwargs("new", 0, 2),
+    )
+    is None
+  )
+  parked = manager.snapshot()
+  assert parked["slots"] == before["slots"]
+  assert parked["live_leases"] == 1
+  assert parked["parked_count"] == 1
+  assert parked["pending_requests"] == 1
+  assert wakes == []
+  payload = b"\x00" * first.byte_count
+  manager.commit_step(first.lease_id, seq=0, data=payload, final=True, cycle=3)
+  assert wakes == []
+  manager.release_final(first.lease_id, 4)
+  assert len(wakes) == 1
+  replacement, grant_cycle = wakes[0]
+  assert grant_cycle == 4
+  assert replacement.owner == owner and replacement.logical_slot == 0
+  assert replacement.lease_id != first.lease_id
+  assert replacement.generation == first.generation + 1
+  assert manager.live_for_owner(owner) == 1
+  assert manager.snapshot()["pending_requests"] == 0
+  _finish_chain(manager, replacement, 5)
+  snapshot = manager.snapshot()
+  assert len(wakes) == 1
+  assert snapshot["wake_count"] == 1
+  assert snapshot["live_leases"] == snapshot["reserved_slots"] == 0
+  assert snapshot["free_slots"] == quota
+
+
+def test_am_cancelled_request_is_never_woken():
+  manager = SharedAmManager(
+    slot_capacity_bytes=65536, group_count=1, slots_per_group=1, slots_per_context=1
+  )
+  holder = AmOwner("holder", 1, 0, 0)
+  waiter = AmOwner("waiter", 1, 0, 1)
+  lease = _acquire(manager, holder, **_request_kwargs("a", 0, 0))
+  assert lease is not None
+  assert _acquire(manager, waiter, **_request_kwargs("a", 0, 1)) is None
+  assert manager.cancel_requests(waiter, 2, "context fault") == 1
+  _finish_chain(manager, lease, 3)
+  snapshot = manager.snapshot()
+  assert snapshot["cancelled_request_count"] == 1
+  assert snapshot["free_slots"] == 1 and snapshot["bundles"] == []
+
+
+def test_runtime_alloc_am_blocks_once_and_wakes_on_slot_free():
+  hw = _hw().with_overrides(boa_am_group_count=1, boa_am_slots_per_group=1, boa_am_slots_per_context=1)
+  a = (INPUTS / "A.bin").read_bytes()
+  b = (INPUTS / "B.bin").read_bytes()
+  bindings = _bindings(len(a), len(b))
+  sim_cfg = _sim()
+  artifact = compile_program(
+    parse_workload_ir(FIXTURE.read_text()), hw, sim_cfg, binding_assumptions=bindings,
+    source_name=str(FIXTURE),
+  )
+  loaded = load_program(artifact, hw, sim_cfg, actual_bindings=bindings)
+  store = ByteStore()
+  store.seed_hbm(0x100000, a)
+  store.seed_hbm(0x200000, b)
+  simulator = Simulator(hw, sim_cfg, byte_store=store)
+  manager = simulator.group.shared_am
+  blocker = manager.request(
+    AmOwner("blocker", 1, 7, 99), bundle_slots=1, wake=_never_woken, **_request_kwargs("x", 0, 0)
+  )
+  assert blocker is not None
+  release_cycle = 2000
+  original_step = simulator.group.step
+
+  def step(cycle: int) -> bool:
+    if cycle == release_cycle:
+      manager.abort_lease(blocker.lease_id, cycle, "test release")
+    return original_step(cycle)
+
+  simulator.group.step = step  # type: ignore[method-assign]
+  result = simulator.run(loaded)
+  assert result.completed
+  snapshot = manager.snapshot()
+  assert snapshot["parked_count"] == 1
+  assert snapshot["wake_count"] == 1
+  assert snapshot["request_count"] == 2
+  assert snapshot["live_leases"] == 0
   assert store.read_hbm(0x300000, 65536) == struct.pack("<16384f", *_oracle(a, b))
