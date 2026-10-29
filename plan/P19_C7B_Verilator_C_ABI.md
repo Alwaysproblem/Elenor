@@ -52,17 +52,17 @@ C ABI 函数集（导出名以实现为准，语义冻结如下）：
 
 ## 6 验收表
 
-| Case ID | 构造 | 必须观测 | 失败特征 |
-| --- | --- | --- | --- |
-| abi-version-mismatch | wrapper 以旧 API 版本握手 | create 返回版本错误，无崩溃、无半初始化句柄 | 默默降级成功 |
-| abi-shape-refuse | config shape ≠ RTL elaboration 参数 | 创建被拒，错误指明字段 | 创建成功但事件错位 |
-| abi-edge-determinism | 两个相同初始身份实例重放；另测连续reset换代 | 前者事件一致；后者按规定epoch/generation映射变化，数值/偏序一致 | 忽略换代或顺序漂移 |
-| abi-batch-equivalence | 同edge输入分多次load_beats或一次批量，再各调用一次edge | beat、事件和数值等价，load_beats不走时钟 | 每次load_beats也推进一拍 |
-| abi-edge-strictness | 计数 `edge` 调用次数与 RTL cycle 计数 | 1:1，无自动多拍 | 内部跑到完成 |
-| abi-reset-generation | 链中途排入reset并由edge执行 | reset_complete、实例epoch、各slot换代与旧访问账本正确 | reset暗跑时钟或旧事件混新代 |
-| abi-no-second-am | factory尝试给同Tile注册cycle/RTL两个AM权威 | 绑定被拒，正常RTL只有硬件更新AM | 只检查flag却仍创建两manager |
-| abi-capability | 读取 capability 并与 config 比对 | 完全一致 | 静默截断 |
-| abi-batch-capacity | 返回批小于当拍request/event量，host延迟取出 | 有界保留、握手/显式读取，不丢事件不重复edge | 覆盖事件或重跑时钟补数据 |
+| Case ID               | 构造                                                   | 必须观测                                                        | 失败特征                    |
+| --------------------- | ------------------------------------------------------ | --------------------------------------------------------------- | --------------------------- |
+| abi-version-mismatch  | wrapper 以旧 API 版本握手                              | create 返回版本错误，无崩溃、无半初始化句柄                     | 默默降级成功                |
+| abi-shape-refuse      | config shape ≠ RTL elaboration 参数                    | 创建被拒，错误指明字段                                          | 创建成功但事件错位          |
+| abi-edge-determinism  | 两个相同初始身份实例重放；另测连续reset换代            | 前者事件一致；后者按规定epoch/generation映射变化，数值/偏序一致 | 忽略换代或顺序漂移          |
+| abi-batch-equivalence | 同edge输入分多次load_beats或一次批量，再各调用一次edge | beat、事件和数值等价，load_beats不走时钟                        | 每次load_beats也推进一拍    |
+| abi-edge-strictness   | 计数 `edge` 调用次数与 RTL cycle 计数                  | 1:1，无自动多拍                                                 | 内部跑到完成                |
+| abi-reset-generation  | 链中途排入reset并由edge执行                            | reset_complete、实例epoch、各slot换代与旧访问账本正确           | reset暗跑时钟或旧事件混新代 |
+| abi-no-second-am      | factory尝试给同Tile注册cycle/RTL两个AM权威             | 绑定被拒，正常RTL只有硬件更新AM                                 | 只检查flag却仍创建两manager |
+| abi-capability        | 读取 capability 并与 config 比对                       | 完全一致                                                        | 静默截断                    |
+| abi-batch-capacity    | 返回批小于当拍request/event量，host延迟取出            | 有界保留、握手/显式读取，不丢事件不重复edge                     | 覆盖事件或重跑时钟补数据    |
 
 ## 7 可执行命令
 

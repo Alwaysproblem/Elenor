@@ -49,19 +49,19 @@
 
 ## 6 验收表
 
-| Case ID | 构造 | 必须观测 | 失败特征 |
-| --- | --- | --- | --- |
-| fw-matmul-bytes | typed matmul capsule 固件执行 | C bytes 与 oracle、与 Python-UCE 路径逐 bit 一致 | 任一路径单独通过 |
-| fw-event-order | 同上 | 事件偏序合法且与 Python 路径一致；取指/调度开销计入 report | 忽略固件开销 |
-| fw-wait-am-once | 槽满迫使 PARKED | `AM_REQ` 恰好一次；wake 位图置位后才运行；无重发（重发计数=0） | 轮询重发 AM_REQ |
-| fw-full-retry | mailbox 满返回 FULL | 同 seq、同 descriptor 重试同一步，无 seq 跳变、无 descriptor 变异 | 重新快照或推进 seq |
-| fw-q09 | FINAL(slot0)→ALLOC(slot0)→await(旧事件)，无中间 reap | 旧链自主 slot_free 后新申请授予，旧事件仍可 await，不挂死（§8.1b Q09） | 等待事件退休才授予 |
-| fw-bundle-error | 注入第三条未受理 FINAL 链申请 | ERROR/fault、无 AM 副作用、独立分母记账 | 挂起等待 |
-| fw-finishing | return 时存在 FINAL drain；缺 FINAL 注入 | 前者 FINISHING 自主收尾；后者错误终态；释放不依赖返回 context | 伪成功或挂死 |
-| fw-8ctx | `--context-mode 8` capsule | 8 context 各持一槽全部推进完成，互不串扰 | 表溢出或互踩 |
-| fw-reject-closure | capsule 含固件不支持操作（如 Gather/Scatter） | admission 明确拒绝，不回退 Python UCE | 静默回退 |
-| fw-mutex | 同 Task 双路径同时启用尝试 | 互斥生效，第二路径被拒 | 双解释同 Task |
-| fw-stale-gen | 换代后旧响应到达 | 丢弃计数，新 owner 无污染 | 旧字节入新 lease |
+| Case ID           | 构造                                                 | 必须观测                                                               | 失败特征           |
+| ----------------- | ---------------------------------------------------- | ---------------------------------------------------------------------- | ------------------ |
+| fw-matmul-bytes   | typed matmul capsule 固件执行                        | C bytes 与 oracle、与 Python-UCE 路径逐 bit 一致                       | 任一路径单独通过   |
+| fw-event-order    | 同上                                                 | 事件偏序合法且与 Python 路径一致；取指/调度开销计入 report             | 忽略固件开销       |
+| fw-wait-am-once   | 槽满迫使 PARKED                                      | `AM_REQ` 恰好一次；wake 位图置位后才运行；无重发（重发计数=0）         | 轮询重发 AM_REQ    |
+| fw-full-retry     | mailbox 满返回 FULL                                  | 同 seq、同 descriptor 重试同一步，无 seq 跳变、无 descriptor 变异      | 重新快照或推进 seq |
+| fw-q09            | FINAL(slot0)→ALLOC(slot0)→await(旧事件)，无中间 reap | 旧链自主 slot_free 后新申请授予，旧事件仍可 await，不挂死（§8.1b Q09） | 等待事件退休才授予 |
+| fw-bundle-error   | 注入第三条未受理 FINAL 链申请                        | ERROR/fault、无 AM 副作用、独立分母记账                                | 挂起等待           |
+| fw-finishing      | return 时存在 FINAL drain；缺 FINAL 注入             | 前者 FINISHING 自主收尾；后者错误终态；释放不依赖返回 context          | 伪成功或挂死       |
+| fw-8ctx           | `--context-mode 8` capsule                           | 8 context 各持一槽全部推进完成，互不串扰                               | 表溢出或互踩       |
+| fw-reject-closure | capsule 含固件不支持操作（如 Gather/Scatter）        | admission 明确拒绝，不回退 Python UCE                                  | 静默回退           |
+| fw-mutex          | 同 Task 双路径同时启用尝试                           | 互斥生效，第二路径被拒                                                 | 双解释同 Task      |
+| fw-stale-gen      | 换代后旧响应到达                                     | 丢弃计数，新 owner 无污染                                              | 旧字节入新 lease   |
 
 ## 7 可执行命令
 

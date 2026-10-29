@@ -57,15 +57,15 @@
 
 ## 6. 验收表
 
-| Case ID | 构造 | 必须观测 | 失败特征 |
-| --- | --- | --- | --- |
-| S-P07-1 成功偏序 | 背压拉开阶段的 FINAL 链 | commit ≤ output_visible ≤ slot_free ≤ chain_done ≤ event 全部成立且有 trace 证据 | chain_done 早于 slot_free |
-| S-P07-2 事件不早于终态 | 正常与背压运行 | UCE 事件 trace ts ≥ chain_done 发布 cycle | 事件先于终态发布 |
-| S-P07-3 失败收尾顺序 | 输入/AM 访问注入 fault | quiesce→回收→失败终态；终态 cycle ≥ 回收；无旧响应泄入新 generation | 先发终态后回收 |
-| S-P07-4 非 FINAL 无终态 | 多 step 链中途快照 | 只有 step_committed trace；无 L1 写；无终态记录 | 中间步骤发布终态 |
-| S-P07-5 环有界 | 配置小terminal_capacity后产生超过容量的完成 | bounded环/overflow正确，旧程序事件仍可观察，不因环满挡grant | 默认值字符串测试或环满死锁 |
-| S-P07-6 Q07 恢复 | 背压解除 | 无 UCE 轮询下自主 写回→释放→终态→事件 | 需要固件动作才恢复 |
-| REG-P07-7 全量 gate | 步骤 10 | exit 0 | 终态断言散漏导致旧测试红 |
+| Case ID                 | 构造                                        | 必须观测                                                                         | 失败特征                   |
+| ----------------------- | ------------------------------------------- | -------------------------------------------------------------------------------- | -------------------------- |
+| S-P07-1 成功偏序        | 背压拉开阶段的 FINAL 链                     | commit ≤ output_visible ≤ slot_free ≤ chain_done ≤ event 全部成立且有 trace 证据 | chain_done 早于 slot_free  |
+| S-P07-2 事件不早于终态  | 正常与背压运行                              | UCE 事件 trace ts ≥ chain_done 发布 cycle                                        | 事件先于终态发布           |
+| S-P07-3 失败收尾顺序    | 输入/AM 访问注入 fault                      | quiesce→回收→失败终态；终态 cycle ≥ 回收；无旧响应泄入新 generation              | 先发终态后回收             |
+| S-P07-4 非 FINAL 无终态 | 多 step 链中途快照                          | 只有 step_committed trace；无 L1 写；无终态记录                                  | 中间步骤发布终态           |
+| S-P07-5 环有界          | 配置小terminal_capacity后产生超过容量的完成 | bounded环/overflow正确，旧程序事件仍可观察，不因环满挡grant                      | 默认值字符串测试或环满死锁 |
+| S-P07-6 Q07 恢复        | 背压解除                                    | 无 UCE 轮询下自主 写回→释放→终态→事件                                            | 需要固件动作才恢复         |
+| REG-P07-7 全量 gate     | 步骤 10                                     | exit 0                                                                           | 终态断言散漏导致旧测试红   |
 
 ## 7. 可执行命令
 

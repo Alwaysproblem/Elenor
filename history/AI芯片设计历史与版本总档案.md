@@ -1,6 +1,6 @@
 # AI 芯片设计历史与版本总档案
 
-整理日期：2026 年 10 月 28 日  
+整理日期：2026 年 10 月 28 日
 已恢复的讨论时间范围：2025 年 8 月至 2026 年 10 月 28 日
 
 这份档案按**历史方案、同一方案的修订、独立探索分支和关键决策**整理你的 AI 芯片设计讨论，不只总结最新 Nexus。被放弃、被收缩、尚未采纳的设计也保留，并说明它们解决什么问题、后来为什么变化。
@@ -25,6 +25,7 @@
 - [十四 覆盖范围与原始来源](#sources)
 
 <a id="scope"></a>
+
 ## 一 档案范围与版本判定
 
 ### 这份档案怎样使用版本一词
@@ -49,6 +50,7 @@
 本文优先保留“用户原话 → 当时建议 → 后续修正”的顺序。性能、功耗、面积、可发表性及工期分别注明证据等级，不把推测改写成事实。
 
 <a id="inventory"></a>
+
 ## 二 设计与版本总目录
 
 以下是架构层目录；硬件内部候选与参数另见第六节。每项均有后文档案或来源，可用原始名称继续检索。
@@ -89,6 +91,7 @@
 主要来源：[工业起点与单 L2 修订](https://chatgpt.com/c/68a5bbdb-9b60-8324-9060-57434a696d7b?messageId=ba2698fc-65fa-437e-85ea-e37497dc58a7) [来源 S04](https://chatgpt.com/c/68a5bbdb-9b60-8324-9060-57434a696d7b?messageId=36fc1de6-01c5-4528-9edc-a863d3b4df40)、[早期 Island/BOA](https://chatgpt.com/c/69b3c416-ada4-832a-ac9f-87f9dd8d7a6d?messageId=a0ec1f97-4247-460c-b60c-04a4149e0e84)、[CORA](https://chatgpt.com/c/6a5f63e8-24e8-83ee-bd57-b7ec12877cf1?messageId=89f9397d-745f-40a6-909a-50b33e9e7f39)、[SPMD](https://chatgpt.com/c/6a6b5824-1a44-83ee-bb57-0c9b54cf8ee9?messageId=b628a6f0-c936-44d1-b572-f623c2bb989b)、[NEST](https://chatgpt.com/c/6a71de1f-0810-83e8-910a-4750fa44e196?messageId=83a46c45-1143-433c-ac77-037f1e080f72)、[Nexus IR](https://chatgpt.com/c/6a7441dc-106c-83ee-be18-e369fbe11110?messageId=cee8808a-d227-4db9-8bbf-c63b41cc8dc4)、[Shared AM V1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=c6e53288-a6ff-4cf6-b98d-2b17541a879e)。
 
 <a id="timeline"></a>
+
 ## 三 历史时间线
 
 ### 2025 年 8 月至 12 月 从重 runtime 到程序化调度
@@ -147,6 +150,7 @@
 表内来源：[调度](https://chatgpt.com/c/6aa3ee92-6bfc-83e8-b43c-15c34a255742?messageId=b34b621f-95e6-4d36-9183-75d2380f9315) [来源 S51](https://chatgpt.com/c/6aa3ee92-6bfc-83e8-b43c-15c34a255742?messageId=d9720292-8f8f-41e1-86ba-1cda1d6e26b7)、[存储](https://chatgpt.com/c/6a7ad9ed-9d60-83ee-9bc5-c9c6ce4b9288?messageId=0bcc2e8e-8787-44d1-a326-d79ef6acc382) [来源 S20](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=7eff8b05-df9c-4435-ad12-03b9e8903f6c) [来源 S21](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=bc75f0ff-84a8-4b4d-be0c-3f3781d61da1) [来源 S52](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=d03c1861-1a68-4ee2-9dd0-fb86be4dea6c)、[编译](https://chatgpt.com/c/6aa7c75a-21bc-83e8-bc55-0a5d342a7b22?messageId=50675cfa-a814-4729-bc1e-dcc27a811935)、[10 月控制与 ownership](https://chatgpt.com/c/6abb7d0e-0bb8-83ee-8042-892cb647deb7?messageId=32ae04b5-99f4-48a3-af3a-5361bef40597) [来源 S53](https://chatgpt.com/c/6ac46ddf-b068-83e8-8373-8968d2cd955d?messageId=44bc19fb-f07f-4c0a-ab05-e271002e3f1c)、[计算与验证](https://chatgpt.com/c/6acdcc25-13b4-83e8-99cf-a2c96449e6ad?messageId=17b1cf20-73ab-487b-b771-aa9b23d70786) [来源 S26](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=54ac9c1e-11b0-4bf4-91b6-75b20f2d3d74) [来源 S29](https://chatgpt.com/c/6ad377b4-8338-83e8-8c6e-1e8edd966207?messageId=af77c502-9589-4e7b-86e3-840f05d89f79) [来源 S30](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=ab30b99b-b4f6-419e-b91d-87df54849bda) [来源 S31](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=6f64f011-11d6-4c4b-be8a-7d6e1fca3621) [来源 S32](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=c6e53288-a6ff-4cf6-b98d-2b17541a879e) [来源 S36](https://chatgpt.com/c/6ae15ddf-0670-83e8-ab0d-b99a9dad965e?messageId=d7fb793b-8c12-4d4e-a287-9bb8df90310b) [来源 S43](https://chatgpt.com/c/6ad9d1a8-ebd8-83e8-aeac-5fff7d2f3bf6?messageId=0f65b652-2cd4-4f2d-96a0-ff552be8f68e) [来源 S57](https://chatgpt.com/c/6ad309e6-3c78-83ee-b743-02bb8c6cebaf?messageId=7aa75680-b6b5-4ff0-904a-1864086c52ee)。
 
 <a id="design-records"></a>
+
 ## 四 逐设计档案
 
 ### 工业 NPU 改造 从双解释器到单 L2 bytecode
@@ -160,7 +164,6 @@
 - **存储与调度**：异步 DMA/compute、多 buffer、显式依赖；Host 负责装包、参数、doorbell 和等待，而不是逐微操作介入。
 - **编译**：模型相关程序与常驻解释器固件分开，不是每个模型都重烧解释器。
 - **状态与演进**：单 L2 是这阶段的明确选择，后来 Tile program 是新的设计边界，不能被这条旧约束禁止。长期继承的是薄 runtime、强 compiler 和设备侧异步执行。[来源 S03](https://chatgpt.com/c/68a5bbdb-9b60-8324-9060-57434a696d7b?messageId=ba2698fc-65fa-437e-85ea-e37497dc58a7)[来源 S04](https://chatgpt.com/c/68a5bbdb-9b60-8324-9060-57434a696d7b?messageId=36fc1de6-01c5-4528-9edc-a863d3b4df40)
-
 
 ### 分页 bytecode 与离线 microkernel 两条早期修订
 
@@ -282,6 +285,7 @@
 - **状态**：对话当时产生需求与指南，明确未修改仓库、未跑模拟器或 RTL 验收。跨 engine migration、split-K 并行归约、无槽 one-shot bypass 是另案或被收紧的旧建议。[来源 S29](https://chatgpt.com/c/6ad377b4-8338-83e8-8c6e-1e8edd966207?messageId=af77c502-9589-4e7b-86e3-840f05d89f79)[来源 S30](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=ab30b99b-b4f6-419e-b91d-87df54849bda)[来源 S31](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=6f64f011-11d6-4c4b-be8a-7d6e1fca3621)[来源 S32](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=c6e53288-a6ff-4cf6-b98d-2b17541a879e)[来源 S33](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=c43305ce-d2d3-5252-87e0-065284c1f0c4)[来源 S34](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=fd703440-acc3-5fef-bde2-7bce63546bb1)[来源 S35](https://chatgpt.com/c/6adf1f1b-f6b8-83ee-8b14-f1611a1345d2?messageId=5c33af74-9582-59ac-a2ae-66b14339c88f)
 
 <a id="named-branches"></a>
+
 ## 五 历史命名与独立方案补录
 
 本节专门保留容易被最新基线摘要省略的独立架构、局部重构、论文工作名和实际分支。它们的名称与状态不应互相替代。
@@ -289,9 +293,11 @@
 ### ELENOR Region 主线的内部收缩
 
 #### 既有层级
+
 `Host → Tile Group/Region Sequencer → Tile/UCE → BOA/EVU/MFE/USE`。Tile 有 PC/context/event；Group 有共享 SRAM/DMA/collective、空间分配和粗粒度编排。基础编程已经包含 Tile-SPMD，不是“ELENOR 全是 MPMD”。
 
 #### 6/16：SuperRegion → Pattern Region
+
 助手此前提出 SuperRegion + 任意 tile-dataflow 调度，涉及全图 buffer、跨 op reorder、资源约束排程。随后认可用户的更保守方案：
 
 ```text
@@ -304,7 +310,9 @@ Region 内固定模板，Region 间隐藏 descriptor/program/weight 预取与前
 来源：[6/16 修正与两方案完整对比](https://chatgpt.com/c/6a30fc13-f444-83e8-b86c-759c7ad320ce?messageId=480b582e-2857-431a-a79d-e2223036daa3)。
 
 #### 7/8：不能删除 Tile 的执行上下文
+
 HFC 讨论里助手曾简化成没有 PC 的 compute lane。用户追问怎样 overlap IO/compute，并指出修正后和自身 ELENOR 一样。助手最终承认：
+
 - 保留 Chip→Group→Tile；Tile 保留 UCE/PC/context/event。
 - Group 降为资源/执行域管理，不重复逐指令发射。
 - overlap 来自多 outstanding context + 异步引擎，不是“每一个 ALU 都有 PC”。
@@ -314,6 +322,7 @@ HFC 讨论里助手曾简化成没有 PC 的 compute lane。用户追问怎样 o
 ### EFP 与 HFC：两条独立推理架构探索
 
 #### EFP（2026-07-08）
+
 全称 Elastic Flow-Pipeline Processor。flowlet 是可静态调度的小 tile/page/block 子图；算子中间值尽量走 FIFO，依赖用 predicate/token，credit/backpressure 处理延迟。
 
 - 计算：micro-systolic island + vector/reduce/SFU/mask/RF/FIFO。
@@ -325,7 +334,9 @@ HFC 讨论里助手曾简化成没有 PC 的 compute lane。用户追问怎样 o
 来源：[EFP 提案](https://chatgpt.com/c/6a4df94e-c59c-83ee-8aea-006ad1e05265?messageId=adcedac6-6785-4f8a-9de3-cb477c32babd)、[用户否定适用面](https://chatgpt.com/c/6a4df94e-c59c-83ee-8aea-006ad1e05265?messageId=43305fca-562d-4939-9399-a29d8a71f2da)。
 
 #### HFC（同日）
+
 全称 Heterogeneous Flow Compute，作为回应通用性不足的新提案：
+
 - 层级 `OperationToken → FlowBlock → ComputeCluster → Fabric`。
 - FlowBlock 把 load/mma/vector/reduce/store 组织成依赖图，ready 操作驱动执行。
 - Cluster 增加标量 RISC 控制 pointer/loop/branch，配 tensor/vector/memory/reduce、SRAM/FIFO。
@@ -388,6 +399,7 @@ CPU → Central Program FIFO → Central Multi-Context UCE
 同日另一讨论将目标明确为通用 AI 推理：irregular 强于传统 NPU、可略弱于 GPU，面积功耗低于 GPU，重点是**当前负载关键资源的有效利用率**，不是所有引擎永不闲。
 
 助手提出 Heterogeneous Task-Flow Accelerator：
+
 1. Tensor path：矩阵切片、local scratch、局部多 context。
 2. Vector/Dataflow path：规则向量/reduce/SFU，局部静态 VLIW/dataflow。
 3. ISE / Irregular Stream Engine：有限 SIMT、独立 PC/mask/reconvergence、scoreboard，非完整 GPU/CPU OoO。
@@ -418,8 +430,8 @@ OPA/BOA 路线图、EVU 的 First-Silicon V1A/V1B/V2 评审、Bank Profile V1、
 | `nexus-v2` · 2026-09-30命中                                                      | 回读只见助手以“例如”列 `main/develop/nexus-v2/nexus-v3/feature/foo` 教迁移Git分支。[原文](https://chatgpt.com/c/69a29061-7fe0-832a-a4ea-981f41a29634?messageId=77e357a0-1f89-4810-a1d8-6eb8bc58b107)                                                                                                                                                                                                        | **不构成真实v2分支或架构规格证据**；本次不补造功能表                                                       |
 | Nexus v1／v2正式代际                                                             | 当前可访问精确搜索未找到足够直接证据；V1常是局部设计首版，V2常是其他对象版本／示例                                                                                                                                                                                                                                                                                                                          | 不能由v3倒推出v1/v2功能；也不宣称历史绝无这两版                                                            |
 
-
 <a id="hardware-history"></a>
+
 ## 六 硬件方案与参数沿革
 
 这一节按局部硬件对象记录候选和变化。表中的日期是讨论时间；原文局部 v1/v2 是当时路线图，不是整个芯片的正式代际。正文后面的执行合同章节解释这些选择的共同正确性要求。
@@ -463,11 +475,11 @@ TCC 的“vector chain descriptor，不必独立 Vector PC”属于 7 月提案�
 随后用户明确纠正为 **4 个独立 8×8，彼此无连接、无广播，各自 AM；编译器 tiling，UCE 提交计算，后续才可能 ring reduce**。[来源 H11-1](https://chatgpt.com/c/6ad377b4-8338-83e8-8c6e-1e8edd966207?messageId=af77c502-9589-4e7b-86e3-840f05d89f79)
 
 因此应保留两条不同记录：
+
 - **助手协同广播簇提案**，非用户方案；
 - **用户独立小阵列版本**，当时明确，后来变更的是 AM 私有／共享组织，不能倒灌成用户已经接受广播。
 
 小阵列的风险是重复 Shared 读取、命令供给、启动／排空与输出管理；好处是小输出块和多独立任务的分配粒度。不能把“8×8 输出阵列”自动解释成每命令 K=8；后来 K_total/K_chunk/K_cmd 已明确拆开。[来源 H10-1](https://chatgpt.com/c/6ad377b4-8338-83e8-8c6e-1e8edd966207?messageId=a0433a52-5efe-5d1d-b8e8-f3c0a58174cc)[来源 H11-1](https://chatgpt.com/c/6ad377b4-8338-83e8-8c6e-1e8edd966207?messageId=af77c502-9589-4e7b-86e3-840f05d89f79)[来源 H15-1](https://chatgpt.com/c/6adf1f1b-f6b8-83ee-8b14-f1611a1345d2?messageId=5c33af74-9582-59ac-a2ae-66b14339c88f) [来源 H15-2](https://chatgpt.com/c/6adf1f1b-f6b8-83ee-8b14-f1611a1345d2?messageId=ca5a1f4b-da43-56f9-b077-51306105ebf9)
-
 
 ### AM 与归约候选的完整序列
 
@@ -483,7 +495,6 @@ TCC 的“vector chain descriptor，不必独立 Vector PC”属于 7 月提案�
 | 10/26 助手物理建议 | 四组物理 SRAM＋各自累加通路，任意 engine→任意 AM group；全局 slot 表                | `slot` 是逻辑输出链空间，`bank` 是物理端口组织，`group` 是独立累加服务模块；不能把三者等同。单 slot 先落单 group 是降低跨 bank 锁定复杂度的建议，非最终物理实现。[来源 H14-1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=fd703440-acc3-5fef-bde2-7bce63546bb1)                                                                                                                                                                                                                                                                                                                                                |
 | 10/26 最新用户 V1  | **保持原 engine affinity；每 tile context 只能使用两个 AM slot**                    | 两槽是跨 matrix engines 总配额，不是每 engine 两槽；一条链一槽一固定 engine。申请后等待输入／未 FIRST／AM 写回／FINAL 后待 drain／安全错误收尾均计数。one-shot 也计入配额。[来源 H16-1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=c6e53288-a6ff-4cf6-b98d-2b17541a879e) [来源 H16-2](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=c43305ce-d2d3-5252-87e0-065284c1f0c4) [来源 H16-3](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=d5a3148e-0038-50f4-b4c3-4abf563328b5)                                                                                      |
 | 后续扩展，未冻结   | 链迁移 engine、并行 split-K、多 engine 更新同一输出、条带化 AM                      | 不能因容量共享就说已支持。需处理上一步全提交、PE 残状态、权重重载、输入可达、hazard 与浮点归约顺序；当前 V1 affinity 主动避开这些复杂度。[来源 H14-1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=fd703440-acc3-5fef-bde2-7bce63546bb1)[来源 H16-1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=c6e53288-a6ff-4cf6-b98d-2b17541a879e) [来源 H16-2](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=c43305ce-d2d3-5252-87e0-065284c1f0c4) [来源 H16-3](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=d5a3148e-0038-50f4-b4c3-4abf563328b5) |
-
 
 ### 地址生成、布局、计算的边界
 
@@ -511,7 +522,6 @@ TCC 的“vector chain descriptor，不必独立 Vector PC”属于 7 月提案�
 
 RF 可以由 SRAM 实现，但“寄存器名＋VL/operand dependency”与“地址＋长度＋stride＋range ownership”不是同一个访问合同。改 controller 不能自动解决 alias、写后读、in-flight return 路由与多 context 隔离。[来源 H20-1](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=4a8dc1bd-ddf5-4d5a-a20a-ff1354cfa5e5) [来源 H20-2](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=c9c4d766-a731-4ac8-a54a-5ee56cbf86d2)
 
-
 ### EVU 从 descriptor 到 Micro-SIMT 和自主 RVV 的备选序列
 
 | 讨论时间与性质              | 执行模型／配置                                                                                                                     | 状态、选它的理由与代价                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
@@ -529,7 +539,6 @@ RF 可以由 SRAM 实现，但“寄存器名＋VL/operand dependency”与“�
 | 10/23 用户                  | 自主 RVV kernel：提交函数入口＋输入输出参数后设备自己跑，不由 UCE 逐条推 RVV 汇编                                                  | 需要本地 PC/取指、标量 RF、地址计算、分支、必要 scalar load/store；Ara 后端本身不构成完整自主 kernel 前端。可轻量 RISC-V＋标准 RVV，也可受限 micro-sequencer。[来源 H30-1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=f142eddd-6116-537b-93b0-1a9991927ea8)                                                                                                                                                                                                                                        |
 | 10/23 助手首版与扩展        | 首版每向量设备单 active kernel；多 UCE contexts 和 matrix/MFE 并行仍保留。多 kernel RVV 驻留留作另一层扩展                         | “多等候任务”不等于“多 active kernel”。若未来共享程序前端，各 kernel/context 仍需自己的 PC/状态，并共享总发射带宽。[来源 H30-1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=f142eddd-6116-537b-93b0-1a9991927ea8)                                                                                                                                                                                                                                                                                    |
 
-
 ### 2026-10-21 五种路线完整保留
 
 用户问如何把 RISC-V 自定义汇编与硬件多 context 融合，助手列以下五条，偏 B、备选 D；**未见用户明确选择最终核或最终流水微架构**。[来源 H29-1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=6f22235b-7231-4426-a6bc-993c71da1653) [来源 H29-2](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=1c2bac32-a0e8-5116-bc7a-1a44a3d374a5)
@@ -541,7 +550,6 @@ RF 可以由 SRAM 实现，但“寄存器名＋VL/operand dependency”与“�
 | C IMT／barrel                           | 每周期轮转不同 ready context，共享流水                                                             | 连续隐藏短依赖，公平 interleave                                          | 单 context issue 份额下降，context state 和 pipeline tagging 更强；未必适合主要等待长异步任务。候选         |
 | D 普通 RISC-V＋独立多 context sequencer | RISC-V 处理配置／复杂控制；硬件 sequencer 跑受限 async program                                     | 核改动小，保留低开销硬件 ready/select/wakeup                             | 两套执行格式与编译边界；需要证明不是固件调度成为细粒度关键路径。助手备选                                    |
 | E 多个小 RISC-V 核共享加速器            | 每核天然独立 PC/GPR，外部共享 matrix/vector/MFE                                                    | 并行来源直观，软件易理解                                                 | 复制 fetch/decode/ALU/cache 等面积功耗，共享引擎仲裁仍在；更多核不创造更多 engine/AM/带宽。候选             |
-
 
 ### 跨时期硬件参数登记
 
@@ -594,8 +602,8 @@ RF 可以由 SRAM 实现，但“寄存器名＋VL/operand dependency”与“�
 
 同一输出形状下，增加 K 不增加 AM 元素数，但增加输入流量、执行时间、槽寿命和数值误差/溢出风险。1 GHz、64 个 FP32 FMA lanes 的纯理论峰值是 128 GFLOPS，不是 1 TFLOPS；这也不包含访存、SFU 和 reduction 的实际限制。[来源 S24](https://chatgpt.com/c/6ac475e9-5494-83ee-8408-2f03c7bc9486?messageId=5ebc07a3-a9c1-4494-b4b4-9fa47f469f53)[来源 S35](https://chatgpt.com/c/6adf1f1b-f6b8-83ee-8b14-f1611a1345d2?messageId=5c33af74-9582-59ac-a2ae-66b14339c88f)
 
-
 <a id="decision-log"></a>
+
 ## 七 跨版本决策日志
 
 这张表记录“改变了什么”，不把最新结果覆盖到旧方案。没有明确否定的候选写作“未采纳证据”而非“已永久放弃”。
@@ -635,8 +643,8 @@ RF 可以由 SRAM 实现，但“寄存器名＋VL/operand dependency”与“�
 | 2026-10-26      | 两槽限制被误解为 K 只能短或两步              | 区分 K_total/K_chunk/K_cmd                            | AM 随输出面积而非 K 增长；长 K 增加驻留时间和数值风险                 | [来源 S35](https://chatgpt.com/c/6adf1f1b-f6b8-83ee-8b14-f1611a1345d2?messageId=5c33af74-9582-59ac-a2ae-66b14339c88f)                                                                                                                                                                                                                                           |
 | 2026-10-28      | 二维 DMA、动态 stride 被等同高效 gather      | 区分规则地址、index-dependent AG 与请求吞吐           | 能表示地址不等于能高效服务逐元素随机请求                              | [来源 S36](https://chatgpt.com/c/6ae15ddf-0670-83e8-ab0d-b99a9dad965e?messageId=d7fb793b-8c12-4d4e-a287-9bb8df90310b)                                                                                                                                                                                                                                           |
 
-
 <a id="execution-contracts"></a>
+
 ## 八 编程层次与执行合同
 
 ### 控制与 IR 的其他历史版本
@@ -662,7 +670,6 @@ SPMD 表示同一个逻辑 kernel/grid 用不同参数或 program_id 执行，�
 多 Context 在一个实例等待数据、事件或资源时推进别的 ready 实例。它提高的是利用率和延迟隐藏能力，不增加物理峰值。一个 Context 也可以先发出多个独立异步操作再 await；不能把所有 overlap 都归功于 multi-context。队列更深也不等于引擎数量更多。
 
 逻辑 Context、物理 slot 和长期 task/event ID 必须分离。Context slot 被复用后，旧异步完成仍应路由到提交时的 owner/generation，而不是当前占槽者。驻留数还受到 L1、L2、AM 和事件资源约束，不等于硬件支持的 PC 数。
-
 
 10月17日，你进一步明确任务身份必须覆盖整个系统，包括 Group，而不只是 Tile 本地槽；希望有系统可识别的任务编号，或由 L2 管理复用。助手提出 HomeGroupID、TaskSlot、Generation 组合及本地 engine tag 到系统 TaskID 的映射；这是候选编码，不是要求编号全局永不重复。Group 只有在旧引用和在途事务排空后才能复用，有限 generation 不能替代安全回收。[来源 S57](https://chatgpt.com/c/6ad309e6-3c78-83ee-b743-02bb8c6cebaf?messageId=7aa75680-b6b5-4ff0-904a-1864086c52ee)
 
@@ -690,6 +697,7 @@ Group/Tile 合同至少包含参数和布局、stride 与 task 坐标、访问�
 这种合同是编译器与动态硬件之间的边界：编译器产出合法计划及需求，硬件在真实依赖、队列、配额和背压下推进。不能要求编译器预测唯一完成顺序，也不能让硬件通过无界队列掩盖不合法的资源需求。
 
 <a id="memory-scheduling"></a>
+
 ## 九 存储系统与动态调度
 
 ### SRAM 分区的阶段性收敛
@@ -791,8 +799,8 @@ PagedAttention 是块间页表间接、块内规则访问，不要求先将整�
 
 真正冲突 scatter-reduce、动态队列等仍需分组、目标独占、串行或 fallback。这些是无通用 atomic 的可行方案，不是已经实现性能的证明；10月1日模型的 profiled gather 缺口，也不能拿来断言后来 real-gather 分支仍未改进。
 
-
 <a id="compute-am"></a>
+
 ## 十 计算后端与 Shared AM
 
 ### 矩阵向量搬运的分工
@@ -882,6 +890,7 @@ K_total 是整个归约长度，K_chunk 是输入分块长度，K_cmd 是单条�
 K 也不能笼统称为无限：INT32 累加有溢出边界，分块后仍累加到同一 INT32 不会解决溢出；浮点有舍入误差和顺序差异。固定归约顺序可增加可复现性，不等于与另一顺序逐位一致。
 
 <a id="irregular"></a>
+
 ## 十一 Irregular 多设备与可观测性
 
 ### 二维 DMA 与间接地址生成
@@ -921,6 +930,7 @@ Context 内合法 in-place、buffer reuse 和局部异步，与跨 Context 可�
 还讨论过 grid_sample 与 mul 的 fusion/tiling，以及 LTC/CfC 液态网络。前者可确认你提出过问题，不宜把未恢复的结论写成已定案 lowering；后者涉及小矩阵、稀疏连接、递归依赖和实时延迟，persistent temporal Context 与跨 Context micro-batching 属于探索，不是当前新增硬件要求。[来源 S40](https://chatgpt.com/c/6acc9954-5a68-83ec-ac31-d2aa4a6812a3?messageId=aceb5cde-d2c9-4519-8d9c-cab83b8d2699)
 
 <a id="compiler-validation"></a>
+
 ## 十二 编译器与验证路线
 
 ### 编译器关注点与接入选择
@@ -983,8 +993,8 @@ NEST 的可证伪问题是：两级 Context 能否保持 SPMD 编译简单，同
 
 公平对比至少保持总容量、端口、带宽、算力和 workload 一致，提供异步 DMA、静态预取、双缓冲、SRAM 规划与 fusion 的强 baseline，再比较 Static、L2-only、Tile-only、Nested 和资源契约。报告 makespan、吞吐、延迟、搬运量、资源占用和 stall reason，不能只摘最佳 speedup。旧功耗百分比和工期估计不应进入当前规格。
 
-
 <a id="open-issues"></a>
+
 ## 十三 未定问题与易混淆事项
 
 ### 仍应保留为开放设计问题
@@ -1035,6 +1045,7 @@ NEST 的可证伪问题是：两级 Context 能否保持 SPMD 编译简单，同
 - 用同一数值 oracle、资源预算和强 baseline 追踪各方案；明确收益来自计算、数据移动、延迟隐藏、准入还是并发请求，而不是只累积最好看的 speedup。
 
 <a id="sources"></a>
+
 ## 十四 覆盖范围与原始来源
 
 ### 覆盖范围与缺口
@@ -1053,184 +1064,182 @@ NEST 的可证伪问题是：两级 Context 能否保持 SPMD 编译简单，同
 
 下列索引保留完整原始消息链接。正文中的同号引用指向该主题的代表消息；若一项包含用户要求、后续澄清与助手提案，可用这里的多条链接比对完整演进。
 
-**S01 2026年7月 设计宗旨与目标**  [原文1](https://chatgpt.com/c/6a646992-d14c-83ee-b27f-a7bad0d4fb79?messageId=cc79cd85-2847-43be-86be-861ddd73d67a)
+**S01 2026年7月 设计宗旨与目标** [原文1](https://chatgpt.com/c/6a646992-d14c-83ee-b27f-a7bad0d4fb79?messageId=cc79cd85-2847-43be-86be-861ddd73d67a)
 
-**S02 2026年10月11日 个人研究目标**  [原文1](https://chatgpt.com/c/6aca30a7-ca88-83ec-a606-67114c0fbfa1?messageId=ac5d71a8-fff0-49ea-881c-99c3a7f55687)
+**S02 2026年10月11日 个人研究目标** [原文1](https://chatgpt.com/c/6aca30a7-ca88-83ec-a606-67114c0fbfa1?messageId=ac5d71a8-fff0-49ea-881c-99c3a7f55687)
 
-**S03 2025年8月20日 工业 NPU 原始需求**  [原文1](https://chatgpt.com/c/68a5bbdb-9b60-8324-9060-57434a696d7b?messageId=ba2698fc-65fa-437e-85ea-e37497dc58a7)
+**S03 2025年8月20日 工业 NPU 原始需求** [原文1](https://chatgpt.com/c/68a5bbdb-9b60-8324-9060-57434a696d7b?messageId=ba2698fc-65fa-437e-85ea-e37497dc58a7)
 
-**S04 2025年8月 单 L2 字节码修正**  [原文1](https://chatgpt.com/c/68a5bbdb-9b60-8324-9060-57434a696d7b?messageId=36fc1de6-01c5-4528-9edc-a863d3b4df40)　[原文2](https://chatgpt.com/c/68a5bbdb-9b60-8324-9060-57434a696d7b?messageId=3572962e-1f88-47e8-963a-2dabc9bbb731)　[原文3](https://chatgpt.com/c/68a5bbdb-9b60-8324-9060-57434a696d7b?messageId=d199c712-07d0-4f69-8e05-e6ff6ccc76d0)
+**S04 2025年8月 单 L2 字节码修正** [原文1](https://chatgpt.com/c/68a5bbdb-9b60-8324-9060-57434a696d7b?messageId=36fc1de6-01c5-4528-9edc-a863d3b4df40)　[原文2](https://chatgpt.com/c/68a5bbdb-9b60-8324-9060-57434a696d7b?messageId=3572962e-1f88-47e8-963a-2dabc9bbb731)　[原文3](https://chatgpt.com/c/68a5bbdb-9b60-8324-9060-57434a696d7b?messageId=d199c712-07d0-4f69-8e05-e6ff6ccc76d0)
 
-**S05 2025年11月 IREE 与 MLIR 优化复用**  [原文1](https://chatgpt.com/c/6921c3c8-5d1c-8330-a56c-3a01baf31510?messageId=39a6ef82-005a-4bd7-9ce4-6e9915dbc618)　[原文2](https://chatgpt.com/c/6921c3c8-5d1c-8330-a56c-3a01baf31510?messageId=c725c5b6-458d-48fd-ab3e-f888693177bc)
+**S05 2025年11月 IREE 与 MLIR 优化复用** [原文1](https://chatgpt.com/c/6921c3c8-5d1c-8330-a56c-3a01baf31510?messageId=39a6ef82-005a-4bd7-9ce4-6e9915dbc618)　[原文2](https://chatgpt.com/c/6921c3c8-5d1c-8330-a56c-3a01baf31510?messageId=c725c5b6-458d-48fd-ab3e-f888693177bc)
 
-**S06 2025年12月 MLIR Async 与 CUDA Tile IR**  [原文1](https://chatgpt.com/c/694b8c19-4548-8327-9fdf-fb16eb74371b?messageId=243bf07b-903d-4aa7-a5c6-28ee3211ff30)　[原文2](https://chatgpt.com/c/694e707a-79c8-832b-afc2-f4e3d079cac1?messageId=e3473184-8661-4145-abfb-bde71c389218)
+**S06 2025年12月 MLIR Async 与 CUDA Tile IR** [原文1](https://chatgpt.com/c/694b8c19-4548-8327-9fdf-fb16eb74371b?messageId=243bf07b-903d-4aa7-a5c6-28ee3211ff30)　[原文2](https://chatgpt.com/c/694e707a-79c8-832b-afc2-f4e3d079cac1?messageId=e3473184-8661-4145-abfb-bde71c389218)
 
-**S07 2025年12月 LLVM IR 层重排**  [原文1](https://chatgpt.com/c/694fec5a-ddb8-832b-aa85-ae7544739e00?messageId=c745f5c4-4d6d-4cf7-b075-643276d38750)
+**S07 2025年12月 LLVM IR 层重排** [原文1](https://chatgpt.com/c/694fec5a-ddb8-832b-aa85-ae7544739e00?messageId=c745f5c4-4d6d-4cf7-b075-643276d38750)
 
-**S08 2026年5月 Tile 控制 ISA 与 launch**  [原文1](https://chatgpt.com/c/6a19530c-b224-83a3-914d-3ee7d6c44904?messageId=fead0f63-eb08-4c1d-817e-2ac4f3ec6572)
+**S08 2026年5月 Tile 控制 ISA 与 launch** [原文1](https://chatgpt.com/c/6a19530c-b224-83a3-914d-3ee7d6c44904?messageId=fead0f63-eb08-4c1d-817e-2ac4f3ec6572)
 
-**S09 2026年7月1日 跨 tile function 重排**  [原文1](https://chatgpt.com/c/6a44b4dc-65bc-83e8-a130-6678dd5fcb6b?messageId=1a9663bb-c0d9-41d1-8120-23da65cdfeda)
+**S09 2026年7月1日 跨 tile function 重排** [原文1](https://chatgpt.com/c/6a44b4dc-65bc-83e8-a130-6678dd5fcb6b?messageId=1a9663bb-c0d9-41d1-8120-23da65cdfeda)
 
-**S10 2026年7月 CORA 命名与控制边界**  [原文1](https://chatgpt.com/c/6a5f63e8-24e8-83ee-bd57-b7ec12877cf1?messageId=89f9397d-745f-40a6-909a-50b33e9e7f39)　[原文2](https://chatgpt.com/c/6a5f63e8-24e8-83ee-bd57-b7ec12877cf1?messageId=416f80df-3122-44f8-a0d6-1d87fe32b8ff)　[原文3](https://chatgpt.com/c/6a5f63e8-24e8-83ee-bd57-b7ec12877cf1?messageId=eeb138c4-b5cc-4cd9-955e-c9a41317d843)
+**S10 2026年7月 CORA 命名与控制边界** [原文1](https://chatgpt.com/c/6a5f63e8-24e8-83ee-bd57-b7ec12877cf1?messageId=89f9397d-745f-40a6-909a-50b33e9e7f39)　[原文2](https://chatgpt.com/c/6a5f63e8-24e8-83ee-bd57-b7ec12877cf1?messageId=416f80df-3122-44f8-a0d6-1d87fe32b8ff)　[原文3](https://chatgpt.com/c/6a5f63e8-24e8-83ee-bd57-b7ec12877cf1?messageId=eeb138c4-b5cc-4cd9-955e-c9a41317d843)
 
-**S11 2026年7月 隔离 CORA 与选择 SPMD**  [原文1](https://chatgpt.com/c/6a6b5824-1a44-83ee-bb57-0c9b54cf8ee9?messageId=b628a6f0-c936-44d1-b572-f623c2bb989b)　[原文2](https://chatgpt.com/c/6a6b5824-1a44-83ee-bb57-0c9b54cf8ee9?messageId=083a359b-516b-401b-99bc-ff5009d45852)　[原文3](https://chatgpt.com/c/6a6b5824-1a44-83ee-bb57-0c9b54cf8ee9?messageId=f29bc173-6b90-4ac4-9db7-30919b37fafc)
+**S11 2026年7月 隔离 CORA 与选择 SPMD** [原文1](https://chatgpt.com/c/6a6b5824-1a44-83ee-bb57-0c9b54cf8ee9?messageId=b628a6f0-c936-44d1-b572-f623c2bb989b)　[原文2](https://chatgpt.com/c/6a6b5824-1a44-83ee-bb57-0c9b54cf8ee9?messageId=083a359b-516b-401b-99bc-ff5009d45852)　[原文3](https://chatgpt.com/c/6a6b5824-1a44-83ee-bb57-0c9b54cf8ee9?messageId=f29bc173-6b90-4ac4-9db7-30919b37fafc)
 
-**S12 2026年7月31日 NEST 论文机制与评估计划**  [原文1](https://chatgpt.com/c/6a71de1f-0810-83e8-910a-4750fa44e196?messageId=83a46c45-1143-433c-ac77-037f1e080f72)
+**S12 2026年7月31日 NEST 论文机制与评估计划** [原文1](https://chatgpt.com/c/6a71de1f-0810-83e8-910a-4750fa44e196?messageId=83a46c45-1143-433c-ac77-037f1e080f72)
 
-**S13 2026年8月7日 NEST IR 与输出生命周期**  [原文1](https://chatgpt.com/c/6a7441dc-106c-83ee-be18-e369fbe11110?messageId=b5f8eb2c-e61a-49e8-9d74-0415cf36ec24)　[原文2](https://chatgpt.com/c/6a7441dc-106c-83ee-be18-e369fbe11110?messageId=99fa4dbd-84f9-487b-991b-48d4558398f7)　[原文3](https://chatgpt.com/c/6a7441dc-106c-83ee-be18-e369fbe11110?messageId=ae88dea3-33ab-40b7-a2cf-2428ba5e8586)
+**S13 2026年8月7日 NEST IR 与输出生命周期** [原文1](https://chatgpt.com/c/6a7441dc-106c-83ee-be18-e369fbe11110?messageId=b5f8eb2c-e61a-49e8-9d74-0415cf36ec24)　[原文2](https://chatgpt.com/c/6a7441dc-106c-83ee-be18-e369fbe11110?messageId=99fa4dbd-84f9-487b-991b-48d4558398f7)　[原文3](https://chatgpt.com/c/6a7441dc-106c-83ee-be18-e369fbe11110?messageId=ae88dea3-33ab-40b7-a2cf-2428ba5e8586)
 
-**S14 2026年8月20日 Nexus 上层提交 IR**  [原文1](https://chatgpt.com/c/6a7441dc-106c-83ee-be18-e369fbe11110?messageId=cee8808a-d227-4db9-8bbf-c63b41cc8dc4)　[原文2](https://chatgpt.com/c/6a7441dc-106c-83ee-be18-e369fbe11110?messageId=9d965648-d905-4384-b464-8f6236716f36)
+**S14 2026年8月20日 Nexus 上层提交 IR** [原文1](https://chatgpt.com/c/6a7441dc-106c-83ee-be18-e369fbe11110?messageId=cee8808a-d227-4db9-8bbf-c63b41cc8dc4)　[原文2](https://chatgpt.com/c/6a7441dc-106c-83ee-be18-e369fbe11110?messageId=9d965648-d905-4384-b464-8f6236716f36)
 
-**S15 2026年10月1日 Group 不支持 if else**  [原文1](https://chatgpt.com/c/6abb7d0e-0bb8-83ee-8042-892cb647deb7?messageId=32ae04b5-99f4-48a3-af3a-5361bef40597)　[原文2](https://chatgpt.com/c/6abb7d0e-0bb8-83ee-8042-892cb647deb7?messageId=f8f973a4-f8f8-46db-b91b-53828931c548)
+**S15 2026年10月1日 Group 不支持 if else** [原文1](https://chatgpt.com/c/6abb7d0e-0bb8-83ee-8042-892cb647deb7?messageId=32ae04b5-99f4-48a3-af3a-5361bef40597)　[原文2](https://chatgpt.com/c/6abb7d0e-0bb8-83ee-8042-892cb647deb7?messageId=f8f973a4-f8f8-46db-b91b-53828931c548)
 
-**S16 2026年10月20日 Shared RF MFE 与释放协议**  [原文1](https://chatgpt.com/c/6ad72b86-1d40-83e8-9e9c-805306982abc?messageId=26579bc3-abbf-4008-aaf6-b4f49626714c)　[原文2](https://chatgpt.com/c/6ad72b86-1d40-83e8-9e9c-805306982abc?messageId=48d31e3c-991c-4b13-b102-a3f84d5a3390)
+**S16 2026年10月20日 Shared RF MFE 与释放协议** [原文1](https://chatgpt.com/c/6ad72b86-1d40-83e8-9e9c-805306982abc?messageId=26579bc3-abbf-4008-aaf6-b4f49626714c)　[原文2](https://chatgpt.com/c/6ad72b86-1d40-83e8-9e9c-805306982abc?messageId=48d31e3c-991c-4b13-b102-a3f84d5a3390)
 
-**S17 2026年9月 Triton 与 Group Tile 编译合同**  [原文1](https://chatgpt.com/c/6aa7c75a-21bc-83e8-bc55-0a5d342a7b22?messageId=50675cfa-a814-4729-bc1e-dcc27a811935)　[原文2](https://chatgpt.com/c/6aa7c75a-21bc-83e8-bc55-0a5d342a7b22?messageId=7b2f4d03-503f-4f2a-bac3-6d2d9fe2e1f7)　[原文3](https://chatgpt.com/c/6aa7c75a-21bc-83e8-bc55-0a5d342a7b22?messageId=09e01a9b-7aa0-4955-8eba-efd23c637bf2)
+**S17 2026年9月 Triton 与 Group Tile 编译合同** [原文1](https://chatgpt.com/c/6aa7c75a-21bc-83e8-bc55-0a5d342a7b22?messageId=50675cfa-a814-4729-bc1e-dcc27a811935)　[原文2](https://chatgpt.com/c/6aa7c75a-21bc-83e8-bc55-0a5d342a7b22?messageId=7b2f4d03-503f-4f2a-bac3-6d2d9fe2e1f7)　[原文3](https://chatgpt.com/c/6aa7c75a-21bc-83e8-bc55-0a5d342a7b22?messageId=09e01a9b-7aa0-4955-8eba-efd23c637bf2)
 
-**S18 2026年8至9月 Bank 双模式与同级统一分区**  [原文1](https://chatgpt.com/c/6a7ad9ed-9d60-83ee-9bc5-c9c6ce4b9288?messageId=0bcc2e8e-8787-44d1-a326-d79ef6acc382)　[原文2](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=608e1b05-6fab-4a4f-9c1b-7ba897ed8347)　[原文3](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=e1359226-a92a-4041-9216-9e02a33bea0a)　[原文4](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=a6cc2e3e-7fe0-412c-a228-c643d4b90ca5)
+**S18 2026年8至9月 Bank 双模式与同级统一分区** [原文1](https://chatgpt.com/c/6a7ad9ed-9d60-83ee-9bc5-c9c6ce4b9288?messageId=0bcc2e8e-8787-44d1-a326-d79ef6acc382)　[原文2](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=608e1b05-6fab-4a4f-9c1b-7ba897ed8347)　[原文3](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=e1359226-a92a-4041-9216-9e02a33bea0a)　[原文4](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=a6cc2e3e-7fe0-412c-a228-c643d4b90ca5)
 
-**S19 2026年8月7日 L1 L2 分配与 gather 路径**  [原文1](https://chatgpt.com/c/6a685920-7d7c-83ee-b25a-5b43878fd86d?messageId=20ab2e80-d38e-4809-ab2d-104edca09975)　[原文2](https://chatgpt.com/c/6a685920-7d7c-83ee-b25a-5b43878fd86d?messageId=56ac7f38-4a68-464e-a699-7ce689a98f47)
+**S19 2026年8月7日 L1 L2 分配与 gather 路径** [原文1](https://chatgpt.com/c/6a685920-7d7c-83ee-b25a-5b43878fd86d?messageId=20ab2e80-d38e-4809-ab2d-104edca09975)　[原文2](https://chatgpt.com/c/6a685920-7d7c-83ee-b25a-5b43878fd86d?messageId=56ac7f38-4a68-464e-a699-7ce689a98f47)
 
-**S20 2026年9月23日 单 Context 单 profile**  [原文1](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=7eff8b05-df9c-4435-ad12-03b9e8903f6c)　[原文2](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=47ed5cbc-e0dd-4f2f-9bb6-424ad559be46)
+**S20 2026年9月23日 单 Context 单 profile** [原文1](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=7eff8b05-df9c-4435-ad12-03b9e8903f6c)　[原文2](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=47ed5cbc-e0dd-4f2f-9bb6-424ad559be46)
 
-**S21 2026年9月13日 HBM 边界与资源合同**  [原文1](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=bc75f0ff-84a8-4b4d-be0c-3f3781d61da1)　[原文2](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=dae07ccf-b952-481e-86e6-ebe82062b487)
+**S21 2026年9月13日 HBM 边界与资源合同** [原文1](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=bc75f0ff-84a8-4b4d-be0c-3f3781d61da1)　[原文2](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=dae07ccf-b952-481e-86e6-ebe82062b487)
 
-**S22 2026年9月28日 历史源码审查**  [原文1](https://chatgpt.com/c/6aba2e6b-b18c-83e8-8316-ed81630116de?messageId=d5095dae-0ae9-45e7-b9c2-d7b3eb75143c)
+**S22 2026年9月28日 历史源码审查** [原文1](https://chatgpt.com/c/6aba2e6b-b18c-83e8-8316-ed81630116de?messageId=d5095dae-0ae9-45e7-b9c2-d7b3eb75143c)
 
-**S23 2026年10月14日 BOA EVU 分工与旧模型**  [原文1](https://chatgpt.com/c/6acdcc25-13b4-83e8-99cf-a2c96449e6ad?messageId=17b1cf20-73ab-487b-b771-aa9b23d70786)
+**S23 2026年10月14日 BOA EVU 分工与旧模型** [原文1](https://chatgpt.com/c/6acdcc25-13b4-83e8-99cf-a2c96449e6ad?messageId=17b1cf20-73ab-487b-b771-aa9b23d70786)
 
-**S24 2026年10月6日 EVU 程序化与性能建模**  [原文1](https://chatgpt.com/c/6ac475e9-5494-83ee-8408-2f03c7bc9486?messageId=5ebc07a3-a9c1-4494-b4b4-9fa47f469f53)
+**S24 2026年10月6日 EVU 程序化与性能建模** [原文1](https://chatgpt.com/c/6ac475e9-5494-83ee-8408-2f03c7bc9486?messageId=5ebc07a3-a9c1-4494-b4b4-9fa47f469f53)
 
-**S25 2026年10月17日 Tile Shared 用户澄清**  [原文1](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=b0c04d5b-6aeb-4a74-8210-0a465fa332eb)　[原文2](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=0e71df90-56f0-46a1-84a6-e883870f0dce)
+**S25 2026年10月17日 Tile Shared 用户澄清** [原文1](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=b0c04d5b-6aeb-4a74-8210-0a465fa332eb)　[原文2](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=0e71df90-56f0-46a1-84a6-e883870f0dce)
 
-**S26 2026年10月15日 Ara 多 Context 边界**  [原文1](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=54ac9c1e-11b0-4bf4-91b6-75b20f2d3d74)
+**S26 2026年10月15日 Ara 多 Context 边界** [原文1](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=54ac9c1e-11b0-4bf4-91b6-75b20f2d3d74)
 
-**S27 2026年10月21日 RISC V 多 Context 五条路线**  [原文1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=6f22235b-7231-4426-a6bc-993c71da1653)　[原文2](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=1c2bac32-a0e8-5116-bc7a-1a44a3d374a5)
+**S27 2026年10月21日 RISC V 多 Context 五条路线** [原文1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=6f22235b-7231-4426-a6bc-993c71da1653)　[原文2](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=1c2bac32-a0e8-5116-bc7a-1a44a3d374a5)
 
-**S28 2026年10月23日 自主 RVV 与公共任务管理**  [原文1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=f142eddd-6116-537b-93b0-1a9991927ea8)
+**S28 2026年10月23日 自主 RVV 与公共任务管理** [原文1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=f142eddd-6116-537b-93b0-1a9991927ea8)
 
-**S29 2026年10月17日 四个独立 8×8 用户纠正**  [原文1](https://chatgpt.com/c/6ad377b4-8338-83e8-8c6e-1e8edd966207?messageId=af77c502-9589-4e7b-86e3-840f05d89f79)
+**S29 2026年10月17日 四个独立 8×8 用户纠正** [原文1](https://chatgpt.com/c/6ad377b4-8338-83e8-8c6e-1e8edd966207?messageId=af77c502-9589-4e7b-86e3-840f05d89f79)
 
-**S30 2026年10月19至20日 ring 与 Reduce Memory 候选**  [原文1](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=ab30b99b-b4f6-419e-b91d-87df54849bda)　[原文2](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=167a29e0-d38d-4ccf-9c0e-0208f6b4e248)
+**S30 2026年10月19至20日 ring 与 Reduce Memory 候选** [原文1](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=ab30b99b-b4f6-419e-b91d-87df54849bda)　[原文2](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=167a29e0-d38d-4ccf-9c0e-0208f6b4e248)
 
-**S31 2026年10月20日 K step 与 AM 持久累加**  [原文1](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=6f64f011-11d6-4c4b-be8a-7d6e1fca3621)
+**S31 2026年10月20日 K step 与 AM 持久累加** [原文1](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=6f64f011-11d6-4c4b-be8a-7d6e1fca3621)
 
-**S32 2026年10月26日 Shared AM V1 用户规定**  [原文1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=c6e53288-a6ff-4cf6-b98d-2b17541a879e)
+**S32 2026年10月26日 Shared AM V1 用户规定** [原文1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=c6e53288-a6ff-4cf6-b98d-2b17541a879e)
 
-**S33 2026年10月26日 Shared AM V1 指南摘要**  [原文1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=c43305ce-d2d3-5252-87e0-065284c1f0c4)
+**S33 2026年10月26日 Shared AM V1 指南摘要** [原文1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=c43305ce-d2d3-5252-87e0-065284c1f0c4)
 
-**S34 2026年10月26日 共享 AM 硬件与带宽建议**  [原文1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=fd703440-acc3-5fef-bde2-7bce63546bb1)
+**S34 2026年10月26日 共享 AM 硬件与带宽建议** [原文1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=fd703440-acc3-5fef-bde2-7bce63546bb1)
 
-**S35 2026年10月26日 K_total K_chunk K_cmd**  [原文1](https://chatgpt.com/c/6adf1f1b-f6b8-83ee-8b14-f1611a1345d2?messageId=5c33af74-9582-59ac-a2ae-66b14339c88f)　[原文2](https://chatgpt.com/c/6adf1f1b-f6b8-83ee-8b14-f1611a1345d2?messageId=ca5a1f4b-da43-56f9-b077-51306105ebf9)
+**S35 2026年10月26日 K_total K_chunk K_cmd** [原文1](https://chatgpt.com/c/6adf1f1b-f6b8-83ee-8b14-f1611a1345d2?messageId=5c33af74-9582-59ac-a2ae-66b14339c88f)　[原文2](https://chatgpt.com/c/6adf1f1b-f6b8-83ee-8b14-f1611a1345d2?messageId=ca5a1f4b-da43-56f9-b077-51306105ebf9)
 
-**S36 2026年10月28日 DMA AG 与 irregular 性能**  [原文1](https://chatgpt.com/c/6ae15ddf-0670-83e8-ab0d-b99a9dad965e?messageId=d7fb793b-8c12-4d4e-a287-9bb8df90310b)　[原文2](https://chatgpt.com/c/6ae15ddf-0670-83e8-ab0d-b99a9dad965e?messageId=e8c70d7b-882c-5288-9634-94ce88194f77)　[原文3](https://chatgpt.com/c/6ae15ddf-0670-83e8-ab0d-b99a9dad965e?messageId=f16f876d-14c6-54e2-a882-6f1b5d225886)
+**S36 2026年10月28日 DMA AG 与 irregular 性能** [原文1](https://chatgpt.com/c/6ae15ddf-0670-83e8-ab0d-b99a9dad965e?messageId=d7fb793b-8c12-4d4e-a287-9bb8df90310b)　[原文2](https://chatgpt.com/c/6ae15ddf-0670-83e8-ab0d-b99a9dad965e?messageId=e8c70d7b-882c-5288-9634-94ce88194f77)　[原文3](https://chatgpt.com/c/6ae15ddf-0670-83e8-ab0d-b99a9dad965e?messageId=f16f876d-14c6-54e2-a882-6f1b5d225886)
 
-**S37 2026年10月5日 跨 Context move 收益纠偏**  [原文1](https://chatgpt.com/c/6ac46ddf-b068-83e8-8373-8968d2cd955d?messageId=83bd4615-28c7-4a8c-9a00-61ab3a52d5c9)
+**S37 2026年10月5日 跨 Context move 收益纠偏** [原文1](https://chatgpt.com/c/6ac46ddf-b068-83e8-8373-8968d2cd955d?messageId=83bd4615-28c7-4a8c-9a00-61ab3a52d5c9)
 
-**S38 2026年10月5日 多设备与 P2P**  [原文1](https://chatgpt.com/c/6ac46ddf-b068-83e8-8373-8968d2cd955d?messageId=fb6fc45f-fec3-4015-8847-86a600771afd)　[原文2](https://chatgpt.com/c/6ac46ddf-b068-83e8-8373-8968d2cd955d?messageId=56a06188-8fbf-4816-8d37-fdd9c5db7524)
+**S38 2026年10月5日 多设备与 P2P** [原文1](https://chatgpt.com/c/6ac46ddf-b068-83e8-8373-8968d2cd955d?messageId=fb6fc45f-fec3-4015-8847-86a600771afd)　[原文2](https://chatgpt.com/c/6ac46ddf-b068-83e8-8373-8968d2cd955d?messageId=56a06188-8fbf-4816-8d37-fdd9c5db7524)
 
-**S39 2026年8月16日 Trace hierarchy**  [原文1](https://chatgpt.com/c/6a81a3e4-5cfc-83e8-9007-2bc85ff78502?messageId=870f28da-c36d-457e-ae67-ec54ced3e31a)
+**S39 2026年8月16日 Trace hierarchy** [原文1](https://chatgpt.com/c/6a81a3e4-5cfc-83e8-9007-2bc85ff78502?messageId=870f28da-c36d-457e-ae67-ec54ced3e31a)
 
-**S40 2026年8至10月 算子与液态网络探索**  [原文1](https://chatgpt.com/c/6acc9954-5a68-83ec-ac31-d2aa4a6812a3?messageId=aceb5cde-d2c9-4519-8d9c-cab83b8d2699)　[原文2](https://chatgpt.com/c/6a919b73-40b4-83ee-8548-8a918705114d?messageId=f8b49436-f0c6-4f75-8a06-9acdf7a73e9e)
+**S40 2026年8至10月 算子与液态网络探索** [原文1](https://chatgpt.com/c/6acc9954-5a68-83ec-ac31-d2aa4a6812a3?messageId=aceb5cde-d2c9-4519-8d9c-cab83b8d2699)　[原文2](https://chatgpt.com/c/6a919b73-40b4-83ee-8548-8a918705114d?messageId=f8b49436-f0c6-4f75-8a06-9acdf7a73e9e)
 
-**S41 2026年10月11日 Python validator 能力边界**  [原文1](https://chatgpt.com/c/6aca30a7-ca88-83ec-a606-67114c0fbfa1?messageId=ac1723fd-2bd3-49b2-971f-c0bf468e0f56)　[原文2](https://chatgpt.com/c/6aca30a7-ca88-83ec-a606-67114c0fbfa1?messageId=c907076f-993b-44b7-9af1-5697915fa3a1)
+**S41 2026年10月11日 Python validator 能力边界** [原文1](https://chatgpt.com/c/6aca30a7-ca88-83ec-a606-67114c0fbfa1?messageId=ac1723fd-2bd3-49b2-971f-c0bf468e0f56)　[原文2](https://chatgpt.com/c/6aca30a7-ca88-83ec-a606-67114c0fbfa1?messageId=c907076f-993b-44b7-9af1-5697915fa3a1)
 
-**S42 2026年10月11日 调度 RTL 与 Python 环境切分**  [原文1](https://chatgpt.com/c/6acb3c76-dc04-83ec-9d87-4c5a4d3dfbf6?messageId=379dcbda-2e9c-48de-82a3-b64d44ba045f)　[原文2](https://chatgpt.com/c/6acb3c76-dc04-83ec-9d87-4c5a4d3dfbf6?messageId=8960adcb-cbc1-451e-afbd-766057ba5f7e)
+**S42 2026年10月11日 调度 RTL 与 Python 环境切分** [原文1](https://chatgpt.com/c/6acb3c76-dc04-83ec-9d87-4c5a4d3dfbf6?messageId=379dcbda-2e9c-48de-82a3-b64d44ba045f)　[原文2](https://chatgpt.com/c/6acb3c76-dc04-83ec-9d87-4c5a4d3dfbf6?messageId=8960adcb-cbc1-451e-afbd-766057ba5f7e)
 
-**S43 2026年10月23日 Scala 倾向与逐组件联仿**  [原文1](https://chatgpt.com/c/6ad9d1a8-ebd8-83e8-aeac-5fff7d2f3bf6?messageId=0f65b652-2cd4-4f2d-96a0-ff552be8f68e)　[原文2](https://chatgpt.com/c/6ad9d1a8-ebd8-83e8-aeac-5fff7d2f3bf6?messageId=c141414a-cb4b-4a1c-beeb-df6185723a67)　[原文3](https://chatgpt.com/c/6ad9d1a8-ebd8-83e8-aeac-5fff7d2f3bf6?messageId=98915acb-7c7a-5447-8412-1102a30a6369)
+**S43 2026年10月23日 Scala 倾向与逐组件联仿** [原文1](https://chatgpt.com/c/6ad9d1a8-ebd8-83e8-aeac-5fff7d2f3bf6?messageId=0f65b652-2cd4-4f2d-96a0-ff552be8f68e)　[原文2](https://chatgpt.com/c/6ad9d1a8-ebd8-83e8-aeac-5fff7d2f3bf6?messageId=c141414a-cb4b-4a1c-beeb-df6185723a67)　[原文3](https://chatgpt.com/c/6ad9d1a8-ebd8-83e8-aeac-5fff7d2f3bf6?messageId=98915acb-7c7a-5447-8412-1102a30a6369)
 
-**S44 2026年10月17日 Gemmini 后端与 custom MatMul**  [原文1](https://chatgpt.com/c/6ad309e6-3c78-83ee-b743-02bb8c6cebaf?messageId=c577d408-4616-574b-b696-7405b5fb9a05)　[原文2](https://chatgpt.com/c/6ad309e6-3c78-83ee-b743-02bb8c6cebaf?messageId=2535c482-cc70-5c9a-9e2c-fbd95adcba0e)
+**S44 2026年10月17日 Gemmini 后端与 custom MatMul** [原文1](https://chatgpt.com/c/6ad309e6-3c78-83ee-b743-02bb8c6cebaf?messageId=c577d408-4616-574b-b696-7405b5fb9a05)　[原文2](https://chatgpt.com/c/6ad309e6-3c78-83ee-b743-02bb8c6cebaf?messageId=2535c482-cc70-5c9a-9e2c-fbd95adcba0e)
 
-**S45 2026年10月 开源向量与系统候选**  [原文1](https://chatgpt.com/c/6ad9d1a8-ebd8-83e8-aeac-5fff7d2f3bf6?messageId=feb5de91-6135-5bac-8083-011b375687be)　[原文2](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=c79258c6-1b93-4220-8017-92b855784278)
+**S45 2026年10月 开源向量与系统候选** [原文1](https://chatgpt.com/c/6ad9d1a8-ebd8-83e8-aeac-5fff7d2f3bf6?messageId=feb5de91-6135-5bac-8083-011b375687be)　[原文2](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=c79258c6-1b93-4220-8017-92b855784278)
 
-**S46 2026年10月12日 openTPU 仅借鉴 sim**  [原文1](https://chatgpt.com/c/6acb3c76-dc04-83ec-9d87-4c5a4d3dfbf6?messageId=338db66a-e872-4d88-b9d4-007e7b31c0e2)　[原文2](https://chatgpt.com/c/6acb3c76-dc04-83ec-9d87-4c5a4d3dfbf6?messageId=788b39b2-046f-4481-95c3-366d6afe7474)
+**S46 2026年10月12日 openTPU 仅借鉴 sim** [原文1](https://chatgpt.com/c/6acb3c76-dc04-83ec-9d87-4c5a4d3dfbf6?messageId=338db66a-e872-4d88-b9d4-007e7b31c0e2)　[原文2](https://chatgpt.com/c/6acb3c76-dc04-83ec-9d87-4c5a4d3dfbf6?messageId=788b39b2-046f-4481-95c3-366d6afe7474)
 
-**S47 2026年10月22日 chisel npu 与 Gemmini 比较**  [原文1](https://chatgpt.com/c/6ad9d043-bd18-83ee-8667-526a9c4878dc?messageId=a6ba43e1-a539-48a1-a1fd-b75cbae57c72)　[原文2](https://chatgpt.com/c/6ad9d043-bd18-83ee-8667-526a9c4878dc?messageId=9c226ff2-2670-5533-a1ee-1c6fc7a8963c)
+**S47 2026年10月22日 chisel npu 与 Gemmini 比较** [原文1](https://chatgpt.com/c/6ad9d043-bd18-83ee-8667-526a9c4878dc?messageId=a6ba43e1-a539-48a1-a1fd-b75cbae57c72)　[原文2](https://chatgpt.com/c/6ad9d043-bd18-83ee-8667-526a9c4878dc?messageId=9c226ff2-2670-5533-a1ee-1c6fc7a8963c)
 
-**S48 2026年8月 模型实验评审与证据等级**  [原文1](https://chatgpt.com/c/6a71de1f-0810-83e8-910a-4750fa44e196?messageId=81f53566-7c09-4b89-8621-81120c8079b2)　[原文2](https://chatgpt.com/c/6a71de1f-0810-83e8-910a-4750fa44e196?messageId=3b4dedc2-71f9-422c-a6a8-b57536a02309)　[原文3](https://chatgpt.com/c/6a71de1f-0810-83e8-910a-4750fa44e196?messageId=edacd9fe-a74a-4065-aa95-c11eaf4a01c5)
+**S48 2026年8月 模型实验评审与证据等级** [原文1](https://chatgpt.com/c/6a71de1f-0810-83e8-910a-4750fa44e196?messageId=81f53566-7c09-4b89-8621-81120c8079b2)　[原文2](https://chatgpt.com/c/6a71de1f-0810-83e8-910a-4750fa44e196?messageId=3b4dedc2-71f9-422c-a6a8-b57536a02309)　[原文3](https://chatgpt.com/c/6a71de1f-0810-83e8-910a-4750fa44e196?messageId=edacd9fe-a74a-4065-aa95-c11eaf4a01c5)
 
-**S49 2026年8月12日 completion driven 滑动补位**  [原文1](https://chatgpt.com/c/6a7ad9ed-9d60-83ee-9bc5-c9c6ce4b9288?messageId=c474e393-071a-44d0-94ba-2c4f5fd41010)
+**S49 2026年8月12日 completion driven 滑动补位** [原文1](https://chatgpt.com/c/6a7ad9ed-9d60-83ee-9bc5-c9c6ce4b9288?messageId=c474e393-071a-44d0-94ba-2c4f5fd41010)
 
-**S50 2026年9月11日 分层调度与有限 action 表**  [原文1](https://chatgpt.com/c/6aa3ee92-6bfc-83e8-b43c-15c34a255742?messageId=b34b621f-95e6-4d36-9183-75d2380f9315)　[原文2](https://chatgpt.com/c/6aa3ee92-6bfc-83e8-b43c-15c34a255742?messageId=be820549-c964-4f12-a769-bd2400ef80f2)　[原文3](https://chatgpt.com/c/6aa3ee92-6bfc-83e8-b43c-15c34a255742?messageId=18919c34-04dd-4614-8780-ddf83eec2bd0)
+**S50 2026年9月11日 分层调度与有限 action 表** [原文1](https://chatgpt.com/c/6aa3ee92-6bfc-83e8-b43c-15c34a255742?messageId=b34b621f-95e6-4d36-9183-75d2380f9315)　[原文2](https://chatgpt.com/c/6aa3ee92-6bfc-83e8-b43c-15c34a255742?messageId=be820549-c964-4f12-a769-bd2400ef80f2)　[原文3](https://chatgpt.com/c/6aa3ee92-6bfc-83e8-b43c-15c34a255742?messageId=18919c34-04dd-4614-8780-ddf83eec2bd0)
 
-**S51 2026年9月11至12日 拓扑登记与 memory admission**  [原文1](https://chatgpt.com/c/6aa3ee92-6bfc-83e8-b43c-15c34a255742?messageId=d9720292-8f8f-41e1-86ba-1cda1d6e26b7)　[原文2](https://chatgpt.com/c/6aa3ee92-6bfc-83e8-b43c-15c34a255742?messageId=1a08bf8b-403e-4db0-8cf1-51787a6d0b54)　[原文3](https://chatgpt.com/c/6aa3ee92-6bfc-83e8-b43c-15c34a255742?messageId=bfead4ad-6dab-47f3-85fd-e379af234733)
+**S51 2026年9月11至12日 拓扑登记与 memory admission** [原文1](https://chatgpt.com/c/6aa3ee92-6bfc-83e8-b43c-15c34a255742?messageId=d9720292-8f8f-41e1-86ba-1cda1d6e26b7)　[原文2](https://chatgpt.com/c/6aa3ee92-6bfc-83e8-b43c-15c34a255742?messageId=1a08bf8b-403e-4db0-8cf1-51787a6d0b54)　[原文3](https://chatgpt.com/c/6aa3ee92-6bfc-83e8-b43c-15c34a255742?messageId=bfead4ad-6dab-47f3-85fd-e379af234733)
 
-**S52 2026年9月18日 跨 Context 等待纠偏**  [原文1](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=d03c1861-1a68-4ee2-9dd0-fb86be4dea6c)
+**S52 2026年9月18日 跨 Context 等待纠偏** [原文1](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=d03c1861-1a68-4ee2-9dd0-fb86be4dea6c)
 
-**S53 2026年10月5日 Context ownership 与 readonly share**  [原文1](https://chatgpt.com/c/6ac46ddf-b068-83e8-8373-8968d2cd955d?messageId=44bc19fb-f07f-4c0a-ab05-e271002e3f1c)　[原文2](https://chatgpt.com/c/6ac46ddf-b068-83e8-8373-8968d2cd955d?messageId=f7df95ff-cae5-478d-a722-0b1c06cb3eec)
+**S53 2026年10月5日 Context ownership 与 readonly share** [原文1](https://chatgpt.com/c/6ac46ddf-b068-83e8-8373-8968d2cd955d?messageId=44bc19fb-f07f-4c0a-ab05-e271002e3f1c)　[原文2](https://chatgpt.com/c/6ac46ddf-b068-83e8-8373-8968d2cd955d?messageId=f7df95ff-cae5-478d-a722-0b1c06cb3eec)
 
-**S54 2026年10月2日 Tile 与 Group gather 比较**  [原文1](https://chatgpt.com/c/6abf1244-7a3c-83ee-9527-ff150a4e701a?messageId=4666263b-e276-4a5c-ab5d-8cbe2f95254d)　[原文2](https://chatgpt.com/c/6abf1244-7a3c-83ee-9527-ff150a4e701a?messageId=4d1a49fd-cd2c-4635-bfc5-6a80d4674bd8)
+**S54 2026年10月2日 Tile 与 Group gather 比较** [原文1](https://chatgpt.com/c/6abf1244-7a3c-83ee-9527-ff150a4e701a?messageId=4666263b-e276-4a5c-ab5d-8cbe2f95254d)　[原文2](https://chatgpt.com/c/6abf1244-7a3c-83ee-9527-ff150a4e701a?messageId=4d1a49fd-cd2c-4635-bfc5-6a80d4674bd8)
 
-**S55 2026年10月1日 无 atomic 的 PagedAttention**  [原文1](https://chatgpt.com/c/6abdec71-c088-83e8-97cb-308af6ee08d0?messageId=c2ee61d8-2c2f-40cd-bf81-66629f20d1b6)　[原文2](https://chatgpt.com/c/6abdec71-c088-83e8-97cb-308af6ee08d0?messageId=a0ab9884-3318-452a-b51c-47da777295cc)
+**S55 2026年10月1日 无 atomic 的 PagedAttention** [原文1](https://chatgpt.com/c/6abdec71-c088-83e8-97cb-308af6ee08d0?messageId=c2ee61d8-2c2f-40cd-bf81-66629f20d1b6)　[原文2](https://chatgpt.com/c/6abdec71-c088-83e8-97cb-308af6ee08d0?messageId=a0ab9884-3318-452a-b51c-47da777295cc)
 
-**S56 2026年3至4月 Tiling Island Path BOA 前驱讨论**  [原文1](https://chatgpt.com/c/69b3c416-ada4-832a-ac9f-87f9dd8d7a6d?messageId=a0ec1f97-4247-460c-b60c-04a4149e0e84)　[原文2](https://chatgpt.com/c/69bd6375-49c8-8332-8e2e-9c9cf80abe0b?messageId=e37d32ca-94c3-4610-9534-993d8333e556)　[原文3](https://chatgpt.com/c/69bd6375-49c8-8332-8e2e-9c9cf80abe0b?messageId=61cbb7d2-8dad-4049-84f0-99e97c0ecb83)　[原文4](https://chatgpt.com/c/69bd6375-49c8-8332-8e2e-9c9cf80abe0b?messageId=a0219e3e-a52c-48b9-994a-9e52f7355e36)　[原文5](https://chatgpt.com/c/69c4fbb8-9aac-832a-a3b0-1a175a47957d?messageId=47b5a8f7-f5a5-4d82-865a-68227f2c23d1)　[原文6](https://chatgpt.com/c/69c4fbb8-9aac-832a-a3b0-1a175a47957d?messageId=d137bb01-8491-4aab-9c36-ebd65f4f4911)
+**S56 2026年3至4月 Tiling Island Path BOA 前驱讨论** [原文1](https://chatgpt.com/c/69b3c416-ada4-832a-ac9f-87f9dd8d7a6d?messageId=a0ec1f97-4247-460c-b60c-04a4149e0e84)　[原文2](https://chatgpt.com/c/69bd6375-49c8-8332-8e2e-9c9cf80abe0b?messageId=e37d32ca-94c3-4610-9534-993d8333e556)　[原文3](https://chatgpt.com/c/69bd6375-49c8-8332-8e2e-9c9cf80abe0b?messageId=61cbb7d2-8dad-4049-84f0-99e97c0ecb83)　[原文4](https://chatgpt.com/c/69bd6375-49c8-8332-8e2e-9c9cf80abe0b?messageId=a0219e3e-a52c-48b9-994a-9e52f7355e36)　[原文5](https://chatgpt.com/c/69c4fbb8-9aac-832a-a3b0-1a175a47957d?messageId=47b5a8f7-f5a5-4d82-865a-68227f2c23d1)　[原文6](https://chatgpt.com/c/69c4fbb8-9aac-832a-a3b0-1a175a47957d?messageId=d137bb01-8491-4aab-9c36-ebd65f4f4911)
 
-**S57 2026年10月17日 系统级 TaskID 与安全复用**  [原文1](https://chatgpt.com/c/6ad309e6-3c78-83ee-b743-02bb8c6cebaf?messageId=7aa75680-b6b5-4ff0-904a-1864086c52ee)　[原文2](https://chatgpt.com/c/6ad309e6-3c78-83ee-b743-02bb8c6cebaf?messageId=5afaae2a-309c-5bda-8ade-c5b7e174825e)
-
+**S57 2026年10月17日 系统级 TaskID 与安全复用** [原文1](https://chatgpt.com/c/6ad309e6-3c78-83ee-b743-02bb8c6cebaf?messageId=7aa75680-b6b5-4ff0-904a-1864086c52ee)　[原文2](https://chatgpt.com/c/6ad309e6-3c78-83ee-b743-02bb8c6cebaf?messageId=5afaae2a-309c-5bda-8ade-c5b7e174825e)
 
 ### 硬件历史的补充原始来源
 
-**H01 2026-03-25，4×4一cycle与早期primitive**  [原文1](https://chatgpt.com/c/69c3981c-f910-8333-af31-baa4f968ffef?messageId=f38e5bc6-c9a5-43e3-9fc4-606d6cce2df1)　[原文2](https://chatgpt.com/c/69c3981c-f910-8333-af31-baa4f968ffef?messageId=ef44cbee-6b0f-4c87-a043-2f9a9f6f5f53)
+**H01 2026-03-25，4×4一cycle与早期primitive** [原文1](https://chatgpt.com/c/69c3981c-f910-8333-af31-baa4f968ffef?messageId=f38e5bc6-c9a5-43e3-9fc4-606d6cce2df1)　[原文2](https://chatgpt.com/c/69c3981c-f910-8333-af31-baa4f968ffef?messageId=ef44cbee-6b0f-4c87-a043-2f9a9f6f5f53)
 
-**H02 2026-03-25，shape选择**  [原文1](https://chatgpt.com/c/69c3981c-f910-8333-af31-baa4f968ffef?messageId=763064a4-8d86-452d-86a9-e0c9bff0bff4)　[原文2](https://chatgpt.com/c/69c3981c-f910-8333-af31-baa4f968ffef?messageId=d2d7ede8-9824-4f91-be78-f37adbbf4dd1)
+**H02 2026-03-25，shape选择** [原文1](https://chatgpt.com/c/69c3981c-f910-8333-af31-baa4f968ffef?messageId=763064a4-8d86-452d-86a9-e0c9bff0bff4)　[原文2](https://chatgpt.com/c/69c3981c-f910-8333-af31-baa4f968ffef?messageId=d2d7ede8-9824-4f91-be78-f37adbbf4dd1)
 
-**H03 2026-03-27与04-01，BOA定义／目标／gather**  [原文1](https://chatgpt.com/c/69c4fbb8-9aac-832a-a3b0-1a175a47957d?messageId=47b5a8f7-f5a5-4d82-865a-68227f2c23d1)　[原文2](https://chatgpt.com/c/69c4fbb8-9aac-832a-a3b0-1a175a47957d?messageId=d137bb01-8491-4aab-9c36-ebd65f4f4911)
+**H03 2026-03-27与04-01，BOA定义／目标／gather** [原文1](https://chatgpt.com/c/69c4fbb8-9aac-832a-a3b0-1a175a47957d?messageId=47b5a8f7-f5a5-4d82-865a-68227f2c23d1)　[原文2](https://chatgpt.com/c/69c4fbb8-9aac-832a-a3b0-1a175a47957d?messageId=d137bb01-8491-4aab-9c36-ebd65f4f4911)
 
-**H04 2026-05-19 06:38 UTC，OPA/BOA评审及版本路线**  [原文1](https://chatgpt.com/c/6a0c051f-c648-83a3-adae-6ccd810965f5?messageId=bad29109-1ca2-4453-a9c9-065f2d4d5d79)
+**H04 2026-05-19 06:38 UTC，OPA/BOA评审及版本路线** [原文1](https://chatgpt.com/c/6a0c051f-c648-83a3-adae-6ccd810965f5?messageId=bad29109-1ca2-4453-a9c9-065f2d4d5d79)
 
-**H05 2026-05-20 02:16 UTC，FEATHER+/MINISA借鉴**  [原文1](https://chatgpt.com/c/6a0c051f-c648-83a3-adae-6ccd810965f5?messageId=115c05d3-07c2-4798-a7bc-6120ba755b75)
+**H05 2026-05-20 02:16 UTC，FEATHER+/MINISA借鉴** [原文1](https://chatgpt.com/c/6a0c051f-c648-83a3-adae-6ccd810965f5?messageId=115c05d3-07c2-4798-a7bc-6120ba755b75)
 
-**H06 2026-05-19 09:16 UTC，BOA＋Flex双岛**  [原文1](https://chatgpt.com/c/6a0c051f-c648-83a3-adae-6ccd810965f5?messageId=c7eef51c-adc9-4a1c-bd9b-71c149883897)　[原文2](https://chatgpt.com/c/6a0c051f-c648-83a3-adae-6ccd810965f5?messageId=f9a874e2-8de6-4e1e-8d9b-20d949fb5f28)
+**H06 2026-05-19 09:16 UTC，BOA＋Flex双岛** [原文1](https://chatgpt.com/c/6a0c051f-c648-83a3-adae-6ccd810965f5?messageId=c7eef51c-adc9-4a1c-bd9b-71c149883897)　[原文2](https://chatgpt.com/c/6a0c051f-c648-83a3-adae-6ccd810965f5?messageId=f9a874e2-8de6-4e1e-8d9b-20d949fb5f28)
 
-**H07 2026-07-15 02:03–02:05 UTC，TCP替换三方案**  [原文1](https://chatgpt.com/c/6a562cbb-4328-83ee-b2ac-dae5b7ad3b94?messageId=58f914c0-6d87-48b7-8271-f90d70d93b44)　[原文2](https://chatgpt.com/c/6a562cbb-4328-83ee-b2ac-dae5b7ad3b94?messageId=7c9040fe-a6df-4e01-93e7-b1094223ca82)
+**H07 2026-07-15 02:03–02:05 UTC，TCP替换三方案** [原文1](https://chatgpt.com/c/6a562cbb-4328-83ee-b2ac-dae5b7ad3b94?messageId=58f914c0-6d87-48b7-8271-f90d70d93b44)　[原文2](https://chatgpt.com/c/6a562cbb-4328-83ee-b2ac-dae5b7ad3b94?messageId=7c9040fe-a6df-4e01-93e7-b1094223ca82)
 
-**H08 2026-10-14 08:28–08:35 UTC，OPA通用PE与共享LSU**  [原文1](https://chatgpt.com/c/6acdcc25-13b4-83e8-99cf-a2c96449e6ad?messageId=d11334f7-8ca1-4c6d-8a44-172e6eec96bf)　[原文2](https://chatgpt.com/c/6acdcc25-13b4-83e8-99cf-a2c96449e6ad?messageId=c5d6d593-88f0-4814-abe8-bb68232ab3b4)
+**H08 2026-10-14 08:28–08:35 UTC，OPA通用PE与共享LSU** [原文1](https://chatgpt.com/c/6acdcc25-13b4-83e8-99cf-a2c96449e6ad?messageId=d11334f7-8ca1-4c6d-8a44-172e6eec96bf)　[原文2](https://chatgpt.com/c/6acdcc25-13b4-83e8-99cf-a2c96449e6ad?messageId=c5d6d593-88f0-4814-abe8-bb68232ab3b4)
 
-**H09 2026-10-14，专用BOA＋EVU与旧配置**  [原文1](https://chatgpt.com/c/6acdcc25-13b4-83e8-99cf-a2c96449e6ad?messageId=17b1cf20-73ab-487b-b771-aa9b23d70786)　[原文2](https://chatgpt.com/c/6acdcc25-13b4-83e8-99cf-a2c96449e6ad?messageId=21dbf1ac-2cd4-40bb-b556-736dc8949e33)
+**H09 2026-10-14，专用BOA＋EVU与旧配置** [原文1](https://chatgpt.com/c/6acdcc25-13b4-83e8-99cf-a2c96449e6ad?messageId=17b1cf20-73ab-487b-b771-aa9b23d70786)　[原文2](https://chatgpt.com/c/6acdcc25-13b4-83e8-99cf-a2c96449e6ad?messageId=21dbf1ac-2cd4-40bb-b556-736dc8949e33)
 
-**H10 2026-10-17 13:59 UTC，DPE／单阵列／小阵列簇比较**  [原文1](https://chatgpt.com/c/6ad377b4-8338-83e8-8c6e-1e8edd966207?messageId=a0433a52-5efe-5d1d-b8e8-f3c0a58174cc)
+**H10 2026-10-17 13:59 UTC，DPE／单阵列／小阵列簇比较** [原文1](https://chatgpt.com/c/6ad377b4-8338-83e8-8c6e-1e8edd966207?messageId=a0433a52-5efe-5d1d-b8e8-f3c0a58174cc)
 
-**H11 2026-10-17，用户四独立8×8纠正**  [原文1](https://chatgpt.com/c/6ad377b4-8338-83e8-8c6e-1e8edd966207?messageId=af77c502-9589-4e7b-86e3-840f05d89f79)
+**H11 2026-10-17，用户四独立8×8纠正** [原文1](https://chatgpt.com/c/6ad377b4-8338-83e8-8c6e-1e8edd966207?messageId=af77c502-9589-4e7b-86e3-840f05d89f79)
 
-**H12 2026-10-19至20，ring与Reduce Memory**  [原文1](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=ab30b99b-b4f6-419e-b91d-87df54849bda)　[原文2](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=167a29e0-d38d-4ccf-9c0e-0208f6b4e248)
+**H12 2026-10-19至20，ring与Reduce Memory** [原文1](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=ab30b99b-b4f6-419e-b91d-87df54849bda)　[原文2](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=167a29e0-d38d-4ccf-9c0e-0208f6b4e248)
 
-**H13 2026-10-20，K-step与持久AM**  [原文1](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=6f64f011-11d6-4c4b-be8a-7d6e1fca3621)
+**H13 2026-10-20，K-step与持久AM** [原文1](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=6f64f011-11d6-4c4b-be8a-7d6e1fca3621)
 
-**H14 2026-10-26，共享AM物理建议**  [原文1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=fd703440-acc3-5fef-bde2-7bce63546bb1)
+**H14 2026-10-26，共享AM物理建议** [原文1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=fd703440-acc3-5fef-bde2-7bce63546bb1)
 
-**H15 2026-10-26，K_total/K_chunk/K_cmd**  [原文1](https://chatgpt.com/c/6adf1f1b-f6b8-83ee-8b14-f1611a1345d2?messageId=5c33af74-9582-59ac-a2ae-66b14339c88f)　[原文2](https://chatgpt.com/c/6adf1f1b-f6b8-83ee-8b14-f1611a1345d2?messageId=ca5a1f4b-da43-56f9-b077-51306105ebf9)
+**H15 2026-10-26，K_total/K_chunk/K_cmd** [原文1](https://chatgpt.com/c/6adf1f1b-f6b8-83ee-8b14-f1611a1345d2?messageId=5c33af74-9582-59ac-a2ae-66b14339c88f)　[原文2](https://chatgpt.com/c/6adf1f1b-f6b8-83ee-8b14-f1611a1345d2?messageId=ca5a1f4b-da43-56f9-b077-51306105ebf9)
 
-**H16 2026-10-26，Shared AM V1规则**  [原文1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=c6e53288-a6ff-4cf6-b98d-2b17541a879e)　[原文2](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=c43305ce-d2d3-5252-87e0-065284c1f0c4)　[原文3](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=d5a3148e-0038-50f4-b4c3-4abf563328b5)
+**H16 2026-10-26，Shared AM V1规则** [原文1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=c6e53288-a6ff-4cf6-b98d-2b17541a879e)　[原文2](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=c43305ce-d2d3-5252-87e0-065284c1f0c4)　[原文3](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=d5a3148e-0038-50f4-b4c3-4abf563328b5)
 
-**H17 2026-06-30 02:39–02:43 UTC，LTF位置三路及用户选择**  [原文1](https://chatgpt.com/c/6a422d12-d7c0-83e8-918c-7bf6fb90cc50?messageId=b10786f4-5ceb-4a69-ba5c-a49c18103dce)　[原文2](https://chatgpt.com/c/6a422d12-d7c0-83e8-918c-7bf6fb90cc50?messageId=ccee2578-fc8c-485b-a100-d002cb03de80)　[原文3](https://chatgpt.com/c/6a422d12-d7c0-83e8-918c-7bf6fb90cc50?messageId=8032d359-9e2a-4029-8a89-02fd70082ea0)
+**H17 2026-06-30 02:39–02:43 UTC，LTF位置三路及用户选择** [原文1](https://chatgpt.com/c/6a422d12-d7c0-83e8-918c-7bf6fb90cc50?messageId=b10786f4-5ceb-4a69-ba5c-a49c18103dce)　[原文2](https://chatgpt.com/c/6a422d12-d7c0-83e8-918c-7bf6fb90cc50?messageId=ccee2578-fc8c-485b-a100-d002cb03de80)　[原文3](https://chatgpt.com/c/6a422d12-d7c0-83e8-918c-7bf6fb90cc50?messageId=8032d359-9e2a-4029-8a89-02fd70082ea0)
 
-**H18 2026-06-30 02:45 UTC，LTF buffers**  [原文1](https://chatgpt.com/c/6a422d12-d7c0-83e8-918c-7bf6fb90cc50?messageId=1b9db319-6710-4eae-a283-b664bc976e76)
+**H18 2026-06-30 02:45 UTC，LTF buffers** [原文1](https://chatgpt.com/c/6a422d12-d7c0-83e8-918c-7bf6fb90cc50?messageId=1b9db319-6710-4eae-a283-b664bc976e76)
 
-**H19 2026-10-06 00:44 UTC，MFE优先与有限LTU**  [原文1](https://chatgpt.com/c/6ac0cc5d-b464-83ee-939a-28b210319244?messageId=e5c632ca-4199-4327-b0ee-3bdf082d8f07)
+**H19 2026-10-06 00:44 UTC，MFE优先与有限LTU** [原文1](https://chatgpt.com/c/6ac0cc5d-b464-83ee-939a-28b210319244?messageId=e5c632ca-4199-4327-b0ee-3bdf082d8f07)
 
-**H20 2026-10-15 14:05–14:10 UTC，L1/RF合并候选**  [原文1](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=4a8dc1bd-ddf5-4d5a-a20a-ff1354cfa5e5)　[原文2](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=c9c4d766-a731-4ac8-a54a-5ee56cbf86d2)
+**H20 2026-10-15 14:05–14:10 UTC，L1/RF合并候选** [原文1](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=4a8dc1bd-ddf5-4d5a-a20a-ff1354cfa5e5)　[原文2](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=c9c4d766-a731-4ac8-a54a-5ee56cbf86d2)
 
-**H21 2026-10-20，RF/Shared与MFE直达**  [原文1](https://chatgpt.com/c/6ad72b86-1d40-83e8-9e9c-805306982abc?messageId=26579bc3-abbf-4008-aaf6-b4f49626714c)
+**H21 2026-10-20，RF/Shared与MFE直达** [原文1](https://chatgpt.com/c/6ad72b86-1d40-83e8-9e9c-805306982abc?messageId=26579bc3-abbf-4008-aaf6-b4f49626714c)
 
-**H22 2026-10-17，Shared而非“全RF”**  [原文1](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=b0c04d5b-6aeb-4a74-8210-0a465fa332eb)　[原文2](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=0e71df90-56f0-46a1-84a6-e883870f0dce)
+**H22 2026-10-17，Shared而非“全RF”** [原文1](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=b0c04d5b-6aeb-4a74-8210-0a465fa332eb)　[原文2](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=0e71df90-56f0-46a1-84a6-e883870f0dce)
 
-**H23 2026-08至10月，SRAM/profile/gather**  [原文1](https://chatgpt.com/c/6a7ad9ed-9d60-83ee-9bc5-c9c6ce4b9288?messageId=0bcc2e8e-8787-44d1-a326-d79ef6acc382)　[原文2](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=608e1b05-6fab-4a4f-9c1b-7ba897ed8347)　[原文3](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=e1359226-a92a-4041-9216-9e02a33bea0a)　[原文4](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=bc75f0ff-84a8-4b4d-be0c-3f3781d61da1)　[原文5](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=7eff8b05-df9c-4435-ad12-03b9e8903f6c)　[原文6](https://chatgpt.com/c/6abf1244-7a3c-83ee-9527-ff150a4e701a?messageId=4666263b-e276-4a5c-ab5d-8cbe2f95254d)
+**H23 2026-08至10月，SRAM/profile/gather** [原文1](https://chatgpt.com/c/6a7ad9ed-9d60-83ee-9bc5-c9c6ce4b9288?messageId=0bcc2e8e-8787-44d1-a326-d79ef6acc382)　[原文2](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=608e1b05-6fab-4a4f-9c1b-7ba897ed8347)　[原文3](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=e1359226-a92a-4041-9216-9e02a33bea0a)　[原文4](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=bc75f0ff-84a8-4b4d-be0c-3f3781d61da1)　[原文5](https://chatgpt.com/c/6aa6880f-8324-83e8-b947-2c23650c1d8d?messageId=7eff8b05-df9c-4435-ad12-03b9e8903f6c)　[原文6](https://chatgpt.com/c/6abf1244-7a3c-83ee-9527-ff150a4e701a?messageId=4666263b-e276-4a5c-ab5d-8cbe2f95254d)
 
-**H24 2026-08-10，FIFO收缩**  [原文1](https://chatgpt.com/c/6a6b5824-1a44-83ee-bb57-0c9b54cf8ee9?messageId=4f9d1607-01ed-4c61-8330-5d0e888eb27a)　[原文2](https://chatgpt.com/c/6a6b5824-1a44-83ee-bb57-0c9b54cf8ee9?messageId=633ed92c-3525-477f-b954-47ed6116f51c)
+**H24 2026-08-10，FIFO收缩** [原文1](https://chatgpt.com/c/6a6b5824-1a44-83ee-bb57-0c9b54cf8ee9?messageId=4f9d1607-01ed-4c61-8330-5d0e888eb27a)　[原文2](https://chatgpt.com/c/6a6b5824-1a44-83ee-bb57-0c9b54cf8ee9?messageId=633ed92c-3525-477f-b954-47ed6116f51c)
 
-**H25 2026-06-11 07:43–07:54 UTC，EVU descriptor/microcode/vector ISA**  [原文1](https://chatgpt.com/c/6a2a671c-f534-83a4-9f09-f406bc0181ac?messageId=b1489649-4764-4561-9cbb-ad1dfbbec4c0)　[原文2](https://chatgpt.com/c/6a2a671c-f534-83a4-9f09-f406bc0181ac?messageId=031676cf-d07a-4f26-9d46-bb81c8ae35c4)
+**H25 2026-06-11 07:43–07:54 UTC，EVU descriptor/microcode/vector ISA** [原文1](https://chatgpt.com/c/6a2a671c-f534-83a4-9f09-f406bc0181ac?messageId=b1489649-4764-4561-9cbb-ad1dfbbec4c0)　[原文2](https://chatgpt.com/c/6a2a671c-f534-83a4-9f09-f406bc0181ac?messageId=031676cf-d07a-4f26-9d46-bb81c8ae35c4)
 
-**H26 2026-06-11 08:01–08:02 UTC，Micro-SIMT**  [原文1](https://chatgpt.com/c/6a2a671c-f534-83a4-9f09-f406bc0181ac?messageId=9b765cd6-8e2f-4e54-b272-18ff8596ca98)　[原文2](https://chatgpt.com/c/6a2a671c-f534-83a4-9f09-f406bc0181ac?messageId=8065cf69-e4aa-4956-b624-319ccab2dbdb)
+**H26 2026-06-11 08:01–08:02 UTC，Micro-SIMT** [原文1](https://chatgpt.com/c/6a2a671c-f534-83a4-9f09-f406bc0181ac?messageId=9b765cd6-8e2f-4e54-b272-18ff8596ca98)　[原文2](https://chatgpt.com/c/6a2a671c-f534-83a4-9f09-f406bc0181ac?messageId=8065cf69-e4aa-4956-b624-319ccab2dbdb)
 
-**H27 2026-10-06，EVU与带宽**  [原文1](https://chatgpt.com/c/6ac475e9-5494-83ee-8408-2f03c7bc9486?messageId=5ebc07a3-a9c1-4494-b4b4-9fa47f469f53)　[原文2](https://chatgpt.com/c/6ac475e9-5494-83ee-8408-2f03c7bc9486?messageId=9cc8b569-f2d5-4565-af54-87dac3858fbd)　[原文3](https://chatgpt.com/c/6ac475e9-5494-83ee-8408-2f03c7bc9486?messageId=64cc222d-b067-42a4-a021-5026b3438632)
+**H27 2026-10-06，EVU与带宽** [原文1](https://chatgpt.com/c/6ac475e9-5494-83ee-8408-2f03c7bc9486?messageId=5ebc07a3-a9c1-4494-b4b4-9fa47f469f53)　[原文2](https://chatgpt.com/c/6ac475e9-5494-83ee-8408-2f03c7bc9486?messageId=9cc8b569-f2d5-4565-af54-87dac3858fbd)　[原文3](https://chatgpt.com/c/6ac475e9-5494-83ee-8408-2f03c7bc9486?messageId=64cc222d-b067-42a4-a021-5026b3438632)
 
-**H28 2026-10-15至17，Ara边界与开源候选**  [原文1](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=54ac9c1e-11b0-4bf4-91b6-75b20f2d3d74)　[原文2](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=3e29a423-c782-4d28-a36d-16bd0e9e3186)　[原文3](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=c79258c6-1b93-4220-8017-92b855784278)
+**H28 2026-10-15至17，Ara边界与开源候选** [原文1](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=54ac9c1e-11b0-4bf4-91b6-75b20f2d3d74)　[原文2](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=3e29a423-c782-4d28-a36d-16bd0e9e3186)　[原文3](https://chatgpt.com/c/6acf4b26-b844-83ec-ad22-2c607b9a61b8?messageId=c79258c6-1b93-4220-8017-92b855784278)
 
-**H29 2026-10-21，RISC-V A–E**  [原文1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=6f22235b-7231-4426-a6bc-993c71da1653)　[原文2](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=1c2bac32-a0e8-5116-bc7a-1a44a3d374a5)
+**H29 2026-10-21，RISC-V A–E** [原文1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=6f22235b-7231-4426-a6bc-993c71da1653)　[原文2](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=1c2bac32-a0e8-5116-bc7a-1a44a3d374a5)
 
-**H30 2026-10-23，自主RVV与公共任务管理**  [原文1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=f142eddd-6116-537b-93b0-1a9991927ea8)
+**H30 2026-10-23，自主RVV与公共任务管理** [原文1](https://chatgpt.com/c/6ad8305d-3ed8-83ee-a2f7-c91c96c12857?messageId=f142eddd-6116-537b-93b0-1a9991927ea8)
 
-**H31 2026-10-23，Scala/Chisel向量底座**  [原文1](https://chatgpt.com/c/6ad9d1a8-ebd8-83e8-aeac-5fff7d2f3bf6?messageId=feb5de91-6135-5bac-8083-011b375687be)
+**H31 2026-10-23，Scala/Chisel向量底座** [原文1](https://chatgpt.com/c/6ad9d1a8-ebd8-83e8-aeac-5fff7d2f3bf6?messageId=feb5de91-6135-5bac-8083-011b375687be)
 
-**H32 2026-10-17，Gemmini与单条custom MatMul**  [原文1](https://chatgpt.com/c/6ad309e6-3c78-83ee-b743-02bb8c6cebaf?messageId=c577d408-4616-574b-b696-7405b5fb9a05)　[原文2](https://chatgpt.com/c/6ad309e6-3c78-83ee-b743-02bb8c6cebaf?messageId=2535c482-cc70-5c9a-9e2c-fbd95adcba0e)
-
+**H32 2026-10-17，Gemmini与单条custom MatMul** [原文1](https://chatgpt.com/c/6ad309e6-3c78-83ee-b743-02bb8c6cebaf?messageId=c577d408-4616-574b-b696-7405b5fb9a05)　[原文2](https://chatgpt.com/c/6ad309e6-3c78-83ee-b743-02bb8c6cebaf?messageId=2535c482-cc70-5c9a-9e2c-fbd95adcba0e)

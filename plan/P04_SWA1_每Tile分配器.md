@@ -48,15 +48,15 @@
 
 ## 6. 验收表
 
-| Case ID | 构造 | 必须观测 | 失败特征 |
-| --- | --- | --- | --- |
-| Q08a Tile 隔离容量 | 4-Tile 样例，Tile0 8 槽满 | Tile1 新申请同窗口授予；`shared_am_per_tile[1]` 计数独立 | Tile1 被 Tile0 满槽阻塞 |
-| Q08b Tile 隔离故障 | Tile0 fault/reset | 仅 Tile0 lease/pending 清零；Tile1 snapshot 不变；报告 fault 归属 Tile0 | abort 波及 Tile1 |
-| Q09 旧事件跨 slot 复用 | 步骤 5 场景（quota=1+背压） | 全部断言通过且为常驻测试 | 第二条 ALLOC 挂死或旧事件不可 await |
-| ID-P04-1 旧 artifact 拒绝 | P04 前 artifact 在 P04 后加载 | 报 `target fingerprint mismatch`，非零退出 | 静默按新拓扑跑完 |
-| ID-P04-2 新fingerprint | 保存迁移前artifact、迁移后重新编译 | 前者拒绝、后者replay正确；固定拓扑身份不可由用户切回旧实现 | 旧artifact静默reinterpret或新增兼容后门 |
-| RPT-P04-3 per-Tile 报告 | 任一 typed 样例 `--json --report` | JSON 含 per-Tile AM 统计；zero-leak 逐 Tile；fault 归属正确 | 只有聚合数无法定位 Tile |
-| REG-P04-4 全量 gate | 步骤 7 | exit 0，计数入 evidence | 漏改的 Group 级测试失败 |
+| Case ID                   | 构造                               | 必须观测                                                                | 失败特征                                |
+| ------------------------- | ---------------------------------- | ----------------------------------------------------------------------- | --------------------------------------- |
+| Q08a Tile 隔离容量        | 4-Tile 样例，Tile0 8 槽满          | Tile1 新申请同窗口授予；`shared_am_per_tile[1]` 计数独立                | Tile1 被 Tile0 满槽阻塞                 |
+| Q08b Tile 隔离故障        | Tile0 fault/reset                  | 仅 Tile0 lease/pending 清零；Tile1 snapshot 不变；报告 fault 归属 Tile0 | abort 波及 Tile1                        |
+| Q09 旧事件跨 slot 复用    | 步骤 5 场景（quota=1+背压）        | 全部断言通过且为常驻测试                                                | 第二条 ALLOC 挂死或旧事件不可 await     |
+| ID-P04-1 旧 artifact 拒绝 | P04 前 artifact 在 P04 后加载      | 报 `target fingerprint mismatch`，非零退出                              | 静默按新拓扑跑完                        |
+| ID-P04-2 新fingerprint    | 保存迁移前artifact、迁移后重新编译 | 前者拒绝、后者replay正确；固定拓扑身份不可由用户切回旧实现              | 旧artifact静默reinterpret或新增兼容后门 |
+| RPT-P04-3 per-Tile 报告   | 任一 typed 样例 `--json --report`  | JSON 含 per-Tile AM 统计；zero-leak 逐 Tile；fault 归属正确             | 只有聚合数无法定位 Tile                 |
+| REG-P04-4 全量 gate       | 步骤 7                             | exit 0，计数入 evidence                                                 | 漏改的 Group 级测试失败                 |
 
 ## 7. 可执行命令
 

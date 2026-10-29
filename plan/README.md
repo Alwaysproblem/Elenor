@@ -8,37 +8,39 @@
 
 “前置”是通过门，不是仅存在文件。所有状态初始化为“未开始”；真实实施完成后更新本表并写 `evidence/Pnn.md`。没有硬件工具/板卡时按总则记录阻塞，不提前标通过。
 
-| ID | 对应原方案 | 独立任务文件 | 前置 | 状态 |
-| --- | --- | --- | --- | --- |
-| P01 | C0-S / S0 | [软件基线与差距清单](P01_C0S_S0_软件基线.md) | 无 | 未开始 |
-| P02 | C0-H | [锁定工具链与统一运行入口](P02_C0H_锁定工具链.md) | P01 | 未开始 |
-| P03 | C1 | [独立 oracle 与数值合同冻结](P03_C1_独立数值Oracle.md) | P02 | 未开始 |
-| P04 | SW-A1 | [每 Tile AM 拓扑与隔离](P04_SWA1_每Tile分配器.md) | P01 | 未开始 |
-| P05 | SW-A2 | [多 engine 与固定 affinity](P05_SWA2_多Engine与Affinity.md) | P04 | 未开始 |
-| P06 | SW-A3 | [逐 MAC 数值与 artifact 切换](P06_SWA3_数值与Artifact迁移.md) | P03、P05 | 未开始 |
-| P07 | SW-A4 | [终态时序与安全释放](P07_SWA4_终态与释放顺序.md) | P04 | 未开始 |
-| P08 | C6-S / C3 软件前置 | [软件后处理、四转置与 im2col Conv](P08_C6S_后处理与软件Conv.md) | P06 | 未开始 |
-| P09 | C7-A / SW-A gate | [软件全链路 gate](P09_C7A_软件集成Gate.md) | P04、P05、P06、P07、P08 | 未开始 |
-| P10 | C4 / §4 ABI | [协议 schema 与接口冻结](P10_C4_协议Schema与接口.md) | P02、P09 | 未开始 |
-| P11 | C2-A | [dataflow 选择与 FP32 PE](P11_C2A_数据流与FP32PE.md) | P02、P03、P10 | 未开始 |
-| P12 | C2-B | [方形 mesh 与不可暂停输出合同](P12_C2B_方形阵列.md) | P11 | 未开始 |
-| P13 | C3 | [操作数、四种转置与 L1 请求](P13_C3_操作数转置与L1.md) | P10、P12 | 未开始 |
-| P14 | C4-H allocator | [硬件 AM allocator 与链表](P14_C4H_分配器与链表.md) | P10 | 未开始 |
-| P15 | C4-H event | [持久事件、取消与安全退休](P15_C4H_事件与故障收尾.md) | P14 | 未开始 |
-| P16 | C5-H | [credit、AM RMW 与有限服务](P16_C5H_Credit与AM服务.md) | P12、P14、P15 | 未开始 |
-| P17 | C6-H | [硬件后处理与自主 drain](P17_C6H_后处理与Drain.md) | P08、P13、P15、P16 | 未开始 |
-| P18 | C2–C6 集成 gate | [单阵列 BOA top](P18_单阵列硬件集成.md) | P12、P13、P14、P15、P16、P17 | 未开始 |
-| P19 | C7-B ABI | [Verilator C ABI 与单步桥](P19_C7B_Verilator_C_ABI.md) | P10、P18 | 未开始 |
-| P20 | C7-B integration | [validator RTL 联仿](P20_C7B_Validator联仿.md) | P09、P19 | 未开始 |
-| P21 | C8-A | [Rocket / RoCC 硬件边界](P21_C8A_Rocket_RoCC硬件.md) | P10、P20 | 未开始 |
-| P22 | C8-B | [真实 UCE 固件与控制接入](P22_C8B_真实UCE固件.md) | P20、P21 | 未开始 |
-| P23 | C11-A synth | [VCU118 单阵列实现与时序](P23_C11A_单阵列FPGA实现.md) | P22 | 未开始 |
-| P24 | C11-A board | [VCU118 单阵列上板](P24_C11A_单阵列板测.md) | P23 | 未开始 |
-| P25 | C9 | [矩形阵列](P25_C9_矩形阵列.md) | P12、P18、P20 | 未开始 |
-| P26 | C10 | [Tile 内多阵列共享 AM](P26_C10_多阵列共享AM.md) | P22、P24、P25 | 未开始 |
-| P27 | C11-B synth | [VCU118 多阵列实现与时序](P27_C11B_多阵列FPGA实现.md) | P23、P26 | 未开始 |
-| P28 | C11-B board | [VCU118 多阵列最终板测](P28_C11B_多阵列板测.md) | P24、P27 | 未开始 |
-| P29 | 全 V1 交付 gate | [完整验收与干净离线复现](P29_V1_最终验收与复现.md) | P09、P20、P22、P25、P26、P28 | 未开始 |
+P01 已于 2026-10-29 执行基线采集，当前因首次 pre-commit 文档格式检查失败而**阻塞**；产物、当日测试/场景结果及解锁条件见 [P01 执行证据](evidence/P01.md)。不得把已有锁定文件或通过的 smoke 当作 P01 gate 已通过。
+
+| ID  | 对应原方案         | 独立任务文件                                                    | 前置                         | 状态   |
+| --- | ------------------ | --------------------------------------------------------------- | ---------------------------- | ------ |
+| P01 | C0-S / S0          | [软件基线与差距清单](P01_C0S_S0_软件基线.md)                    | 无                           | 阻塞   |
+| P02 | C0-H               | [锁定工具链与统一运行入口](P02_C0H_锁定工具链.md)               | P01                          | 未开始 |
+| P03 | C1                 | [独立 oracle 与数值合同冻结](P03_C1_独立数值Oracle.md)          | P02                          | 未开始 |
+| P04 | SW-A1              | [每 Tile AM 拓扑与隔离](P04_SWA1_每Tile分配器.md)               | P01                          | 未开始 |
+| P05 | SW-A2              | [多 engine 与固定 affinity](P05_SWA2_多Engine与Affinity.md)     | P04                          | 未开始 |
+| P06 | SW-A3              | [逐 MAC 数值与 artifact 切换](P06_SWA3_数值与Artifact迁移.md)   | P03、P05                     | 未开始 |
+| P07 | SW-A4              | [终态时序与安全释放](P07_SWA4_终态与释放顺序.md)                | P04                          | 未开始 |
+| P08 | C6-S / C3 软件前置 | [软件后处理、四转置与 im2col Conv](P08_C6S_后处理与软件Conv.md) | P06                          | 未开始 |
+| P09 | C7-A / SW-A gate   | [软件全链路 gate](P09_C7A_软件集成Gate.md)                      | P04、P05、P06、P07、P08      | 未开始 |
+| P10 | C4 / §4 ABI        | [协议 schema 与接口冻结](P10_C4_协议Schema与接口.md)            | P02、P09                     | 未开始 |
+| P11 | C2-A               | [dataflow 选择与 FP32 PE](P11_C2A_数据流与FP32PE.md)            | P02、P03、P10                | 未开始 |
+| P12 | C2-B               | [方形 mesh 与不可暂停输出合同](P12_C2B_方形阵列.md)             | P11                          | 未开始 |
+| P13 | C3                 | [操作数、四种转置与 L1 请求](P13_C3_操作数转置与L1.md)          | P10、P12                     | 未开始 |
+| P14 | C4-H allocator     | [硬件 AM allocator 与链表](P14_C4H_分配器与链表.md)             | P10                          | 未开始 |
+| P15 | C4-H event         | [持久事件、取消与安全退休](P15_C4H_事件与故障收尾.md)           | P14                          | 未开始 |
+| P16 | C5-H               | [credit、AM RMW 与有限服务](P16_C5H_Credit与AM服务.md)          | P12、P14、P15                | 未开始 |
+| P17 | C6-H               | [硬件后处理与自主 drain](P17_C6H_后处理与Drain.md)              | P08、P13、P15、P16           | 未开始 |
+| P18 | C2–C6 集成 gate    | [单阵列 BOA top](P18_单阵列硬件集成.md)                         | P12、P13、P14、P15、P16、P17 | 未开始 |
+| P19 | C7-B ABI           | [Verilator C ABI 与单步桥](P19_C7B_Verilator_C_ABI.md)          | P10、P18                     | 未开始 |
+| P20 | C7-B integration   | [validator RTL 联仿](P20_C7B_Validator联仿.md)                  | P09、P19                     | 未开始 |
+| P21 | C8-A               | [Rocket / RoCC 硬件边界](P21_C8A_Rocket_RoCC硬件.md)            | P10、P20                     | 未开始 |
+| P22 | C8-B               | [真实 UCE 固件与控制接入](P22_C8B_真实UCE固件.md)               | P20、P21                     | 未开始 |
+| P23 | C11-A synth        | [VCU118 单阵列实现与时序](P23_C11A_单阵列FPGA实现.md)           | P22                          | 未开始 |
+| P24 | C11-A board        | [VCU118 单阵列上板](P24_C11A_单阵列板测.md)                     | P23                          | 未开始 |
+| P25 | C9                 | [矩形阵列](P25_C9_矩形阵列.md)                                  | P12、P18、P20                | 未开始 |
+| P26 | C10                | [Tile 内多阵列共享 AM](P26_C10_多阵列共享AM.md)                 | P22、P24、P25                | 未开始 |
+| P27 | C11-B synth        | [VCU118 多阵列实现与时序](P27_C11B_多阵列FPGA实现.md)           | P23、P26                     | 未开始 |
+| P28 | C11-B board        | [VCU118 多阵列最终板测](P28_C11B_多阵列板测.md)                 | P24、P27                     | 未开始 |
+| P29 | 全 V1 交付 gate    | [完整验收与干净离线复现](P29_V1_最终验收与复现.md)              | P09、P20、P22、P25、P26、P28 | 未开始 |
 
 ## 2. 分阶段出口
 

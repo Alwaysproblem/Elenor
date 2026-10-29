@@ -50,16 +50,16 @@
 
 ## 6 验收表
 
-| Case ID | 构造 | 必须观测 | 失败特征 |
-| --- | --- | --- | --- |
-| cosim-matmul-bytes | typed matmul artifact + input-data，RTL 后端 | C bytes 与 P03 oracle 逐 bit 一致；与周期后端一致 | oracle 缺位或 compare 容差化 |
-| cosim-event-order | 同上 | 事件偏序与周期后端一致；终态偏序逐链成立 | 只比总数不比偏序 |
-| cosim-counts | 同上 | request/grant/ALLOC/FINAL/slot_free 非时序计数双后端一致；cycles 允许不同且记录 | 把周期数拉平断言 |
-| cosim-mem-contention | BOA 读与 MFE 流量争同 bank | 边界延迟与服务争用可见（对照无争用 run），读写走真实 bank/NoC 计时 | read_view 即当完成 |
-| cosim-stale-generation | 制造 reset/回收后旧响应到达 | 丢弃并计数，新 owner 数据不受污染 | 旧字节写入新 lease |
-| cosim-backpressure | RTL 输出 credit 注入背压后撤除 | lease 停留至恢复，无需 UCE 轮询即自主完成（Q07 硬件层） | Python 侧代答背压 |
-| cosim-nosecondam | RTL 后端 + 尝试挂 Python AM 驱动 | 创建/运行被拒，report 只有一份 AM 权威 | 双计数混算 |
-| cosim-fault | 注入步骤错误 | ERROR 终态、无副作用、计数入独立分母 | 伪成功 |
+| Case ID                | 构造                                         | 必须观测                                                                        | 失败特征                     |
+| ---------------------- | -------------------------------------------- | ------------------------------------------------------------------------------- | ---------------------------- |
+| cosim-matmul-bytes     | typed matmul artifact + input-data，RTL 后端 | C bytes 与 P03 oracle 逐 bit 一致；与周期后端一致                               | oracle 缺位或 compare 容差化 |
+| cosim-event-order      | 同上                                         | 事件偏序与周期后端一致；终态偏序逐链成立                                        | 只比总数不比偏序             |
+| cosim-counts           | 同上                                         | request/grant/ALLOC/FINAL/slot_free 非时序计数双后端一致；cycles 允许不同且记录 | 把周期数拉平断言             |
+| cosim-mem-contention   | BOA 读与 MFE 流量争同 bank                   | 边界延迟与服务争用可见（对照无争用 run），读写走真实 bank/NoC 计时              | read_view 即当完成           |
+| cosim-stale-generation | 制造 reset/回收后旧响应到达                  | 丢弃并计数，新 owner 数据不受污染                                               | 旧字节写入新 lease           |
+| cosim-backpressure     | RTL 输出 credit 注入背压后撤除               | lease 停留至恢复，无需 UCE 轮询即自主完成（Q07 硬件层）                         | Python 侧代答背压            |
+| cosim-nosecondam       | RTL 后端 + 尝试挂 Python AM 驱动             | 创建/运行被拒，report 只有一份 AM 权威                                          | 双计数混算                   |
+| cosim-fault            | 注入步骤错误                                 | ERROR 终态、无副作用、计数入独立分母                                            | 伪成功                       |
 
 ## 7 可执行命令
 

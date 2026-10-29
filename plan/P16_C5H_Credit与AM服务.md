@@ -1,10 +1,10 @@
 # P16 · C5-H：credit、AM RMW 与有限服务
 
-| 项 | 值 |
-| --- | --- |
-| ID | P16（对应原方案 C5-H） |
-| 前置 | P12、P14、P15 |
-| 状态 | 未开始 |
+| 项   | 值                     |
+| ---- | ---------------------- |
+| ID   | P16（对应原方案 C5-H） |
+| 前置 | P12、P14、P15          |
+| 状态 | 未开始                 |
 
 ## 1. 目标与不做
 
@@ -46,16 +46,16 @@
 
 ## 6. 验收表
 
-| case | 构造 | 必须观测 | 失败特征 / 层 |
-| --- | --- | --- | --- |
-| PS01 (T09) | 故意延迟 FIFO/RMW/writeback | compute_done 先到；commit/output 不提前；五时刻单调 | 边界合并（C/R） |
-| PS02 (T10) | O=6/R=2/Q=8 继续发射请求 | 拒发；到达仅 R→O；出队后容量才释放 | 到达即放行（C/R） |
-| PS03 (T11) | 热点 group+空闲 group | 热点吞吐≤bank/adder 独立能力；等待方公平可观测 | bank 数当 adder 吞吐（C/R） |
-| PS04 (T12) | 同地址 RMW、写后读、控制位变化 | 互锁/forwarding 生效，无旧值覆盖新值 | hazard 旁路（C/R） |
-| PS05 (T22a) | drain 与持续 ADD 竞争读端口 | drain 按年龄/轮转取得端口，无永久饥饿 | ADD 饿死 drain（C/R） |
-| PS06 (T20) | two-engine.yaml 两 context 各两链 | 最多两 engine 同时执行；单 context 不超两 engine | 并发越界（C/R） |
-| PS07 | commit 公式断言 | pending_am_updates 归零前禁止 commit；三个与项缺一不可 | 提前 commit（R） |
-| PS08 | 全成全败多资源获取 | 部分获取即整体回退，无悬挂资格 | 半持有（R） |
+| case        | 构造                              | 必须观测                                               | 失败特征 / 层               |
+| ----------- | --------------------------------- | ------------------------------------------------------ | --------------------------- |
+| PS01 (T09)  | 故意延迟 FIFO/RMW/writeback       | compute_done 先到；commit/output 不提前；五时刻单调    | 边界合并（C/R）             |
+| PS02 (T10)  | O=6/R=2/Q=8 继续发射请求          | 拒发；到达仅 R→O；出队后容量才释放                     | 到达即放行（C/R）           |
+| PS03 (T11)  | 热点 group+空闲 group             | 热点吞吐≤bank/adder 独立能力；等待方公平可观测         | bank 数当 adder 吞吐（C/R） |
+| PS04 (T12)  | 同地址 RMW、写后读、控制位变化    | 互锁/forwarding 生效，无旧值覆盖新值                   | hazard 旁路（C/R）          |
+| PS05 (T22a) | drain 与持续 ADD 竞争读端口       | drain 按年龄/轮转取得端口，无永久饥饿                  | ADD 饿死 drain（C/R）       |
+| PS06 (T20)  | two-engine.yaml 两 context 各两链 | 最多两 engine 同时执行；单 context 不超两 engine       | 并发越界（C/R）             |
+| PS07        | commit 公式断言                   | pending_am_updates 归零前禁止 commit；三个与项缺一不可 | 提前 commit（R）            |
+| PS08        | 全成全败多资源获取                | 部分获取即整体回退，无悬挂资格                         | 半持有（R）                 |
 
 反例边界：无限 FIFO、零延迟 AM、额外永久空槽、以加 bank 声称加 adder 吞吐，全部禁止；WAIT_ANY/等待登记端到端归 P15/P22，本层不强加源级控制流。
 

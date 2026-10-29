@@ -15,12 +15,12 @@
 
 下列YAML由本任务在 `hardware/configs/` 新增，引用P26共同参数而非复制另一份ABI。每份保持默认tile_k=8、4 groups×2 slots、默认4contexts且可执行8context容量验收。
 
-| 配置文件 | arrays_per_tile | array_rows×array_cols | 用途 |
-| --- | --- | --- | --- |
-| `vcu118_multi_array_4.yaml` | 4 | 16×16 | V1主板级基线；两contexts各两链覆盖四engine |
-| `vcu118_multi_array_2.yaml` | 2 | 16×16 | 2-engine对照；单engine超过两个live handles的可达验证 |
-| `vcu118_rect_8x16_4.yaml` | 4 | 8×16 | 矩形板级F02，四transpose与尾块 |
-| `vcu118_rect_16x8_4.yaml` | 4 | 16×8 | 相反方向矩形板级F02，不只测长边一种方向 |
+| 配置文件                    | arrays_per_tile | array_rows×array_cols | 用途                                                 |
+| --------------------------- | --------------- | --------------------- | ---------------------------------------------------- |
+| `vcu118_multi_array_4.yaml` | 4               | 16×16                 | V1主板级基线；两contexts各两链覆盖四engine           |
+| `vcu118_multi_array_2.yaml` | 2               | 16×16                 | 2-engine对照；单engine超过两个live handles的可达验证 |
+| `vcu118_rect_8x16_4.yaml`   | 4               | 8×16                  | 矩形板级F02，四transpose与尾块                       |
+| `vcu118_rect_16x8_4.yaml`   | 4               | 16×8                  | 相反方向矩形板级F02，不只测长边一种方向              |
 
 **为何包含2-engine板级构建：** least-live绑定、总8槽、4engines从空状态出发，不能合法期待某engine持有第3条链而其他engine都至少2条。F05“超过两个live handles”必须在1或2engines配置证实；2engine/8slots自然分配成4+4，既是多阵列又不伪造affinity。4engine配置继续证明真正四路并行。
 
@@ -48,15 +48,15 @@
 
 ## 5. 验收矩阵
 
-| Case | 构造与观察 | 失败条件 |
-| --- | --- | --- |
-| F01-B-4 | 4×16×16完整实现，WNS≥0，明确器件/约束 | 无bitstream、负WNS、关键路径未约束 |
-| F01-B-2 | 2×16×16真实构建，仍4组/8槽 | AM变成每engine2槽或总容量减半 |
-| F01-B-R1/R2 | 8×16与16×8各真实实现 | 只改配置文件，未跑place/route |
-| AM-SHARE | 每配置综合网表的物理存储/端口 | 为每array复制private AM、共享adder吞吐被错算 |
-| SLR-B | array/router/AM在同一SLR | 通过跨SLR宽结果总线规避拥塞而未满足约束 |
-| RETIME-B | 所有新增pipeline后的RTL/cosim | tag错位、credit漏算在途数据、RMW hazard窗口过短 |
-| CTX-B | 8contexts容量和事件槽admission | 静态事件容量不足但loader仍接受 |
+| Case        | 构造与观察                            | 失败条件                                        |
+| ----------- | ------------------------------------- | ----------------------------------------------- |
+| F01-B-4     | 4×16×16完整实现，WNS≥0，明确器件/约束 | 无bitstream、负WNS、关键路径未约束              |
+| F01-B-2     | 2×16×16真实构建，仍4组/8槽            | AM变成每engine2槽或总容量减半                   |
+| F01-B-R1/R2 | 8×16与16×8各真实实现                  | 只改配置文件，未跑place/route                   |
+| AM-SHARE    | 每配置综合网表的物理存储/端口         | 为每array复制private AM、共享adder吞吐被错算    |
+| SLR-B       | array/router/AM在同一SLR              | 通过跨SLR宽结果总线规避拥塞而未满足约束         |
+| RETIME-B    | 所有新增pipeline后的RTL/cosim         | tag错位、credit漏算在途数据、RMW hazard窗口过短 |
+| CTX-B       | 8contexts容量和事件槽admission        | 静态事件容量不足但loader仍接受                  |
 
 本任务只完成F01以及F02/F05的构建前提，数值和并行的B层通过属于P28。
 

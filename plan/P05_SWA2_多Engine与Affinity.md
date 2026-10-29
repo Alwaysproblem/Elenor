@@ -53,16 +53,16 @@
 
 ## 6. 验收表
 
-| Case ID | 构造 | 必须观测 | 失败特征 |
-| --- | --- | --- | --- |
-| T04-P05-1 affinity 恒定 | 两链不同 engine 全程 trace | 每链所有 step bound_engine 不变 | 出现迁移字段变化 |
-| T05-P05-2 忙不迁移 | bound 忙 + 邻 engine 空闲 | 等待原因为 engine 忙；不换 engine；解除后继续 | 静默换 engine |
-| T06-P05-3 单 engine >2 handles | `boa-1engine.yaml`，4 live handles | engine 正常服务 4 handles，公平交替；无 quota 违规（quota 仍按 context≤2） | 出现 “>2 即拒绝” 的隐限 |
-| T06-P05-4 2-engine 均衡 | `boa-2engine.yaml`，4 handles | 2/2 分布；文档注明分布非上限 | 把 2/2 写成硬约束断言 |
-| ID-P05-5 旧 artifact 拒绝 | P05 前 artifact 加载 | `target fingerprint mismatch`，非零 | 旧 hash 静默通过 |
-| ID-P05-6 新键生效 | `--hw-override`/yaml 改 arrays_per_tile | fingerprint 变化；engine 数随之；非法值配置报错 | 键存在但不进指纹/不生效 |
-| GRANT-P05-7 原子授予 | 授予 trace | slot/quota/mailbox/engine 绑定同一周期完成 | 先占槽后补元数据 |
-| REG-P05-8 全量 gate | 步骤 9 | exit 0 | 漏迁移 `tile.boa` 引用导致失败 |
+| Case ID                        | 构造                                    | 必须观测                                                                   | 失败特征                       |
+| ------------------------------ | --------------------------------------- | -------------------------------------------------------------------------- | ------------------------------ |
+| T04-P05-1 affinity 恒定        | 两链不同 engine 全程 trace              | 每链所有 step bound_engine 不变                                            | 出现迁移字段变化               |
+| T05-P05-2 忙不迁移             | bound 忙 + 邻 engine 空闲               | 等待原因为 engine 忙；不换 engine；解除后继续                              | 静默换 engine                  |
+| T06-P05-3 单 engine >2 handles | `boa-1engine.yaml`，4 live handles      | engine 正常服务 4 handles，公平交替；无 quota 违规（quota 仍按 context≤2） | 出现 “>2 即拒绝” 的隐限        |
+| T06-P05-4 2-engine 均衡        | `boa-2engine.yaml`，4 handles           | 2/2 分布；文档注明分布非上限                                               | 把 2/2 写成硬约束断言          |
+| ID-P05-5 旧 artifact 拒绝      | P05 前 artifact 加载                    | `target fingerprint mismatch`，非零                                        | 旧 hash 静默通过               |
+| ID-P05-6 新键生效              | `--hw-override`/yaml 改 arrays_per_tile | fingerprint 变化；engine 数随之；非法值配置报错                            | 键存在但不进指纹/不生效        |
+| GRANT-P05-7 原子授予           | 授予 trace                              | slot/quota/mailbox/engine 绑定同一周期完成                                 | 先占槽后补元数据               |
+| REG-P05-8 全量 gate            | 步骤 9                                  | exit 0                                                                     | 漏迁移 `tile.boa` 引用导致失败 |
 
 ## 7. 可执行命令
 

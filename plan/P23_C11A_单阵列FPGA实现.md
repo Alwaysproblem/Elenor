@@ -25,14 +25,14 @@
 
 ## 3. 修改范围与交付路径
 
-| 路径（除前序交付外均拟新增） | 责任 |
-| --- | --- |
-| `hardware/fpga/vcu118/` | 叠加配置、约束、存储绑定、观测寄存器、构建 Tcl/脚本 |
-| `hardware/configs/vcu118_single_array.yaml` | 1 Tile、1 array、16×16、16×16×8、4 groups/8 slots、100 MHz |
+| 路径（除前序交付外均拟新增）                     | 责任                                                                      |
+| ------------------------------------------------ | ------------------------------------------------------------------------- |
+| `hardware/fpga/vcu118/`                          | 叠加配置、约束、存储绑定、观测寄存器、构建 Tcl/脚本                       |
+| `hardware/configs/vcu118_single_array.yaml`      | 1 Tile、1 array、16×16、16×16×8、4 groups/8 slots、100 MHz                |
 | `hardware/configs/vcu118_single_array_8ctx.yaml` | 同一硬件边界的8-context验收构建；若基线容量已8则可共用bitstream并显式证明 |
-| `hardware/uce/src/main/scala/` | 在既有系统接入 board harness、Tile DMA、可编程背压观测 |
-| `hardware/scripts/check` 的 `fpga-synth` target | 调用真实 Vivado flow，收集并检查报告 |
-| `hardware/toolchain/toolchain.lock` | 写入本次验证的 Vivado/器件/IP/约束依赖 hash，不写授权密钥 |
+| `hardware/uce/src/main/scala/`                   | 在既有系统接入 board harness、Tile DMA、可编程背压观测                    |
+| `hardware/scripts/check` 的 `fpga-synth` target  | 调用真实 Vivado flow，收集并检查报告                                      |
+| `hardware/toolchain/toolchain.lock`              | 写入本次验证的 Vivado/器件/IP/约束依赖 hash，不写授权密钥                 |
 
 复用前序 AM/array/事件实现；如 FPGA 内存 wrapper 必须改变读延迟，修改其唯一实现并重跑依赖 gate，不复制仿真版和板级版两套协议状态机。遵守同一 Gemmini 源码只编译一次。
 
@@ -51,14 +51,14 @@
 
 ## 5. 验收
 
-| Case | 构造 | 必须观察 | 失败条件 |
-| --- | --- | --- | --- |
-| F01-A | 锁定单阵列配置完整实现 | 真bitstream、post-route WNS≥0、无未处理关键DRC/未约束关键路径 | 仅有RTL、负WNS、忽略关键时序违例 |
-| MAP-A | 检查综合网表与hierarchy | AM为Tile-local4组8槽、URAM及RMW端口符合冻结profile | AM变private、推成大量寄存器却未报告、端口数假设错误 |
-| RESET-A | FPGA memory wrapper RTL reset注入 | 无旧代写新owner，INIT覆盖垃圾，无需物理清零 | reset后旧响应仍可写新region |
-| DMA-A | DDR→L1→BOA→L1→DDR仿真 | bytes及phase顺序正确，真实DMA流量 | 绕过SPM、用host直接拷贝C代替DMA |
-| OBS-A | 小ring强制overflow/背压寄存器 | overflow可见，FINAL保持lease直至恢复 | trace缺失不报警、背压只延迟事件不阻止释放 |
-| CTX8-A | 8-context elaboration及真实固件回归 | 容量与admission匹配，非固定4context硬编码 | 超出4即越界或拒绝合法配置 |
+| Case    | 构造                                | 必须观察                                                      | 失败条件                                            |
+| ------- | ----------------------------------- | ------------------------------------------------------------- | --------------------------------------------------- |
+| F01-A   | 锁定单阵列配置完整实现              | 真bitstream、post-route WNS≥0、无未处理关键DRC/未约束关键路径 | 仅有RTL、负WNS、忽略关键时序违例                    |
+| MAP-A   | 检查综合网表与hierarchy             | AM为Tile-local4组8槽、URAM及RMW端口符合冻结profile            | AM变private、推成大量寄存器却未报告、端口数假设错误 |
+| RESET-A | FPGA memory wrapper RTL reset注入   | 无旧代写新owner，INIT覆盖垃圾，无需物理清零                   | reset后旧响应仍可写新region                         |
+| DMA-A   | DDR→L1→BOA→L1→DDR仿真               | bytes及phase顺序正确，真实DMA流量                             | 绕过SPM、用host直接拷贝C代替DMA                     |
+| OBS-A   | 小ring强制overflow/背压寄存器       | overflow可见，FINAL保持lease直至恢复                          | trace缺失不报警、背压只延迟事件不阻止释放           |
+| CTX8-A  | 8-context elaboration及真实固件回归 | 容量与admission匹配，非固定4context硬编码                     | 超出4即越界或拒绝合法配置                           |
 
 实际资源数量以报告为准：64 URAM等是目标映射推导，不能把它直接作为实测值填入结果。WNS≥0是必要条件，不替代DRC/功能检查。
 

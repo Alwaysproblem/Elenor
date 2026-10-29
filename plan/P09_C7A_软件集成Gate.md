@@ -50,17 +50,17 @@
 
 ## 6. 验收表
 
-| Case ID | 构造 | 必须观测 | 失败特征 |
-| --- | --- | --- | --- |
-| G-P09-1 统一 target | 步骤 2 全部命令 | 六个 target 全 PASS（真实断言），manifest 齐全 | 空 target 或仅 echo |
-| G-P09-2 宿主 gate | 步骤 3 | pre-commit/pytest exit 0，当日计数入 evidence | 用历史计数冒充 |
-| G-P09-3 bytes链 | BOA-only/Conv及真实numeric部分 | 全输出或BOA partial逐byte等于golden，EVU timing部分明确不宣称数值 | 整体exit0或hash存在冒充正确性 |
-| G-P09-4 零 K/零维 | 步骤 5 集合 | 合法完成且 bytes 正确；无挂死 | 异常拒绝 |
-| G-P09-5 旧artifact升级链拒 | P06前、P08前artifact | 旧ABI版本明确拒绝；另测新版错target拒绝 | 静默升级/执行旧语义 |
-| G-P09-6 target拒绝 | 有效arrays/geometry/块长错配与未知profile | 前者fingerprint mismatch，后者配置错误，各自路径正确 | 为追求同错误信息放过非法配置 |
-| G-P09-7 混合故障计数 | fault 注入运行 | 独立分母与闭合等式成立记录 | 对故障运行硬套成功恒等式 |
-| G-P09-8 合同审计 | 步骤 6 | 三组审计均有 grep/清单证据 | 只有口头结论 |
-| G-P09-9 基线与文档 | 步骤 7/8 | 新基线表完整；历史列有标签；文档无过期断言 | 新旧数字混写 |
+| Case ID                    | 构造                                      | 必须观测                                                          | 失败特征                      |
+| -------------------------- | ----------------------------------------- | ----------------------------------------------------------------- | ----------------------------- |
+| G-P09-1 统一 target        | 步骤 2 全部命令                           | 六个 target 全 PASS（真实断言），manifest 齐全                    | 空 target 或仅 echo           |
+| G-P09-2 宿主 gate          | 步骤 3                                    | pre-commit/pytest exit 0，当日计数入 evidence                     | 用历史计数冒充                |
+| G-P09-3 bytes链            | BOA-only/Conv及真实numeric部分            | 全输出或BOA partial逐byte等于golden，EVU timing部分明确不宣称数值 | 整体exit0或hash存在冒充正确性 |
+| G-P09-4 零 K/零维          | 步骤 5 集合                               | 合法完成且 bytes 正确；无挂死                                     | 异常拒绝                      |
+| G-P09-5 旧artifact升级链拒 | P06前、P08前artifact                      | 旧ABI版本明确拒绝；另测新版错target拒绝                           | 静默升级/执行旧语义           |
+| G-P09-6 target拒绝         | 有效arrays/geometry/块长错配与未知profile | 前者fingerprint mismatch，后者配置错误，各自路径正确              | 为追求同错误信息放过非法配置  |
+| G-P09-7 混合故障计数       | fault 注入运行                            | 独立分母与闭合等式成立记录                                        | 对故障运行硬套成功恒等式      |
+| G-P09-8 合同审计           | 步骤 6                                    | 三组审计均有 grep/清单证据                                        | 只有口头结论                  |
+| G-P09-9 基线与文档         | 步骤 7/8                                  | 新基线表完整；历史列有标签；文档无过期断言                        | 新旧数字混写                  |
 
 ## 7. 可执行命令
 

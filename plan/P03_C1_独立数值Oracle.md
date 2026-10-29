@@ -47,19 +47,19 @@
 
 ## 6. 验收表
 
-| Case ID | 构造 | 必须观测 | 失败特征 |
-| --- | --- | --- | --- |
-| N-P03-1 RNE tie | 精确落在两可表示值中点的 fma/add/转 bf16 向量 | 三方 bits 一致且按 to-even | 与 SoftFloat 差 1 ulp |
-| N-P03-2 符号零/非规格化 | `(-0)+(+0)`、subnormal 进/出 | 与 probe 位型一致，无 FTZ；`-0 + +0 = +0` 表冻结 | 出现 FTZ 或符号零规则含糊 |
-| N-P03-3 溢出/NaN | 大数溢出、`0×Inf`、NaN payload 组合 | 溢出→±Inf；NaN 编码与传播规则逐条冻结并记录 | “NaN 行为待定”留白 |
-| N-P03-4 尾块旁路 | valid_k不足且无效槽含0×Inf/-0 | 与相同块边界、仅执行有效k的独立计算一致 | 补零MAC污染；改分组却要求结果一样 |
-| N-P03-5 块分组 | 已选出有舍入差异的定向输入，tile_k=4/8 | 两套golden确实不同，普通无差异输入也正确 | 用任意相同结果误判实现失败 |
-| N-P03-6 INIT/ADD | 两 step 链（INIT 覆盖 + ADD） | INIT 不读旧值；块间 add_rne 一次 | INIT 读了旧 owner 残留 |
-| N-P03-7 INT8 | saturate/tie/zero_point 边界/NaN/Inf/非法参数 | 量化策略逐条冻结；非法参数被拒 | 策略与设计建议矛盾却未记录 |
-| N-P03-8 binary64 反例 | 存在一组输入使 sum-then-round ≠ 逐 MAC profile | 反例向量入 vectors，两者 bytes 不同 | 无法证明差异（反例缺失） |
-| N-P03-9 conv 参考 | pad/stride/dilation 组合小形状 | golden bytes + 解析流量公式 | 无独立参考供 P08 对拍 |
-| N-P03-11 空工作 | INIT/ADD的K=0，bias/scale组合，m/n=0 | INIT +0、ADD保留原AM、FINAL epilogue一次、空输出与无MAC合同冻结 | K=0误清ADD旧值或漏scale |
-| N-P03-10 确定性 | 同 seed 两次 gen | bytes 相同 | 依赖随机未播种 |
+| Case ID                 | 构造                                           | 必须观测                                                        | 失败特征                          |
+| ----------------------- | ---------------------------------------------- | --------------------------------------------------------------- | --------------------------------- |
+| N-P03-1 RNE tie         | 精确落在两可表示值中点的 fma/add/转 bf16 向量  | 三方 bits 一致且按 to-even                                      | 与 SoftFloat 差 1 ulp             |
+| N-P03-2 符号零/非规格化 | `(-0)+(+0)`、subnormal 进/出                   | 与 probe 位型一致，无 FTZ；`-0 + +0 = +0` 表冻结                | 出现 FTZ 或符号零规则含糊         |
+| N-P03-3 溢出/NaN        | 大数溢出、`0×Inf`、NaN payload 组合            | 溢出→±Inf；NaN 编码与传播规则逐条冻结并记录                     | “NaN 行为待定”留白                |
+| N-P03-4 尾块旁路        | valid_k不足且无效槽含0×Inf/-0                  | 与相同块边界、仅执行有效k的独立计算一致                         | 补零MAC污染；改分组却要求结果一样 |
+| N-P03-5 块分组          | 已选出有舍入差异的定向输入，tile_k=4/8         | 两套golden确实不同，普通无差异输入也正确                        | 用任意相同结果误判实现失败        |
+| N-P03-6 INIT/ADD        | 两 step 链（INIT 覆盖 + ADD）                  | INIT 不读旧值；块间 add_rne 一次                                | INIT 读了旧 owner 残留            |
+| N-P03-7 INT8            | saturate/tie/zero_point 边界/NaN/Inf/非法参数  | 量化策略逐条冻结；非法参数被拒                                  | 策略与设计建议矛盾却未记录        |
+| N-P03-8 binary64 反例   | 存在一组输入使 sum-then-round ≠ 逐 MAC profile | 反例向量入 vectors，两者 bytes 不同                             | 无法证明差异（反例缺失）          |
+| N-P03-9 conv 参考       | pad/stride/dilation 组合小形状                 | golden bytes + 解析流量公式                                     | 无独立参考供 P08 对拍             |
+| N-P03-11 空工作         | INIT/ADD的K=0，bias/scale组合，m/n=0           | INIT +0、ADD保留原AM、FINAL epilogue一次、空输出与无MAC合同冻结 | K=0误清ADD旧值或漏scale           |
+| N-P03-10 确定性         | 同 seed 两次 gen                               | bytes 相同                                                      | 依赖随机未播种                    |
 
 ## 7. 可执行命令
 

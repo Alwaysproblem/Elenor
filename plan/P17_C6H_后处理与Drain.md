@@ -1,10 +1,10 @@
 # P17 · C6-H：硬件后处理与自主 drain
 
-| 项 | 值 |
-| --- | --- |
-| ID | P17（对应原方案 C6-H） |
-| 前置 | P08、P13、P15、P16 |
-| 状态 | 未开始 |
+| 项   | 值                     |
+| ---- | ---------------------- |
+| ID   | P17（对应原方案 C6-H） |
+| 前置 | P08、P13、P15、P16     |
+| 状态 | 未开始                 |
 
 ## 1. 目标与不做
 
@@ -44,15 +44,15 @@
 
 ## 6. 验收表
 
-| case | 构造 | 必须观测 | 失败特征 / 层 |
-| --- | --- | --- | --- |
-| PB01 | P03/P08 f32/BF16/INT8 后处理向量集 | 输出 bytes 逐 bit 一致；各阶段关闭开关有效 | 双重舍入/缺旁路（R） |
-| PB02 (T07) | bias 向量 + 多链 ADD | bias 仅 FINAL 一次；中间步无后处理痕迹 | 每步重复 bias（R） |
-| PB03 (Q07) | L1 output credit 不可得 | 停 FINAL_READY/DRAINING、持有 lease、quota 不减；恢复后无固件动作完成并 slot_free | 提前释放或需轮询（R） |
-| PB04 (T22) | 背压+持续 ADD 长时间 | 下游恢复且仲裁公平后最终释放；无泄漏 | 永久饥饿（C/R） |
-| PB05 (T19) | FINAL drain 中 context 返回 | FINISHING 自主收尾，终态完整 | 依赖已返回 context（R） |
-| PB06 | 非法参数（inv_scale≤0、zero_point 越界） | 输出副作用前拒绝 | 先写后报错（F） |
-| PB07 | 五时刻校验（全部成功 FINAL case） | `compute_done ≤ commit ≤ output_visible ≤ slot_free ≤ chain_done` 单调 | 次序颠倒即违反 SW-A4 对应硬件合同（C/R） |
+| case       | 构造                                     | 必须观测                                                                          | 失败特征 / 层                            |
+| ---------- | ---------------------------------------- | --------------------------------------------------------------------------------- | ---------------------------------------- |
+| PB01       | P03/P08 f32/BF16/INT8 后处理向量集       | 输出 bytes 逐 bit 一致；各阶段关闭开关有效                                        | 双重舍入/缺旁路（R）                     |
+| PB02 (T07) | bias 向量 + 多链 ADD                     | bias 仅 FINAL 一次；中间步无后处理痕迹                                            | 每步重复 bias（R）                       |
+| PB03 (Q07) | L1 output credit 不可得                  | 停 FINAL_READY/DRAINING、持有 lease、quota 不减；恢复后无固件动作完成并 slot_free | 提前释放或需轮询（R）                    |
+| PB04 (T22) | 背压+持续 ADD 长时间                     | 下游恢复且仲裁公平后最终释放；无泄漏                                              | 永久饥饿（C/R）                          |
+| PB05 (T19) | FINAL drain 中 context 返回              | FINISHING 自主收尾，终态完整                                                      | 依赖已返回 context（R）                  |
+| PB06       | 非法参数（inv_scale≤0、zero_point 越界） | 输出副作用前拒绝                                                                  | 先写后报错（F）                          |
+| PB07       | 五时刻校验（全部成功 FINAL case）        | `compute_done ≤ commit ≤ output_visible ≤ slot_free ≤ chain_done` 单调            | 次序颠倒即违反 SW-A4 对应硬件合同（C/R） |
 
 反例边界：把 NaN→zero_point 策略在本任务重新发明（偏离 P03 冻结记录）即停止条件；用「drain 吞吐足够」论证不需要 credit 即违反有限资源合同。
 

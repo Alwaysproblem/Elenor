@@ -42,7 +42,7 @@
 2. IR/dialect：`tile.boa.async` 增加 §4 attrs 与 parser/printer/verifier（静态非法即 parse/verify 失败）；更新 `IR_SPEC.md` 对应节。
 3. DTO/lowering：`ExecBoaEpilogue` 定义与 lowering 映射；参数非法在 lowering/verifier 报错（错误信息含参数名）。
 4. codec/cutover：`compiled_program` 序列化字段 + 版本升到实际下一版（以 P06 落地版本为基）；上一版 artifact 负例（明确版本错误）；重新生成受影响 fixtures；IR16 replay/tamper 用例更新。
-5. runtime预校验放受理前，真正epilogue在FINAL AM commit之后、output服务写回之前执行；_make_boa_completion只准备数值partial/回调，不能提前写ByteStore或绕过分阶段结果服务。transpose消费typed view/stride得到真实A/B，四组合与独立oracle对照。
+5. runtime预校验放受理前，真正epilogue在FINAL AM commit之后、output服务写回之前执行；\_make_boa_completion只准备数值partial/回调，不能提前写ByteStore或绕过分阶段结果服务。transpose消费typed view/stride得到真实A/B，四组合与独立oracle对照。
 6. 测试翻转与新增：i8 成功链（对 P03 i8 vectors）；saturate/tie/NaN/Inf 注入用例（构造含 Inf/NaN 的 AM 值路径：溢出向量输入）；`inv_scale=0/负/NaN`、`zero_point=200`、bias 长度错 → 编译/加载期拒绝且 ByteStore 无部分输出；各阶段开关组合矩阵。
 7. 软件 Conv：
    - 生成小shape、pad/stride/dilation完整case，经真实MFE load/store或gather组装im2col；padding必须显式写+0来源，不越界读，也不假设新L1默认全零。固定channel/kernel展平K顺序，与P03独立卷积参考一致，再执行typed Matmul及epilogue。
@@ -55,19 +55,19 @@
 
 ## 6. 验收表
 
-| Case ID | 构造 | 必须观测 | 失败特征 |
-| --- | --- | --- | --- |
-| E-P08-1 INT8 全链 | BF16 输入 + i8 输出 + inv_scale/zero_point | 输出 bytes == P03 i8 golden；饱和/tie 边界一致 | 与 golden 位差；仍走旧拒绝路径 |
-| E-P08-2 特殊值量化 | Inf/NaN与量化边界输入 | 完整bytes符合P03冻结表，未冻结则阻塞而非猜策略 | 擅自假定NaN编码/量化政策 |
-| E-P08-3 参数非法拒绝 | 三组非法参数 | 编译/加载期明确报错；ByteStore 无部分输出 | 运行期才崩或写了脏输出 |
-| E-P08-4 一次性应用 | 两 step 链 + bias | ADD 步无 bias；FINAL 恰好一次；顺序==冻结顺序 | bias 作用两次或顺序错 |
-| E-P08-5 阶段开关 | bias/scale/relu/clip 组合矩阵 | 每组合 bytes == 对应 golden | 组合间串扰 |
-| E-P08-6 零K | INIT/ADD零K，bias/scale等组合 | INIT epilogue(+0)、ADD epilogue(旧AM)，各阶段只一次 | 误清ADD或漏scale |
-| E-P08-7 Conv 正确性 | pad/stride/dilation 组合 | 输出 bytes == conv 参考 | 仅算术近似通过 |
-| E-P08-8 Conv流量 | pad/stride/dilation与重叠窗口 | 逐阶段字节等于独立解析计数，A矩阵也逐byte正确 | 仅最终C偶合正确或padding隐式零 |
-| CUT-P08-9 版本拒绝 | 上一版 artifact | 明确版本错误、非零；新版本 replay 通过 | 静默兼容 |
-| AUD-P08-10 无 EVU 数值 | split-K 用例审计 | EVU combine 仍非数值；BOA-only fixture 承担 bytes 证明 | EVU 数值实现混入 |
-| E-P08-11 四转置全链 | 非对称strided A/B四组合，经artifact replay | typed字段可序列化、view取样与golden一致，改原descriptor不串扰 | 只有harness参数有transpose |
+| Case ID                | 构造                                       | 必须观测                                                      | 失败特征                       |
+| ---------------------- | ------------------------------------------ | ------------------------------------------------------------- | ------------------------------ |
+| E-P08-1 INT8 全链      | BF16 输入 + i8 输出 + inv_scale/zero_point | 输出 bytes == P03 i8 golden；饱和/tie 边界一致                | 与 golden 位差；仍走旧拒绝路径 |
+| E-P08-2 特殊值量化     | Inf/NaN与量化边界输入                      | 完整bytes符合P03冻结表，未冻结则阻塞而非猜策略                | 擅自假定NaN编码/量化政策       |
+| E-P08-3 参数非法拒绝   | 三组非法参数                               | 编译/加载期明确报错；ByteStore 无部分输出                     | 运行期才崩或写了脏输出         |
+| E-P08-4 一次性应用     | 两 step 链 + bias                          | ADD 步无 bias；FINAL 恰好一次；顺序==冻结顺序                 | bias 作用两次或顺序错          |
+| E-P08-5 阶段开关       | bias/scale/relu/clip 组合矩阵              | 每组合 bytes == 对应 golden                                   | 组合间串扰                     |
+| E-P08-6 零K            | INIT/ADD零K，bias/scale等组合              | INIT epilogue(+0)、ADD epilogue(旧AM)，各阶段只一次           | 误清ADD或漏scale               |
+| E-P08-7 Conv 正确性    | pad/stride/dilation 组合                   | 输出 bytes == conv 参考                                       | 仅算术近似通过                 |
+| E-P08-8 Conv流量       | pad/stride/dilation与重叠窗口              | 逐阶段字节等于独立解析计数，A矩阵也逐byte正确                 | 仅最终C偶合正确或padding隐式零 |
+| CUT-P08-9 版本拒绝     | 上一版 artifact                            | 明确版本错误、非零；新版本 replay 通过                        | 静默兼容                       |
+| AUD-P08-10 无 EVU 数值 | split-K 用例审计                           | EVU combine 仍非数值；BOA-only fixture 承担 bytes 证明        | EVU 数值实现混入               |
+| E-P08-11 四转置全链    | 非对称strided A/B四组合，经artifact replay | typed字段可序列化、view取样与golden一致，改原descriptor不串扰 | 只有harness参数有transpose     |
 
 ## 7. 可执行命令
 

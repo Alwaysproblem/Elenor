@@ -1,10 +1,10 @@
 # P10 · C4 / §4 ABI：协议 Schema 与接口冻结
 
-| 项 | 值 |
-| --- | --- |
-| ID | P10（对应原方案 C4 / §4 接口协议） |
-| 前置 | P02、P09 |
-| 状态 | 未开始 |
+| 项   | 值                                 |
+| ---- | ---------------------------------- |
+| ID   | P10（对应原方案 C4 / §4 接口协议） |
+| 前置 | P02、P09                           |
+| 状态 | 未开始                             |
 
 ## 1. 目标与不做
 
@@ -52,19 +52,19 @@ schema 必须覆盖（字段名可评审调整，语义不可缩水）：
 4. 跨语言一致性测试：同一 golden 消息字节在三个 codec 下解码结果一致、再编码 byte-identical；负例（非法 logical_am=2、bundle_slots=3、未知 reason、截断流、未知版本）全部非零失败。
 5. 统一比较具有相同语义/粒度的配置：Tile-local group/slot/quota、数值profile/shape及事件身份。软件step粒度的FIFO/credit/commit_cycles与硬件微块参数分别带单位/粒度，不要求数值相等；同一语义参数两个来源不一致才拒绝。
 6. 注册boa-protocol的PC01–PC07；公共case过滤由P02实现。本任务真实编译运行三语言codec，schema源检查只能辅助，不能代替跨语言边界消息/错误行为验收。
-7. 写 `plan/evidence/P10.md`：含 §4.1(4) 要求的 producer/consumer/codec/config/docs 调用方清单——P14 消费 AM_REQUEST/WAKE/CANCEL；P15 消费 EVT_*/CTX_CANCEL/terminal 环字段；P16 消费 SUBMIT_STEP/FULL/mem_req 与容量字段；P17 消费 FINAL/drain/事件次序字段；P19 消费 C header；P21 在 encoding 槽冻结 RoCC opcode/funct。
+7. 写 `plan/evidence/P10.md`：含 §4.1(4) 要求的 producer/consumer/codec/config/docs 调用方清单——P14 消费 AM*REQUEST/WAKE/CANCEL；P15 消费 EVT*\*/CTX_CANCEL/terminal 环字段；P16 消费 SUBMIT_STEP/FULL/mem_req 与容量字段；P17 消费 FINAL/drain/事件次序字段；P19 消费 C header；P21 在 encoding 槽冻结 RoCC opcode/funct。
 
 ## 6. 验收表
 
-| case | 构造 | 必须观测 | 失败特征 / 层 |
-| --- | --- | --- | --- |
-| PC01 | 三 codec 对同一 golden 消息集解码再编码 | byte-identical，计数一致 | 任一 codec 差 1 byte 即失败（F） |
-| PC02 | 非法字段集：logical_am=2、bundle=3、未知 reason、截断、未知版本 | 全部非零错误并指明字段 | 静默接受或 0 退出（F） |
-| PC03 | 旧事件未reap、slot换代消息的三codec往返 | request/wake与静态event_id独立保留，无消息字段覆盖；授予不等事件的动态证明由P14/P15负责 | 将事件槽当AM资源或身份混淆（F） |
-| PC04 | 同语义配置错配；另设step/microblock不同credit值 | 前者拒绝，后者按各自粒度合法接受并完整编码 | 不分粒度强求所有常量相等（F） |
-| PC05 | 干净重复生成并编译codec，再运行同向量集 | 生成物确定、真实编解码结果相同；作为构建smoke而非只测文件拷贝 | 编码漂移（F） |
-| PC06 | 有限位宽最大值/溢出/未知版本消息；回绕策略评审 | 边界编码精确、超界拒绝；回绕行为后续P14/P15验证 | 隐式截断或“大位宽无需回收”（F） |
-| PC07 | 三codec round-trip四转置和全部epilogue使能/参数、allocation generation | typed字段不丢失，非法dtype/范围拒绝；使用P09真实descriptor生成消息 | 隐藏harness参数代替可执行字段（F） |
+| case | 构造                                                                   | 必须观测                                                                                | 失败特征 / 层                      |
+| ---- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ---------------------------------- |
+| PC01 | 三 codec 对同一 golden 消息集解码再编码                                | byte-identical，计数一致                                                                | 任一 codec 差 1 byte 即失败（F）   |
+| PC02 | 非法字段集：logical_am=2、bundle=3、未知 reason、截断、未知版本        | 全部非零错误并指明字段                                                                  | 静默接受或 0 退出（F）             |
+| PC03 | 旧事件未reap、slot换代消息的三codec往返                                | request/wake与静态event_id独立保留，无消息字段覆盖；授予不等事件的动态证明由P14/P15负责 | 将事件槽当AM资源或身份混淆（F）    |
+| PC04 | 同语义配置错配；另设step/microblock不同credit值                        | 前者拒绝，后者按各自粒度合法接受并完整编码                                              | 不分粒度强求所有常量相等（F）      |
+| PC05 | 干净重复生成并编译codec，再运行同向量集                                | 生成物确定、真实编解码结果相同；作为构建smoke而非只测文件拷贝                           | 编码漂移（F）                      |
+| PC06 | 有限位宽最大值/溢出/未知版本消息；回绕策略评审                         | 边界编码精确、超界拒绝；回绕行为后续P14/P15验证                                         | 隐式截断或“大位宽无需回收”（F）    |
+| PC07 | 三codec round-trip四转置和全部epilogue使能/参数、allocation generation | typed字段不丢失，非法dtype/范围拒绝；使用P09真实descriptor生成消息                      | 隐藏harness参数代替可执行字段（F） |
 
 反例边界：不得以「先冻结一份编码再让下游适配」绕过评审；不得把 P03 数值编码、P21 指令编码提前冒充已冻结。
 

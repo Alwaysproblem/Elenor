@@ -39,7 +39,7 @@
 
 1. 扩展 P10 schema（若缺 RoCC 编码）→ 生成 Scala 常量与 C header；记录冻结依据。
 2. Chipyard harness：BOA RoCC ConfigFragment 叠加进候选基线；真实构建，锁依赖；输出 elaborated RTL 与 firrtl 报告。
-3. `BoaFrontend` 实现：cmd 译码 → 对 allocator（AM_REQ）、step mailbox（SUBMIT）、EventTracker（EVT_*/REC_REAP）、TileAmAllocator（CTX_CANCEL）的端口事务；resp 打包。
+3. `BoaFrontend` 实现：cmd 译码 → 对 allocator（AM*REQ）、step mailbox（SUBMIT）、EventTracker（EVT*\*/REC_REAP）、TileAmAllocator（CTX_CANCEL）的端口事务；resp 打包。
 4. TCM/uncached：descriptor/mailbox 地址窗口、release/acquire 栅栏映射、访存端口证据（波形可见 uncached 通路）。
 5. 与 P20 backend 对接的联仿 harness：Rocket Verilator top 内 BoaFrontend 驱动 BOA；testbench 信号级驱动 cmd/resp 供前端合同测试。
 6. 注册 `rocket-uce` target（信号级 stage）；固件级 case 由 P22 续接同一 target。
@@ -47,16 +47,16 @@
 
 ## 6 验收表
 
-| Case ID | 构造 | 必须观测 | 失败特征 |
-| --- | --- | --- | --- |
-| rocket-build | 干净目录构建+elaborate | 构建/elaborate 成功，依赖 hash 入 manifest | 仅打印版本 |
-| fe-amreq-granted | 信号级 AM_REQ（空闲 allocator） | GRANTED(lease) 在 bound 内返回，slot/quota/mailbox 一次性取得 | 半授予（占槽缺元数据） |
-| fe-amreq-parked | 信号级 AM_REQ（不可授予） | PARKED 返回且无 slot/quota/generation 副作用；slot_free 后位图置位 | 前端自行重发或占资源 |
-| fe-submit-full | mailbox 填满后 BOA_SUBMIT | FULL 在 bound 内返回，seq 不消费，descriptor 不变 | 静默吞步骤 |
-| fe-evt-status | 制造就绪/未就绪事件 | 位图电平正确，连续读状态不变 | 破坏性读 |
-| fe-ctx-cancel | 挂起请求+live lease 时 CTX_CANCEL | 请求撤销、lease 回收、bundle 归还；被取消请求永不唤醒 | 唤醒僵尸请求 |
-| fe-tcm-uncached | descriptor 写+读 | 波形显示 TCM/uncached 通路与 release/acquire 顺序 | 走 D-cache 缓存行 |
-| fe-illegal-instr | 非法 funct/opcode | ERROR resp，无 BOA 状态变化 | 静默忽略 |
+| Case ID          | 构造                              | 必须观测                                                           | 失败特征               |
+| ---------------- | --------------------------------- | ------------------------------------------------------------------ | ---------------------- |
+| rocket-build     | 干净目录构建+elaborate            | 构建/elaborate 成功，依赖 hash 入 manifest                         | 仅打印版本             |
+| fe-amreq-granted | 信号级 AM_REQ（空闲 allocator）   | GRANTED(lease) 在 bound 内返回，slot/quota/mailbox 一次性取得      | 半授予（占槽缺元数据） |
+| fe-amreq-parked  | 信号级 AM_REQ（不可授予）         | PARKED 返回且无 slot/quota/generation 副作用；slot_free 后位图置位 | 前端自行重发或占资源   |
+| fe-submit-full   | mailbox 填满后 BOA_SUBMIT         | FULL 在 bound 内返回，seq 不消费，descriptor 不变                  | 静默吞步骤             |
+| fe-evt-status    | 制造就绪/未就绪事件               | 位图电平正确，连续读状态不变                                       | 破坏性读               |
+| fe-ctx-cancel    | 挂起请求+live lease 时 CTX_CANCEL | 请求撤销、lease 回收、bundle 归还；被取消请求永不唤醒              | 唤醒僵尸请求           |
+| fe-tcm-uncached  | descriptor 写+读                  | 波形显示 TCM/uncached 通路与 release/acquire 顺序                  | 走 D-cache 缓存行      |
+| fe-illegal-instr | 非法 funct/opcode                 | ERROR resp，无 BOA 状态变化                                        | 静默忽略               |
 
 ## 7 可执行命令
 

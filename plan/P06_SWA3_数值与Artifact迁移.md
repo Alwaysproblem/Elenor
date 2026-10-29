@@ -50,17 +50,17 @@
 
 ## 6. 验收表
 
-| Case ID | 构造 | 必须观测 | 失败特征 |
-| --- | --- | --- | --- |
-| V-P06-1 向量全对拍 | P03 matmul 向量（含特殊值/尾块/mask）经 full_memory 生产路径 | 输出 bytes 与 golden 逐 bit 相等 | 任一位差 |
-| V-P06-2 块长与fingerprint | P03已证明有舍入差异的定向输入，块长8/16 | 两fingerprint不同，各自bits匹配golden且该反例确有差异 | 指纹未变或不符合各自golden |
-| V-P06-3 块序语义 | k=64 链 8 块，中间 AM 导出 | INIT 仅首块覆盖；后续 add_rne；与 N-P03-5/6 一致 | 整 step 求和再舍入 |
-| V-P06-4 零K/零维 | INIT/ADD K=0、m/n=0 | 当前无epilogue时+0/保留AM/空bytes符合P03；bias/scale组合由P08/P09验证 | 依赖尚未完成P08或空工作挂死 |
-| CUT-P06-5 旧版本拒绝 | P06前artifact按旧版本加载 | 明确版本错误，非零，不能自动升级旧数值语义 | 仅更hash后继续执行旧版 |
-| CUT-P06-6 指纹拒绝 | 旧 target_hash artifact | `target fingerprint mismatch` | 静默执行 |
-| V-P06-7 反例保留 | N-P03-8 输入 | 旧 binary64 与现实现 bytes 不同的断言仍在 | 反例被删 |
-| PERF-P06-8 性能记录 | 真实boa-am数值运行与向量规模 | 报wall-clock/配置，不放宽bits/fidelity | 无实测或偷降数值精度 |
-| REG-P06-9 全量 gate | 步骤 8 | exit 0；报告新基线标签 | 旧数字混入新基线 |
+| Case ID                   | 构造                                                         | 必须观测                                                              | 失败特征                    |
+| ------------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------- | --------------------------- |
+| V-P06-1 向量全对拍        | P03 matmul 向量（含特殊值/尾块/mask）经 full_memory 生产路径 | 输出 bytes 与 golden 逐 bit 相等                                      | 任一位差                    |
+| V-P06-2 块长与fingerprint | P03已证明有舍入差异的定向输入，块长8/16                      | 两fingerprint不同，各自bits匹配golden且该反例确有差异                 | 指纹未变或不符合各自golden  |
+| V-P06-3 块序语义          | k=64 链 8 块，中间 AM 导出                                   | INIT 仅首块覆盖；后续 add_rne；与 N-P03-5/6 一致                      | 整 step 求和再舍入          |
+| V-P06-4 零K/零维          | INIT/ADD K=0、m/n=0                                          | 当前无epilogue时+0/保留AM/空bytes符合P03；bias/scale组合由P08/P09验证 | 依赖尚未完成P08或空工作挂死 |
+| CUT-P06-5 旧版本拒绝      | P06前artifact按旧版本加载                                    | 明确版本错误，非零，不能自动升级旧数值语义                            | 仅更hash后继续执行旧版      |
+| CUT-P06-6 指纹拒绝        | 旧 target_hash artifact                                      | `target fingerprint mismatch`                                         | 静默执行                    |
+| V-P06-7 反例保留          | N-P03-8 输入                                                 | 旧 binary64 与现实现 bytes 不同的断言仍在                             | 反例被删                    |
+| PERF-P06-8 性能记录       | 真实boa-am数值运行与向量规模                                 | 报wall-clock/配置，不放宽bits/fidelity                                | 无实测或偷降数值精度        |
+| REG-P06-9 全量 gate       | 步骤 8                                                       | exit 0；报告新基线标签                                                | 旧数字混入新基线            |
 
 ## 7. 可执行命令
 
