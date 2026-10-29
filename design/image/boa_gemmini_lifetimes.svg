@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 976" role="img" aria-labelledby="title desc">
   <title id="title">BOA 输出累加链：AM lease、engine 占用、输入释放与完成记录的生命周期</title>
-  <desc id="desc">逻辑生命周期图，不是周期测量。TRY_OPEN 原子取得物理 slot、配额、mailbox 与完成记录，并固定 bound_engine。AM lease 依次经历 RESERVED、WAIT_INPUT、RUNNING、COMMITTING、FINAL_READY、DRAINING，直到 output_visible 且旧 AM 访问结束后 slot_free，配额在 slot_free 递减。engine 的 affinity 从建立到 slot_free 不变，但 engine 占用只是各步骤从发射到 step_committed 的离散区间，等输入或等 drain 时该 engine 可服务其他已绑定链。输入引用在真实最后读取且全部读者结束后释放，独立于 C 的生命周期。完成记录自 OPEN 预留，保留到软件 reap 或按协议退休，可比物理 slot 存活更久。Task context 的 FINISHING 与 retire 安全边界另行说明。</desc>
+  <desc id="desc">逻辑生命周期图，不是周期测量。AM_REQ 只发一次：可授予时原子取得物理 slot、配额、ChainTable 与 mailbox，并固定 bound_engine，不等待任何事件 await/reap；不可授予则挂起在本 Tile allocator 的请求 FIFO（不计配额、无 slot/generation 变化），由 slot_free 重评估后恰好一次唤醒并直接交付 lease。AM lease 依次经历 RESERVED、WAIT_INPUT、RUNNING、COMMITTING、FINAL_READY、DRAINING，直到 output_visible 且旧 AM 访问结束后 slot_free，配额在 slot_free 递减。engine 的 affinity 从授予到 slot_free 不变，但 engine 占用只是各步骤从发射到 step_committed 的离散区间，等输入或等 drain 时该 engine 可服务其他已绑定链。输入引用在真实最后读取且全部读者结束后释放，独立于 C 的生命周期。完成事件槽在 context 绑定时按 Tile Program 静态分配，保留到 await 或 context 退休，可比物理 slot 存活更久，slot 复用不覆盖旧事件。Task context 的 FINISHING 与 retire 安全边界另行说明。</desc>
   <defs>
     <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="var(--muted, currentColor)"/></marker>
     <marker id="arrow-s" markerUnits="userSpaceOnUse" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8 Z" fill="var(--success, currentColor)"/></marker>
@@ -38,13 +38,14 @@
   <text x="24" y="54" class="note">逻辑生命周期图：只表达事件先后与资源归属边界，不是周期测量；水平距离非等间距，区段长度不代表持续时间；不同 context 的时间线可交错。</text>
   <text x="24" y="84" class="rtitle">① 单条输出累加链（成功路径）：AM 区域、engine 占用、完成记录三个独立寿命</text>
   <text x="958" y="84" class="note end">时间自左向右（非等间距，非周期）</text>
+  <text x="24" y="106" class="note">授予前：AM_REQ 只发一次；不能授予则挂起（不计 quota、无 slot/generation 变化），slot_free 后唤醒并直接交付 lease，不重发。</text>
 
   <path d="M202 118 V600 M944 118 V600" class="guide"/>
 
   <!-- L1: AM slot lease states -->
   <text x="18" y="150" class="lane">AM slot lease</text>
   <text x="18" y="170" class="note">一条链独占一个物理区域</text>
-  <text x="206" y="128" class="flag">TRY_OPEN：原子取得 slot·quota·mailbox·完成记录，固定 bound_engine</text>
+  <text x="206" y="128" class="flag">授予：原子取 slot·quota·ChainTable·mailbox，固定 bound_engine</text>
   <text x="940" y="128" class="flag end">slot_free：可安全再分配</text>
   <rect x="202" y="136" width="78" height="36" class="state"/>
   <rect x="280" y="136" width="82" height="36" class="state"/>
@@ -81,7 +82,7 @@
   <!-- L3: engine affinity vs discrete occupancy -->
   <text x="18" y="282" class="lane">engine 占用</text>
   <text x="18" y="302" class="note">affinity ≠ 永久占用</text>
-  <text x="206" y="276" class="flag">bound_engine：OPEN→slot_free 不变（不迁移）</text>
+  <text x="206" y="276" class="flag">bound_engine：授予→slot_free 不变（不迁移）</text>
   <path d="M202 282 H944" class="affline"/>
   <text x="282" y="311" class="note mid">等输入：可服务其他链</text>
   <rect x="362" y="294" width="150" height="26" class="occ"/>
@@ -127,10 +128,10 @@
   <text x="18" y="580" class="note">寿命 &gt; AM lease</text>
   <text x="940" y="550" class="flag end">chain_done = output_visible 且 slot 已安全释放 → SUCCESS</text>
   <rect x="202" y="564" width="742" height="32" class="state"/>
-  <text x="210" y="584" class="flag">OPEN 时预留容量；记录区分 SUCCESS / ERROR / CANCELLED；slot 复用不清除旧记录</text>
+  <text x="210" y="584" class="flag">context 绑定时按程序事件分配；区分 SUCCESS / ERROR / CANCELLED；slot 复用不覆盖旧事件</text>
   <path d="M944 580 H950" class="draindash"/>
   <circle cx="944" cy="580" r="4.5" class="evt"/>
-  <text x="938" y="614" class="note end">…保留至软件 reap / 按协议退休（配额已在 slot_free 递减，不等此处）</text>
+  <text x="938" y="614" class="note end">…保留至 await / context 退休（配额已在 slot_free 递减；新授予不等此处）</text>
 
   <path d="M24 636 H958" class="guide"/>
 

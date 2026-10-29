@@ -2,7 +2,7 @@
 
 - 状态：**已按本计划完成硬件前置软件 gate；§3.4 源级分支/重试 MLIR 仍不在本次范围。实施记录见 [实施报告](BOA_Software_Managed_AM_IR_Implementation_Report.md)。**
 - 范围：先完成当前 pipeline validator 的 AM/Matmul 源语义、compiler、artifact、资源/数值/周期模型和调用方迁移；具体分支与重试处理留给更低层 IR／执行协议后续考虑，不作为本次软件 gate。
-- 依据：[共享 AM V1](../../nexus_shared_am_v1_requirements_and_design.md)、[硬件与系统 proposal](BOA_Gemmini_Integration_Design.md)，以及本轮软件管理 AM 的用户确认。
+- 依据：[共享 AM V1](../../history/nexus_shared_am_v1_requirements_and_design.md)、[硬件与系统 proposal](BOA_Gemmini_Integration_Design.md)，以及本轮软件管理 AM 的用户确认。
 - 本计划只展开软件/IR 前置任务；不是整个硬件任务的实施授权。下文新语法、类型、类名、测试和生成器均为**拟实现接口**，不是当前仓库已支持的能力。
 - §3.4“受限控制流，不增加通用 DAG 执行器”按用户要求保留，**整节标记为本次不实现**。本次继续使用单 block 源 IR 和现有 `tile.await`，不新增源级 TRY 状态、retry token 或控制流操作。
 
