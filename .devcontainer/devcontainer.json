@@ -1,0 +1,18 @@
+{
+  "name": "Nexus pinned BOA toolchain",
+  "image": "sha256:41ee940355b801c3068e1850dccf960ff85b294551f4ef31ba424b1fb5e325b3",
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+  "containerUser": "1002:1000",
+  "remoteUser": "1002:1000",
+  "updateRemoteUserUID": false,
+  "runArgs": [
+    "--network=none",
+    "--cap-drop=ALL",
+    "--security-opt=no-new-privileges"
+  ],
+  "containerEnv": {
+    "HOME": "/tmp/nexus-home"
+  },
+  "postCreateCommand": "mkdir -p /tmp/nexus-home"
+}

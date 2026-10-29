@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Unified hardware check dispatcher (P02).
+
+Usage:
+  hardware/scripts/check TARGET [BOARD] --out DIR [--config PATH] [--seed N] [--case ID]
+
+Resolves TARGET/BOARD/ID against hardware/scripts/targets.json, validates the
+locked toolchain image identity, serializes the fully-expanded request into
+<out>/request.json, and executes hardware/scripts/container_check.py inside
+the exact locked image (repository mounted read-only at /workspace, output
+writable at /out, host UID:GID, no network, capabilities dropped).
+
+Fail closed: unknown target/case, unimplemented targets, missing lock/image,
+and config or environment violations are all nonzero exits (see
+hardware/scripts/README.md for the exit-code table).
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import common
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+  parser = argparse.ArgumentParser(
+    prog="hardware/scripts/check",
+    description="Run registered hardware validation targets in the locked toolchain container.",
+  )
+  parser.add_argument("target", help="registered target name (see targets.json)")
+  parser.add_argument("board", nargs="?", default=None, help="board name, required only for board targets")
+  parser.add_argument(
+    "--out", default=None, help="fresh output directory (required for implemented targets)"
+  )
+  parser.add_argument(
+    "--config", default=None, help="config YAML path (default: target's registered default)"
+  )
+  parser.add_argument("--seed", type=int, default=1, help="recorded run seed (default: 1)")
+  parser.add_argument("--case", default=None, help="run only this registered case ID")
+  return parser.parse_args(argv)
+
+
+def main(argv: list[str]) -> int:
+  args = parse_args(argv)
+  registry = common.load_registry()
+  targets = registry["targets"]
+
+  entry = targets.get(args.target)
+  if entry is None:
+    common.fail(
+      f"unknown target '{args.target}' (registered: {', '.join(sorted(targets))})", common.EXIT_USAGE
+    )
+
+  board = entry.get("board")
+  if board is not None:
+    if args.board is None:
+      common.fail(f"target '{args.target}' requires board argument '{board}'", common.EXIT_USAGE)
+    if args.board != board:
+      common.fail(
+        f"target '{args.target}' only supports board '{board}', got '{args.board}'", common.EXIT_USAGE
+      )
+  elif args.board is not None:
+    common.fail(f"target '{args.target}' does not take a board argument", common.EXIT_USAGE)
+
+  if not entry.get("implemented"):
+    owner = entry.get("owner", "unassigned")
+    if args.target == "fpga-synth" and os.environ.get("VIVADO_PATH") is None:
+      print(
+        f"blocked: fpga_capability requires Vivado via read-only VIVADO_PATH mount "
+        f"(none set); owner {owner}; no synthesis possible in this environment",
+        file=sys.stderr,
+      )
+      raise SystemExit(common.EXIT_BLOCKED)
+    print(f"not implemented (owner {owner})", file=sys.stderr)
+    raise SystemExit(common.EXIT_NOT_IMPLEMENTED)
+
+  config_spec = entry.get("config", {})
+  cases = list(entry.get("cases", []))
+  if args.case is None:
+    selected = list(cases)
+  else:
+    if args.case not in cases:
+      common.fail(
+        f"unknown case '{args.case}' for target '{args.target}' (registered: {', '.join(cases) or 'none'})",
+        common.EXIT_USAGE,
+      )
+    selected = [args.case]
+  if not selected:
+    common.fail(f"target '{args.target}' registers no cases", common.EXIT_USAGE)
+
+  if args.out is None:
+    common.fail("--out DIR is required for implemented targets", common.EXIT_USAGE)
+  out_dir = Path(args.out).absolute()
+  if out_dir.exists() and not out_dir.is_dir():
+    common.fail(f"--out {out_dir} exists and is not a directory", common.EXIT_USAGE)
+  if out_dir.is_dir() and any(out_dir.iterdir()):
+    common.fail(
+      f"--out {out_dir} exists and is not empty; use a fresh directory "
+      "(check and reproduce never reuse prior outputs or caches)",
+      common.EXIT_USAGE,
+    )
+
+  lock = common.load_lock()
+  image_id = lock["image"]["id"]
+  expect_lock_sha = common.lock_sha256()
+
+  docker = common.docker_binary()
+  common.require_image(docker, image_id)
+
+  config_rel = args.config or config_spec.get("default_config")
+  if not config_rel:
+    common.fail(f"target '{args.target}' has no default config; pass --config PATH", common.EXIT_USAGE)
+  config_path = common.repo_path(config_rel)
+  if not config_path.is_file():
+    common.fail(f"config not found: {config_rel}", common.EXIT_USAGE)
+  try:
+    config_content = config_path.read_text(encoding="utf-8")
+  except UnicodeError as exc:
+    common.fail(f"config {config_rel} is not valid UTF-8: {exc}", common.EXIT_USAGE)
+
+  out_dir.mkdir(parents=True, exist_ok=True)
+  request = {
+    "schema": 1,
+    "mode": "check",
+    "task_id": "P02",
+    "target": args.target,
+    "board": args.board,
+    "cases": selected,
+    "seed": args.seed,
+    "config_path": config_rel,
+    "config_content": config_content,
+    "lock_path": common.LOCK_REL,
+    "expect": {"lock_sha256": expect_lock_sha, "image_id": image_id},
+    "source": common.source_identity(),
+    "created_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+  }
+  common.write_json(out_dir / "request.json", request)
+
+  container_name = f"nexus-p02-check-{os.getpid()}"
+  argv_container = common.container_run_argv(
+    docker, image_id, Path(os.path.realpath(common.REPO_ROOT)), out_dir, expect_lock_sha, container_name
+  )
+  code = common.run_container(argv_container, container_name, out_dir / "logs" / "docker-check.log")
+  if code == common.EXIT_OK:
+    print(f"PASS: manifest={out_dir / 'manifest.json'} summary={out_dir / 'summary.json'}")
+  else:
+    details = out_dir / "summary.json"
+    if not details.is_file():
+      details = out_dir / "logs" / "docker-check.log"
+    print(f"FAIL (exit {code}): see {details}", file=sys.stderr)
+  return code
+
+
+if __name__ == "__main__":
+  raise SystemExit(main(sys.argv[1:]))

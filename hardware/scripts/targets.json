@@ -1,0 +1,182 @@
+{
+  "schema": 1,
+  "description": "Unified `hardware/scripts/check` target registry. Owners are pre-registered per plan/00 §4.2; `implemented=false` targets always fail closed with an explicit owner note. Later tasks register themselves here and add real case runners in hardware/scripts/container_check.py (see hardware/scripts/README.md). Case lists for unimplemented targets are filled by their owners; do not invent cases.",
+  "targets": {
+    "toolchain": {
+      "owner": "P02",
+      "implemented": true,
+      "board": null,
+      "cases": ["elaborate", "softfloat", "riscv", "python-env"],
+      "config": {
+        "required_target": "toolchain",
+        "consumed_sections": ["validator"],
+        "default_config": "hardware/configs/toolchain-minimal.yaml"
+      }
+    },
+    "numeric": {
+      "owner": "P03",
+      "implemented": false,
+      "board": null,
+      "cases": [],
+      "config": {
+        "required_target": "numeric",
+        "consumed_sections": [],
+        "default_config": null
+      }
+    },
+    "numeric-profile": {
+      "owner": "P06",
+      "implemented": false,
+      "board": null,
+      "cases": [],
+      "config": {
+        "required_target": "numeric-profile",
+        "consumed_sections": [],
+        "default_config": null
+      }
+    },
+    "soft-conv": {
+      "owner": "P08",
+      "implemented": false,
+      "board": null,
+      "cases": [],
+      "config": {
+        "required_target": "soft-conv",
+        "consumed_sections": [],
+        "default_config": null
+      }
+    },
+    "shared-am-functional": {
+      "owner": "P09",
+      "implemented": false,
+      "board": null,
+      "cases": [],
+      "config": {
+        "required_target": "shared-am-functional",
+        "consumed_sections": [],
+        "default_config": null
+      }
+    },
+    "two-slot-progress": {
+      "owner": "P09",
+      "implemented": false,
+      "board": null,
+      "cases": [],
+      "config": {
+        "required_target": "two-slot-progress",
+        "consumed_sections": [],
+        "default_config": null
+      }
+    },
+    "shared-am-cycle": {
+      "owner": "P09",
+      "implemented": false,
+      "board": null,
+      "cases": [],
+      "config": {
+        "required_target": "shared-am-cycle",
+        "consumed_sections": [],
+        "default_config": null
+      }
+    },
+    "boa-allocator": {
+      "owner": "P14",
+      "implemented": false,
+      "board": null,
+      "cases": [],
+      "config": {
+        "required_target": "boa-allocator",
+        "consumed_sections": [],
+        "default_config": null
+      }
+    },
+    "boa-event": {
+      "owner": "P15",
+      "implemented": false,
+      "board": null,
+      "cases": [],
+      "config": {
+        "required_target": "boa-event",
+        "consumed_sections": [],
+        "default_config": null
+      }
+    },
+    "single-array": {
+      "owner": "P18",
+      "implemented": false,
+      "board": null,
+      "cases": [],
+      "config": {
+        "required_target": "single-array",
+        "consumed_sections": [],
+        "default_config": null
+      }
+    },
+    "validator-cosim": {
+      "owner": "P20",
+      "implemented": false,
+      "board": null,
+      "cases": [],
+      "config": {
+        "required_target": "validator-cosim",
+        "consumed_sections": [],
+        "default_config": null
+      }
+    },
+    "rocket-uce": {
+      "owner": "P21",
+      "implemented": false,
+      "board": null,
+      "cases": [],
+      "config": {
+        "required_target": "rocket-uce",
+        "consumed_sections": [],
+        "default_config": null
+      }
+    },
+    "fpga-synth": {
+      "owner": "P23",
+      "implemented": false,
+      "board": "vcu118",
+      "cases": [],
+      "config": {
+        "required_target": "fpga-synth",
+        "consumed_sections": [],
+        "default_config": null
+      }
+    },
+    "fpga-board": {
+      "owner": "P24",
+      "implemented": false,
+      "board": "vcu118",
+      "cases": [],
+      "config": {
+        "required_target": "fpga-board",
+        "consumed_sections": [],
+        "default_config": null
+      }
+    },
+    "rectangular": {
+      "owner": "P25",
+      "implemented": false,
+      "board": null,
+      "cases": [],
+      "config": {
+        "required_target": "rectangular",
+        "consumed_sections": [],
+        "default_config": null
+      }
+    },
+    "multi-array": {
+      "owner": "P26",
+      "implemented": false,
+      "board": null,
+      "cases": [],
+      "config": {
+        "required_target": "multi-array",
+        "consumed_sections": [],
+        "default_config": null
+      }
+    }
+  }
+}

@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""Build or enter the pinned P02 image; never install anything on the host."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+TOOLS = ROOT / "hardware/toolchain"
+LOCK = TOOLS / "toolchain.lock"
+
+
+def file_hash(path: Path) -> str:
+  with path.open("rb") as stream:
+    return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def build_identity() -> dict:
+  paths = [
+    p
+    for p in TOOLS.rglob("*")
+    if p.is_file()
+    and p != LOCK
+    and not any(
+      part in ("target", "__pycache__", ".bsp", "package-seed") for part in p.relative_to(TOOLS).parts
+    )
+    and p.suffix != ".md"
+  ]
+  paths += list((ROOT / "pipeline_validator").glob("environment.lock.*"))
+  records = {str(p.relative_to(ROOT)): file_hash(p) for p in sorted(paths)}
+  return {
+    "files": records,
+    "sha256": hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest(),
+  }
+
+
+def invoke(command: list[str], *, log: Path | None = None) -> subprocess.CompletedProcess:
+  if log is None:
+    return subprocess.run(command, check=True, text=True, capture_output=True)
+  log.parent.mkdir(parents=True, exist_ok=True)
+  with log.open("w") as output:
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    assert process.stdout is not None
+    for line in process.stdout:
+      print(line, end="", flush=True)
+      output.write(line)
+    status = process.wait()
+  if status:
+    raise subprocess.CalledProcessError(status, command)
+  return subprocess.CompletedProcess(command, status)
+
+
+def docker_run(image: str) -> list[str]:
+  return [
+    "docker",
+    "run",
+    "--rm",
+    "--network",
+    "none",
+    "--user",
+    f"{os.getuid()}:{os.getgid()}",
+    "--cap-drop",
+    "ALL",
+    "--security-opt",
+    "no-new-privileges",
+    image,
+  ]
+
+
+def image_json(image: str, path: str) -> dict:
+  return json.loads(
+    invoke(
+      [
+        *docker_run(image),
+        "/opt/validator/bin/python",
+        "-c",
+        "from pathlib import Path; import sys; print(Path(sys.argv[1]).read_text())",
+        path,
+      ]
+    ).stdout
+  )
+
+
+def export_gemmini(image: str) -> None:
+  destination = ROOT / "hardware/gemmini"
+  destination.mkdir(parents=True, exist_ok=True)
+  baseline = image_json(image, "/opt/gemmini-upstream.lock")
+  upstream_lock = destination / "upstream.lock"
+  if (destination / "upstream").exists():
+    if (
+      not upstream_lock.is_file()
+      or json.loads(upstream_lock.read_text())["source"]["commit"] != baseline["source"]["commit"]
+    ):
+      raise ValueError("existing Gemmini tree has no matching upstream.lock; refusing to overwrite it")
+  else:
+    command = docker_run(image)
+    command[-1:-1] = ["--mount", f"type=bind,source={destination},target=/export"]
+    invoke(
+      [
+        *command,
+        "/opt/validator/bin/python",
+        "-c",
+        "import shutil; shutil.copytree('/opt/gemmini/upstream', '/export/upstream', "
+        "symlinks=True, ignore=shutil.ignore_patterns('.git'))",
+      ]
+    )
+  upstream_lock.write_text(json.dumps(baseline, indent=2) + "\n")
+
+
+def capability(image: str, out: Path) -> dict:
+  supplied = os.environ.get("VIVADO_PATH")
+  if not supplied:
+    return {
+      "vivado": {"status": "absent", "version": None, "license": "unverified"},
+      "fpga_capability": "blocked",
+    }
+  source = Path(supplied).expanduser().resolve()
+  if not (source / "bin/vivado").is_file():
+    return {
+      "vivado": {
+        "status": "absent",
+        "version": None,
+        "license": "unverified",
+        "reason": "VIVADO_PATH/bin/vivado is not a file",
+      },
+      "fpga_capability": "blocked",
+    }
+  probe_out = out / "vivado"
+  probe_out.mkdir(parents=True, exist_ok=True)
+  command = docker_run(image)
+  command[-1:-1] = [
+    "--mount",
+    f"type=bind,source={source},target=/opt/vivado,readonly",
+    "--mount",
+    f"type=bind,source={ROOT},target=/workspace,readonly",
+    "--mount",
+    f"type=bind,source={probe_out},target=/out",
+  ]
+  for key in ("XILINXD_LICENSE_FILE", "LM_LICENSE_FILE"):
+    if os.environ.get(key):
+      command[-1:-1] = ["--env", key]
+      license_file = Path(os.environ[key])
+      if license_file.is_file():
+        command[-1:-1] = [
+          "--mount",
+          f"type=bind,source={license_file.resolve()},target={license_file.resolve()},readonly",
+        ]
+  invoke(
+    [*command, "/opt/validator/bin/python", "/workspace/hardware/toolchain/probe_vivado.py"],
+    log=probe_out / "probe.log",
+  )
+  return json.loads((probe_out / "capability.json").read_text())
+
+
+def build(out: Path) -> None:
+  out.mkdir(parents=True, exist_ok=True)
+  identity = build_identity()
+  invoke(
+    [
+      "docker",
+      "build",
+      "--progress=plain",
+      "--iidfile",
+      str(out / "image.id"),
+      "-f",
+      str(TOOLS / "Dockerfile"),
+      str(ROOT),
+    ],
+    log=out / "docker-build.log",
+  )
+  if build_identity() != identity:
+    raise ValueError("build inputs changed while Docker was building; refusing to seal a mixed image")
+  image = (out / "image.id").read_text().strip()
+  inspected = json.loads(invoke(["docker", "image", "inspect", image]).stdout)[0]
+  if inspected["Id"] != image or inspected["Architecture"] != "amd64":
+    raise ValueError("built image identity or architecture mismatch")
+  observed = image_json(image, "/opt/toolchain-build.json")
+  if observed["sources"] != json.loads((TOOLS / "sources.json").read_text()):
+    raise ValueError("image sources differ from the pinned build inputs")
+  # A local Docker image ID is an immutable content digest, not a registry RepoDigest.
+  lock = {
+    "schema": 1,
+    "image": {
+      "id": image,
+      "base": observed["sources"]["base_image"],
+      "digest_kind": "docker_image_config_sha256",
+    },
+    "build_inputs_sha256": identity["sha256"],
+    "build_inputs": identity["files"],
+    "sources": observed["sources"],
+    "tools": observed["tools"],
+    "dependencies": observed["dependencies"],
+    "source_build": observed["source_build"],
+    "softfloat_headers": observed["softfloat_headers"],
+    "capabilities": capability(image, out),
+  }
+  export_gemmini(image)
+  LOCK.write_text(json.dumps(lock, indent=2) + "\n")
+  (out / "toolchain-build.json").write_text(json.dumps(observed, indent=2) + "\n")
+  (out / "build-inputs.json").write_text(json.dumps(identity, indent=2) + "\n")
+  devcontainer = ROOT / ".devcontainer"
+  devcontainer.mkdir(exist_ok=True)
+  (devcontainer / "devcontainer.json").write_text(
+    json.dumps(
+      {
+        "name": "Nexus pinned BOA toolchain",
+        "image": image,
+        "workspaceFolder": "/workspace",
+        "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+        "containerUser": f"{os.getuid()}:{os.getgid()}",
+        "remoteUser": f"{os.getuid()}:{os.getgid()}",
+        "updateRemoteUserUID": False,
+        "runArgs": ["--network=none", "--cap-drop=ALL", "--security-opt=no-new-privileges"],
+        "containerEnv": {"HOME": "/tmp/nexus-home"},
+        "postCreateCommand": "mkdir -p /tmp/nexus-home",
+      },
+      indent=2,
+    )
+    + "\n"
+  )
+  print(f"Locked image {image}; FPGA capability {lock['capabilities']['fpga_capability']}")
+
+
+def shell(image: str) -> None:
+  command = docker_run(image)
+  options = [
+    "--mount",
+    f"type=bind,source={ROOT},target=/workspace",
+    "--workdir",
+    "/workspace",
+    "--env",
+    "HOME=/tmp/nexus-home",
+  ]
+  if sys.stdin.isatty():
+    options += ["-it"]
+  command[-1:-1] = options
+  os.execvp("docker", [*command, "/bin/bash", "-c", 'mkdir -p "$HOME"; exec /bin/bash'])
+
+
+def export_patch(image: str, out: Path) -> None:
+  if out.exists():
+    raise ValueError(f"refusing to overwrite existing patch: {out}")
+  command = docker_run(image)
+  command[-1:-1] = ["--mount", f"type=bind,source={ROOT},target=/workspace,readonly"]
+  script = """import pathlib, shutil, subprocess
+base=pathlib.Path('/tmp/gemmini-export')
+shutil.copytree('/opt/gemmini/upstream', base, symlinks=True, ignore=shutil.ignore_patterns('.git'))
+def git(*args):
+  return subprocess.run(['git','-C',str(base),*args], check=True, stdout=subprocess.DEVNULL)
+git('init','-q'); git('add','-A')
+git('-c','user.name=Nexus export','-c','user.email=export@localhost','commit','-qm','Pinned upstream')
+for p in base.iterdir():
+  if p.name != '.git':
+    if p.is_dir() and not p.is_symlink(): shutil.rmtree(p)
+    else: p.unlink()
+shutil.copytree('/workspace/hardware/gemmini/upstream',base,dirs_exist_ok=True,symlinks=True)
+git('add','-A')
+subprocess.run(['git','-C',str(base),'diff','--cached','--binary',
+ '--src-prefix=a/','--dst-prefix=b/'],check=True)
+"""
+  result = invoke([*command, "/opt/validator/bin/python", "-c", script])
+  out.parent.mkdir(parents=True, exist_ok=True)
+  out.write_text(result.stdout)
+  upstream_commit = json.loads(LOCK.read_text())["sources"]["sources"]["gemmini"]["commit"]
+  print(f"Exported Gemmini delta to {out}; upstream commit {upstream_commit}")
+
+
+def main() -> int:
+  parser = argparse.ArgumentParser(description=__doc__)
+  sub = parser.add_subparsers(dest="command", required=True)
+  build_parser = sub.add_parser("build")
+  build_parser.add_argument("--locked", action="store_true", required=True)
+  build_parser.add_argument("--out", type=Path, default=ROOT / "plan/evidence/P02/build")
+  sub.add_parser("shell")
+  patch_parser = sub.add_parser("export-gemmini-patch")
+  patch_parser.add_argument("--out", type=Path, required=True)
+  args = parser.parse_args()
+  try:
+    if args.command == "build":
+      build(args.out.resolve())
+    else:
+      lock = json.loads(LOCK.read_text())
+      if lock["build_inputs_sha256"] != build_identity()["sha256"]:
+        raise ValueError("toolchain build inputs changed; run env build --locked first")
+      if args.command == "shell":
+        shell(lock["image"]["id"])
+      else:
+        export_patch(lock["image"]["id"], args.out.resolve())
+  except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as exc:
+    print(f"env: {exc}", file=sys.stderr)
+    return 1
+  return 0
+
+
+if __name__ == "__main__":
+  raise SystemExit(main())

@@ -1,0 +1,90 @@
+{
+  "schema": 1,
+  "base_image": "ubuntu@sha256:0e0a0fc6d18feda9db1590da249ac93e8d5abfea8f4c3c0c849ce512b5ef8982",
+  "bootstrap": {
+    "version": "25.11.0-0",
+    "url": "https://github.com/conda-forge/miniforge/releases/download/25.11.0-0/Miniforge3-25.11.0-0-Linux-x86_64.sh",
+    "sha256": "28bc73d1cc37d6db2c5eb3757bc4c79b31803b7bed505bc67ec8141e7e4e2c4e"
+  },
+  "native_lock": {
+    "url": "https://raw.githubusercontent.com/ucb-bar/chipyard/e02074414158c85059c1dcb231ff2f8941254b9a/conda-reqs/conda-lock-reqs/conda-requirements-riscv-tools-linux-64.conda-lock.yml",
+    "sha256": "3112921502ab2979d87bf89cd32d5b4ec3a71d9230e05d3c4fccff1565386e2f",
+    "roots": [
+      "openjdk",
+      "verilator",
+      "gcc",
+      "gxx",
+      "make",
+      "git",
+      "binutils",
+      "riscv-tools"
+    ],
+    "package_count": 115,
+    "acquisition_overrides": {
+      "gettext-tools": {
+        "canonical_url": "https://conda.anaconda.org/conda-forge/linux-64/gettext-tools-0.22.5-he02047a_3.conda",
+        "download_url": "https://api.anaconda.org/download/conda-forge/gettext-tools/0.22.5/linux-64/gettext-tools-0.22.5-he02047a_3.conda",
+        "sha256": "0fd003953ce1ce9f4569458aab9ffaa397e3be2bc069250e2f05fd93b0ad2976",
+        "reason": "Canonical CDN repeatedly stalled after 2277367 of 2750908 bytes; official Anaconda API exposes the identical archive hash."
+      }
+    }
+  },
+  "sources": {
+    "chipyard": {
+      "url": "https://github.com/ucb-bar/chipyard.git",
+      "commit": "e02074414158c85059c1dcb231ff2f8941254b9a",
+      "path": "/opt/deps/chipyard"
+    },
+    "rocket": {
+      "url": "https://github.com/chipsalliance/rocket-chip.git",
+      "commit": "c7aabd2823d3d001a7a9e8a982bb65d6cb7c9bdf",
+      "path": "/opt/deps/chipyard/generators/rocket-chip"
+    },
+    "gemmini": {
+      "url": "https://github.com/ucb-bar/gemmini.git",
+      "commit": "25809f78323a729ef76fb68f3cedd8a24da2942b",
+      "path": "/opt/gemmini/upstream"
+    },
+    "hardfloat": {
+      "url": "https://github.com/ucb-bar/berkeley-hardfloat.git",
+      "commit": "4225367ed282aadd70f4cbd131f6959f4d00c502",
+      "path": "/opt/deps/chipyard/generators/hardfloat"
+    },
+    "diplomacy": {
+      "url": "https://github.com/chipsalliance/diplomacy.git",
+      "commit": "6b7dc988a771ff21237b102fd02a1f2d2c2e7b72",
+      "path": "/opt/deps/chipyard/generators/diplomacy"
+    },
+    "cde": {
+      "url": "https://github.com/chipsalliance/cde.git",
+      "commit": "2bcaeae2b9914bd25497ce3c6fa62dc5ca80e09f",
+      "path": "/opt/deps/chipyard/tools/cde"
+    },
+    "firesim": {
+      "url": "https://github.com/firesim/firesim.git",
+      "commit": "b084672c2f8cf32e55d78f73a001074c23f8a2b8",
+      "path": "/opt/deps/chipyard/sims/firesim"
+    },
+    "softfloat": {
+      "url": "https://github.com/ucb-bar/berkeley-softfloat-3.git",
+      "commit": "5c06db33fc1e2130f67c045327b0ec949032df1d",
+      "path": "/opt/deps/softfloat",
+      "release": "3e",
+      "release_commit": "f74b1e48110ac3a27dd49b787d164e55e42d81d1",
+      "specialization": "RISCV"
+    }
+  },
+  "firtool": {
+    "version": "1.75.0",
+    "commit": "481cb60add7358934414a3c6b396f5d29ad934fe",
+    "url": "https://github.com/llvm/circt/releases/download/firtool-1.75.0/firrtl-bin-linux-x64.tar.gz",
+    "sha256": "5c822c07268d20cb85f4488a416cd62b983d33c13ffa9a5b5656ce5078d6475c"
+  },
+  "sbt_launcher": {
+    "version": "1.8.2",
+    "url": "https://repo.maven.apache.org/maven2/org/scala-sbt/sbt-launch/1.8.2/sbt-launch-1.8.2.jar",
+    "sha1": "800f48f13b9d19f2a59e946aa18e799e058f2676"
+  },
+  "scala": "2.13.12",
+  "chisel": "6.5.0"
+}

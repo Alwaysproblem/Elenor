@@ -1,4 +1,5 @@
-exclude: ^(?:[^/]+\.json|examples/artifacts/)
+# Preserve pinned sources and raw evidence bytes; human-readable evidence/*.md reports remain checked.
+exclude: ^(?:[^/]+\.json|examples/artifacts/|plan/evidence/P[0-9]+/|hardware/gemmini/upstream/|hardware/toolchain/chipyard-native\.lock\.yml\.txt$)
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks

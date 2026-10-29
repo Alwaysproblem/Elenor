@@ -1,10 +1,10 @@
 # Scala BOA / Gemmini BF16 Matmul 与 pipeline validator 集成设计
 
-- 状态：**总体设计评审稿 v0.5；硬件/FPGA 实现尚未开始。软件前置 gate 已实现并验证（见[实施报告](BOA_Software_Managed_AM_IR_Implementation_Report.md)），包括 2026-10-27 的 AM「一次申请 + 阻塞等待 + slot_free 唤醒」、bundle 预留和分阶段结果服务；本版把这些已实现的软件合同映射为 FPGA 硬件合同。**
+- 状态：**总体设计评审稿 v0.5；BOA/Gemmini adapter 与 FPGA 实现尚未开始。软件前置 gate 已实现并验证（见[实施报告](BOA_Software_Managed_AM_IR_Implementation_Report.md)），包括 2026-10-27 的 AM「一次申请 + 阻塞等待 + slot_free 唤醒」、bundle 预留和分阶段结果服务。P02 已交付锁定工具链及 HardFloat primitive RTL smoke，见[实际证据](../../plan/evidence/P02.md)；不等于系统硬件验收通过。**
 - 需求优先级：用户最新修改 > [共享 AM V1 需求规格](../../history/nexus_shared_am_v1_requirements_and_design.md) > [prompt.md](../../prompt.md) 与此前确认中仍适用的内容。
 - 本版新增确认（2026-10-28）：共享 AM 位于 **Compute Tile 内**，由该 Tile 的 1→4 个阵列共享；数值改为逐 MAC FP32 RNE profile `bf16_fp32_mac_rne_v1`；首个 FPGA 平台为 **AMD UltraScale+**，参考板 VCU118。
 - 阅读顺序：§1 范围 → §4.1 AM 申请协议 → §5.2 进展证明 → §3.5/§3.6 结果与释放 → §7.4 FPGA 映射 → §8 验收。
-- 本轮只修改本文与两张图，不修改实现代码。§7.2 的 SW-A1–SW-A4 是 FPGA 联调前必须完成的软件对齐项，尚未实施。源 IR 仍不增加分支/重试控制，软件计划 §3.4 仍延期。
+- v0.5 初稿阶段只修改本文与两张图；后续 P01/P02 的执行记录在 `plan/evidence/`，不覆盖本文的历史数字。§7.2 的 SW-A1–SW-A4 仍尚未实施。源 IR 仍不增加分支/重试控制，软件计划 §3.4 仍延期。
 
 ## 1. 定位、目标和 First Silicon cutline
 
@@ -76,17 +76,17 @@
 
 ### 1.4 Gemmini 调研与依赖基线
 
-上游调研版本是 `ucb-bar/gemmini@8c3f9923a44a2fe2c7930587be297d6d4f8c09ca`。为避免随意拼接 Rocket/Chisel 版本，**拟采用一套 Chipyard 锁定组合做构建基线**：
+上游调研版本是 `ucb-bar/gemmini@8c3f9923a44a2fe2c7930587be297d6d4f8c09ca`。为避免随意拼接 Rocket/Chisel 版本，采用下列 Chipyard 锁定组合；**P02 已实际编译该依赖图并通过 primitive RTL smoke 与离线复现**，不是 BF16 BOA adapter 已完成：
 
-| 依赖                   | 候选不可变来源                             | 证据/状态                                                                                            |
+| 依赖                   | 锁定不可变来源                             | 证据/状态                                                                                            |
 | ---------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| Chipyard               | `e02074414158c85059c1dcb231ff2f8941254b9a` | 来自 Gemmini 的 [CHIPYARD.hash][up-chipyard-hash]；尚未在本轮构建                                    |
+| Chipyard               | `e02074414158c85059c1dcb231ff2f8941254b9a` | 来自 Gemmini 的 [CHIPYARD.hash][up-chipyard-hash]；P02 已按该父 pin 核对 gitlinks 并构建依赖图       |
 | Gemmini 基线           | `25809f78323a729ef76fb68f3cedd8a24da2942b` | 上述 Chipyard 的 [实际 submodule pin][up-parent-gemmini]，不是调研 master 的 SHA                     |
 | Rocket Chip            | `c7aabd2823d3d001a7a9e8a982bb65d6cb7c9bdf` | 同一父版本的 [实际 submodule pin][up-parent-rocket]                                                  |
 | Scala / 主 Chisel      | `2.13.12` / `6.5.0`                        | 上述 [Chipyard build.sbt][up-chipyard-build]，`commonSettings`/`chiselSettings`                      |
 | Gemmini 独立 build.sbt | 调研版本写 `2.13.10` / `chisel3 3.6.0`     | [上游独立构建声明][up-gemmini-build]；**不得混入前一行构建**，更不能沿用 `rocketchip 1.2.+` 浮动依赖 |
 
-这些 SHA 是可复核的候选组合，不是「已完成 BF16 BOA 构建」的声明。构建 gate 必须解析并锁定所有 transitive dependencies、HardFloat、sbt、JDK、firtool、Verilator 和 RISC-V 工具链；失败时提交证据再调整整个组合，不能暗中换 latest。
+这些 SHA 已通过 [P02 工具链 gate](../../plan/evidence/P02.md)，仍不是「已完成 BF16 BOA 构建」的声明。本次构建及四个 case 运行路径使用的 transitive dependencies、HardFloat、sbt/JDK、firtool、Verilator、RISC-V 工具链和镜像 ID 已进入 `hardware/toolchain/toolchain.lock`。后续扩展若需调整版本，仍须提交实际构建证据并整体复验，不能暗中换 latest。
 
 已核实的复用限制：
 
@@ -530,7 +530,9 @@ trace 关联 ctx_key、handle/generation、seq、bound_engine、physical group/r
 
 ## 7. RTL/软件实现建议
 
-### 7.1 Monorepo 组织（拟议，不在本轮建立代码脚手架）
+### 7.1 Monorepo 组织（工具链已交付，其余按分任务实施）
+
+P02 已交付 `toolchain/`、`scripts/`、最小 `configs/`、Gemmini upstream 与 `.devcontainer/`；下面仍是完整 V1 的目标布局，不表示 BOA/UCE/FPGA 目录均已实现。
 
 ```text
 hardware/
@@ -555,7 +557,7 @@ hardware/
   fpga/
     vcu118/                    Chipyard vcu118 SUB_PROJECT 叠加配置、约束、ILA 与板级脚本
     board-tests/               上板裸机测试、结果与 trace 导出
-  scripts/                     构建/运行/复现入口（需在实现时真正提供）
+  scripts/                     P02 已提供统一入口；具体 target 按任务 owner 逐项实现
 .devcontainer/                 引用同一镜像与工作目录，不建立第二套环境
 pipeline_validator/            保持现有 Python 子项目，新增有边界的 backend
 examples/generators/            数值 Matmul/Conv 场景生成器
@@ -699,9 +701,9 @@ guide：这四项会改变 validator 的可观察行为，是有意的合同变�
 
 ### 7.3 Docker / dev container 可复现契约
 
-容器仍是默认环境。初稿阶段已确认 Docker client/server 可访问；本次文档修订未运行硬件镜像、安装依赖或修改系统文件，不把该历史工具探测当作共享 AM 构建证明。
+容器是默认硬件工具链环境。初稿阶段的 Docker 可访问性只是历史探测；后续 [P02 实施](../../plan/evidence/P02.md) 已实际构建固定镜像、运行 HardFloat/SoftFloat/RISC-V ELF/validator smoke，并以禁网、新工作目录复现全部确定性产物。没有修改宿主系统包或配置；Vivado 子能力仍为 blocked。
 
-实现必须提供一个权威入口，下面是**拟交付的命令接口，不是本轮已经存在的脚本**：
+P02 已提供 `env`、`check toolchain`、`reproduce`。下方列出完整 V1 的入口/target 名称；其余预登记 target 尚未实现，调用须非零并说明 owner。完整参数契约见 `hardware/scripts/README.md` 与对应任务：运行 case 必须给 `--out`，`reproduce` 必须给 `--offline`，`--config` 可选。不把名字存在当作通过：
 
 ```text
 hardware/scripts/env build --locked

@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""Offline reproduction dispatcher (P02).
+
+Usage:
+  hardware/scripts/reproduce MANIFEST --out DIR --offline
+
+Reconstructs the full request (config content, seed, case selection) from a
+PASSing manifest, rejects any source/lock/image drift, reruns the identical
+engine inside the same locked image with a fresh work directory and no
+network, then compares deterministic artifact hashes and recorded metrics
+(e.g. validator cycles) between the two manifests. Comparison is on actual
+outputs, never on logs.
+
+Only offline reproduction is supported; `--offline` is required.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import common
+
+REQUIRED_REQUEST_KEYS = ("target", "board", "cases", "seed", "config_path", "config_content")
+REQUIRED_MANIFEST_KEYS = ("request", "lock", "source", "probes", "cases", "status")
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+  parser = argparse.ArgumentParser(
+    prog="hardware/scripts/reproduce",
+    description="Reproduce a PASSing check manifest offline and compare deterministic outputs.",
+  )
+  parser.add_argument("manifest", help="manifest.json of the run to reproduce")
+  parser.add_argument("--out", required=True, help="fresh output directory for the reproduction run")
+  parser.add_argument(
+    "--offline",
+    required=True,
+    action="store_true",
+    help="required: reproduction always runs networkless in the locked image",
+  )
+  return parser.parse_args(argv)
+
+
+def load_source_manifest(path: Path) -> dict:
+  if not path.is_file():
+    common.fail(f"manifest not found: {path}", common.EXIT_MANIFEST)
+  manifest = common.load_json(path)
+  if manifest.get("schema") != 1:
+    common.fail(f"manifest schema must be 1, got {manifest.get('schema')!r}", common.EXIT_MANIFEST)
+  if manifest.get("task_id") != "P02":
+    common.fail(f"manifest task_id must be 'P02', got {manifest.get('task_id')!r}", common.EXIT_MANIFEST)
+  for key in REQUIRED_MANIFEST_KEYS:
+    if key not in manifest:
+      common.fail(f"manifest missing required key '{key}'", common.EXIT_MANIFEST)
+  if manifest.get("status") != "PASS":
+    common.fail(
+      f"refusing to reproduce non-PASS manifest (status={manifest.get('status')!r})", common.EXIT_MANIFEST
+    )
+  request = manifest["request"]
+  if not isinstance(request, dict):
+    common.fail("manifest request must be an object", common.EXIT_MANIFEST)
+  for key in REQUIRED_REQUEST_KEYS:
+    if key not in request:
+      common.fail(f"manifest request missing required key '{key}'", common.EXIT_MANIFEST)
+  source = manifest.get("source")
+  if not isinstance(source, dict) or not isinstance(source.get("host"), dict):
+    common.fail("manifest source.host must contain the host source identity", common.EXIT_MANIFEST)
+  if not isinstance(manifest.get("cases"), dict) or not manifest["cases"]:
+    common.fail("manifest cases must be a non-empty object", common.EXIT_MANIFEST)
+  return manifest
+
+
+def main(argv: list[str]) -> int:
+  args = parse_args(argv)
+  manifest_path = Path(args.manifest).absolute()
+  source_manifest = load_source_manifest(manifest_path)
+
+  # --- Pre-run identity rejection (contract: reject source/lock/image drift). ---
+  current_identity = common.source_identity()
+  identity_problems = common.identity_mismatches(source_manifest["source"]["host"], current_identity)
+  if identity_problems:
+    for problem in identity_problems[:20]:
+      print(f"error: source drift: {problem}", file=sys.stderr)
+    common.fail(
+      "repository source identity differs from the manifest; reproduction requires "
+      "byte-identical scoped inputs",
+      common.EXIT_MANIFEST,
+    )
+
+  lock = common.load_lock()
+  image_id = lock["image"]["id"]
+  expect_lock_sha = common.lock_sha256()
+  recorded_lock = source_manifest.get("lock", {})
+  if recorded_lock.get("sha256") != expect_lock_sha:
+    common.fail(
+      "toolchain.lock changed since the manifest was produced "
+      f"(manifest={recorded_lock.get('sha256')!r} current={expect_lock_sha!r})",
+      common.EXIT_MANIFEST,
+    )
+  if recorded_lock.get("content", {}).get("image", {}).get("id") != image_id:
+    common.fail("locked image identity changed since the manifest was produced", common.EXIT_MANIFEST)
+
+  out_dir = Path(args.out).absolute()
+  if out_dir.exists() and not out_dir.is_dir():
+    common.fail(f"--out {out_dir} exists and is not a directory", common.EXIT_USAGE)
+  if out_dir.is_dir() and any(out_dir.iterdir()):
+    common.fail(f"--out {out_dir} exists and is not empty; use a fresh directory", common.EXIT_USAGE)
+
+  docker = common.docker_binary()
+  common.require_image(docker, image_id)
+
+  request = {key: source_manifest["request"][key] for key in REQUIRED_REQUEST_KEYS}
+  request.update(
+    {
+      "schema": 1,
+      "mode": "reproduce",
+      "task_id": "P02",
+      "lock_path": common.LOCK_REL,
+      "expect": {"lock_sha256": expect_lock_sha, "image_id": image_id},
+      "source": current_identity,
+      "reproduce_of": {"manifest": str(manifest_path), "lock_sha256": expect_lock_sha},
+      "created_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+  )
+
+  out_dir.mkdir(parents=True, exist_ok=True)
+  common.write_json(out_dir / "request.json", request)
+
+  container_name = f"nexus-p02-reproduce-{os.getpid()}"
+  argv_container = common.container_run_argv(
+    docker, image_id, Path(os.path.realpath(common.REPO_ROOT)), out_dir, expect_lock_sha, container_name
+  )
+  code = common.run_container(argv_container, container_name, out_dir / "logs" / "docker-reproduce.log")
+  if code != common.EXIT_OK:
+    print(
+      f"FAIL (exit {code}) during reproduction run: see {out_dir / 'logs' / 'docker-reproduce.log'}",
+      file=sys.stderr,
+    )
+    return code
+
+  reproduced = common.load_json(out_dir / "manifest.json")
+  report = compare_manifests(source_manifest, reproduced, str(manifest_path))
+  common.write_json(out_dir / "reproduce_report.json", report)
+  if report["result"] != "MATCH":
+    for problem in report["mismatches"][:20]:
+      print(f"error: {problem}", file=sys.stderr)
+    common.fail(
+      f"reproduction mismatch ({len(report['mismatches'])} differences); "
+      f"see {out_dir / 'reproduce_report.json'}",
+      common.EXIT_MISMATCH,
+    )
+  print(f"MATCH: reproduction identical; report={out_dir / 'reproduce_report.json'}")
+  return common.EXIT_OK
+
+
+def compare_manifests(first: dict, second: dict, source_manifest_path: str) -> dict:
+  """Compare deterministic outputs and metrics between two manifests."""
+  mismatches: list[str] = []
+
+  if second.get("status") != "PASS":
+    mismatches.append(f"reproduced status is {second.get('status')!r}, expected PASS")
+
+  first_probes, second_probes = first.get("probes", {}), second.get("probes", {})
+  if first_probes != second_probes:
+    differing = sorted(
+      key
+      for key in set(first_probes) | set(second_probes)
+      if first_probes.get(key) != second_probes.get(key)
+    )
+    mismatches.append(f"tool identity probes differ: {differing}")
+
+  if first.get("lock", {}).get("sha256") != second.get("lock", {}).get("sha256"):
+    mismatches.append("reproduced run observed a different toolchain.lock")
+
+  for case_id, first_case in sorted(first["cases"].items()):
+    second_case = second.get("cases", {}).get(case_id)
+    if second_case is None:
+      mismatches.append(f"case '{case_id}' missing from reproduced manifest")
+      continue
+    if second_case.get("status") != "PASS":
+      mismatches.append(f"case '{case_id}' did not PASS on reproduction")
+    first_artifacts = {a["path"]: a for a in first_case.get("artifacts", []) if a.get("deterministic")}
+    second_artifacts = {a["path"]: a for a in second_case.get("artifacts", [])}
+    for artifact_path, artifact in sorted(first_artifacts.items()):
+      other = second_artifacts.get(artifact_path)
+      if other is None:
+        mismatches.append(f"case '{case_id}': deterministic artifact {artifact_path} missing")
+      elif other.get("sha256") != artifact.get("sha256"):
+        mismatches.append(
+          f"case '{case_id}': {artifact_path} sha256 {artifact.get('sha256')} != {other.get('sha256')}"
+        )
+    first_cycles = first_case.get("metrics", {}).get("cycles")
+    if first_cycles is not None and second_case.get("metrics", {}).get("cycles") != first_cycles:
+      mismatches.append(
+        f"case '{case_id}': cycles {first_cycles} != {second_case.get('metrics', {}).get('cycles')}"
+      )
+
+  return {
+    "schema": 1,
+    "task_id": "P02",
+    "mode": "reproduce",
+    "compared_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
+    "source_manifest": source_manifest_path,
+    "source_manifest_status": first.get("status"),
+    "reproduced_manifest": "manifest.json",
+    "cases_compared": sorted(first.get("cases", {})),
+    "deterministic_artifacts_compared": sum(
+      1
+      for case in first.get("cases", {}).values()
+      for artifact in case.get("artifacts", [])
+      if artifact.get("deterministic")
+    ),
+    "mismatches": mismatches,
+    "result": "MATCH" if not mismatches else "MISMATCH",
+  }
+
+
+if __name__ == "__main__":
+  raise SystemExit(main(sys.argv[1:]))

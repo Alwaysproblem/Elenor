@@ -1,0 +1,11 @@
+# P02 toolchain target: minimal schema-1 config instance (see hardware/configs/README.md).
+# All four registered toolchain cases use the P01 BOA-only AM capacity below.
+# The override is consumed by the real validator CLI, not just copied to a manifest.
+schema: 1
+target: toolchain
+topology: {}
+numeric: {}
+validator:
+  hw_overrides:
+    boa_am_slot_capacity_bytes: 65536
+board: {}

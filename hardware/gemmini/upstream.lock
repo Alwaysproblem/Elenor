@@ -1,0 +1,665 @@
+{
+  "schema": 1,
+  "source": {
+    "url": "https://github.com/ucb-bar/gemmini.git",
+    "commit": "25809f78323a729ef76fb68f3cedd8a24da2942b",
+    "path": "/opt/gemmini/upstream"
+  },
+  "tree_sha256": "06908b083cbc393f746a2df4e11d71dfe56c0c4f918fdf459a1f2b64af978c9c",
+  "files": [
+    {
+      "path": ".github/scripts/defaults.sh",
+      "size": 323,
+      "sha256": "be2edcb684562b29d9a81396d6dc8cdde340520697eccf9dacd06488b3b48e55",
+      "executable": true
+    },
+    {
+      "path": ".github/scripts/do-rtl-build.sh",
+      "size": 348,
+      "sha256": "43fd31b4504739b09bfa3f5142bde31a12df5286931db9d5aa4db2e0ffe845c8",
+      "executable": true
+    },
+    {
+      "path": ".github/scripts/install-gemmini.sh",
+      "size": 931,
+      "sha256": "99544da46f14b15bdc1fb8451e9ea9af1510f2ba52d8c0f3a60f348b5422bd19",
+      "executable": true
+    },
+    {
+      "path": ".github/scripts/run-tests-rtl.sh",
+      "size": 554,
+      "sha256": "77f943902c4131a2e791a4196d7972f47cb0f61e9a76507ca0acea55b11aeedb",
+      "executable": true
+    },
+    {
+      "path": ".github/scripts/run-tests-spike.sh",
+      "size": 733,
+      "sha256": "b6b40c524671241c7f34bafdd5f27ee04a5f4fea1c605bb973f12ba4cf2f1d48",
+      "executable": true
+    },
+    {
+      "path": ".github/workflows/config.yml",
+      "size": 1954,
+      "sha256": "bc711bf5556117e703b642523a29ffbb1ad7c7a194bf62e43714ae5f4b07a062",
+      "executable": false
+    },
+    {
+      "path": ".gitignore",
+      "size": 4356,
+      "sha256": "94ada89471d1145c8352c4e64ed2e03137438b6c5851a2d4e79edde63561dda0",
+      "executable": false
+    },
+    {
+      "path": ".gitmodules",
+      "size": 385,
+      "sha256": "fab56c41abc38d384f25fafb284d0acf41655e82c7ba289ca1e926555535dc61",
+      "executable": false
+    },
+    {
+      "path": "CHIPYARD.hash",
+      "size": 41,
+      "sha256": "e6b8f51eccbfd5943f981db1a22a07f9ab525f7b2b34f6d19d3e69bf74c63e92",
+      "executable": false
+    },
+    {
+      "path": "LICENSE",
+      "size": 1403,
+      "sha256": "c41aaa8016faefb6d266f5cfbbaeefc32b5ae0ff3c67670be2b1b0cf291ef6e0",
+      "executable": false
+    },
+    {
+      "path": "README.md",
+      "size": 41266,
+      "sha256": "6af00afa05e1559fac1eca222984abd720cdcadf2e2b52da86ca8019a394b348",
+      "executable": false
+    },
+    {
+      "path": "build.sbt",
+      "size": 601,
+      "sha256": "5db17ba489a13125826bea614aa427f33db101da32da39f33a115ad7b1aca0c9",
+      "executable": false
+    },
+    {
+      "path": "img/block-mvin.png",
+      "size": 66309,
+      "sha256": "1bb7de83b0dea88a0f86740b8dc41d53cec851a4a028a15244e86930d4e2f8bf",
+      "executable": false
+    },
+    {
+      "path": "img/delay-registers.png",
+      "size": 17910,
+      "sha256": "13e68cf547e8f24dbb09ff39f94fc95f797e4f8ea89fe4616599eb39f9bf91fa",
+      "executable": false
+    },
+    {
+      "path": "img/full-logo.svg",
+      "size": 13673,
+      "sha256": "a6915919e08f567f06a44c379ee6fdb35ac023abe245fb64e41cd2a7019a6810",
+      "executable": false
+    },
+    {
+      "path": "img/gemmini-system.png",
+      "size": 115294,
+      "sha256": "e007eb3a938f239e284592949c26bab20a59353b811d0b2cca97a625d355f23b",
+      "executable": false
+    },
+    {
+      "path": "img/gemmini-systolic-array.png",
+      "size": 113148,
+      "sha256": "7bc195cc05f9c2426c8dac497ae3be0cec3dd58a3726cce850c4be91401345bb",
+      "executable": false
+    },
+    {
+      "path": "img/logo.svg",
+      "size": 10430,
+      "sha256": "74ff2c027b08ed2912691c57f8a1ed42907da642f00eab73dea2d9cd3e8d61c4",
+      "executable": false
+    },
+    {
+      "path": "img/memory-addressing.png",
+      "size": 40920,
+      "sha256": "2bfb77ba549c1f126126784a7e94d805cd8b69a5e4000803f13e306202b8d549",
+      "executable": false
+    },
+    {
+      "path": "img/mvin.png",
+      "size": 49085,
+      "sha256": "ea374363a7cb92636362252cf14314674189986fc73def73595e2e0f19f6251d",
+      "executable": false
+    },
+    {
+      "path": "img/transposer.png",
+      "size": 37779,
+      "sha256": "0678af1ba6ebc848df5e30100d45576feebdd55ffc0e4641c6fab5a0bf1972ed",
+      "executable": false
+    },
+    {
+      "path": "modeling/timeloop/arch/arch_default.yaml",
+      "size": 1554,
+      "sha256": "27c27a886751d0aef798b7ffd03136d3a28bd61a920d617e52f469277190aa2e",
+      "executable": false
+    },
+    {
+      "path": "modeling/timeloop/mapspace/mapspace.yaml",
+      "size": 941,
+      "sha256": "747e38fa119adb0fe9fd5f925c817170872a2c9f2ae11684e24f6e05c67d32a8",
+      "executable": false
+    },
+    {
+      "path": "project/build.properties",
+      "size": 21,
+      "sha256": "1fca69723ec6441ad5cfe80a054452d9a5a7b02fc9b82ab48314d18715d9b3a4",
+      "executable": false
+    },
+    {
+      "path": "project/plugins.sbt",
+      "size": 22,
+      "sha256": "27b09f7eea496a78554d0d2288df8d79d78f7bdffe3a980bcff7ca842ef31598",
+      "executable": false
+    },
+    {
+      "path": "scalastyle-config.xml",
+      "size": 5681,
+      "sha256": "971bc3d8e3c256627053c9d93b2a3c78b3cd7084132d3dc1b26da2f040e88444",
+      "executable": false
+    },
+    {
+      "path": "scalastyle-test-config.xml",
+      "size": 5832,
+      "sha256": "9c86f5e7b0756139c675164483d4dc79e2e3db7b8d390a11d1cf30a5d812fa90",
+      "executable": false
+    },
+    {
+      "path": "scripts/build-midas.sh",
+      "size": 1798,
+      "sha256": "44f3545e395e0183bd35d5f85c67cdcf7ab9e2c7e48acdbabe87f37e0d857be9",
+      "executable": true
+    },
+    {
+      "path": "scripts/build-onnx-inference.sh",
+      "size": 320,
+      "sha256": "e6f37114eb59b748f575cf109d7a5219639388c7a16064cb99fe24e036d4db75",
+      "executable": true
+    },
+    {
+      "path": "scripts/build-onnx-training.sh",
+      "size": 294,
+      "sha256": "1971b12ce1f13455a5490554441f11f799cca928bffebbd942f74576100f59c3",
+      "executable": true
+    },
+    {
+      "path": "scripts/build-spike.sh",
+      "size": 910,
+      "sha256": "cb3e24198f3c9098d1469858c72966b818559fe44cd93b8ba63090a473271c4e",
+      "executable": true
+    },
+    {
+      "path": "scripts/build-vcs.sh",
+      "size": 749,
+      "sha256": "2084ab57197adeb4c90787e37b0c83bf7408c72621c5b2794cc04c9257aa75b6",
+      "executable": true
+    },
+    {
+      "path": "scripts/build-verilator.sh",
+      "size": 767,
+      "sha256": "4f86e1a0d3050d18b905e761824687ee63982d1abcda27e065a08d5f066b3936",
+      "executable": true
+    },
+    {
+      "path": "scripts/run-midas.sh",
+      "size": 4709,
+      "sha256": "58bc04241f79acd9f7bb567853d2921120b9930776c5d7127c8dd10b063a8c03",
+      "executable": true
+    },
+    {
+      "path": "scripts/run-spike.sh",
+      "size": 1968,
+      "sha256": "a86845605e7243eafffec331e5967351d6085dbfac0a21788588148fe4aaa38c",
+      "executable": true
+    },
+    {
+      "path": "scripts/run-vcs.sh",
+      "size": 2142,
+      "sha256": "eb1f771b86da7f4871cd32ff446286ee7ddba9a9cd0cdb5c7f90756e5d047058",
+      "executable": true
+    },
+    {
+      "path": "scripts/run-verilator.sh",
+      "size": 2115,
+      "sha256": "534e155903d26bbe0cffeddddef61fffed499e0c2621f3e604a3373c3d53ad10",
+      "executable": true
+    },
+    {
+      "path": "scripts/setup-paths.sh",
+      "size": 1540,
+      "sha256": "b8804db9066509929bf31848c586941dd5f2c4f03e42afe8d7c94fab139b0cf2",
+      "executable": true
+    },
+    {
+      "path": "software/gemmini-ort/run-ort.sh",
+      "size": 6609,
+      "sha256": "3e156aeb8fa9b6709a06d36f9df7cdfd838d64ac63e5f9db7978aee0b8ab1eef",
+      "executable": true
+    },
+    {
+      "path": "software/gemmini-ort.json",
+      "size": 2274,
+      "sha256": "9bb1d32f697ff7eb22019f2db132b6e37a9903e29255462db2b0309be697028d",
+      "executable": false
+    },
+    {
+      "path": "software/gemmini-smoke.json",
+      "size": 241,
+      "sha256": "86e86c07da1908d2ef0e4c2efcecaca5e4f00e28709e96143a7a379d5b7ba0de",
+      "executable": false
+    },
+    {
+      "path": "software/gemmini-tests-full.json",
+      "size": 218,
+      "sha256": "b2d9bdc7fabd804a0b9c666d6cb699671d55daec3351c633e2cf0873554205d2",
+      "executable": false
+    },
+    {
+      "path": "software/gemmini-tests-interactive.json",
+      "size": 212,
+      "sha256": "f4402e5210f6c68fe4b9010d44b58991ea07ae6b58ee13930a5f9e58ce5c6cd4",
+      "executable": false
+    },
+    {
+      "path": "software/gemmini-tests.json",
+      "size": 236,
+      "sha256": "46a8316923f9f5dfa6ac26c1a6f0db82f1287b42b2b3b54ba1f9591780245c9e",
+      "executable": false
+    },
+    {
+      "path": "software/host-init.sh",
+      "size": 440,
+      "sha256": "012d44808e1e1dfbc1569193d570315388fcb0a50793f4f40f65a57208a3f27e",
+      "executable": true
+    },
+    {
+      "path": "software/overlay/root/run-test-smoke.sh",
+      "size": 207,
+      "sha256": "2fcff39df673f877ee15d4e585027218d25a3544f04bf1dcb3e5ba4d021958cc",
+      "executable": true
+    },
+    {
+      "path": "software/overlay/root/run-tests-full.sh",
+      "size": 3890,
+      "sha256": "f39eee84e3ef915709c87026c7cd1ef25a23b21f7b89192dfc5976108b1be234",
+      "executable": true
+    },
+    {
+      "path": "software/overlay/root/run-tests.sh",
+      "size": 2062,
+      "sha256": "6037e619b577fe537fe72988ae7f8365fddb1a3a44254965209ef79466833755",
+      "executable": true
+    },
+    {
+      "path": "src/main/scala/gemmini/AccumulatorMem.scala",
+      "size": 13170,
+      "sha256": "09e710bdd7ec5c3a5e738d72433529583da29b5d50629447f2887535a06abd9b",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/AccumulatorScale.scala",
+      "size": 16348,
+      "sha256": "036fa0005a02eb570e72f18c0ab7c7a00e7c1504a665aaa67b205d45efed40eb",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/Activation.scala",
+      "size": 171,
+      "sha256": "9aec0433b8be1861a0e474f7fc13f9276c5344e60951da3b18eb8fbc41cc7c2b",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/Arithmetic.scala",
+      "size": 21557,
+      "sha256": "fbad802b6eea2276b7da4b4e891045c1f1243d5ef3ec22e67e31ffa1359b915b",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/BeatMerger.scala",
+      "size": 5597,
+      "sha256": "f51a0cc30fbd384acd48ee4146abd34eb4fb81965bb9f7b094f47abdb0413e2a",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/CmdFSM.scala",
+      "size": 6479,
+      "sha256": "441784079f8cb0140c7e34d1d89e6d5cdf700caf4ff8c6cfcfed20c3e17ea8d9",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/Configs.scala",
+      "size": 14084,
+      "sha256": "93e5d475c5465b2ab565e45968b31b3269461b3c7685f36d29608ae07ec29eba",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/ConfigsFP.scala",
+      "size": 8064,
+      "sha256": "12d14362c7294c62ca24019f5f81c71738838049ebe39ab02657ebfc862b4bb0",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/Controller.scala",
+      "size": 19176,
+      "sha256": "300b86dbfd520c2592a2a81e97d24904f0b3f2b16ef667a212f2b66fffbf5d00",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/CounterFile.scala",
+      "size": 8719,
+      "sha256": "daa937f95ed94c0c085c64bb3d24ee71d3dcd251f839f1654468093690d72192",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/CustomCPUConfigs.scala",
+      "size": 474,
+      "sha256": "297f6e464dc925493837dfbc2cf603b101ecf29589967715c83fc469c1db25bb",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/CustomConfigs.scala",
+      "size": 1762,
+      "sha256": "5371b2ff72f7e5e14521586a5839cd0516eb8b37688e9a5d6b37b4fdd2f88369",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/CustomSoCConfigs.scala",
+      "size": 675,
+      "sha256": "f72bd443afff0b3200af63af0a97d6ed67303fdf95035f8fff736b29a0930c71",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/DMA.scala",
+      "size": 28067,
+      "sha256": "6cca9411209c440b780ddd73bf0cf194482ea0d00f545e088f5f6d92bff01b32",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/DMACommandTracker.scala",
+      "size": 3145,
+      "sha256": "a0fbc60a1cdd4f58636a3aafed630f5bec106176fa3e5b57ce028321ac73e0b6",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/DSEConfigs.scala",
+      "size": 9876,
+      "sha256": "7ce4eac12e52e146844ce9c1f38a36f79b08efb2a6fd2f771500b507b9639ec3",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/Dataflow.scala",
+      "size": 87,
+      "sha256": "e87024cf9357868ddeb013d0599e5f48fc709c224dbad3d1a64b56bbe2e7815f",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/ExecuteController.scala",
+      "size": 45174,
+      "sha256": "b56c6556581a6afaaa54987590ca6a06bf2d48d3b64dbafc678350495b7eaf93",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/FrontendTLB.scala",
+      "size": 5853,
+      "sha256": "a377f50746a0d607b3b3738faf2a8ba12ce0b234f9b41d70961fd463b093206a",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/GemminiConfigs.scala",
+      "size": 26400,
+      "sha256": "b4cebe69d5c54bb59f7ed1e67427f8686a4691f27e912bcbacc75ef8690d29bd",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/GemminiISA.scala",
+      "size": 9847,
+      "sha256": "65e9ea63c026caad7f79ed15d7b700744a0da2d4a1a93c33b826e27a921579ff",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/Im2Col.scala",
+      "size": 18037,
+      "sha256": "85977c0003b4ec0bf9e7c9e78f33e13ee9224d785e26a771805e9b3958ef44aa",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/InstructionCompression.scala",
+      "size": 2843,
+      "sha256": "95972dd9445c74677f0ca132a1a1d5974b489112a2abebd4d651b0febb1eadfe",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/LoadController.scala",
+      "size": 7781,
+      "sha256": "82db47c2079b9ec4a02f550890411e96dec466858232db54992f870c6f5dd32d",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/LocalAddr.scala",
+      "size": 5450,
+      "sha256": "cb1d7de3d0f04c77f79044fb53c560409743962cd82d2a86b8ae95898231ac61",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/LoopConv.scala",
+      "size": 70705,
+      "sha256": "8609d9f27ff037ffdeaba53f70e8c0a9b3a994c3871e9eacbee20e58d3dc6c6d",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/LoopMatmul.scala",
+      "size": 45113,
+      "sha256": "23b37660adbe9d2ec590157e228048251777d3771480441f7eca4ecea3561716",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/LoopUnroller.scala",
+      "size": 3075,
+      "sha256": "01e3eb8c12ac749e34a1de1cd16d88900c0383f2a4b8cb2e9c8fdd093b95152c",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/Mesh.scala",
+      "size": 5644,
+      "sha256": "82e0ab80b78a71436437fb92aef3f6bfb82b89c3665c4ec5f8ea8b884cb799a1",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/MeshWithDelays.scala",
+      "size": 10431,
+      "sha256": "3a0bccc14cfd73f6de315e31d6c0f2595009edb98a84aadc48715e50150607b5",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/MultiHeadedQueue.scala",
+      "size": 1499,
+      "sha256": "68e537e5a3d6b811f78f07d0dfabe7ceec55bb664e960c2d3b6c4ae39fd77a51",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/MultiTailedQueue.scala",
+      "size": 1330,
+      "sha256": "51e148223ddf51222e6cc3c74d6b84d179529dcd1154a37691b155c94fff0d5b",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/NormCmd.scala",
+      "size": 463,
+      "sha256": "7f70d5aa2a63d8c05fdb75b0f0f26930983894eb68712afe751a63946d078f06",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/Normalizer.scala",
+      "size": 28548,
+      "sha256": "31013f874085f8ba9724ea6f2e624afe329a64ed6f9f6405801164500b7791b3",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/PE.scala",
+      "size": 4520,
+      "sha256": "3f9a86873d58614261edd7ec3b7125e40fda31d961823d9ad500a7d130d5614d",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/Pipeline.scala",
+      "size": 2239,
+      "sha256": "c33cdc67d9e9eb61478e69a182503be8bd801d950555ed3179c40f68763aa8ae",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/PixelRepeater.scala",
+      "size": 3336,
+      "sha256": "172347ac6c9737d03ed379c73bfdf360d1c9919f94fa5c5fd9f310437b6a31f7",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/ReservationStation.scala",
+      "size": 25244,
+      "sha256": "8f010ff4c54562f35b4b322599ae2e82851b5ba330b39769acabcdccf7232035",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/Scratchpad.scala",
+      "size": 39135,
+      "sha256": "e8c0f4ca334ce71d3fa321fa2b6c7e79aae01aa9454b9852132e696fbae8ae91",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/SharedExtMem.scala",
+      "size": 2863,
+      "sha256": "7ee395b0e906d2de6decc6ed9bbc0dfcd60a1791da8f6c1829c6482cd6d81619",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/Shifter.scala",
+      "size": 1275,
+      "sha256": "aaa70ce1c9c6872f717aa800b9d1dda5fc2b6f5b396ff9c960718ffda87b26ad",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/StoreController.scala",
+      "size": 15248,
+      "sha256": "e76e8799f7fe67a245894a32fa976fd371d6d508a9be3ab55838998e42c2ba6f",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/SyncMem.scala",
+      "size": 3051,
+      "sha256": "c118cdae6ceb96896c43c41281f85d7d3adfff9b0fc74e0413d9ed272c10af97",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/TagQueue.scala",
+      "size": 1164,
+      "sha256": "513c0b8aa5b813207919eee9916b3c27f4a5805f3c5a07f2acab04042671c0ae",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/Tile.scala",
+      "size": 4000,
+      "sha256": "28d3a0165876cf29e10799244c420cff835447e9ec2777006d0d693b581b7946",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/TilerController.scala",
+      "size": 3209,
+      "sha256": "e48bd886b6a354db95a1f32977826a9af0eda913e40284e88e2d2460dc05c8ff",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/TilerFSM.scala",
+      "size": 29130,
+      "sha256": "fd84f2a45546cb9c807566697f1ad624d010b4a607e7e7e1e744727e07ae7c00",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/TilerScheduler.scala",
+      "size": 16858,
+      "sha256": "ae6638331c6f6e8342f94a262938b5829a0e334f6e835edbde529f14d4aee187",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/TransposePreloadUnroller.scala",
+      "size": 3297,
+      "sha256": "a11538f9e6cac152862cd4bd2c44e0a3398a6926c874bb635b2ecc9bc5d49148",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/Transposer.scala",
+      "size": 5363,
+      "sha256": "69a1349d98d188e9fffe8acb4e108e6fbb56c8ef314956faa4bf22a23828e5e3",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/Util.scala",
+      "size": 4248,
+      "sha256": "e57a938f1d6a417d558ac7018ec34ce48e0cf0678c6dfd4ddca6c51fefbce20b",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/VectorScalarMultiplier.scala",
+      "size": 7249,
+      "sha256": "c0972580f295dc7aed7941f4a2792070ab2923c2737f7c73de892d5b506059ce",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/WeightedArbiter.scala",
+      "size": 2063,
+      "sha256": "9166528522f060bcedcf2af7c1538e3690b449a52a9fa2d6ed869fae74f3f4b8",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/XactTracker.scala",
+      "size": 4282,
+      "sha256": "0e2152821780b0b6d91e33ecd06edcdd62eb7f30806aca880a3b2fc923b67803",
+      "executable": false
+    },
+    {
+      "path": "src/main/scala/gemmini/ZeroWriter.scala",
+      "size": 2056,
+      "sha256": "cc8adef645cb46a6152a74fbfed2e16cb144082910a09b21a60f48d34099c3ac",
+      "executable": false
+    },
+    {
+      "path": "src/test/scala/gemmini/DMACommandTrackerTest.scala",
+      "size": 2994,
+      "sha256": "f49fc41c595b9b2c285005243d591fcc0d338b838720cb16e22dd8e1dbbb3251",
+      "executable": false
+    },
+    {
+      "path": "src/test/scala/gemmini/HeaderGenerationUnitTest.scala",
+      "size": 200,
+      "sha256": "9bf5507aeb84990fea7b8d1f3b7bb2212d2737cc57bd49dc76b58567464dac83",
+      "executable": false
+    },
+    {
+      "path": "src/test/scala/gemmini/MeshWithDelaysUnitTest.scala",
+      "size": 15887,
+      "sha256": "5140176bc9c7d58fe993ac76028ccd6bf8b4b704a4868da9e169c0ba1b34ab56",
+      "executable": false
+    },
+    {
+      "path": "src/test/scala/gemmini/PipelineTest.scala",
+      "size": 1976,
+      "sha256": "ba84f343b9068d25bde7fdb2491a2e97b7faef6371ef83756905d60cb27eb918",
+      "executable": false
+    },
+    {
+      "path": "src/test/scala/gemmini/TestUtils.scala",
+      "size": 1191,
+      "sha256": "8e9bd852be5a4cd136bd84b230c9847c6e24b5704488fd7c99ee564fc6051b1e",
+      "executable": false
+    },
+    {
+      "path": "src/test/scala/gemmini/TransposerUnitTest.scala",
+      "size": 2469,
+      "sha256": "1f2d41e653fbe9b3e91c47c6eaed7f67e432a2d3f047a1675da975f19397dc93",
+      "executable": false
+    }
+  ]
+}

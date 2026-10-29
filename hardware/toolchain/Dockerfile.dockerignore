@@ -1,0 +1,13 @@
+**
+!hardware/
+!hardware/toolchain/
+!hardware/toolchain/**
+!pipeline_validator/
+!pipeline_validator/environment.lock.explicit.txt
+!pipeline_validator/environment.lock.yml
+!pipeline_validator/environment.lock.pip.txt
+hardware/toolchain/toolchain.lock
+hardware/toolchain/**/target/
+hardware/toolchain/**/__pycache__/
+# Overlay documentation is not a compiler input; pinned source licenses stay in /opt/deps.
+hardware/toolchain/overlay/*.md

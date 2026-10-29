@@ -1,0 +1,3 @@
+*.conda
+*.tar.bz2
+*.whl

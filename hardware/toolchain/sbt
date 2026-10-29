@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+: "${SBT_BOOT_DIRECTORY:?Set SBT_BOOT_DIRECTORY to the pinned boot bundle or a fresh copy}"
+: "${SBT_IVY_HOME:?Set SBT_IVY_HOME to the pinned Ivy bundle or a fresh copy}"
+: "${COURSIER_CACHE:?Set COURSIER_CACHE to the pinned Maven bundle or a fresh copy}"
+if [[ "${SBT_OFFLINE:-true}" == true ]]; then
+  export COURSIER_MODE=offline
+fi
+user_home="${HOME:-/tmp/nexus-home}"
+sbt_tmp="${SBT_TMPDIR:-$user_home/.cache/nexus-sbt-tmp}"
+mkdir -p "$sbt_tmp"
+exec /opt/native/bin/java -Xmx4G -Xss4M -XX:ActiveProcessorCount=4 \
+  -Duser.home="$user_home" -Djava.io.tmpdir="$sbt_tmp" \
+  -Dsbt.task.cpus=4 -Dsbt.server.autostart=false -Dsbt.supershell=false \
+  -Dsbt.ci=true -Dsbt.log.noformat=true \
+  -Dsbt.offline="${SBT_OFFLINE:-true}" \
+  -Dsbt.boot.directory="$SBT_BOOT_DIRECTORY" \
+  -Dsbt.ivy.home="$SBT_IVY_HOME" \
+  -Dsbt.global.base="${SBT_GLOBAL_BASE:-$user_home/.cache/nexus-sbt-global}" \
+  -Dsbt.override.build.repos=true -Dsbt.repository.config=/opt/sbt-repositories \
+  -jar /opt/sbt-launch.jar "$@"
