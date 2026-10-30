@@ -83,8 +83,10 @@ LoadedProgram → Simulator.run`；Simulator 不包含源码 lowering fallback�
   gate、generation 和静态预算检查。
 - `tile.boa.async` typed Matmul 在 full_memory 下执行真实 BF16→FP32 数值、
   AM 分步提交与最终 f32/BF16 输出；`tile.boa.estimate.async`、EVU、USE 仍是
-  Roofline/launch 时序模型，单 job 非流水；MFE 有可配置
-  load/store lane，每 lane 内串行，未建模更多真实端口/仲裁细节。
+  Roofline/launch 时序模型。P05 每 Tile 有可配置的 BOA engine 池，各实例单 job
+  非流水，链固定 affinity；逻辑 M/N 块影响物理 array wave 数，BOA L1 带宽按
+  engine 静态等分，不模拟动态借用或逐 beat 的真实阵列端口。共享结果服务仍每
+  Tile 每 cycle 推进一次。MFE 有可配置 load/store lane，每 lane 内串行。
 - Stream Queue 模拟 credit/backpressure/EOS，但不是 RTL FIFO/CDC 对拍。
 - `clock_mhz` 与 CPU `issue_width` 都是模拟参数，不是实测 Fmax 或 CPU IPC。
   真实 CPU/FPGA 异步时钟、PCIe/AXI/doorbell 物理链路、CDC、综合、

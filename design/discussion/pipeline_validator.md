@@ -131,22 +131,22 @@ pipeline_validator/
 
 所有硬件参数从 YAML 加载，Python HardwareConfig 是冻结 dataclass：
 
-| 参数组              | 关键字段                | 默认值           | 冻结状态       |
-| ------------------- | ----------------------- | ---------------- | -------------- |
-| `system`            | `num_tiles`             | 4                | 冻结           |
-| `clock`             | `core_mhz`              | 1000             | 建模基线       |
-| `memory.hbm`        | `capacity_bytes`        | 16 GB            | 由后续规格冻结 |
-| `memory.hbm`        | `bandwidth_gbs`         | 819.2 (8 stacks) | 由后续规格冻结 |
-| `memory.group_sram` | `capacity_bytes`        | 8 MB             | 冻结           |
-| `memory.group_sram` | `banks`                 | 16               | 冻结           |
-| `memory.tile_l1`    | `capacity_bytes`        | 1 MB             | 冻结           |
-| `memory.tile_l1`    | `banks`                 | 16               | 冻结           |
-| `engines.boa`       | `num_opa × rows × cols` | 4×16×16          | 冻结           |
-| `engines.evu`       | `lanes`                 | 32               | 冻结           |
-| `engines.mfe`       | `bandwidth_gbs`         | 256.0            | 冻结           |
-| `engines.use`       | `clock_mhz`             | 500              | 冻结           |
-| `fabric.dma`        | `channels`              | 2                | 冻结           |
-| `fabric.noc`        | `vc_depth`              | 8                | 由 PPA 冻结    |
+| 参数组              | 关键字段                                    | 默认值                         | 冻结状态                   |
+| ------------------- | ------------------------------------------- | ------------------------------ | -------------------------- |
+| `system`            | `num_tiles`                                 | 4                              | 冻结                       |
+| `clock`             | `core_mhz`                                  | 1000                           | 建模基线                   |
+| `memory.hbm`        | `capacity_bytes`                            | 16 GB                          | 由后续规格冻结             |
+| `memory.hbm`        | `bandwidth_gbs`                             | 819.2 (8 stacks)               | 由后续规格冻结             |
+| `memory.group_sram` | `capacity_bytes`                            | 8 MB                           | 冻结                       |
+| `memory.group_sram` | `banks`                                     | 16                             | 冻结                       |
+| `memory.tile_l1`    | `capacity_bytes`                            | 1 MB                           | 冻结                       |
+| `memory.tile_l1`    | `banks`                                     | 16                             | 冻结                       |
+| `engines.boa`       | `arrays_per_tile × array_rows × array_cols` | 默认1×16×16；V1软件实例4×16×16 | P05软件模型；非RTL/PPA冻结 |
+| `engines.evu`       | `lanes`                                     | 32                             | 冻结                       |
+| `engines.mfe`       | `bandwidth_gbs`                             | 256.0                          | 冻结                       |
+| `engines.use`       | `clock_mhz`                                 | 500                            | 冻结                       |
+| `fabric.dma`        | `channels`                                  | 2                              | 冻结                       |
+| `fabric.noc`        | `vc_depth`                                  | 8                              | 由 PPA 冻结                |
 
 --hw-override 命令行可覆盖任意 YAML 参数。
 

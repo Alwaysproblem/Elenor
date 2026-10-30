@@ -68,7 +68,6 @@ from .runtime import (
 )
 from .runtime.relocation import relocate_task
 from .runtime.reset_domain import ResetState
-from .runtime.shared_am import SharedAmManager
 from .stream_queue import EOSPolicy, QueueKind, StreamQueue
 from .tile import ComputeTile, TileAdmission, _UCETerminalEvent
 from .tile_group_sequencer import TileGroupSequencer
@@ -260,14 +259,6 @@ class TileGroup:
       pool_id=0,
     )
     self.l2_mshr = MshrTable(cfg.l2_mshr_entries)
-    self.shared_am = SharedAmManager(
-      slot_capacity_bytes=cfg.boa_am_slot_capacity_bytes,
-      group_count=cfg.boa_am_group_count,
-      slots_per_group=cfg.boa_am_slots_per_group,
-      slots_per_context=cfg.boa_am_slots_per_context,
-      tile_id=0,
-      tracer=self.tracer,
-    )
     self.tiles: list[ComputeTile] = [
       ComputeTile(
         i,
@@ -280,7 +271,6 @@ class TileGroup:
         l2_cache=self.l2_cache,
         l2_mshr=self.l2_mshr,
         memory_trace=self.memory_trace,
-        shared_am=self.shared_am,
       )
       for i in range(cfg.num_tiles)
     ]
@@ -1129,7 +1119,7 @@ class TileGroup:
     self._live_launches.clear()
     self._l2_roles.clear()
     for tile in self.tiles:
-      tile.reset()
+      tile.reset(cycle)
     self.transfer_manager.acknowledge_all_terminals(cycle)
     self.assert_l2_closed()
     return True
@@ -2267,8 +2257,7 @@ class TileGroup:
       self.profile_controller.step(cycle)
       cycle += 1
     for tile in self.tiles:
-      tile.reset()
-    self.shared_am.reset(cycle)
+      tile.reset(cycle)
     self.event_table.clear()
     self.scheduler.reset()
     self.program_table.invalidate_group()
@@ -2301,6 +2290,24 @@ class TileGroup:
     return snapshot
 
   def snapshot(self) -> dict:
+    shared_am_per_tile = [tile.shared_am.snapshot() for tile in self.tiles]
+    additive_fields = (
+      "total_slots", "free_slots", "live_leases", "pending_requests", "reserved_slots",
+      "request_count", "parked_count", "wake_count", "cancelled_request_count",
+      "acquire_count", "commit_count", "final_count", "fault_count", "slot_free_count",
+    )
+    shared_am = {
+      "topology": "per_tile_v1",
+      "tile_count": len(self.tiles),
+      "slot_capacity_bytes": self.cfg.boa_am_slot_capacity_bytes,
+      "groups_per_tile": self.cfg.boa_am_group_count,
+      "slots_per_group": self.cfg.boa_am_slots_per_group,
+      "slots_per_context": self.cfg.boa_am_slots_per_context,
+      **{name: sum(tile[name] for tile in shared_am_per_tile) for name in additive_fields},
+      # Tile peaks need not occur together; these are not a global high-water mark.
+      "sum_tile_peak_live": sum(tile["peak_live"] for tile in shared_am_per_tile),
+      "sum_tile_peak_pending": sum(tile["peak_pending"] for tile in shared_am_per_tile),
+    }
     return {
       "compiled_artifact_hash": None if self.loaded_program is None else self.loaded_program.artifact_hash,
       "registry_hash": self.registry.registry_hash,
@@ -2318,7 +2325,8 @@ class TileGroup:
       "task_submission_pc": self.sequencer.submission_pc,
       "scheduler": self._scheduler_snapshot(),
       "event_table": self.event_table.snapshot(),
-      "shared_am": self.shared_am.snapshot(),
+      "shared_am": shared_am,
+      "shared_am_per_tile": shared_am_per_tile,
       "queues": {qid: q.snapshot() for qid, q in self.queues.items()},
       "tiles": [t.snapshot() for t in self.tiles],
       "memory": {

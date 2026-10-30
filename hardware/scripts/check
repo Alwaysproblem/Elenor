@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unified hardware check dispatcher (P02).
+"""Unified hardware check dispatcher.
 
 Usage:
   hardware/scripts/check TARGET [BOARD] --out DIR [--config PATH] [--seed N] [--case ID]
@@ -128,7 +128,7 @@ def main(argv: list[str]) -> int:
   request = {
     "schema": 1,
     "mode": "check",
-    "task_id": "P02",
+    "task_id": entry["owner"],
     "target": args.target,
     "board": args.board,
     "cases": selected,
@@ -142,7 +142,7 @@ def main(argv: list[str]) -> int:
   }
   common.write_json(out_dir / "request.json", request)
 
-  container_name = f"nexus-p02-check-{os.getpid()}"
+  container_name = f"nexus-check-{os.getpid()}"
   argv_container = common.container_run_argv(
     docker, image_id, Path(os.path.realpath(common.REPO_ROOT)), out_dir, expect_lock_sha, container_name
   )

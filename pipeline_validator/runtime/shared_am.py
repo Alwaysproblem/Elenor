@@ -1,7 +1,7 @@
 """Software-managed shared accumulator memory (shared AM V1).
 
-The manager owns the only mutable AM state: physical slots, per-context
-lease quota, fixed engine affinity, slot generations and terminal records.
+Each Compute Tile owns one manager containing its only mutable AM state:
+physical slots, per-context lease quota, fixed engine affinity, generations and terminal records.
 It never chooses software logical slots and never exposes AM as an L1
 address: a caller must first obtain a lease, then commit typed Matmul steps
 through that lease.
@@ -9,6 +9,21 @@ through that lease.
 Physical layout is ``group_count x slots_per_group`` dynamic slots.  A
 lease counts against its owner's quota from the successful grant until
 ``slot_free`` -- not until software awaits an event or reaps a record.
+
+Engine affinity: physical groups are pure slot addressing and are
+independent of the BOA engine pool (``engine_count`` engines, ids
+``0..engine_count-1``).  At grant time the allocator binds the lease to the
+engine with the fewest currently live handles, ties broken by the lowest
+engine id.  The live count increments with the same grant and decrements
+exactly once at the safe free, before parked requests are woken, so wake
+grants observe the freed engine's updated count.  A finalized commit does
+not decrement: the lease -- and its engine handle -- stay live through the
+FINAL output and any output backpressure until ``slot_free``.  Affinity is
+never re-evaluated and ``bound_engine`` is never mutated after grant; a busy
+engine's queue therefore keeps its leases.  One engine may serve any number
+of live handles (only the per-context quota and physical slots bound it);
+the familiar "at most 2 per engine from an empty start" is a distribution
+outcome of least-live balancing, not a limit.
 
 Allocation is one request + blocking wait + event wake-up.  ``ALLOC_AM`` is
 issued exactly once; a request that cannot be granted is parked here, not
@@ -36,6 +51,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 
+from ..config import MAX_BOA_ENGINES
 from ..trace import Tracer
 
 
@@ -133,6 +149,7 @@ class SharedAmManager:
     group_count: int = 4,
     slots_per_group: int = 2,
     slots_per_context: int = 2,
+    engine_count: int = 1,
     tile_id: int = 0,
     tracer: Tracer | None = None,
     terminal_capacity: int = 256,
@@ -143,10 +160,15 @@ class SharedAmManager:
       raise ValueError("AM groups and slots per group must be positive")
     if not 1 <= slots_per_context <= group_count * slots_per_group:
       raise ValueError("AM per-context quota must fit the physical slot count")
+    if not isinstance(engine_count, int) or isinstance(engine_count, bool):
+      raise ValueError("AM engine count must be an exact integer")
+    if not 1 <= engine_count <= MAX_BOA_ENGINES:
+      raise ValueError(f"AM engine count must be in 1..{MAX_BOA_ENGINES}")
     self.slot_capacity_bytes = slot_capacity_bytes
     self.group_count = group_count
     self.slots_per_group = slots_per_group
     self.slots_per_context = slots_per_context
+    self.engine_count = engine_count
     self.tile_id = tile_id
     self.tracer = tracer
     self.terminal_capacity = terminal_capacity
@@ -392,6 +414,7 @@ class SharedAmManager:
             "ctx_id": request.owner.ctx_id,
             "tile_id": request.owner.tile_id,
             "buffer": request.buffer_name,
+            "bound_engine": lease.bound_engine,
             "waited_cycles": cycle - request.enqueue_cycle,
           },
         )
@@ -413,6 +436,12 @@ class SharedAmManager:
     slot = next((item for item in self._slots if item.lease_id is None), None)
     if slot is None:
       return None
+    # Grant-time affinity: fewest currently live handles wins, ties go to
+    # the lowest engine id.  ``min`` over the ascending id domain keeps the
+    # tie rule; the count is read and incremented inside this same grant so
+    # slot, quota and engine binding are one atomic result.
+    handles = self._engine_handles
+    bound_engine = min(range(self.engine_count), key=lambda engine: handles.get(engine, 0))
     slot.generation += 1
     self._next_chain_id += 1
     lease = AmLease(
@@ -424,7 +453,7 @@ class SharedAmManager:
       group=slot.group,
       slot=slot.index,
       logical_slot=logical_slot,
-      bound_engine=slot.group,
+      bound_engine=bound_engine,
       dims=tuple(dims),
       byte_count=byte_count,
       output_base=output_base,
@@ -433,7 +462,7 @@ class SharedAmManager:
     self._next_lease_id += 1
     slot.lease_id = lease.lease_id
     self._leases[lease.lease_id] = lease
-    self._engine_handles[lease.bound_engine] = self._engine_handles.get(lease.bound_engine, 0) + 1
+    handles[bound_engine] = handles.get(bound_engine, 0) + 1
     self.acquire_count += 1
     self.peak_live = max(self.peak_live, self.live_lease_count)
     self._trace(
@@ -451,6 +480,11 @@ class SharedAmManager:
         "bound_engine": lease.bound_engine,
         "bytes": lease.byte_count,
         "logical_slot": logical_slot,
+        "quota_slots": self.slots_per_context,
+        "owner_live_handles": self.live_for_owner(owner),
+        "engine_live_handles": handles[bound_engine],
+        "live_leases": self.live_lease_count,
+        "engine_count": self.engine_count,
       },
     )
     return lease
@@ -483,6 +517,7 @@ class SharedAmManager:
         "chain_id": lease.chain_id,
         "owner": lease.owner.context_name,
         "ctx_id": lease.owner.ctx_id,
+        "bound_engine": lease.bound_engine,
         "seq": seq,
         "init": init,
         "final": final,
@@ -522,6 +557,7 @@ class SharedAmManager:
         "chain_id": lease.chain_id,
         "owner": lease.owner.context_name,
         "ctx_id": lease.owner.ctx_id,
+        "bound_engine": lease.bound_engine,
         "seq": seq,
         "final": final,
         "slot": f"{lease.group}.{lease.slot}",
@@ -590,6 +626,15 @@ class SharedAmManager:
     slot.lease_id = None
     lease.state = AmLeaseState.FREE
     self._leases.pop(lease.lease_id, None)
+    # The engine handle dies with the lease, exactly once, strictly before
+    # any parked request is woken: the wake grant must weigh the freed
+    # engine's updated live count.  FINAL commits never reach this path, so
+    # handles stay live through output backpressure.
+    remaining = self._engine_handles.get(lease.bound_engine, 0) - 1
+    if remaining > 0:
+      self._engine_handles[lease.bound_engine] = remaining
+    else:
+      self._engine_handles.pop(lease.bound_engine, None)
     self._drop_idle_bundle(lease.owner)
     self.slot_free_count += 1
     self._trace(
@@ -603,6 +648,8 @@ class SharedAmManager:
         "tile_id": lease.owner.tile_id,
         "slot": f"{lease.group}.{lease.slot}",
         "generation": lease.generation,
+        "bound_engine": lease.bound_engine,
+        "engine_live_handles": self._engine_handles.get(lease.bound_engine, 0),
         "reason": reason,
       },
     )
@@ -612,10 +659,12 @@ class SharedAmManager:
 
   def snapshot(self) -> dict:
     return {
+      "tile_id": self.tile_id,
       "slot_capacity_bytes": self.slot_capacity_bytes,
       "group_count": self.group_count,
       "slots_per_group": self.slots_per_group,
       "slots_per_context": self.slots_per_context,
+      "engine_count": self.engine_count,
       "total_slots": self.total_slots,
       "free_slots": sum(slot.lease_id is None for slot in self._slots),
       "live_leases": self.live_lease_count,
@@ -642,7 +691,12 @@ class SharedAmManager:
       "final_count": self.final_count,
       "fault_count": self.fault_count,
       "slot_free_count": self.slot_free_count,
-      "engine_handle_counts": dict(sorted(self._engine_handles.items())),
+      # Every engine id appears, zero counts included; the values always sum
+      # to ``live_leases`` because each lease contributes exactly one handle
+      # from grant until its single safe free.
+      "engine_handle_counts": {
+        engine: self._engine_handles.get(engine, 0) for engine in range(self.engine_count)
+      },
       "slots": [
         {
           "slot": slot.name,
@@ -670,6 +724,7 @@ class SharedAmManager:
           "chain_id": lease.chain_id,
           "owner": lease.owner.context_name,
           "ctx_id": lease.owner.ctx_id,
+          "tile_id": lease.owner.tile_id,
           "owner_epoch": lease.owner.epoch,
           "buffer": lease.buffer_name,
           "slot": f"{lease.group}.{lease.slot}",
@@ -690,6 +745,7 @@ class SharedAmManager:
           "chain_id": record.chain_id,
           "owner": record.owner.context_name,
           "ctx_id": record.owner.ctx_id,
+          "tile_id": record.owner.tile_id,
           "owner_epoch": record.owner.epoch,
           "generation": record.generation,
           "seq": record.seq,

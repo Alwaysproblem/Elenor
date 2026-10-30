@@ -1,8 +1,8 @@
-# hardware/scripts — 统一硬件入口（P02 runner slice）
+# hardware/scripts — 统一硬件入口（P02 / P03）
 
-统一构建/验收入口。`env`（镜像构建/进入）由 parent 实现并另行维护；本目录的
-`check` / `reproduce` 是所有 target 的统一分派器，`container_check.py` 是锁定镜像内
-唯一的 case 执行器，`common.py` 是宿主侧共享库（仅 stdlib，宿主零安装约束）。
+`env` 管理镜像构建/进入；`check` / `reproduce` 是所有 target 的统一分派器，
+`container_check.py` 是锁定镜像内的 case 执行器，`common.py` 是宿主侧共享库
+（仅 stdlib，宿主零安装约束）。P03 的数值 case 位于 `numeric_cases.py`。
 
 ```text
 hardware/scripts/check      TARGET [BOARD] --out DIR [--config PATH] [--seed N] [--case ID]
@@ -65,7 +65,7 @@ case 内过滤，不改变 case 集合语义。
 
 ## lock 消费约定（runner 视角）
 
-runner 只消费 parent 生成的 `hardware/toolchain/toolchain.lock`，绝不写它：
+runner 只消费 P02 生成的 `hardware/toolchain/toolchain.lock`，绝不写它：
 
 - 必需 `schema == 1`；`image.id` 必须是精确 Docker image-config ID
   （`sha256:<64hex>`），可变 tag 一律拒绝。宿主用该 ID 直接 `docker run`
@@ -75,12 +75,12 @@ runner 只消费 parent 生成的 `hardware/toolchain/toolchain.lock`，绝不�
 - manifest `lock.content` 内嵌完整 lock JSON + 其 sha256；reproduce 先比对当前
   lock sha256 与 manifest 记录，不一致 exit 9。
 
-## 容器调用契约（parent 集成所需的确切命令）
+## 容器调用契约
 
 宿主每次执行（check 与 reproduce 相同）：
 
 ```text
-docker run --rm --name nexus-p02-<mode>-<pid> \
+docker run --rm --name nexus-<mode>-<pid> \
   --network none --cap-drop ALL --security-opt no-new-privileges \
   --user <hostUID>:<hostGID> -e HOME=/tmp/nexus-home \
   --entrypoint /opt/validator/bin/python -w /workspace \
@@ -91,7 +91,7 @@ docker run --rm --name nexus-p02-<mode>-<pid> \
   --expect-lock-sha256 <sha256(lock)> --expect-image-id <lock image.id>
 ```
 
-镜像侧假设（由 parent 的 Dockerfile/ENV 满足；ENTRYPOINT/CMD 被绕过）：
+镜像侧假设（由 P02 Dockerfile/ENV 满足；ENTRYPOINT/CMD 被绕过）：
 
 - `/opt/validator/bin/python`（Python 3.11 + xdsl + PyYAML）是解释器与 validator 环境。
 - ENV PATH 解析：`verilator`、`riscv64-unknown-elf-gcc/-readelf/-objdump`、`java`
@@ -142,7 +142,7 @@ resource_cleanup, counts`。
 counts{cases,passed,failed,assertions,assertions_failed,commands},
 resource_cleanup, manifest`。`PASS` 仅当全部请求 case 的全部断言通过。
 
-## toolchain target 的四个 case（当前唯一实现）
+## toolchain target 的四个 case（owner P02）
 
 | case         | layer       | 证明内容（核心断言）                                                                                                                                                                                              |
 | ------------ | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -153,16 +153,44 @@ resource_cleanup, manifest`。`PASS` 仅当全部请求 case 的全部断言通�
 
 actual/golden 的 `kind` 和 ABI 诊断 metadata 可不同；比较的是全部向量数据，不将 metadata 的 JSON 字节差异当成数值失败。离线复现分别核对两个完整文件的 hash。
 
-seed 语义：manifest/request 完整记录并传给消费 case（python-env replay 的
-SimConfig.seed）；validator CLI 本身无 seed 输入，全部 case 输入固定，输出确定性。
+toolchain 的 seed 语义：manifest/request 完整记录并传给 python-env replay 的
+SimConfig.seed；validator CLI 本身无 seed 输入，toolchain 各 case 使用固定向量。
+
+## numeric target（owner P03）
+
+独立精确数值 reference + SoftFloat 3e + 实际 HardFloat primitive 的逐 bit/flags
+对照；不是完整 BOA/Gemmini RTL，也不修改生产 validator 数值。合同、Python API、
+golden 格式见 [numeric_freeze.md](../boa/reference/numeric_freeze.md)。
+
+```bash
+hardware/scripts/check numeric --out /tmp/boa-p03/all --seed 20261028
+hardware/scripts/check numeric --case probe-nan --out /tmp/boa-p03/nan --seed 20261028
+hardware/scripts/reproduce /tmp/boa-p03/all/manifest.json --out /tmp/boa-p03/offline --offline
+```
+
+| case         | layer | 实际检查                                                                                                                          |
+| ------------ | ----- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `selftest`   | F     | 独立 Fraction/整数原语、Matmul/AM/mask/K=0、后处理/INT8、直接 Conv/流量和 binary64 反例                                           |
+| `crosscheck` | R     | 从 pinned HardFloat 源生成 SV、Verilator 编译，再将 FMA/add/mul/BF16/i32 的所有 bits/flags 与精确 oracle、真实 SoftFloat 调用对拍 |
+| `probe-nan`  | R     | 完整特殊值笛卡尔矩阵、定向边界和 BF16 转换边界；保留原始 NaN payload 输入与实际输出，不做 NaN 归一化后再比较                      |
+| `vectors`    | F     | 同 seed 两次生成全部 JSON，精确比较；另用 committed baseline 的 seed/tile_k 重生成并核对仓库 golden                               |
+
+`numeric.yaml` 的 `random_cases` 是 crosscheck 每种 primitive 的随机向量数，默认 1024；
+`probe-nan` 不添加随机行。`tile_k` 作用于 selftest/向量默认几何，4/8 定向反例保留
+自身几何。seed 真正参与输入生成，不只写 manifest。
+
+每次 check/reproduce 从镜像依赖 bundle 复制全新构建目录。单次 all 运行中
+crosscheck 和 probe-nan 共享本次刚构建的 probe，不跨运行复用二进制。SoftFloat
+无原生 BF16 API，BF16 使用独立的 SoftFloat 整数 RNE 适配器，并与实际
+`RecFNToRecFN` 对拍；该限制明确写入 report。错误时保留 first_failure 和三方原始结果。
 
 ## reproduce 算法
 
-1. 读取 manifest，要求 schema 1 / task_id P02 / status PASS / 结构完整（否则 exit 9）。
+1. 读取 manifest，要求 schema 1 / status PASS / 结构完整，且 task_id 与注册表中已实现 target 的 owner 一致（否则 exit 9）。
 2. 宿主重算 source 身份（scope：`hardware/ pipeline_validator/ examples/` 的 HEAD、
    tracked diff、untracked 文件逐文件 hash），与 manifest 不一致 exit 9。
 3. 当前 `toolchain.lock` sha256 与 manifest 记录比对、镜像 ID 比对（exit 9）。
-4. 从 manifest 重建完整 request（config 全文/seed/cases），写入全新 `--out`，
+4. 从 manifest 的完整解析后 config、seed、cases 重建 request，写入全新 `--out`，
    以同一镜像、`--network none`、全新 `/out/work` 再执行同一 engine；镜像内
    build_inputs 逐文件复核（无暖缓存、无网络、不重用任何旧类/旧二进制）。
 5. 对比两份 manifest：确定性 artifact（`deterministic: true`）逐文件 sha256、

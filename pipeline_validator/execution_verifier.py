@@ -78,9 +78,11 @@ _HW_TARGET_FIELDS = (
   "group_sram_banks",
   "tile_l1_bytes",
   "tile_l1_banks",
-  "boa_num_opa",
-  "boa_opa_rows",
-  "boa_opa_cols",
+  "boa_arrays_per_tile",
+  "boa_array_rows",
+  "boa_array_cols",
+  "boa_tile_m",
+  "boa_tile_n",
   "boa_dtype_bytes",
   "boa_acc_bytes",
   "boa_am_slot_capacity_bytes",
@@ -136,6 +138,9 @@ def target_fingerprint(hw: HardwareConfig, sim: SimConfig) -> str:
     raise ValueError("target_fingerprint requires HardwareConfig and SimConfig")
   registry = build_registry(hw)
   payload = {
+    # Fixed implementation semantics, never a user-selectable legacy topology.
+    "boa_am_topology": "per_tile_v1",
+    "boa_engine_affinity": "least_live_v1",
     "hardware": {name: getattr(hw, name) for name in _HW_TARGET_FIELDS},
     "simulation": {name: getattr(sim, name) for name in _SIM_TARGET_FIELDS},
     "device": {name: getattr(sim.device, name) for name in _DEVICE_TARGET_FIELDS},

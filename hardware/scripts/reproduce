@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline reproduction dispatcher (P02).
+"""Offline reproduction dispatcher.
 
 Usage:
   hardware/scripts/reproduce MANIFEST --out DIR --offline
@@ -17,6 +17,7 @@ Only offline reproduction is supported; `--offline` is required.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from datetime import UTC, datetime
@@ -27,7 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import common
 
 REQUIRED_REQUEST_KEYS = ("target", "board", "cases", "seed", "config_path", "config_content")
-REQUIRED_MANIFEST_KEYS = ("request", "lock", "source", "probes", "cases", "status")
+REQUIRED_MANIFEST_KEYS = ("request", "config", "lock", "source", "probes", "cases", "status")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -52,8 +53,6 @@ def load_source_manifest(path: Path) -> dict:
   manifest = common.load_json(path)
   if manifest.get("schema") != 1:
     common.fail(f"manifest schema must be 1, got {manifest.get('schema')!r}", common.EXIT_MANIFEST)
-  if manifest.get("task_id") != "P02":
-    common.fail(f"manifest task_id must be 'P02', got {manifest.get('task_id')!r}", common.EXIT_MANIFEST)
   for key in REQUIRED_MANIFEST_KEYS:
     if key not in manifest:
       common.fail(f"manifest missing required key '{key}'", common.EXIT_MANIFEST)
@@ -67,6 +66,13 @@ def load_source_manifest(path: Path) -> dict:
   for key in REQUIRED_REQUEST_KEYS:
     if key not in request:
       common.fail(f"manifest request missing required key '{key}'", common.EXIT_MANIFEST)
+  entry = common.load_registry()["targets"].get(request["target"])
+  if not entry or not entry.get("implemented"):
+    common.fail("manifest target has no registered implementation", common.EXIT_MANIFEST)
+  if manifest.get("task_id") != entry["owner"] or request.get("task_id") != entry["owner"]:
+    common.fail("manifest task_id does not match the registered target owner", common.EXIT_MANIFEST)
+  if not isinstance(manifest.get("config"), dict):
+    common.fail("manifest config must contain the fully resolved configuration", common.EXIT_MANIFEST)
   source = manifest.get("source")
   if not isinstance(source, dict) or not isinstance(source.get("host"), dict):
     common.fail("manifest source.host must contain the host source identity", common.EXIT_MANIFEST)
@@ -115,11 +121,15 @@ def main(argv: list[str]) -> int:
   common.require_image(docker, image_id)
 
   request = {key: source_manifest["request"][key] for key in REQUIRED_REQUEST_KEYS}
+  try:
+    request["config_content"] = json.dumps(source_manifest["config"], sort_keys=True, allow_nan=False)
+  except (TypeError, ValueError) as exc:
+    common.fail(f"manifest config is not a finite JSON value: {exc}", common.EXIT_MANIFEST)
   request.update(
     {
       "schema": 1,
       "mode": "reproduce",
-      "task_id": "P02",
+      "task_id": source_manifest["task_id"],
       "lock_path": common.LOCK_REL,
       "expect": {"lock_sha256": expect_lock_sha, "image_id": image_id},
       "source": current_identity,
@@ -131,7 +141,7 @@ def main(argv: list[str]) -> int:
   out_dir.mkdir(parents=True, exist_ok=True)
   common.write_json(out_dir / "request.json", request)
 
-  container_name = f"nexus-p02-reproduce-{os.getpid()}"
+  container_name = f"nexus-reproduce-{os.getpid()}"
   argv_container = common.container_run_argv(
     docker, image_id, Path(os.path.realpath(common.REPO_ROOT)), out_dir, expect_lock_sha, container_name
   )
@@ -161,6 +171,8 @@ def main(argv: list[str]) -> int:
 def compare_manifests(first: dict, second: dict, source_manifest_path: str) -> dict:
   """Compare deterministic outputs and metrics between two manifests."""
   mismatches: list[str] = []
+  if first.get("task_id") != second.get("task_id") or first.get("config") != second.get("config"):
+    mismatches.append("reproduced task owner or resolved configuration differs")
 
   if second.get("status") != "PASS":
     mismatches.append(f"reproduced status is {second.get('status')!r}, expected PASS")
@@ -202,7 +214,7 @@ def compare_manifests(first: dict, second: dict, source_manifest_path: str) -> d
 
   return {
     "schema": 1,
-    "task_id": "P02",
+    "task_id": first["task_id"],
     "mode": "reproduce",
     "compared_at_utc": datetime.now(UTC).isoformat(timespec="seconds"),
     "source_manifest": source_manifest_path,

@@ -15,13 +15,13 @@
     },
     "numeric": {
       "owner": "P03",
-      "implemented": false,
+      "implemented": true,
       "board": null,
-      "cases": [],
+      "cases": ["selftest", "crosscheck", "probe-nan", "vectors"],
       "config": {
         "required_target": "numeric",
-        "consumed_sections": [],
-        "default_config": null
+        "consumed_sections": ["numeric"],
+        "default_config": "hardware/configs/numeric.yaml"
       }
     },
     "numeric-profile": {

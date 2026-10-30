@@ -67,6 +67,7 @@ class BoaResultRecord:
   output_cycle: int | None
   event_cycle: int
   status: str
+  engine_id: int | None = None
 
 
 class BoaResultService:
@@ -167,6 +168,7 @@ class BoaResultService:
       "boa_result_enqueue",
       {
         "event_id": getattr(job, "event_id", ""),
+        "engine_id": getattr(job, "engine_id", None),
         "am": prepared.matmul.am,
         "final": prepared.final,
         "compute_done": getattr(job, "compute_done_cycle", cycle),
@@ -202,7 +204,8 @@ class BoaResultService:
             self._trace(
               cycle,
               "boa_result_wait_output",
-              {"event_id": getattr(pending.job, "event_id", ""), "am": pending.prepared.matmul.am},
+              {"event_id": getattr(pending.job, "event_id", ""), "am": pending.prepared.matmul.am,
+               "engine_id": getattr(pending.job, "engine_id", None)},
             )
         if pending.state is BoaResultState.WAIT_OUTPUT:
           if self._output_blocked or self._output_in_use >= self.output_credit_capacity:
@@ -223,6 +226,7 @@ class BoaResultService:
             "boa_result_output_written",
             {
               "event_id": getattr(pending.job, "event_id", ""),
+              "engine_id": getattr(pending.job, "engine_id", None),
               "am": pending.prepared.matmul.am,
               "output_cycle": cycle,
               "drain_end": pending.drain_end_cycle,
@@ -256,6 +260,7 @@ class BoaResultService:
         getattr(pending.job, "output_cycle", None),
         cycle,
         status,
+        getattr(pending.job, "engine_id", None),
       )
     )
     if len(self._records) > self._record_capacity:
@@ -265,6 +270,7 @@ class BoaResultService:
       "boa_result_ready",
       {
         "event_id": getattr(pending.job, "event_id", ""),
+        "engine_id": getattr(pending.job, "engine_id", None),
         "am": pending.prepared.matmul.am,
         "status": status,
         "event_cycle": cycle,
@@ -293,6 +299,7 @@ class BoaResultService:
         None,
         cycle,
         "fault",
+        getattr(pending.job, "engine_id", None),
       )
     )
 
@@ -342,6 +349,7 @@ class BoaResultService:
       "records": [
         {
           "event_id": record.event_id,
+          "engine_id": record.engine_id,
           "am": record.am,
           "final": record.final,
           "compute_done_cycle": record.compute_done_cycle,

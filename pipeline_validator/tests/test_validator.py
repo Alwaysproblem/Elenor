@@ -1520,15 +1520,29 @@ class TestHardwareConfigYaml:
       "    tiles_per_group: 8\n"
       "engines:\n"
       "  boa:\n"
-      "    opa:\n"
-      "      count: 8\n",
+      "    arrays_per_tile: 2\n"
+      "    tile_m: 32\n",
     )
     cfg = HardwareConfig.from_yaml(path)
     assert cfg.clock_mhz == 2000.0
     assert cfg.num_tiles == 8
-    assert cfg.boa_num_opa == 8
+    assert cfg.boa_arrays_per_tile == 2
+    assert cfg.boa_tile_m == 32
     assert cfg.group_sram_bytes == 8 * 1024 * 1024
     assert cfg.with_overrides(clock_mhz=1500.0).clock_mhz == 1500.0
+
+  def test_from_yaml_rejects_removed_opa_keys(self, tmp_path):
+    path = self._write_yaml(
+      tmp_path,
+      "engines:\n"
+      "  boa:\n"
+      "    opa:\n"
+      "      count: 8\n"
+      "      rows: 16\n"
+      "      cols: 16\n",
+    )
+    with pytest.raises(ValueError, match="unknown hardware config path 'engines.boa.opa"):
+      HardwareConfig.from_yaml(path)
 
   def test_from_yaml_rejects_unknown_nested_path(self, tmp_path):
     path = self._write_yaml(tmp_path, "engines:\n  boa:\n    unknown_lanes: 4\n")

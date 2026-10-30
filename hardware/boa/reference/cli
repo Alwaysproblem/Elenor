@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""Generate exact BOA goldens or verify the independent numerical reference."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+from boa_reference.generators import generate_documents, write_documents
+
+
+def main() -> int:
+  parser = argparse.ArgumentParser(description=__doc__)
+  commands = parser.add_subparsers(dest="command", required=True)
+  for name in ("gen-matmul", "gen-epilogue", "gen-conv", "selftest", "crosscheck"):
+    command = commands.add_parser(name)
+    command.add_argument("--seed", type=int, default=20261028)
+    command.add_argument("--out", type=Path, required=True)
+    if name != "crosscheck":
+      command.add_argument("--tile-k", type=int, default=8)
+    else:
+      command.add_argument("--probe", type=Path, required=True)
+      command.add_argument("--abi-json", type=Path, required=True)
+      command.add_argument("--softfloat-lib", type=Path, default=Path("/opt/softfloat/lib/libsoftfloat.so"))
+      command.add_argument("--random-cases", type=int, default=1024)
+      command.add_argument("--specials-only", action="store_true")
+  args = parser.parse_args()
+  try:
+    if args.command.startswith("gen-"):
+      kinds = {
+        "gen-matmul": ("matmul", "primitives"),
+        "gen-epilogue": ("epilogue",),
+        "gen-conv": ("conv",),
+      }[args.command]
+      documents = generate_documents(args.seed, args.tile_k, kinds)
+      hashes = write_documents(args.out, documents)
+      print(json.dumps({"status": "PASS", "seed": args.seed, "files": hashes}, sort_keys=True))
+      return 0
+    if args.command == "selftest":
+      from boa_reference.selftest import run_selftest
+
+      result = run_selftest(args.seed, args.tile_k)
+      args.out.mkdir(parents=True, exist_ok=True)
+      (args.out / "report.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+    else:
+      from boa_reference.verification import crosscheck
+
+      result = crosscheck(
+        args.seed,
+        args.random_cases,
+        args.probe,
+        args.abi_json,
+        args.out,
+        specials_only=args.specials_only,
+        library=args.softfloat_lib,
+      )
+    print(
+      json.dumps(
+        {"status": result["status"], "counts": result["counts"], "report": str(args.out / "report.json")},
+        sort_keys=True,
+      )
+    )
+    return 0 if result["status"] == "PASS" else 1
+  except (OSError, ValueError, TypeError, RuntimeError) as exc:
+    args.out.mkdir(parents=True, exist_ok=True)
+    (args.out / "error.json").write_text(json.dumps({"status": "FAIL", "error": str(exc)}, indent=2) + "\n")
+    print(f"reference error: {exc}", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+  raise SystemExit(main())

@@ -1385,7 +1385,7 @@ class TestFidelityModes:
     )
     simulator = Simulator(
       HardwareConfig(),
-      SimConfig(fidelity="runtime", context_count=context_count, max_cycles=200000),
+      SimConfig(fidelity="runtime", context_count=context_count),
       enable_tracer=True,
     )
     result = run_source(simulator, ModuleOp([*programs, context]))

@@ -202,10 +202,12 @@ class ResetDomain:
       if not callable(retire_isolated):
         raise MemoryInvariantError("reset integration lacks MFE isolation retirement")
       retire_isolated(cycle)
-      for name in ("boa", "evu", "mfe", "use"):
-        engine = getattr(tile, name, None)
-        if engine is None or not hasattr(engine, "accepted_count"):
-          raise MemoryInvariantError(f"reset integration is missing {name} accepted-job accounting")
+      engines = getattr(tile, "engines", None)
+      if engines is None:
+        raise MemoryInvariantError("reset integration is missing the Tile engine pool")
+      for engine in engines:
+        if not hasattr(engine, "accepted_count"):
+          raise MemoryInvariantError("reset integration is missing engine accepted-job accounting")
         if engine.accepted_count:
           return False
       l1_mshr = getattr(tile, "l1_mshr", None)

@@ -1,0 +1,9 @@
+schema: 1
+target: numeric
+topology: {}
+numeric:
+  profile: bf16_fp32_mac_rne_v1
+  tile_k: 8
+  random_cases: 1024
+validator: {}
+board: {}

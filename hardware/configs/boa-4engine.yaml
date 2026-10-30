@@ -1,0 +1,13 @@
+# P05 software configuration; P09 owns the two-slot-progress container target.
+schema: 1
+target: two-slot-progress
+topology: {}
+numeric: {}
+validator:
+  hw_overrides:
+    boa_arrays_per_tile: 4
+    boa_array_rows: 16
+    boa_array_cols: 16
+    boa_tile_m: 16
+    boa_tile_n: 16
+board: {}

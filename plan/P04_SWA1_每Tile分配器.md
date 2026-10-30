@@ -1,6 +1,6 @@
 # P04 · SW-A1 每 Tile AM 拓扑与隔离（含 target identity 升级与 Q09 永久回归）
 
-状态：未开始
+状态：通过（2026-10-29；Q08a/Q08b/Q09/ID-P04-1/2/RPT-P04-3 与全量 gate 均通过；见 [执行证据](evidence/P04.md)）。
 前置：P01 通过（P02 硬件环境不是本任务前置；软件层独立验收）。
 对应原方案：SW-A1（[设计 v0.5](../design/proposal/BOA_Gemmini_Integration_Design.md) §1.3、§7.2 SW-A 表）；Q08/Q09（§8.1b）；总则 §3.1。
 

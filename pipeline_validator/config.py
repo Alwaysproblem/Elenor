@@ -8,6 +8,7 @@ First Silicon V1 recommended value so a baseline simulation is reproducible.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,12 @@ from .profiles import (
 # (design/elenor_tile_uce §3.2.1); the validator allows up to 8 for
 # what-if exploration.
 MAX_CONTEXT_COUNT = 8
+
+# Per-Tile BOA engine (physical array) pool bound.  This is a software
+# exploration bound for validator configurations, NOT a hardware cap: the
+# P05 总则 §3.1 explicitly allows one engine to serve more than two live
+# handles, and no hardware limit on arrays_per_tile is claimed here.
+MAX_BOA_ENGINES = 8
 
 
 # Explicit YAML path -> HardwareConfig field mapping for the grouped
@@ -60,9 +67,11 @@ _HW_YAML_PATH_TO_FIELD = {
   "memory.tile_l1.cache.lookup_latency_cycles": "l1_cache_lookup_latency_cycles",
   "memory.tile_l1.cache.mshr_entries": "l1_mshr_entries",
   "memory.tile_program_sram.capacity_bytes": "tile_program_sram_bytes",
-  "engines.boa.opa.count": "boa_num_opa",
-  "engines.boa.opa.rows": "boa_opa_rows",
-  "engines.boa.opa.cols": "boa_opa_cols",
+  "engines.boa.arrays_per_tile": "boa_arrays_per_tile",
+  "engines.boa.array_rows": "boa_array_rows",
+  "engines.boa.array_cols": "boa_array_cols",
+  "engines.boa.tile_m": "boa_tile_m",
+  "engines.boa.tile_n": "boa_tile_n",
   "engines.boa.clock_multiplier": "boa_clock_multiplier",
   "engines.boa.dtype.input_bytes": "boa_dtype_bytes",
   "engines.boa.dtype.accumulator_bytes": "boa_acc_bytes",
@@ -252,12 +261,20 @@ class HardwareConfig:
   tile_l1_bandwidth_gbs: float = _HW_DEFAULTS["tile_l1_bandwidth_gbs"]  # per-tile read peak
 
   # --- BOA --------------------------------------------------------------
-  # 6.1 / 8.x: 4 OPA per tile, 16x16 outer-product tile.
-  boa_num_opa: int = _HW_DEFAULTS["boa_num_opa"]
-  boa_opa_rows: int = _HW_DEFAULTS["boa_opa_rows"]
-  boa_opa_cols: int = _HW_DEFAULTS["boa_opa_cols"]
+  # One BOA engine == one physical outer-product array.  arrays_per_tile is
+  # the per-Tile engine pool size (engine id domain 0..arrays_per_tile-1,
+  # independent of the 0..3 AM group domain).  array_rows/cols are the
+  # physical array geometry; tile_m/tile_n are the logical chunk geometry
+  # that drives the spatial-wave timing model in engines.py.  Both enter
+  # the target fingerprint (P05); numeric_tile_k/profile naming is
+  # reserved for P06 and deliberately absent here.
+  boa_arrays_per_tile: int = _HW_DEFAULTS["boa_arrays_per_tile"]
+  boa_array_rows: int = _HW_DEFAULTS["boa_array_rows"]
+  boa_array_cols: int = _HW_DEFAULTS["boa_array_cols"]
+  boa_tile_m: int = _HW_DEFAULTS["boa_tile_m"]
+  boa_tile_n: int = _HW_DEFAULTS["boa_tile_n"]
   boa_clock_multiplier: float = _HW_DEFAULTS["boa_clock_multiplier"]  # BOA at core clock
-  # Peak TOPS computed in boa_peak tops() from OPA geometry + dtype.
+  # Peak TOPS computed in boa_peak_tops() from the array pool + geometry + dtype.
   boa_dtype_bytes: int = _HW_DEFAULTS["boa_dtype_bytes"]  # BF16 input
   boa_acc_bytes: int = _HW_DEFAULTS["boa_acc_bytes"]  # INT32 / BF16 accumulate
   # Software-managed AM: 4 groups x 2 physical slots, at most 2 live
@@ -384,6 +401,22 @@ class HardwareConfig:
       raise ValueError("l1_mshr_entries must be > 0")
     if self.boa_am_slot_capacity_bytes < 1:
       raise ValueError("boa_am_slot_capacity_bytes must be >= 1")
+    if type(self.boa_arrays_per_tile) is not int or not 1 <= self.boa_arrays_per_tile <= MAX_BOA_ENGINES:
+      raise ValueError(
+        f"boa_arrays_per_tile must be an exact integer in 1..{MAX_BOA_ENGINES}, "
+        f"got {self.boa_arrays_per_tile!r}"
+      )
+    _max_uint64 = (1 << 64) - 1
+    for name in ("boa_array_rows", "boa_array_cols", "boa_tile_m", "boa_tile_n"):
+      value = getattr(self, name)
+      if type(value) is not int or not 1 <= value <= _max_uint64:
+        raise ValueError(f"{name} must be an exact positive integer in 1..2^64-1, got {value!r}")
+    if isinstance(self.boa_clock_multiplier, bool) or not isinstance(
+      self.boa_clock_multiplier, (int, float)
+    ) or not math.isfinite(self.boa_clock_multiplier) or self.boa_clock_multiplier <= 0:
+      raise ValueError(
+        f"boa_clock_multiplier must be finite and positive, got {self.boa_clock_multiplier!r}"
+      )
     if self.boa_am_group_count < 1:
       raise ValueError("boa_am_group_count must be >= 1")
     if self.boa_am_slots_per_group < 1:
@@ -407,11 +440,12 @@ class HardwareConfig:
     return 1000.0 / self.clock_mhz
 
   def boa_peak_tops(self) -> float:
-    """Peak BOA TOPS for INT8/BF16 GEMM.
+    """Peak BOA TOPS for INT8/BF16 GEMM across the per-Tile array pool.
 
-    2 FLOP per MAC element.  4 OPA * (16*16) MACs/cycle * 2 * clock.
+    2 FLOP per MAC element.  arrays_per_tile * (rows*cols) MACs/cycle
+    * 2 * clock.
     """
-    macs_per_cycle = self.boa_num_opa * self.boa_opa_rows * self.boa_opa_cols
+    macs_per_cycle = self.boa_arrays_per_tile * self.boa_array_rows * self.boa_array_cols
     flops_per_cycle = macs_per_cycle * 2 * self.boa_clock_multiplier
     return flops_per_cycle * (self.clock_mhz * 1e6) / 1e12
 

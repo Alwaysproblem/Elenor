@@ -11,8 +11,11 @@ design/ELENOR_Architecture_Design_v1.md section 21:
   MFE      : bandwidth-bound (bytes / mfe_bandwidth)
   USE      : state ops on the small control core
 
-V1: BOA/EVU/USE are non-pipelined (one job at a time; UCE blocks on
-`is_busy`).  MFE is channelized (design/elenor_mfe §3.1.4):
+V1: each BOA/EVU/USE engine instance is non-pipelined (one job at a
+time; UCE blocks on `is_busy`).  A Tile owns `boa_arrays_per_tile` BOA
+instances (one physical array each, engine id 0..N-1, distinct trace
+lanes BOA0/BOA1/...); affinity is fixed at AM grant time and never
+migrates.  MFE is channelized (design/elenor_mfe §3.1.4):
 `mfe_load_channels` load lanes plus `mfe_store_channels` store lanes,
 each lane an independent serial resource with per-lane descriptor-accept
 queuing (`mfe_pipeline_depth` per lane).  Launch routes store-class ops
@@ -24,10 +27,12 @@ programs issuing back-to-back loads without UCE stalls.
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
+from fractions import Fraction
 
 from .config import HardwareConfig
 from .execution_ir import ExecBoaMatmulDesc, ExecEngineDesc, ExecTileGatherDesc, ExecTileScatterDesc
@@ -76,6 +81,9 @@ class EngineJob:
   output_cycle: int | None = None
   event_cycle: int | None = None
   result_reserved: bool = False
+  # Runtime-only engine identity (BOA pool index); never serialized into a
+  # compiled descriptor.  None for non-BOA engines.
+  engine_id: int | None = None
 
 
 class Engine:
@@ -127,6 +135,42 @@ class Engine:
   def has_accepted_jobs(self) -> bool:
     return self.accepted_count > 0
 
+  @property
+  def trace_lane(self) -> str:
+    """Trace lane (thread) this engine renders its job slices on.
+
+    Defaults to the engine kind so PMU keys stay kind-based; pooled
+    engines (BOA) override this with a per-instance lane.
+    """
+    return self.kind
+
+  def _trace_args(self, job: EngineJob) -> dict:
+    """Trace args with descriptor-supplied runtime metadata.
+
+    ``lease_id``/``chain_id``/``bound_engine``/``seq`` come from the
+    resolved descriptor's trace metadata (supplied by the Tile runtime);
+    they are omitted when absent instead of flooding non-BOA lanes with
+    null keys.
+    """
+    args: dict = {
+      "event_id": job.event_id,
+      "ops": job.desc.params.get("ops", 0),
+      "bytes": job.desc.params.get("bytes", 0),
+      "desc": job.desc.name,
+      "tile_id": self.tile_id,
+      "ctx_id": job.desc.params.get("ctx_id"),
+      "program": job.desc.params.get("program"),
+      "local_event_id": job.desc.params.get("local_event_id"),
+    }
+    engine_id = getattr(self, "engine_id", None)
+    if engine_id is not None:
+      args["engine_id"] = engine_id
+    for key in ("lease_id", "chain_id", "bound_engine", "seq"):
+      value = job.desc.params.get(key)
+      if value is not None:
+        args[key] = value
+    return args
+
   def launch(
     self,
     desc: ExecEngineDesc,
@@ -174,20 +218,11 @@ class Engine:
     if self.tracer is not None:
       self.tracer.complete(
         f"Tile{self.tile_id}",
-        self.kind,
+        self.trace_lane,
         f"{self.kind}:{self._running.desc.op}",
         self._running.start_cycle,
         self._running.finish_cycle,
-        args={
-          "event_id": self._running.event_id,
-          "ops": self._running.desc.params.get("ops", 0),
-          "bytes": self._running.desc.params.get("bytes", 0),
-          "desc": self._running.desc.name,
-          "tile_id": self.tile_id,
-          "ctx_id": self._running.desc.params.get("ctx_id"),
-          "program": self._running.desc.params.get("program"),
-          "local_event_id": self._running.desc.params.get("local_event_id"),
-        },
+        args=self._trace_args(self._running),
       )
 
   def tick(self, cycle: int) -> list[EngineJob]:
@@ -226,17 +261,92 @@ class Engine:
 class BOAEngine(Engine):
   """Block Outer-product Accelerator — dense compute.
 
-  Estimate descriptors keep the legacy FLOP latency model.  Typed Matmul
-  steps add explicit A/B/AM bytes, a bounded result FIFO, a commit stage
-  and (for FINAL) an output-drain stage: the UCE completion event is only
-  observed after the commit, never at the raw compute-done boundary.
+  One engine instance is ONE physical outer-product array
+  (``boa_array_rows`` x ``boa_array_cols``); a Tile runs
+  ``boa_arrays_per_tile`` instances as an engine pool.  The per-Tile
+  SharedAmManager binds a lease to exactly one engine at grant time; the
+  engine never re-binds accepted work.
+
+  Timing is a documented spatial roofline model, NOT WS/OS pipeline
+  freezing and not P06 numerical chunking:
+
+  * spatial contribution count for dimension ``d`` with logical chunk
+    ``t`` and physical width ``a``:
+    ``(d // t) * ceil(t / a) + ceil((d % t) / a)``;
+  * typed compute cycles =
+    ``ceil(waves_m * waves_n * k / boa_clock_multiplier)`` — ``tile_m`` /
+    ``tile_n`` really change partial-wave timing (closed form, no loop
+    allocations);
+  * estimate descriptors stay timing-only: with positive m/n their
+    ops-based cost is scaled by ``waves_m * waves_n / (m * n)`` (equal to
+    the typed formula when ``ops == 2*m*n*k``); without shapes the
+    roofline uses ``min(rows, tile_m) * min(cols, tile_n)`` effective
+    lanes.  Estimates never fabricate tensor data or AM leases;
+  * the L1 byte roofline uses a conservative static per-engine share
+    ``tile_l1_bandwidth_gbs / boa_arrays_per_tile`` (equal partition, no
+    dynamic borrowing).  The shared result FIFO/credit service stays
+    per Tile; commit/drain latency rules are unchanged.
+
+  Typed Matmul steps keep explicit A/B/AM bytes, a bounded result FIFO, a
+  commit stage and (for FINAL) an output-drain stage: the UCE completion
+  event is only observed after the commit, never at the raw compute-done
+  boundary.
   """
 
   kind = "BOA"
 
-  def __init__(self, cfg: HardwareConfig, tile_id: int, tracer: Tracer | None = None):
+  def __init__(
+    self, cfg: HardwareConfig, tile_id: int, tracer: Tracer | None = None, *, engine_id: int = 0
+  ):
     super().__init__(cfg, tile_id, tracer, pipeline_depth=1)
+    # The engine id must fall inside the configured pool 0..arrays_per_tile-1
+    # (the pool the Tile constructs and the allocator selects from).
+    if type(engine_id) is not int or not 0 <= engine_id < cfg.boa_arrays_per_tile:
+      raise ValueError(
+        f"BOAEngine.engine_id must be an exact integer in the configured pool "
+        f"0..{cfg.boa_arrays_per_tile - 1}, got {engine_id!r}"
+      )
+    self.engine_id = engine_id
     self.result_service: BoaResultService | None = None
+    # Cache the exact static share once: E=3/6/7 produces fractional B/cycle.
+    share = (
+      Fraction(str(cfg.tile_l1_bandwidth_gbs)) * 1000
+      / (Fraction(str(cfg.clock_mhz)) * cfg.boa_arrays_per_tile)
+    )
+    self._l1_share_numerator = share.numerator
+    self._l1_share_denominator = share.denominator
+    # Cumulative counters since reset().  The Tile PMU drains ``.pmu`` every
+    # cycle, so these keep the whole-run view.  ``active_cycles`` mirrors the
+    # ``boa_active`` PMU increments (busy cycles, never idle).  Stall
+    # counters belong to the Tile drain loop only: a blocked attempt
+    # increments exactly one of them per cycle/attempt there; the engine
+    # itself never counts stalls.
+    self.active_cycles = 0
+    self.launch_count = 0
+    self.complete_count = 0
+    self.busy_stall_cycles = 0
+    self.credit_stall_cycles = 0
+
+  @property
+  def trace_lane(self) -> str:
+    """Distinct per-engine lane (BOA0/BOA1/...); PMU keys stay kind-based."""
+    return f"{self.kind}{self.engine_id}"
+
+  @staticmethod
+  def _spatial_waves(dim: int, chunk: int, width: int) -> int:
+    full, rem = divmod(dim, chunk)
+    return full * ((chunk + width - 1) // width) + ((rem + width - 1) // width)
+
+  def _compute_cycles(self, m: int, n: int, k: int) -> int:
+    waves_m = self._spatial_waves(m, self.cfg.boa_tile_m, self.cfg.boa_array_rows)
+    waves_n = self._spatial_waves(n, self.cfg.boa_tile_n, self.cfg.boa_array_cols)
+    return math.ceil(waves_m * waves_n * k / self.cfg.boa_clock_multiplier)
+
+  def _l1_transfer_cycles(self, num_bytes: int) -> int:
+    if num_bytes <= 0 or self._l1_share_numerator <= 0:
+      return 0
+    demand = num_bytes * self._l1_share_denominator
+    return (demand + self._l1_share_numerator - 1) // self._l1_share_numerator
 
   def _matmul(self, desc: ExecEngineDesc):
     matmul = desc.params.get("matmul")
@@ -248,32 +358,63 @@ class BOAEngine(Engine):
     """Return ``(compute_cycles, commit_cycles, drain_cycles)``."""
     matmul = self._matmul(desc)
     if matmul is None:
+      # Timing-only estimate: ops-derived roofline, no tensor data, no AM.
       ops = desc.params.get("ops", 0)
       macs = ops // 2 if ops else 0
-      peak_macs = self.cfg.boa_num_opa * self.cfg.boa_opa_rows * self.cfg.boa_opa_cols
-      compute = (macs + peak_macs - 1) // peak_macs if peak_macs else 0
-      bytes_per_op = desc.params.get("bytes", 0)
-      sram_bw_bytes_per_cycle = self.cfg.tile_l1_bandwidth_gbs * 1e9 / (self.cfg.clock_mhz * 1e6)
-      bw_cycles = 0
-      if sram_bw_bytes_per_cycle > 0 and bytes_per_op > 0:
-        bw_cycles = int((bytes_per_op + sram_bw_bytes_per_cycle - 1) // sram_bw_bytes_per_cycle)
+      m = desc.params.get("m")
+      n = desc.params.get("n")
+      mult = self.cfg.boa_clock_multiplier
+      if type(m) is int and type(n) is int and m > 0 and n > 0:
+        waves_m = self._spatial_waves(m, self.cfg.boa_tile_m, self.cfg.boa_array_rows)
+        waves_n = self._spatial_waves(n, self.cfg.boa_tile_n, self.cfg.boa_array_cols)
+        compute = math.ceil(waves_m * waves_n * macs / (m * n) / mult)
+      else:
+        effective_lanes = min(self.cfg.boa_array_rows, self.cfg.boa_tile_m) * min(
+          self.cfg.boa_array_cols, self.cfg.boa_tile_n
+        )
+        compute = math.ceil(macs / effective_lanes / mult)
+      bw_cycles = self._l1_transfer_cycles(desc.params.get("bytes", 0))
       return max(compute, bw_cycles), 0, 0
-    macs = matmul.m * matmul.n * matmul.k
-    peak_macs = self.cfg.boa_num_opa * self.cfg.boa_opa_rows * self.cfg.boa_opa_cols
-    compute = (macs + peak_macs - 1) // peak_macs if peak_macs else 0
+    compute = self._compute_cycles(matmul.m, matmul.n, matmul.k)
     touched = matmul.m * matmul.k * 2 + matmul.k * matmul.n * 2
     touched += matmul.m * matmul.n * 4  # AM partial read / write
-    sram_bw_bytes_per_cycle = self.cfg.tile_l1_bandwidth_gbs * 1e9 / (self.cfg.clock_mhz * 1e6)
-    bw_cycles = (
-      int((touched + sram_bw_bytes_per_cycle - 1) // sram_bw_bytes_per_cycle)
-      if sram_bw_bytes_per_cycle > 0
-      else 0
-    )
+    bw_cycles = self._l1_transfer_cycles(touched)
     return (
       max(compute, bw_cycles),
       self.cfg.boa_commit_cycles,
       self.cfg.boa_output_drain_cycles if matmul.final else 0,
     )
+
+  def snapshot(self) -> dict:
+    """Cumulative per-engine counters since ``reset`` (whole-run view)."""
+    return {
+      "engine_id": self.engine_id,
+      "state": self.state.name,
+      "accepted_count": self.accepted_count,
+      "active_cycles": self.active_cycles,
+      "launch_count": self.launch_count,
+      "complete_count": self.complete_count,
+      "busy_stall_cycles": self.busy_stall_cycles,
+      "credit_stall_cycles": self.credit_stall_cycles,
+    }
+
+  def tick(self, cycle: int) -> list[EngineJob]:
+    was_active = self._running is not None
+    completed = super().tick(cycle)
+    if was_active:
+      # Mirror the base ``boa_active`` PMU increment one-for-one.
+      self.active_cycles += 1
+    if completed:
+      self.complete_count += len(completed)
+    return completed
+
+  def reset(self) -> None:
+    super().reset()
+    self.active_cycles = 0
+    self.launch_count = 0
+    self.complete_count = 0
+    self.busy_stall_cycles = 0
+    self.credit_stall_cycles = 0
 
   def latency(self, desc: ExecEngineDesc) -> int:
     compute, _commit, _drain = self.breakdown(desc)
@@ -307,6 +448,8 @@ class BOAEngine(Engine):
     assert isinstance(job, EngineJob)
     job.compute_done_cycle = job.finish_cycle
     job.result_reserved = reserved
+    job.engine_id = self.engine_id
+    self.launch_count += 1
     return job
 
 

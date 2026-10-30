@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P02 in-container case runner.
+"""In-container case runner for registered hardware validation targets.
 
 Executed by the host launchers (hardware/scripts/check, hardware/scripts/
 reproduce) inside the locked toolchain image via
@@ -32,13 +32,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
 
+import numeric_cases
+
 EXIT_OK = 0
 EXIT_CONFIG = 6
 EXIT_CASES = 7
 EXIT_ENV = 8
 
 SCHEMA = 1
-TASK_ID = "P02"
 GOLDEN_C_SHA256 = "ebd1555712c10fb5636e5d21fe415d82e2ce4a46dd9a10901a9849669e7eaaea"
 
 CONFIG_TOP_KEYS = {"schema", "target", "topology", "numeric", "validator", "board"}
@@ -379,6 +380,11 @@ def validate_config(text: str, registry_entry: dict, request: dict) -> dict:
     if isinstance(value, str) and OVERRIDE_VALUE_RE.match(value):
       continue
     fail_config(f"invalid hw_overrides value for '{key}': {value!r}")
+  if target == "numeric":
+    try:
+      config["numeric"] = numeric_cases.validate_numeric_config(config.get("numeric", {}))
+    except ValueError as exc:
+      fail_config(str(exc))
   return config
 
 
@@ -605,10 +611,7 @@ def case_riscv(ctx: CaseContext) -> bool:
   gcc = ctx.tools["riscv-gcc"]
   target_flags = ["-march=rv64gc_zicsr_zifencei", "-mabi=lp64d"]
   compile_code = ctx.run(
-    [gcc, *target_flags, "-c", str(source), "-o", str(object_path)],
-    work,
-    "riscv-assemble",
-    timeout=600,
+    [gcc, *target_flags, "-c", str(source), "-o", str(object_path)], work, "riscv-assemble", timeout=600
   )
   if not ctx.check("riscv-assemble-exit", compile_code == 0, f"assembler exit={compile_code}"):
     return False
@@ -875,6 +878,10 @@ CASE_RUNNERS = {
   "softfloat": (case_softfloat, "F"),
   "riscv": (case_riscv, "F"),
   "python-env": (case_python_env, "F"),
+  "selftest": (numeric_cases.case_selftest, "F"),
+  "crosscheck": (numeric_cases.case_crosscheck, "R"),
+  "probe-nan": (numeric_cases.case_probe_nan, "R"),
+  "vectors": (numeric_cases.case_vectors, "F"),
 }
 
 
@@ -885,7 +892,7 @@ def load_request(path: Path) -> dict:
     fail_env(f"cannot read request {path}: {exc}")
   if request.get("schema") != SCHEMA:
     fail_env(f"request schema must be {SCHEMA}")
-  for key in ("mode", "target", "cases", "seed", "config_content", "expect"):
+  for key in ("mode", "target", "task_id", "cases", "seed", "config_content", "expect"):
     if key not in request:
       fail_env(f"request missing required key '{key}'")
   return request
@@ -1002,7 +1009,7 @@ def verify_environment(ctx: CaseContext, lock: dict, request: dict) -> dict:
 
 
 def main() -> int:
-  parser = argparse.ArgumentParser(description="P02 in-container case runner")
+  parser = argparse.ArgumentParser(description="In-container hardware validation runner")
   parser.add_argument("--request", required=True)
   parser.add_argument("--repo", required=True)
   parser.add_argument("--out", required=True)
@@ -1026,6 +1033,9 @@ def main() -> int:
     fail_env(f"request target '{request['target']}' is not registered")
   if not entry.get("implemented"):
     fail_env(f"target '{request['target']}' is registered but not implemented")
+  task_id = entry["owner"]
+  if request["task_id"] != task_id:
+    fail_env(f"request task_id must match registered owner {task_id}")
   registered_cases = list(entry.get("cases", []))
   requested = list(request["cases"])
   unknown = [case for case in requested if case not in registered_cases]
@@ -1078,6 +1088,9 @@ def main() -> int:
     for rel in PYTHON_ENV_FIXTURES:
       path = repo / rel
       fixtures[rel] = sha256_path(path) if path.is_file() else "missing"
+  if request["target"] == "numeric":
+    for path in sorted((repo / "hardware/boa/reference/vectors").glob("*.json")):
+      fixtures[str(path.relative_to(repo))] = sha256_path(path)
 
   cleanup = {
     "work_root": "/out/work",
@@ -1100,7 +1113,7 @@ def main() -> int:
 
   manifest = {
     "schema": SCHEMA,
-    "task_id": TASK_ID,
+    "task_id": task_id,
     "mode": request["mode"],
     "created_utc": datetime.now(UTC).isoformat(timespec="seconds"),
     "status": overall,
@@ -1125,7 +1138,7 @@ def main() -> int:
 
   summary = {
     "schema": SCHEMA,
-    "task_id": TASK_ID,
+    "task_id": task_id,
     "status": overall,
     "validation_layer": {case: result["layer"] for case, result in case_results.items()},
     "cases": list(case_results),

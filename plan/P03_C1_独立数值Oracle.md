@@ -1,6 +1,6 @@
 # P03 · C1 独立数值 Oracle 与数值合同冻结
 
-状态：未开始
+状态：通过（2026-10-29；N-P03-1–N-P03-11、完整 numeric target、25 个确定性产物的离线复现均通过；见 [执行证据](evidence/P03.md)）。
 前置：P02 通过（需要锁定容器、Verilator、C 编译工具链；SoftFloat/HardFloat 源在容器内构建）。
 对应原方案：C1（[设计 v0.5](../design/proposal/BOA_Gemmini_Integration_Design.md) §3.2、§7.2 C1 行）；总则 §3.2、§4.1。
 
@@ -18,9 +18,9 @@
 
 ## 3. 当前证据与修改文件
 
-生产现状（P06 将改，本任务只引用不改）：`pipeline_validator/boa_numeric.py::matmul_f32` 为 binary64 整 step 累加；`convert_output` 拒绝 i8；`_float_to_bf16_bits` 的舍入行为需与冻结转换向量对拍。仓库无任何独立 oracle。
+生产现状（P06 将改，本任务未改）：`pipeline_validator/boa_numeric.py::matmul_f32` 为 binary64 整 step 累加；`convert_output` 拒绝 i8；`_float_to_bf16_bits` 将与本任务冻结转换向量对拍。实施前没有独立 oracle；现已交付 `hardware/boa/reference/`，数值权威为 [numeric_freeze.md](../hardware/boa/reference/numeric_freeze.md)。
 
-拟新增（本任务 ownership）：
+已交付（本任务 ownership）：
 
 - `hardware/boa/reference/boa_reference/`：独立精确数值原语、块AM循环、epilogue；Conv golden用独立卷积索引循环，按声明的K展平次序/分块执行同一数值profile，不调用P08 im2col materializer生成答案。
 - `softfloat_binding.py` 通过ctypes加载P02的PIC共享库libsoftfloat.so，定义明确的C ABI位型参数，不能加载静态.a。
@@ -68,3 +68,11 @@
 ## 8. 产物、交接与停止条件
 
 交付reference包、vectors、numeric_freeze.md、numeric runner及P03 evidence；第三方来源由P02唯一拥有。本任务原样记录已冻结INT8/NaN政策，P06/P08/P11消费。无法归因的三方差异保留最小复现并阻塞，不挑有利一方或放宽bits。
+
+## 9. 本次交接
+
+- 默认完整运行：4 cases / 99 assertions 全通过；72 项 reference 行为检查、24,828 组原语三方 bits/flags、19,708 组独立特殊值扫描。
+- 同 seed 两次生成与仓库 4 份 golden 精确一致；tile_k=4 / seed=20261029 / 每 primitive 16 个随机输入的替代配置也通过完整运行和离线复现。
+- 使用 P02 原锁定镜像，全部构建断网、非 root、仓库只读；未更改宿主安装环境、第三方 pin 或生产数值。
+- 保存 tininess 边界失败与修复证据；SoftFloat 的 BF16 路径明确为整数 RNE 适配器，不声称原生 BF16 API。
+- 下一默认任务为 P04（每 Tile AM 拓扑与隔离）；没有提前实施 P04，也没有宣称 Gemmini 阵列或 validator RTL 联仿通过。

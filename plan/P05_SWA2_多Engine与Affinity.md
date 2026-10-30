@@ -1,6 +1,6 @@
 # P05 · SW-A2 多 engine 与固定 affinity
 
-状态：未开始
+状态：通过（2026-10-30；1/2/4 engine runtime、固定 affinity、配置/target 切换、Perfetto 审计与全量 gate 均已完成；见 [P05 evidence](evidence/P05.md)）。
 前置：P04 通过（per-Tile manager 与 per-Tile 报告是本任务的底座；P02 只影响 target 注册时机，不阻塞软件实现）。
 对应原方案：SW-A2（[设计 v0.5](../design/proposal/BOA_Gemmini_Integration_Design.md) §1.3、§3.1、§4.1、§7.2 SW-A 表）；T04/T05/T06（§8.1）；总则 §3.1。
 
@@ -18,7 +18,7 @@
 
 ## 3. 当前证据与修改文件
 
-现状（符号定位）：
+实施前现状（P04 底座快照；P05 已迁移这些路径，保留为变更依据）：
 
 - `pipeline_validator/runtime/shared_am.py::_allocate_lease`：`bound_engine=slot.group`（affinity 只是元数据且与 group 绑定）；`_engine_handles` 按 bound_engine 计数；`reset()` 清空。
 - `pipeline_validator/tile.py`：`ComputeTile.__init__` 只建 `self.boa = BOAEngine(cfg, tile_id, tracer)` 并挂 tile 级 `BoaResultService`；`TileUCE._engine_for_queue(queue_key="BOA")` 返回 `tile.boa`；launch 构建处 `engine = self._engine_for_queue(tile, queue_key)`。
@@ -73,3 +73,5 @@
 ## 8. 产物、交接与停止条件
 
 交付engine池/调度/trace/配置、1/2/4engine实例和P05 evidence，交接新array_rows/cols、tile_m/n以及P06的numeric_tile_k/profile命名。typed/estimate均保持真实执行；不能因estimate无lease就拒绝整个已有时序功能。统一runner由P09集成。
+
+实施交接：最终字段与兼容性决策见 [evidence §2](evidence/P05.md#2-身份配置与干净切换)，真实 F/C 验收见 §4–§6。全量 `pytest -q -n 4` 为 716 passed / 1 skipped；source/executable 仍为 v4/v4，固定 affinity 标识为 `least_live_v1`。独立 smoke 入口为 `python -m pipeline_validator.tests.test_boa_multi_engine --config hardware/configs/boa-4engine.yaml`。下一默认任务为 P06；未实施 P06/P07/P09 或 RTL 联仿。

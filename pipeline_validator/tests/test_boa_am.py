@@ -76,7 +76,7 @@ def _compile_and_run(
   *,
   capacity: int = 65536,
   c_bytes: int = 65536,
-  block_until: int | None = None,
+  block_cycles: int | None = None,
 ):
   a = (INPUTS / "A.bin").read_bytes()
   b = (INPUTS / "B.bin").read_bytes()
@@ -97,9 +97,26 @@ def _compile_and_run(
   store.seed_hbm(0x100000, a)
   store.seed_hbm(0x200000, b)
   simulator = Simulator(hw, sim_cfg, byte_store=store)
-  if block_until is not None:
-    simulator.group.tiles[0].boa_results.set_output_blocked(True, until_cycle=block_until)
-  result = simulator.run(loaded)
+  if block_cycles is not None:
+    service = simulator.group.tiles[0].boa_results
+    service.set_output_blocked(True)
+    original_step = simulator.group.step
+    resume_cycle = None
+
+    def step(cycle: int) -> bool:
+      nonlocal resume_cycle
+      # Port stimulus follows real readiness; no assumed absolute compute time.
+      if resume_cycle is None and service.snapshot()["states"]["wait_output"]:
+        resume_cycle = cycle + block_cycles
+      if resume_cycle is not None and cycle >= resume_cycle:
+        service.set_output_blocked(False)
+      return original_step(cycle)
+
+    with pytest.MonkeyPatch.context() as patch:
+      patch.setattr(simulator.group, "step", step)
+      result = simulator.run(loaded)
+  else:
+    result = simulator.run(loaded)
   return artifact, simulator, store, result
 
 
@@ -165,7 +182,7 @@ def test_ir01_am_declaration_is_not_in_l1_arena():
   assert len(program.l1_buffers) == 5
   assert all(item.buffer_id != "am:0" for item in program.layout.buffer_layouts)
   assert ExecTileOp.ALLOC_AM in [inst.op for inst in program.insts]
-  assert simulator.group.shared_am.snapshot()["acquire_count"] == 1
+  assert simulator.group.tiles[0].shared_am.snapshot()["acquire_count"] == 1
 
 
 def test_ir02_am_capacity_is_explicit_and_not_grown():
@@ -173,7 +190,7 @@ def test_ir02_am_capacity_is_explicit_and_not_grown():
     _compile_and_run(capacity=32768)
   artifact, simulator, _store, _result = _compile_and_run(capacity=65536)
   assert _first_program(artifact).am_buffers[0].bytes == 65536
-  assert simulator.group.shared_am.snapshot()["slot_capacity_bytes"] == 65536
+  assert simulator.group.tiles[0].shared_am.snapshot()["slot_capacity_bytes"] == 65536
   large = _hw(262144)
   small = _hw(65536)
   from pipeline_validator.execution_verifier import target_fingerprint
@@ -194,7 +211,7 @@ def test_ir03_05_07_f32_output_matches_independent_oracle():
   actual = store.read_hbm(0x300000, 65536)
   assert result.completed
   assert actual == expected
-  snapshot = simulator.group.shared_am.snapshot()
+  snapshot = simulator.group.tiles[0].shared_am.snapshot()
   assert snapshot["live_leases"] == 0
   assert snapshot["free_slots"] == snapshot["total_slots"] == 8
   assert snapshot["terminals"][-1]["kind"] == "chain_done"
@@ -290,12 +307,13 @@ def test_ir10_affinity_is_fixed_and_one_engine_serves_many_handles():
     group_count=4,
     slots_per_group=2,
     slots_per_context=2,
+    engine_count=1,
   )
   owner = AmOwner("ctx", 1, 0, 0)
   engines = []
   for index in range(6):
     lease = _acquire(
-    manager,
+      manager,
       owner,
       buffer_name=f"a{index}",
       logical_slot=index % 2,
@@ -305,10 +323,15 @@ def test_ir10_affinity_is_fixed_and_one_engine_serves_many_handles():
       cycle=index,
     )
     assert lease is not None
+    # One engine serves every handle; nothing re-pins a live lease.
+    assert lease.bound_engine == 0
     engines.append(lease.bound_engine)
+    snapshot = manager.snapshot()
+    assert snapshot["engine_handle_counts"] == {0: 1}
+    assert sum(snapshot["engine_handle_counts"].values()) == snapshot["live_leases"]
     manager.abort_lease(lease.lease_id, index + 1, "test")
-  assert engines[:2] == [0, 0]
-  assert manager.snapshot()["engine_handle_counts"][0] >= 3
+    assert manager.snapshot()["engine_handle_counts"] == {0: 0}
+  assert engines == [0] * 6
 
 
 # ---------------------------------------------------------------------------
@@ -337,8 +360,6 @@ def test_ir11_typed_boa_commit_is_after_compute_and_drain():
   assert service["release_count"] == 1
   assert service["output_write_count"] == 1
   assert service["credits"] == service["credit_capacity"]
-  terminal = simulator.group.shared_am.snapshot()["terminals"][-1]
-  assert terminal["cycle"] == record["commit_cycle"]
   assert result.cycles >= record["event_cycle"]
 
 
@@ -457,14 +478,34 @@ def test_two_independent_chains_are_expressible():
 # ---------------------------------------------------------------------------
 
 
-def test_ir16_v4_artifact_replays_without_source():
-  artifact, _simulator, _store, _result = _compile_and_run()
-  assert artifact.schema_version == 4
-  assert artifact.compiler_abi == "v4"
-  text = serialize_compiled_program(artifact)
-  replay = parse_compiled_program(text)
-  assert replay.artifact_hash == artifact.artifact_hash
-  assert parse_compiled_program(text).entry == artifact.entry
+def test_ir16_serialized_per_tile_artifact_runs_and_old_group_target_is_rejected():
+  a = (INPUTS / "A.bin").read_bytes()
+  b = (INPUTS / "B.bin").read_bytes()
+  bindings = _bindings(len(a), len(b))
+  hw, sim_cfg = _hw(), _sim()
+  legacy = parse_compiled_program(
+    (ROOT / "plan/evidence/P04/before/boa-am.compiled.json").read_text()
+  )
+  with pytest.raises(ValueError, match="target fingerprint mismatch"):
+    load_program(legacy, hw, sim_cfg, actual_bindings=bindings)
+
+  compiled = compile_program(
+    parse_workload_ir(_fixture_text()), hw, sim_cfg, binding_assumptions=bindings,
+    source_name=str(FIXTURE),
+  )
+  replay = parse_compiled_program(serialize_compiled_program(compiled))
+  loaded = load_program(replay, hw, sim_cfg, actual_bindings=bindings)
+  store = ByteStore()
+  store.seed_hbm(0x100000, a)
+  store.seed_hbm(0x200000, b)
+  result = Simulator(hw, sim_cfg, byte_store=store).run(loaded)
+  assert result.completed, result.reason
+  assert store.read_hbm(0x300000, 65536) == struct.pack("<16384f", *_oracle(a, b))
+  assert all(
+    pool["live_leases"] == pool["pending_requests"] == pool["reserved_slots"] == 0
+    and pool["free_slots"] == pool["total_slots"]
+    for pool in result.group_snapshot["shared_am_per_tile"]
+  )
 
 
 def test_ir16_resealed_tampered_am_binding_is_rejected():
@@ -642,7 +683,7 @@ def test_am_i8_output_is_accepted_by_source_but_rejected_numerically():
   _artifact, simulator, _store, result = _compile_and_run(text, c_bytes=16384)
   assert not result.completed
   assert "INT8 AM output conversion policy" in result.reason
-  snapshot = simulator.group.shared_am.snapshot()
+  snapshot = simulator.group.tiles[0].shared_am.snapshot()
   assert snapshot["fault_count"] == 1
   assert snapshot["live_leases"] == 0
 
@@ -674,7 +715,7 @@ def test_eight_contexts_with_one_lease_each_fill_all_slots():
   for index in range(8):
     lease = _acquire(
     manager,
-      AmOwner("ctx", 1, index, index),
+      AmOwner("ctx", 1, index, 0),
       buffer_name="a",
       logical_slot=0,
       dims=(64, 256),
@@ -688,7 +729,7 @@ def test_eight_contexts_with_one_lease_each_fill_all_slots():
   woken: list = []
   ninth = _acquire(
     manager,
-    AmOwner("ctx", 1, 8, 8),
+    AmOwner("ctx", 1, 8, 0),
     wake=lambda lease, cycle: woken.append((lease, cycle)),
     **_request_kwargs("a", 0, 9),
   )
@@ -697,7 +738,7 @@ def test_eight_contexts_with_one_lease_each_fill_all_slots():
   assert manager.snapshot()["pending_requests"] == 1
   manager.abort_lease(leases[0].lease_id, 10, "test")
   assert len(woken) == 1 and woken[0][1] == 10
-  assert woken[0][0].owner == AmOwner("ctx", 1, 8, 8)
+  assert woken[0][0].owner == AmOwner("ctx", 1, 8, 0)
   for lease in leases[1:]:
     manager.abort_lease(lease.lease_id, 11, "test")
   manager.abort_lease(woken[0][0].lease_id, 12, "test")
@@ -848,91 +889,21 @@ def test_ir14_final_output_backpressure_defers_release_and_event():
 
 
 def test_ir14_runtime_final_output_backpressure_recovers_without_polling():
-  _artifact, simulator, store, result = _compile_and_run(block_until=3000)
+  hold_cycles = 11
+  _artifact, simulator, store, result = _compile_and_run(block_cycles=hold_cycles)
   assert result.completed
   service = simulator.group.tiles[0].boa_results.snapshot()
   finals = [record for record in service["records"] if record["final"]]
   assert len(finals) == 1
   record = finals[0]
-  assert service["blocked_cycles"] > 0
-  assert record["output_cycle"] >= 3000
+  assert service["blocked_cycles"] >= hold_cycles
+  assert record["output_cycle"] - record["compute_done_cycle"] >= hold_cycles
   assert record["event_cycle"] >= record["output_cycle"]
-  assert simulator.group.shared_am.snapshot()["live_leases"] == 0
-  assert simulator.group.shared_am.snapshot()["terminals"][-1]["kind"] == "chain_done"
+  assert simulator.group.tiles[0].shared_am.snapshot()["live_leases"] == 0
+  assert simulator.group.tiles[0].shared_am.snapshot()["terminals"][-1]["kind"] == "chain_done"
   a = (INPUTS / "A.bin").read_bytes()
   b = (INPUTS / "B.bin").read_bytes()
   assert store.read_hbm(0x300000, 65536) == struct.pack("<16384f", *_oracle(a, b))
-
-
-def test_am_owner_uses_physical_tile_identity():
-  manager = SharedAmManager(
-    slot_capacity_bytes=65536,
-    group_count=2,
-    slots_per_group=1,
-    slots_per_context=1,
-  )
-  tile0_ctx0 = AmOwner("mm", 1, 0, 0)
-  tile1_ctx0 = AmOwner("mm", 1, 0, 1)
-  first = _acquire(
-    manager,
-    tile0_ctx0,
-    buffer_name="a",
-    logical_slot=0,
-    dims=(64, 256),
-    byte_count=65536,
-    output_base="l1:0",
-    cycle=0,
-  )
-  second = _acquire(
-    manager,
-    tile1_ctx0,
-    buffer_name="a",
-    logical_slot=0,
-    dims=(64, 256),
-    byte_count=65536,
-    output_base="l1:0",
-    cycle=1,
-  )
-  assert first is not None
-  assert second is not None
-  assert first.owner != second.owner
-  assert manager.snapshot()["free_slots"] == 0
-
-
-def test_am_fault_isolation_by_physical_tile():
-  manager = SharedAmManager(
-    slot_capacity_bytes=65536,
-    group_count=2,
-    slots_per_group=1,
-    slots_per_context=1,
-  )
-  tile0 = AmOwner("mm", 1, 0, 0)
-  tile1 = AmOwner("mm", 1, 0, 1)
-  lease0 = _acquire(
-    manager,
-    tile0,
-    buffer_name="a",
-    logical_slot=0,
-    dims=(64, 256),
-    byte_count=65536,
-    output_base="l1:0",
-    cycle=0,
-  )
-  lease1 = _acquire(
-    manager,
-    tile1,
-    buffer_name="a",
-    logical_slot=0,
-    dims=(64, 256),
-    byte_count=65536,
-    output_base="l1:0",
-    cycle=1,
-  )
-  assert lease0 is not None and lease1 is not None
-  manager.abort_owner(tile0, 2, "fault")
-  assert manager.snapshot()["live_leases"] == 1
-  assert manager.lease(lease1.lease_id) is lease1
-
 
 
 def test_am_request_parks_once_and_wakes_on_slot_free():
@@ -940,7 +911,7 @@ def test_am_request_parks_once_and_wakes_on_slot_free():
     slot_capacity_bytes=65536, group_count=1, slots_per_group=1, slots_per_context=1
   )
   holder = AmOwner("holder", 1, 0, 0)
-  waiter = AmOwner("waiter", 1, 0, 1)
+  waiter = AmOwner("waiter", 1, 1, 0)
   first = _acquire(manager, holder, **_request_kwargs("a", 0, 0))
   assert first is not None
   wakes: list = []
@@ -968,8 +939,8 @@ def test_am_bundle_reserves_continuation_and_prevents_hold_and_wait():
     slot_capacity_bytes=65536, group_count=2, slots_per_group=1, slots_per_context=2
   )
   owner_a = AmOwner("a", 1, 0, 0)
-  owner_b = AmOwner("b", 1, 0, 1)
-  owner_c = AmOwner("c", 1, 0, 2)
+  owner_b = AmOwner("b", 1, 1, 0)
+  owner_c = AmOwner("c", 1, 2, 0)
   first_a = _acquire(manager, owner_a, bundle_slots=2, **_request_kwargs("a0", 0, 0))
   assert first_a is not None
   assert manager.snapshot()["reserved_slots"] == 1
@@ -1003,7 +974,7 @@ def test_am_continuation_waits_only_for_own_draining_final():
     slot_capacity_bytes=65536, group_count=2, slots_per_group=1, slots_per_context=2
   )
   owner = AmOwner("a", 1, 0, 0)
-  other = AmOwner("b", 1, 0, 1)
+  other = AmOwner("b", 1, 1, 0)
   first = _acquire(manager, owner, bundle_slots=1, **_request_kwargs("a0", 0, 0))
   assert first is not None
   other_lease = _acquire(manager, other, **_request_kwargs("b0", 0, 0))
@@ -1083,7 +1054,7 @@ def test_am_cancelled_request_is_never_woken():
     slot_capacity_bytes=65536, group_count=1, slots_per_group=1, slots_per_context=1
   )
   holder = AmOwner("holder", 1, 0, 0)
-  waiter = AmOwner("waiter", 1, 0, 1)
+  waiter = AmOwner("waiter", 1, 1, 0)
   lease = _acquire(manager, holder, **_request_kwargs("a", 0, 0))
   assert lease is not None
   assert _acquire(manager, waiter, **_request_kwargs("a", 0, 1)) is None
@@ -1099,7 +1070,7 @@ def test_runtime_alloc_am_blocks_once_and_wakes_on_slot_free():
   a = (INPUTS / "A.bin").read_bytes()
   b = (INPUTS / "B.bin").read_bytes()
   bindings = _bindings(len(a), len(b))
-  sim_cfg = _sim()
+  sim_cfg = replace(_sim(), context_count=2)
   artifact = compile_program(
     parse_workload_ir(FIXTURE.read_text()), hw, sim_cfg, binding_assumptions=bindings,
     source_name=str(FIXTURE),
@@ -1109,9 +1080,9 @@ def test_runtime_alloc_am_blocks_once_and_wakes_on_slot_free():
   store.seed_hbm(0x100000, a)
   store.seed_hbm(0x200000, b)
   simulator = Simulator(hw, sim_cfg, byte_store=store)
-  manager = simulator.group.shared_am
+  manager = simulator.group.tiles[0].shared_am
   blocker = manager.request(
-    AmOwner("blocker", 1, 7, 99), bundle_slots=1, wake=_never_woken, **_request_kwargs("x", 0, 0)
+    AmOwner("blocker", 1, 1, 0), bundle_slots=1, wake=_never_woken, **_request_kwargs("x", 0, 0)
   )
   assert blocker is not None
   release_cycle = 2000

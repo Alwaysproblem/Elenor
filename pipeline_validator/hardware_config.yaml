@@ -80,10 +80,14 @@ memory:
 
 engines:
   boa:
-    opa:
-      count: 8
-      rows: 16
-      cols: 16
+    # 每 Tile 物理 BOA array（engine）数：engine id 域 0..arrays_per_tile-1，
+    # 与 AM group id 域 0..3 相互独立。V1 默认 1（单 array 基线），
+    # 目标拓扑为 4；软件探索上限 MAX_BOA_ENGINES=8，非硬件上限。
+    arrays_per_tile: 1
+    array_rows: 16 # 物理 array 行数（一个 engine = 一块物理 array）
+    array_cols: 16 # 物理 array 列数
+    tile_m: 16 # 逻辑分块 M：进入 spatial wave 计数，真实影响时序
+    tile_n: 16 # 逻辑分块 N：同上
 
     clock_multiplier: 1.0
 

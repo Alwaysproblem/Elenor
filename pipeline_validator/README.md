@@ -383,8 +383,8 @@ Software-managed AM is a separate capability, not an L1 heap: `tile.alloc
 memory_space = "am"` declares a logical chain and its bound L1 output; typed
 `tile.boa.async` carries `ins/outs/acc` and an explicit `seq`; the FINAL step
 writes the L1 output and releases the lease automatically. The runtime models
-4 groups x 2 physical slots (8 dynamic leases), at most 2 live leases per Tile
-context, fixed engine affinity and generation-safe terminal records.
+4 groups x 2 physical slots per Tile (8 dynamic leases), at most 2 live leases
+per Tile context, fixed engine affinity and generation-safe terminal records.
 `ALLOC_AM` is issued once; an ungranted request parks without slot/quota side
 effect, the context blocks in `WAIT_AM`, and `slot_free` wakes it with the
 lease (no retry/polling). Each context's static bundle (peak live chains,
@@ -396,6 +396,47 @@ Compute completion is not the UCE event: a typed result enters a finite
 FINAL output waits for a bounded L1 output credit, writes/drains, and only then
 releases AM and signals the event. L1 output backpressure leaves the lease live
 in `WAIT_OUTPUT`/`DRAINING`; recovery needs no UCE polling.
+
+### BOA engine pools (P05)
+
+Each `ComputeTile` owns `boa_engines`, one physical array per engine; the old
+`tile.boa` interface and OPA geometry configuration aliases have been removed.
+The YAML keys under `engines.boa` are `arrays_per_tile` (default 1), `array_rows`,
+`array_cols`, `tile_m`, and `tile_n` (geometry defaults 16). Flat overrides use
+the `boa_` prefix. Array count accepts integers 1–8 (8 is a software exploration
+limit, not a frozen hardware limit); the V1 multi-array reference uses 4.
+`numeric_tile_k`/numeric profile remain P06 work, not P05 configuration.
+
+AM grants choose the engine with the fewest **live** handles, ties to the lowest
+ID, independently of AM group. Affinity lasts through FINAL output backpressure
+until slot release. Each engine has its own single-entry waiting FIFO and one
+executing job. A busy bound engine never redirects its typed chain; another
+engine's ready work can progress. Estimates allocate no AM: enqueue uses an
+idle-first round-robin choice and records the selected engine. The shared
+`BoaResultService` advances once per Tile cycle, not once per engine.
+
+Timing uses logical M/N chunks mapped into physical array waves, including
+partial waves; changing `tile_m/n` changes timing, not the numerical reduction
+order. BOA L1 roofline bandwidth is conservatively split equally among engines
+(no dynamic borrowing). This is not a Gemmini WS/OS pipeline or RTL timing model.
+Traces have `BOA0`, `BOA1`, ... lanes; reports contain all `boa_engines` rows and
+`boa_utilization = BOA active engine-cycles / available engine-cycles`. Per-engine
+snapshot counters accumulate until engine reset; report utilization uses the
+current run's PMU deltas. The older overall utilization heuristic is unchanged.
+
+All five geometry/pool fields and fixed `boa_engine_affinity="least_live_v1"`
+enter target identity. Pre-P05 artifacts fail target validation; the immutable
+codec stays v4 because its layout did not change. Recompile source; old target
+YAML containing `engines.boa.opa` is separately rejected as unknown configuration.
+
+```bash
+python -m pipeline_validator.tests.test_boa_multi_engine --config hardware/configs/boa-2engine.yaml
+bash examples/run.sh matmul-splitk-pipeline --hw-override boa_arrays_per_tile=4 --json
+```
+
+The `hardware/configs/boa-{1,2,4}engine.yaml` files use the P02 wrapper schema for
+the standalone P05 smoke and later P09 runner. They are **not** schema-2
+`--hw-config` files; `two-slot-progress` remains unimplemented until P09.
 
 ## Hardware YAML schema 2 and default experimental modes
 

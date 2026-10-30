@@ -676,6 +676,14 @@ bounded L1 output credit, writes/drains, then releases the AM lease and only
 then produces the tile event. L1 output backpressure leaves the lease live in
 WAIT_OUTPUT/DRAINING; recovery is autonomous and does not require UCE polling.
 
+P05 provides a per-Tile pool of BOA engines. An AM grant selects the
+least-live-handle engine (lowest-ID tie), independently of the physical AM group,
+and keeps that affinity until slot_free. Typed queues are per engine, so a busy
+engine cannot block another engine's ready queue. Each engine executes at most
+one step, while the finite result/credit service remains shared and advances
+once per Tile cycle. Timing-only estimates use deterministic idle-first
+round-robin enqueue selection and do not acquire AM.
+
 ### 4.8 `tile.gather.global.async` / `tile.scatter.global.async`
 
 ```mlir
@@ -1238,6 +1246,13 @@ feasibility: `context_count`, `device_context_count`, Device pending/completion
 capacity, and Group active/pending/action/quota/scan/event/inflight/prefetch/
 store/dispatch capacities. It excludes runtime-only trace, fidelity,
 max-cycles, timing knobs, seed, and scheduler policy.
+
+BOA configuration uses `engines.boa.arrays_per_tile`, `array_rows`, `array_cols`,
+`tile_m`, and `tile_n` (flat `boa_` names). They all enter target identity together
+with fixed `boa_engine_affinity="least_live_v1"` and P04's
+`boa_am_topology="per_tile_v1"`. OPA-named configuration aliases are removed.
+P05 preserves the v4 codec: pre-P05 targets are rejected, not reinterpreted.
+M/N geometry changes spatial timing; per-MAC numeric K chunking remains P06.
 
 ## 11. Fidelity and Byte Semantics
 

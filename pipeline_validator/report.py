@@ -46,7 +46,10 @@ class WorkloadReport:
   arenas: dict = field(default_factory=dict)
   task_leases: dict = field(default_factory=dict)
   shared_am: dict = field(default_factory=dict)
+  shared_am_per_tile: list[dict] = field(default_factory=list)
   boa_results: dict = field(default_factory=dict)
+  boa_engines: dict[int, list[dict]] = field(default_factory=dict)
+  boa_utilization: float = 0.0
   traffic: dict = field(default_factory=dict)  # per-interface completed bytes
   stall_categories: dict = field(default_factory=dict)  # guide KPI grouping
 
@@ -290,6 +293,12 @@ def build_report(wl: WorkloadInfo, result: SimResult, num_tiles: int = 4) -> Wor
   # engine/uce stall cycles are aggregated across all tiles, so the
   # correct denominator for per-tile engine ratios uses actual hardware.
   tile_cycles = total * actual_num_tiles
+  boa_engines = {
+    tile["tile_id"]: tile.get("boa_engines", [])
+    for tile in tile_snapshots if isinstance(tile, Mapping)
+  }
+  boa_count = sum(len(pool) for pool in boa_engines.values()) or actual_num_tiles
+  boa_capacity_cycles = total * boa_count
 
   engine_active = {
     "BOA": pmu.named_cycles.get("boa_active", 0),
@@ -303,7 +312,7 @@ def build_report(wl: WorkloadInfo, result: SimResult, num_tiles: int = 4) -> Wor
     if k.startswith("queue") or k in ("occupancy", "credit_full", "credit_empty", "credit_fault"):
       stream_counters[k] = v
 
-  checks = _run_checks(wl, result, engine_active, tile_cycles)
+  checks = _run_checks(wl, result, engine_active, tile_cycles, boa_capacity_cycles)
   scheduler_raw = result.group_snapshot.get("scheduler")
   if not isinstance(scheduler_raw, Mapping):
     scheduler_raw = {}
@@ -360,6 +369,10 @@ def build_report(wl: WorkloadInfo, result: SimResult, num_tiles: int = 4) -> Wor
   shared_am_raw = result.group_snapshot.get("shared_am")
   if not isinstance(shared_am_raw, Mapping):
     shared_am_raw = {}
+  # Bound each Tile's diagnostic records, never the list of physical Tile pools.
+  shared_am_per_tile = [
+    _bounded_snapshot(tile, name="shared_am") for tile in _shared_am_snapshots(result)
+  ]
   boa_results_raw: dict = {}
   tiles_raw = result.group_snapshot.get("tiles")
   if isinstance(tiles_raw, (list, tuple)):
@@ -408,7 +421,10 @@ def build_report(wl: WorkloadInfo, result: SimResult, num_tiles: int = 4) -> Wor
     arenas=_bounded_snapshot(arenas_raw, name="arenas"),
     task_leases=_bounded_snapshot(task_leases_raw, name="task_leases"),
     shared_am=_bounded_snapshot(shared_am_raw, name="shared_am"),
+    shared_am_per_tile=shared_am_per_tile,
     boa_results=boa_results_raw,
+    boa_engines=boa_engines,
+    boa_utilization=engine_active["BOA"] / boa_capacity_cycles,
     traffic=traffic,
     stall_categories=stall_categories,
   )
@@ -460,7 +476,39 @@ def _memory_summary(group_memory: dict | None, scheduler: Mapping, arenas: Mappi
   return summary
 
 
-def _run_checks(wl: WorkloadInfo, result: SimResult, engine_active: dict, total: int) -> list[dict]:
+def _shared_am_snapshots(result: SimResult) -> list[Mapping]:
+  snapshots = result.group_snapshot.get("shared_am_per_tile", ())
+  if not isinstance(snapshots, (list, tuple)) or any(
+    not isinstance(tile, Mapping) for tile in snapshots
+  ):
+    raise ValueError("shared_am_per_tile must contain per-Tile AM snapshots")
+  aggregate = result.group_snapshot.get("shared_am", {})
+  if not snapshots and isinstance(aggregate, Mapping) and aggregate.get("request_count", 0):
+    raise ValueError("active AM report requires per-Tile snapshots")
+  return list(snapshots)
+
+
+def _expected_am_faults(wl: WorkloadInfo, tiles: list[Mapping]) -> dict[int, int]:
+  value = wl.expected.get("am_fault_expected")
+  if value is None or value is False:
+    return {}
+  if not isinstance(value, Mapping):
+    raise ValueError("am_fault_expected must map Tile IDs to exact fault counts, not suppress all faults")
+  tile_ids = {tile["tile_id"] for tile in tiles}
+  expected: dict[int, int] = {}
+  for key, count in value.items():
+    tile_id = int(key) if isinstance(key, str) and key.isdecimal() else key
+    if type(tile_id) is not int or tile_id not in tile_ids or tile_id in expected:
+      raise ValueError("am_fault_expected has an unknown or duplicate Tile ID")
+    if type(count) is not int or count < 0:
+      raise ValueError("am_fault_expected counts must be nonnegative integers")
+    expected[tile_id] = count
+  return expected
+
+
+def _run_checks(
+  wl: WorkloadInfo, result: SimResult, engine_active: dict, total: int, boa_capacity_cycles: int
+) -> list[dict]:
   checks: list[dict] = []
   exp = wl.expected
 
@@ -483,32 +531,76 @@ def _run_checks(wl: WorkloadInfo, result: SimResult, engine_active: dict, total:
       "pass": result.credit_invariant_ok,
     }
   )
-  shared_am = result.group_snapshot.get("shared_am")
-  if isinstance(shared_am, Mapping) and shared_am.get("acquire_count", 0) > 0:
-    zero_leak = (
-      shared_am.get("live_leases", 0) == 0
-      and shared_am.get("free_slots") == shared_am.get("total_slots")
-    )
-    checks.append(
-      {
-        "check": "am_slot_zero_leak",
-        "expected": True,
-        "actual": zero_leak,
-        "pass": zero_leak,
-      }
-    )
-    if not exp.get("am_fault_expected"):
-      no_fault = shared_am.get("fault_count", 0) == 0
-      checks.append(
-        {
-          "check": "am_chain_success",
-          "expected": True,
-          "actual": no_fault,
-          "pass": no_fault,
-        }
+  am_tiles = _shared_am_snapshots(result)
+  expected_faults = _expected_am_faults(wl, am_tiles)
+  if expected_faults or any(
+    tile.get("request_count", 0) or tile.get("acquire_count", 0) or tile.get("fault_count", 0)
+    for tile in am_tiles
+  ):
+    leak_checks = []
+    fault_checks = []
+    affinity_checks = []
+    for tile in am_tiles:
+      zero_leak = (
+        tile["live_leases"] == 0
+        and tile["free_slots"] == tile["total_slots"]
+        and tile["pending_requests"] == 0
+        and tile["reserved_slots"] == 0
       )
+      leak_checks.append({
+        "tile_id": tile["tile_id"],
+        **{key: tile[key] for key in (
+          "free_slots", "total_slots", "live_leases", "pending_requests", "reserved_slots"
+        )},
+        "pass": zero_leak,
+      })
+      expected_count = expected_faults.get(tile["tile_id"], 0)
+      fault_checks.append({
+        "tile_id": tile["tile_id"],
+        "expected": expected_count,
+        "actual": tile["fault_count"],
+        "pass": tile["fault_count"] == expected_count,
+      })
+      by_engine = dict.fromkeys(range(tile["engine_count"]), 0)
+      for lease in tile["leases"]:
+        engine_id = lease["bound_engine"]
+        by_engine[engine_id] = by_engine.get(engine_id, 0) + 1
+      counts = tile["engine_handle_counts"]
+      affinity_checks.append({
+        "tile_id": tile["tile_id"], "expected": by_engine, "actual": counts,
+        "pass": (
+          counts == by_engine and sum(counts.values()) == tile["live_leases"]
+          and set(counts) == set(range(tile["engine_count"]))
+        ),
+      })
+    zero_leak = all(tile["pass"] for tile in leak_checks)
+    checks.append({
+      "check": "am_slot_zero_leak",
+      "expected": True,
+      "actual": zero_leak,
+      "pass": zero_leak,
+      "per_tile": leak_checks,
+    })
+    faults_match = all(tile["pass"] for tile in fault_checks)
+    checks.append({
+      "check": "am_fault_expected" if expected_faults else "am_chain_success",
+      "expected": {tile["tile_id"]: tile["expected"] for tile in fault_checks} if expected_faults else True,
+      "actual": (
+        {tile["tile_id"]: tile["actual"] for tile in fault_checks}
+        if expected_faults
+        else faults_match
+      ),
+      "pass": faults_match,
+      "per_tile": fault_checks,
+    })
+    affinity_ok = all(tile["pass"] for tile in affinity_checks)
+    checks.append({
+      "check": "boa_affinity_accounting",
+      "expected": True, "actual": affinity_ok, "pass": affinity_ok,
+      "per_tile": affinity_checks,
+    })
 
-  boa_ratio = engine_active.get("BOA", 0) / total if total else 0
+  boa_ratio = engine_active.get("BOA", 0) / boa_capacity_cycles if boa_capacity_cycles else 0
   evu_ratio = engine_active.get("EVU", 0) / total if total else 0
   mfe_ratio = engine_active.get("MFE", 0) / total if total else 0
   stream_stall = result.pmu.stall_cycles.get(StallReason.STREAM_CREDIT, 0)
@@ -776,15 +868,34 @@ def report_to_text(r: WorkloadReport, *, detailed: bool = False) -> str:
   lines.append(f"  Completed:       {r.completed}  ({r.reason})")
   lines.append(f"  Utilization:     {r.utilization:.1%}")
   lines.append(f"  Credit inv OK:   {r.credit_invariant_ok}")
+  if r.boa_engines:
+    count = sum(len(pool) for pool in r.boa_engines.values())
+    lines.append(f"  BOA pool:        engines={count} capacity_utilization={r.boa_utilization:.1%}")
+    for tile_id, pool in r.boa_engines.items():
+      for engine in pool:
+        if engine["launch_count"]:
+          lines.append(
+            f"    Tile{tile_id}/BOA{engine['engine_id']}: "
+            f"active={engine['active_cycles']} launches={engine['launch_count']} "
+            f"busy_wait={engine['busy_stall_cycles']} credit_wait={engine['credit_stall_cycles']}"
+          )
   if r.shared_am.get("acquire_count", 0):
     lines.append(
       "  Shared AM:       "
+      f"tile_pools={r.shared_am.get('tile_count', 0)} "
       f"leases={r.shared_am.get('live_leases', 0)} "
       f"free={r.shared_am.get('free_slots', 0)}/{r.shared_am.get('total_slots', 0)} "
       f"acquire={r.shared_am.get('acquire_count', 0)} "
       f"final={r.shared_am.get('final_count', 0)} "
       f"fault={r.shared_am.get('fault_count', 0)}"
     )
+    for tile in r.shared_am_per_tile:
+      lines.append(
+        f"    Tile{tile['tile_id']} AM: "
+        f"free={tile['free_slots']}/{tile['total_slots']} live={tile['live_leases']} "
+        f"pending={tile['pending_requests']} reserved={tile['reserved_slots']} "
+        f"acquire={tile['acquire_count']} fault={tile['fault_count']}"
+      )
   if r.boa_results:
     services = [item for item in r.boa_results.values() if isinstance(item, Mapping)]
     pending = sum(item.get("pending", 0) for item in services)
@@ -835,7 +946,8 @@ def report_to_text(r: WorkloadReport, *, detailed: bool = False) -> str:
       _append_report_section(lines, "CPU request timing", r.request_timing)
   lines.append("  Engine active cycles:")
   for eng, c in r.engine_active.items():
-    lines.append(f"    {eng:<4}: {c:>8}  ({c / max(r.cycles * r.num_tiles, 1):.1%})")
+    utilization = r.boa_utilization if eng == "BOA" else c / max(r.cycles * r.num_tiles, 1)
+    lines.append(f"    {eng:<4}: {c:>8}  ({utilization:.1%})")
   lines.append("")
   lines.append("  Stall breakdown (primary owner):")
   if r.stall_breakdown:
@@ -905,7 +1017,10 @@ def report_to_json(r: WorkloadReport) -> str:
       "arenas": r.arenas,
       "task_leases": r.task_leases,
       "shared_am": r.shared_am,
+      "shared_am_per_tile": r.shared_am_per_tile,
       "boa_results": r.boa_results,
+      "boa_engines": r.boa_engines,
+      "boa_utilization": r.boa_utilization,
       "checks": r.checks,
     },
     indent=2,

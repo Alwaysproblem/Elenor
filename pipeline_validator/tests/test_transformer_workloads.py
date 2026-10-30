@@ -24,7 +24,8 @@ import pytest
 
 from pipeline_validator.compiler import compile_program
 from pipeline_validator.config import HardwareConfig, SimConfig
-from pipeline_validator.execution_ir import GlobalBinding
+from pipeline_validator.engines import BOAEngine
+from pipeline_validator.execution_ir import ExecModel, ExecTileOp, GlobalBinding
 from pipeline_validator.loader import load_program
 from pipeline_validator.simulator import Simulator
 from pipeline_validator.workload_ir import load_workload_ir
@@ -59,13 +60,28 @@ DECODE_BINDINGS = {
 
 def make_sim(hw_overrides: dict | None = None, **sim) -> Simulator:
   hw = replace(HardwareConfig(), num_dma_channels=2, hbm_fixed_latency_cycles=10, **(hw_overrides or {}))
-  config = SimConfig(fidelity="full_memory", max_cycles=1000000, **sim)
+  # Use the simulator/CLI budget, not the old merged-OPA throughput's shorter cap.
+  config = SimConfig(fidelity="full_memory", **sim)
   return Simulator(hw, config, enable_tracer=True)
 
 
 def run_file(name: str, bindings: dict, simulator: Simulator):
   module = load_workload_ir(WORKLOADS / name)
   artifact = compile_program(module, simulator.hw, simulator.sim, source_name=name)
+  # A priori serial BOA work bound, independent of observed makespan. The
+  # former 8-OPA merged engine's fixed cap is not a bound for one real array.
+  engine = BOAEngine(simulator.hw, 0)
+  serial_boa_cycles = 0
+  assert isinstance(artifact.entry, ExecModel)
+  for task in artifact.entry.tasks.values():
+    for role in task.role_bindings.values():
+      assert role.task_domain is not None
+      jobs = role.task_domain.to_task - role.task_domain.from_task
+      serial_boa_cycles += jobs * sum(
+        engine.latency(role.tile_program.descriptors[inst.args[0]])
+        for inst in role.tile_program.insts if inst.op is ExecTileOp.LAUNCH_BOA
+      )
+  simulator.sim = replace(simulator.sim, max_cycles=simulator.sim.max_cycles + serial_boa_cycles)
   loaded = load_program(artifact, simulator.hw, simulator.sim, actual_bindings=bindings)
   return simulator.run(loaded)
 
