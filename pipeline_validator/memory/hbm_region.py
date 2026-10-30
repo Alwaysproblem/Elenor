@@ -41,14 +41,19 @@ class HBMRegion:
       raise ValueError(f"input binding '{name}' is already bound")
     if permissions not in ("r", "w", "rw"):
       raise ValueError(f"input binding '{name}' has invalid permissions")
-    if size <= 0:
-      raise ValueError(f"input binding '{name}' size must be > 0")
+    if size < 0:
+      raise ValueError(f"input binding '{name}' size must be >= 0")
     if base < self.base_iova:
       raise ValueError(f"input binding '{name}' base is below HBM region")
     if base + size > self.base_iova + self.size_bytes:
       raise ValueError(f"input binding '{name}' exceeds HBM capacity")
     for existing in self._bindings.values():
-      if base < existing.end_address and existing.base_address < base + size:
+      if (
+        size
+        and existing.size_bytes
+        and base < existing.end_address
+        and existing.base_address < base + size
+      ):
         raise ValueError(f"input binding '{name}' overlaps existing binding")
 
     if self._next_generation >= (1 << 64) - 1:
@@ -58,6 +63,7 @@ class HBMRegion:
     self._next_generation += 1
     generation = self._next_generation
     owner = ExternalOwner(binding_name=name)
+    # A zero-byte binding owns no physical bytes and carries no segments.
     segment = BankSegment(bank_id=0, address=base, size_bytes=size)
     handle = AllocationHandle(
       allocation_id=f"global:{name}:{generation}",
@@ -66,7 +72,7 @@ class HBMRegion:
       base_address=base,
       size_bytes=size,
       alignment=1,
-      bank_segments=(segment,),
+      bank_segments=(segment,) if size else (),
       generation=generation,
       allocate_cycle=cycle,
     )
@@ -111,7 +117,11 @@ class HBMRegion:
         raise MemoryInvariantError(
           f"HBM binding '{handle.owner.binding_name}' lacks {required_permission} permission"
         )
-    return (BankSegment(bank_id=0, address=handle.base_address + offset_bytes, size_bytes=size_bytes),)
+    return (
+      (BankSegment(bank_id=0, address=handle.base_address + offset_bytes, size_bytes=size_bytes),)
+      if size_bytes
+      else ()
+    )
 
   def assert_live(self, handle: AllocationHandle, owner: MemoryOwner | None = None) -> None:
     live = self._bindings.get(handle.owner.binding_name if isinstance(handle.owner, ExternalOwner) else "")

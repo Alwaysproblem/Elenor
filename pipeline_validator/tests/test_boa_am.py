@@ -2,12 +2,14 @@
 
 Covers the plan's IR01-IR17 items that are in scope before hardware:
 source semantics, AM/L1 separation, capacity, four modes, numeric bytes,
-lease quota/affinity, bounded commit timing, v4 replay and resealed tamper
-rejection.  Concrete low-level retry CFG and RTL are intentionally absent.
+lease quota/affinity, bounded commit timing, current-format replay,
+wrong-target rejection, and refusal of legacy v4 artifacts.  Concrete
+low-level retry CFG and RTL are intentionally absent.
 """
 
 from __future__ import annotations
 
+import json
 import struct
 from dataclasses import replace
 from pathlib import Path
@@ -16,12 +18,12 @@ import pytest
 from xdsl.parser import Parser
 from xdsl.utils.exceptions import ParseError, VerifyException
 
-from pipeline_validator.compiler import compile_program
 from pipeline_validator.compiled_program import (
   parse_compiled_program,
   seal_program,
   serialize_compiled_program,
 )
+from pipeline_validator.compiler import compile_program
 from pipeline_validator.config import HardwareConfig, SimConfig
 from pipeline_validator.execution_ir import ExecTileOp, GlobalBinding
 from pipeline_validator.loader import load_program
@@ -33,6 +35,9 @@ from pipeline_validator.workload_ir import make_elenor_context, parse_workload_i
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "examples" / "workloads" / "boa_am_matmul.mlir"
 INPUTS = ROOT / "examples" / "workloads" / "boa_am_inputs" / "boa_am_matmul"
+# Verbatim pre-P06 capture (never resealed, never upgraded in place); parsing
+# it under the current compiler must fail at the version gate.
+LEGACY_V4_ARTIFACT = ROOT / "pipeline_validator" / "tests" / "data" / "legacy_v4_boa_am.json"
 
 
 def _hw(capacity: int = 65536) -> HardwareConfig:
@@ -51,23 +56,160 @@ def _bindings(a_bytes: int, b_bytes: int) -> dict[str, GlobalBinding]:
   }
 
 
-def _bf16_value(data: bytes, offset: int) -> float:
-  bits = int.from_bytes(data[offset : offset + 2], "little")
-  return struct.unpack("<f", struct.pack("<I", bits << 16))[0]
+# ---------------------------------------------------------------------------
+# Independent exact oracle (bf16_fp32_mac_rne_v1 semantics)
+#
+# Structurally independent of pipeline_validator.boa_numeric: BF16/FP32 words
+# are decoded to exact dyadic rationals (numerator, power-of-two exponent)
+# and every rounding is a single round-to-nearest-even over Python integers.
+# ---------------------------------------------------------------------------
 
 
-def _oracle(a: bytes, b: bytes) -> list[float]:
-  a_values = [_bf16_value(a, index * 2) for index in range(2 * 64 * 64)]
-  b_values = [_bf16_value(b, index * 2) for index in range(2 * 64 * 256)]
-  result = [0.0] * (64 * 256)
+def _bf16_dyadic(bits: int) -> tuple[int, int]:
+  """Exact value of one BF16 word as ``num * 2**exp`` (finite words only)."""
+  sign = -1 if bits >> 15 else 1
+  biased = (bits >> 7) & 0xFF
+  frac = bits & 0x7F
+  if biased == 0xFF:
+    raise ValueError("oracle fixture must not contain Inf/NaN words")
+  if biased == 0:
+    return sign * frac, -133
+  return sign * (128 + frac), biased - 134
+
+
+def _bf16_eighths(bits: int) -> int:
+  """Exact fixture word value in 1/8 units (``value = k * 2**-3``).
+
+  Normalizes the decoded dyadic to the eighth-unit integer ``k`` and asserts
+  the proven fixture bound (zero, or 1 <= |k| <= 56); words finer than 1/8
+  are rejected instead of silently mis-scaled.
+  """
+  num, exp = _bf16_dyadic(bits)
+  shift = exp + 3
+  if shift >= 0:
+    scaled = num << shift
+  else:
+    den = 1 << -shift
+    if num % den:
+      raise AssertionError("fixture word is not a multiple of 1/8")
+    scaled = num // den
+  if scaled and not 1 <= abs(scaled) <= 56:
+    raise AssertionError("fixture no longer within the proven exact 1/8-unit bound")
+  return scaled
+
+
+def _f32_dyadic(bits: int) -> tuple[int, int]:
+  """Exact value of one finite FP32 word as ``num * 2**exp``."""
+  sign = -1 if bits >> 31 else 1
+  biased = (bits >> 23) & 0xFF
+  frac = bits & 0x007F_FFFF
+  if biased == 0xFF:
+    raise ValueError("oracle AM left the finite FP32 range")
+  if biased == 0:
+    return sign * frac, -149
+  return sign * ((1 << 23) + frac), biased - 150
+
+
+def _rne_f32(num: int, exp: int) -> int:
+  """Round the exact dyadic value ``num * 2**exp`` to FP32 bits.
+
+  One round-to-nearest-even at the target precision with an unbounded
+  exponent range (tininess decided after rounding, per the frozen P03
+  rules); overflow goes to same-sign infinity.
+  """
+  sign = 0x8000_0000 if num < 0 else 0
+  if num < 0:
+    num = -num
+  if num == 0:
+    return sign
+  bl = num.bit_length()
+  unbiased = bl - 1 + exp
+  if unbiased > 127:
+    return sign | 0x7F80_0000
+  if unbiased >= -126:
+    # Quantize the significand to 24 precision bits.
+    right = bl - 24
+    if right <= 0:
+      mant = num << -right
+    else:
+      q, rem = divmod(num, 1 << right)
+      half = 1 << (right - 1)
+      if rem > half or (rem == half and q & 1):
+        q += 1
+      mant = q
+    if mant == 1 << 24:  # rounding carried into a new binade
+      if unbiased == 127:
+        return sign | 0x7F80_0000
+      mant, unbiased = 1 << 23, unbiased + 1
+    return sign | ((unbiased + 127) << 23) | (mant - (1 << 23))
+  # Subnormal grid: value = mant * 2**-149, mant in [0, 2**23).
+  right = -149 - exp
+  if right <= 0:
+    mant = num << -right
+  else:
+    q, rem = divmod(num, 1 << right)
+    half = 1 << (right - 1)
+    if rem > half or (rem == half and q & 1):
+      q += 1
+    mant = q
+  if mant == 1 << 23:  # tiny result rounded up to the minimum normal
+    return sign | (1 << 23)
+  return sign | mant
+
+
+def _add_f32_rne(x_bits: int, y_bits: int) -> int:
+  """Single-rounded exact FP32 addition of two raw words."""
+  xn, xe = _f32_dyadic(x_bits)
+  yn, ye = _f32_dyadic(y_bits)
+  common = min(xe, ye)
+  return _rne_f32(xn * (1 << (xe - common)) + yn * (1 << (ye - common)), common)
+
+
+def _oracle(a: bytes, b: bytes, *, tile_k: int = 8) -> list[int]:
+  """Independent oracle for the boa_am fixture chain.
+
+  Fixture contract: A is block-packed [2, 64, 64] and B [2, 64, 256] BF16
+  for two k=64 steps (step 0 INIT, step 1 ADD), m=64, n=256, storage_k=64
+  per step.  Returns row-major FP32 bit patterns.
+
+  Exactness proof (asserted below, not assumed): every fixture word decodes
+  to a multiple of 1/8 with |value| <= 7, so every FMA product is a multiple
+  of 1/64 with |product| <= 49, and every per-MAC partial sums at most
+  128 such products: |partial| <= 401408 in 1/64 units, below 2**24.  Each
+  partial is therefore exactly representable in FP32, which makes the
+  production per-MAC single-rounded FMA chain equal to the exact block sum
+  rounded once, and the INIT-overwrite / subsequent-block ``add_rne``
+  block order below is the frozen P03 block semantics.
+  """
+  if tile_k < 1:
+    raise ValueError("tile_k must be positive")
+  a_words = [int.from_bytes(a[i : i + 2], "little") for i in range(0, len(a), 2)]
+  b_words = [int.from_bytes(b[i : i + 2], "little") for i in range(0, len(b), 2)]
+  if len(a_words) != 2 * 64 * 64 or len(b_words) != 2 * 64 * 256:
+    raise ValueError("oracle fixture shape changed; re-derive the exactness bound")
+  # Eighth-unit integers: value = k * 2**-3, so every product is a multiple
+  # of 1/64 (numerator an*bn at exponent -6) and every partial of at most
+  # 128 products stays below 2**24 in those units -> exactly representable.
+  a_vals = [_bf16_eighths(word) for word in a_words]
+  b_vals = [_bf16_eighths(word) for word in b_words]
+  result = [0] * (64 * 256)
   for step in range(2):
     a_base = step * 64 * 64
     b_base = step * 64 * 256
-    for row in range(64):
-      for kk in range(64):
-        avalue = a_values[a_base + row * 64 + kk]
+    for start in range(0, 64, tile_k):
+      overwrite = step == 0 and start == 0  # INIT's first block overwrites AM
+      for row in range(64):
+        row_base = a_base + row * 64
+        out_base = row * 256
         for col in range(256):
-          result[row * 256 + col] += avalue * b_values[b_base + kk * 256 + col]
+          # Exact block sum in 1/64 units (every product exponent is -6).
+          num = 0
+          for kk in range(start, min(start + tile_k, 64)):
+            num += a_vals[row_base + kk] * b_vals[b_base + kk * 256 + col]
+          block = _rne_f32(num, -6)
+          result[out_base + col] = (
+            block if overwrite else _add_f32_rne(result[out_base + col], block)
+          )
   return result
 
 
@@ -207,7 +349,7 @@ def test_ir03_05_07_f32_output_matches_independent_oracle():
   _artifact, simulator, store, result = _compile_and_run()
   a = (INPUTS / "A.bin").read_bytes()
   b = (INPUTS / "B.bin").read_bytes()
-  expected = struct.pack("<16384f", *_oracle(a, b))
+  expected = struct.pack("<16384I", *_oracle(a, b))
   actual = store.read_hbm(0x300000, 65536)
   assert result.completed
   assert actual == expected
@@ -218,11 +360,11 @@ def test_ir03_05_07_f32_output_matches_independent_oracle():
   assert snapshot["terminals"][-1]["success"] is True
 
 
-def _bf16_bytes(value: float) -> bytes:
-  bits = struct.unpack("<I", struct.pack("<f", value))[0]
-  if bits & 0x7F800000 == 0x7F800000 and bits & 0x007FFFFF:
-    return struct.pack("<H", 0x7FC0 | ((bits >> 16) & 0x8000))
-  rounded = bits + 0x7FFF + ((bits >> 16) & 1)
+def _bf16_bytes(f32_bits: int) -> bytes:
+  """RNE BF16 conversion of one raw FP32 word with canonical positive NaN."""
+  if f32_bits & 0x7F800000 == 0x7F800000 and f32_bits & 0x007FFFFF:
+    return struct.pack("<H", 0x7FC0)
+  rounded = f32_bits + 0x7FFF + ((f32_bits >> 16) & 1)
   return struct.pack("<H", (rounded >> 16) & 0xFFFF)
 
 
@@ -246,7 +388,7 @@ def test_ir07_bf16_output_is_converted_only_at_final():
   _artifact, _simulator, store, result = _compile_and_run(text, c_bytes=32768)
   a = (INPUTS / "A.bin").read_bytes()
   b = (INPUTS / "B.bin").read_bytes()
-  expected = b"".join(_bf16_bytes(value) for value in _oracle(a, b))
+  expected = b"".join(_bf16_bytes(bits) for bits in _oracle(a, b))
   assert result.completed
   assert store.read_hbm(0x300000, 32768) == expected
 
@@ -474,21 +616,29 @@ def test_two_independent_chains_are_expressible():
 
 
 # ---------------------------------------------------------------------------
-# IR16: v4 replay and resealed tamper rejection
+# IR16/P06: current-format replay, legacy-version and wrong-target rejection
 # ---------------------------------------------------------------------------
 
 
-def test_ir16_serialized_per_tile_artifact_runs_and_old_group_target_is_rejected():
+def test_legacy_v4_artifact_is_rejected_at_the_version_gate():
+  """The verbatim pre-cutover v4 capture must fail on schema/ABI version at
+  parse time; old bytes are never upgraded in place and never reach the
+  fingerprint check."""
+  text = LEGACY_V4_ARTIFACT.read_text()
+  document = json.loads(text)
+  assert document["schema_version"] == 4 and document["compiler_abi"] == "v4"
+  with pytest.raises(ValueError) as excinfo:
+    parse_compiled_program(text)
+  message = str(excinfo.value)
+  assert "recompile" in message or "unsupported compiled schema" in message
+  assert "fingerprint" not in message
+
+
+def test_ir16_serialized_artifact_runs_and_wrong_target_fingerprint_is_rejected():
   a = (INPUTS / "A.bin").read_bytes()
   b = (INPUTS / "B.bin").read_bytes()
   bindings = _bindings(len(a), len(b))
   hw, sim_cfg = _hw(), _sim()
-  legacy = parse_compiled_program(
-    (ROOT / "plan/evidence/P04/before/boa-am.compiled.json").read_text()
-  )
-  with pytest.raises(ValueError, match="target fingerprint mismatch"):
-    load_program(legacy, hw, sim_cfg, actual_bindings=bindings)
-
   compiled = compile_program(
     parse_workload_ir(_fixture_text()), hw, sim_cfg, binding_assumptions=bindings,
     source_name=str(FIXTURE),
@@ -500,12 +650,19 @@ def test_ir16_serialized_per_tile_artifact_runs_and_old_group_target_is_rejected
   store.seed_hbm(0x200000, b)
   result = Simulator(hw, sim_cfg, byte_store=store).run(loaded)
   assert result.completed, result.reason
-  assert store.read_hbm(0x300000, 65536) == struct.pack("<16384f", *_oracle(a, b))
+  assert store.read_hbm(0x300000, 65536) == struct.pack("<16384I", *_oracle(a, b))
   assert all(
     pool["live_leases"] == pool["pending_requests"] == pool["reserved_slots"] == 0
     and pool["free_slots"] == pool["total_slots"]
     for pool in result.group_snapshot["shared_am_per_tile"]
   )
+  # Independent second negative: a freshly compiled current-format artifact
+  # loaded against a different static target (the numeric tile_k field is
+  # part of the fingerprint) is refused.  This is distinct from the
+  # legacy-version rejection above and must not collapse into it.
+  other_hw = _hw().with_overrides(boa_numeric_tile_k=16)
+  with pytest.raises(ValueError, match="target fingerprint mismatch"):
+    load_program(replay, other_hw, sim_cfg, actual_bindings=bindings)
 
 
 def test_ir16_resealed_tampered_am_binding_is_rejected():
@@ -541,7 +698,7 @@ def test_ir16_resealed_tampered_am_binding_is_rejected():
     artifact.entry, tasks={task.binding_id: tampered_task}
   )
   tampered = seal_program(replace(artifact, entry=tampered_entry))
-  with pytest.raises(ValueError, match="AM chain sequence|INIT/ADD"):
+  with pytest.raises(ValueError, match=r"AM chain sequence|INIT/ADD"):
     load_program(tampered, _hw(), _sim())
 
   # An absent AM reference is caught even earlier by the strict codec.
@@ -903,7 +1060,7 @@ def test_ir14_runtime_final_output_backpressure_recovers_without_polling():
   assert simulator.group.tiles[0].shared_am.snapshot()["terminals"][-1]["kind"] == "chain_done"
   a = (INPUTS / "A.bin").read_bytes()
   b = (INPUTS / "B.bin").read_bytes()
-  assert store.read_hbm(0x300000, 65536) == struct.pack("<16384f", *_oracle(a, b))
+  assert store.read_hbm(0x300000, 65536) == struct.pack("<16384I", *_oracle(a, b))
 
 
 def test_am_request_parks_once_and_wakes_on_slot_free():
@@ -1101,4 +1258,4 @@ def test_runtime_alloc_am_blocks_once_and_wakes_on_slot_free():
   assert snapshot["wake_count"] == 1
   assert snapshot["request_count"] == 2
   assert snapshot["live_leases"] == 0
-  assert store.read_hbm(0x300000, 65536) == struct.pack("<16384f", *_oracle(a, b))
+  assert store.read_hbm(0x300000, 65536) == struct.pack("<16384I", *_oracle(a, b))

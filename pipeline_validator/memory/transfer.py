@@ -842,8 +842,8 @@ class TransferManager:
       raise MemoryInvariantError("duplicate transaction id")
     if not self.can_accept_new:
       raise MemoryInvariantError("transfer tombstone capacity is full")
-    if transaction.bytes_total <= 0:
-      raise MemoryInvariantError("transfer bytes_total must be positive")
+    if transaction.bytes_total < 0:
+      raise MemoryInvariantError("transfer bytes_total must be non-negative")
     if transaction.src is not None and transaction.src.size_bytes != transaction.bytes_total:
       raise MemoryInvariantError("transfer source byte count mismatch")
     if transaction.dst is not None and transaction.dst.size_bytes != transaction.bytes_total:
@@ -856,6 +856,16 @@ class TransferManager:
     self._issued_by_op[op_name] = self._issued_by_op.get(op_name, 0) + 1
     if not self._generation_valid(transaction, "submit"):
       self._fault_transaction(transaction, "stale profile/allocation generation at submit", cycle)
+      return
+    if transaction.bytes_total == 0:
+      # True zero-byte transfer: an empty transaction with no transport
+      # legs and no L2 reference (nothing is read from or written to the
+      # physical backing).  ``step`` completes it after one staged cycle
+      # so the completion event fires through the normal path.
+      transaction.legs = ()
+      transaction.status = TransferStatus.RUNNING
+      transaction.current_leg = 0
+      transaction.leg_start_cycle = -1
       return
     if any(level not in ("l1", "l2") for level in transaction.bypass_levels):
       raise MemoryInvariantError("transfer bypass level must be l1 or l2")
@@ -1433,6 +1443,17 @@ class TransferManager:
       if txn.status in (TransferStatus.DONE, TransferStatus.FAULTED, TransferStatus.CANCELLED):
         continue
       if not txn.legs:
+        # Empty transaction (bytes_total == 0): no data movement and no
+        # transport legs; it completes after exactly one staged cycle so
+        # its completion event still fires through the normal path.
+        txn.status = TransferStatus.DONE
+        txn.wait_reason = StageWaitReason.NONE
+        txn.start_cycle = txn.start_cycle if txn.start_cycle >= 0 else cycle
+        txn.completed_cycle = cycle
+        self._record_terminal(txn.transaction_id, TransferStatus.DONE)
+        self.pmu_completed_count += 1
+        self._count_transaction_bytes(txn)
+        completed.append(txn)
         continue
       if txn.current_leg >= len(txn.legs):
         continue

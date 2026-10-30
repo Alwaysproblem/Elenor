@@ -371,7 +371,7 @@ class BufferLayout:
 
   def __post_init__(self):
     _text(self.buffer_id, "buffer_id")
-    uint64(self.logical_bytes, "buffer logical_bytes", positive=True)
+    uint64(self.logical_bytes, "buffer logical_bytes")
     uint64(self.slot_id, "buffer slot_id")
     uint64(self.arena_offset, "buffer arena_offset")
     uint64(self.stripe_bytes, "buffer stripe_bytes", positive=True)

@@ -1466,9 +1466,14 @@ class TileUCE:
         k=matmul.k,
         accumulate=not matmul.init,
         partial=lease.partial,
+        tile_k=tile.cfg.boa_numeric_tile_k,
+        storage_k=matmul.a.dims[1],
+        mask=matmul.k_mask,
       )
       out_bytes = (
-        boa_numeric.convert_output(boa_numeric.decode_f32(partial), matmul.output.dtype)
+        # Raw-bit conversion: f32 output preserves partial bits exactly
+        # (including sNaN payloads); bf16 applies the frozen RNE rules.
+        boa_numeric.convert_output(boa_numeric.decode_f32_bits(partial), matmul.output.dtype)
         if matmul.final
         else None
       )
@@ -1716,7 +1721,7 @@ class TileUCE:
       offset_bytes=offset_bytes,
       size_bytes=view.bytes,
       permissions=resolver.permissions(handle) if view.space == "l2" else "rw",
-      address=segments[0].address,
+      address=segments[0].address if segments else handle.base_address,
       segments=segments,
     )
 

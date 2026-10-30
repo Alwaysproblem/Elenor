@@ -665,6 +665,26 @@ with consecutive `seq`; exactly one step must be FINAL. `ops` is derived as
 `2*m*n*k`. The event means step_committed for non-final steps and chain_done
 for FINAL (output visible, AM lease released).
 
+P06 uses exact integer `bf16_fp32_mac_rne_v1` evaluation. Each original-index
+`numeric_tile_k` contribution block starts at FP32 +0, applies fused FP32 RNE
+for each active K lane, then overwrites AM for the INIT step's first active
+block or adds to AM with FP32 RNE otherwise. Runtime AM commit remains once
+per complete step. f32 FINAL writes raw AM bits; BF16 FINAL converts once.
+INT8 and optional FINAL epilogue stages remain P08 work.
+
+A/B storage shapes are `[m, storage_k]` and `[storage_k, n]`; storage K is
+inferred from the views and must agree. M/N/K are non-negative, with
+`k <= storage_k`. An optional `k_mask = [1, 0, ...]` appears after `seq`,
+has exactly `storage_k` boolean-int entries and no active lane at/after `k`.
+Tail and masked lanes execute no MAC; masks do not compact indices or move
+contribution boundaries. Fully inactive blocks do not add +0 to AM.
+
+INIT with no active K produces +0; ADD with no active K preserves previous
+AM bits, including negative zero. Zero M/N yields empty bytes with no MAC
+waves. These are real completed operations, not dropped events: allocation,
+step commit, FINAL release and reference cleanup still occur. Zero-byte
+bindings/views retain bounds, permission and generation validation.
+
 `tile.boa.estimate.async` is an explicit timing-only FLOP estimate. It owns no
 operands, declares no AM computation, produces no numerical C, and must not be
 used to prove typed AM behaviour. It exists so control/timing gates do not
@@ -818,9 +838,10 @@ restrict the private execution IR's branch/stream instructions.
 - Dispatch `globals` and `bindings` positionally cover all corresponding
   formals. `ins`/`outs` are exact duplicate-free actual read/write sets;
   aliases merge effects and unused formals remain bound without pins.
-- Every view dimension has non-negative offset, positive size, and stays
-  inside its backing shape. V1 strides are all 1; view chains are unsupported.
-  Transfer endpoints have identical derived byte counts.
+- Every view dimension has non-negative offset and size and stays inside its
+  backing shape. Zero-sized views describe empty intervals. V1 source strides
+  are all 1; view chains are unsupported. Transfer endpoints have identical
+  derived byte counts, including zero.
 - Gather source is a current-program global formal and Scatter destination is
   one too; Gather indices/destination and Scatter indices/source are distinct
   live `tile.alloc` results. The indexed map has positive
@@ -920,7 +941,7 @@ compile_program(
 ) -> CompiledProgram
 ```
 
-The result has compiled schema 4 and compiler ABI `v4`. It contains canonical
+The result has compiled schema 5 and compiler ABI `v5`. It contains canonical
 `source_ir`/`source_hash`, embedded `ProfileRegistry`/`registry_hash`, static
 `target_hash`, `artifact_hash`, `"standalone"|"model"` entry kind, immutable
 entry/prefix, call bindings, explicit relocations, instruction source map,
@@ -1248,11 +1269,14 @@ store/dispatch capacities. It excludes runtime-only trace, fidelity,
 max-cycles, timing knobs, seed, and scheduler policy.
 
 BOA configuration uses `engines.boa.arrays_per_tile`, `array_rows`, `array_cols`,
-`tile_m`, and `tile_n` (flat `boa_` names). They all enter target identity together
-with fixed `boa_engine_affinity="least_live_v1"` and P04's
-`boa_am_topology="per_tile_v1"`. OPA-named configuration aliases are removed.
-P05 preserves the v4 codec: pre-P05 targets are rejected, not reinterpreted.
-M/N geometry changes spatial timing; per-MAC numeric K chunking remains P06.
+`tile_m`, `tile_n`, `numeric_profile` and `numeric_tile_k` (flat `boa_` names).
+They enter target identity together with fixed `boa_engine_affinity="least_live_v1"`
+and P04's `boa_am_topology="per_tile_v1"`. OPA aliases are removed. M/N geometry
+changes spatial timing; numeric K changes rounding boundaries. The only
+numerical profile is `bf16_fp32_mac_rne_v1`, with default numeric K=8.
+P06 upgrades the numerical/descriptor contract to v5: v4 and older packages
+fail the version gate; a valid v5 package with the wrong target fails target
+validation independently. Neither path upgrades or reinterprets old packages.
 
 ## 11. Fidelity and Byte Semantics
 
@@ -1272,8 +1296,9 @@ destination only at write completion. Byte-checked Gather additionally
 requires `bind_profiled_source(binding_id, request_id, source_offset)`.
 
 Without the oracle, Gather outcomes remain explicit source-authored timing
-profiles. Cache capacity never predicts a hit rate. BOA/EVU/USE remain timing
-models and do not establish tensor numerical correctness.
+profiles. Cache capacity never predicts a hit rate. Typed BOA Matmul has
+full-memory numerical execution; BOA estimate and EVU/USE remain timing models
+and cannot establish tensor numerical correctness.
 
 ## 12. CLI Artifacts, Replay, and Observability
 

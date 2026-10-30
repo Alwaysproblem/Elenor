@@ -289,6 +289,11 @@ class ExecBoaMatmulDesc:
   ``init`` is true for the first step (``acc := A x B``); otherwise the
   step adds into the existing partial.  ``final`` is the single step that
   writes the bound L1 output and releases the AM lease.
+
+  Storage K is NOT stored here: it is inferred from the A/B view shapes
+  (``a.dims[1] == b.dims[0] >= k``).  ``k_mask`` is the optional
+  ``storage_k``-length boolean activity mask; lanes at or after ``k``
+  must be False, and a tail lane without a mask is implicitly inactive.
   """
 
   a: ExecMemoryView
@@ -301,6 +306,7 @@ class ExecBoaMatmulDesc:
   seq: int
   init: bool
   final: bool
+  k_mask: tuple[bool, ...] | None = None
 
 
 @dataclass(frozen=True)

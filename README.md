@@ -16,7 +16,7 @@ binary ABI **尚未冻结**，不将模拟周期当器件性能。
 ```text
 source xDSL ModuleOp
   └─ compiler.compile_program(...)            # 证明 + lowering
-       └─ CompiledProgram（不可变 artifact，schema_version=4 / compiler_abi=v4）
+       └─ CompiledProgram（不可变 artifact，schema_version=5 / compiler_abi=v5）
             └─ loader.load_program(...)       # 只读加载，不导入 compiler
                  └─ LoadedProgram
                       └─ Simulator.run(LoadedProgram)   # 唯一接受的输入类型

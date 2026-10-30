@@ -26,13 +26,13 @@
     },
     "numeric-profile": {
       "owner": "P06",
-      "implemented": false,
+      "implemented": true,
       "board": null,
-      "cases": [],
+      "cases": ["vector-parity", "zero-k", "cutover-reject"],
       "config": {
         "required_target": "numeric-profile",
-        "consumed_sections": [],
-        "default_config": null
+        "consumed_sections": ["validator"],
+        "default_config": "hardware/configs/numeric-profile.yaml"
       }
     },
     "soft-conv": {

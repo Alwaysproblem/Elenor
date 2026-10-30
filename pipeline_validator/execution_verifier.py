@@ -89,6 +89,8 @@ _HW_TARGET_FIELDS = (
   "boa_am_group_count",
   "boa_am_slots_per_group",
   "boa_am_slots_per_context",
+  "boa_numeric_profile",
+  "boa_numeric_tile_k",
   "evu_lanes",
   "evu_dtype_bytes",
   "use_state_cache_bytes",
@@ -207,12 +209,12 @@ def _verify_global_input(item: ExecGlobalInput, where: str) -> None:
   if not isinstance(item, ExecGlobalInput):
     _fail(f"{where} is not an ExecGlobalInput")
   _nonempty(item.name, f"{where}.name")
-  if not item.dims or any(type(dim) is not int or dim <= 0 for dim in item.dims):
-    _fail(f"{where}.dims must be positive integers")
+  if any(type(dim) is not int or dim < 0 for dim in item.dims):
+    _fail(f"{where}.dims must be non-negative integers")
   if item.dtype not in _DTYPE_BYTES:
     _fail(f"{where} has unsupported dtype {item.dtype!r}")
   expected = _product(item.dims) * _DTYPE_BYTES[item.dtype]
-  if item.size_bytes != expected or not 0 < expected < (1 << 63):
+  if item.size_bytes != expected or not 0 <= expected < (1 << 63):
     _fail(f"{where}.size_bytes does not match shape and dtype")
 
 
@@ -239,8 +241,8 @@ def _verify_view(view: object, where: str, *, spaces: set[str] | None = None) ->
   rank = len(view.backing_dims)
   if rank == 0 or any(len(part) != rank for part in (view.dims, view.offsets, view.strides)):
     _fail(f"{where} has inconsistent or zero rank")
-  if any(type(dim) is not int or dim <= 0 for dim in (*view.backing_dims, *view.dims)):
-    _fail(f"{where} dimensions must be positive integers")
+  if any(type(dim) is not int or dim < 0 for dim in (*view.backing_dims, *view.dims)):
+    _fail(f"{where} dimensions must be non-negative integers")
   if any(type(offset) is not int or offset < 0 for offset in view.offsets):
     _fail(f"{where} offsets must be non-negative integers")
   if any(stride != 1 for stride in view.strides):
@@ -255,7 +257,7 @@ def _verify_view(view: object, where: str, *, spaces: set[str] | None = None) ->
   if view.dtype not in _DTYPE_BYTES or view.element_bytes != _DTYPE_BYTES.get(view.dtype):
     _fail(f"{where} has invalid dtype width")
   expected_bytes = _product(view.dims) * view.element_bytes
-  if view.bytes != expected_bytes or not 0 < expected_bytes < (1 << 63):
+  if view.bytes != expected_bytes or not 0 <= expected_bytes < (1 << 63):
     _fail(f"{where}.bytes does not match its shape")
   if view.task_dim is not None and (
     type(view.task_dim) is not int or not 0 <= view.task_dim < rank or view.space != "l2"
@@ -493,7 +495,7 @@ def _verify_program(
     if formal.space == "global" and seen_l2:
       _fail(f"{where} global formal follows an L2 formal")
     seen_l2 |= formal.space == "l2"
-    if not formal.dims or any(type(dim) is not int or dim <= 0 for dim in formal.dims):
+    if not formal.dims or any(type(dim) is not int or dim < 0 for dim in formal.dims):
       _fail(f"{where}.formals[{index}] has invalid shape")
     if formal.dtype not in _DTYPE_BYTES:
       _fail(f"{where}.formals[{index}] has invalid dtype")
@@ -516,7 +518,7 @@ def _verify_program(
       _fail(f"{where} has duplicate AM buffer {am.name!r}")
     if am.dtype != "f32" or am.element_bytes != 4:
       _fail(f"{where}.am_buffers[{index}] must carry f32 AM bytes")
-    if not am.dims or any(type(dim) is not int or dim <= 0 for dim in am.dims):
+    if not am.dims or any(type(dim) is not int or dim < 0 for dim in am.dims):
       _fail(f"{where}.am_buffers[{index}] has an invalid shape")
     if am.bytes != _product(am.dims) * am.element_bytes:
       _fail(f"{where}.am_buffers[{index}].bytes does not match its shape")
@@ -696,14 +698,21 @@ def _verify_boa_matmul(
   if am is None:
     _fail(f"{where} references an absent AM buffer")
   for field_name in ("m", "n", "k"):
-    _uint(getattr(matmul, field_name), f"{where}.{field_name}", positive=True)
+    _uint(getattr(matmul, field_name), f"{where}.{field_name}")
   _uint(matmul.seq, f"{where}.seq")
   if type(matmul.init) is not bool or type(matmul.final) is not bool:
     _fail(f"{where} init/final must be bool")
+  if len(a.dims) != 2 or len(b.dims) != 2:
+    _fail(f"{where} A/B must be rank-2 L1 views")
+  storage_k = a.dims[1]
+  if b.dims[0] != storage_k:
+    _fail(f"{where} A and B storage K dims must match")
+  if matmul.k > storage_k:
+    _fail(f"{where} k must not exceed its storage K")
   if a.dtype != "bf16" or b.dtype != "bf16":
     _fail(f"{where} inputs must be bf16 L1 views")
-  if a.dims != (matmul.m, matmul.k) or b.dims != (matmul.k, matmul.n):
-    _fail(f"{where} A/B shapes must be (m, k) and (k, n)")
+  if a.dims != (matmul.m, storage_k) or b.dims != (storage_k, matmul.n):
+    _fail(f"{where} A/B shapes must be (m, storage_k) and (storage_k, n)")
   if output.dims != (matmul.m, matmul.n) or output.dims != am.dims:
     _fail(f"{where} output/AM shape mismatch")
   if matmul.init != (matmul.seq == 0):
@@ -714,6 +723,14 @@ def _verify_boa_matmul(
     _fail(f"{where}.output dtype is invalid")
   if output.base in (a.base, b.base):
     _fail(f"{where}.output must differ from its A/B input buffers")
+  if matmul.k_mask is not None:
+    mask = matmul.k_mask
+    if type(mask) is not tuple or any(type(lane) is not bool for lane in mask):
+      _fail(f"{where}.k_mask must be a tuple of booleans")
+    if len(mask) != storage_k:
+      _fail(f"{where}.k_mask length must equal its storage K")
+    if any(mask[lane] for lane in range(matmul.k, len(mask))):
+      _fail(f"{where}.k_mask lanes at or after k must be inactive")
   for view, buffer in (
     (a, l1_buffers.get(a.base)),
     (b, l1_buffers.get(b.base)),
@@ -728,8 +745,8 @@ def _verify_boa_matmul(
 def _verify_buffer(buffer: ExecL1Buffer | ExecL2Buffer, where: str) -> None:
   name = buffer.name if isinstance(buffer, ExecL1Buffer) else buffer.slot
   _nonempty(name, f"{where}.id")
-  if not buffer.dims or any(type(dim) is not int or dim <= 0 for dim in buffer.dims):
-    _fail(f"{where}.dims must be positive")
+  if not buffer.dims or any(type(dim) is not int or dim < 0 for dim in buffer.dims):
+    _fail(f"{where}.dims must be non-negative")
   if buffer.dtype not in _DTYPE_BYTES or buffer.element_bytes != _DTYPE_BYTES.get(buffer.dtype):
     _fail(f"{where} has invalid dtype width")
   if buffer.bytes != _product(buffer.dims) * buffer.element_bytes:
@@ -2744,7 +2761,7 @@ def verify_compiled_program(program: CompiledProgram, hw: HardwareConfig, sim: S
   """Verify package integrity and executable semantics without graph mutation."""
   if not isinstance(program, CompiledProgram):
     _fail("expected CompiledProgram")
-  if type(program.schema_version) is not int or program.schema_version != 4 or program.compiler_abi != "v4":
+  if type(program.schema_version) is not int or program.schema_version != 5 or program.compiler_abi != "v5":
     _fail("unsupported compiled schema or compiler ABI; recompile from source")
   _fail_indexed_memory_fidelity(program, sim)
   if not _is_frozen(program):
@@ -3152,7 +3169,7 @@ def verify_actual_bindings(
     if binding.permissions not in ("r", "w", "rw"):
       _fail(f"actual binding {name!r} has invalid permissions")
     _uint(binding.base_iova, f"actual binding {name!r}.base_iova")
-    _uint(binding.size_bytes, f"actual binding {name!r}.size_bytes", positive=True)
+    _uint(binding.size_bytes, f"actual binding {name!r}.size_bytes")
     guard = guards[name]
     if binding.size_bytes < guard.minimum_bytes:
       _fail(f"actual binding {name!r} is smaller than its compiled range guard")
@@ -3160,7 +3177,11 @@ def verify_actual_bindings(
       _fail(f"actual binding {name!r} violates its compiled permission guard")
     if binding.base_iova + binding.size_bytes > hw.hbm_capacity_bytes:
       _fail(f"actual binding {name!r} exceeds HBM capacity")
-    ordered.append(binding)
+    # Empty bindings still obey bounds/permissions but own no alias interval.
+    # Remove them before pairwise checks, or an empty interval could hide an
+    # overlap between two nonempty neighbours.
+    if binding.size_bytes:
+      ordered.append(binding)
   ordered.sort(key=lambda item: item.base_iova)
   for left, right in pairwise(ordered):
     if right.base_iova < left.base_iova + left.size_bytes:

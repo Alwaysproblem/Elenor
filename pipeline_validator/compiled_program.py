@@ -339,12 +339,14 @@ def _digest_text(value: object, name: str, *, allow_zero: bool = False) -> str:
   return value
 
 
-def _shape(value: object, name: str, *, empty: bool = False) -> tuple[int, ...]:
+def _shape(value: object, name: str, *, empty: bool = False, nonnegative: bool = False) -> tuple[int, ...]:
   result = _tuple(value, name)
+  minimum = 0 if nonnegative else 1
   if (not empty and not result) or any(
-    type(item) is not int or not 0 < item <= _UINT64_MAX for item in result
+    type(item) is not int or not minimum <= item <= _UINT64_MAX for item in result
   ):
-    raise ValueError(f"{name} must contain positive uint64 dimensions")
+    bound = "non-negative" if nonnegative else "positive"
+    raise ValueError(f"{name} must contain {bound} uint64 dimensions")
   return result
 
 
@@ -368,8 +370,10 @@ def _validate_view(view: object, name: str, *, spaces: set[str] | None = None) -
   if spaces is not None and view.space not in spaces:
     raise ValueError(f"{name}.space must be one of {sorted(spaces)}")
   _text(view.base, f"{name}.base")
-  backing = _shape(view.backing_dims, f"{name}.backing_dims")
-  dims = _shape(view.dims, f"{name}.dims")
+  # Empty views are legal: a typed matmul with zero m/n/storage-K owns
+  # zero-byte L1 operands and empty L2/global flows carry empty views.
+  backing = _shape(view.backing_dims, f"{name}.backing_dims", nonnegative=True)
+  dims = _shape(view.dims, f"{name}.dims", nonnegative=True)
   offsets = _tuple(view.offsets, f"{name}.offsets")
   strides = _tuple(view.strides, f"{name}.strides")
   if len(backing) != len(dims) or len(backing) != len(offsets) or len(backing) != len(strides):
@@ -383,7 +387,7 @@ def _validate_view(view: object, name: str, *, spaces: set[str] | None = None) -
   if view.dtype not in _DTYPE_BYTES:
     raise ValueError(f"{name} has an invalid dtype")
   _uint(view.element_bytes, f"{name}.element_bytes", positive=True)
-  _uint(view.bytes, f"{name}.bytes", positive=True)
+  _uint(view.bytes, f"{name}.bytes")
   if view.element_bytes != _DTYPE_BYTES[view.dtype]:
     raise ValueError(f"{name} has an invalid dtype width")
   expected = math.prod(dims) * view.element_bytes
@@ -406,12 +410,12 @@ def _validate_buffer(buffer: object, name: str) -> None:
       raise ValueError(f"{name}.sharing is invalid")
   else:
     raise ValueError(f"{name} is not a buffer")
-  dims = _shape(buffer.dims, f"{name}.dims")
+  dims = _shape(buffer.dims, f"{name}.dims", nonnegative=True)
   if buffer.dtype not in _DTYPE_BYTES:
     raise ValueError(f"{name} has an invalid dtype")
   _uint(buffer.element_bytes, f"{name}.element_bytes", positive=True)
   _uint(buffer.alignment, f"{name}.alignment", positive=True)
-  _uint(buffer.bytes, f"{name}.bytes", positive=True)
+  _uint(buffer.bytes, f"{name}.bytes")
   if buffer.element_bytes != _DTYPE_BYTES[buffer.dtype]:
     raise ValueError(f"{name} has an invalid dtype width")
   expected = math.prod(dims) * buffer.element_bytes
@@ -615,7 +619,7 @@ def _validate_executable_value(value: object, name: str) -> None:
   if _is_exact_type(value, execution.GlobalBinding):
     _text(value.name, f"{name}.name")
     _uint(value.base_iova, f"{name}.base_iova")
-    _uint(value.size_bytes, f"{name}.size_bytes", positive=True)
+    _uint(value.size_bytes, f"{name}.size_bytes")
     if value.base_iova + value.size_bytes > _UINT64_MAX:
       raise ValueError(f"{name} address range overflows uint64")
     if value.permissions not in ("r", "w", "rw"):
@@ -623,10 +627,10 @@ def _validate_executable_value(value: object, name: str) -> None:
     return
   if _is_exact_type(value, execution.ExecGlobalInput):
     _text(value.name, f"{name}.name")
-    dims = _shape(value.dims, f"{name}.dims")
+    dims = _shape(value.dims, f"{name}.dims", nonnegative=True)
     if value.dtype not in _DTYPE_BYTES:
       raise ValueError(f"{name}.dtype is invalid")
-    _uint(value.size_bytes, f"{name}.size_bytes", positive=True)
+    _uint(value.size_bytes, f"{name}.size_bytes")
     expected_size = math.prod(dims) * _DTYPE_BYTES[value.dtype]
     if expected_size > _UINT64_MAX or value.size_bytes != expected_size:
       raise ValueError(f"{name}.size_bytes does not conserve its shape")
@@ -675,7 +679,7 @@ def _validate_executable_value(value: object, name: str) -> None:
   if _is_exact_type(value, execution.ExecTransfer):
     _validate_view(value.src, f"{name}.src")
     _validate_view(value.dst, f"{name}.dst")
-    _uint(value.bytes, f"{name}.bytes", positive=True)
+    _uint(value.bytes, f"{name}.bytes")
     if value.bytes != value.src.bytes or value.bytes != value.dst.bytes:
       raise ValueError(f"{name}.bytes does not conserve its views")
     return
@@ -684,7 +688,7 @@ def _validate_executable_value(value: object, name: str) -> None:
     return
   if _is_exact_type(value, execution.ExecAmBuffer):
     _text(value.name, f"{name}.name")
-    dims = _shape(value.dims, f"{name}.dims")
+    dims = _shape(value.dims, f"{name}.dims", nonnegative=True)
     if value.dtype != "f32" or value.element_bytes != 4:
       raise ValueError(f"{name} must carry f32 AM bytes")
     if value.bytes != math.prod(dims) * value.element_bytes:
@@ -704,23 +708,40 @@ def _validate_executable_value(value: object, name: str) -> None:
     _validate_view(value.output, f"{name}.output", spaces={"l1"})
     _text(value.am, f"{name}.am")
     for field_name in ("m", "n", "k"):
-      _uint(getattr(value, field_name), f"{name}.{field_name}", positive=True)
+      _uint(getattr(value, field_name), f"{name}.{field_name}")
     _uint(value.seq, f"{name}.seq")
     if type(value.init) is not bool or type(value.final) is not bool:
       raise ValueError(f"{name} init/final must be bool")
+    if len(value.a.dims) != 2 or len(value.b.dims) != 2:
+      raise ValueError(f"{name} A/B must be rank-2 L1 views")
+    storage_k = value.a.dims[1]
+    if value.b.dims[0] != storage_k:
+      raise ValueError(f"{name} A and B storage K dims must match")
+    if value.k > storage_k:
+      raise ValueError(f"{name} k must not exceed its storage K")
     if value.a.dtype != "bf16" or value.b.dtype != "bf16":
       raise ValueError(f"{name} inputs must be bf16 L1 views")
-    if value.a.dims != (value.m, value.k) or value.b.dims != (value.k, value.n):
-      raise ValueError(f"{name} A/B shapes must be (m, k) and (k, n)")
+    if value.a.dims != (value.m, storage_k) or value.b.dims != (storage_k, value.n):
+      raise ValueError(f"{name} A/B shapes must be (m, storage_k) and (storage_k, n)")
     if value.output.dims != (value.m, value.n):
       raise ValueError(f"{name}.output shape must be (m, n)")
     if value.output.dtype not in ("f32", "bf16", "i8"):
       raise ValueError(f"{name}.output dtype is invalid")
+    if value.k_mask is not None:
+      mask = value.k_mask
+      if type(mask) is not tuple or any(type(lane) is not bool for lane in mask):
+        raise ValueError(f"{name}.k_mask must be a tuple of booleans")
+      if len(mask) != storage_k:
+        raise ValueError(f"{name}.k_mask length must equal its storage K")
+      if any(mask[lane] for lane in range(value.k, len(mask))):
+        raise ValueError(f"{name}.k_mask lanes at or after k must be inactive")
     return
   if _is_exact_type(value, execution.ExecTileFormal):
     if value.space not in ("task", "global", "l2"):
       raise ValueError(f"{name}.space is invalid")
-    dims = _shape(value.dims, f"{name}.dims", empty=value.space == "task")
+    dims = _shape(
+      value.dims, f"{name}.dims", empty=value.space == "task", nonnegative=True
+    )
     if value.space == "task":
       if dims or value.dtype != "":
         raise ValueError(f"{name} has an invalid task formal")
@@ -983,7 +1004,7 @@ def _validate_executable_value(value: object, name: str) -> None:
 
 
 def _validate_compiled_program_value(program: CompiledProgram, *, allow_unsealed: bool) -> None:
-  if type(program.schema_version) is not int or program.schema_version != 4 or program.compiler_abi != "v4":
+  if type(program.schema_version) is not int or program.schema_version != 5 or program.compiler_abi != "v5":
     raise ValueError("unsupported compiled schema or ABI; recompile the source with this compiler")
   _text(program.source_ir, "source_ir")
   _digest_text(program.source_hash, "source_hash")
@@ -1178,7 +1199,7 @@ def parse_compiled_program(text: str) -> CompiledProgram:
     if (
       isinstance(encoded, dict)
       and encoded.get("$type") == "CompiledProgram"
-      and (encoded.get("schema_version") != 4 or encoded.get("compiler_abi") != "v4")
+      and (encoded.get("schema_version") != 5 or encoded.get("compiler_abi") != "v5")
     ):
       raise ValueError("unsupported compiled schema or ABI; recompile from source")
     program = _decode(encoded)

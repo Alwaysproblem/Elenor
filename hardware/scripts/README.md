@@ -1,8 +1,9 @@
-# hardware/scripts — 统一硬件入口（P02 / P03）
+# hardware/scripts — 统一硬件入口（P02 / P03 / P06）
 
 `env` 管理镜像构建/进入；`check` / `reproduce` 是所有 target 的统一分派器，
 `container_check.py` 是锁定镜像内的 case 执行器，`common.py` 是宿主侧共享库
-（仅 stdlib，宿主零安装约束）。P03 的数值 case 位于 `numeric_cases.py`。
+（仅 stdlib，宿主零安装约束）。P03 的数值 case 位于 `numeric_cases.py`，
+P06 的 numeric-profile case 位于 `numeric_profile_cases.py`。
 
 ```text
 hardware/scripts/check      TARGET [BOARD] --out DIR [--config PATH] [--seed N] [--case ID]
@@ -183,6 +184,39 @@ hardware/scripts/reproduce /tmp/boa-p03/all/manifest.json --out /tmp/boa-p03/off
 crosscheck 和 probe-nan 共享本次刚构建的 probe，不跨运行复用二进制。SoftFloat
 无原生 BF16 API，BF16 使用独立的 SoftFloat 整数 RNE 适配器，并与实际
 `RecFNToRecFN` 对拍；该限制明确写入 report。错误时保留 first_failure 和三方原始结果。
+
+## numeric-profile target（owner P06）
+
+生产路径数值 gate：`pipeline_validator.tests.test_boa_numeric_profile` 在锁定
+容器内执行真实 `parse -> compile -> load -> Simulator`（full_memory ByteStore），
+把观测到的 HBM 输出 bytes 与 committed golden 逐 bit 对拍。golden 权威是
+P03 `vectors/matmul.json`（不变）与 P06 定向 fixture
+`pipeline_validator/tests/data/numeric_profile_directed_golden.json`（由未改动的
+P03 reference 在独立进程生成，verbatim 拷贝进测试数据）；模块本身不 import
+`hardware/boa/reference`，也不自行推导期望 bytes。
+
+```bash
+hardware/scripts/check numeric-profile --out /tmp/boa-p06/all --seed 20261028
+hardware/scripts/check numeric-profile --case vector-parity --out /tmp/boa-p06/parity --seed 20261028
+hardware/scripts/check numeric-profile --case zero-k --out /tmp/boa-p06/zero --seed 20261028
+hardware/scripts/check numeric-profile --case cutover-reject --out /tmp/boa-p06/cut --seed 20261028
+hardware/scripts/reproduce /tmp/boa-p06/all/manifest.json --out /tmp/boa-p06/offline --offline
+```
+
+| case             | layer | 实际检查                                                                                                                                                                                                                                                   |
+| ---------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `vector-parity`  | F     | 30 个合法 P03 Matmul：16 个完整 f32/BF16 输出、14 个 P08 病例的原始 f32 AM（含 INT8 病例，明确不声明 FINAL）；17 个非法向量真实经过 config、parse/compile/load、数值 API 或输入 word 边界拒绝；另含 3 个定向 case 与 8-vs-16 指纹/bytes、binary64 反例检查 |
+| `zero-k`         | F     | N-P03-11 零 K/零维组：ADD K=0 逐 bit 保留（-0）、INIT K=0 得 +0、m=0/n=0 空 bytes 正常完成                                                                                                                                                                 |
+| `cutover-reject` | F     | 旧 v4 artifact（verbatim 拷贝，从不 reseal）在 parse 阶段按版本拒绝（绝不到 fingerprint）；当前格式 serialize->parse->load->run 复现 golden；同一新 artifact 换 target（numeric tile_k）被 `target fingerprint mismatch` 独立拒绝                          |
+
+配置：`numeric-profile.yaml` 只有空 section。committed 向量固定了每条 case 自身的
+`boa_numeric_tile_k`（2/4/8/16），因此 `validator.hw_overrides` 必须为空——容器内
+配置校验对非空 overrides 直接 exit 6，绝不静默丢弃或回显接受。每条执行向量的
+report 记录其实际执行的 `executed_tile_k` 与 `target_fingerprint`（k8/k16 两行
+fingerprint 必须不同）。`--seed` 记录并进 SimConfig；golden 固定，seed 不改变期望
+bytes。每 case 产物：`{case}.report.json`、`{case}.vectors.json`（含
+actual/golden hex）、`sources/*.mlir`（deterministic）与 `{case}.timing.json`
+（`deterministic: false`，wall-clock 永不进入离线对比；cycles 为确定性指标）。
 
 ## reproduce 算法
 

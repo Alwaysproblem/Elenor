@@ -8,7 +8,7 @@
 
 “前置”是通过门，不是仅存在文件。所有状态初始化为“未开始”；真实实施完成后更新本表并写 `evidence/Pnn.md`。没有硬件工具/板卡时按总则记录阻塞，不提前标通过。
 
-P01 补跑软件 gate 已通过，首次失败仍保留在 [P01 证据](evidence/P01.md)。[P02 工具链与离线复现](evidence/P02.md) 已通过；Vivado 未提供，FPGA 子能力仍为 blocked。[P03 独立数值 oracle、合同冻结与离线复现](evidence/P03.md)、[P04 每 Tile AM 拓扑与隔离](evidence/P04.md)、[P05 多 engine 与固定 affinity](evidence/P05.md) 已通过，下一默认任务为 **P06**。当前多 engine 证据来自 Python 功能/周期模型；primitive RTL 对拍不等于完整 Gemmini/BOA 系统或 validator RTL 联仿通过。
+P01 补跑软件 gate 已通过，首次失败仍保留在 [P01 证据](evidence/P01.md)。[P02 工具链与离线复现](evidence/P02.md) 已通过；Vivado 未提供，FPGA 子能力仍为 blocked。[P03 独立数值 oracle](evidence/P03.md)、[P04 每 Tile AM](evidence/P04.md)、[P05 多 engine/affinity](evidence/P05.md)、[P06 逐 MAC 数值与 v5 cutover](evidence/P06.md) 已通过。下一默认任务为 **P07：终态时序与安全释放**。P06 是生产 Python 功能/周期模型与独立 golden 的对拍，不代表 Gemmini/BOA RTL、C ABI 联仿或 FPGA 通过。
 
 | ID  | 对应原方案         | 独立任务文件                                                    | 前置                         | 状态   |
 | --- | ------------------ | --------------------------------------------------------------- | ---------------------------- | ------ |
@@ -17,7 +17,7 @@ P01 补跑软件 gate 已通过，首次失败仍保留在 [P01 证据](evidence
 | P03 | C1                 | [独立 oracle 与数值合同冻结](P03_C1_独立数值Oracle.md)          | P02                          | 通过   |
 | P04 | SW-A1              | [每 Tile AM 拓扑与隔离](P04_SWA1_每Tile分配器.md)               | P01                          | 通过   |
 | P05 | SW-A2              | [多 engine 与固定 affinity](P05_SWA2_多Engine与Affinity.md)     | P04                          | 通过   |
-| P06 | SW-A3              | [逐 MAC 数值与 artifact 切换](P06_SWA3_数值与Artifact迁移.md)   | P03、P05                     | 未开始 |
+| P06 | SW-A3              | [逐 MAC 数值与 artifact 切换](P06_SWA3_数值与Artifact迁移.md)   | P03、P05                     | 通过   |
 | P07 | SW-A4              | [终态时序与安全释放](P07_SWA4_终态与释放顺序.md)                | P04                          | 未开始 |
 | P08 | C6-S / C3 软件前置 | [软件后处理、四转置与 im2col Conv](P08_C6S_后处理与软件Conv.md) | P06                          | 未开始 |
 | P09 | C7-A / SW-A gate   | [软件全链路 gate](P09_C7A_软件集成Gate.md)                      | P04、P05、P06、P07、P08      | 未开始 |

@@ -628,8 +628,8 @@ class TileGroup:
     context_name = sequencer.context_name if sequencer is not None and sequencer.context_name else "ctx"
     buffer_id = desc_id.split(":", 1)[-1]
     bytes_total = transfer.bytes
-    if bytes_total <= 0:
-      raise MemoryInvariantError("compiled transfer must have positive bytes")
+    if bytes_total < 0:
+      raise MemoryInvariantError("compiled transfer must have non-negative bytes")
     src_view = self._resolve_view(transfer.src, gen, formals)
     dst_view = self._resolve_view(transfer.dst, gen, formals)
     if src_view is None or dst_view is None:
@@ -679,7 +679,7 @@ class TileGroup:
         offset_bytes=offset,
         size_bytes=view.bytes,
         permissions=self.hbm.permissions(name),
-        address=segments[0].address,
+        address=segments[0].address if segments else handle.base_address,
         segments=segments,
       )
     if space == "l2":
@@ -693,7 +693,8 @@ class TileGroup:
       segs = self.l2_sram.resolve_segments(handle, offset, view.bytes)
       return ResolvedMemoryView(
         handle=handle, offset_bytes=offset, size_bytes=view.bytes,
-        permissions=self.l2_sram.permissions(handle), address=segs[0].address, segments=segs
+        permissions=self.l2_sram.permissions(handle),
+        address=segs[0].address if segs else handle.base_address, segments=segs
       )
     # l1 views are resolved per-tile in dispatch admission
     return None
@@ -1569,7 +1570,12 @@ class TileGroup:
           if t.uce.has_active_contexts():
             t.uce.notify_event(txn.completion_event)
       # full_memory: record payload using real transaction addresses
-      if self.memory_enabled and txn.src is not None and txn.dst is not None:
+      if (
+        self.memory_enabled
+        and txn.bytes_total
+        and txn.src is not None
+        and txn.dst is not None
+      ):
         from .memory.payload import Payload
 
         src_addr = txn.src.address

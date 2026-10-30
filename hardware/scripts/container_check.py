@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import NoReturn
 
 import numeric_cases
+import numeric_profile_cases
 
 EXIT_OK = 0
 EXIT_CONFIG = 6
@@ -385,6 +386,11 @@ def validate_config(text: str, registry_entry: dict, request: dict) -> dict:
       config["numeric"] = numeric_cases.validate_numeric_config(config.get("numeric", {}))
     except ValueError as exc:
       fail_config(str(exc))
+  if target == "numeric-profile" and overrides:
+    fail_config(
+      "numeric-profile golden vectors pin each case's boa_numeric_tile_k; "
+      "validator.hw_overrides must be empty (nothing is silently discarded)"
+    )
   return config
 
 
@@ -882,6 +888,9 @@ CASE_RUNNERS = {
   "crosscheck": (numeric_cases.case_crosscheck, "R"),
   "probe-nan": (numeric_cases.case_probe_nan, "R"),
   "vectors": (numeric_cases.case_vectors, "F"),
+  "vector-parity": (numeric_profile_cases.case_vector_parity, "F"),
+  "zero-k": (numeric_profile_cases.case_zero_k, "F"),
+  "cutover-reject": (numeric_profile_cases.case_cutover_reject, "F"),
 }
 
 
@@ -1091,6 +1100,14 @@ def main() -> int:
   if request["target"] == "numeric":
     for path in sorted((repo / "hardware/boa/reference/vectors").glob("*.json")):
       fixtures[str(path.relative_to(repo))] = sha256_path(path)
+  if request["target"] == "numeric-profile":
+    for rel in (
+      "hardware/boa/reference/vectors/matmul.json",
+      "pipeline_validator/tests/data/numeric_profile_directed_golden.json",
+      "pipeline_validator/tests/data/legacy_v4_boa_am.json",
+    ):
+      path = repo / rel
+      fixtures[rel] = sha256_path(path) if path.is_file() else "missing"
 
   cleanup = {
     "work_root": "/out/work",

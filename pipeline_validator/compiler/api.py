@@ -414,8 +414,8 @@ def compile_program(
   from ..execution_verifier import target_fingerprint, verify_compiled_program
 
   program = CompiledProgram(
-    4,
-    "v4",
+    5,
+    "v5",
     source_hash,
     source_ir,
     registry,

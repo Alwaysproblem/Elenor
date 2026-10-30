@@ -6,7 +6,7 @@ from itertools import pairwise
 from pathlib import Path
 
 import pytest
-from xdsl.utils.exceptions import VerifyException
+from xdsl.utils.exceptions import ParseError, VerifyException
 
 from pipeline_validator.compiled_program import (
   parse_compiled_program,
@@ -18,6 +18,7 @@ from pipeline_validator.compiler.resources import conservative_arena_bytes, layo
 from pipeline_validator.config import HardwareConfig, SimConfig
 from pipeline_validator.execution_ir import ExecGroupActionOp, ExecModel, ExecTileGroupTask, GlobalBinding
 from pipeline_validator.loader import load_program
+from pipeline_validator.memory.byte_store import ByteStore
 from pipeline_validator.profiles import build_registry
 from pipeline_validator.simulator import Simulator
 from pipeline_validator.workload_ir import parse_workload_ir, print_workload_ir
@@ -153,10 +154,11 @@ class TestExplicitCompileLoadReplay:
       simulator.run(workload.module)
 
     text = serialize_compiled_program(artifact)
-    assert artifact.schema_version == 4
-    assert artifact.compiler_abi == "v4"
-    # Plan §1: v3 clean cutover - every earlier schema/ABI pair is rejected
-    # with a recompile hint; no upgrade shim exists.
+    assert artifact.schema_version == 5
+    assert artifact.compiler_abi == "v5"
+    # P06: clean cutover from the previous v4/v4 ABI - every earlier
+    # schema/ABI pair (including the incoming v4/v4) is rejected with a
+    # recompile hint; no upgrade shim exists.
     for schema_version, compiler_abi in (
       (1, "v0"),
       (2, "v0"),
@@ -164,6 +166,9 @@ class TestExplicitCompileLoadReplay:
       (2, "v1"),
       (2, "v2"),
       (3, "v2"),
+      (4, "v4"),
+      (4, "v5"),
+      (5, "v4"),
     ):
       legacy = json.loads(text)
       legacy["schema_version"] = schema_version
@@ -740,8 +745,8 @@ class TestIndependentSharedArtifactVerification:
 
     loaded = load_program(replay, hw, sim, actual_bindings=bindings)
 
-    assert loaded.compiled.schema_version == 4
-    assert loaded.compiled.compiler_abi == "v4"
+    assert loaded.compiled.schema_version == 5
+    assert loaded.compiled.compiler_abi == "v5"
     assert serialize_compiled_program(loaded.compiled) == text
 
 
@@ -1029,3 +1034,183 @@ def test_context_local_final_store_must_cover_writers_after_resealed_reorder() -
   corrupted = _replace_task(artifact, replace(task, actions=tuple(actions)))
   with pytest.raises(ValueError, match="final store does not cover every actual writer"):
     load_program(corrupted, hw, sim, actual_bindings=bindings)
+
+
+# ---------------------------------------------------------------------------
+# P06: typed zero-work contract (zero K / zero M / zero N) and k_mask
+# ---------------------------------------------------------------------------
+
+
+def _zero_work_ir(*, m: int, n: int, k: int, storage: int | None = None, mask_kw: str = "") -> str:
+  storage_k = k if storage is None else storage
+  a_dims = f"{m}x{storage_k}xbf16"
+  b_dims = f"{storage_k}x{n}xbf16"
+  return f"""builtin.module {{
+  tile.program @zero_mm(%task : !nest.task)
+    resource_contract = #tile.resources<allowed_profiles = [0],
+        tile_l1_spm_bytes_per_context = 147456> {{
+    %a = tile.alloc shape = [{m}, {storage_k}] dtype = "bf16" alignment = 256
+      : !tile.l1_buffer<{a_dims}>
+    %b = tile.alloc shape = [{storage_k}, {n}] dtype = "bf16" alignment = 256
+      : !tile.l1_buffer<{b_dims}>
+    %out = tile.alloc memory_space = "l1" shape = [{m}, {n}] dtype = "f32" alignment = 256
+      : !tile.l1_buffer<{m}x{n}xf32>
+    %acc = tile.alloc memory_space = "am" logical_slot = 0 output(%out) shape = [{m}, {n}]
+      dtype = "f32" alignment = 256 : !tile.am_buffer<{m}x{n}xf32>
+    %k0 = tile.boa.async "matmul" ins(%a, %b) outs(%out) acc(%acc)
+      m = {m} n = {n} k = {k} seq = 0{mask_kw} output : !tile.event<"k0">
+    tile.await %k0
+    tile.free %a
+    tile.free %b
+    tile.return
+  }}
+  nest.context @zero_mm_ctx() placement = 1
+    resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0],
+        logical_tasks = 1, l2_spm_bytes = 4096, requested_contexts_per_tile = 1> {{
+    %tasks = nest.task.range from = 0 to = 1 : !nest.task_range
+    %grid, %read, %ready = nest.dispatch.tasks.async @zero_mm l1_mode = 0 context = 0
+      tasks(%tasks) globals() bindings() ins() outs()
+      signal_policy {{}}
+      : (!nest.event<"grid">, !nest.event<"">, !nest.event<"">)
+    nest.await %grid
+    nest.return
+  }}
+  nexus.program @zero_work() {{
+    %done = nexus.submit_context.async @zero_mm_ctx : !nexus.event<"done">
+    nexus.await %done
+    nexus.return
+  }}
+}}
+"""
+
+
+
+
+class TestZeroWorkAndKMaskContract:
+  """Zero INIT/ADD K and zero M/N must be expressible from actual source,
+  survive the whole compile->codec->independent-verifier->loader chain,
+  and reject invalid negatives/masks independently."""
+
+  @pytest.mark.parametrize(("m", "n", "k"), ((1, 1, 0), (0, 3, 0), (2, 0, 0), (0, 0, 0)))
+  def test_zero_k_and_zero_mn_compile_load_and_replay(self, m, n, k):
+    hw = HardwareConfig().with_overrides(hbm_fixed_latency_cycles=10)
+    sim = SimConfig(fidelity="full_memory", max_cycles=200000)
+    module = parse_workload_ir(_zero_work_ir(m=m, n=n, k=k))
+    artifact = compile_program(module, hw, sim)
+    text = serialize_compiled_program(artifact)
+    replay = parse_compiled_program(text)
+    loaded = load_program(replay, hw, sim)
+    result = Simulator(hw, sim, byte_store=ByteStore()).run(loaded)
+    assert result.completed, result.reason
+    pool = result.group_snapshot["shared_am_per_tile"][0]
+    assert (pool["commit_count"], pool["final_count"], pool["slot_free_count"]) == (1, 1, 1)
+    assert pool["live_leases"] == pool["pending_requests"] == pool["reserved_slots"] == 0
+    assert pool["free_slots"] == pool["total_slots"]
+
+
+  @pytest.mark.parametrize(
+    ("dims", "shape", "expected"),
+    (
+      ("0xbf16", "[0]", (0,)),
+      ("0x3xbf16", "[0, 3]", (0, 3)),
+      ("0x12x3xbf16", "[0, 12, 3]", (0, 12, 3)),
+      ("1x0xbf16", "[1, 0]", (1, 0)),
+      ("4x128x128xbf16", "[4, 128, 128]", (4, 128, 128)),
+    ),
+  )
+  def test_zero_leading_dims_parse_without_hex_collapse(self, dims, shape, expected):
+    """A leading-zero dim lexes as a hex literal; the type parser must
+    recover the decimal dims so zero-M sources stay expressible."""
+    source = (
+      "builtin.module {\n"
+      "  tile.program @t(%task : !nest.task)\n"
+      "    resource_contract = #tile.resources<allowed_profiles = [0],\n"
+      "        tile_l1_spm_bytes_per_context = 147456> {\n"
+      f'    %a = tile.alloc shape = {shape} dtype = "bf16" alignment = 256\n'
+      f"      : !tile.l1_buffer<{dims}>\n"
+      "    tile.return\n"
+      "  }\n"
+      "  nest.context @c() placement = 1\n"
+      "    resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0],\n"
+      "        logical_tasks = 0, l2_spm_bytes = 0, requested_contexts_per_tile = 1> {\n"
+      "    nest.return\n"
+      "  }\n"
+      "  nexus.program @p {\n"
+      '    %done = nexus.submit_context.async @c : !nexus.event<"done">\n'
+      "    nexus.await %done\n"
+      "    nexus.return\n"
+      "  }\n"
+      "}\n"
+    )
+    module = parse_workload_ir(source)
+    from pipeline_validator.dialects.elenor import TileProgramDefOp
+    from pipeline_validator.workload_ir import _int_list
+
+    program = next(op for op in module.body.block.ops if isinstance(op, TileProgramDefOp))
+    alloc = list(program.body.block.ops)[0]
+    assert tuple(_int_list(alloc.result.type.dims)) == expected
+
+
+  def test_negative_mnk_is_rejected_independently(self):
+    # Allocations stay legal; only the op declares a negative dimension.
+    source = _zero_work_ir(m=0, n=1, k=0).replace(
+      "m = 0 n = 1 k = 0 seq = 0", "m = -1 n = 1 k = 0 seq = 0"
+    )
+    with pytest.raises((ParseError, VerifyException), match="m/n/k must be non-negative"):
+      parse_workload_ir(source)
+
+  def test_k_above_storage_k_is_rejected_independently(self):
+    hw = HardwareConfig()
+    sim = SimConfig(max_cycles=200000)
+    # storage K = k = 1 in the template; declare k = 2 against [1,1] operands.
+    source = _zero_work_ir(m=1, n=1, k=1).replace(
+      "m = 1 n = 1 k = 1 seq = 0", "m = 1 n = 1 k = 2 seq = 0"
+    )
+    with pytest.raises(VerifyException, match="must not exceed its storage K"):
+      compile_program(parse_workload_ir(source), hw, sim)
+
+  def test_storage_k_mismatch_between_a_and_b_is_rejected(self):
+    hw = HardwareConfig()
+    sim = SimConfig(max_cycles=200000)
+    source = _zero_work_ir(m=1, n=1, k=1).replace(
+      '%b = tile.alloc shape = [1, 1] dtype = "bf16" alignment = 256\n'
+      "      : !tile.l1_buffer<1x1xbf16>",
+      '%b = tile.alloc shape = [2, 1] dtype = "bf16" alignment = 256\n'
+      "      : !tile.l1_buffer<2x1xbf16>",
+    )
+    with pytest.raises(VerifyException, match="storage K"):
+      compile_program(parse_workload_ir(source), hw, sim)
+
+  def test_k_mask_length_mismatch_is_rejected_independently(self):
+    hw = HardwareConfig()
+    sim = SimConfig(max_cycles=200000)
+    source = _zero_work_ir(m=1, n=1, k=1, storage=2, mask_kw=" k_mask = [1]")
+    with pytest.raises(VerifyException, match="k_mask length"):
+      compile_program(parse_workload_ir(source), hw, sim)
+
+  def test_active_lane_after_k_is_rejected_independently(self):
+    source = _zero_work_ir(m=1, n=1, k=1, storage=2, mask_kw=" k_mask = [1, 1]")
+    with pytest.raises((ParseError, VerifyException), match="lanes at or after k"):
+      parse_workload_ir(source)
+
+  def test_non_boolean_k_mask_entry_is_rejected_independently(self):
+    source = _zero_work_ir(m=1, n=1, k=2, mask_kw=" k_mask = [1, 2]")
+    with pytest.raises((ParseError, VerifyException), match="boolean ints 0 or 1"):
+      parse_workload_ir(source)
+
+
+  def test_fingerprint_moves_with_numeric_profile_fields(self):
+    from pipeline_validator.execution_verifier import target_fingerprint
+
+    hw_a = HardwareConfig()
+    sim = SimConfig(max_cycles=200000)
+    module = parse_workload_ir(_zero_work_ir(m=1, n=1, k=0))
+    base = compile_program(module, hw_a, sim)
+    # tile_k is part of the target identity: a different value is a
+    # different target, so the artifact must refuse to load.
+    hw_b = hw_a.with_overrides(boa_numeric_tile_k=16)
+    assert target_fingerprint(hw_a, sim) != target_fingerprint(hw_b, sim)
+    with pytest.raises(ValueError, match="target fingerprint mismatch"):
+      load_program(base, hw_b, sim)
+    # Same-numeric-config loads still succeed.
+    load_program(base, hw_a, sim)

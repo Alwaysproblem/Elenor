@@ -861,6 +861,7 @@ def _lower_engine_descriptor(
       int(op.seq.value.data),
       op.accumulate is None,
       op.output is not None,
+      None if op.k_mask is None else tuple(bool(value) for value in _int_list(op.k_mask)),
     )
     return ExecEngineDesc(name, "BOA", "matmul", {"matmul": matmul}), ExecTileOp.LAUNCH_BOA
   if isinstance(op, TileBoaEstimateOp):

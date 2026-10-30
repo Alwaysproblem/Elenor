@@ -60,9 +60,9 @@ result = Simulator(hw, sim).run(loaded)
 Registry, target/artifact hashes, frozen executable, call bindings,
 relocations, source map, dependency proofs, readonly import references, entry/exit
 Profiles, resource budgets, binding guards, and workload metadata. The compiled
-package format currently has `schema_version=4` and `compiler_abi="v4"`; this is
-distinct from hardware YAML schema 2. Older schema/ABI artifacts (including
-`v2` and `v3`) are rejected and must be rebuilt from source. Parsing uses an explicit type/opcode
+package format has `schema_version=5` and `compiler_abi="v5"` (P06); this is
+distinct from hardware YAML schema 2. All earlier schema/ABI artifacts, including
+P05's v4 packages, are rejected and must be rebuilt from source. Parsing uses an explicit type/opcode
 allowlist and rejects unknown fields/types, duplicate JSON keys, non-finite
 numbers, unknown versions, and a mismatched artifact hash.
 
@@ -405,7 +405,7 @@ The YAML keys under `engines.boa` are `arrays_per_tile` (default 1), `array_rows
 `array_cols`, `tile_m`, and `tile_n` (geometry defaults 16). Flat overrides use
 the `boa_` prefix. Array count accepts integers 1–8 (8 is a software exploration
 limit, not a frozen hardware limit); the V1 multi-array reference uses 4.
-`numeric_tile_k`/numeric profile remain P06 work, not P05 configuration.
+P06 adds the numerical configuration described below; it does not change affinity.
 
 AM grants choose the engine with the fewest **live** handles, ties to the lowest
 ID, independently of AM group. Affinity lasts through FINAL output backpressure
@@ -425,9 +425,9 @@ snapshot counters accumulate until engine reset; report utilization uses the
 current run's PMU deltas. The older overall utilization heuristic is unchanged.
 
 All five geometry/pool fields and fixed `boa_engine_affinity="least_live_v1"`
-enter target identity. Pre-P05 artifacts fail target validation; the immutable
-codec stays v4 because its layout did not change. Recompile source; old target
-YAML containing `engines.boa.opa` is separately rejected as unknown configuration.
+enter target identity. P05 preserved the then-v4 codec; P06 now requires v5.
+Recompile source; old target YAML containing `engines.boa.opa` is independently
+rejected as unknown configuration.
 
 ```bash
 python -m pipeline_validator.tests.test_boa_multi_engine --config hardware/configs/boa-2engine.yaml
@@ -437,6 +437,47 @@ bash examples/run.sh matmul-splitk-pipeline --hw-override boa_arrays_per_tile=4 
 The `hardware/configs/boa-{1,2,4}engine.yaml` files use the P02 wrapper schema for
 the standalone P05 smoke and later P09 runner. They are **not** schema-2
 `--hw-config` files; `two-slot-progress` remains unimplemented until P09.
+
+### Exact BOA numerical profile (P06)
+
+`engines.boa.numeric_profile` (`boa_numeric_profile`) accepts only
+`bf16_fp32_mac_rne_v1`. `engines.boa.numeric_tile_k` (`boa_numeric_tile_k`,
+default 8, positive integer up to `2^64-1`) is a numerical rounding boundary,
+not `WorkloadConfig.tile_k`. Both fields enter the target fingerprint; changing
+the chunk length requires recompilation and can change output bits.
+
+Production arithmetic uses exact integers, not binary64 accumulation or a
+reference-model import. Each contribution block starts at FP32 +0 and performs
+one fused FP32 RNE per active K lane. INIT's first active block overwrites AM;
+every subsequent block is added to AM with FP32 RNE. The runtime still commits
+one complete partial payload per step; there is no new block-level commit API.
+Arithmetic NaN is positive `0x7fc00000`, BF16 conversion NaN is `0x7fc0`;
+subnormals and signed zero follow the frozen P03 contract. f32 output preserves
+the AM bits directly; BF16 output rounds once at FINAL.
+
+Operands may store a padded K extent: A `[m, storage_k]`, B `[storage_k, n]`,
+with `0 <= k <= storage_k`. Optional `k_mask = [1, 0, ...]` follows `seq`;
+it covers the storage extent, has only 0/1 entries and is inactive beyond `k`.
+Masked lanes do not execute MACs and are never compacted into different blocks.
+An entirely inactive contribution does not add a phantom +0 to AM.
+
+Zero K INIT produces +0, zero K ADD preserves the previous AM bits, and zero
+M/N produces empty output. These paths still complete the AM/event/reference
+lifecycle. Empty views and bindings own no data interval but remain subject to
+ownership, bounds, permission and generation checks.
+
+```bash
+conda run -n elenor-validator python -m pipeline_validator.tests.test_boa_numeric_profile \
+  --case vector-parity --out /tmp/boa-p06/vectors --seed 20261028
+hardware/scripts/check numeric-profile --out /tmp/boa-p06/container --seed 20261028
+bash examples/run.sh boa-am-matmul --hw-override boa_numeric_tile_k=16 --json
+```
+
+The profile gate compares frozen P03 golden bytes through source/codec replay
+and `full_memory` execution. P08 bias/scale/ReLU/clip/INT8 cases are observed as
+raw FP32 AM and explicitly labelled pre-epilogue; their FINAL bytes are not
+claimed. INT8 conversion remains unsupported, EVU combine remains timing-only,
+and this is not Gemmini RTL/Verilator co-simulation.
 
 ## Hardware YAML schema 2 and default experimental modes
 

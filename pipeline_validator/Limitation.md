@@ -81,12 +81,15 @@ LoadedProgram → Simulator.run`；Simulator 不包含源码 lowering fallback�
 - `timing_only`/`runtime` 把普通 transfer 折叠为单腿带宽+launch 延迟，
   因而不提供逐 Bank 时序结论；但二者仍执行资源合同、Profile/维护命令、
   gate、generation 和静态预算检查。
-- `tile.boa.async` typed Matmul 在 full_memory 下执行真实 BF16→FP32 数值、
-  AM 分步提交与最终 f32/BF16 输出；`tile.boa.estimate.async`、EVU、USE 仍是
-  Roofline/launch 时序模型。P05 每 Tile 有可配置的 BOA engine 池，各实例单 job
-  非流水，链固定 affinity；逻辑 M/N 块影响物理 array wave 数，BOA L1 带宽按
-  engine 静态等分，不模拟动态借用或逐 beat 的真实阵列端口。共享结果服务仍每
-  Tile 每 cycle 推进一次。MFE 有可配置 load/store lane，每 lane 内串行。
+- `tile.boa.async` typed Matmul 在 full_memory 下执行 `bf16_fp32_mac_rne_v1`：
+  逐 MAC FP32 fused RNE、逐 numeric-K 块 AM add RNE、最终 f32 原样或 BF16 RNE
+  输出。生产实现为独立精确整数算法，不调用 P03 oracle；每 step 仍整槽 commit
+  一次，不声称硬件微块级 RMW/可见性已建模。零 K/零 M/N 与 K-mask 有真实
+  完成/释放路径；零工作不执行 MAC，但仍有控制与结果服务阶段开销。
+- `tile.boa.estimate.async`、EVU、USE 仍是 Roofline/launch 时序模型。P05 每
+  Tile 有独立 BOA engine 池、固定 affinity；逻辑 M/N 块影响 array waves，
+  L1 带宽静态等分，不模拟动态借用或逐 beat 阵列端口。结果服务每 Tile 每
+  cycle 只推进一次。MFE 有可配置 load/store lane，每 lane 内串行。
 - Stream Queue 模拟 credit/backpressure/EOS，但不是 RTL FIFO/CDC 对拍。
 - `clock_mhz` 与 CPU `issue_width` 都是模拟参数，不是实测 Fmax 或 CPU IPC。
   真实 CPU/FPGA 异步时钟、PCIe/AXI/doorbell 物理链路、CDC、综合、
@@ -124,6 +127,10 @@ LoadedProgram → Simulator.run`；Simulator 不包含源码 lowering fallback�
 
 - `tile.boa.estimate.async` 与 EVU/USE 不执行 tensor 算术；这些 op 的 bytes/ops 只驱动
   时序与资源模型。
+- P06 的 P03 向量对拍区分完整 f32/BF16 输出与 pre-epilogue FP32 AM 观察。
+  bias/scale/ReLU/clip/INT8 仍归 P08；不能把这些病例的 AM 一致说成 FINAL
+  后处理已实现。split-K 只证明全部 BOA partial bytes，不证明 EVU combine C。
+  numeric-profile 是 Python 模型验证，不是完整 Gemmini RTL / C ABI 联仿。
 - Gather 仍由源码 `tile.profiled.access` 显式给出
   `L1_HIT`/`L2_HIT`/`HBM_MISS`。Cache 容量不会推导命中率，也不会把 hit
   改写成 miss；`line`/`merge` 在非 oracle 模式是 opaque profile identity。

@@ -145,12 +145,6 @@ class TestBoaArrayConfig:
     with pytest.raises(ValueError, match=r"unknown hardware config path 'engines\.boa\.opa'"):
       HardwareConfig.from_yaml(path)
 
-  def test_numeric_tile_k_reserved_for_p06_not_available(self, tmp_path):
-    path = tmp_path / "hw.yaml"
-    path.write_text("engines:\n  boa:\n    numeric_tile_k: 8\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="unknown hardware config path"):
-      HardwareConfig.from_yaml(path)
-    assert not hasattr(HardwareConfig(), "boa_numeric_tile_k")
 
 
 # ---------------------------------------------------------------------------

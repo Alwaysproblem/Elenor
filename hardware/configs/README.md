@@ -1,14 +1,14 @@
 # hardware/configs — 统一硬件配置格式（schema 1）
 
-所有 target 的 `--config` 入口。P02 定义格式与校验规则，P03 注册 numeric 实例；
-各 `Pnn` 通过 `targets.json` 的 `config.consumed_sections` 注册自己消费的 section。
+所有 target 的 `--config` 入口。P02 定义格式，P03 注册 reference numeric 实例，
+P06 注册生产 `numeric-profile`；各任务通过 `config.consumed_sections` 声明消费者。
 
 ## Schema 1
 
 ```yaml
 schema: 1 # 必填，恒为 1
 target: toolchain # 必填，必须与 targets.json 中该 target 的 required_target 一致
-topology: {} # 保留（P05 拓扑/几何消费者注册前必须为空 mapping 或缺省）
+topology: {} # 保留，显式注册 topology section 消费者前必须为空 mapping 或缺省
 numeric: {} # toolchain 不消费；numeric target 的非空格式见下
 validator: # toolchain 消费的 section；numeric target 必须为空
   hw_overrides: {} # 可选；键值对，逐项映射为 validator CLI 的 --hw-override k=v
@@ -27,7 +27,7 @@ board: {} # 保留（板级消费者注册前必须为空）
 6. `hw_overrides` 键须匹配 `[A-Za-z0-9_][A-Za-z0-9_.-]*`；值须是 bool / number /
    匹配 `[A-Za-z0-9_][A-Za-z0-9_.+-]*` 的字符串（保证可安全序列化为 CLI 参数）。
    执行时按键排序逐项展开为 `--hw-override <k>=<v>`（bool 转 `true|false`），
-   施加到真实 validator 运行（当前消费者：python-env case）。
+   施加到真实 validator 运行（通用消费者：python-env case；numeric-profile 的限制见下）。
 
 ## hw_overrides 与既有 CLI 的关系
 
@@ -76,6 +76,20 @@ config 保存于 manifest，reproduce 使用其值重建请求，不依赖原 YA
   亦可在省略 `--config` 时由 registry 默认提供。
 - `numeric.yaml`：P03 独立 reference/SoftFloat/HardFloat 数值对照默认实例；
   `check numeric --config hardware/configs/numeric.yaml ...` 可显式选择，也可省略 `--config`。
+- `numeric-profile.yaml`：P06 生产 full_memory 数值/零工作/v5 cutover gate；
+  `check numeric-profile --config hardware/configs/numeric-profile.yaml ...`。
+
+## 生产 numeric-profile 配置（P06）
+
+`numeric-profile.yaml` 是 schema 1 runner wrapper，不是原生 `--hw-config`
+（schema 2）。向量自带权威 numeric K（2/4/8/16），因此该 target 要求
+`validator.hw_overrides` 为空，其余 section 也为空；非空覆盖明确拒绝而非忽略。
+每条向量记录实际执行的 numeric K 和 target fingerprint。
+
+普通 workload 使用 schema 2 的 `engines.boa.numeric_profile` /
+`engines.boa.numeric_tile_k`，或 `--hw-override boa_numeric_tile_k=16`；
+profile 唯一为 `bf16_fp32_mac_rne_v1`，numeric K 默认8。两者属于数值 target，
+不能将新配置应用到旧 artifact；必须从源重编译 v5。
 
 ## BOA 1/2/4 engine 软件实例（P05）
 

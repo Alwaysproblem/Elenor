@@ -4,7 +4,7 @@
 - 需求优先级：用户最新修改 > [共享 AM V1 需求规格](../../history/nexus_shared_am_v1_requirements_and_design.md) > [prompt.md](../../prompt.md) 与此前确认中仍适用的内容。
 - 本版新增确认（2026-10-28）：共享 AM 位于 **Compute Tile 内**，由该 Tile 的 1→4 个阵列共享；数值改为逐 MAC FP32 RNE profile `bf16_fp32_mac_rne_v1`；首个 FPGA 平台为 **AMD UltraScale+**，参考板 VCU118。
 - 阅读顺序：§1 范围 → §4.1 AM 申请协议 → §5.2 进展证明 → §3.5/§3.6 结果与释放 → §7.4 FPGA 映射 → §8 验收。
-- v0.5 初稿阶段只修改本文与两张图；后续 P01/P02 的执行记录在 `plan/evidence/`，不覆盖本文的历史数字。§7.2 的 SW-A1–SW-A4 仍尚未实施。源 IR 仍不增加分支/重试控制，软件计划 §3.4 仍延期。
+- v0.5 初稿只修改本文与两张图；后续实施记录在 `plan/evidence/`，历史数字保留历史标签。SW-A1/P04、SW-A2/P05 已通过，SW-A3/P06 已落地逐 MAC 数值与 v5 cutover，验收状态以计划 evidence 为准；SW-A4/P07 尚未实施。源 IR 仍无分支/重试控制，软件计划 §3.4 仍延期。
 
 ## 1. 定位、目标和 First Silicon cutline
 
@@ -45,18 +45,18 @@
 
 ### 1.3 当前仓库事实，不等同于拟议硬件
 
-| 事实                                                                                     | 当前源码证据                                                                                                                                                                                   | 设计影响                                                                         |
-| ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| typed Matmul 已有 A/B/output/AM、seq、INIT/FINAL descriptor                              | [execution_ir.py](../../pipeline_validator/execution_ir.py) `ExecBoaMatmulDesc`；[lowering.py](../../pipeline_validator/compiler/lowering.py)；artifact `schema_version=4`/`compiler_abi="v4"` | 硬件 descriptor 由该合同派生；estimate descriptor 不进入数值 backend             |
-| AM manager 已按每 Compute Tile 独立实例化（P04）                                         | [tile.py](../../pipeline_validator/tile.py) `ComputeTile.shared_am`；[tile_group.py](../../pipeline_validator/tile_group.py) `shared_am_per_tile`                                              | 每 Tile 8 槽，无跨 Tile 借用；旧 Group 拓扑 artifact 拒绝                        |
-| AM 申请为一次发出、挂起、slot_free 唤醒，带 bundle 预留与 FIFO                           | [shared_am.py](../../pipeline_validator/runtime/shared_am.py) 13–29、206–400 行 `request`/`_grantable`/`_grant_pending_locked`；[tile.py](../../pipeline_validator/tile.py) 925–1032 行        | 硬件 allocator 直接实现同一规则（§2.3、§4.1、§5.2）                              |
-| P05 已实现多 BOA engine 与独立 least-live affinity                                       | [shared_am.py](../../pipeline_validator/runtime/shared_am.py) `_allocate_lease/_free_slot`；[tile.py](../../pipeline_validator/tile.py) `boa_engines` 与逐 engine FIFO/RR                      | group 不再编码 engine；绑定持续至 slot_free，忙时不迁移                          |
-| 数值在 binary64 内累加整个 step，commit 时一次舍入为 FP32                                | [boa_numeric.py](../../pipeline_validator/boa_numeric.py) 60–93 行 `matmul_f32`；[test_boa_am.py](../../pipeline_validator/tests/test_boa_am.py) `_oracle` 同构                                | 与逐 MAC FP32 RNE profile 不同，FPGA 无法逐 bit 对拍 → SW-A3                     |
-| 结果服务分阶段：launch 原子预留 FIFO 项与 2 credit，再 commit/output/drain/release/event | [boa_result.py](../../pipeline_validator/runtime/boa_result.py) 112–243 行；[hardware_config.yaml](../../pipeline_validator/hardware_config.yaml) 104–112 行                                   | 对应 ResultCapture/AmCommit/Drain 硬件；软件为 step 粒度，硬件为微块粒度（§3.5） |
-| `chain_done` 终态记录在 FINAL commit 时写入，早于 slot_free                              | [shared_am.py](../../pipeline_validator/runtime/shared_am.py) 511–514 行 `commit_step`、532–539 行 `release_final`                                                                             | 与 §4.3「chain_done 包含 slot_free」不一致 → SW-A4                               |
-| UCE 是 Python Tile Program 解释器                                                        | [tile.py](../../pipeline_validator/tile.py) `TileUCE`                                                                                                                                          | 没有真实 RISC-V 指令执行；RoCC 是新增验证层                                      |
-| 数值 Matmul 只在 full_memory/ByteStore 下执行                                            | [tile.py](../../pipeline_validator/tile.py) 1344–1349 行                                                                                                                                       | 联仿与上板对拍都以 ByteStore 字节为外部内存权威                                  |
-| P05 几何配置已替换旧 8-OPA 合并峰值模型                                                  | [hardware_config.yaml](../../pipeline_validator/hardware_config.yaml) `engines.boa.arrays_per_tile/array_rows/array_cols/tile_m/tile_n`                                                        | 默认 1 array、V1 多阵列实例为4；numeric K/profile 留给 P06                       |
+| 事实                                                                                     | 当前源码证据                                                                                                                                                                                       | 设计影响                                                                         |
+| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| typed Matmul 有 A/B/output/AM、seq、INIT/FINAL 与可选 K-mask descriptor                  | [execution_ir.py](../../pipeline_validator/execution_ir.py) `ExecBoaMatmulDesc`；[lowering.py](../../pipeline_validator/compiler/lowering.py)；P06 artifact `schema_version=5`/`compiler_abi="v5"` | 旧版本拒绝，重编译源；硬件 wire ABI 仍由 P10 冻结                                |
+| AM manager 已按每 Compute Tile 独立实例化（P04）                                         | [tile.py](../../pipeline_validator/tile.py) `ComputeTile.shared_am`；[tile_group.py](../../pipeline_validator/tile_group.py) `shared_am_per_tile`                                                  | 每 Tile 8 槽，无跨 Tile 借用；旧 Group 拓扑 artifact 拒绝                        |
+| AM 申请为一次发出、挂起、slot_free 唤醒，带 bundle 预留与 FIFO                           | [shared_am.py](../../pipeline_validator/runtime/shared_am.py) 13–29、206–400 行 `request`/`_grantable`/`_grant_pending_locked`；[tile.py](../../pipeline_validator/tile.py) 925–1032 行            | 硬件 allocator 直接实现同一规则（§2.3、§4.1、§5.2）                              |
+| P05 已实现多 BOA engine 与独立 least-live affinity                                       | [shared_am.py](../../pipeline_validator/runtime/shared_am.py) `_allocate_lease/_free_slot`；[tile.py](../../pipeline_validator/tile.py) `boa_engines` 与逐 engine FIFO/RR                          | group 不再编码 engine；绑定持续至 slot_free，忙时不迁移                          |
+| P06 生产数值已改为独立精确整数逐 MAC FP32 fused RNE、逐 numeric-K 块 AM add RNE          | [boa_numeric.py](../../pipeline_validator/boa_numeric.py)；`test_boa_numeric.py` / `test_boa_numeric_profile.py` 消费 P03 golden；既有 fixture oracle 用独立整数边界证明                           | 不再以 binary64 整 step 累加；支持零 K/M/N 与 mask，INT8/epilogue 仍归 P08       |
+| 结果服务分阶段：launch 原子预留 FIFO 项与 2 credit，再 commit/output/drain/release/event | [boa_result.py](../../pipeline_validator/runtime/boa_result.py) 112–243 行；[hardware_config.yaml](../../pipeline_validator/hardware_config.yaml) 104–112 行                                       | 对应 ResultCapture/AmCommit/Drain 硬件；软件为 step 粒度，硬件为微块粒度（§3.5） |
+| `chain_done` 终态记录在 FINAL commit 时写入，早于 slot_free                              | [shared_am.py](../../pipeline_validator/runtime/shared_am.py) 511–514 行 `commit_step`、532–539 行 `release_final`                                                                                 | 与 §4.3「chain_done 包含 slot_free」不一致 → SW-A4                               |
+| UCE 是 Python Tile Program 解释器                                                        | [tile.py](../../pipeline_validator/tile.py) `TileUCE`                                                                                                                                              | 没有真实 RISC-V 指令执行；RoCC 是新增验证层                                      |
+| 数值 Matmul 只在 full_memory/ByteStore 下执行                                            | [tile.py](../../pipeline_validator/tile.py) 1344–1349 行                                                                                                                                           | 联仿与上板对拍都以 ByteStore 字节为外部内存权威                                  |
+| P05 几何配置替换旧 8-OPA 合并峰值模型；P06 数值参数独立                                  | [hardware_config.yaml](../../pipeline_validator/hardware_config.yaml) 的 array/pool/M/N 与 `numeric_profile/numeric_tile_k`                                                                        | 默认 1 array；numeric K=8 改变舍入边界，不混同 WorkloadConfig.tile_k             |
 
 旧 [BOA 设计](../elenor_boa/ELENOR_BOA_Design.md) 只参考 ownership、事件身份和故障边界；其 dtype、OPA、reduce tree 等内容不覆盖本需求。
 
@@ -203,12 +203,12 @@ FINAL：AM 读出一次，进入 epilogue 与输出转换（BF16 RNE / f32 原�
 - seq=0 为 INIT，后续为 ADD；one-shot 为 INIT|FINAL。INIT 必须覆盖全部有效输出，不能读上一 owner 的残留值；同一 INIT step 的后续块按 ADD 处理。
 - 无效 lane/k（尾块、mask）不执行 MAC，不能用 `fma(0,0,p)` 代替旁路：`-0 + +0` 会改变符号零，`0×Inf` 会产生 NaN。
 - 舍入与特殊值以 [Gemmini Float `mac`][up-arith] 所用 HardFloat `MulAddRecFN` 为准：RNE、tininess after rounding、不 FTZ、溢出为 Inf。P03 已通过真实 HardFloat/SoftFloat 对拍冻结 arithmetic NaN=`0x7fc00000`、BF16 conversion NaN=`0x7fc0`，均为正 canonical NaN，不保留 payload；详细 flags/signed-zero/tininess 边界见 [数值冻结记录](../../hardware/boa/reference/numeric_freeze.md)。tininess-after 按无界 exponent 范围的精度舍入判定，不是只检查最终编码是否 subnormal。
-- 当前软件 `boa_numeric.matmul_f32` 在 binary64 中累加整个 step 后一次舍入（§1.3），不满足本 profile；SW-A3 必须同时修改模型与测试 oracle。Python 3.11/3.12 没有 `math.fma`，binary64 先求和再转 FP32 有双重舍入，oracle 须用精确有理/整数运算再单次 RNE，并以 Berkeley SoftFloat `f32_mulAdd`/`f32_add` 交叉校验。
+- P06 已将生产 `boa_numeric.matmul_f32` 切换为独立精确整数实现，并替换同构 binary64 测试 oracle。保留旧算法与 profile 结果不同的反例；生产代码不 import P03 reference。Python 3.11/3.12 没有 `math.fma`，不能以 binary64 乘加再转 FP32 代替单次 fused RNE。P03 的独立 Fraction/整数 oracle 与 SoftFloat/HardFloat golden 仍是外部判据。
 - shape/layout/acc_format 在同一链中不变；部分 mask、未初始化位置、同地址写后读及 FINAL read 均进入 hazard 检查。bias/初始 C 仅按数学合同应用一次；中间结果不缩位、不激活、不量化；FINAL 提交后才执行 epilogue。
 
 P03 冻结后处理顺序为 `FP32 AM → 每列 bias add_f32_rne → scalar scale mul_f32_rne → ReLU → clip → 输出转换`；关闭阶段不执行恒等运算，显式 scale=1 仍执行乘法。f32 原样写出，BF16 最终转换一次；INT8 为先 `z=mul_f32_rne(y,inv_scale)`，再 `saturate[-128,127](round_to_int_rne(z)+zero_point)`。inv_scale 有限且严格为正，zero_point 是 INT8 范围内的非 bool 整数；scaled NaN→zero_point、±Inf→对应饱和端点。非法 quant/clip 参数在输出前拒绝。ReLU/clip 的 NaN、符号零及等边界规则见冻结记录，不引入 FP32/INT8 输入 Matmul 或默认 per-channel quant。
 
-独立 reference 的 Python API 默认 f32 便于观察 FP32 AM，并不更改本节产品默认 BF16；消费者必须读取 golden 的 epilogue/output dtype，不从 API 默认值推断硬件输出格式。INIT 的 K=0 初始化 +0，ADD 的 K=0 保留原 AM bits，FINAL 仍应用完整启用的 epilogue；m/n=0 无 MAC 或 C bytes。P03 只交付 oracle/probe/golden，生产逐 MAC 数值切换仍归 SW-A3/P06。
+独立 reference 的 Python API 默认 f32 便于观察 FP32 AM，不改变产品默认 BF16。INIT 的 K=0 初始化 +0，ADD 的 K=0 保留原 AM bits；m/n=0 无 MAC/C bytes，但保留真实完成与释放。P06 已实现上述生产核心及 f32/BF16 FINAL 转换；FINAL 的可选 bias/scale/ReLU/clip/INT8 归 P08，P06 对相关 golden 只观察其 pre-epilogue AM，不冒充后处理输出通过。
 
 软件 Conv 继续先 im2col 再 Matmul；展平布局、padding/stride/dilation 和额外流量必须显式验证，不实例化硬件 LoopConv。
 
@@ -395,7 +395,7 @@ Matmul 为 `%done = tile.boa.async "matmul" ins(%a,%b) outs(%out) acc(%acc)`，�
 
 旧无 operand Matmul 签名已迁移；真正只有 FLOPs/控制门的用途已改为显式 `tile.boa.estimate.async`。数值 backend 不静默执行 estimate，不保留旧别名或默认空 operand。
 
-本次迁移范围是源语义、typed executable、codec、线性独立 verifier、AM 资源/数值/周期模型、既有 UCE/事件接线和调用方。当前产物与本次实现均为 v4/v4，受影响 artifact 已重生成。64×256 f32 的 64 KiB 单槽需求与新 L1 output 预算分开计算，不承诺 L1 自动减少相同容量。
+原软件迁移建立了源语义、typed executable、线性独立 verifier、AM 资源/数值/周期模型和 UCE/事件接线。P06 将 compiler schema/ABI 升为 v5/v5，加入 K-mask 与零工作表达，并重编译受影响 artifact；不自动升级 v4 数值语义。64×256 f32 的 64 KiB 单槽需求与新 L1 output 预算分开计算，不承诺 L1 自动减少相同容量。
 
 ### 4.5 Rocket / RoCC UCE
 
@@ -450,7 +450,7 @@ RoCC resp 只返回状态和短 token，完整 descriptor/record 位于受保护
 
 ### 5.3 功能模型、周期模型与 RTL 联仿
 
-软件已建立共享 AM 的功能与周期合同：owner/quota/affinity 元数据、INIT/ADD/FINAL、挂起/唤醒、bundle、分阶段结果服务和错误回收。但当前是 Tile Group 级 manager、每 Tile 单个 BOA 实例和 binary64 step 数值（§1.3）。RTL 联仿前必须完成 SW-A1–SW-A4，使 validator 的拓扑、engine 选择、数值和终态顺序与硬件同一合同；功能模型不冒充周期模型，所有场景报告验证层级。
+软件已建立 owner/quota、INIT/ADD/FINAL、挂起/唤醒、bundle 和分阶段结果服务。P04/P05 已实现 per-Tile AM、多 engine 与独立 affinity；P06 已替换 binary64 step 数值为逐 MAC profile。SW-A4/P07 的终态顺序仍未对齐（§1.3）；RTL 联仿前仍须完成全部 SW-A gate。功能/周期模型不能冒充 RTL，所有场景报告须标明验证层级。
 
 RTL 联仿采用进程内 C ABI（C++/Verilator shared library + Python 薄封装），不每条命令启动子进程，不一次性返回矩阵后伪造中间时序：
 
@@ -484,24 +484,24 @@ BOA-only 模式由 Python UCE 执行相同协议；Rocket 模式由真实固件�
 
 ### 6.1 V1 基线与容量
 
-| 参数                                                      | 设计值/规则                                                | 当前软件键/默认                                                                 | 性质                                                      |
-| --------------------------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| arrays_per_tile（P05）                                    | bring-up默认1；V1多阵列基线4，覆盖2/4                      | `engines.boa.arrays_per_tile` → `boa_arrays_per_tile`，默认1                    | 软件接受1–8；上限8不是物理硬件冻结值                      |
-| 每 Tile group_count / slots_per_group / 总槽              | 4 / 2 / 8                                                  | `engines.boa.am.group_count`/`slots_per_group` = 4/2，P04已按Tile实例化         | slot完整落入一个group，与engine独立                       |
-| slots_per_context                                         | 2                                                          | `engines.boa.am.slots_per_context` = 2                                          | 硬约束，跨本 Tile engines 计数；V1 不允许改大             |
-| bundle_slots                                              | 1 或 2，compiler 计算，loader/verifier 校验                | `_am_peak_live`、`_program_am_bundle`                                           | 程序元数据，不是配置项                                    |
-| 挂起请求容量                                              | 每 owner ≤1；队列深度 = 每 Tile context 数                 | `SharedAmManager._pending_requests`                                             | 不会溢出，不需要 BUSY                                     |
-| slot_capacity_bytes                                       | 软件默认 262144（256 KiB）；FPGA 映射见 §7.4.3             | `engines.boa.am.slot_capacity_bytes`                                            | 由 SRAM profile 冻结                                      |
-| context_count                                             | 默认 4；覆盖 1/2/4/8，受 UCE/memory admission 限制         | `--context-mode`                                                                | 不是 AM 永久预留数，也不是 engine 数                      |
-| array_rows / array_cols（P05）                            | 默认16/16；矩形RTL需独立gate                               | `engines.boa.array_rows/array_cols` → `boa_array_rows/cols`                     | 实际array wave时序与target fingerprint；旧OPA aliases删除 |
-| tile_m / tile_n / tile_k                                  | 默认16/16/8；tile_k也是数值profile参数                     | P05已有 `engines.boa.tile_m/tile_n` → `boa_tile_m/n`；`numeric_tile_k`由P06落地 | M/N改变空间分块时序；K改变数值，P05不改数值               |
-| numeric_profile（拟新增）                                 | `bf16_fp32_mac_rne_v1`                                     | 无；当前为 binary64 step 累加                                                   | 进入 target fingerprint                                   |
-| 结果 FIFO / AM credit / commit / drain / L1 output credit | 软件 step 粒度默认 4 / 8 / 2 / 1 / 1                       | `engines.boa.result_fifo_depth` 等，hardware_config.yaml 104–112 行             | 硬件按微块与 O+R≤Q 冻结，由 PPA exploration 冻结          |
-| next_step_mailboxes_per_live_chain                        | 1，加一个当前执行记录                                      | —                                                                               | 授予时保证 continuation 元数据，不建无限步骤队列          |
-| 完成事件槽                                                | 每个 typed Matmul 一个，context 绑定时按程序静态事件数分配 | UCE 事件 `ctx{n}:{name}`；`SharedAmManager` terminal 环（有界、覆盖最旧）       | AM 授予从不等待事件退休                                   |
-| SRAM/bank/adder/drain ports 与延迟                        | 各自独立配置和服务模型                                     | —                                                                               | 由 SRAM profile / PPA exploration 冻结                    |
-| FPGA 时钟                                                 | 首版 100 MHz 单时钟（Chipyard VCU118 默认）                | `system.clock.core_mhz` = 1000（建模基线）                                      | 板级 fmax 由 PPA exploration 冻结                         |
-| ISA 位宽、context/事件容量、PE pipeline                   | 不从示例猜编码或硅片频率                                   | —                                                                               | 由后续规格冻结                                            |
+| 参数                                                      | 设计值/规则                                                | 当前软件键/默认                                                                           | 性质                                                      |
+| --------------------------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| arrays_per_tile（P05）                                    | bring-up默认1；V1多阵列基线4，覆盖2/4                      | `engines.boa.arrays_per_tile` → `boa_arrays_per_tile`，默认1                              | 软件接受1–8；上限8不是物理硬件冻结值                      |
+| 每 Tile group_count / slots_per_group / 总槽              | 4 / 2 / 8                                                  | `engines.boa.am.group_count`/`slots_per_group` = 4/2，P04已按Tile实例化                   | slot完整落入一个group，与engine独立                       |
+| slots_per_context                                         | 2                                                          | `engines.boa.am.slots_per_context` = 2                                                    | 硬约束，跨本 Tile engines 计数；V1 不允许改大             |
+| bundle_slots                                              | 1 或 2，compiler 计算，loader/verifier 校验                | `_am_peak_live`、`_program_am_bundle`                                                     | 程序元数据，不是配置项                                    |
+| 挂起请求容量                                              | 每 owner ≤1；队列深度 = 每 Tile context 数                 | `SharedAmManager._pending_requests`                                                       | 不会溢出，不需要 BUSY                                     |
+| slot_capacity_bytes                                       | 软件默认 262144（256 KiB）；FPGA 映射见 §7.4.3             | `engines.boa.am.slot_capacity_bytes`                                                      | 由 SRAM profile 冻结                                      |
+| context_count                                             | 默认 4；覆盖 1/2/4/8，受 UCE/memory admission 限制         | `--context-mode`                                                                          | 不是 AM 永久预留数，也不是 engine 数                      |
+| array_rows / array_cols（P05）                            | 默认16/16；矩形RTL需独立gate                               | `engines.boa.array_rows/array_cols` → `boa_array_rows/cols`                               | 实际array wave时序与target fingerprint；旧OPA aliases删除 |
+| tile_m / tile_n / tile_k                                  | 默认16/16/8；K为数值参数                                   | `engines.boa.tile_m/tile_n` → `boa_tile_m/n`；P06 `numeric_tile_k` → `boa_numeric_tile_k` | M/N控制空间时序，K控制舍入边界；全部进入target            |
+| numeric_profile（P06）                                    | 唯一 `bf16_fp32_mac_rne_v1`                                | `engines.boa.numeric_profile` → `boa_numeric_profile`                                     | target身份的一部分；未知profile明确拒绝                   |
+| 结果 FIFO / AM credit / commit / drain / L1 output credit | 软件 step 粒度默认 4 / 8 / 2 / 1 / 1                       | `engines.boa.result_fifo_depth` 等，hardware_config.yaml 104–112 行                       | 硬件按微块与 O+R≤Q 冻结，由 PPA exploration 冻结          |
+| next_step_mailboxes_per_live_chain                        | 1，加一个当前执行记录                                      | —                                                                                         | 授予时保证 continuation 元数据，不建无限步骤队列          |
+| 完成事件槽                                                | 每个 typed Matmul 一个，context 绑定时按程序静态事件数分配 | UCE 事件 `ctx{n}:{name}`；`SharedAmManager` terminal 环（有界、覆盖最旧）                 | AM 授予从不等待事件退休                                   |
+| SRAM/bank/adder/drain ports 与延迟                        | 各自独立配置和服务模型                                     | —                                                                                         | 由 SRAM profile / PPA exploration 冻结                    |
+| FPGA 时钟                                                 | 首版 100 MHz 单时钟（Chipyard VCU118 默认）                | `system.clock.core_mhz` = 1000（建模基线）                                                | 板级 fmax 由 PPA exploration 冻结                         |
+| ISA 位宽、context/事件容量、PE pipeline                   | 不从示例猜编码或硅片频率                                   | —                                                                                         | 由后续规格冻结                                            |
 
 slot_capacity 包含 M/N、stride、accType 字节数、padding、alignment 和实际分配粒度。紧密 16×16 FP32 输出的有效数据下界为每槽 1024 bytes；当前 typed fixture 的 64×256 f32 为 64 KiB；软件默认 slot 为 256 KiB，八槽每 Tile 2 MiB。实际宏容量不由这些数字冻结，也不包含结果缓冲/metadata/ECC。
 
@@ -596,18 +596,18 @@ C10 + C11-A --------------> C11-B VCU118 多阵列上板（最终验收）
 
 validator 必须先与本稿硬件合同一致，联仿和上板的差异才能归因到 RTL。四项可以并行，但都在 C7-B 之前完成：
 
-| 项                          | 现状（§1.3）                            | 改动                                                                                                                                  | 验收                                                                                     |
-| --------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| SW-A1 每 Tile allocator     | P04已落地                               | 每ComputeTile独立manager、逐Tile报告和固定拓扑身份                                                                                    | [P04 evidence](../../plan/evidence/P04.md)；后续硬件层仍须复验                           |
-| SW-A2 多 engine 与 affinity | P05软件实现已落地                       | `arrays_per_tile`、独立least-live绑定、逐engine FIFO/ready RR、完整pool生命周期                                                       | T04/T05/T06/T20软件路径与配置见[P05 evidence](../../plan/evidence/P05.md)；不是RTL通过   |
-| SW-A3 数值 profile          | binary64 累加整个 step，commit 时舍入   | `boa_numeric` 与测试 oracle 改为 §3.2；`numeric_profile`、`tile_k` 进入 target fingerprint，按严格版本规则升级并重生成受影响 artifact | SoftFloat 交叉校验向量；保留 binary64 与 profile 结果不同的反例；全部 typed fixture 通过 |
-| SW-A4 终态顺序              | `chain_done` 记录在 FINAL commit 时写入 | 记录移到 slot_free 之后，或同时记录 output_visible 与 slot_free 时刻                                                                  | 每个成功终态时刻 ≥ slot_free；UCE 事件不早于终态                                         |
+| 项                          | 现状（§1.3）                            | 改动                                                                            | 验收                                                                                                |
+| --------------------------- | --------------------------------------- | ------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| SW-A1 每 Tile allocator     | P04已落地                               | 每ComputeTile独立manager、逐Tile报告和固定拓扑身份                              | [P04 evidence](../../plan/evidence/P04.md)；后续硬件层仍须复验                                      |
+| SW-A2 多 engine 与 affinity | P05软件实现已落地                       | `arrays_per_tile`、独立least-live绑定、逐engine FIFO/ready RR、完整pool生命周期 | T04/T05/T06/T20软件路径与配置见[P05 evidence](../../plan/evidence/P05.md)；不是RTL通过              |
+| SW-A3 数值 profile          | P06 生产核心与 v5 cutover 已落地        | 精确整数 FMA/add/转换，K-mask/零工作，数值配置与指纹，旧版拒绝                  | [P06 evidence](../../plan/evidence/P06.md)：独立 golden/full_memory 对拍；P08 后处理与 RTL 不在此项 |
+| SW-A4 终态顺序              | `chain_done` 记录在 FINAL commit 时写入 | 记录移到 slot_free 之后，或同时记录 output_visible 与 slot_free 时刻            | 每个成功终态时刻 ≥ slot_free；UCE 事件不早于终态                                                    |
 
 guide：这四项会改变 validator 的可观察行为，是有意的合同变更；更新测试期望时要写明依据，不能为了让旧数字通过而保留旧拓扑或旧数值。
 
 P04 实际交付与验收（2026-10-29）：SW-A1 已实施——每 `ComputeTile` 独立 `SharedAmManager`、逐 Tile report、`target_fingerprint` 固定拓扑标识 `per_tile_v1`、迁移前 artifact 拒绝。证据与接口交接见 [P04 evidence](../../plan/evidence/P04.md)。
 
-P05 的软件 engine 池已落地：`boa_engine_affinity="least_live_v1"` 与五个几何/pool 字段进入 target identity；codec仍为v4，旧target拒绝。1/2/4实例与独立smoke已提供。空间wave模型不冻结WS/OS，BOA L1带宽按engine静态等分，不动态借用。SW-A3数值与SW-A4终态仍未实施。
+P05 的软件 engine 池保持 `least_live_v1` 与独立队列/affinity；空间 wave 模型不冻结 WS/OS，L1 带宽静态等分。P05 当时的 v4 codec 已由 P06 升为 v5；P06 另将 `numeric_profile/numeric_tile_k` 纳入 target identity，实现逐 MAC 数值。SW-A4 终态仍待 P07，不因数值通过而视作关闭。
 
 #### C0 · P0：环境与来源
 
@@ -965,14 +965,14 @@ conda run -n elenor-validator python -m pipeline_validator \
 
 共享 AM V1 的链级固定 affinity、每 context 两 live slots、正常自动 drain/free，以及 2026-10-27 起的「一次申请 + 挂起 + slot_free 唤醒 + bundle 预留」和 2026-10-28 确认的 Tile 内共享 AM，已经作为本次修订依据；不能在后续实现时重新改为每 engine 配额、永久分区、跨 step 迁移、跨 Tile 共享或可重试 BUSY。
 
-| 待 review 项  | 当前边界                                                                                                       | 冻结前证据                                                                             |
-| ------------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| PE 数据流     | WS/OS 未定；FPGA 推导显示 tile_k=8 时两者利用率上限都约 50%（§7.4.5）                                          | 默认/矩形 shape 下的馈数、FP32 路径、数值顺序与周期                                    |
-| 数值细则      | P03 已冻结 `bf16_fp32_mac_rne_v1`、canonical NaN、tininess、INT8/epilogue；生产切换仍归 P06/P08                | 独立 oracle / SoftFloat / HardFloat primitive 已逐 bit 对拍；阵列与系统级仍须后续 gate |
-| 物理存储/吞吐 | 每 Tile 4 groups/8 槽；FPGA 首版 URAM 映射见 §7.4.3；bank、adder、结果 credit、drain 宽度未物理定型            | 容量、O/R 不变量、冲突与服务轨迹                                                       |
-| IR/ABI        | 单结果 AM allocation、四 operand/四模式和 v4；numeric profile、tile_k、arrays_per_tile 进 fingerprint 后需升级 | 线性 codec/独立验证、数值/周期、compiled-only 与调用方迁移                             |
-| Rocket/环境   | 一 Tile 一 hart、可配置 contexts、锁版本工具链；Vivado 只读挂载                                                | 真实固件执行、构建和 PPA；不把名称当作“微型”证明                                       |
-| FPGA 平台     | AMD UltraScale+，VCU118 首选（已确认）；首版 1 Tile、100 MHz 单时钟                                            | 综合/实现报告、WNS ≥ 0、§8.1c F 项；U55C 等 HBM 板需另行 review 加入                   |
+| 待 review 项  | 当前边界                                                                                            | 冻结前证据                                                                                     |
+| ------------- | --------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| PE 数据流     | WS/OS 未定；FPGA 推导显示 tile_k=8 时两者利用率上限都约 50%（§7.4.5）                               | 默认/矩形 shape 下的馈数、FP32 路径、数值顺序与周期                                            |
+| 数值细则      | P03 已冻结；P06 生产逐 MAC/AM/f32/BF16 已落地，epilogue/INT8 归 P08                                 | 独立 oracle / SoftFloat / HardFloat primitive golden 与生产路径对拍；阵列与系统级仍须后续 gate |
+| 物理存储/吞吐 | 每 Tile 4 groups/8 槽；FPGA 首版 URAM 映射见 §7.4.3；bank、adder、结果 credit、drain 宽度未物理定型 | 容量、O/R 不变量、冲突与服务轨迹                                                               |
+| IR/ABI        | P06 为 schema 5 / compiler ABI v5；含 K-mask、零工作与数值 target；wire ABI 独立                    | 严格旧版本拒绝、错target拒绝、compiled-only replay；P08 若改可执行字段须继续升版               |
+| Rocket/环境   | 一 Tile 一 hart、可配置 contexts、锁版本工具链；Vivado 只读挂载                                     | 真实固件执行、构建和 PPA；不把名称当作“微型”证明                                               |
+| FPGA 平台     | AMD UltraScale+，VCU118 首选（已确认）；首版 1 Tile、100 MHz 单时钟                                 | 综合/实现报告、WNS ≥ 0、§8.1c F 项；U55C 等 HBM 板需另行 review 加入                           |
 
 软件 gate 已实现；SW-A1–SW-A4 对齐以及整体硬件/FPGA 的文件级实施计划，仍需 review/授权后推进。
 

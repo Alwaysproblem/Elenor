@@ -62,18 +62,16 @@ DTYPE_BYTES: dict[str, int] = {"i8": 1, "bf16": 2, "f16": 2, "i32": 4, "f32": 4}
 
 
 def _parse_dims_dtype(parser: AttrParser) -> tuple[list[int], str]:
-  """Parse ``<Dx...xDtype>`` returning (dims, dtype).
-
-  The lexer treats ``4x128x128xbf16`` as ``4`` then a single BARE_IDENT
-  ``x128x128xbf16``; we split on ``x`` to recover dims + dtype.
-  """
+  """Parse static decimal shape dimensions, including zero-sized axes."""
   parser.parse_punctuation("<")
-  first = parser.parse_integer()
-  rest = parser.parse_identifier()
+  # xDSL's shape parser splits 0xbf16 into dimension 0, delimiter x,
+  # and dtype bf16 instead of interpreting it as a hexadecimal integer.
+  dims = parser.parse_dimension_list()
+  if not dims or any(dim < 0 for dim in dims):
+    parser.raise_error("shape requires non-negative static dimensions")
+  parser.parse_shape_delimiter()
+  dtype = parser.parse_identifier()
   parser.parse_punctuation(">")
-  parts = rest.split("x")
-  dims = [first] + [int(p) for p in parts[1:-1]]
-  dtype = parts[-1]
   if dtype not in DTYPE_BYTES:
     parser.raise_error(f"unknown dtype '{dtype}'")
   return dims, dtype
@@ -653,6 +651,17 @@ def _parse_int_list_kw(parser: Parser, keyword: str) -> list[int]:
   )
 
 
+def _parse_opt_int_list_kw(parser: Parser, keyword: str) -> list[int] | None:
+  if parser.parse_optional_keyword(keyword) is None:
+    return None
+  parser.parse_punctuation("=")
+  return list(
+    parser.parse_comma_separated_list(
+      parser.Delimiter.SQUARE, parser.parse_integer, f" in {keyword} = [...] list"
+    )
+  )
+
+
 def _print_str_kw(printer: Printer, keyword: str, value: str) -> None:
   printer.print_string(f" {keyword} = ")
   printer.print_string_literal(value)
@@ -1010,6 +1019,8 @@ class NestAllocOp(IRDLOperation):
   ):
     if sharing not in ("private", "readonly", "context-local"):
       raise ValueError("nest.alloc sharing must be 'private', 'readonly' or 'context-local'")
+    if any(type(dim) is not int or dim < 0 for dim in shape):
+      raise ValueError("nest.alloc shape dims must be non-negative")
     super().__init__(
       result_types=[NestBuffer.of(shape, dtype)],
       properties=_props(
@@ -2043,6 +2054,8 @@ class TileAllocOp(IRDLOperation):
   ):
     if memory_space not in (None, "l1", "am"):
       raise ValueError(f"unsupported tile.alloc memory_space '{memory_space}'")
+    if any(type(dim) is not int or dim < 0 for dim in shape):
+      raise ValueError("tile.alloc shape dims must be non-negative")
     if memory_space == "am":
       if dtype != "f32":
         raise ValueError("AM allocation dtype must be f32")
@@ -2542,6 +2555,14 @@ class TileBoaOp(_TileAsyncOp):
   AM FP32 accumulator capability.  The only accepted op name is
   ``"matmul"``; control-only FLOP estimates use ``tile.boa.estimate``.
 
+  Storage K is inferred from the operand types: A is ``[m, storage_k]``,
+  B is ``[storage_k, n]`` with the same ``storage_k >= k``.  The logical
+  ``k`` may be 0; lanes at or after ``k`` never MAC.  The optional
+  ``k_mask = [1, 0, ...]`` (after ``seq``) is a ``storage_k``-length list
+  of boolean ints (strictly 0/1) whose lanes at or after ``k`` must be
+  inactive.  A tail lane without a mask is implicitly inactive; masks
+  never compact operands.  ``m``/``n``/``k`` must be non-negative.
+
   Flags are orthogonal:
 
   - no flag: INIT, ``acc := A x B``, no L1 output write;
@@ -2562,6 +2583,7 @@ class TileBoaOp(_TileAsyncOp):
   n = prop_def(IntegerAttr)
   k = prop_def(IntegerAttr)
   seq = prop_def(IntegerAttr)
+  k_mask = opt_prop_def(ArrayAttr)
   accumulate = opt_prop_def(IntegerAttr)
   output = opt_prop_def(IntegerAttr)
 
@@ -2577,9 +2599,18 @@ class TileBoaOp(_TileAsyncOp):
     seq: int,
     tag: str,
     *,
+    k_mask: Sequence[int] | None = None,
     accumulate: bool = False,
     output: bool = False,
   ):
+    if m < 0 or n < 0 or k < 0:
+      raise ValueError("tile.boa.async m/n/k must be non-negative")
+    if k_mask is not None:
+      mask = tuple(k_mask)
+      if any(type(value) is not int or value not in (0, 1) for value in mask):
+        raise ValueError("tile.boa.async k_mask entries must be the boolean ints 0 or 1")
+      if any(mask[lane] for lane in range(k, len(mask))):
+        raise ValueError("tile.boa.async k_mask lanes at or after k must be inactive (0)")
     self._finish(
       tag,
       operands=[a, b, out, acc],
@@ -2590,6 +2621,11 @@ class TileBoaOp(_TileAsyncOp):
           "n": _index_attr(n),
           "k": _index_attr(k),
           "seq": _index_attr(seq),
+          "k_mask": (
+            None
+            if k_mask is None
+            else ArrayAttr([_index_attr(value) for value in k_mask])
+          ),
           "accumulate": None if not accumulate else _index_attr(1),
           "output": None if not output else _index_attr(1),
         }
@@ -2612,6 +2648,8 @@ class TileBoaOp(_TileAsyncOp):
     _print_int_kw(printer, "n", self.n.value.data)
     _print_int_kw(printer, "k", self.k.value.data)
     _print_int_kw(printer, "seq", self.seq.value.data)
+    if self.k_mask is not None:
+      _print_int_list_kw(printer, "k_mask", _int_list(self.k_mask))
     if self.accumulate is not None:
       printer.print_string(" accumulate")
     if self.output is not None:
@@ -2641,13 +2679,28 @@ class TileBoaOp(_TileAsyncOp):
     n = _parse_int_kw(parser, "n")
     k = _parse_int_kw(parser, "k")
     seq = _parse_int_kw(parser, "seq")
+    k_mask = _parse_opt_int_list_kw(parser, "k_mask")
     accumulate = parser.parse_optional_keyword("accumulate") is not None
     output = parser.parse_optional_keyword("output") is not None
     event_type = _parse_event_type(parser, TileEvent)
     tag = event_type.tag.data  # type: ignore[attr-defined]
-    return cls(
-      a, b, out, acc, m, n, k, seq, tag, accumulate=accumulate, output=output
-    )
+    try:
+      return cls(
+        a,
+        b,
+        out,
+        acc,
+        m,
+        n,
+        k,
+        seq,
+        tag,
+        k_mask=k_mask,
+        accumulate=accumulate,
+        output=output,
+      )
+    except ValueError as exc:
+      parser.raise_error(str(exc))
 
 
 @irdl_op_definition

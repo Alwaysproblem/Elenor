@@ -274,10 +274,28 @@ class TestHBMRegion:
     with pytest.raises(ValueError, match="exceeds HBM capacity"):
       hbm.bind_external(GlobalBinding("Y", 0x1000, 4096, "rw"))
 
-  def test_zero_size_rejected(self):
+  @pytest.mark.parametrize("empty_first", (False, True))
+  def test_empty_binding_preserves_bounds_permissions_and_other_bindings(self, empty_first):
     hbm = HBMRegion(size_bytes=4096)
-    with pytest.raises(ValueError, match="size must be > 0"):
-      hbm.bind_external(GlobalBinding("Y", 0, 0, "rw"))
+    bindings = [GlobalBinding("whole", 0, 4096, "rw"), GlobalBinding("empty", 128, 0, "r")]
+    if empty_first:
+      bindings.reverse()
+    for binding in bindings:
+      hbm.bind_external(binding)
+    empty = hbm.get_handle("empty")
+    whole = hbm.get_handle("whole")
+    assert empty is not None and whole is not None
+    assert hbm.used_bytes() == 4096
+    assert hbm.resolve(empty, 0, 0, "r") == ()
+    with pytest.raises(MemoryInvariantError):
+      hbm.resolve(empty, 0, 1, "r")
+    with pytest.raises(MemoryInvariantError):
+      hbm.resolve(empty, 0, 0, "w")
+    hbm.unbind_external("empty")
+    assert hbm.resolve(whole, 128, 1, "r")[0].size_bytes == 1
+    assert hbm.used_bytes() == 4096
+    with pytest.raises(MemoryInvariantError):
+      hbm.resolve(empty, 0, 0, "r")
 
   def test_resolve_view_bounds(self):
     hbm = HBMRegion(size_bytes=16 * 1024 * 1024 * 1024)

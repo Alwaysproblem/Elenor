@@ -1,6 +1,6 @@
 # P06 · SW-A3 逐 MAC 数值 profile 与 artifact 迁移
 
-状态：未开始
+状态：通过（2026-10-30；精确数值/full_memory 向量、v5 cutover、完整 fixture bytes、Docker/离线复现及全量 gate 均通过；见 [P06 evidence](evidence/P06.md)）。
 前置：P03 通过（冻结 vectors + 数值合同）、P05 通过（配置拼写与 fingerprint 字段状态）。
 对应原方案：SW-A3（[设计 v0.5](../design/proposal/BOA_Gemmini_Integration_Design.md) §1.3、§3.1、§3.2、§7.2 SW-A 表）；总则 §3.2、§4.1、§5。
 
@@ -18,7 +18,7 @@
 
 ## 3. 当前证据与修改文件
 
-现状（符号定位，行号以当日为准）：
+实施前现状（P05 的 v4 底座快照，保留为变更依据；最终实现以 P06 evidence 为准）：
 
 - `pipeline_validator/boa_numeric.py::matmul_f32`：binary64 全 step 累加、`k<1` 直接 raise（零 K 未定义）；`convert_output` 拒 i8（本任务不动）；`encode_f32/_float_to_bf16_bits` 舍入行为需对照 P03 转换向量核对。
 - `pipeline_validator/tests/test_boa_am.py::_oracle`：与生产同构的 binary64 实现（P03 已判 “生产模型与 oracle 不能同构复用”）。
@@ -71,3 +71,5 @@
 ## 8. 产物、交接与停止条件
 
 产物：新数值实现与配置/指纹/artifact 版本、重生成 fixtures、`plan/evidence/P06.md`（含版本决策记录、性能对比、向量对拍摘要）。交接：P08 以实施时仓库实际版本为基加 epilogue 字段并按规则升版；P10 的 wire ABI 以本任务冻结数值语义为输入（软件 artifact 版本与 wire ABI v0 仍是不同版本域）；P11/P12 以同向量对拍 RTL。停止条件：若 P03 向量与生产实现在某向量上无法达成位级一致且归因不清（实现 bug 与向量 bug 无法区分），记录最小复现并交 P03 owner 复核，不得单方改向量迁就实现；完成后更新 README 状态。
+
+实施交接：最终版本为 schema 5 / compiler ABI v5，`boa_numeric_profile="bf16_fp32_mac_rne_v1"`、`boa_numeric_tile_k=8` 进入 target；新增可选 `k_mask` 与一致零工作语义。完整 gate 为 769 passed / 1 skipped；numeric-profile 容器 3 cases / 71 assertions，离线55个确定性产物 MATCH；两份大 fixture 的1114112 bytes逐 bit相等。下一默认任务为 P07；P08后处理/INT8和RTL联仿未提前实施。

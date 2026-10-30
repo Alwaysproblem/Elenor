@@ -72,6 +72,8 @@ _HW_YAML_PATH_TO_FIELD = {
   "engines.boa.array_cols": "boa_array_cols",
   "engines.boa.tile_m": "boa_tile_m",
   "engines.boa.tile_n": "boa_tile_n",
+  "engines.boa.numeric_profile": "boa_numeric_profile",
+  "engines.boa.numeric_tile_k": "boa_numeric_tile_k",
   "engines.boa.clock_multiplier": "boa_clock_multiplier",
   "engines.boa.dtype.input_bytes": "boa_dtype_bytes",
   "engines.boa.dtype.accumulator_bytes": "boa_acc_bytes",
@@ -265,14 +267,16 @@ class HardwareConfig:
   # the per-Tile engine pool size (engine id domain 0..arrays_per_tile-1,
   # independent of the 0..3 AM group domain).  array_rows/cols are the
   # physical array geometry; tile_m/tile_n are the logical chunk geometry
-  # that drives the spatial-wave timing model in engines.py.  Both enter
-  # the target fingerprint (P05); numeric_tile_k/profile naming is
-  # reserved for P06 and deliberately absent here.
+  # that drives the spatial-wave timing model in engines.py. Numeric K is
+  # a separate rounding boundary, not WorkloadConfig.tile_k or a timing knob.
+  # Pool, spatial geometry and numerical semantics enter target identity.
   boa_arrays_per_tile: int = _HW_DEFAULTS["boa_arrays_per_tile"]
   boa_array_rows: int = _HW_DEFAULTS["boa_array_rows"]
   boa_array_cols: int = _HW_DEFAULTS["boa_array_cols"]
   boa_tile_m: int = _HW_DEFAULTS["boa_tile_m"]
   boa_tile_n: int = _HW_DEFAULTS["boa_tile_n"]
+  boa_numeric_profile: str = _HW_DEFAULTS["boa_numeric_profile"]
+  boa_numeric_tile_k: int = _HW_DEFAULTS["boa_numeric_tile_k"]
   boa_clock_multiplier: float = _HW_DEFAULTS["boa_clock_multiplier"]  # BOA at core clock
   # Peak TOPS computed in boa_peak_tops() from the array pool + geometry + dtype.
   boa_dtype_bytes: int = _HW_DEFAULTS["boa_dtype_bytes"]  # BF16 input
@@ -407,10 +411,12 @@ class HardwareConfig:
         f"got {self.boa_arrays_per_tile!r}"
       )
     _max_uint64 = (1 << 64) - 1
-    for name in ("boa_array_rows", "boa_array_cols", "boa_tile_m", "boa_tile_n"):
+    for name in ("boa_array_rows", "boa_array_cols", "boa_tile_m", "boa_tile_n", "boa_numeric_tile_k"):
       value = getattr(self, name)
       if type(value) is not int or not 1 <= value <= _max_uint64:
         raise ValueError(f"{name} must be an exact positive integer in 1..2^64-1, got {value!r}")
+    if self.boa_numeric_profile != "bf16_fp32_mac_rne_v1":
+      raise ValueError("boa_numeric_profile must be 'bf16_fp32_mac_rne_v1'")
     if isinstance(self.boa_clock_multiplier, bool) or not isinstance(
       self.boa_clock_multiplier, (int, float)
     ) or not math.isfinite(self.boa_clock_multiplier) or self.boa_clock_multiplier <= 0:

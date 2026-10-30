@@ -88,6 +88,8 @@ engines:
     array_cols: 16 # 物理 array 列数
     tile_m: 16 # 逻辑分块 M：进入 spatial wave 计数，真实影响时序
     tile_n: 16 # 逻辑分块 N：同上
+    numeric_profile: bf16_fp32_mac_rne_v1 # 逐 MAC FP32 fused RNE，P03 冻结
+    numeric_tile_k: 8 # 数值贡献块长；改变可改变 bits，进入 target identity
 
     clock_multiplier: 1.0
 

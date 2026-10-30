@@ -1,0 +1,8 @@
+schema: 1
+target: numeric-profile
+topology: {}
+# P06 numeric-profile vectors pin each case's boa_numeric_tile_k (2/4/8/16
+# come from the committed golden vectors), so no hardware overrides are
+# consumed here; the container runner rejects non-empty hw_overrides.
+validator: {}
+board: {}

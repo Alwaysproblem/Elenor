@@ -248,7 +248,7 @@ class SharedAmManager:
     """
     if logical_slot not in (0, 1):
       raise ValueError("AM logical slot must be 0 or 1")
-    if byte_count < 1 or byte_count > self.slot_capacity_bytes:
+    if byte_count < 0 or byte_count > self.slot_capacity_bytes:
       raise ValueError("AM byte request exceeds physical slot capacity")
     if not 1 <= bundle_slots <= self.slots_per_context:
       raise ValueError("AM bundle exceeds the per-context lease quota")

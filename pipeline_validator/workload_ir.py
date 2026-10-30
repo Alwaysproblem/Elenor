@@ -167,10 +167,10 @@ def _verify_context_subview(op: NestSubviewOp, block: Block) -> None:
   view_type = _shape_type(op.result.type)
   if _int_list(view_type.dims) != sizes or view_type.dtype.data != formal_type.dtype.data:
     raise VerifyException("nest.subview result type must match sizes and source dtype")
-  # Rule 6: bounds
+  # Rule 6: bounds (zero-byte subviews are legal empty views)
   for d, (o, s, pd) in enumerate(zip(offsets, sizes, parent)):
-    if o < 0 or s < 1:
-      raise VerifyException(f"nest.subview dim {d} requires offset >= 0 and size >= 1")
+    if o < 0 or s < 0:
+      raise VerifyException(f"nest.subview dim {d} requires offset >= 0 and size >= 0")
     if o + s > pd:
       raise VerifyException(
         f"nest.subview exceeds bounds of '{name}' dim {d}: offset {o} + size {s} > {pd}"
@@ -297,7 +297,7 @@ def _verify_dispatch_contract(
       td = None if sv.task_dim is None else int(sv.task_dim.value.data)
       if td is None:
         for d, (o, s, pd) in enumerate(zip(offsets, sizes, parent)):
-          if o < 0 or s < 1 or o + s > pd:
+          if o < 0 or s < 0 or o + s > pd:
             raise VerifyException(
               f"tile.subview exceeds bounds of formal {i} dim {d}: offset {o} + size {s} > {pd}"
             )
@@ -668,8 +668,7 @@ def _verify_context(
         raise VerifyException(
           f"nest.context '@{context.sym_name.data}' global formal {i} may not follow an L2 import"
         )
-      continue
-    if isinstance(arg.type, NestBuffer):
+    elif isinstance(arg.type, NestBuffer):
       seen_import = True
       if not allow_shared_imports:
         raise VerifyException("readonly L2 context formals require a nexus.program model")
@@ -684,11 +683,16 @@ def _verify_context(
         )
       import_names.add(name)
       context_imports.add(arg)
-      continue
-    raise VerifyException(
-      f"nest.context '@{context.sym_name.data}' formal {i} must be !nest.global_memref"
-      " or a readonly !nest.l2_buffer import"
-    )
+    else:
+      raise VerifyException(
+        f"nest.context '@{context.sym_name.data}' formal {i} must be !nest.global_memref"
+        " or a readonly !nest.l2_buffer import"
+      )
+    formal_dims = _int_list(arg.type.dims)
+    if any(int(dim) < 0 for dim in formal_dims):
+      raise VerifyException(
+        f"nest.context '@{context.sym_name.data}' formal {i} dims must be non-negative"
+      )
 
   body = _body_ops(context)
   context_allocs: set[SSAValue] = {op.result for op in body if isinstance(op, NestAllocOp)}
@@ -1110,13 +1114,17 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
         raise VerifyException(
           f"tile.program '@{prog.sym_name.data}' global formal {i} may not follow an l2 formal"
         )
-      continue
-    if isinstance(arg.type, NestBuffer):
+    elif isinstance(arg.type, NestBuffer):
       seen_l2_formal = True
-      continue
-    raise VerifyException(
-      f"tile.program '@{prog.sym_name.data}' formal {i} must be !nest.global_view or !nest.l2_buffer"
-    )
+    else:
+      raise VerifyException(
+        f"tile.program '@{prog.sym_name.data}' formal {i} must be !nest.global_view or !nest.l2_buffer"
+      )
+    formal_dims = _int_list(arg.type.dims)
+    if any(int(dim) < 0 for dim in formal_dims):
+      raise VerifyException(
+        f"tile.program '@{prog.sym_name.data}' formal {i} dims must be non-negative"
+      )
 
   body = _body_ops(prog)
   returns = [op for op in body if isinstance(op, TileReturnOp)]
@@ -1321,14 +1329,43 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
           )
         m, n, k = (int(op.m.value.data), int(op.n.value.data), int(op.k.value.data))
         seq = int(op.seq.value.data)
-        if m <= 0 or n <= 0 or k <= 0:
-          raise VerifyException("tile.boa.async m/n/k must be positive")
+        if m < 0 or n < 0 or k < 0:
+          raise VerifyException("tile.boa.async m/n/k must be non-negative")
         if seq < 0:
           raise VerifyException("tile.boa.async seq must be non-negative")
         if op.accumulate is not None and int(op.accumulate.value.data) != 1:
           raise VerifyException("tile.boa.async accumulate flag must be present exactly once")
         if op.output is not None and int(op.output.value.data) != 1:
           raise VerifyException("tile.boa.async output flag must be present exactly once")
+        if not isinstance(op.a.type, TileL1Buffer) or not isinstance(op.b.type, TileL1Buffer):
+          raise VerifyException("tile.boa.async A/B inputs must be L1 buffers")
+        a_dims = tuple(_int_list(op.a.type.dims))
+        b_dims = tuple(_int_list(op.b.type.dims))
+        if len(a_dims) != 2 or len(b_dims) != 2:
+          raise VerifyException("tile.boa.async A/B inputs must be rank-2 L1 buffers")
+        storage_k_a, storage_k_b = a_dims[1], b_dims[0]
+        if storage_k_a != storage_k_b:
+          raise VerifyException(
+            f"tile.boa.async A storage K ({storage_k_a}) and B storage K ({storage_k_b}) must match"
+          )
+        storage_k = storage_k_a
+        if k > storage_k:
+          raise VerifyException(
+            f"tile.boa.async k ({k}) must not exceed its storage K ({storage_k})"
+          )
+        if op.k_mask is not None:
+          mask_values = _int_list(op.k_mask)
+          if any(value not in (0, 1) for value in mask_values):
+            raise VerifyException("tile.boa.async k_mask entries must be the boolean ints 0 or 1")
+          if len(mask_values) != storage_k:
+            raise VerifyException(
+              f"tile.boa.async k_mask length ({len(mask_values)}) must equal"
+              f" its storage K ({storage_k})"
+            )
+          if any(mask_values[lane] for lane in range(k, storage_k)):
+            raise VerifyException(
+              "tile.boa.async k_mask lanes at or after k must be inactive (0)"
+            )
         info = require_live_am(op.acc, "tile.boa.async accumulator")
         if op.out is not info["output"]:
           raise VerifyException(
@@ -1341,8 +1378,8 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
           raise VerifyException(
             "tile.boa.async L1 output must differ from its A/B input buffers"
           )
-        require_matmul_shape(op.a, (m, k), "bf16", "tile.boa.async A input")
-        require_matmul_shape(op.b, (k, n), "bf16", "tile.boa.async B input")
+        require_matmul_shape(op.a, (m, storage_k), "bf16", "tile.boa.async A input")
+        require_matmul_shape(op.b, (storage_k, n), "bf16", "tile.boa.async B input")
         require_matmul_shape(op.acc, (m, n), "f32", "tile.boa.async AM accumulator")
         if op.out.type.dtype.data not in TileAllocOp.OUTPUT_DTYPES:
           raise VerifyException(

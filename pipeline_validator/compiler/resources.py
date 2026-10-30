@@ -49,7 +49,7 @@ def conservative_arena_bytes(byte_alignments: Sequence[tuple[int, int]], profile
   """
   stripe = profile.alignment
   for logical_bytes, alignment in byte_alignments:
-    uint64(logical_bytes, "buffer bytes", positive=True)
+    uint64(logical_bytes, "buffer bytes")
     uint64(alignment, "buffer alignment", positive=True)
     stripe = uint64(lcm(stripe, alignment), "stripe_bytes", positive=True)
   round_bytes = uint64(stripe * profile.banks, "stripe round", positive=True)
@@ -79,7 +79,7 @@ def layout_buffers(
   uint64(slot_capacity, "Frame Slot capacity", positive=bool(buffers))
   stripe = profile.alignment
   for buffer in buffers:
-    uint64(buffer.bytes, "buffer bytes", positive=True)
+    uint64(buffer.bytes, "buffer bytes")
     uint64(buffer.alignment, "buffer alignment", positive=True)
     stripe = uint64(lcm(stripe, buffer.alignment), "stripe_bytes", positive=True)
   round_bytes = uint64(stripe * profile.banks, "stripe round", positive=True)
