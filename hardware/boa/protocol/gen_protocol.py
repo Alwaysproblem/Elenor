@@ -18,9 +18,12 @@ Wire model (frozen here, all little-endian):
 * ``EpilogueConfig`` uses a fixed layout: ``n_cols`` (u16), ``enables`` (u8,
   presence bits 0..4, bits 5..7 reserved zero) then the bias words (``n_cols``
   u32), ``scale`` (u32), clip lo/hi (u32 each) and quant inv_scale (u32) +
-  zero_point (i8).  Disabled stages serialize canonical zeros; decoders
-  reject non-zero words for disabled stages, so decode/encode is canonical
-  and byte-identical.
+  zero_point (i8).  Stage presence is an explicit ``*_present`` field on the
+  decoded struct: the value representation (None/empty/NULL) is never used to
+  infer presence, so present-empty stages (e.g. ``n_cols=0`` with bias enabled)
+  survive decode/re-encode byte-identically.  Disabled stages serialize
+  canonical zeros; decoders reject non-zero words for disabled stages, so
+  decode/encode is canonical and byte-identical.
 * ``EVT_TAKE`` is a tagged record union discriminated by ``EvtRecordKind``.
 
 Usage:
@@ -97,6 +100,7 @@ class Field:
     self.count_expr = spec.get("count_expr")
     self.count_field = spec.get("count_field")
     self.role = spec.get("role")
+    self.presence = spec.get("presence")
     if self.type not in SCALARS and not self.type.startswith(("enum:", "struct:", "list:")):
       raise SchemaError(f"{owner}.{self.name}: unknown type {self.type!r}")
     if self.type.startswith("list:"):
@@ -377,6 +381,26 @@ def lint_schema(schema: dict) -> list[str]:
   epilogue_fields = {field.name for field in model["structs"]["EpilogueConfig"].fields}
   if not {"bias", "scale", "relu", "clip", "quant"} <= epilogue_fields:
     problems.append("typed fields: EpilogueConfig must carry all per-stage parameters")
+  implicit = model["structs"]["EpilogueConfig"].raw.get("implicit_fields", [])
+  if not any(spec.get("name") == "enables" for spec in implicit):
+    problems.append("epilogue presence: EpilogueConfig must declare the implicit enables field")
+  by_name = {field.name: field for field in model["structs"]["EpilogueConfig"].fields}
+  for name in ("bias", "scale", "clip", "quant"):
+    if by_name[name].presence != "enable_bit":
+      problems.append(
+        f"epilogue presence: EpilogueConfig.{name} must declare"
+        f' presence = "enable_bit" (explicit flag; presence never derives'
+        f" from the value representation)"
+      )
+  for spec in model["structs"]["EpilogueConfig"].raw.get("implicit_fields", []):
+    name = spec.get("name", "")
+    if name == "enables":
+      continue
+    problems.append(f"epilogue presence: unknown implicit EpilogueConfig field {name!r}")
+  if not any(
+    field.name == "allocation" and field.type == "u16" for field in model["structs"]["OperandView"].fields
+  ):
+    problems.append("typed fields: OperandView must serialize the allocation identity")
   for group_name, grouped in schema["descriptor_groups"].items():
     if not isinstance(grouped, dict):
       continue
@@ -941,9 +965,10 @@ def _py_predicate(e, predicate: dict, indent: str) -> None:
     )
   elif kind == "quant_i8":
     dtype_field = predicate["dtype_field"]
-    quant = ".".join(["self", *predicate["quant_field"].split(".")])
+    parent, _, leaf = predicate["quant_field"].rpartition(".")
+    present_target = f"self.{parent}.{'_'.join((leaf, 'present'))}" if parent else f"self.{leaf}_present"
     e(f"{indent}_is_i8 = self.{dtype_field} == DTYPE_I8")
-    e(f"{indent}_has_quant = {quant} is not None")
+    e(f"{indent}_has_quant = {present_target}")
     e(f"{indent}if _is_i8 != _has_quant:")
     e(
       f"{indent}  raise ProtocolError(f'{{_p}}.{dtype_field}',"
@@ -956,46 +981,60 @@ def _py_predicate(e, predicate: dict, indent: str) -> None:
 def _py_epilogue(e) -> None:
   e("@dataclass(frozen=True)")
   e("class EpilogueConfig:")
-  e('  """FINAL-only post-processing block; presence bits derive from the values."""')
+  e('  """FINAL-only post-processing block; presence is the explicit *_present flag."""')
   e("")
   e("  n_cols: int")
   e("  bias: tuple[int, ...] | None = None")
+  e("  bias_present: bool = False")
   e("  scale: int | None = None")
+  e("  scale_present: bool = False")
   e("  relu: bool = False")
   e("  clip: ClipPair | None = None")
+  e("  clip_present: bool = False")
   e("  quant: QuantConfig | None = None")
+  e("  quant_present: bool = False")
   e("")
   e("  def enables(self) -> int:")
   e("    return (")
-  e("      (EPILOGUE_EN_BIAS if self.bias is not None else 0)")
-  e("      | (EPILOGUE_EN_SCALE if self.scale is not None else 0)")
+  e("      (EPILOGUE_EN_BIAS if self.bias_present else 0)")
+  e("      | (EPILOGUE_EN_SCALE if self.scale_present else 0)")
   e("      | (EPILOGUE_EN_RELU if self.relu else 0)")
-  e("      | (EPILOGUE_EN_CLIP if self.clip is not None else 0)")
-  e("      | (EPILOGUE_EN_QUANT if self.quant is not None else 0)")
+  e("      | (EPILOGUE_EN_CLIP if self.clip_present else 0)")
+  e("      | (EPILOGUE_EN_QUANT if self.quant_present else 0)")
   e("    )")
   e("")
   e("  def _validate(self, _p: str = 'EpilogueConfig') -> None:")
   e("    _ck_range(self.n_cols, 0, 65535, f'{_p}.n_cols')")
-  e("    if self.bias is not None and len(self.bias) != self.n_cols:")
+  e("    if self.bias_present and len(self.bias or ()) != self.n_cols:")
   e("      raise ProtocolError(f'{_p}.bias', 'bias word count must equal n_cols')")
-  e("    if self.scale is not None:")
-  e("      _ck_range(self.scale, 0, 0xFFFFFFFF, f'{_p}.scale')")
-  e("    _ck_bool(self.relu, f'{_p}.relu')")
-  e("    if self.clip is not None:")
-  e("      self.clip._validate(f'{_p}.clip')")
-  e("    if self.quant is not None:")
-  e("      self.quant._validate(f'{_p}.quant')")
+  e("    if not self.bias_present and self.bias:")
+  e("      raise ProtocolError(f'{_p}.bias', 'absent bias must be empty')")
+  e("    if self.scale_present and self.scale is None:")
+  e("      raise ProtocolError(f'{_p}.scale', 'present stage requires its value')")
+  e("    if self.scale_present:")
+  e("      _ck_range(self.scale or 0, 0, 0xFFFFFFFF, f'{_p}.scale')")
+  e("    if self.relu:")
+  e("      _ck_bool(True, f'{_p}.relu')")
+  e("    if self.clip_present and self.clip is None:")
+  e("      raise ProtocolError(f'{_p}.clip', 'present stage requires its value')")
+  e("    if self.clip_present:")
+  e("      (self.clip or ClipPair(0, 0))._validate(f'{_p}.clip')")
+  e("    if self.quant_present and self.quant is None:")
+  e("      raise ProtocolError(f'{_p}.quant', 'present stage requires its value')")
+  e("    if self.quant_present:")
+  e("      (self.quant or QuantConfig(0, 0))._validate(f'{_p}.quant')")
   e("")
   e("  def _encode(self, _o: _Writer) -> None:")
+  e("    self._validate()")
   e("    _o.u16(self.n_cols)")
   e("    _o.u8(self.enables())")
-  e("    bias = self.bias or ()")
+  e("    bias = self.bias if self.bias_present else ()")
   e("    for _i in range(self.n_cols):")
   e("      _o.u32(bias[_i] if _i < len(bias) else 0)")
-  e("    _o.u32(self.scale if self.scale is not None else 0)")
-  e("    clip = self.clip if self.clip is not None else ClipPair(0, 0)")
+  e("    _o.u32(self.scale if self.scale_present else 0)")
+  e("    clip = self.clip if self.clip_present else ClipPair(0, 0)")
   e("    clip._encode(_o)")
-  e("    quant = self.quant if self.quant is not None else QuantConfig(0, 0)")
+  e("    quant = self.quant if self.quant_present else QuantConfig(0, 0)")
   e("    quant._encode(_o)")
   e("")
   e("  @classmethod")
@@ -1004,30 +1043,34 @@ def _py_epilogue(e) -> None:
   e("    enables = _r.u8(f'{_p}.enables')")
   e("    if enables & EPILOGUE_RESERVED_MASK:")
   e("      raise ProtocolError(f'{_p}.enables', 'reserved bits must be zero')")
+  e("    bias_present = bool(enables & EPILOGUE_EN_BIAS)")
   e("    bias: tuple[int, ...] | None = tuple(")
   e("      _r.u32(f'{_p}.bias[_i]') for _i in range(n_cols)")
   e("    )")
-  e("    if not enables & EPILOGUE_EN_BIAS:")
+  e("    if not bias_present:")
   e("      if any(bias or ()):")
   e("        raise ProtocolError(f'{_p}.bias', 'disabled stage must serialize zeros')")
   e("      bias = None")
+  e("    scale_present = bool(enables & EPILOGUE_EN_SCALE)")
   e("    scale: int | None = _r.u32(f'{_p}.scale')")
-  e("    if not enables & EPILOGUE_EN_SCALE:")
+  e("    if not scale_present:")
   e("      if scale:")
   e("        raise ProtocolError(f'{_p}.scale', 'disabled stage must serialize zeros')")
   e("      scale = None")
+  e("    clip_present = bool(enables & EPILOGUE_EN_CLIP)")
   e("    _clip_lo = _r.u32(f'{_p}.clip.lo')")
   e("    _clip_hi = _r.u32(f'{_p}.clip.hi')")
   e("    clip: ClipPair | None = None")
-  e("    if enables & EPILOGUE_EN_CLIP:")
+  e("    if clip_present:")
   e("      clip = ClipPair(lo=_clip_lo, hi=_clip_hi)")
   e("      clip._validate(f'{_p}.clip')")
   e("    elif _clip_lo or _clip_hi:")
   e("      raise ProtocolError(f'{_p}.clip', 'disabled stage must serialize zeros')")
+  e("    quant_present = bool(enables & EPILOGUE_EN_QUANT)")
   e("    _inv_scale = _r.u32(f'{_p}.quant.inv_scale')")
   e("    _zero_point = _r.i8(f'{_p}.quant.zero_point')")
   e("    quant: QuantConfig | None = None")
-  e("    if enables & EPILOGUE_EN_QUANT:")
+  e("    if quant_present:")
   e("      quant = QuantConfig(inv_scale=_inv_scale, zero_point=_zero_point)")
   e("      quant._validate(f'{_p}.quant')")
   e("    elif _inv_scale or _zero_point:")
@@ -1035,10 +1078,14 @@ def _py_epilogue(e) -> None:
   e("    value = cls(")
   e("      n_cols=n_cols,")
   e("      bias=bias,")
+  e("      bias_present=bias_present,")
   e("      scale=scale,")
+  e("      scale_present=scale_present,")
   e("      relu=bool(enables & EPILOGUE_EN_RELU),")
   e("      clip=clip,")
+  e("      clip_present=clip_present,")
   e("      quant=quant,")
+  e("      quant_present=quant_present,")
   e("    )")
   e("    value._validate(_p)")
   e("    return value")
@@ -1152,6 +1199,10 @@ def emit_scala(schema: dict, model: dict) -> str:
     valid = ", ".join(str(value) for _, value in enum_values(model, ename))
     e(f"  private val {pascal(ename)}Valid: Set[Int] = Set({valid})")
     e("")
+  e(
+    "  val DtypeElementBytes: Map[Int, Int] = Map("
+    "DtypeF32 -> 4, DtypeBf16 -> 2, DtypeI8 -> 1, DtypeI32 -> 4)"
+  )
   e("  final case class ProtocolError(field: String, reason: String)")
   e('      extends RuntimeException(s"$field: $reason")')
   e("")
@@ -1415,6 +1466,9 @@ def _scala_field_decode(e, model: dict, field: Field, indent: str) -> None:
         suffix = "L" if _scala_long(field.type) else ""
         e(f'{indent}ckRange({name}.toLong, {low}{suffix}, {high}{suffix}, s"{p}")')
       # u64 values ride in a signed Long; no wider range exists to check.
+    if field.predicate == "dtype_width":
+      type_owner = scala_field_name("dtype")
+      e(f'{indent}ckEq({name}, DtypeElementBytes({type_owner}), s"{p}")')
   elif field.kind == "enum":
     e(f'{indent}val {name} = reader.u8(s"{p}")')
     e(f'{indent}ckEnum({name}, {pascal(field.ref_name)}Valid, s"{p}")')
@@ -1483,14 +1537,19 @@ def _scala_predicates(e, struct: Struct, indent: str) -> None:
       e(f"{indent}  item.ctxEpoch == {token}.ctxEpoch &&")
       e(f"{indent}  item.eventId == {token}.eventId))")
       e(
-        f"{indent}  throw ProtocolError(s\"$path.{name_field}\","
-        " \"a step must not wait on its own completion event\")"
+        f'{indent}  throw ProtocolError(s"$path.{name_field}",'
+        ' "a step must not wait on its own completion event")'
       )
     elif kind == "quant_i8":
       dtype_field = scala_field_name(predicate["dtype_field"])
-      quant = _scala_path(predicate["quant_field"])
+      parent, _, leaf = predicate["quant_field"].rpartition(".")
+      quant_present = (
+        _scala_path(f"{parent}.{leaf}_present")
+        if parent
+        else scala_field_name(f"{predicate['quant_field']}_present")
+      )
       e(f"{indent}val isI8 = {dtype_field} == DtypeI8")
-      e(f"{indent}val hasQuant = {quant}.isDefined")
+      e(f"{indent}val hasQuant = {quant_present}")
       e(f"{indent}if (isI8 != hasQuant)")
       e(
         f'{indent}  throw ProtocolError(s"$path.{predicate["dtype_field"]}",'
@@ -1508,22 +1567,27 @@ def _scala_epilogue(e) -> None:
   e("  final case class EpilogueConfig(")
   e("      nCols: Int,")
   e("      bias: Option[Vector[Long]],")
+  e("      biasPresent: Boolean,")
   e("      scale: Option[Long],")
+  e("      scalePresent: Boolean,")
   e("      relu: Boolean,")
   e("      clip: Option[ClipPair],")
+  e("      clipPresent: Boolean,")
   e("      quant: Option[QuantConfig],")
+  e("      quantPresent: Boolean,")
   e("  ) {")
   e("    def enables: Int =")
-  e("      (if (bias.isDefined) EpilogueEnBias else 0) |")
-  e("        (if (scale.isDefined) EpilogueEnScale else 0) |")
+  e("      (if (biasPresent) EpilogueEnBias else 0) |")
+  e("        (if (scalePresent) EpilogueEnScale else 0) |")
   e("        (if (relu) EpilogueEnRelu else 0) |")
-  e("        (if (clip.isDefined) EpilogueEnClip else 0) |")
-  e("        (if (quant.isDefined) EpilogueEnQuant else 0)")
+  e("        (if (clipPresent) EpilogueEnClip else 0) |")
+  e("        (if (quantPresent) EpilogueEnQuant else 0)")
   e("")
   e("    def encodePayload(writer: Writer): Unit = {")
   e("      writer.u16(nCols)")
   e("      writer.u8(enables)")
-  e("      bias.getOrElse(Vector.fill(nCols)(0L)).foreach(word => writer.u32(word))")
+  e("      (if (biasPresent) bias.getOrElse(Vector.fill(nCols)(0L)) else Vector.fill(nCols)(0L))")
+  e("        .foreach(word => writer.u32(word))")
   e("      writer.u32(scale.getOrElse(0L))")
   e("      clip.getOrElse(ClipPair(0L, 0L)).encodePayload(writer)")
   e("      quant.getOrElse(QuantConfig(0L, 0)).encodePayload(writer)")
@@ -1536,21 +1600,24 @@ def _scala_epilogue(e) -> None:
   e('      val enables = reader.u8(s"$path.enables")')
   e("      if ((enables & EpilogueReservedMask) != 0)")
   e('        throw ProtocolError(s"$path.enables", "reserved bits must be zero")')
+  e("      val biasPresent = (enables & EpilogueEnBias) != 0")
   e('      val rawBias = (0 until nCols).map(_ => reader.u32(s"$path.bias[]")).toVector')
-  e("      val bias = if ((enables & EpilogueEnBias) != 0) Some(rawBias) else {")
+  e("      val bias = if (biasPresent) Some(rawBias) else {")
   e("        if (rawBias.exists(_ != 0L))")
   e('          throw ProtocolError(s"$path.bias", "disabled stage must serialize zeros")')
   e("        None")
   e("      }")
+  e("      val scalePresent = (enables & EpilogueEnScale) != 0")
   e('      val rawScale = reader.u32(s"$path.scale")')
-  e("      val scale = if ((enables & EpilogueEnScale) != 0) Some(rawScale) else {")
+  e("      val scale = if (scalePresent) Some(rawScale) else {")
   e("        if (rawScale != 0L)")
   e('          throw ProtocolError(s"$path.scale", "disabled stage must serialize zeros")')
   e("        None")
   e("      }")
+  e("      val clipPresent = (enables & EpilogueEnClip) != 0")
   e('      val rawClipLo = reader.u32(s"$path.clip.lo")')
   e('      val rawClipHi = reader.u32(s"$path.clip.hi")')
-  e("      val clip = if ((enables & EpilogueEnClip) != 0) {")
+  e("      val clip = if (clipPresent) {")
   e("        val value = ClipPair(rawClipLo, rawClipHi)")
   e('        ckFp32NotNan(value.lo, s"$path.clip.lo")')
   e('        ckFp32NotNan(value.hi, s"$path.clip.hi")')
@@ -1562,9 +1629,10 @@ def _scala_epilogue(e) -> None:
   e('          throw ProtocolError(s"$path.clip", "disabled stage must serialize zeros")')
   e("        None")
   e("      }")
+  e("      val quantPresent = (enables & EpilogueEnQuant) != 0")
   e('      val rawInvScale = reader.u32(s"$path.quant.inv_scale")')
   e('      val rawZeroPoint = reader.i8(s"$path.quant.zero_point")')
-  e("      val quant = if ((enables & EpilogueEnQuant) != 0) {")
+  e("      val quant = if (quantPresent) {")
   e("        val value = QuantConfig(rawInvScale, rawZeroPoint)")
   e('        ckFp32Pos(value.invScale, s"$path.quant.inv_scale")')
   e('        ckRange(value.zeroPoint.toLong, -128L, 127L, s"$path.quant.zero_point")')
@@ -1574,9 +1642,12 @@ def _scala_epilogue(e) -> None:
   e('          throw ProtocolError(s"$path.quant", "disabled stage must serialize zeros")')
   e("        None")
   e("      }")
-  e("      if (bias.isDefined && bias.get.length != nCols)")
+  e("      if (biasPresent && bias.get.length != nCols)")
   e('        throw ProtocolError(s"$path.bias", "bias word count must equal n_cols")')
-  e("      new EpilogueConfig(nCols, bias, scale, (enables & EpilogueEnRelu) != 0, clip, quant)")
+  e(
+    "      new EpilogueConfig(nCols, bias, biasPresent, scale, scalePresent,"
+    " (enables & EpilogueEnRelu) != 0, clip, clipPresent, quant, quantPresent)"
+  )
   e("    }")
   e("  }")
   e("")
@@ -1752,6 +1823,8 @@ def emit_c(schema: dict, model: dict) -> str:
   e("  }")
   e("}")
   e("")
+  e("static const uint8_t boa_dtype_element_bytes[4] = {4, 2, 1, 4};")
+  e("")
   e("BOA_UNUSED static int boa_fail(boa_err *err, const char *field, const char *reason) {")
   e("  if (err != NULL) {")
   e("    err->field = field;")
@@ -1918,15 +1991,19 @@ def _c_struct_decl(e, struct: Struct) -> None:
 
 
 def _c_epilogue_decl(e) -> None:
-  e("/* EpilogueConfig: fixed layout; enables presence bits are derived. */")
+  e("/* EpilogueConfig: fixed layout; presence is the explicit *_present flag.")
+  e(" * bias counts n_cols words whenever bias_present is set, so present-empty")
+  e(" * (n_cols == 0) is distinct from disabled: presence never derives from the")
+  e(" * allocation or from value emptiness. */")
   e("typedef struct {")
   e("  uint16_t n_cols;")
   e("  uint8_t enables;")
   e("  uint8_t relu;")
+  e("  uint8_t bias_present;")
   e("  uint8_t scale_present;")
   e("  uint8_t clip_present;")
   e("  uint8_t quant_present;")
-  e("  boa_u32_list bias; /* count == n_cols; items NULL when disabled */")
+  e("  boa_u32_list bias; /* n_cols words when present; zeros when disabled */")
   e("  uint32_t scale; /* 0 when disabled */")
   e("  boa_clip_pair clip; /* zeros when disabled */")
   e("  boa_quant_config quant; /* zeros when disabled */")
@@ -2032,6 +2109,10 @@ def _c_dec_field(e, model: dict, struct: Struct, field: Field, indent: str) -> N
       if checks:
         e(f"{indent}if ({' || '.join(checks)})")
         e(f'  {indent}return boa_fail(err, "{fld}", "value outside range");')
+    if field.predicate == "dtype_width":
+      dtype_owner = f"m->{camel('dtype')}"
+      e(f"{indent}if ({member} != boa_dtype_element_bytes[{dtype_owner}])")
+      e(f'  {indent}return boa_fail(err, "{fld}", "element_bytes disagrees with dtype");')
   elif field.kind == "enum":
     e(f'{indent}if (rd_u8(buf, pos, end, &{member}, "{fld}", err) != 0)')
     e(f"{indent}  return -1;")
@@ -2116,12 +2197,8 @@ def _c_predicates(e, struct: Struct) -> None:
       e("    int self_ready = 0;")
       e(f"    for (self_ready_index = 0; self_ready_index < m->{the_list}.count;")
       e("         self_ready_index++) {")
-      e(
-        f"      if (m->{the_list}.items[self_ready_index].ctx_id == {token}.ctx_id &&"
-      )
-      e(
-        f"          m->{the_list}.items[self_ready_index].ctx_epoch == {token}.ctx_epoch &&"
-      )
+      e(f"      if (m->{the_list}.items[self_ready_index].ctx_id == {token}.ctx_id &&")
+      e(f"          m->{the_list}.items[self_ready_index].ctx_epoch == {token}.ctx_epoch &&")
       e("          m->" + the_list + ".items[self_ready_index].event_id ==")
       e(f"            {token}.event_id) {{")
       e("        self_ready = 1;")
@@ -2161,7 +2238,7 @@ def _c_epilogue_code(e) -> None:
   e("  uint8_t enables = 0;")
   e("  size_t index;")
   e("  (void)err;")
-  e("  if (m->bias.items != NULL)")
+  e("  if (m->bias_present)")
   e("    enables |= BOA_EPILOGUE_EN_BIAS;")
   e("  if (m->scale_present)")
   e("    enables |= BOA_EPILOGUE_EN_SCALE;")
@@ -2197,6 +2274,7 @@ def _c_epilogue_code(e) -> None:
   e("  m->enables = enables;")
   e("  if ((enables & BOA_EPILOGUE_RESERVED_MASK) != 0)")
   e('    return boa_fail(err, "EpilogueConfig.enables", "reserved bits must be zero");')
+  e("  m->bias_present = (enables & BOA_EPILOGUE_EN_BIAS) != 0;")
   e("  m->bias.count = m->n_cols;")
   e("  m->bias.items = NULL;")
   e("  if (m->n_cols > 0) {")
@@ -2207,10 +2285,10 @@ def _c_epilogue_code(e) -> None:
   e("  for (index = 0; index < m->n_cols; index++) {")
   e('    if (rd_u32(buf, pos, end, &m->bias.items[index], "EpilogueConfig.bias[]", err) != 0)')
   e("      return -1;")
-  e("    if ((enables & BOA_EPILOGUE_EN_BIAS) == 0 && m->bias.items[index] != 0)")
+  e("    if (!m->bias_present && m->bias.items[index] != 0)")
   e('      return boa_fail(err, "EpilogueConfig.bias", "disabled stage must serialize zeros");')
   e("  }")
-  e("  if ((enables & BOA_EPILOGUE_EN_BIAS) == 0) {")
+  e("  if (!m->bias_present) {")
   e("    free(m->bias.items);")
   e("    m->bias.items = NULL;")
   e("    m->bias.count = 0;")

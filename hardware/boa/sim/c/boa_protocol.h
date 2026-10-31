@@ -159,15 +159,19 @@ typedef struct {
 
 typedef struct { size_t count; boa_allocation_ref *items; } boa_allocation_ref_list;
 
-/* EpilogueConfig: fixed layout; enables presence bits are derived. */
+/* EpilogueConfig: fixed layout; presence is the explicit *_present flag.
+ * bias counts n_cols words whenever bias_present is set, so present-empty
+ * (n_cols == 0) is distinct from disabled: presence never derives from the
+ * allocation or from value emptiness. */
 typedef struct {
   uint16_t n_cols;
   uint8_t enables;
   uint8_t relu;
+  uint8_t bias_present;
   uint8_t scale_present;
   uint8_t clip_present;
   uint8_t quant_present;
-  boa_u32_list bias; /* count == n_cols; items NULL when disabled */
+  boa_u32_list bias; /* n_cols words when present; zeros when disabled */
   uint32_t scale; /* 0 when disabled */
   boa_clip_pair clip; /* zeros when disabled */
   boa_quant_config quant; /* zeros when disabled */
@@ -384,6 +388,8 @@ const char *boa_kind_name(uint8_t kind) {
     default: return "UNKNOWN";
   }
 }
+
+static const uint8_t boa_dtype_element_bytes[4] = {4, 2, 1, 4};
 
 BOA_UNUSED static int boa_fail(boa_err *err, const char *field, const char *reason) {
   if (err != NULL) {
@@ -627,6 +633,8 @@ BOA_UNUSED static long boa_dec_operand_view(const uint8_t *buf, size_t *pos, siz
     return boa_fail(err, "OperandView.dtype", "unknown enum value");
   if (rd_u8(buf, pos, end, &m->element_bytes, "OperandView.element_bytes", err) != 0)
     return -1;
+  if (m->element_bytes != boa_dtype_element_bytes[m->dtype])
+    return boa_fail(err, "OperandView.element_bytes", "element_bytes disagrees with dtype");
   if (rd_u32(buf, pos, end, &m->bytes, "OperandView.bytes", err) != 0)
     return -1;
   if (rd_i16(buf, pos, end, &m->task_dim, "OperandView.task_dim", err) != 0)
@@ -671,7 +679,7 @@ BOA_UNUSED static int boa_enc_epilogue_config(const boa_epilogue_config *m, uint
   uint8_t enables = 0;
   size_t index;
   (void)err;
-  if (m->bias.items != NULL)
+  if (m->bias_present)
     enables |= BOA_EPILOGUE_EN_BIAS;
   if (m->scale_present)
     enables |= BOA_EPILOGUE_EN_SCALE;
@@ -707,6 +715,7 @@ BOA_UNUSED static long boa_dec_epilogue_config(const uint8_t *buf, size_t *pos, 
   m->enables = enables;
   if ((enables & BOA_EPILOGUE_RESERVED_MASK) != 0)
     return boa_fail(err, "EpilogueConfig.enables", "reserved bits must be zero");
+  m->bias_present = (enables & BOA_EPILOGUE_EN_BIAS) != 0;
   m->bias.count = m->n_cols;
   m->bias.items = NULL;
   if (m->n_cols > 0) {
@@ -717,10 +726,10 @@ BOA_UNUSED static long boa_dec_epilogue_config(const uint8_t *buf, size_t *pos, 
   for (index = 0; index < m->n_cols; index++) {
     if (rd_u32(buf, pos, end, &m->bias.items[index], "EpilogueConfig.bias[]", err) != 0)
       return -1;
-    if ((enables & BOA_EPILOGUE_EN_BIAS) == 0 && m->bias.items[index] != 0)
+    if (!m->bias_present && m->bias.items[index] != 0)
       return boa_fail(err, "EpilogueConfig.bias", "disabled stage must serialize zeros");
   }
-  if ((enables & BOA_EPILOGUE_EN_BIAS) == 0) {
+  if (!m->bias_present) {
     free(m->bias.items);
     m->bias.items = NULL;
     m->bias.count = 0;

@@ -105,6 +105,7 @@ object BoaProtocol {
   final val TransposeTt: Int = 3
   private val TransposeValid: Set[Int] = Set(0, 1, 2, 3)
 
+  val DtypeElementBytes: Map[Int, Int] = Map(DtypeF32 -> 4, DtypeBf16 -> 2, DtypeI8 -> 1, DtypeI32 -> 4)
   final case class ProtocolError(field: String, reason: String)
       extends RuntimeException(s"$field: $reason")
 
@@ -312,6 +313,7 @@ object BoaProtocol {
       ckEnum(dtype, DtypeValid, s"$path.dtype")
       val elementBytes = reader.u8(s"$path.element_bytes").toInt
       ckRange(elementBytes.toLong, 0, 255, s"$path.element_bytes")
+      ckEq(elementBytes, DtypeElementBytes(dtype), s"$path.element_bytes")
       val bytes = reader.u32(s"$path.bytes")
       ckRange(bytes.toLong, 0L, 4294967295L, s"$path.bytes")
       val taskDim = reader.i16(s"$path.task_dim").toInt
@@ -359,22 +361,27 @@ object BoaProtocol {
   final case class EpilogueConfig(
       nCols: Int,
       bias: Option[Vector[Long]],
+      biasPresent: Boolean,
       scale: Option[Long],
+      scalePresent: Boolean,
       relu: Boolean,
       clip: Option[ClipPair],
+      clipPresent: Boolean,
       quant: Option[QuantConfig],
+      quantPresent: Boolean,
   ) {
     def enables: Int =
-      (if (bias.isDefined) EpilogueEnBias else 0) |
-        (if (scale.isDefined) EpilogueEnScale else 0) |
+      (if (biasPresent) EpilogueEnBias else 0) |
+        (if (scalePresent) EpilogueEnScale else 0) |
         (if (relu) EpilogueEnRelu else 0) |
-        (if (clip.isDefined) EpilogueEnClip else 0) |
-        (if (quant.isDefined) EpilogueEnQuant else 0)
+        (if (clipPresent) EpilogueEnClip else 0) |
+        (if (quantPresent) EpilogueEnQuant else 0)
 
     def encodePayload(writer: Writer): Unit = {
       writer.u16(nCols)
       writer.u8(enables)
-      bias.getOrElse(Vector.fill(nCols)(0L)).foreach(word => writer.u32(word))
+      (if (biasPresent) bias.getOrElse(Vector.fill(nCols)(0L)) else Vector.fill(nCols)(0L))
+        .foreach(word => writer.u32(word))
       writer.u32(scale.getOrElse(0L))
       clip.getOrElse(ClipPair(0L, 0L)).encodePayload(writer)
       quant.getOrElse(QuantConfig(0L, 0)).encodePayload(writer)
@@ -387,21 +394,24 @@ object BoaProtocol {
       val enables = reader.u8(s"$path.enables")
       if ((enables & EpilogueReservedMask) != 0)
         throw ProtocolError(s"$path.enables", "reserved bits must be zero")
+      val biasPresent = (enables & EpilogueEnBias) != 0
       val rawBias = (0 until nCols).map(_ => reader.u32(s"$path.bias[]")).toVector
-      val bias = if ((enables & EpilogueEnBias) != 0) Some(rawBias) else {
+      val bias = if (biasPresent) Some(rawBias) else {
         if (rawBias.exists(_ != 0L))
           throw ProtocolError(s"$path.bias", "disabled stage must serialize zeros")
         None
       }
+      val scalePresent = (enables & EpilogueEnScale) != 0
       val rawScale = reader.u32(s"$path.scale")
-      val scale = if ((enables & EpilogueEnScale) != 0) Some(rawScale) else {
+      val scale = if (scalePresent) Some(rawScale) else {
         if (rawScale != 0L)
           throw ProtocolError(s"$path.scale", "disabled stage must serialize zeros")
         None
       }
+      val clipPresent = (enables & EpilogueEnClip) != 0
       val rawClipLo = reader.u32(s"$path.clip.lo")
       val rawClipHi = reader.u32(s"$path.clip.hi")
-      val clip = if ((enables & EpilogueEnClip) != 0) {
+      val clip = if (clipPresent) {
         val value = ClipPair(rawClipLo, rawClipHi)
         ckFp32NotNan(value.lo, s"$path.clip.lo")
         ckFp32NotNan(value.hi, s"$path.clip.hi")
@@ -413,9 +423,10 @@ object BoaProtocol {
           throw ProtocolError(s"$path.clip", "disabled stage must serialize zeros")
         None
       }
+      val quantPresent = (enables & EpilogueEnQuant) != 0
       val rawInvScale = reader.u32(s"$path.quant.inv_scale")
       val rawZeroPoint = reader.i8(s"$path.quant.zero_point")
-      val quant = if ((enables & EpilogueEnQuant) != 0) {
+      val quant = if (quantPresent) {
         val value = QuantConfig(rawInvScale, rawZeroPoint)
         ckFp32Pos(value.invScale, s"$path.quant.inv_scale")
         ckRange(value.zeroPoint.toLong, -128L, 127L, s"$path.quant.zero_point")
@@ -425,9 +436,9 @@ object BoaProtocol {
           throw ProtocolError(s"$path.quant", "disabled stage must serialize zeros")
         None
       }
-      if (bias.isDefined && bias.get.length != nCols)
+      if (biasPresent && bias.get.length != nCols)
         throw ProtocolError(s"$path.bias", "bias word count must equal n_cols")
-      new EpilogueConfig(nCols, bias, scale, (enables & EpilogueEnRelu) != 0, clip, quant)
+      new EpilogueConfig(nCols, bias, biasPresent, scale, scalePresent, (enables & EpilogueEnRelu) != 0, clip, clipPresent, quant, quantPresent)
     }
   }
 
@@ -612,7 +623,7 @@ object BoaProtocol {
       if (chainConfig.nCols != outputCols)
         throw ProtocolError(s"$path.chain_config.n_cols", "must equal output_cols")
       val isI8 = outputDtype == DtypeI8
-      val hasQuant = chainConfig.quant.isDefined
+      val hasQuant = chainConfig.quantPresent
       if (isI8 != hasQuant)
         throw ProtocolError(s"$path.output_dtype", "i8 output requires exactly the quant parameters")
       new AmRequest(

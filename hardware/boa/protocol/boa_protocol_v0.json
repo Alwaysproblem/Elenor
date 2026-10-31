@@ -169,10 +169,7 @@
         {
           "name": "ctx_id",
           "type": "u8",
-          "range": [
-            0,
-            7
-          ]
+          "range": [0, 7]
         },
         {
           "name": "ctx_epoch",
@@ -216,16 +213,13 @@
         {
           "name": "zero_point",
           "type": "i8",
-          "range": [
-            -128,
-            127
-          ]
+          "range": [-128, 127]
         }
       ],
       "note": "P03/P08 INT8 quantization parameters."
     },
     "EpilogueConfig": {
-      "note": "FINAL-only post-processing block (P03 section 4, P08 production contract); order bias -> scale -> ReLU -> clip -> convert is frozen by reference in numeric_freeze.md.  Fixed wire layout: n_cols (u16), enables (u8 presence bits bias=0/scale=1/relu=2/clip=3/quant=4, bits 5..7 reserved zero), then the n_cols bias words, scale, clip lo/hi and quant inv_scale+zero_point.  The enables byte is derived from parameter presence; a disabled stage executes nothing (no identity op) and serializes canonical zeros, and decoders reject non-zero disabled stages, so the encoding is canonical and round-trips byte-identically",
+      "note": "FINAL-only post-processing block (P03 section 4, P08 production contract); order bias -> scale -> ReLU -> clip -> convert is frozen by reference in numeric_freeze.md.  Fixed wire layout: n_cols (u16), enables (u8 presence bits bias=0/scale=1/relu=2/clip=3/quant=4, bits 5..7 reserved zero), then the n_cols bias words, scale, clip lo/hi and quant inv_scale+zero_point.  Stage presence is explicit (enables on the wire, a dedicated bias_present/scale_present/clip_present/quant_present field in the decoded codecs); it never derives from the value representation, so a present-empty stage (n_cols=0, bias enabled) survives decode/re-encode byte-identically.  A disabled stage executes nothing (no identity op) and serializes canonical zeros, and decoders reject non-zero disabled stages, so the encoding is canonical and round-trips byte-identically",
       "fields": [
         {
           "name": "n_cols",
@@ -235,11 +229,13 @@
         {
           "name": "bias",
           "type": "list:u32",
-          "count_expr": "n_cols"
+          "count_expr": "n_cols",
+          "presence": "enable_bit"
         },
         {
           "name": "scale",
-          "type": "u32"
+          "type": "u32",
+          "presence": "enable_bit"
         },
         {
           "name": "relu",
@@ -247,11 +243,19 @@
         },
         {
           "name": "clip",
-          "type": "struct:ClipPair"
+          "type": "struct:ClipPair",
+          "presence": "enable_bit"
         },
         {
           "name": "quant",
-          "type": "struct:QuantConfig"
+          "type": "struct:QuantConfig",
+          "presence": "enable_bit"
+        }
+      ],
+      "implicit_fields": [
+        {
+          "name": "enables",
+          "note": "u8; stages declare presence = enable_bit, the generator emits an explicit bias_present/scale_present/clip_present/quant_present flag set from the decoded enable bit and read back by encode; presence never derives from the value representation (None/empty/NULL items), so present-empty stages (n_cols=0 with bias enabled) round-trip byte-identically"
         }
       ]
     },
@@ -316,10 +320,7 @@
         {
           "name": "task_dim",
           "type": "i16",
-          "range": [
-            -1,
-            32767
-          ],
+          "range": [-1, 32767],
           "note": "-1 = not task indexed"
         }
       ],
@@ -327,11 +328,7 @@
         {
           "kind": "eq_product",
           "target": "bytes",
-          "factors": [
-            "dim0",
-            "dim1",
-            "element_bytes"
-          ],
+          "factors": ["dim0", "dim1", "element_bytes"],
           "constant": 1
         }
       ]
@@ -361,18 +358,12 @@
         {
           "name": "tile_id",
           "type": "u8",
-          "range": [
-            0,
-            15
-          ]
+          "range": [0, 15]
         },
         {
           "name": "ctx_id",
           "type": "u8",
-          "range": [
-            0,
-            7
-          ]
+          "range": [0, 7]
         },
         {
           "name": "ctx_epoch",
@@ -386,18 +377,12 @@
         {
           "name": "logical_am",
           "type": "u8",
-          "range": [
-            0,
-            1
-          ]
+          "range": [0, 1]
         },
         {
           "name": "bundle_slots",
           "type": "u8",
-          "range": [
-            1,
-            2
-          ],
+          "range": [1, 2],
           "note": "compiler-written Tile Program metadata; upper bound == capacities.am_slots_per_context"
         },
         {
@@ -428,10 +413,7 @@
         {
           "name": "byte_count",
           "type": "u32",
-          "range": [
-            0,
-            262144
-          ],
+          "range": [0, 262144],
           "note": "upper bound == capacities.am_slot_capacity_bytes default; runtime rejects against the configured capacity"
         },
         {
@@ -443,10 +425,7 @@
         {
           "kind": "eq_product",
           "target": "byte_count",
-          "factors": [
-            "output_rows",
-            "output_cols"
-          ],
+          "factors": ["output_rows", "output_cols"],
           "constant": 4
         },
         {
@@ -477,18 +456,12 @@
         {
           "name": "group",
           "type": "u8",
-          "range": [
-            0,
-            3
-          ]
+          "range": [0, 3]
         },
         {
           "name": "slot_index",
           "type": "u8",
-          "range": [
-            0,
-            1
-          ]
+          "range": [0, 1]
         },
         {
           "name": "chain_id",
@@ -497,10 +470,7 @@
         {
           "name": "bound_engine",
           "type": "u8",
-          "range": [
-            0,
-            7
-          ]
+          "range": [0, 7]
         },
         {
           "name": "completion_token",
@@ -556,10 +526,7 @@
         {
           "name": "bound_engine",
           "type": "u8",
-          "range": [
-            0,
-            7
-          ]
+          "range": [0, 7]
         },
         {
           "name": "completion_token",
@@ -576,18 +543,12 @@
         {
           "name": "tile_id",
           "type": "u8",
-          "range": [
-            0,
-            15
-          ]
+          "range": [0, 15]
         },
         {
           "name": "ctx_id",
           "type": "u8",
-          "range": [
-            0,
-            7
-          ]
+          "range": [0, 7]
         },
         {
           "name": "ctx_epoch",
@@ -650,10 +611,7 @@
           "name": "k_mask",
           "type": "list:u8",
           "count_field": "u16",
-          "item_range": [
-            0,
-            1
-          ],
+          "item_range": [0, 1],
           "note": "storage_k-length activity mask, one byte per lane"
         },
         {
@@ -744,10 +702,7 @@
             {
               "name": "bound_engine",
               "type": "u8",
-              "range": [
-                0,
-                7
-              ]
+              "range": [0, 7]
             }
           ],
           "step_terminal": [
@@ -822,18 +777,12 @@
         {
           "name": "tile_id",
           "type": "u8",
-          "range": [
-            0,
-            15
-          ]
+          "range": [0, 15]
         },
         {
           "name": "ctx_id",
           "type": "u8",
-          "range": [
-            0,
-            7
-          ]
+          "range": [0, 7]
         },
         {
           "name": "ctx_epoch",
@@ -853,10 +802,7 @@
         {
           "name": "ctx_id",
           "type": "u8",
-          "range": [
-            0,
-            7
-          ]
+          "range": [0, 7]
         },
         {
           "name": "ctx_epoch",
@@ -877,10 +823,7 @@
         {
           "name": "length",
           "type": "u16",
-          "range": [
-            1,
-            65535
-          ]
+          "range": [1, 65535]
         },
         {
           "name": "byte_mask",
@@ -951,43 +894,26 @@
       ]
     },
     "internal_state": {
-      "fields": [
-        "bound_engine",
-        "group/slot_index",
-        "result credits"
-      ],
+      "fields": ["bound_engine", "group/slot_index", "result credits"],
       "maintained_by": "device; the compiler never guesses these"
     }
   },
   "identities": {
     "ctx_key": {
-      "fields": [
-        "ctx_id",
-        "ctx_epoch"
-      ],
+      "fields": ["ctx_id", "ctx_epoch"],
       "scope": "physical Compute Tile; cross-tile messages also carry tile_id",
       "not": "never conflated with TaskIdentity (Grid/Task), physical slot, or engine"
     },
     "lease_handle": {
-      "fields": [
-        "lease_handle",
-        "slot_generation"
-      ],
+      "fields": ["lease_handle", "slot_generation"],
       "note": "opaque (entry, generation) pair; slot_generation is per physical slot"
     },
     "event_token": {
-      "fields": [
-        "ctx_id",
-        "ctx_epoch",
-        "event_id"
-      ],
+      "fields": ["ctx_id", "ctx_epoch", "event_id"],
       "note": "event slots allocated at context admission from the Tile Program static event count; content associates handle/generation/seq/kind"
     },
     "logical_am": {
-      "values": [
-        0,
-        1
-      ],
+      "values": [0, 1],
       "note": "software-selected logical position, not a physical slot"
     }
   },
@@ -1081,20 +1007,14 @@
     },
     "am_slot_capacity_bytes": {
       "value": 262144,
-      "legal_range": [
-        1024,
-        262144
-      ],
+      "legal_range": [1024, 262144],
       "note": "software default 256 KiB f32; typed fixture 64 KiB; effective lower bound 1024 bytes (16x16 f32); physical macro frozen later by SRAM profile",
       "frozen": "candidate; value is the software model default, physical capacity owner is the SRAM profile task",
       "source": "hardware_config.yaml engines.boa.am.slot_capacity_bytes"
     },
     "contexts_per_tile": {
       "default": 4,
-      "legal_range": [
-        1,
-        8
-      ],
+      "legal_range": [1, 8],
       "note": "default 4; acceptance covers 1/2/4/8; a hart is not a context; AM slots are never permanently partitioned by context count",
       "frozen": "P10 review-frozen 2026-10-31",
       "source": "design 6.1 context_count"
@@ -1128,10 +1048,7 @@
     },
     "engines_per_tile": {
       "default": 1,
-      "legal_range": [
-        1,
-        8
-      ],
+      "legal_range": [1, 8],
       "note": "software default 1 (V1 multi-array target 4, exploration cap MAX_BOA_ENGINES=8); engine id domain independent of AM group id domain",
       "frozen": "candidate; physical engine count frozen by the array tasks",
       "source": "hardware_config.yaml engines.boa.arrays_per_tile"
@@ -1141,30 +1058,21 @@
       "owner": "P16",
       "software_step_default": 4,
       "unit": "per-engine result FIFO entries, hardware microblock granularity",
-      "legal_range": [
-        1,
-        64
-      ]
+      "legal_range": [1, 64]
     },
     "am_credit_capacity": {
       "status": "reserved",
       "owner": "P16",
       "software_step_default": 8,
       "unit": "O/R credits per engine (A/B reads + AM RMW writeback), hardware microblock granularity",
-      "legal_range": [
-        2,
-        256
-      ]
+      "legal_range": [2, 256]
     },
     "l1_output_credits": {
       "status": "reserved",
       "owner": "P16",
       "software_step_default": 1,
       "unit": "concurrent FINAL L1 output drains",
-      "legal_range": [
-        1,
-        16
-      ]
+      "legal_range": [1, 16]
     },
     "software_step_timing": {
       "domain": "software_model",
@@ -1237,34 +1145,22 @@
     "widths": {
       "tile_id": {
         "bits": 8,
-        "legal": [
-          0,
-          15
-        ],
+        "legal": [0, 15],
         "rationale": "4-Tile software Group, 1-Tile FPGA V1; 16 values headroom"
       },
       "ctx_id": {
         "bits": 8,
-        "legal": [
-          0,
-          7
-        ],
+        "legal": [0, 7],
         "rationale": "8-context acceptance ceiling (design 6.1 context_count 1/2/4/8)"
       },
       "ctx_epoch": {
         "bits": 8,
-        "legal": [
-          0,
-          255
-        ],
+        "legal": [0, 255],
         "rationale": "epoch churn is per retirement; wrap rule above"
       },
       "logical_am": {
         "bits": 1,
-        "legal": [
-          0,
-          1
-        ],
+        "legal": [0, 1],
         "rationale": "two logical AM positions per context"
       },
       "request_seq": {
@@ -1289,26 +1185,17 @@
       },
       "bound_engine": {
         "bits": 8,
-        "legal": [
-          0,
-          7
-        ],
+        "legal": [0, 7],
         "rationale": "MAX_BOA_ENGINES=8 exploration cap; V1 target 4"
       },
       "group": {
         "bits": 8,
-        "legal": [
-          0,
-          3
-        ],
+        "legal": [0, 3],
         "rationale": "4 groups per Tile"
       },
       "slot_index": {
         "bits": 8,
-        "legal": [
-          0,
-          1
-        ],
+        "legal": [0, 1],
         "rationale": "2 slots per group"
       },
       "event_id": {
@@ -1413,18 +1300,10 @@
       "SUBMIT_STEP.final",
       "EVT_TAKE chain_terminal ordering fields"
     ],
-    "P18": [
-      "single-array top integration consumes the generated codecs only"
-    ],
-    "P19": [
-      "C header boa_protocol.h"
-    ],
-    "P20": [
-      "generated Python codec for backend wiring"
-    ],
-    "P21": [
-      "encoding_slots freeze of RoCC opcode/funct"
-    ]
+    "P18": ["single-array top integration consumes the generated codecs only"],
+    "P19": ["C header boa_protocol.h"],
+    "P20": ["generated Python codec for backend wiring"],
+    "P21": ["encoding_slots freeze of RoCC opcode/funct"]
   },
   "lint": {
     "rules": [
@@ -1439,8 +1318,10 @@
       "field_ranges_agree_with_capacities",
       "operand_allocation_generation_serialized",
       "submit_step_completion_event_bans_self_reference",
-      "usage_references_are_typed_allocation_refs"
+      "usage_references_are_typed_allocation_refs",
+      "epilogue_presence_enable_bit",
+      "no_presence_by_emptiness"
     ],
-    "note": "executable in hardware/boa/protocol/gen_protocol.py::lint_schema; the check target runs it on the committed schema and on negative fixtures"
+    "note": "executable in hardware/boa/protocol/gen_protocol.py::lint_schema; the check target runs it on the committed schema and on negative fixtures.  epilogue_presence_enable_bit: every enable-bit stage declares presence = enable_bit and each codec carries an explicit presence flag set from the decoded enables byte; no_presence_by_emptiness: a full-codec audit found no presence semantics outside the epilogue enables block (per-message count_field/count_expr lists encode by length with no enable bit; booleans are bool8; AM_ERROR.field uses the field_tag_none sentinel), so presence can never derive from emptiness and no additional generator representation exists"
   }
 }

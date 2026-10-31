@@ -445,46 +445,60 @@ class AllocationRef:
 
 @dataclass(frozen=True)
 class EpilogueConfig:
-  """FINAL-only post-processing block; presence bits derive from the values."""
+  """FINAL-only post-processing block; presence is the explicit *_present flag."""
 
   n_cols: int
   bias: tuple[int, ...] | None = None
+  bias_present: bool = False
   scale: int | None = None
+  scale_present: bool = False
   relu: bool = False
   clip: ClipPair | None = None
+  clip_present: bool = False
   quant: QuantConfig | None = None
+  quant_present: bool = False
 
   def enables(self) -> int:
     return (
-      (EPILOGUE_EN_BIAS if self.bias is not None else 0)
-      | (EPILOGUE_EN_SCALE if self.scale is not None else 0)
+      (EPILOGUE_EN_BIAS if self.bias_present else 0)
+      | (EPILOGUE_EN_SCALE if self.scale_present else 0)
       | (EPILOGUE_EN_RELU if self.relu else 0)
-      | (EPILOGUE_EN_CLIP if self.clip is not None else 0)
-      | (EPILOGUE_EN_QUANT if self.quant is not None else 0)
+      | (EPILOGUE_EN_CLIP if self.clip_present else 0)
+      | (EPILOGUE_EN_QUANT if self.quant_present else 0)
     )
 
   def _validate(self, _p: str = 'EpilogueConfig') -> None:
     _ck_range(self.n_cols, 0, 65535, f'{_p}.n_cols')
-    if self.bias is not None and len(self.bias) != self.n_cols:
+    if self.bias_present and len(self.bias or ()) != self.n_cols:
       raise ProtocolError(f'{_p}.bias', 'bias word count must equal n_cols')
-    if self.scale is not None:
-      _ck_range(self.scale, 0, 0xFFFFFFFF, f'{_p}.scale')
-    _ck_bool(self.relu, f'{_p}.relu')
-    if self.clip is not None:
-      self.clip._validate(f'{_p}.clip')
-    if self.quant is not None:
-      self.quant._validate(f'{_p}.quant')
+    if not self.bias_present and self.bias:
+      raise ProtocolError(f'{_p}.bias', 'absent bias must be empty')
+    if self.scale_present and self.scale is None:
+      raise ProtocolError(f'{_p}.scale', 'present stage requires its value')
+    if self.scale_present:
+      _ck_range(self.scale or 0, 0, 0xFFFFFFFF, f'{_p}.scale')
+    if self.relu:
+      _ck_bool(True, f'{_p}.relu')
+    if self.clip_present and self.clip is None:
+      raise ProtocolError(f'{_p}.clip', 'present stage requires its value')
+    if self.clip_present:
+      (self.clip or ClipPair(0, 0))._validate(f'{_p}.clip')
+    if self.quant_present and self.quant is None:
+      raise ProtocolError(f'{_p}.quant', 'present stage requires its value')
+    if self.quant_present:
+      (self.quant or QuantConfig(0, 0))._validate(f'{_p}.quant')
 
   def _encode(self, _o: _Writer) -> None:
+    self._validate()
     _o.u16(self.n_cols)
     _o.u8(self.enables())
-    bias = self.bias or ()
+    bias = self.bias if self.bias_present else ()
     for _i in range(self.n_cols):
       _o.u32(bias[_i] if _i < len(bias) else 0)
-    _o.u32(self.scale if self.scale is not None else 0)
-    clip = self.clip if self.clip is not None else ClipPair(0, 0)
+    _o.u32(self.scale if self.scale_present else 0)
+    clip = self.clip if self.clip_present else ClipPair(0, 0)
     clip._encode(_o)
-    quant = self.quant if self.quant is not None else QuantConfig(0, 0)
+    quant = self.quant if self.quant_present else QuantConfig(0, 0)
     quant._encode(_o)
 
   @classmethod
@@ -493,30 +507,34 @@ class EpilogueConfig:
     enables = _r.u8(f'{_p}.enables')
     if enables & EPILOGUE_RESERVED_MASK:
       raise ProtocolError(f'{_p}.enables', 'reserved bits must be zero')
+    bias_present = bool(enables & EPILOGUE_EN_BIAS)
     bias: tuple[int, ...] | None = tuple(
       _r.u32(f'{_p}.bias[_i]') for _i in range(n_cols)
     )
-    if not enables & EPILOGUE_EN_BIAS:
+    if not bias_present:
       if any(bias or ()):
         raise ProtocolError(f'{_p}.bias', 'disabled stage must serialize zeros')
       bias = None
+    scale_present = bool(enables & EPILOGUE_EN_SCALE)
     scale: int | None = _r.u32(f'{_p}.scale')
-    if not enables & EPILOGUE_EN_SCALE:
+    if not scale_present:
       if scale:
         raise ProtocolError(f'{_p}.scale', 'disabled stage must serialize zeros')
       scale = None
+    clip_present = bool(enables & EPILOGUE_EN_CLIP)
     _clip_lo = _r.u32(f'{_p}.clip.lo')
     _clip_hi = _r.u32(f'{_p}.clip.hi')
     clip: ClipPair | None = None
-    if enables & EPILOGUE_EN_CLIP:
+    if clip_present:
       clip = ClipPair(lo=_clip_lo, hi=_clip_hi)
       clip._validate(f'{_p}.clip')
     elif _clip_lo or _clip_hi:
       raise ProtocolError(f'{_p}.clip', 'disabled stage must serialize zeros')
+    quant_present = bool(enables & EPILOGUE_EN_QUANT)
     _inv_scale = _r.u32(f'{_p}.quant.inv_scale')
     _zero_point = _r.i8(f'{_p}.quant.zero_point')
     quant: QuantConfig | None = None
-    if enables & EPILOGUE_EN_QUANT:
+    if quant_present:
       quant = QuantConfig(inv_scale=_inv_scale, zero_point=_zero_point)
       quant._validate(f'{_p}.quant')
     elif _inv_scale or _zero_point:
@@ -524,10 +542,14 @@ class EpilogueConfig:
     value = cls(
       n_cols=n_cols,
       bias=bias,
+      bias_present=bias_present,
       scale=scale,
+      scale_present=scale_present,
       relu=bool(enables & EPILOGUE_EN_RELU),
       clip=clip,
+      clip_present=clip_present,
       quant=quant,
+      quant_present=quant_present,
     )
     value._validate(_p)
     return value
@@ -721,7 +743,7 @@ class AmRequest:
     if self.chain_config.n_cols != self.output_cols:
       raise ProtocolError(f'{_p}.chain_config.n_cols', 'must equal output_cols')
     _is_i8 = self.output_dtype == DTYPE_I8
-    _has_quant = self.chain_config.quant is not None
+    _has_quant = self.chain_config.quant_present
     if _is_i8 != _has_quant:
       raise ProtocolError(f'{_p}.output_dtype', 'i8 output requires exactly the quant parameters')
 

@@ -518,7 +518,9 @@ def _am_request(
   byte_count=None,
 ):
   dtype = codec.DTYPE_F32 if dtype is None else dtype
-  epilogue = codec.EpilogueConfig(n_cols=cols) if epilogue is None else epilogue
+  epilogue = (
+    codec.EpilogueConfig(n_cols=cols, scale=0, scale_present=True) if epilogue is None else epilogue
+  )
   return codec.AmRequest(
     tile_id=tile_id,
     ctx_id=ctx_id,
@@ -542,18 +544,25 @@ def _golden_messages(codec):
   full_epilogue = codec.EpilogueConfig(
     n_cols=256,
     bias=tuple(0x3F000000 + index for index in range(256)),
+    bias_present=True,
     scale=0x3F400000,
+    scale_present=True,
     relu=True,
     clip=codec.ClipPair(0xBF800000, 0x3F800000),
+    clip_present=True,
     quant=None,
   )
   i8_epilogue = codec.EpilogueConfig(
     n_cols=1,
     bias=(0x41200000,),
+    bias_present=True,
     scale=None,
+    scale_present=False,
     relu=True,
     clip=None,
+    clip_present=False,
     quant=codec.QuantConfig(inv_scale=0x3F000000, zero_point=3),
+    quant_present=True,
   )
   a_view = _view(codec, 0, 64, 64, codec.DTYPE_BF16, 2)
   b_view = _view(codec, 2, 64, 256, codec.DTYPE_BF16, 2)
@@ -635,7 +644,9 @@ def _golden_messages(codec):
 
 def case_pc01_cross_codec_roundtrip(ctx) -> bool:
   """PC01: the golden message set decodes and re-encodes byte-identically
-  under all three generated codecs with consistent per-kind counts."""
+  under all three generated codecs with consistent per-kind counts, plus the
+  dedicated epilogue bias-presence vectors (present-empty, absent, all-zero
+  present; decode presence and byte-identical re-encode in all three codecs)."""
   codec = _codec(ctx)
   messages = _golden_messages(codec)
   work = ctx.work / "pc01"
@@ -659,6 +670,116 @@ def case_pc01_cross_codec_roundtrip(ctx) -> bool:
       "counts_line": _counts_line(codec, messages),
     },
   )
+
+  # Epilogue bias-presence vectors: presence is the wire enable bit plus the
+  # explicit *_present flag, never the value representation.  The AM_REQUEST
+  # carrier carries n_cols == output_cols so the eq_field predicates hold on
+  # empty and non-empty vectors alike.
+  presence_vectors = [
+    (
+      "bias-present-empty",
+      _am_request(
+        codec,
+        rows=0,
+        cols=0,
+        byte_count=0,
+        request_seq=21,
+        epilogue=codec.EpilogueConfig(n_cols=0, bias=(), bias_present=True),
+      ),
+      True,
+    ),
+    (
+      "bias-absent-empty",
+      _am_request(
+        codec, rows=0, cols=0, byte_count=0, request_seq=22, epilogue=codec.EpilogueConfig(n_cols=0)
+      ),
+      False,
+    ),
+    (
+      "bias-present-all-zero-words",
+      _am_request(
+        codec,
+        rows=4,
+        cols=2,
+        byte_count=32,
+        request_seq=23,
+        epilogue=codec.EpilogueConfig(n_cols=2, bias=(0, 0), bias_present=True),
+      ),
+      True,
+    ),
+  ]
+  expected_presence = [item[2] for item in presence_vectors]
+  ok &= ctx.check(
+    "pc01-presence-vector-plan",
+    expected_presence == [True, False, True],
+    f"the positive vector set must be present-empty, absent-empty, present-all-zero: {expected_presence}",
+  )
+  ok &= _roundtrip_all_codecs(ctx, "pc01-presence", [message for _n, message, _b in presence_vectors], work)
+
+  data = codec.encode_many([message for _name, message, _bias in presence_vectors])
+  decoded = codec.decode_stream(data)
+  decoded_bias = [(message.chain_config.bias, message.chain_config.bias_present) for message in decoded]
+  ok &= ctx.check(
+    "pc01-bias-presence-decoded-exact",
+    decoded_bias == [((), True), (None, False), ((0, 0), True)],
+    f"decoded (bias, bias_present) must distinguish present-empty from absent: {decoded_bias}",
+  )
+  present_empty = next(message for message in decoded if message.chain_config.bias_present)
+  ok &= ctx.check(
+    "pc01-present-empty-byte-identical-python",
+    codec.encode_message(present_empty) == codec.encode_many([presence_vectors[0][1]]),
+    "the present-empty vector's Python re-encode must be byte-identical",
+  )
+
+  # Negative: a bias-disabled chain that still carries a non-zero word is
+  # rejected and names the field in all three codecs.  Python refuses to
+  # construct "absent with a word" (encode-side validation: absent bias must
+  # be empty), so the wire shape a value-derived source would emit for that
+  # state is written directly: a bias-disabled chain header (n_cols=1,
+  # enables=0) followed by one non-zero bias word instead of the canonical
+  # zero word.  (Clearing the bit on a present-empty n_cols=0 carrier is
+  # canonical-equal to absence and must NOT be rejected; that identity is what
+  # the present-empty vector above asserts.)
+  writer = codec._Writer()
+  writer.u16(1)
+  writer.u8(0)  # enables: every stage disabled, canonical zeros required
+  writer.u32(0x3F800000)  # the stray bias word under a cleared enable bit
+  writer.u32(0)  # scale, disabled
+  writer.u32(0)  # clip lo, disabled
+  writer.u32(0)  # clip hi, disabled
+  writer.u32(0)  # quant inv_scale, disabled
+  writer.i8(0)  # quant zero_point, disabled
+  disabled_payload = bytes(writer._buf)
+  data = bytearray(codec.encode_many([presence_vectors[0][1]]))
+  payload_len = data[4] | (data[5] << 8)
+  epi_start = 6 + payload_len - 20  # trailing chain_config of the present-empty carrier
+  data[epi_start : 6 + payload_len] = disabled_payload
+  data[4] = (payload_len + 4) & 0xFF
+  data[5] = ((payload_len + 4) >> 8) & 0xFF
+  patched_path = work / "pc01-bias-disabled-nonzero-word.bin"
+  patched_path.write_bytes(bytes(data))
+  ctx.record_artifact(patched_path, deterministic=True)
+  rejected = None
+  try:
+    codec.decode_stream(bytes(data))
+  except codec.ProtocolError as exc:
+    rejected = exc
+  ok &= ctx.check(
+    "pc01:bias-disabled-nonzero-word-python-rejects",
+    rejected is not None and "bias" in rejected.field,
+    f"a bias-disabled chain with a non-zero word must be rejected naming bias,"
+    f" got {rejected.field if rejected else 'acceptance'}",
+  )
+  code, _stdout = _scala_run(
+    ctx,
+    ctx.repo / SCALA_SRC_REL,
+    ["expect-fail", str(patched_path), "bias"],
+    "pc01-presence-negative-scala",
+  )
+  ok &= ctx.check("pc01:bias-disabled-nonzero-word-scala-rejects", code == 0, f"exit={code}")
+  binary = _cc_binary(ctx, ctx.repo / "hardware/boa/sim/c")
+  code = ctx.run([str(binary), "expect-fail", str(patched_path), "bias"], work, "pc01-presence-negative-c")
+  ok &= ctx.check("pc01:bias-disabled-nonzero-word-c-rejects", code == 0, f"exit={code}")
   return bool(ok)
 
 
@@ -1042,9 +1163,12 @@ def case_pc06_boundaries_and_wraparound(ctx) -> bool:
   boundary_epilogue = codec.EpilogueConfig(
     n_cols=256,
     bias=(0x7F7FFFFF,) * 256,
+    bias_present=True,
     scale=0x7F7FFFFF,
+    scale_present=True,
     relu=True,
     clip=codec.ClipPair(0xFF7FFFFF, 0x7F7FFFFF),
+    clip_present=True,
     quant=None,
   )
   messages = [
@@ -1663,6 +1787,54 @@ def case_pc07_real_descriptors(ctx) -> bool:
     f"an unknown view dtype must be rejected naming dtype, got"
     f" {rejected.field if rejected else 'acceptance'}",
   )
+  # dtype/element_bytes mismatch (dtype_width predicate) must reject on the
+  # same wire bytes in all three codecs: a patched BF16/eb2 step claiming dtype
+  # f32 while keeping element_bytes=2.
+  same_shape_f32 = _view(codec, 0, 2, 8, codec.DTYPE_F32, 4)
+  same_shape_i32 = _view(codec, 0, 2, 8, codec.DTYPE_I32, 4)
+  probe = codec.SubmitStep(
+    lease_handle=1,
+    seq=0,
+    mode=codec.STEP_MODE_INIT,
+    final=False,
+    transpose=codec.TRANSPOSE_NN,
+    a=same_shape_f32,
+    b=_view(codec, 1, 4, 2, codec.DTYPE_BF16, 2),
+    k_extent=4,
+    input_ready_tokens=(),
+    input_usage_handles=(),
+    k_mask=(),
+    completion_event=codec.EventToken(ctx_id=0, ctx_epoch=0, event_id=0),
+  )
+  bf16_target = _with(probe, a=_view(codec, 0, 2, 8, codec.DTYPE_BF16, 2))
+  payload, index = _patched_different_byte(codec, probe, a=same_shape_i32)
+  raw = bytearray(codec.encode_message(bf16_target))
+  raw[index] = 0  # dtype f32 while element_bytes stays 2
+  rejected = None
+  try:
+    codec.decode_stream(bytes(raw))
+  except codec.ProtocolError as exc:
+    rejected = exc
+  ok &= ctx.check(
+    "pc07:dtype-width-mismatch-python",
+    rejected is not None and "element_bytes" in rejected.field,
+    f"a BF16/eb2 view claiming dtype f32 must be rejected naming element_bytes,"
+    f" got {rejected.field if rejected else 'acceptance'}",
+  )
+  width_path = work / "pc07-dtype-width.bin"
+  width_path.write_bytes(bytes(raw))
+  ctx.record_artifact(width_path, deterministic=True)
+  code, _stdout = _scala_run(
+    ctx,
+    ctx.repo / SCALA_SRC_REL,
+    ["expect-fail", str(width_path), "element_bytes"],
+    "pc07-dtype-width-scala",
+  )
+  ok &= ctx.check("pc07:dtype-width-mismatch-scala", code == 0, f"exit={code}")
+  binary = _cc_binary(ctx, ctx.repo / "hardware/boa/sim/c")
+  code = ctx.run([str(binary), "expect-fail", str(width_path), "element_bytes"], work, "pc07-dtype-width-c")
+  ok &= ctx.check("pc07:dtype-width-mismatch-c", code == 0, f"exit={code}")
+
   bad_mask = codec.SubmitStep(
     lease_handle=1,
     seq=0,
@@ -1694,7 +1866,9 @@ def case_pc07_real_descriptors(ctx) -> bool:
     dtype=codec.DTYPE_I8,
     byte_count=16,
     request_seq=2,
-    epilogue=codec.EpilogueConfig(n_cols=1, quant=codec.QuantConfig(inv_scale=0x7FC00000, zero_point=0)),
+    epilogue=codec.EpilogueConfig(
+      n_cols=1, quant_present=True, quant=codec.QuantConfig(inv_scale=0x7FC00000, zero_point=0)
+    ),
   )
   rejected = None
   try:
@@ -1713,7 +1887,9 @@ def case_pc07_real_descriptors(ctx) -> bool:
     dtype=codec.DTYPE_I8,
     byte_count=16,
     request_seq=3,
-    epilogue=codec.EpilogueConfig(n_cols=1, quant=codec.QuantConfig(inv_scale=0x3F000000, zero_point=200)),
+    epilogue=codec.EpilogueConfig(
+      n_cols=1, quant_present=True, quant=codec.QuantConfig(inv_scale=0x3F000000, zero_point=200)
+    ),
   )
   rejected = None
   try:
@@ -1765,12 +1941,16 @@ def _epilogue_from(codec, epilogue, n_cols: int):
   return codec.EpilogueConfig(
     n_cols=n_cols,
     bias=tuple(epilogue.bias) if epilogue.bias is not None else None,
+    bias_present=epilogue.bias is not None,
     scale=epilogue.scale,
+    scale_present=epilogue.scale is not None,
     relu=epilogue.relu,
     clip=codec.ClipPair(*epilogue.clip) if epilogue.clip is not None else None,
+    clip_present=epilogue.clip is not None,
     quant=None
     if epilogue.inv_scale is None
     else codec.QuantConfig(inv_scale=epilogue.inv_scale, zero_point=epilogue.zero_point),
+    quant_present=epilogue.inv_scale is not None,
   )
 
 
