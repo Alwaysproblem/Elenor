@@ -911,40 +911,58 @@ def test_rpt_seventeen_tiles_survive_report_bounding():
 
 
 # ---------------------------------------------------------------------------
-# Module smoke: reuse the actual cases, emit diagnostics to stdout only
+# Module CLI (container target shared-am-functional, case q08-tile-isolation)
 # ---------------------------------------------------------------------------
 
 
-_SMOKE_CASES = {
-  "q08a_tile_isolation_capacity": _case_q08a_isolation,
-  "q08b_parked_request_fault_scope": _case_q08b_parked_request_fault,
-  "q08b_live_lease_fault_scope": _case_q08b_live_lease_fault,
-  "q08b_tile_reset_scope": _case_q08b_tile_reset,
-  "q08b_rebind_scope": _case_q08b_rebind,
-  "group_reset_recovery": _case_group_reset_recovery,
-  "rpt_report_zero_leak_attribution": _case_report_zero_leak,
-  "rpt_report_fault_attribution": _case_report_fault_attribution,
-  "rpt_report_seventeen_tile_boundary": _case_report_boundary,
-}
+CLI_CASE = "q08-tile-isolation"
 
 
-def main() -> int:  # pragma: no cover
-  cases: dict[str, dict] = {}
-  ok = True
-  for name, case in _SMOKE_CASES.items():
-    try:
-      cases[name] = {"ok": True, **case()}
-    except Exception as exc:  # smoke reports any case failure inline
-      ok = False
-      cases[name] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-  print(
-    json.dumps(
-      {"workload": "p04_am_tile_isolation", "all_ok": ok, "cases": cases},
-      indent=2,
-      sort_keys=True,
-    )
+def _case_checks() -> list:
+  """The module's own regressions: Q08a/Q08b isolation + RPT per-Tile reports."""
+  from pipeline_validator.tests import case_cli
+
+  return case_cli.run_checks(
+    [
+      ("q08a-every-tile-owns-an-independent-eight-slot-allocator",
+       test_q08a_every_tile_owns_an_independent_eight_slot_allocator),
+      ("q08a-tile0-full-grants-tile1-at-the-same-requested-cycle",
+       test_q08a_tile0_full_grants_tile1_at_same_requested_cycle),
+      ("q08b-parked-request-fault-spares-tile0-peer-and-tile1",
+       test_q08b_parked_request_fault_spares_tile0_peer_and_tile1),
+      ("q08b-live-lease-fault-frees-slot-to-tile0-waiter-only",
+       test_q08b_live_lease_fault_frees_slot_to_tile0_waiter_only),
+      ("q08b-tile-reset-clears-only-its-own-allocator",
+       test_q08b_tile_reset_clears_only_its_own_allocator),
+      ("q08b-rebind-aborts-only-the-previous-incarnation",
+       test_q08b_rebind_aborts_only_previous_incarnation_via_tile_allocator),
+      ("group-reset-reaches-every-tile-allocator-exactly-once",
+       test_group_reset_reaches_every_tile_allocator_exactly_once),
+      ("rpt-zero-leak-names-the-single-offending-tile",
+       test_rpt_zero_leak_names_the_single_offending_tile),
+      ("rpt-fault-attribution-exact-per-tile-and-wrong-tile-rejected",
+       test_rpt_fault_attribution_exact_per_tile_and_wrong_tile_rejected),
+      ("rpt-seventeen-tiles-survive-report-bounding",
+       test_rpt_seventeen_tiles_survive_report_bounding),
+    ]
   )
-  return 0 if ok else 1
+
+
+def main(argv: list[str] | None = None) -> int:  # pragma: no cover
+  """Run the real Q08/RPT regressions and write the case report."""
+  from pathlib import Path
+
+  from pipeline_validator.tests import case_cli
+
+  args = case_cli.build_parser(
+    "python -m pipeline_validator.tests.test_am_tile_isolation",
+    "P04 Q08a/Q08b + RPT-P04-3: per-Tile AM allocator isolation.",
+    [CLI_CASE],
+  ).parse_args(argv)
+  checks = _case_checks()
+  report = case_cli.build_report(CLI_CASE, "test_am_tile_isolation", args.seed, checks)
+  case_cli.write_report(Path(args.out), report)
+  return case_cli.finish(report)
 
 
 if __name__ == "__main__":  # pragma: no cover

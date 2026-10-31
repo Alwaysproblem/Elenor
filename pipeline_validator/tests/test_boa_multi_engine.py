@@ -187,7 +187,7 @@ class Case:
 
 def run_case(hw: HardwareConfig, *, contexts: int = 1, steps: int = 2, k: int = 8,
              estimates: tuple[int, ...] = (), before: bool = False, block: bool = False,
-             on_cycle=None, grant_before_estimates: bool = False) -> Case:
+             on_cycle=None, grant_before_estimates: bool = False, seed: int = 0) -> Case:
   bindings: dict[str, GlobalBinding] = {}
   seeds: dict[str, bytes] = {}
   expected: dict[str, bytes] = {}
@@ -200,13 +200,14 @@ def run_case(hw: HardwareConfig, *, contexts: int = 1, steps: int = 2, k: int = 
         bindings[name] = GlobalBinding(name, base, len(data), "w" if kind == "c" else "r")
         (expected if kind == "c" else seeds)[name] = data
   source = _source(contexts, k, steps, estimates, before, grant_before_estimates)
+  sim_cfg = SimConfig(fidelity="full_memory", context_count=contexts, seed=seed)
   artifact = compile_program(parse_workload_ir(source),
-                             hw, SimConfig(fidelity="full_memory", context_count=contexts),
+                             hw, sim_cfg,
                              binding_assumptions=bindings, source_name="p05_engine_pool")
   store = ByteStore()
   for name, data in seeds.items():
     store.seed_hbm(bindings[name].base_iova, data)
-  simulator = Simulator(hw, SimConfig(fidelity="full_memory", context_count=contexts),
+  simulator = Simulator(hw, sim_cfg,
                         enable_tracer=True, byte_store=store)
   service = simulator.group.tiles[0].boa_results
   resume_cycle = None
@@ -302,11 +303,13 @@ def check_case(case: Case, *, contexts: int, steps: int, estimates: int = 0) -> 
           "output_sha256": {name: hashlib.sha256(data).hexdigest() for name, data in case.expected.items()}}
 
 
-@pytest.mark.parametrize("arrays", [1, 2, 4])
-def test_legal_four_live_handles_progress_with_context_quota_two(arrays):
+def _four_live_handles_progress(hw: HardwareConfig) -> tuple[Case, dict]:
+  """T06-P05-3/-4: two contexts x two chains live at once under per-context quota 2."""
+  arrays = hw.boa_arrays_per_tile
   estimates = (LONG_ESTIMATE_OPS,) if arrays == 1 else ()
-  case = run_case(HardwareConfig(boa_arrays_per_tile=arrays), contexts=2, block=True,
-                  estimates=estimates, before=True, grant_before_estimates=True)
+  case = run_case(
+    hw, contexts=2, block=True, estimates=estimates, before=True, grant_before_estimates=True
+  )
   info = check_case(case, contexts=2, steps=2, estimates=len(estimates))
   assert info["peak_live"] == 4
   assert info["grant_engines"] == [i % arrays for i in range(4)]
@@ -318,13 +321,24 @@ def test_legal_four_live_handles_progress_with_context_quota_two(arrays):
     assert min(job["start"] for job in typed) >= max(g["cycle"] for g in case.grants)
     order = [job["ctx_id"] for job in typed]
     assert set(order[:2]) == {0, 1} and order[:2] == order[2:4], order
+  return case, info
+
+
+@pytest.mark.parametrize("arrays", [1, 2, 4])
+def test_legal_four_live_handles_progress_with_context_quota_two(arrays):
+  _four_live_handles_progress(HardwareConfig(boa_arrays_per_tile=arrays))
+
+
+def _multistep_overlap(hw: HardwareConfig) -> dict:
+  case = run_case(hw, steps=3)
+  info = check_case(case, contexts=1, steps=3)
+  assert info["grant_engines"] == [0, 1] and info["overlap"]
+  return info
 
 
 @pytest.mark.parametrize("arrays", [2, 4])
 def test_single_context_multistep_affinity_and_independent_output_overlap(arrays):
-  case = run_case(HardwareConfig(boa_arrays_per_tile=arrays), steps=3)
-  info = check_case(case, contexts=1, steps=3)
-  assert info["grant_engines"] == [0, 1] and info["overlap"]
+  _multistep_overlap(HardwareConfig(boa_arrays_per_tile=arrays))
 
 
 def check_busy(hw: HardwareConfig) -> dict:
@@ -349,25 +363,36 @@ def test_busy_affinity_never_migrates_and_neighbor_queue_progresses():
   check_busy(HardwareConfig(boa_arrays_per_tile=2))
 
 
-def test_two_engines_can_each_own_four_handles_without_increasing_context_quota():
-  case = run_case(HardwareConfig(boa_arrays_per_tile=2), contexts=4, steps=1, block=True)
+def _two_engines_four_contexts(hw: HardwareConfig) -> dict:
+  """T06-P05-4: 2/2 handle distribution is least-live's result, not a cap."""
+  case = run_case(hw, contexts=4, steps=1, block=True)
   info = check_case(case, contexts=4, steps=1)
   assert info["peak_live"] == 8 and info["grant_engines"] == [0, 1] * 4
   assert [g["engine_live_handles"] for g in case.grants] == [1, 1, 2, 2, 3, 3, 4, 4]
   assert {g["ctx_id"] for g in case.grants} == {0, 1, 2, 3}
   assert all(g["quota_slots"] == 2 for g in case.grants)
+  return info
 
 
-@pytest.mark.parametrize("arrays", [1, 2, 4])
-def test_mixed_estimates_run_without_am_and_select_deterministically(arrays):
-  hw = HardwareConfig(boa_arrays_per_tile=arrays)
+def test_two_engines_can_each_own_four_handles_without_increasing_context_quota():
+  _two_engines_four_contexts(HardwareConfig(boa_arrays_per_tile=2))
+
+
+def _mixed_estimates(hw: HardwareConfig) -> list[list[int]]:
+  """Estimates run without AM and pick engines deterministically."""
   cases = [run_case(hw, k=64, steps=1, estimates=(8192, 8192)) for _ in range(2)]
   for case in cases:
     check_case(case, contexts=1, steps=1, estimates=2)
   selection = [[j["engine_id"] for j in c.jobs if j.get("lease_id") is None] for c in cases]
   assert selection[0] == selection[1]
-  if arrays == 4:
+  if hw.boa_arrays_per_tile == 4:
     assert selection[0] == [2, 3]
+  return selection
+
+
+@pytest.mark.parametrize("arrays", [1, 2, 4])
+def test_mixed_estimates_run_without_am_and_select_deterministically(arrays):
+  _mixed_estimates(HardwareConfig(boa_arrays_per_tile=arrays))
 
 
 def parse_schema1_config(path: str | Path) -> dict:
@@ -412,12 +437,96 @@ def test_schema1_rejects_wrong_target_and_unconsumed_fields(tmp_path):
       parse_schema1_config(path)
 
 
+CLI_CASES = ["t06-one-engine-many-handles", "engine-pool-progress"]
+_REGISTERED_ENGINE_POOLS = (1, 2, 4)
+
+
+def _run_cli_case(args: argparse.Namespace, hw: HardwareConfig, overrides: dict) -> int:
+  """Run one registered container case through the real config-driven scenarios."""
+  from pipeline_validator.tests import case_cli
+
+  arrays = hw.boa_arrays_per_tile
+  captured: dict = {}
+
+  def _registered_pool() -> None:
+    assert arrays in _REGISTERED_ENGINE_POOLS, (
+      f"this case consumes the registered hardware/configs/boa-{{1,2,4}}engine.yaml "
+      f"instances; boa_arrays_per_tile={arrays}"
+    )
+
+  def _single_engine() -> None:
+    assert arrays == 1, (
+      f"case t06-one-engine-many-handles must run under boa-1engine.yaml "
+      f"(boa_arrays_per_tile=1), got {arrays}"
+    )
+
+  def _progress() -> None:
+    case, info = _four_live_handles_progress(hw)
+    assert case.simulator.tracer is not None
+    captured["progress_trace"] = case.simulator.tracer.to_chrome_json()
+    captured["progress"] = {
+      "cycles": info["cycles"], "peak_live": info["peak_live"],
+      "grant_engines": info["grant_engines"], "target_hash": info["target_hash"],
+      "blocked_cycles": info["blocked_cycles"], "resume_cycle": info["resume_cycle"],
+    }
+
+  def _mixed() -> None:
+    captured["mixed_selection"] = _mixed_estimates(hw)
+
+  spec: list = [
+    ("config-single-engine-pool" if args.case == "t06-one-engine-many-handles"
+     else "config-registered-engine-pool",
+     _single_engine if args.case == "t06-one-engine-many-handles" else _registered_pool),
+    ("four-live-handles-quota-two-progress" if args.case != "t06-one-engine-many-handles"
+     else "four-live-handles-one-engine-fair-progress", _progress),
+    ("mixed-estimates-deterministic-selection", _mixed),
+  ]
+  if args.case == "engine-pool-progress" and arrays >= 2:
+    spec += [
+      ("busy-affinity-never-migrates-neighbor-progresses", lambda: check_busy(hw)),
+      ("single-context-multistep-affinity-and-overlap", lambda: _multistep_overlap(hw)),
+    ]
+  if args.case == "engine-pool-progress" and arrays == 2:
+    spec += [
+      ("two-engines-four-contexts-eight-handles-quota-two",
+       lambda: _two_engines_four_contexts(hw)),
+      ("fault-drain-waits-for-inflight-before-pool-reset",
+       lambda: _fault_drain_waits_for_inflight(hw)),
+    ]
+
+  checks = case_cli.run_checks(spec)
+  out = args.out
+  assert out is not None, "--out DIR is required with --case"
+  out.mkdir(parents=True, exist_ok=True)
+  trace_name = f"{args.case}.progress.trace.json"
+  (out / trace_name).write_text(captured.get("progress_trace", ""), encoding="utf-8")
+  report = case_cli.build_report(
+    args.case,
+    "test_boa_multi_engine",
+    args.seed,
+    checks,
+    config={"hw_overrides": overrides, "boa_arrays_per_tile": arrays,
+            "geometry": [hw.boa_array_rows, hw.boa_array_cols, hw.boa_tile_m, hw.boa_tile_n]},
+    metrics={key: captured[key] for key in ("progress", "mixed_selection") if key in captured},
+  )
+  case_cli.write_report(out, report)
+  return case_cli.finish(report)
+
+
 def main(argv: list[str] | None = None) -> int:
-  parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+  parser = argparse.ArgumentParser(prog="python -m pipeline_validator.tests.test_boa_multi_engine",
+                                   description=__doc__.splitlines()[0])
   parser.add_argument("--arrays-per-tile", type=int, choices=range(1, 9))
   parser.add_argument("--config")
   parser.add_argument("--trace-json", type=Path, help="save the actual progress-case trace")
+  parser.add_argument("--case", choices=CLI_CASES,
+                      help="registered container case (writes a report JSON to --out)")
+  parser.add_argument("--out", type=Path, help="output directory for the case report (--case)")
+  parser.add_argument("--seed", type=int, default=1,
+                      help="recorded run seed; feeds SimConfig (inputs are deterministic)")
   args = parser.parse_args(argv)
+  if args.case is not None and args.out is None:
+    parser.error("--case requires --out DIR")
   try:
     overrides = parse_schema1_config(args.config) if args.config else {}
     if args.arrays_per_tile is not None:
@@ -425,10 +534,12 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("config and --arrays-per-tile disagree")
       overrides["boa_arrays_per_tile"] = args.arrays_per_tile
     hw = HardwareConfig().with_overrides(**overrides)
-    progress = run_case(hw, contexts=2, block=True)
+    if args.case is not None:
+      return _run_cli_case(args, hw, overrides)
+    progress = run_case(hw, contexts=2, block=True, seed=args.seed)
     info = check_case(progress, contexts=2, steps=2)
     assert info["peak_live"] == 4
-    mixed = run_case(hw, k=64, steps=1, estimates=(8192, 8192))
+    mixed = run_case(hw, k=64, steps=1, estimates=(8192, 8192), seed=args.seed)
     report = {"ok": True, "arrays_per_tile": hw.boa_arrays_per_tile,
               "geometry": [hw.boa_array_rows, hw.boa_array_cols, hw.boa_tile_m, hw.boa_tile_n],
               "progress": info, "mixed": check_case(mixed, contexts=1, steps=1, estimates=2)}
@@ -447,8 +558,7 @@ def main(argv: list[str] | None = None) -> int:
   print(json.dumps(report, indent=2, sort_keys=True))
   return 0
 
-
-def test_fault_drain_waits_for_nonzero_engine_before_resetting_the_pool():
+def _fault_drain_waits_for_inflight(hw: HardwareConfig) -> list[int]:
   from pipeline_validator.runtime import FaultCode
 
   injected: list[int] = []
@@ -459,8 +569,7 @@ def test_fault_drain_waits_for_nonzero_engine_before_resetting_the_pool():
       simulator.group.trigger_fault(FaultCode.ENGINE_INTERNAL_FAULT, tile_id=0, cycle=cycle)
       injected.append(cycle)
 
-  case = run_case(HardwareConfig(boa_arrays_per_tile=2), steps=1,
-                  estimates=(2, LONG_ESTIMATE_OPS), before=True,
+  case = run_case(hw, steps=1, estimates=(2, LONG_ESTIMATE_OPS), before=True,
                   on_cycle=fault_when_only_engine_one_is_busy)
   assert len(injected) == 1 and not case.result.completed
   long_job = next(job for job in case.jobs if job["engine_id"] == 1)
@@ -470,7 +579,14 @@ def test_fault_drain_waits_for_nonzero_engine_before_resetting_the_pool():
   assert all(not engine.has_accepted_jobs for engine in tile.engines)
   assert tile.boa_results.pending_count == 0
   assert tile.boa_results.credits == tile.boa_results.credit_capacity
-  assert tile.shared_am.snapshot()["engine_handle_counts"] == {0: 0, 1: 0}
+  assert tile.shared_am.snapshot()["engine_handle_counts"] == dict.fromkeys(
+    range(hw.boa_arrays_per_tile), 0
+  )
+  return injected
+
+
+def test_fault_drain_waits_for_nonzero_engine_before_resetting_the_pool():
+  _fault_drain_waits_for_inflight(HardwareConfig(boa_arrays_per_tile=2))
 
 
 if __name__ == "__main__":

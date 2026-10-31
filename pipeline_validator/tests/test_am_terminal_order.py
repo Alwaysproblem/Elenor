@@ -40,7 +40,7 @@ PAYLOAD = b"\x01" * (64 * 256 * 4)
 # --- full parser/compiler/loader/Simulator scenario ---------------------------
 
 
-def _run_fixture(*, blocked_until: int | None = None, on_cycle=None):
+def _run_fixture(*, blocked_until: int | None = None, on_cycle=None, seed: int = 0):
   a = (INPUTS / "A.bin").read_bytes()
   b = (INPUTS / "B.bin").read_bytes()
   bindings = {
@@ -49,7 +49,7 @@ def _run_fixture(*, blocked_until: int | None = None, on_cycle=None):
     "C": GlobalBinding("C", C_BASE, C_BYTES, "w"),
   }
   hw = HardwareConfig()
-  sim_cfg = SimConfig(fidelity="full_memory", context_count=1)
+  sim_cfg = SimConfig(fidelity="full_memory", context_count=1, seed=seed)
   artifact = compile_program(
     parse_workload_ir(FIXTURE.read_text()), hw, sim_cfg,
     binding_assumptions=bindings, source_name=str(FIXTURE),
@@ -422,3 +422,97 @@ def test_terminal_ring_is_bounded_and_never_blocks_grants(capacity):
   assert snapshot["terminal_overflow_count"] == finished - capacity
   assert [t["lease_id"] for t in snapshot["terminals"]] == granted[finished - capacity:finished]
   assert snapshot["live_leases"] == 1 and snapshot["acquire_count"] == len(owners)
+
+
+# ---------------------------------------------------------------------------
+# Module CLI (container target shared-am-cycle)
+# ---------------------------------------------------------------------------
+
+
+CLI_CASES = ["terminal-order-backpressure", "manager-terminal-units"]
+
+
+def _unissued_reset_scenario() -> None:
+  """The queued-unissued reset scenario under a real MonkeyPatch context."""
+  with pytest.MonkeyPatch.context() as patch:
+    test_group_fault_reset_with_unissued_boa_records_actual_cycle(patch)
+
+
+def _capture_trace(blocked_until: int | None, seed: int, captured: dict, label: str) -> None:
+  """Fresh real run whose full trace is kept for the independent SQL audit."""
+  simulator, _store, result, _marks = _run_fixture(blocked_until=blocked_until, seed=seed)
+  assert result.completed, result.reason
+  order_check = next(c for c in _report_checks(simulator, result) if c["check"] == "am_terminal_order")
+  assert order_check["pass"] is True and order_check["joined_finals"] == 1
+  assert simulator.tracer is not None
+  simulator.tracer.assert_well_formed()
+  captured[f"{label}_trace"] = simulator.tracer.to_chrome_json()
+  captured[f"{label}_cycles"] = result.cycles
+
+
+def main(argv: list[str] | None = None) -> int:  # pragma: no cover
+  """Run the real P07 regressions and write report + trace artifacts."""
+  from pathlib import Path
+
+  from pipeline_validator.tests import case_cli
+
+  args = case_cli.build_parser(
+    "python -m pipeline_validator.tests.test_am_terminal_order",
+    "P07 terminal order: compute_done <= step_committed <= output_visible <= "
+    "slot_free <= chain_done <= UCE event; faults quiesce, free, then publish.",
+    CLI_CASES,
+  ).parse_args(argv)
+  captured: dict = {}
+
+  if args.case == "terminal-order-backpressure":
+    spec: list = [
+      ("success-final-order-joined-by-identity-free",
+       lambda: test_success_final_order_is_joined_by_identity_in_trace(None)),
+      ("success-final-order-joined-by-identity-backpressure",
+       lambda: test_success_final_order_is_joined_by_identity_in_trace(BLOCKED_UNTIL)),
+      ("backpressure-changes-timing-but-not-output-bytes",
+       test_backpressure_changes_timing_but_not_output_bytes),
+      ("nonfinal-step-commits-without-terminal-or-output",
+       test_nonfinal_step_commits_without_terminal_or_output),
+      ("context-fault-during-output-backpressure-quiesces-then-frees",
+       test_context_fault_during_output_backpressure_quiesces_then_frees),
+      ("group-fault-reset-with-pending-final-records-actual-cycle",
+       test_group_fault_reset_with_pending_final_records_actual_cycle),
+      ("group-fault-reset-with-unissued-boa-records-actual-cycle", _unissued_reset_scenario),
+      ("trace-capture-free-run", lambda: _capture_trace(None, args.seed, captured, "free")),
+      ("trace-capture-backpressure-run",
+       lambda: _capture_trace(BLOCKED_UNTIL, args.seed, captured, "blocked")),
+    ]
+  else:
+    spec = [
+      ("fault-with-inflight-access-holds-slot-until-quiesced",
+       test_fault_with_inflight_access_holds_slot_until_quiesced),
+      ("double-abort-counts-one-fault-and-keeps-first-reason",
+       test_double_abort_counts_one_fault_and_keeps_first_reason),
+      ("release-final-refuses-pending-step", test_release_final_refuses_pending_step),
+      ("terminal-ring-bounded-capacity-1",
+       lambda: test_terminal_ring_is_bounded_and_never_blocks_grants(1)),
+      ("terminal-ring-bounded-capacity-3",
+       lambda: test_terminal_ring_is_bounded_and_never_blocks_grants(3)),
+    ]
+  checks = case_cli.run_checks(spec)
+  out = Path(args.out)
+  out.mkdir(parents=True, exist_ok=True)
+  for label in ("free", "blocked"):
+    if f"{label}_trace" in captured:
+      (out / f"{args.case}.{label}.trace.json").write_text(
+        captured[f"{label}_trace"], encoding="utf-8"
+      )
+  report = case_cli.build_report(
+    args.case,
+    "test_am_terminal_order",
+    args.seed,
+    checks,
+    metrics={key: value for key, value in captured.items() if key.endswith("_cycles")},
+  )
+  case_cli.write_report(out, report)
+  return case_cli.finish(report)
+
+
+if __name__ == "__main__":  # pragma: no cover
+  raise SystemExit(main())

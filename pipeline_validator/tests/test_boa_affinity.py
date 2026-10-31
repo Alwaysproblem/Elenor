@@ -387,3 +387,106 @@ def test_four_engines_balance_eight_live_handles():
     engines.append(lease.bound_engine)
   assert engines == [0, 1, 2, 3, 0, 1, 2, 3]
   assert _assert_accounting(manager) == {0: 2, 1: 2, 2: 2, 3: 2}
+
+
+# ---------------------------------------------------------------------------
+# Module CLI (container target two-slot-progress)
+# ---------------------------------------------------------------------------
+
+
+CLI_CASES = ["one-engine-many-handles", "engine-affinity-units"]
+
+# The container target consumes the registered P05 instances
+# hardware/configs/boa-{1,2,4}engine.yaml; a config-matched balance scenario
+# exists for exactly these pool sizes.
+_REGISTERED_ENGINE_POOLS = (1, 2, 4)
+
+
+def _configured_hw(path: str | None) -> tuple[dict, HardwareConfig]:
+  """Parse the schema-1 wrapper with the real P05 parser and build the hw."""
+  from pipeline_validator.tests.test_boa_multi_engine import parse_schema1_config
+
+  overrides = parse_schema1_config(path) if path else {}
+  return overrides, HardwareConfig().with_overrides(**overrides)
+
+
+def main(argv: list[str] | None = None) -> int:  # pragma: no cover
+  """Run the real P05 affinity regressions and write the case report."""
+  from pathlib import Path
+
+  from pipeline_validator.tests import case_cli
+
+  args = case_cli.build_parser(
+    "python -m pipeline_validator.tests.test_boa_affinity",
+    "P05 grant-time least-live affinity, live-handle accounting and legal "
+    "load distributions without a per-engine handle cap.",
+    CLI_CASES,
+    config=True,
+  ).parse_args(argv)
+  overrides, hw = case_cli.load_config_or_exit(_configured_hw, args.config)
+  arrays = hw.boa_arrays_per_tile
+
+  def _registered_pool() -> None:
+    assert arrays in _REGISTERED_ENGINE_POOLS, (
+      f"this case consumes the registered hardware/configs/boa-{{1,2,4}}engine.yaml "
+      f"instances; boa_arrays_per_tile={arrays}"
+    )
+
+  def _single_engine() -> None:
+    assert arrays == 1, (
+      f"case one-engine-many-handles must run under boa-1engine.yaml "
+      f"(boa_arrays_per_tile=1), got {arrays}"
+    )
+
+  balance = {
+    1: ("config-matched-balance-one-engine-eight-live-handles",
+        test_one_engine_serves_eight_live_handles),
+    2: ("config-matched-balance-two-engines-four-then-eight-live-handles",
+        test_two_engines_balance_four_then_eight_live_handles),
+    4: ("config-matched-balance-four-engines-eight-live-handles",
+        test_four_engines_balance_eight_live_handles),
+  }[arrays]
+
+  common: list = [
+    ("engine-count-is-an-exact-bounded-integer", test_engine_count_is_an_exact_bounded_integer),
+    ("engine-ids-are-independent-of-physical-groups",
+     test_engine_ids_are_independent_of_physical_groups),
+    ("grant-walks-engines-by-live-count-with-lowest-id-ties",
+     test_grant_walks_engines_by_live_count_with_lowest_id_ties),
+    ("grant-trace-carries-atomic-slot-engine-quota-and-counts",
+     test_grant_trace_carries_atomic_slot_engine_quota_and_counts),
+    ("decrement-happens-before-the-parked-request-is-woken",
+     test_decrement_happens_before_the_parked_request_is_woken),
+    ("final-commit-holds-handle-through-output-backpressure",
+     test_final_commit_holds_handle_through_output_backpressure),
+    ("bound-engine-stays-fixed-while-accounting-shifts",
+     test_bound_engine_stays_fixed_while_accounting_shifts),
+    ("step-and-commit-trace-carry-the-granted-engine",
+     test_step_and_commit_trace_carry_the_granted_engine),
+    ("abort-and-reset-zero-every-engine-domain",
+     test_abort_and_reset_zero_every_engine_domain),
+    ("owner-abort-frees-all-handles-and-rebind-grants-least-live",
+     test_owner_abort_frees_all_handles_and_rebind_grants_least_live),
+  ]
+  if args.case == "one-engine-many-handles":
+    spec = [
+      ("config-single-engine-pool", _single_engine),
+      balance,
+      ("engine-count-is-an-exact-bounded-integer", test_engine_count_is_an_exact_bounded_integer),
+    ]
+  else:
+    spec = [("config-registered-engine-pool", _registered_pool), balance] + common
+  checks = case_cli.run_checks(spec)
+  report = case_cli.build_report(
+    args.case,
+    "test_boa_affinity",
+    args.seed,
+    checks,
+    config={"hw_overrides": overrides, "boa_arrays_per_tile": arrays},
+  )
+  case_cli.write_report(Path(args.out), report)
+  return case_cli.finish(report)
+
+
+if __name__ == "__main__":  # pragma: no cover
+  raise SystemExit(main())

@@ -54,35 +54,43 @@
     },
     "shared-am-functional": {
       "owner": "P09",
-      "implemented": false,
+      "implemented": true,
       "board": null,
-      "cases": [],
+      "cases": [
+        "q09-old-event-cross-slot",
+        "q08-tile-isolation",
+        "t01-q06-over-bundle-reject"
+      ],
       "config": {
         "required_target": "shared-am-functional",
         "consumed_sections": [],
-        "default_config": null
+        "default_config": "hardware/configs/shared-am-functional.yaml"
       }
     },
     "two-slot-progress": {
       "owner": "P09",
-      "implemented": false,
+      "implemented": true,
       "board": null,
-      "cases": [],
+      "cases": [
+        "t06-one-engine-many-handles",
+        "engine-pool-progress",
+        "engine-affinity-units"
+      ],
       "config": {
         "required_target": "two-slot-progress",
-        "consumed_sections": [],
-        "default_config": null
+        "consumed_sections": ["validator"],
+        "default_config": "hardware/configs/boa-1engine.yaml"
       }
     },
     "shared-am-cycle": {
       "owner": "P09",
-      "implemented": false,
+      "implemented": true,
       "board": null,
-      "cases": [],
+      "cases": ["terminal-order-backpressure", "manager-terminal-units"],
       "config": {
         "required_target": "shared-am-cycle",
         "consumed_sections": [],
-        "default_config": null
+        "default_config": "hardware/configs/shared-am-cycle.yaml"
       }
     },
     "boa-allocator": {

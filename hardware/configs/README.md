@@ -78,6 +78,9 @@ config 保存于 manifest，reproduce 使用其值重建请求，不依赖原 YA
   `check numeric --config hardware/configs/numeric.yaml ...` 可显式选择，也可省略 `--config`。
 - `numeric-profile.yaml`：P06 生产 full_memory 数值/零工作/v5 cutover gate；
   `check numeric-profile --config hardware/configs/numeric-profile.yaml ...`。
+- `shared-am-functional.yaml` / `shared-am-cycle.yaml`：P09 的两个固定场景
+  target（Q08/Q09/T01-Q06 与 P07 终态偏序 + trace-audit.sql）；场景钉死硬件
+  配置，`validator.hw_overrides` 必须为空，非空被 exit 6 拒绝。
 
 ## 生产 numeric-profile 配置（P06）
 
@@ -94,14 +97,21 @@ profile 唯一为 `bf16_fp32_mac_rne_v1`，numeric K 默认8。两者属于数�
 ## BOA 1/2/4 engine 软件实例（P05）
 
 `boa-1engine.yaml`、`boa-2engine.yaml`、`boa-4engine.yaml` 使用 schema 1，
-目标为 P09 负责的 `two-slot-progress`。真实字段在 `validator.hw_overrides`：
+目标为 P09 已注册实现的 `two-slot-progress`（registry 默认实例为
+`boa-1engine.yaml`）。真实字段在 `validator.hw_overrides`：
 `boa_arrays_per_tile`、`boa_array_rows/cols`、`boa_tile_m/n`；其余 section 为空。
-P05 已提供软件消费者，不提前宣称 P09 容器 target 已实现：
+容器 runner 把同一文件透传给真实测试模块 CLI 消费；P05 的独立软件消费者
+保持可用：
 
 ```bash
 conda run -n elenor-validator python -m pipeline_validator.tests.test_boa_multi_engine \
   --config hardware/configs/boa-1engine.yaml
+hardware/scripts/check two-slot-progress --config hardware/configs/boa-4engine.yaml \
+  --case engine-pool-progress --out OUT --seed 20261028
 ```
+
+`t06-one-engine-many-handles` 只在 `boa-1engine.yaml` 下合法（fail closed）；
+多 engine case 用匹配的 2/4 配置。
 
 这些 wrapper 不传给 validator 的 `--hw-config`（后者为 schema 2）。
 直接运行工作负载时用 `--hw-override boa_arrays_per_tile=4` 等扁平字段，或

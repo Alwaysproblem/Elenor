@@ -2,7 +2,8 @@
 
 - 状态：**已实现并验证硬件前置软件 gate；§3.4 源级控制流、低层 retry 与 RTL 明确不在本次范围。**
 - 对应计划：[BOA_Software_Managed_AM_IR_Plan.md](BOA_Software_Managed_AM_IR_Plan.md)
-- 当前产物：`schema_version=4` / `compiler_abi="v4"`；旧 v3 及更早 artifact 明确拒绝并要求重编译。
+- 当前产物（2026-10-31，P09 新合同基线）：`schema_version=6` / `compiler_abi="v6"`。新合同为 per-Tile AM（P04）、多 engine 固定 affinity（P05）、逐 MAC `bf16_fp32_mac_rne_v1`（P06）、终态偏序（P07）、FINAL epilogue/INT8/四转置/软件 im2col Conv（P08）。v5 及更早 artifact 一律拒绝。现状以 `plan/evidence/P09.md` 为准。
+- **历史（S0，旧合同：Group 共享 AM + binary64 + 旧终态）**：本报告以下内容记录的是 S0 当时的 `schema_version=4` / `compiler_abi="v4"` 实施与数字，保留作对照。其中“INT8 明确拒绝”以及 IR07、§4、§5 的周期数字均已被 P06/P08 取代。
 
 ## 1. 已落地范围
 

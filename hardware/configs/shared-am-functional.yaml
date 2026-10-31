@@ -1,0 +1,11 @@
+# P09 shared-am-functional target: fixed per-Tile AM allocator scenarios
+# (Q08a/Q08b isolation + RPT attribution, Q09 old-event cross-slot, T01/Q06
+# quota/bundle rejections). The scenarios pin their hardware configuration,
+# so validator.hw_overrides must stay empty; the container runner rejects
+# non-empty overrides instead of silently discarding them.
+schema: 1
+target: shared-am-functional
+topology: {}
+numeric: {}
+validator: {}
+board: {}

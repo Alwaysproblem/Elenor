@@ -30,7 +30,7 @@ from pipeline_validator.config import HardwareConfig, SimConfig
 from pipeline_validator.execution_ir import ExecTileOp, GlobalBinding
 from pipeline_validator.loader import load_program
 from pipeline_validator.memory.byte_store import ByteStore
-from pipeline_validator.simulator import Simulator
+from pipeline_validator.simulator import SimResult, Simulator
 from pipeline_validator.workload_ir import parse_workload_ir
 
 M, N, K = 16, 16, 8
@@ -197,7 +197,7 @@ def _chain_operands(a_values, b_values) -> tuple[bytes, bytes, bytes]:
 
 @dataclass
 class _Q09Run:
-  result: object
+  result: SimResult
   simulator: Simulator
   store: ByteStore
   am_pcs: tuple[int, int]
@@ -211,14 +211,14 @@ def _tile_program(artifact):
   return next(iter(task.role_bindings.values())).tile_program
 
 
-def _run_q09() -> _Q09Run:
+def _run_q09(*, seed: int = 0) -> _Q09Run:
   old_a, old_b, expected_old = _chain_operands(_old_a, _old_b)
   new_a, new_b, expected_new = _chain_operands(_new_a, _new_b)
   assert expected_old != expected_new
   hw = HardwareConfig().with_overrides(
     boa_am_group_count=1, boa_am_slots_per_group=1, boa_am_slots_per_context=1
   )
-  sim_cfg = SimConfig(fidelity="full_memory", context_count=1)
+  sim_cfg = SimConfig(fidelity="full_memory", context_count=1, seed=seed)
   bindings = {
     "A": GlobalBinding("A", A_BASE, len(old_a) + len(new_a), "r"),
     "B": GlobalBinding("B", B_BASE, len(old_b) + len(new_b), "r"),
@@ -398,5 +398,63 @@ def test_q09_same_owner_reuses_slot0_before_awaiting_old_completion():
   assert store.read_hbm(NEW_C_BASE, OUT_BYTES) == run.expected_new
 
 
+# ---------------------------------------------------------------------------
+# Module CLI (container target shared-am-functional, case q09-old-event-cross-slot)
+# ---------------------------------------------------------------------------
+
+
+CLI_CASE = "q09-old-event-cross-slot"
+
+
+def main(argv: list[str] | None = None) -> int:  # pragma: no cover
+  """Run the real Q09 regression and write the report/trace artifacts."""
+  import hashlib
+  from pathlib import Path
+
+  from pipeline_validator.tests import case_cli
+
+  args = case_cli.build_parser(
+    "python -m pipeline_validator.tests.test_am_slot_reuse",
+    "P04 Q09: one owner reuses AM slot 0 across chains, old event awaitable "
+    "strictly after the new grant.",
+    [CLI_CASE],
+  ).parse_args(argv)
+  captured: dict = {}
+
+  def _capture_artifacts() -> None:
+    run = _run_q09(seed=args.seed)
+    assert run.result.completed, run.result.reason
+    old_c = run.store.read_hbm(OLD_C_BASE, OUT_BYTES)
+    new_c = run.store.read_hbm(NEW_C_BASE, OUT_BYTES)
+    assert old_c == run.expected_old and new_c == run.expected_new
+    assert run.simulator.tracer is not None
+    run.simulator.tracer.assert_well_formed()
+    captured["trace"] = run.simulator.tracer.to_chrome_json()
+    captured["cycles"] = run.result.cycles
+    captured["old_c_sha256"] = hashlib.sha256(old_c).hexdigest()
+    captured["new_c_sha256"] = hashlib.sha256(new_c).hexdigest()
+
+  checks = case_cli.run_checks(
+    [
+      ("q09-same-owner-reuses-slot0-before-awaiting-old-completion",
+       test_q09_same_owner_reuses_slot0_before_awaiting_old_completion),
+      ("q09-trace-and-output-bytes-capture", _capture_artifacts),
+    ]
+  )
+  out = Path(args.out)
+  out.mkdir(parents=True, exist_ok=True)
+  trace_path = out / f"{CLI_CASE}.trace.json"
+  trace_path.write_text(captured.get("trace", ""), encoding="utf-8")
+  report = case_cli.build_report(
+    CLI_CASE,
+    "test_am_slot_reuse",
+    args.seed,
+    checks,
+    metrics={key: captured[key] for key in ("cycles", "old_c_sha256", "new_c_sha256") if key in captured},
+  )
+  case_cli.write_report(out, report)
+  return case_cli.finish(report)
+
+
 if __name__ == "__main__":  # pragma: no cover
-  raise SystemExit(pytest.main([__file__]))
+  raise SystemExit(main())

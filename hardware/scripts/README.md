@@ -1,9 +1,11 @@
-# hardware/scripts — 统一硬件入口（P02 / P03 / P06）
+# hardware/scripts — 统一硬件入口（P02 / P03 / P06 / P08 / P09）
 
 `env` 管理镜像构建/进入；`check` / `reproduce` 是所有 target 的统一分派器，
 `container_check.py` 是锁定镜像内的 case 执行器，`common.py` 是宿主侧共享库
 （仅 stdlib，宿主零安装约束）。P03 的数值 case 位于 `numeric_cases.py`，
-P06 的 numeric-profile case 位于 `numeric_profile_cases.py`。
+P06 的 numeric-profile case 位于 `numeric_profile_cases.py`，P08 的 soft-conv
+case 位于 `soft_conv_cases.py`，P09 的三个软件协议/周期 target case 位于
+`am_gate_cases.py`。
 
 ```text
 hardware/scripts/check      TARGET [BOARD] --out DIR [--config PATH] [--seed N] [--case ID]
@@ -254,6 +256,92 @@ i8 向量（本轮 21 个：17 sNaN/payload、3 尾数、1 −0）以显式 bloc
 `boa_numeric_tile_k`，因此 `validator.hw_overrides` 必须为空——容器内配置
 校验对非空 overrides 直接 exit 6。每 case 产物与 numeric-profile 相同
 （report/vectors/sources/timing，timing 为 deterministic: false）。
+
+## shared-am-functional target（owner P09）
+
+per-Tile AM 分配器合同的功能 gate。每个 case 都通过模块自身的
+`--case/--out/--seed` CLI（`pipeline_validator.tests.case_cli.py` 把模块的
+**常驻 pytest 回归函数**直接变成 report JSON，容器 gate 不可能和 pytest
+漂移）在锁定容器内执行真实场景；adapter 不复制任何场景逻辑。
+
+```bash
+hardware/scripts/check shared-am-functional --out /tmp/p09/am-all --seed 20261028
+hardware/scripts/check shared-am-functional --case q09-old-event-cross-slot \
+  --out /tmp/p09/am --seed 20261028
+hardware/scripts/reproduce /tmp/p09/am-all/manifest.json --out /tmp/p09/am-offline --offline
+```
+
+| case                         | layer | 实际检查（复用模块）                                                                                                                                                                                                                                                              |
+| ---------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `q09-old-event-cross-slot`   | F     | `test_am_slot_reuse`：完整 parser→compiler→loader→full_memory Simulator；同一 owner 第二条 ALLOC 在旧链 FINAL 背压下挂起一次，新授予后旧事件仍可 await（无中间 reap）；两代 slot0 terminal、逐事件偏序与两个 C buffer 的独立整数 oracle bytes；另捕获真实 trace 与输出 bytes hash |
+| `q08-tile-isolation`         | F     | `test_am_tile_isolation` 的全部 Q08a/Q08b/RPT 回归：每 Tile 独立 8 槽分配器、Tile0 满额当拍授予 Tile1、fault/reset/rebind 只影响本 Tile、group reset 恰好一次到达每 Tile、报告 zero-leak/fault 归属/17-Tile 边界                                                                  |
+| `t01-q06-over-bundle-reject` | F     | `test_boa_am` 的 T01/Q06 面：两条未受理 FINAL 后第三条链申请是永久合同错误且无副作用（计数/slot 不变）；bundle 预留、continuation 只等自身 FINAL、同 slot 换代等待、取消的请求永不唤醒、runtime ALLOC 一次阻塞一次唤醒                                                            |
+
+配置：`shared-am-functional.yaml` 各 section 为空。场景钉死硬件配置，
+`validator.hw_overrides` 非空一律 exit 6（不静默丢弃）。`--seed` 记录入
+report 并进 SimConfig；场景输入是确定性函数，期望 bytes 不随 seed 改变。
+
+## two-slot-progress target（owner P09）
+
+quota=2 进展与多 engine affinity gate。**配置真实透传**：请求的
+`hardware/configs/boa-{1,2,4}engine.yaml`（`validator.hw_overrides`：
+`boa_arrays_per_tile` 等）在容器内以同一文件传给
+`pipeline_validator.tests.test_boa_multi_engine` / `test_boa_affinity` 的 CLI，
+由其真实 `parse_schema1_config` → `HardwareConfig().with_overrides(**…)` 构建
+执行配置（几何改变真实 cycles 与 target hash，不只是 manifest 元数据）。
+
+```bash
+hardware/scripts/check two-slot-progress --config hardware/configs/boa-1engine.yaml \
+  --case t06-one-engine-many-handles --out /tmp/p09/progress --seed 20261028
+hardware/scripts/check two-slot-progress --config hardware/configs/boa-1engine.yaml \
+  --out /tmp/p09/progress-all1 --seed 20261028
+# 多 engine case 各自使用匹配的 2/4 配置（单 engine >2 句不用 4-engine 配置验证）：
+hardware/scripts/check two-slot-progress --config hardware/configs/boa-2engine.yaml \
+  --case engine-pool-progress --out /tmp/p09/progress-2epool --seed 20261028
+hardware/scripts/check two-slot-progress --config hardware/configs/boa-2engine.yaml \
+  --case engine-affinity-units --out /tmp/p09/progress-2eaff --seed 20261028
+hardware/scripts/check two-slot-progress --config hardware/configs/boa-4engine.yaml \
+  --case engine-pool-progress --out /tmp/p09/progress-4epool --seed 20261028
+hardware/scripts/check two-slot-progress --config hardware/configs/boa-4engine.yaml \
+  --case engine-affinity-units --out /tmp/p09/progress-4eaff --seed 20261028
+hardware/scripts/reproduce /tmp/p09/progress-all1/manifest.json --out /tmp/p09/progress-offline --offline
+```
+
+| case                          | layer | 实际检查（复用模块）                                                                                                                                                                                                                                                                                                                                                                                 |
+| ----------------------------- | ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `t06-one-engine-many-handles` | C     | `test_boa_multi_engine --case t06-one-engine-many-handles`（配置驱动真实执行：2 contexts×2 链、quota 2、1 engine 上 4 live handles、per-context step 公平交替、输出 bytes=独立 oracle）+ `test_boa_affinity --case one-engine-many-handles`（allocator 级 1 engine 8 live handles）。**fail closed**：仅 `boa-1engine.yaml` 合法，用 2/4 配置运行该 case 是真实断言失败（实测 exit 7），不是静默跳过 |
+| `engine-pool-progress`        | C     | `test_boa_multi_engine --case engine-pool-progress`：按配置自适应——4 live handles quota 2 进展、estimate 无 AM 且确定性选 engine、busy affinity 不迁移+邻 engine 推进（≥2 engine）、单 context 多步 affinity+重叠（≥2）、2-engine 四 context 八 handles 2/2 分布与 fault drain 等在途工作结束后归零（2-engine 配置）                                                                                 |
+| `engine-affinity-units`       | F     | `test_boa_affinity --case engine-affinity-units`：grant 时 least-live+最小 ID 平局、原子授予 trace、free 先减账再唤醒、FINAL 持 handle 至 slot_free、affinity 不迁移、abort/reset 记账归零、按配置匹配的合法负载分布（1/4→单 engine 8 handles、2→2/2→8）                                                                                                                                             |
+
+配置：registry 默认 `boa-1engine.yaml`；`consumed_sections: ["validator"]`。
+该 target 消费 hw_overrides（P05 交付的三个实例），非空 overrides 合法。
+
+## shared-am-cycle target（owner P09）
+
+P07 终态偏序/安全释放的周期 gate：真实 full-runtime 场景（free 与 20000-cycle
+输出背压两份运行按 lease/event 身份取各自 trace 事件的时刻与发射序）加上
+**committed Perfetto 审计** `plan/evidence/P07/trace-audit.sql`，由仓库内
+`examples/artifacts/tools/trace_processor_shell` 对捕获的真实 trace 执行
+（stats error/data_loss=0、unfinished slices=0、每个 FINAL 的
+commit→output→release→terminal→event ts 与发射序全部有序、无 fault terminal）。
+若容器内该二进制不可用，adapter 退回对同一 trace JSON 的等价 Python 偏序
+审计并在断言 detail 中明说；本次验证走了真实 `trace_processor_shell` 路径。
+
+```bash
+hardware/scripts/check shared-am-cycle --case terminal-order-backpressure \
+  --out /tmp/p09/cycle --seed 20261028
+hardware/scripts/check shared-am-cycle --out /tmp/p09/cycle-all --seed 20261028
+hardware/scripts/reproduce /tmp/p09/cycle-all/manifest.json --out /tmp/p09/cycle-offline --offline
+```
+
+| case                          | layer | 实际检查（复用模块）                                                                                                                                                                                                                                                                                                              |
+| ----------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `terminal-order-backpressure` | C     | `test_am_terminal_order --case terminal-order-backpressure`：成功 FINAL 六段偏序（free+背压）、背压只改时刻不改 bytes、context fault 先 quiesce 再 free 再发失败终态、group reset 的 pending-FINAL 与 queued-unissued 都在实际 cycle 记账（≠0）、两份 trace 捕获运行（report 的 `am_terminal_order` check join 1）+ 上述 SQL 机检 |
+| `manager-terminal-units`      | F     | `test_am_terminal_order --case manager-terminal-units`：非 FINAL commit 无终态/无 L1 写、在途 AM 访问 quiesce 前不 free、double abort 只计一个 fault 且保留首个原因、有 pending step 时拒绝 release、terminal 环有界不阻塞授予                                                                                                    |
+
+配置：`shared-am-cycle.yaml` 各 section 为空；非空 `validator.hw_overrides`
+exit 6。manifest fixtures 记录 `trace-audit.sql` 与 trace_processor_shell 的
+sha256。free/blocked cycles 为确定性 metrics（本次 11332 / 21410）。
 
 ## reproduce 算法
 

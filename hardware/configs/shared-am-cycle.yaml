@@ -1,0 +1,12 @@
+# P09 shared-am-cycle target: P07 terminal-order scenarios (free + backpressure
+# full-runtime ordering by identity, fault cleanup at real cycles) plus the
+# committed Perfetto audit plan/evidence/P07/trace-audit.sql on the captured
+# traces. The scenarios pin their hardware configuration, so
+# validator.hw_overrides must stay empty; the container runner rejects
+# non-empty overrides instead of silently discarding them.
+schema: 1
+target: shared-am-cycle
+topology: {}
+numeric: {}
+validator: {}
+board: {}

@@ -452,8 +452,9 @@ bash examples/run.sh matmul-splitk-pipeline --hw-override boa_arrays_per_tile=4 
 ```
 
 The `hardware/configs/boa-{1,2,4}engine.yaml` files use the P02 wrapper schema for
-the standalone P05 smoke and later P09 runner. They are **not** schema-2
-`--hw-config` files; `two-slot-progress` remains unimplemented until P09.
+the standalone P05 smoke and the P09 runner. They are **not** schema-2
+`--hw-config` files; `hardware/scripts/check two-slot-progress --config
+hardware/configs/boa-Nengine.yaml` (P09) consumes them.
 
 ### Exact BOA numerical profile (P06)
 

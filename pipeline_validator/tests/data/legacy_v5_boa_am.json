@@ -1,0 +1,4161 @@
+{
+  "$type": "CompiledProgram",
+  "artifact_hash": "4910e771f0ba25350746162f3afee3a8637a8a4c462eb94d6f90714f00040aaf",
+  "binding_guards": [
+    {
+      "$type": "BindingGuard",
+      "minimum_bytes": 16384,
+      "name": "A",
+      "permissions": "r"
+    },
+    {
+      "$type": "BindingGuard",
+      "minimum_bytes": 65536,
+      "name": "B",
+      "permissions": "r"
+    },
+    {
+      "$type": "BindingGuard",
+      "minimum_bytes": 65536,
+      "name": "C",
+      "permissions": "w"
+    }
+  ],
+  "call_bindings": {
+    "$map": [
+      [
+        "call:boa_am_matmul:0:done",
+        {
+          "$type": "CallBinding",
+          "actual_inputs": [
+            0,
+            1,
+            2
+          ],
+          "binding_id": "call:boa_am_matmul:0:done",
+          "context_name": "boa_am_ctx",
+          "entry_l1_mode": 0,
+          "exit_l1_mode": 0,
+          "permitted_profiles": [
+            {
+              "$type": "ProfileState",
+              "l1_mode": 0,
+              "l2_mode": 0
+            }
+          ],
+          "requested_l2_mode": 0,
+          "requires_l1_exclusive": false,
+          "resolved_l2_mode": 0
+        }
+      ]
+    ]
+  },
+  "compiler_abi": "v5",
+  "dependency_proofs": {
+    "$map": [
+      [
+        "call:boa_am_matmul:0:done:device:0:submit",
+        {
+          "$map": [
+            [
+              "dependencies",
+              []
+            ],
+            [
+              "event",
+              "done"
+            ],
+            [
+              "scope",
+              "device"
+            ]
+          ]
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:10:store",
+        {
+          "$map": [
+            [
+              "dependencies",
+              [
+                "ready",
+                "__call:boa_am_matmul:0:done:l2.bind:2"
+              ]
+            ],
+            [
+              "outputs",
+              [
+                "c_store"
+              ]
+            ],
+            [
+              "reads",
+              [
+                "c"
+              ]
+            ],
+            [
+              "scope",
+              "group"
+            ],
+            [
+              "writes",
+              []
+            ]
+          ]
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:11:release_l2",
+        {
+          "$map": [
+            [
+              "dependencies",
+              [
+                "read",
+                "a_pref",
+                "__call:boa_am_matmul:0:done:l2.bind:0"
+              ]
+            ],
+            [
+              "outputs",
+              [
+                "__call:boa_am_matmul:0:done:l2.release:0"
+              ]
+            ],
+            [
+              "reads",
+              []
+            ],
+            [
+              "scope",
+              "group"
+            ],
+            [
+              "writes",
+              []
+            ]
+          ]
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:12:release_l2",
+        {
+          "$map": [
+            [
+              "dependencies",
+              [
+                "read",
+                "b_pref",
+                "__call:boa_am_matmul:0:done:l2.bind:1"
+              ]
+            ],
+            [
+              "outputs",
+              [
+                "__call:boa_am_matmul:0:done:l2.release:1"
+              ]
+            ],
+            [
+              "reads",
+              []
+            ],
+            [
+              "scope",
+              "group"
+            ],
+            [
+              "writes",
+              []
+            ]
+          ]
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:13:release_l2",
+        {
+          "$map": [
+            [
+              "dependencies",
+              [
+                "c_store",
+                "__call:boa_am_matmul:0:done:l2.bind:2",
+                "ready"
+              ]
+            ],
+            [
+              "outputs",
+              [
+                "__call:boa_am_matmul:0:done:l2.release:2"
+              ]
+            ],
+            [
+              "reads",
+              []
+            ],
+            [
+              "scope",
+              "group"
+            ],
+            [
+              "writes",
+              []
+            ]
+          ]
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:14:await:0",
+        {
+          "$map": [
+            [
+              "dependencies",
+              [
+                "grid"
+              ]
+            ],
+            [
+              "outputs",
+              []
+            ],
+            [
+              "reads",
+              []
+            ],
+            [
+              "scope",
+              "group"
+            ],
+            [
+              "writes",
+              []
+            ]
+          ]
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:14:await:1",
+        {
+          "$map": [
+            [
+              "dependencies",
+              [
+                "c_store"
+              ]
+            ],
+            [
+              "outputs",
+              []
+            ],
+            [
+              "reads",
+              []
+            ],
+            [
+              "scope",
+              "group"
+            ],
+            [
+              "writes",
+              []
+            ]
+          ]
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:15:return",
+        {
+          "$map": [
+            [
+              "dependencies",
+              [
+                "__call:boa_am_matmul:0:done:l2.release:0",
+                "__call:boa_am_matmul:0:done:l2.release:1",
+                "__call:boa_am_matmul:0:done:l2.release:2"
+              ]
+            ],
+            [
+              "outputs",
+              [
+                "context_done"
+              ]
+            ],
+            [
+              "reads",
+              []
+            ],
+            [
+              "scope",
+              "group"
+            ],
+            [
+              "writes",
+              []
+            ]
+          ]
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:3:bind_l2",
+        {
+          "$map": [
+            [
+              "dependencies",
+              []
+            ],
+            [
+              "outputs",
+              [
+                "__call:boa_am_matmul:0:done:l2.bind:0"
+              ]
+            ],
+            [
+              "reads",
+              []
+            ],
+            [
+              "scope",
+              "group"
+            ],
+            [
+              "writes",
+              []
+            ]
+          ]
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:4:bind_l2",
+        {
+          "$map": [
+            [
+              "dependencies",
+              []
+            ],
+            [
+              "outputs",
+              [
+                "__call:boa_am_matmul:0:done:l2.bind:1"
+              ]
+            ],
+            [
+              "reads",
+              []
+            ],
+            [
+              "scope",
+              "group"
+            ],
+            [
+              "writes",
+              []
+            ]
+          ]
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:5:bind_l2",
+        {
+          "$map": [
+            [
+              "dependencies",
+              []
+            ],
+            [
+              "outputs",
+              [
+                "__call:boa_am_matmul:0:done:l2.bind:2"
+              ]
+            ],
+            [
+              "reads",
+              []
+            ],
+            [
+              "scope",
+              "group"
+            ],
+            [
+              "writes",
+              []
+            ]
+          ]
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:6:prefetch",
+        {
+          "$map": [
+            [
+              "dependencies",
+              [
+                "__call:boa_am_matmul:0:done:l2.bind:0"
+              ]
+            ],
+            [
+              "outputs",
+              [
+                "a_pref"
+              ]
+            ],
+            [
+              "reads",
+              []
+            ],
+            [
+              "scope",
+              "group"
+            ],
+            [
+              "writes",
+              [
+                "a"
+              ]
+            ]
+          ]
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:7:prefetch",
+        {
+          "$map": [
+            [
+              "dependencies",
+              [
+                "__call:boa_am_matmul:0:done:l2.bind:1"
+              ]
+            ],
+            [
+              "outputs",
+              [
+                "b_pref"
+              ]
+            ],
+            [
+              "reads",
+              []
+            ],
+            [
+              "scope",
+              "group"
+            ],
+            [
+              "writes",
+              [
+                "b"
+              ]
+            ]
+          ]
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:9:dispatch",
+        {
+          "$map": [
+            [
+              "dependencies",
+              [
+                "a_pref",
+                "b_pref",
+                "__call:boa_am_matmul:0:done:l2.bind:0",
+                "__call:boa_am_matmul:0:done:l2.bind:1",
+                "__call:boa_am_matmul:0:done:l2.bind:2"
+              ]
+            ],
+            [
+              "outputs",
+              [
+                "grid",
+                "read",
+                "ready"
+              ]
+            ],
+            [
+              "reads",
+              [
+                "a",
+                "b"
+              ]
+            ],
+            [
+              "scope",
+              "group"
+            ],
+            [
+              "writes",
+              [
+                "c"
+              ]
+            ]
+          ]
+        }
+      ],
+      [
+        "model:boa_am_matmul:device:1:await:0",
+        {
+          "$map": [
+            [
+              "dependencies",
+              []
+            ],
+            [
+              "event",
+              "done"
+            ],
+            [
+              "scope",
+              "device"
+            ]
+          ]
+        }
+      ],
+      [
+        "model:boa_am_matmul:device:2:return",
+        {
+          "$map": [
+            [
+              "dependencies",
+              []
+            ],
+            [
+              "event",
+              ""
+            ],
+            [
+              "scope",
+              "device"
+            ]
+          ]
+        }
+      ]
+    ]
+  },
+  "entry": {
+    "$type": "ExecModel",
+    "body": [
+      {
+        "$type": "ExecDeviceOp",
+        "actual_inputs": [
+          0,
+          1,
+          2
+        ],
+        "binding_id": "call:boa_am_matmul:0:done",
+        "callsite_id": "boa_am_matmul:call:0",
+        "command": null,
+        "ctx_name": "boa_am_ctx",
+        "dependencies": [],
+        "event_tag": "done",
+        "instruction_id": "call:boa_am_matmul:0:done:device:0:submit",
+        "op": "submit",
+        "source_ref": {
+          "$type": "SourceRef",
+          "body_op_index": 0,
+          "generated_by": "",
+          "op_name": "nexus.submit_context.async",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_matmul"
+        }
+      },
+      {
+        "$type": "ExecDeviceOp",
+        "actual_inputs": [],
+        "binding_id": "",
+        "callsite_id": "",
+        "command": null,
+        "ctx_name": "",
+        "dependencies": [],
+        "event_tag": "done",
+        "instruction_id": "model:boa_am_matmul:device:1:await:0",
+        "op": "await",
+        "source_ref": {
+          "$type": "SourceRef",
+          "body_op_index": 1,
+          "generated_by": "",
+          "op_name": "nexus.await",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_matmul"
+        }
+      },
+      {
+        "$type": "ExecDeviceOp",
+        "actual_inputs": [],
+        "binding_id": "",
+        "callsite_id": "",
+        "command": null,
+        "ctx_name": "",
+        "dependencies": [],
+        "event_tag": "",
+        "instruction_id": "model:boa_am_matmul:device:2:return",
+        "op": "return",
+        "source_ref": {
+          "$type": "SourceRef",
+          "body_op_index": 2,
+          "generated_by": "",
+          "op_name": "nexus.return",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_matmul"
+        }
+      }
+    ],
+    "context_pins": {
+      "$map": [
+        [
+          "call:boa_am_matmul:0:done",
+          null
+        ]
+      ]
+    },
+    "inputs": [
+      {
+        "$type": "ExecGlobalInput",
+        "dims": [
+          2,
+          64,
+          64
+        ],
+        "dtype": "bf16",
+        "name": "A",
+        "size_bytes": 16384
+      },
+      {
+        "$type": "ExecGlobalInput",
+        "dims": [
+          2,
+          64,
+          256
+        ],
+        "dtype": "bf16",
+        "name": "B",
+        "size_bytes": 65536
+      },
+      {
+        "$type": "ExecGlobalInput",
+        "dims": [
+          64,
+          256
+        ],
+        "dtype": "f32",
+        "name": "C",
+        "size_bytes": 65536
+      }
+    ],
+    "name": "boa_am_matmul",
+    "tasks": {
+      "$map": [
+        [
+          "call:boa_am_matmul:0:done",
+          {
+            "$type": "ExecTileGroupTask",
+            "actions": [
+              {
+                "$type": "ExecGroupAction",
+                "args": [
+                  "a",
+                  0
+                ],
+                "comment": "",
+                "dependencies": [],
+                "dst": "__call:boa_am_matmul:0:done:l2.bind:0",
+                "instruction_id": "call:boa_am_matmul:0:done:group:3:bind_l2",
+                "op": {
+                  "$enum": "ExecGroupActionOp",
+                  "value": "bind.l2.view"
+                },
+                "reads": [],
+                "source_ref": {
+                  "$type": "SourceRef",
+                  "body_op_index": 3,
+                  "generated_by": "",
+                  "op_name": "nest.alloc",
+                  "reason": "",
+                  "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                  "symbol": "boa_am_ctx"
+                },
+                "writes": []
+              },
+              {
+                "$type": "ExecGroupAction",
+                "args": [
+                  "b",
+                  1
+                ],
+                "comment": "",
+                "dependencies": [],
+                "dst": "__call:boa_am_matmul:0:done:l2.bind:1",
+                "instruction_id": "call:boa_am_matmul:0:done:group:4:bind_l2",
+                "op": {
+                  "$enum": "ExecGroupActionOp",
+                  "value": "bind.l2.view"
+                },
+                "reads": [],
+                "source_ref": {
+                  "$type": "SourceRef",
+                  "body_op_index": 4,
+                  "generated_by": "",
+                  "op_name": "nest.alloc",
+                  "reason": "",
+                  "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                  "symbol": "boa_am_ctx"
+                },
+                "writes": []
+              },
+              {
+                "$type": "ExecGroupAction",
+                "args": [
+                  "c",
+                  2
+                ],
+                "comment": "",
+                "dependencies": [],
+                "dst": "__call:boa_am_matmul:0:done:l2.bind:2",
+                "instruction_id": "call:boa_am_matmul:0:done:group:5:bind_l2",
+                "op": {
+                  "$enum": "ExecGroupActionOp",
+                  "value": "bind.l2.view"
+                },
+                "reads": [],
+                "source_ref": {
+                  "$type": "SourceRef",
+                  "body_op_index": 5,
+                  "generated_by": "",
+                  "op_name": "nest.alloc",
+                  "reason": "",
+                  "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                  "symbol": "boa_am_ctx"
+                },
+                "writes": []
+              },
+              {
+                "$type": "ExecGroupAction",
+                "args": [
+                  "gdma_prefetch:a",
+                  {
+                    "$type": "ExecTransfer",
+                    "bytes": 16384,
+                    "dst": {
+                      "$type": "ExecMemoryView",
+                      "backing_dims": [
+                        2,
+                        64,
+                        64
+                      ],
+                      "base": "a",
+                      "bytes": 16384,
+                      "dims": [
+                        2,
+                        64,
+                        64
+                      ],
+                      "dtype": "bf16",
+                      "element_bytes": 2,
+                      "offsets": [
+                        0,
+                        0,
+                        0
+                      ],
+                      "space": "l2",
+                      "strides": [
+                        1,
+                        1,
+                        1
+                      ],
+                      "task_dim": null
+                    },
+                    "src": {
+                      "$type": "ExecMemoryView",
+                      "backing_dims": [
+                        2,
+                        64,
+                        64
+                      ],
+                      "base": "global:A",
+                      "bytes": 16384,
+                      "dims": [
+                        2,
+                        64,
+                        64
+                      ],
+                      "dtype": "bf16",
+                      "element_bytes": 2,
+                      "offsets": [
+                        0,
+                        0,
+                        0
+                      ],
+                      "space": "global",
+                      "strides": [
+                        1,
+                        1,
+                        1
+                      ],
+                      "task_dim": null
+                    }
+                  }
+                ],
+                "comment": "",
+                "dependencies": [
+                  "__call:boa_am_matmul:0:done:l2.bind:0"
+                ],
+                "dst": "a_pref",
+                "instruction_id": "call:boa_am_matmul:0:done:group:6:prefetch",
+                "op": {
+                  "$enum": "ExecGroupActionOp",
+                  "value": "dma.prefetch"
+                },
+                "reads": [],
+                "source_ref": {
+                  "$type": "SourceRef",
+                  "body_op_index": 6,
+                  "generated_by": "",
+                  "op_name": "nest.dma.prefetch.async",
+                  "reason": "",
+                  "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                  "symbol": "boa_am_ctx"
+                },
+                "writes": [
+                  "a"
+                ]
+              },
+              {
+                "$type": "ExecGroupAction",
+                "args": [
+                  "gdma_prefetch:b",
+                  {
+                    "$type": "ExecTransfer",
+                    "bytes": 65536,
+                    "dst": {
+                      "$type": "ExecMemoryView",
+                      "backing_dims": [
+                        2,
+                        64,
+                        256
+                      ],
+                      "base": "b",
+                      "bytes": 65536,
+                      "dims": [
+                        2,
+                        64,
+                        256
+                      ],
+                      "dtype": "bf16",
+                      "element_bytes": 2,
+                      "offsets": [
+                        0,
+                        0,
+                        0
+                      ],
+                      "space": "l2",
+                      "strides": [
+                        1,
+                        1,
+                        1
+                      ],
+                      "task_dim": null
+                    },
+                    "src": {
+                      "$type": "ExecMemoryView",
+                      "backing_dims": [
+                        2,
+                        64,
+                        256
+                      ],
+                      "base": "global:B",
+                      "bytes": 65536,
+                      "dims": [
+                        2,
+                        64,
+                        256
+                      ],
+                      "dtype": "bf16",
+                      "element_bytes": 2,
+                      "offsets": [
+                        0,
+                        0,
+                        0
+                      ],
+                      "space": "global",
+                      "strides": [
+                        1,
+                        1,
+                        1
+                      ],
+                      "task_dim": null
+                    }
+                  }
+                ],
+                "comment": "",
+                "dependencies": [
+                  "__call:boa_am_matmul:0:done:l2.bind:1"
+                ],
+                "dst": "b_pref",
+                "instruction_id": "call:boa_am_matmul:0:done:group:7:prefetch",
+                "op": {
+                  "$enum": "ExecGroupActionOp",
+                  "value": "dma.prefetch"
+                },
+                "reads": [],
+                "source_ref": {
+                  "$type": "SourceRef",
+                  "body_op_index": 7,
+                  "generated_by": "",
+                  "op_name": "nest.dma.prefetch.async",
+                  "reason": "",
+                  "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                  "symbol": "boa_am_ctx"
+                },
+                "writes": [
+                  "b"
+                ]
+              },
+              {
+                "$type": "ExecGroupAction",
+                "args": [
+                  {
+                    "$type": "ExecDispatchRequest",
+                    "binding_id": "call:boa_am_matmul:0:done",
+                    "dispatch_ordinal": 0,
+                    "input_released_event": "read",
+                    "output_ready_event": "ready",
+                    "requested_l1_mode": 0,
+                    "resolved_l1_mode": 0,
+                    "role_id": 0,
+                    "signal_policy": {
+                      "$type": "ExecSignalPolicy",
+                      "input_released": "all_tasks",
+                      "output_ready": "all_tasks"
+                    }
+                  }
+                ],
+                "comment": "",
+                "dependencies": [
+                  "a_pref",
+                  "b_pref",
+                  "__call:boa_am_matmul:0:done:l2.bind:0",
+                  "__call:boa_am_matmul:0:done:l2.bind:1",
+                  "__call:boa_am_matmul:0:done:l2.bind:2"
+                ],
+                "dst": "grid",
+                "instruction_id": "call:boa_am_matmul:0:done:group:9:dispatch",
+                "op": {
+                  "$enum": "ExecGroupActionOp",
+                  "value": "dispatch.role"
+                },
+                "reads": [
+                  "a",
+                  "b"
+                ],
+                "source_ref": {
+                  "$type": "SourceRef",
+                  "body_op_index": 9,
+                  "generated_by": "",
+                  "op_name": "nest.dispatch.tasks.async",
+                  "reason": "",
+                  "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                  "symbol": "boa_am_ctx"
+                },
+                "writes": [
+                  "c"
+                ]
+              },
+              {
+                "$type": "ExecGroupAction",
+                "args": [
+                  "gdma_store:c",
+                  {
+                    "$type": "ExecTransfer",
+                    "bytes": 65536,
+                    "dst": {
+                      "$type": "ExecMemoryView",
+                      "backing_dims": [
+                        64,
+                        256
+                      ],
+                      "base": "global:C",
+                      "bytes": 65536,
+                      "dims": [
+                        64,
+                        256
+                      ],
+                      "dtype": "f32",
+                      "element_bytes": 4,
+                      "offsets": [
+                        0,
+                        0
+                      ],
+                      "space": "global",
+                      "strides": [
+                        1,
+                        1
+                      ],
+                      "task_dim": null
+                    },
+                    "src": {
+                      "$type": "ExecMemoryView",
+                      "backing_dims": [
+                        64,
+                        256
+                      ],
+                      "base": "c",
+                      "bytes": 65536,
+                      "dims": [
+                        64,
+                        256
+                      ],
+                      "dtype": "f32",
+                      "element_bytes": 4,
+                      "offsets": [
+                        0,
+                        0
+                      ],
+                      "space": "l2",
+                      "strides": [
+                        1,
+                        1
+                      ],
+                      "task_dim": null
+                    }
+                  }
+                ],
+                "comment": "",
+                "dependencies": [
+                  "ready",
+                  "__call:boa_am_matmul:0:done:l2.bind:2"
+                ],
+                "dst": "c_store",
+                "instruction_id": "call:boa_am_matmul:0:done:group:10:store",
+                "op": {
+                  "$enum": "ExecGroupActionOp",
+                  "value": "dma.store"
+                },
+                "reads": [
+                  "c"
+                ],
+                "source_ref": {
+                  "$type": "SourceRef",
+                  "body_op_index": 10,
+                  "generated_by": "",
+                  "op_name": "nest.dma.store.async",
+                  "reason": "",
+                  "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                  "symbol": "boa_am_ctx"
+                },
+                "writes": []
+              },
+              {
+                "$type": "ExecGroupAction",
+                "args": [
+                  {
+                    "$type": "ExecReleaseRequest",
+                    "buffer_role": "in",
+                    "buffer_slot": "a",
+                    "dependency_events": [
+                      "read",
+                      "a_pref",
+                      "__call:boa_am_matmul:0:done:l2.bind:0"
+                    ],
+                    "reader_dispatch_ordinals": [
+                      0
+                    ],
+                    "writer_dispatch_ordinals": []
+                  }
+                ],
+                "comment": "",
+                "dependencies": [
+                  "read",
+                  "a_pref",
+                  "__call:boa_am_matmul:0:done:l2.bind:0"
+                ],
+                "dst": "__call:boa_am_matmul:0:done:l2.release:0",
+                "instruction_id": "call:boa_am_matmul:0:done:group:11:release_l2",
+                "op": {
+                  "$enum": "ExecGroupActionOp",
+                  "value": "release.l2"
+                },
+                "reads": [],
+                "source_ref": {
+                  "$type": "SourceRef",
+                  "body_op_index": 11,
+                  "generated_by": "",
+                  "op_name": "nest.release",
+                  "reason": "",
+                  "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                  "symbol": "boa_am_ctx"
+                },
+                "writes": []
+              },
+              {
+                "$type": "ExecGroupAction",
+                "args": [
+                  {
+                    "$type": "ExecReleaseRequest",
+                    "buffer_role": "in",
+                    "buffer_slot": "b",
+                    "dependency_events": [
+                      "read",
+                      "b_pref",
+                      "__call:boa_am_matmul:0:done:l2.bind:1"
+                    ],
+                    "reader_dispatch_ordinals": [
+                      0
+                    ],
+                    "writer_dispatch_ordinals": []
+                  }
+                ],
+                "comment": "",
+                "dependencies": [
+                  "read",
+                  "b_pref",
+                  "__call:boa_am_matmul:0:done:l2.bind:1"
+                ],
+                "dst": "__call:boa_am_matmul:0:done:l2.release:1",
+                "instruction_id": "call:boa_am_matmul:0:done:group:12:release_l2",
+                "op": {
+                  "$enum": "ExecGroupActionOp",
+                  "value": "release.l2"
+                },
+                "reads": [],
+                "source_ref": {
+                  "$type": "SourceRef",
+                  "body_op_index": 12,
+                  "generated_by": "",
+                  "op_name": "nest.release",
+                  "reason": "",
+                  "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                  "symbol": "boa_am_ctx"
+                },
+                "writes": []
+              },
+              {
+                "$type": "ExecGroupAction",
+                "args": [
+                  {
+                    "$type": "ExecReleaseRequest",
+                    "buffer_role": "out",
+                    "buffer_slot": "c",
+                    "dependency_events": [
+                      "c_store",
+                      "__call:boa_am_matmul:0:done:l2.bind:2",
+                      "ready"
+                    ],
+                    "reader_dispatch_ordinals": [],
+                    "writer_dispatch_ordinals": [
+                      0
+                    ]
+                  }
+                ],
+                "comment": "",
+                "dependencies": [
+                  "c_store",
+                  "__call:boa_am_matmul:0:done:l2.bind:2",
+                  "ready"
+                ],
+                "dst": "__call:boa_am_matmul:0:done:l2.release:2",
+                "instruction_id": "call:boa_am_matmul:0:done:group:13:release_l2",
+                "op": {
+                  "$enum": "ExecGroupActionOp",
+                  "value": "release.l2"
+                },
+                "reads": [],
+                "source_ref": {
+                  "$type": "SourceRef",
+                  "body_op_index": 13,
+                  "generated_by": "",
+                  "op_name": "nest.release",
+                  "reason": "",
+                  "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                  "symbol": "boa_am_ctx"
+                },
+                "writes": []
+              },
+              {
+                "$type": "ExecGroupAction",
+                "args": [
+                  "grid"
+                ],
+                "comment": "",
+                "dependencies": [
+                  "grid"
+                ],
+                "dst": null,
+                "instruction_id": "call:boa_am_matmul:0:done:group:14:await:0",
+                "op": {
+                  "$enum": "ExecGroupActionOp",
+                  "value": "wait.event"
+                },
+                "reads": [],
+                "source_ref": {
+                  "$type": "SourceRef",
+                  "body_op_index": 14,
+                  "generated_by": "",
+                  "op_name": "nest.await",
+                  "reason": "",
+                  "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                  "symbol": "boa_am_ctx"
+                },
+                "writes": []
+              },
+              {
+                "$type": "ExecGroupAction",
+                "args": [
+                  "c_store"
+                ],
+                "comment": "",
+                "dependencies": [
+                  "c_store"
+                ],
+                "dst": null,
+                "instruction_id": "call:boa_am_matmul:0:done:group:14:await:1",
+                "op": {
+                  "$enum": "ExecGroupActionOp",
+                  "value": "wait.event"
+                },
+                "reads": [],
+                "source_ref": {
+                  "$type": "SourceRef",
+                  "body_op_index": 14,
+                  "generated_by": "",
+                  "op_name": "nest.await",
+                  "reason": "",
+                  "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                  "symbol": "boa_am_ctx"
+                },
+                "writes": []
+              },
+              {
+                "$type": "ExecGroupAction",
+                "args": [
+                  "context_done"
+                ],
+                "comment": "",
+                "dependencies": [
+                  "__call:boa_am_matmul:0:done:l2.release:0",
+                  "__call:boa_am_matmul:0:done:l2.release:1",
+                  "__call:boa_am_matmul:0:done:l2.release:2"
+                ],
+                "dst": null,
+                "instruction_id": "call:boa_am_matmul:0:done:group:15:return",
+                "op": {
+                  "$enum": "ExecGroupActionOp",
+                  "value": "signal.event"
+                },
+                "reads": [],
+                "source_ref": {
+                  "$type": "SourceRef",
+                  "body_op_index": 15,
+                  "generated_by": "",
+                  "op_name": "nest.return",
+                  "reason": "",
+                  "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                  "symbol": "boa_am_ctx"
+                },
+                "writes": []
+              }
+            ],
+            "binding_id": "call:boa_am_matmul:0:done",
+            "completion_event": "context_done",
+            "event_uses": {
+              "$map": [
+                [
+                  "__call:boa_am_matmul:0:done:l2.bind:0",
+                  3
+                ],
+                [
+                  "__call:boa_am_matmul:0:done:l2.bind:1",
+                  3
+                ],
+                [
+                  "__call:boa_am_matmul:0:done:l2.bind:2",
+                  3
+                ],
+                [
+                  "__call:boa_am_matmul:0:done:l2.release:0",
+                  1
+                ],
+                [
+                  "__call:boa_am_matmul:0:done:l2.release:1",
+                  1
+                ],
+                [
+                  "__call:boa_am_matmul:0:done:l2.release:2",
+                  1
+                ],
+                [
+                  "a_pref",
+                  2
+                ],
+                [
+                  "b_pref",
+                  2
+                ],
+                [
+                  "c_store",
+                  2
+                ],
+                [
+                  "context_done",
+                  0
+                ],
+                [
+                  "grid",
+                  1
+                ],
+                [
+                  "read",
+                  2
+                ],
+                [
+                  "ready",
+                  2
+                ]
+              ]
+            },
+            "global_inputs": [
+              {
+                "$type": "ExecGlobalInput",
+                "dims": [
+                  2,
+                  64,
+                  64
+                ],
+                "dtype": "bf16",
+                "name": "A",
+                "size_bytes": 16384
+              },
+              {
+                "$type": "ExecGlobalInput",
+                "dims": [
+                  2,
+                  64,
+                  256
+                ],
+                "dtype": "bf16",
+                "name": "B",
+                "size_bytes": 65536
+              },
+              {
+                "$type": "ExecGlobalInput",
+                "dims": [
+                  64,
+                  256
+                ],
+                "dtype": "f32",
+                "name": "C",
+                "size_bytes": 65536
+              }
+            ],
+            "l2_buffers": [
+              {
+                "$type": "ExecL2Buffer",
+                "alignment": 256,
+                "bytes": 16384,
+                "dims": [
+                  2,
+                  64,
+                  64
+                ],
+                "dtype": "bf16",
+                "element_bytes": 2,
+                "role": "in",
+                "sharing": "private",
+                "slot": "a"
+              },
+              {
+                "$type": "ExecL2Buffer",
+                "alignment": 256,
+                "bytes": 65536,
+                "dims": [
+                  2,
+                  64,
+                  256
+                ],
+                "dtype": "bf16",
+                "element_bytes": 2,
+                "role": "in",
+                "sharing": "private",
+                "slot": "b"
+              },
+              {
+                "$type": "ExecL2Buffer",
+                "alignment": 256,
+                "bytes": 65536,
+                "dims": [
+                  64,
+                  256
+                ],
+                "dtype": "f32",
+                "element_bytes": 4,
+                "role": "out",
+                "sharing": "private",
+                "slot": "c"
+              }
+            ],
+            "layout": {
+              "$type": "ArenaLayout",
+              "alignment": 256,
+              "buffer_layouts": [
+                {
+                  "$type": "BufferLayout",
+                  "arena_offset": 0,
+                  "banks": 16,
+                  "buffer_id": "a",
+                  "logical_bytes": 16384,
+                  "role": "in",
+                  "slot_id": 0,
+                  "stripe_bytes": 256
+                },
+                {
+                  "$type": "BufferLayout",
+                  "arena_offset": 16384,
+                  "banks": 16,
+                  "buffer_id": "b",
+                  "logical_bytes": 65536,
+                  "role": "in",
+                  "slot_id": 1,
+                  "stripe_bytes": 256
+                },
+                {
+                  "$type": "BufferLayout",
+                  "arena_offset": 81920,
+                  "banks": 16,
+                  "buffer_id": "c",
+                  "logical_bytes": 65536,
+                  "role": "out",
+                  "slot_id": 2,
+                  "stripe_bytes": 256
+                }
+              ],
+              "layout_hash": "9ee6314060d9fbf15e53238cfd8ba9013e23ad68595b1d184440ab2bee7dafc1",
+              "per_bank_bytes": [
+                9216,
+                9216,
+                9216,
+                9216,
+                9216,
+                9216,
+                9216,
+                9216,
+                9216,
+                9216,
+                9216,
+                9216,
+                9216,
+                9216,
+                9216,
+                9216
+              ],
+              "reserved_bytes": 147456,
+              "stripe_bytes": 256
+            },
+            "name": "boa_am_ctx",
+            "resource_contract": {
+              "$type": "ContextResources",
+              "allowed_profiles": [
+                0,
+                1,
+                2
+              ],
+              "l2_cache": null,
+              "l2_mode": 0,
+              "l2_spm_bytes": 147456,
+              "logical_tasks": 1,
+              "requested_contexts_per_tile": 1
+            },
+            "role_bindings": {
+              "$map": [
+                [
+                  0,
+                  {
+                    "$type": "ExecTileRoleBinding",
+                    "actuals": [
+                      "a",
+                      "b",
+                      "c"
+                    ],
+                    "context_id": 0,
+                    "global_actuals": [],
+                    "in_stream": null,
+                    "out_stream": null,
+                    "read_actuals": [
+                      "a",
+                      "b"
+                    ],
+                    "role_id": 0,
+                    "task_domain": {
+                      "$type": "ExecTaskDomain",
+                      "from_task": 0,
+                      "to_task": 1
+                    },
+                    "tile_mask": 1,
+                    "tile_program": {
+                      "$type": "ExecTileProgram",
+                      "am_buffers": [
+                        {
+                          "$type": "ExecAmBuffer",
+                          "alignment": 256,
+                          "bytes": 65536,
+                          "dims": [
+                            64,
+                            256
+                          ],
+                          "dtype": "f32",
+                          "element_bytes": 4,
+                          "logical_slot": 0,
+                          "name": "am:0",
+                          "output": {
+                            "$type": "ExecMemoryView",
+                            "backing_dims": [
+                              64,
+                              256
+                            ],
+                            "base": "l1:4",
+                            "bytes": 65536,
+                            "dims": [
+                              64,
+                              256
+                            ],
+                            "dtype": "f32",
+                            "element_bytes": 4,
+                            "offsets": [
+                              0,
+                              0
+                            ],
+                            "space": "l1",
+                            "strides": [
+                              1,
+                              1
+                            ],
+                            "task_dim": null
+                          }
+                        }
+                      ],
+                      "descriptors": {
+                        "$map": [
+                          [
+                            "d0",
+                            {
+                              "$type": "ExecEngineDesc",
+                              "kind": "MFE",
+                              "name": "d0",
+                              "op": "load",
+                              "params": {
+                                "$map": []
+                              },
+                              "transfer": {
+                                "$type": "ExecTransfer",
+                                "bytes": 8192,
+                                "dst": {
+                                  "$type": "ExecMemoryView",
+                                  "backing_dims": [
+                                    64,
+                                    64
+                                  ],
+                                  "base": "l1:0",
+                                  "bytes": 8192,
+                                  "dims": [
+                                    64,
+                                    64
+                                  ],
+                                  "dtype": "bf16",
+                                  "element_bytes": 2,
+                                  "offsets": [
+                                    0,
+                                    0
+                                  ],
+                                  "space": "l1",
+                                  "strides": [
+                                    1,
+                                    1
+                                  ],
+                                  "task_dim": null
+                                },
+                                "src": {
+                                  "$type": "ExecMemoryView",
+                                  "backing_dims": [
+                                    2,
+                                    64,
+                                    64
+                                  ],
+                                  "base": "formal:1",
+                                  "bytes": 8192,
+                                  "dims": [
+                                    1,
+                                    64,
+                                    64
+                                  ],
+                                  "dtype": "bf16",
+                                  "element_bytes": 2,
+                                  "offsets": [
+                                    0,
+                                    0,
+                                    0
+                                  ],
+                                  "space": "l2",
+                                  "strides": [
+                                    1,
+                                    1,
+                                    1
+                                  ],
+                                  "task_dim": null
+                                }
+                              }
+                            }
+                          ],
+                          [
+                            "d1",
+                            {
+                              "$type": "ExecEngineDesc",
+                              "kind": "MFE",
+                              "name": "d1",
+                              "op": "load",
+                              "params": {
+                                "$map": []
+                              },
+                              "transfer": {
+                                "$type": "ExecTransfer",
+                                "bytes": 32768,
+                                "dst": {
+                                  "$type": "ExecMemoryView",
+                                  "backing_dims": [
+                                    64,
+                                    256
+                                  ],
+                                  "base": "l1:2",
+                                  "bytes": 32768,
+                                  "dims": [
+                                    64,
+                                    256
+                                  ],
+                                  "dtype": "bf16",
+                                  "element_bytes": 2,
+                                  "offsets": [
+                                    0,
+                                    0
+                                  ],
+                                  "space": "l1",
+                                  "strides": [
+                                    1,
+                                    1
+                                  ],
+                                  "task_dim": null
+                                },
+                                "src": {
+                                  "$type": "ExecMemoryView",
+                                  "backing_dims": [
+                                    2,
+                                    64,
+                                    256
+                                  ],
+                                  "base": "formal:2",
+                                  "bytes": 32768,
+                                  "dims": [
+                                    1,
+                                    64,
+                                    256
+                                  ],
+                                  "dtype": "bf16",
+                                  "element_bytes": 2,
+                                  "offsets": [
+                                    0,
+                                    0,
+                                    0
+                                  ],
+                                  "space": "l2",
+                                  "strides": [
+                                    1,
+                                    1,
+                                    1
+                                  ],
+                                  "task_dim": null
+                                }
+                              }
+                            }
+                          ],
+                          [
+                            "d2",
+                            {
+                              "$type": "ExecEngineDesc",
+                              "kind": "MFE",
+                              "name": "d2",
+                              "op": "load",
+                              "params": {
+                                "$map": []
+                              },
+                              "transfer": {
+                                "$type": "ExecTransfer",
+                                "bytes": 8192,
+                                "dst": {
+                                  "$type": "ExecMemoryView",
+                                  "backing_dims": [
+                                    64,
+                                    64
+                                  ],
+                                  "base": "l1:1",
+                                  "bytes": 8192,
+                                  "dims": [
+                                    64,
+                                    64
+                                  ],
+                                  "dtype": "bf16",
+                                  "element_bytes": 2,
+                                  "offsets": [
+                                    0,
+                                    0
+                                  ],
+                                  "space": "l1",
+                                  "strides": [
+                                    1,
+                                    1
+                                  ],
+                                  "task_dim": null
+                                },
+                                "src": {
+                                  "$type": "ExecMemoryView",
+                                  "backing_dims": [
+                                    2,
+                                    64,
+                                    64
+                                  ],
+                                  "base": "formal:1",
+                                  "bytes": 8192,
+                                  "dims": [
+                                    1,
+                                    64,
+                                    64
+                                  ],
+                                  "dtype": "bf16",
+                                  "element_bytes": 2,
+                                  "offsets": [
+                                    1,
+                                    0,
+                                    0
+                                  ],
+                                  "space": "l2",
+                                  "strides": [
+                                    1,
+                                    1,
+                                    1
+                                  ],
+                                  "task_dim": null
+                                }
+                              }
+                            }
+                          ],
+                          [
+                            "d3",
+                            {
+                              "$type": "ExecEngineDesc",
+                              "kind": "MFE",
+                              "name": "d3",
+                              "op": "load",
+                              "params": {
+                                "$map": []
+                              },
+                              "transfer": {
+                                "$type": "ExecTransfer",
+                                "bytes": 32768,
+                                "dst": {
+                                  "$type": "ExecMemoryView",
+                                  "backing_dims": [
+                                    64,
+                                    256
+                                  ],
+                                  "base": "l1:3",
+                                  "bytes": 32768,
+                                  "dims": [
+                                    64,
+                                    256
+                                  ],
+                                  "dtype": "bf16",
+                                  "element_bytes": 2,
+                                  "offsets": [
+                                    0,
+                                    0
+                                  ],
+                                  "space": "l1",
+                                  "strides": [
+                                    1,
+                                    1
+                                  ],
+                                  "task_dim": null
+                                },
+                                "src": {
+                                  "$type": "ExecMemoryView",
+                                  "backing_dims": [
+                                    2,
+                                    64,
+                                    256
+                                  ],
+                                  "base": "formal:2",
+                                  "bytes": 32768,
+                                  "dims": [
+                                    1,
+                                    64,
+                                    256
+                                  ],
+                                  "dtype": "bf16",
+                                  "element_bytes": 2,
+                                  "offsets": [
+                                    1,
+                                    0,
+                                    0
+                                  ],
+                                  "space": "l2",
+                                  "strides": [
+                                    1,
+                                    1,
+                                    1
+                                  ],
+                                  "task_dim": null
+                                }
+                              }
+                            }
+                          ],
+                          [
+                            "d4",
+                            {
+                              "$type": "ExecEngineDesc",
+                              "kind": "BOA",
+                              "name": "d4",
+                              "op": "matmul",
+                              "params": {
+                                "$map": [
+                                  [
+                                    "matmul",
+                                    {
+                                      "$type": "ExecBoaMatmulDesc",
+                                      "a": {
+                                        "$type": "ExecMemoryView",
+                                        "backing_dims": [
+                                          64,
+                                          64
+                                        ],
+                                        "base": "l1:0",
+                                        "bytes": 8192,
+                                        "dims": [
+                                          64,
+                                          64
+                                        ],
+                                        "dtype": "bf16",
+                                        "element_bytes": 2,
+                                        "offsets": [
+                                          0,
+                                          0
+                                        ],
+                                        "space": "l1",
+                                        "strides": [
+                                          1,
+                                          1
+                                        ],
+                                        "task_dim": null
+                                      },
+                                      "am": "am:0",
+                                      "b": {
+                                        "$type": "ExecMemoryView",
+                                        "backing_dims": [
+                                          64,
+                                          256
+                                        ],
+                                        "base": "l1:2",
+                                        "bytes": 32768,
+                                        "dims": [
+                                          64,
+                                          256
+                                        ],
+                                        "dtype": "bf16",
+                                        "element_bytes": 2,
+                                        "offsets": [
+                                          0,
+                                          0
+                                        ],
+                                        "space": "l1",
+                                        "strides": [
+                                          1,
+                                          1
+                                        ],
+                                        "task_dim": null
+                                      },
+                                      "final": false,
+                                      "init": true,
+                                      "k": 64,
+                                      "k_mask": null,
+                                      "m": 64,
+                                      "n": 256,
+                                      "output": {
+                                        "$type": "ExecMemoryView",
+                                        "backing_dims": [
+                                          64,
+                                          256
+                                        ],
+                                        "base": "l1:4",
+                                        "bytes": 65536,
+                                        "dims": [
+                                          64,
+                                          256
+                                        ],
+                                        "dtype": "f32",
+                                        "element_bytes": 4,
+                                        "offsets": [
+                                          0,
+                                          0
+                                        ],
+                                        "space": "l1",
+                                        "strides": [
+                                          1,
+                                          1
+                                        ],
+                                        "task_dim": null
+                                      },
+                                      "seq": 0
+                                    }
+                                  ]
+                                ]
+                              },
+                              "transfer": null
+                            }
+                          ],
+                          [
+                            "d5",
+                            {
+                              "$type": "ExecEngineDesc",
+                              "kind": "BOA",
+                              "name": "d5",
+                              "op": "matmul",
+                              "params": {
+                                "$map": [
+                                  [
+                                    "matmul",
+                                    {
+                                      "$type": "ExecBoaMatmulDesc",
+                                      "a": {
+                                        "$type": "ExecMemoryView",
+                                        "backing_dims": [
+                                          64,
+                                          64
+                                        ],
+                                        "base": "l1:1",
+                                        "bytes": 8192,
+                                        "dims": [
+                                          64,
+                                          64
+                                        ],
+                                        "dtype": "bf16",
+                                        "element_bytes": 2,
+                                        "offsets": [
+                                          0,
+                                          0
+                                        ],
+                                        "space": "l1",
+                                        "strides": [
+                                          1,
+                                          1
+                                        ],
+                                        "task_dim": null
+                                      },
+                                      "am": "am:0",
+                                      "b": {
+                                        "$type": "ExecMemoryView",
+                                        "backing_dims": [
+                                          64,
+                                          256
+                                        ],
+                                        "base": "l1:3",
+                                        "bytes": 32768,
+                                        "dims": [
+                                          64,
+                                          256
+                                        ],
+                                        "dtype": "bf16",
+                                        "element_bytes": 2,
+                                        "offsets": [
+                                          0,
+                                          0
+                                        ],
+                                        "space": "l1",
+                                        "strides": [
+                                          1,
+                                          1
+                                        ],
+                                        "task_dim": null
+                                      },
+                                      "final": true,
+                                      "init": false,
+                                      "k": 64,
+                                      "k_mask": null,
+                                      "m": 64,
+                                      "n": 256,
+                                      "output": {
+                                        "$type": "ExecMemoryView",
+                                        "backing_dims": [
+                                          64,
+                                          256
+                                        ],
+                                        "base": "l1:4",
+                                        "bytes": 65536,
+                                        "dims": [
+                                          64,
+                                          256
+                                        ],
+                                        "dtype": "f32",
+                                        "element_bytes": 4,
+                                        "offsets": [
+                                          0,
+                                          0
+                                        ],
+                                        "space": "l1",
+                                        "strides": [
+                                          1,
+                                          1
+                                        ],
+                                        "task_dim": null
+                                      },
+                                      "seq": 1
+                                    }
+                                  ]
+                                ]
+                              },
+                              "transfer": null
+                            }
+                          ],
+                          [
+                            "d6",
+                            {
+                              "$type": "ExecEngineDesc",
+                              "kind": "MFE",
+                              "name": "d6",
+                              "op": "store",
+                              "params": {
+                                "$map": []
+                              },
+                              "transfer": {
+                                "$type": "ExecTransfer",
+                                "bytes": 65536,
+                                "dst": {
+                                  "$type": "ExecMemoryView",
+                                  "backing_dims": [
+                                    64,
+                                    256
+                                  ],
+                                  "base": "formal:3",
+                                  "bytes": 65536,
+                                  "dims": [
+                                    64,
+                                    256
+                                  ],
+                                  "dtype": "f32",
+                                  "element_bytes": 4,
+                                  "offsets": [
+                                    0,
+                                    0
+                                  ],
+                                  "space": "l2",
+                                  "strides": [
+                                    1,
+                                    1
+                                  ],
+                                  "task_dim": null
+                                },
+                                "src": {
+                                  "$type": "ExecMemoryView",
+                                  "backing_dims": [
+                                    64,
+                                    256
+                                  ],
+                                  "base": "l1:4",
+                                  "bytes": 65536,
+                                  "dims": [
+                                    64,
+                                    256
+                                  ],
+                                  "dtype": "f32",
+                                  "element_bytes": 4,
+                                  "offsets": [
+                                    0,
+                                    0
+                                  ],
+                                  "space": "l1",
+                                  "strides": [
+                                    1,
+                                    1
+                                  ],
+                                  "task_dim": null
+                                }
+                              }
+                            }
+                          ]
+                        ]
+                      },
+                      "formals": [
+                        {
+                          "$type": "ExecTileFormal",
+                          "dims": [],
+                          "dtype": "",
+                          "space": "task"
+                        },
+                        {
+                          "$type": "ExecTileFormal",
+                          "dims": [
+                            2,
+                            64,
+                            64
+                          ],
+                          "dtype": "bf16",
+                          "space": "l2"
+                        },
+                        {
+                          "$type": "ExecTileFormal",
+                          "dims": [
+                            2,
+                            64,
+                            256
+                          ],
+                          "dtype": "bf16",
+                          "space": "l2"
+                        },
+                        {
+                          "$type": "ExecTileFormal",
+                          "dims": [
+                            64,
+                            256
+                          ],
+                          "dtype": "f32",
+                          "space": "l2"
+                        }
+                      ],
+                      "insts": [
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "l1:0",
+                            0
+                          ],
+                          "comment": "",
+                          "dst": null,
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:5:alloc_l1",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "alloc.l1"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 5,
+                            "generated_by": "",
+                            "op_name": "tile.alloc",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "l1:1",
+                            1
+                          ],
+                          "comment": "",
+                          "dst": null,
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:6:alloc_l1",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "alloc.l1"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 6,
+                            "generated_by": "",
+                            "op_name": "tile.alloc",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "l1:2",
+                            2
+                          ],
+                          "comment": "",
+                          "dst": null,
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:7:alloc_l1",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "alloc.l1"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 7,
+                            "generated_by": "",
+                            "op_name": "tile.alloc",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "l1:3",
+                            3
+                          ],
+                          "comment": "",
+                          "dst": null,
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:8:alloc_l1",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "alloc.l1"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 8,
+                            "generated_by": "",
+                            "op_name": "tile.alloc",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "l1:4",
+                            4
+                          ],
+                          "comment": "",
+                          "dst": null,
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:9:alloc_l1",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "alloc.l1"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 9,
+                            "generated_by": "",
+                            "op_name": "tile.alloc",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "am:0",
+                            0
+                          ],
+                          "comment": "",
+                          "dst": null,
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:10:alloc_am",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "alloc.am"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 10,
+                            "generated_by": "",
+                            "op_name": "tile.alloc",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "d0"
+                          ],
+                          "comment": "",
+                          "dst": "la0",
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:11:launch",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "launch.mfe"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 11,
+                            "generated_by": "",
+                            "op_name": "tile.load.async",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "d1"
+                          ],
+                          "comment": "",
+                          "dst": "lb0",
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:12:launch",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "launch.mfe"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 12,
+                            "generated_by": "",
+                            "op_name": "tile.load.async",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "d2"
+                          ],
+                          "comment": "",
+                          "dst": "la1",
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:13:launch",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "launch.mfe"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 13,
+                            "generated_by": "",
+                            "op_name": "tile.load.async",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "d3"
+                          ],
+                          "comment": "",
+                          "dst": "lb1",
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:14:launch",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "launch.mfe"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 14,
+                            "generated_by": "",
+                            "op_name": "tile.load.async",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "la0",
+                            "lb0"
+                          ],
+                          "comment": "",
+                          "dst": null,
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:15:await",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "waitall"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 15,
+                            "generated_by": "",
+                            "op_name": "tile.await",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "d4"
+                          ],
+                          "comment": "",
+                          "dst": "k0",
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:16:launch",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "launch.boa"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 16,
+                            "generated_by": "",
+                            "op_name": "tile.boa.async",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "la1",
+                            "lb1"
+                          ],
+                          "comment": "",
+                          "dst": null,
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:17:await",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "waitall"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 17,
+                            "generated_by": "",
+                            "op_name": "tile.await",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "input_released",
+                            0
+                          ],
+                          "comment": "",
+                          "dst": null,
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:18:signal",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "signal.phase"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 18,
+                            "generated_by": "",
+                            "op_name": "tile.signal",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "k0"
+                          ],
+                          "comment": "",
+                          "dst": null,
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:19:await",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "wait"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 19,
+                            "generated_by": "",
+                            "op_name": "tile.await",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "d5"
+                          ],
+                          "comment": "",
+                          "dst": "done",
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:20:launch",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "launch.boa"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 20,
+                            "generated_by": "",
+                            "op_name": "tile.boa.async",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "done"
+                          ],
+                          "comment": "",
+                          "dst": null,
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:21:await",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "wait"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 21,
+                            "generated_by": "",
+                            "op_name": "tile.await",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "l1:0"
+                          ],
+                          "comment": "",
+                          "dst": null,
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:22:free_l1",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "free.l1"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 22,
+                            "generated_by": "",
+                            "op_name": "tile.free",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "l1:1"
+                          ],
+                          "comment": "",
+                          "dst": null,
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:23:free_l1",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "free.l1"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 23,
+                            "generated_by": "",
+                            "op_name": "tile.free",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "l1:2"
+                          ],
+                          "comment": "",
+                          "dst": null,
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:24:free_l1",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "free.l1"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 24,
+                            "generated_by": "",
+                            "op_name": "tile.free",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "l1:3"
+                          ],
+                          "comment": "",
+                          "dst": null,
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:25:free_l1",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "free.l1"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 25,
+                            "generated_by": "",
+                            "op_name": "tile.free",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "d6"
+                          ],
+                          "comment": "",
+                          "dst": "stored",
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:26:launch",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "launch.mfe"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 26,
+                            "generated_by": "",
+                            "op_name": "tile.store.async",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "stored"
+                          ],
+                          "comment": "",
+                          "dst": null,
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:27:await",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "wait"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 27,
+                            "generated_by": "",
+                            "op_name": "tile.await",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [
+                            "output_ready",
+                            0
+                          ],
+                          "comment": "",
+                          "dst": null,
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:28:signal",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "signal.phase"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 28,
+                            "generated_by": "",
+                            "op_name": "tile.signal",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        },
+                        {
+                          "$type": "ExecTileInst",
+                          "args": [],
+                          "comment": "",
+                          "dst": null,
+                          "instruction_id": "call:boa_am_matmul:0:done:tile:boa_am_mm:29:return",
+                          "label": null,
+                          "op": {
+                            "$enum": "ExecTileOp",
+                            "value": "ret"
+                          },
+                          "source_ref": {
+                            "$type": "SourceRef",
+                            "body_op_index": 29,
+                            "generated_by": "",
+                            "op_name": "tile.return",
+                            "reason": "",
+                            "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+                            "symbol": "boa_am_mm"
+                          }
+                        }
+                      ],
+                      "l1_buffers": [
+                        {
+                          "$type": "ExecL1Buffer",
+                          "alignment": 256,
+                          "bytes": 8192,
+                          "dims": [
+                            64,
+                            64
+                          ],
+                          "dtype": "bf16",
+                          "element_bytes": 2,
+                          "name": "l1:0"
+                        },
+                        {
+                          "$type": "ExecL1Buffer",
+                          "alignment": 256,
+                          "bytes": 8192,
+                          "dims": [
+                            64,
+                            64
+                          ],
+                          "dtype": "bf16",
+                          "element_bytes": 2,
+                          "name": "l1:1"
+                        },
+                        {
+                          "$type": "ExecL1Buffer",
+                          "alignment": 256,
+                          "bytes": 32768,
+                          "dims": [
+                            64,
+                            256
+                          ],
+                          "dtype": "bf16",
+                          "element_bytes": 2,
+                          "name": "l1:2"
+                        },
+                        {
+                          "$type": "ExecL1Buffer",
+                          "alignment": 256,
+                          "bytes": 32768,
+                          "dims": [
+                            64,
+                            256
+                          ],
+                          "dtype": "bf16",
+                          "element_bytes": 2,
+                          "name": "l1:3"
+                        },
+                        {
+                          "$type": "ExecL1Buffer",
+                          "alignment": 256,
+                          "bytes": 65536,
+                          "dims": [
+                            64,
+                            256
+                          ],
+                          "dtype": "f32",
+                          "element_bytes": 4,
+                          "name": "l1:4"
+                        }
+                      ],
+                      "labels": {
+                        "$map": []
+                      },
+                      "layout": {
+                        "$type": "ArenaLayout",
+                        "alignment": 256,
+                        "buffer_layouts": [
+                          {
+                            "$type": "BufferLayout",
+                            "arena_offset": 0,
+                            "banks": 16,
+                            "buffer_id": "l1:0",
+                            "logical_bytes": 8192,
+                            "role": "",
+                            "slot_id": 0,
+                            "stripe_bytes": 256
+                          },
+                          {
+                            "$type": "BufferLayout",
+                            "arena_offset": 8192,
+                            "banks": 16,
+                            "buffer_id": "l1:1",
+                            "logical_bytes": 8192,
+                            "role": "",
+                            "slot_id": 1,
+                            "stripe_bytes": 256
+                          },
+                          {
+                            "$type": "BufferLayout",
+                            "arena_offset": 16384,
+                            "banks": 16,
+                            "buffer_id": "l1:2",
+                            "logical_bytes": 32768,
+                            "role": "",
+                            "slot_id": 2,
+                            "stripe_bytes": 256
+                          },
+                          {
+                            "$type": "BufferLayout",
+                            "arena_offset": 49152,
+                            "banks": 16,
+                            "buffer_id": "l1:3",
+                            "logical_bytes": 32768,
+                            "role": "",
+                            "slot_id": 3,
+                            "stripe_bytes": 256
+                          },
+                          {
+                            "$type": "BufferLayout",
+                            "arena_offset": 81920,
+                            "banks": 16,
+                            "buffer_id": "l1:4",
+                            "logical_bytes": 65536,
+                            "role": "",
+                            "slot_id": 4,
+                            "stripe_bytes": 256
+                          }
+                        ],
+                        "layout_hash": "98ffff7cea7c684ffe2139a82754d13259850c4b4e8df926035899ae61724115",
+                        "per_bank_bytes": [
+                          9216,
+                          9216,
+                          9216,
+                          9216,
+                          9216,
+                          9216,
+                          9216,
+                          9216,
+                          9216,
+                          9216,
+                          9216,
+                          9216,
+                          9216,
+                          9216,
+                          9216,
+                          9216
+                        ],
+                        "reserved_bytes": 147456,
+                        "stripe_bytes": 256
+                      },
+                      "name": "boa_am_mm",
+                      "program_hash": "faf8cc1ced407567419c33c67f8f0ece207842eefaac89ee6889669959564c5a",
+                      "program_id": 1,
+                      "resource_contract": {
+                        "$type": "TileResources",
+                        "allowed_profiles": [
+                          0,
+                          1,
+                          2
+                        ],
+                        "l1_cache": null,
+                        "l2_cache": null,
+                        "tile_l1_spm_bytes_per_context": 147456
+                      },
+                      "text_bytes": 1024,
+                      "version": 1
+                    },
+                    "write_actuals": [
+                      "c"
+                    ]
+                  }
+                ]
+              ]
+            },
+            "shared_inputs": [],
+            "streams": []
+          }
+        ]
+      ]
+    }
+  },
+  "entry_kind": "model",
+  "entry_prefix": [],
+  "entry_profiles": {
+    "$type": "ProfileState",
+    "l1_mode": 0,
+    "l2_mode": 0
+  },
+  "exit_profiles": {
+    "$type": "ProfileState",
+    "l1_mode": 0,
+    "l2_mode": 0
+  },
+  "registry": {
+    "$type": "ProfileRegistry",
+    "abi": "v0",
+    "l1": {
+      "$map": [
+        [
+          0,
+          {
+            "$type": "MemoryProfile",
+            "alignment": 64,
+            "bank_bytes": 65536,
+            "banks": 16,
+            "cache_bytes_per_bank": 0,
+            "cache_org_id": "profiled_lru_v0",
+            "cache_write_policy": "read_only",
+            "level": "l1",
+            "maintenance_caps": [
+              "invalidate_range",
+              "clean_invalidate_all",
+              "bypass"
+            ],
+            "mode": 0,
+            "pools": 4,
+            "spm_bytes_per_bank": 65536,
+            "spm_mapping_id": "striped_arena_v0",
+            "system_reserved_spm_per_bank": 2048
+          }
+        ],
+        [
+          1,
+          {
+            "$type": "MemoryProfile",
+            "alignment": 64,
+            "bank_bytes": 65536,
+            "banks": 16,
+            "cache_bytes_per_bank": 8192,
+            "cache_org_id": "profiled_lru_v0",
+            "cache_write_policy": "read_only",
+            "level": "l1",
+            "maintenance_caps": [
+              "invalidate_range",
+              "clean_invalidate_all",
+              "bypass"
+            ],
+            "mode": 1,
+            "pools": 4,
+            "spm_bytes_per_bank": 57344,
+            "spm_mapping_id": "striped_arena_v0",
+            "system_reserved_spm_per_bank": 2048
+          }
+        ],
+        [
+          2,
+          {
+            "$type": "MemoryProfile",
+            "alignment": 64,
+            "bank_bytes": 65536,
+            "banks": 16,
+            "cache_bytes_per_bank": 16384,
+            "cache_org_id": "profiled_lru_v0",
+            "cache_write_policy": "read_only",
+            "level": "l1",
+            "maintenance_caps": [
+              "invalidate_range",
+              "clean_invalidate_all",
+              "bypass"
+            ],
+            "mode": 2,
+            "pools": 4,
+            "spm_bytes_per_bank": 49152,
+            "spm_mapping_id": "striped_arena_v0",
+            "system_reserved_spm_per_bank": 2048
+          }
+        ],
+        [
+          3,
+          {
+            "$type": "MemoryProfile",
+            "alignment": 64,
+            "bank_bytes": 65536,
+            "banks": 16,
+            "cache_bytes_per_bank": 32768,
+            "cache_org_id": "profiled_lru_v0",
+            "cache_write_policy": "read_only",
+            "level": "l1",
+            "maintenance_caps": [
+              "invalidate_range",
+              "clean_invalidate_all",
+              "bypass"
+            ],
+            "mode": 3,
+            "pools": 4,
+            "spm_bytes_per_bank": 32768,
+            "spm_mapping_id": "striped_arena_v0",
+            "system_reserved_spm_per_bank": 2048
+          }
+        ]
+      ]
+    },
+    "l2": {
+      "$map": [
+        [
+          0,
+          {
+            "$type": "MemoryProfile",
+            "alignment": 64,
+            "bank_bytes": 524288,
+            "banks": 16,
+            "cache_bytes_per_bank": 0,
+            "cache_org_id": "profiled_lru_v0",
+            "cache_write_policy": "read_only",
+            "level": "l2",
+            "maintenance_caps": [
+              "invalidate_range",
+              "clean_invalidate_all",
+              "bypass"
+            ],
+            "mode": 0,
+            "pools": 1,
+            "spm_bytes_per_bank": 524288,
+            "spm_mapping_id": "striped_arena_v0",
+            "system_reserved_spm_per_bank": 4096
+          }
+        ],
+        [
+          1,
+          {
+            "$type": "MemoryProfile",
+            "alignment": 64,
+            "bank_bytes": 524288,
+            "banks": 16,
+            "cache_bytes_per_bank": 65536,
+            "cache_org_id": "profiled_lru_v0",
+            "cache_write_policy": "read_only",
+            "level": "l2",
+            "maintenance_caps": [
+              "invalidate_range",
+              "clean_invalidate_all",
+              "bypass"
+            ],
+            "mode": 1,
+            "pools": 1,
+            "spm_bytes_per_bank": 458752,
+            "spm_mapping_id": "striped_arena_v0",
+            "system_reserved_spm_per_bank": 4096
+          }
+        ],
+        [
+          2,
+          {
+            "$type": "MemoryProfile",
+            "alignment": 64,
+            "bank_bytes": 524288,
+            "banks": 16,
+            "cache_bytes_per_bank": 131072,
+            "cache_org_id": "profiled_lru_v0",
+            "cache_write_policy": "read_only",
+            "level": "l2",
+            "maintenance_caps": [
+              "invalidate_range",
+              "clean_invalidate_all",
+              "bypass"
+            ],
+            "mode": 2,
+            "pools": 1,
+            "spm_bytes_per_bank": 393216,
+            "spm_mapping_id": "striped_arena_v0",
+            "system_reserved_spm_per_bank": 4096
+          }
+        ],
+        [
+          3,
+          {
+            "$type": "MemoryProfile",
+            "alignment": 64,
+            "bank_bytes": 524288,
+            "banks": 16,
+            "cache_bytes_per_bank": 262144,
+            "cache_org_id": "profiled_lru_v0",
+            "cache_write_policy": "read_only",
+            "level": "l2",
+            "maintenance_caps": [
+              "invalidate_range",
+              "clean_invalidate_all",
+              "bypass"
+            ],
+            "mode": 3,
+            "pools": 1,
+            "spm_bytes_per_bank": 262144,
+            "spm_mapping_id": "striped_arena_v0",
+            "system_reserved_spm_per_bank": 4096
+          }
+        ]
+      ]
+    },
+    "registry_hash": "3ce3708c4ffe91cf3e01b9b561f2b98de140a3bd12b970c0f35ea04b6cd587b4",
+    "target": {
+      "$type": "MemoryTargetConfig",
+      "l1": {
+        "$type": "MemoryLevelTarget",
+        "cache_org_id": "profiled_lru_v0",
+        "cache_write_policy": "read_only",
+        "maintenance_caps": [
+          "invalidate_range",
+          "clean_invalidate_all",
+          "bypass"
+        ],
+        "reset_mode": 0,
+        "spm_mapping_id": "striped_arena_v0",
+        "system_reserved_spm_per_bank": 2048
+      },
+      "l2": {
+        "$type": "MemoryLevelTarget",
+        "cache_org_id": "profiled_lru_v0",
+        "cache_write_policy": "read_only",
+        "maintenance_caps": [
+          "invalidate_range",
+          "clean_invalidate_all",
+          "bypass"
+        ],
+        "reset_mode": 0,
+        "spm_mapping_id": "striped_arena_v0",
+        "system_reserved_spm_per_bank": 4096
+      },
+      "profile_command_timeout_cycles": 2000000
+    }
+  },
+  "registry_hash": "3ce3708c4ffe91cf3e01b9b561f2b98de140a3bd12b970c0f35ea04b6cd587b4",
+  "relocations": [
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dst",
+      "kind": "event",
+      "ordinal": 0,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dst",
+      "kind": "event",
+      "ordinal": 1,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dst",
+      "kind": "event",
+      "ordinal": 2,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dst",
+      "kind": "event",
+      "ordinal": 3,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dependencies",
+      "kind": "event_tuple",
+      "ordinal": 3,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": 0,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "global_view",
+      "kind": "binding",
+      "ordinal": 3,
+      "role_id": -1,
+      "scope": "context"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dst",
+      "kind": "event",
+      "ordinal": 4,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dependencies",
+      "kind": "event_tuple",
+      "ordinal": 4,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": 1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "global_view",
+      "kind": "binding",
+      "ordinal": 4,
+      "role_id": -1,
+      "scope": "context"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dst",
+      "kind": "event",
+      "ordinal": 5,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dependencies",
+      "kind": "event_tuple",
+      "ordinal": 5,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "args",
+      "kind": "dispatch_events",
+      "ordinal": 5,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dst",
+      "kind": "event",
+      "ordinal": 6,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dependencies",
+      "kind": "event_tuple",
+      "ordinal": 6,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": 2,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "global_view",
+      "kind": "binding",
+      "ordinal": 6,
+      "role_id": -1,
+      "scope": "context"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dst",
+      "kind": "event",
+      "ordinal": 7,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dependencies",
+      "kind": "event_tuple",
+      "ordinal": 7,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "args",
+      "kind": "release_events",
+      "ordinal": 7,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dst",
+      "kind": "event",
+      "ordinal": 8,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dependencies",
+      "kind": "event_tuple",
+      "ordinal": 8,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "args",
+      "kind": "release_events",
+      "ordinal": 8,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dst",
+      "kind": "event",
+      "ordinal": 9,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dependencies",
+      "kind": "event_tuple",
+      "ordinal": 9,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "args",
+      "kind": "release_events",
+      "ordinal": 9,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dependencies",
+      "kind": "event_tuple",
+      "ordinal": 10,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "args",
+      "kind": "event_tuple",
+      "ordinal": 10,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dependencies",
+      "kind": "event_tuple",
+      "ordinal": 11,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "args",
+      "kind": "event_tuple",
+      "ordinal": 11,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "dependencies",
+      "kind": "event_tuple",
+      "ordinal": 12,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "args",
+      "kind": "event_tuple",
+      "ordinal": 12,
+      "role_id": -1,
+      "scope": "group"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "completion_event",
+      "kind": "event",
+      "ordinal": 0,
+      "role_id": -1,
+      "scope": "task"
+    },
+    {
+      "$type": "Relocation",
+      "argument_index": -1,
+      "binding_id": "call:boa_am_matmul:0:done",
+      "field": "event_uses",
+      "kind": "event_map",
+      "ordinal": 0,
+      "role_id": -1,
+      "scope": "task"
+    }
+  ],
+  "resource_budgets": {
+    "$map": [
+      [
+        "call:boa_am_matmul:0:done",
+        {
+          "$type": "ResourceBudget",
+          "engine_requirements": {
+            "$map": [
+              [
+                "dispatch",
+                1
+              ],
+              [
+                "inflight",
+                1
+              ],
+              [
+                "mfe_load",
+                1
+              ],
+              [
+                "mfe_store",
+                1
+              ]
+            ]
+          },
+          "event_frontier": 12,
+          "frame_slots": 5,
+          "max_live_grids": 1
+        }
+      ]
+    ]
+  },
+  "schema_version": 5,
+  "source_hash": "983205bc2a8b366a4cb33ef24e3a9ed64146fc5ca1dcb47ffdcfabd275ba8155",
+  "source_ir": "builtin.module {\n  tile.program @boa_am_mm (%task: !nest.task, %a_l2: !nest.l2_buffer<2x64x64xbf16>, %b_l2: !nest.l2_buffer<2x64x256xbf16>, %c_l2: !nest.l2_buffer<64x256xf32>) resource_contract = #tile.resources<allowed_profiles = [0, 1, 2], tile_l1_spm_bytes_per_context = 147456> {\n    %a0_v = tile.subview %a_l2 offsets = [0, 0, 0] sizes = [1, 64, 64] strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>\n    %a1_v = tile.subview %a_l2 offsets = [1, 0, 0] sizes = [1, 64, 64] strides = [1, 1, 1] : !nest.l2_view<1x64x64xbf16>\n    %b0_v = tile.subview %b_l2 offsets = [0, 0, 0] sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>\n    %b1_v = tile.subview %b_l2 offsets = [1, 0, 0] sizes = [1, 64, 256] strides = [1, 1, 1] : !nest.l2_view<1x64x256xbf16>\n    %c_v = tile.subview %c_l2 offsets = [0, 0] sizes = [64, 256] strides = [1, 1] : !nest.l2_view<64x256xf32>\n    %a0 = tile.alloc shape = [64, 64] dtype = \"bf16\" alignment = 256 : !tile.l1_buffer<64x64xbf16>\n    %a1 = tile.alloc shape = [64, 64] dtype = \"bf16\" alignment = 256 : !tile.l1_buffer<64x64xbf16>\n    %b0 = tile.alloc shape = [64, 256] dtype = \"bf16\" alignment = 256 : !tile.l1_buffer<64x256xbf16>\n    %b1 = tile.alloc shape = [64, 256] dtype = \"bf16\" alignment = 256 : !tile.l1_buffer<64x256xbf16>\n    %out = tile.alloc memory_space = \"l1\" shape = [64, 256] dtype = \"f32\" alignment = 256 : !tile.l1_buffer<64x256xf32>\n    %acc = tile.alloc memory_space = \"am\" logical_slot = 0 output(%out) shape = [64, 256] dtype = \"f32\" alignment = 256 : !tile.am_buffer<64x256xf32>\n    %la0 = tile.load.async %a0_v into %a0 : !tile.event<\"la0\">\n    %lb0 = tile.load.async %b0_v into %b0 : !tile.event<\"lb0\">\n    %la1 = tile.load.async %a1_v into %a1 : !tile.event<\"la1\">\n    %lb1 = tile.load.async %b1_v into %b1 : !tile.event<\"lb1\">\n    tile.await %la0, %lb0\n    %k0 = tile.boa.async \"matmul\" ins(%a0, %b0) outs(%out) acc(%acc) m = 64 n = 256 k = 64 seq = 0 : !tile.event<\"k0\">\n    tile.await %la1, %lb1\n    tile.signal input_released(%task)\n    tile.await %k0\n    %done = tile.boa.async \"matmul\" ins(%a1, %b1) outs(%out) acc(%acc) m = 64 n = 256 k = 64 seq = 1 accumulate output : !tile.event<\"done\">\n    tile.await %done\n    tile.free %a0\n    tile.free %a1\n    tile.free %b0\n    tile.free %b1\n    %stored = tile.store.async %out into %c_v : !tile.event<\"stored\">\n    tile.await %stored\n    tile.signal output_ready(%task)\n    tile.return\n  }\n  nest.context @boa_am_ctx (%A: !nest.global_memref<2x64x64xbf16>, %B: !nest.global_memref<2x64x256xbf16>, %C: !nest.global_memref<64x256xf32>) placement = 1 resource_contract = #nest.context_resources<l2_mode = 0, allowed_profiles = [0, 1, 2], logical_tasks = 1, l2_spm_bytes = 147456, requested_contexts_per_tile = 1> {\n    %a_blk = nest.subview %A offsets = [0, 0, 0] sizes = [2, 64, 64] strides = [1, 1, 1] : !nest.global_view<2x64x64xbf16>\n    %b_blk = nest.subview %B offsets = [0, 0, 0] sizes = [2, 64, 256] strides = [1, 1, 1] : !nest.global_view<2x64x256xbf16>\n    %c_blk = nest.subview %C offsets = [0, 0] sizes = [64, 256] strides = [1, 1] : !nest.global_view<64x256xf32>\n    %a_l2_1 = nest.alloc slot = \"a\" role = \"in\" shape = [2, 64, 64] dtype = \"bf16\" alignment = 256 : !nest.l2_buffer<2x64x64xbf16>\n    %b_l2_1 = nest.alloc slot = \"b\" role = \"in\" shape = [2, 64, 256] dtype = \"bf16\" alignment = 256 : !nest.l2_buffer<2x64x256xbf16>\n    %c_l2_1 = nest.alloc slot = \"c\" role = \"out\" shape = [64, 256] dtype = \"f32\" alignment = 256 : !nest.l2_buffer<64x256xf32>\n    %a_pref = nest.dma.prefetch.async %a_blk into %a_l2_1 : !nest.event<\"a_pref\">\n    %b_pref = nest.dma.prefetch.async %b_blk into %b_l2_1 : !nest.event<\"b_pref\">\n    %tasks = nest.task.range from = 0 to = 1 : !nest.task_range\n    %grid, %read, %ready = nest.dispatch.tasks.async @boa_am_mm l1_mode = 0 context = 0 tasks(%tasks) globals() bindings(%a_l2_1, %b_l2_1, %c_l2_1) ins(%a_l2_1, %b_l2_1) outs(%c_l2_1) signal_policy { input_released = #nest.aggregate<all_tasks>,  output_ready = #nest.aggregate<all_tasks> } depends_on(%a_pref, %b_pref) : (!nest.event<\"grid\">, !nest.event<\"read\">, !nest.event<\"ready\">)\n    %c_store = nest.dma.store.async %c_l2_1 into %c_blk depends_on(%ready) : !nest.event<\"c_store\">\n    nest.release %a_l2_1 depends_on(%read, %a_pref)\n    nest.release %b_l2_1 depends_on(%read, %b_pref)\n    nest.release %c_l2_1 depends_on(%c_store)\n    nest.await %grid, %c_store\n    nest.return\n  }\n  nexus.program @boa_am_matmul (%A_1: !nest.global_memref<2x64x64xbf16>, %B_1: !nest.global_memref<2x64x256xbf16>, %C_1: !nest.global_memref<64x256xf32>) {\n    %done_1 = nexus.submit_context.async @boa_am_ctx(%A_1, %B_1, %C_1) : !nexus.event<\"done\">\n    nexus.await %done_1\n    nexus.return\n  }\n}\n",
+  "source_map": {
+    "$map": [
+      [
+        "call:boa_am_matmul:0:done:device:0:submit",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 0,
+          "generated_by": "",
+          "op_name": "nexus.submit_context.async",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_matmul"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:10:store",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 10,
+          "generated_by": "",
+          "op_name": "nest.dma.store.async",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_ctx"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:11:release_l2",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 11,
+          "generated_by": "",
+          "op_name": "nest.release",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_ctx"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:12:release_l2",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 12,
+          "generated_by": "",
+          "op_name": "nest.release",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_ctx"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:13:release_l2",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 13,
+          "generated_by": "",
+          "op_name": "nest.release",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_ctx"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:14:await:0",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 14,
+          "generated_by": "",
+          "op_name": "nest.await",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_ctx"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:14:await:1",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 14,
+          "generated_by": "",
+          "op_name": "nest.await",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_ctx"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:15:return",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 15,
+          "generated_by": "",
+          "op_name": "nest.return",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_ctx"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:3:bind_l2",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 3,
+          "generated_by": "",
+          "op_name": "nest.alloc",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_ctx"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:4:bind_l2",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 4,
+          "generated_by": "",
+          "op_name": "nest.alloc",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_ctx"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:5:bind_l2",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 5,
+          "generated_by": "",
+          "op_name": "nest.alloc",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_ctx"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:6:prefetch",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 6,
+          "generated_by": "",
+          "op_name": "nest.dma.prefetch.async",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_ctx"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:7:prefetch",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 7,
+          "generated_by": "",
+          "op_name": "nest.dma.prefetch.async",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_ctx"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:group:9:dispatch",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 9,
+          "generated_by": "",
+          "op_name": "nest.dispatch.tasks.async",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_ctx"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:10:alloc_am",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 10,
+          "generated_by": "",
+          "op_name": "tile.alloc",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:11:launch",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 11,
+          "generated_by": "",
+          "op_name": "tile.load.async",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:12:launch",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 12,
+          "generated_by": "",
+          "op_name": "tile.load.async",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:13:launch",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 13,
+          "generated_by": "",
+          "op_name": "tile.load.async",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:14:launch",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 14,
+          "generated_by": "",
+          "op_name": "tile.load.async",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:15:await",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 15,
+          "generated_by": "",
+          "op_name": "tile.await",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:16:launch",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 16,
+          "generated_by": "",
+          "op_name": "tile.boa.async",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:17:await",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 17,
+          "generated_by": "",
+          "op_name": "tile.await",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:18:signal",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 18,
+          "generated_by": "",
+          "op_name": "tile.signal",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:19:await",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 19,
+          "generated_by": "",
+          "op_name": "tile.await",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:20:launch",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 20,
+          "generated_by": "",
+          "op_name": "tile.boa.async",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:21:await",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 21,
+          "generated_by": "",
+          "op_name": "tile.await",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:22:free_l1",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 22,
+          "generated_by": "",
+          "op_name": "tile.free",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:23:free_l1",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 23,
+          "generated_by": "",
+          "op_name": "tile.free",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:24:free_l1",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 24,
+          "generated_by": "",
+          "op_name": "tile.free",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:25:free_l1",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 25,
+          "generated_by": "",
+          "op_name": "tile.free",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:26:launch",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 26,
+          "generated_by": "",
+          "op_name": "tile.store.async",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:27:await",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 27,
+          "generated_by": "",
+          "op_name": "tile.await",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:28:signal",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 28,
+          "generated_by": "",
+          "op_name": "tile.signal",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:29:return",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 29,
+          "generated_by": "",
+          "op_name": "tile.return",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:5:alloc_l1",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 5,
+          "generated_by": "",
+          "op_name": "tile.alloc",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:6:alloc_l1",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 6,
+          "generated_by": "",
+          "op_name": "tile.alloc",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:7:alloc_l1",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 7,
+          "generated_by": "",
+          "op_name": "tile.alloc",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:8:alloc_l1",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 8,
+          "generated_by": "",
+          "op_name": "tile.alloc",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "call:boa_am_matmul:0:done:tile:boa_am_mm:9:alloc_l1",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 9,
+          "generated_by": "",
+          "op_name": "tile.alloc",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_mm"
+        }
+      ],
+      [
+        "model:boa_am_matmul:device:1:await:0",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 1,
+          "generated_by": "",
+          "op_name": "nexus.await",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_matmul"
+        }
+      ],
+      [
+        "model:boa_am_matmul:device:2:return",
+        {
+          "$type": "SourceRef",
+          "body_op_index": 2,
+          "generated_by": "",
+          "op_name": "nexus.return",
+          "reason": "",
+          "source_name": "/home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+          "symbol": "boa_am_matmul"
+        }
+      ]
+    ]
+  },
+  "static_effects": {
+    "$map": [
+      [
+        "accesses",
+        {
+          "$map": [
+            [
+              "call:boa_am_matmul:0:done",
+              [
+                {
+                  "$map": [
+                    [
+                      "access",
+                      "read"
+                    ],
+                    [
+                      "bytes",
+                      16384
+                    ],
+                    [
+                      "cache_levels",
+                      []
+                    ],
+                    [
+                      "input_index",
+                      0
+                    ],
+                    [
+                      "offset",
+                      0
+                    ]
+                  ]
+                },
+                {
+                  "$map": [
+                    [
+                      "access",
+                      "read"
+                    ],
+                    [
+                      "bytes",
+                      65536
+                    ],
+                    [
+                      "cache_levels",
+                      []
+                    ],
+                    [
+                      "input_index",
+                      1
+                    ],
+                    [
+                      "offset",
+                      0
+                    ]
+                  ]
+                },
+                {
+                  "$map": [
+                    [
+                      "access",
+                      "write"
+                    ],
+                    [
+                      "bytes",
+                      65536
+                    ],
+                    [
+                      "cache_levels",
+                      []
+                    ],
+                    [
+                      "input_index",
+                      2
+                    ],
+                    [
+                      "offset",
+                      0
+                    ]
+                  ]
+                }
+              ]
+            ]
+          ]
+        }
+      ],
+      [
+        "host_accesses",
+        {
+          "$map": []
+        }
+      ],
+      [
+        "program_text_bytes",
+        {
+          "$map": [
+            [
+              "call:boa_am_matmul:0:done",
+              [
+                1024
+              ]
+            ]
+          ]
+        }
+      ],
+      [
+        "resources",
+        {
+          "$map": [
+            [
+              "call:boa_am_matmul:0:done",
+              {
+                "$map": [
+                  [
+                    "am_chains",
+                    1
+                  ],
+                  [
+                    "am_peak_live",
+                    1
+                  ],
+                  [
+                    "am_slot_bytes",
+                    [
+                      65536
+                    ]
+                  ],
+                  [
+                    "l1_layout_hashes",
+                    [
+                      "98ffff7cea7c684ffe2139a82754d13259850c4b4e8df926035899ae61724115"
+                    ]
+                  ],
+                  [
+                    "l1_modes",
+                    [
+                      0,
+                      1,
+                      2
+                    ]
+                  ],
+                  [
+                    "l2_layout_hash",
+                    "9ee6314060d9fbf15e53238cfd8ba9013e23ad68595b1d184440ab2bee7dafc1"
+                  ],
+                  [
+                    "l2_modes",
+                    [
+                      0,
+                      1,
+                      2
+                    ]
+                  ],
+                  [
+                    "logical_tasks",
+                    1
+                  ]
+                ]
+              }
+            ]
+          ]
+        }
+      ],
+      [
+        "scope_effects",
+        {
+          "$map": []
+        }
+      ]
+    ]
+  },
+  "target_hash": "ed8dd476cb9ad37babcec2b77f65e11dc424b54b0b99abf82c9c303c7302d80b",
+  "workload_info": {
+    "$type": "WorkloadInfo",
+    "description": "External IR: /home/yongxiy/Desktop/nexus/examples/workloads/boa_am_matmul.mlir",
+    "expected": {
+      "$map": []
+    },
+    "name": "boa_am_matmul"
+  }
+}

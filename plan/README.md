@@ -20,7 +20,7 @@ P01 补跑软件 gate 已通过，首次失败仍保留在 [P01 证据](evidence
 | P06 | SW-A3              | [逐 MAC 数值与 artifact 切换](P06_SWA3_数值与Artifact迁移.md)   | P03、P05                     | 通过   |
 | P07 | SW-A4              | [终态时序与安全释放](P07_SWA4_终态与释放顺序.md)                | P04                          | 通过   |
 | P08 | C6-S / C3 软件前置 | [软件后处理、四转置与 im2col Conv](P08_C6S_后处理与软件Conv.md) | P06                          | 通过   |
-| P09 | C7-A / SW-A gate   | [软件全链路 gate](P09_C7A_软件集成Gate.md)                      | P04、P05、P06、P07、P08      | 未开始 |
+| P09 | C7-A / SW-A gate   | [软件全链路 gate](P09_C7A_软件集成Gate.md)                      | P04、P05、P06、P07、P08      | 通过   |
 | P10 | C4 / §4 ABI        | [协议 schema 与接口冻结](P10_C4_协议Schema与接口.md)            | P02、P09                     | 未开始 |
 | P11 | C2-A               | [dataflow 选择与 FP32 PE](P11_C2A_数据流与FP32PE.md)            | P02、P03、P10                | 未开始 |
 | P12 | C2-B               | [方形 mesh 与不可暂停输出合同](P12_C2B_方形阵列.md)             | P11                          | 未开始 |

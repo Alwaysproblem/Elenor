@@ -1265,3 +1265,49 @@ def test_runtime_alloc_am_blocks_once_and_wakes_on_slot_free():
   assert snapshot["request_count"] == 2
   assert snapshot["live_leases"] == 0
   assert store.read_hbm(0x300000, 65536) == struct.pack("<16384I", *_oracle(a, b))
+
+
+# ---------------------------------------------------------------------------
+# Module CLI (container target shared-am-functional, case t01-q06-over-bundle-reject)
+# ---------------------------------------------------------------------------
+
+
+CLI_CASE = "t01-q06-over-bundle-reject"
+
+
+def main(argv: list[str] | None = None) -> int:  # pragma: no cover
+  """Run the real T01/Q06 quota/bundle regressions and write the case report."""
+  from pathlib import Path
+
+  from pipeline_validator.tests import case_cli
+
+  args = case_cli.build_parser(
+    "python -m pipeline_validator.tests.test_boa_am",
+    "T01/Q06: two un-FINALed chains then a third request is a permanent "
+    "contract error with no side effect; continuation/park/cancel semantics.",
+    [CLI_CASE],
+  ).parse_args(argv)
+  checks = case_cli.run_checks(
+    [
+      ("ir09-over-bundle-third-request-rejected-without-side-effect",
+       test_ir09_allocation_beyond_bundle_is_rejected_without_side_effect),
+      ("bundle-reserves-continuation-and-prevents-hold-and-wait",
+       test_am_bundle_reserves_continuation_and_prevents_hold_and_wait),
+      ("continuation-waits-only-for-own-draining-final",
+       test_am_continuation_waits_only_for_own_draining_final),
+      ("same-slot-reuse-waits-for-final-release-quota-1",
+       lambda: test_am_same_slot_reuse_waits_for_final_release(1)),
+      ("same-slot-reuse-waits-for-final-release-quota-2",
+       lambda: test_am_same_slot_reuse_waits_for_final_release(2)),
+      ("cancelled-request-is-never-woken", test_am_cancelled_request_is_never_woken),
+      ("runtime-alloc-blocks-once-and-wakes-on-slot-free",
+       test_runtime_alloc_am_blocks_once_and_wakes_on_slot_free),
+    ]
+  )
+  report = case_cli.build_report(CLI_CASE, "test_boa_am", args.seed, checks)
+  case_cli.write_report(Path(args.out), report)
+  return case_cli.finish(report)
+
+
+if __name__ == "__main__":  # pragma: no cover
+  raise SystemExit(main())

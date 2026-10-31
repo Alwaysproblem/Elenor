@@ -32,6 +32,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
 
+import am_gate_cases
 import numeric_cases
 import numeric_profile_cases
 import soft_conv_cases
@@ -387,9 +388,15 @@ def validate_config(text: str, registry_entry: dict, request: dict) -> dict:
       config["numeric"] = numeric_cases.validate_numeric_config(config.get("numeric", {}))
     except ValueError as exc:
       fail_config(str(exc))
-  if target in ("numeric-profile", "soft-conv") and overrides:
+  fixed_scenario_reason = {
+    "numeric-profile": "golden vectors pin each case's boa_numeric_tile_k",
+    "soft-conv": "golden vectors pin each chain's boa_numeric_tile_k",
+    "shared-am-functional": "scenarios pin their hardware configuration",
+    "shared-am-cycle": "scenarios pin their hardware configuration",
+  }
+  if target in fixed_scenario_reason and overrides:
     fail_config(
-      f"{target} golden vectors pin each case's boa_numeric_tile_k; "
+      f"{target} {fixed_scenario_reason[target]}; "
       "validator.hw_overrides must be empty (nothing is silently discarded)"
     )
   return config
@@ -892,6 +899,14 @@ CASE_RUNNERS = {
   "vector-parity": (numeric_profile_cases.case_vector_parity, "F"),
   "zero-k": (numeric_profile_cases.case_zero_k, "F"),
   "cutover-reject": (numeric_profile_cases.case_cutover_reject, "F"),
+  "q09-old-event-cross-slot": (am_gate_cases.case_q09_old_event_cross_slot, "F"),
+  "q08-tile-isolation": (am_gate_cases.case_q08_tile_isolation, "F"),
+  "t01-q06-over-bundle-reject": (am_gate_cases.case_t01_q06_over_bundle_reject, "F"),
+  "t06-one-engine-many-handles": (am_gate_cases.case_t06_one_engine_many_handles, "C"),
+  "engine-pool-progress": (am_gate_cases.case_engine_pool_progress, "C"),
+  "engine-affinity-units": (am_gate_cases.case_engine_affinity_units, "F"),
+  "terminal-order-backpressure": (am_gate_cases.case_terminal_order_backpressure, "C"),
+  "manager-terminal-units": (am_gate_cases.case_manager_terminal_units, "F"),
   "int8-chain": (soft_conv_cases.case_int8_chain, "F"),
   "param-reject": (soft_conv_cases.case_param_reject, "F"),
   "stage-matrix": (soft_conv_cases.case_stage_matrix, "F"),
@@ -1122,6 +1137,38 @@ def main() -> int:
       "examples/workloads/soft_conv_inputs/pad1_stride1/golden.json",
       "examples/generators/generate_soft_conv.py",
       "pipeline_validator/tests/test_soft_conv.py",
+    ):
+      path = repo / rel
+      fixtures[rel] = sha256_path(path) if path.is_file() else "missing"
+  if request["target"] == "shared-am-functional":
+    for rel in (
+      "pipeline_validator/tests/case_cli.py",
+      "pipeline_validator/tests/test_am_tile_isolation.py",
+      "pipeline_validator/tests/test_am_slot_reuse.py",
+      "pipeline_validator/tests/test_boa_am.py",
+    ):
+      path = repo / rel
+      fixtures[rel] = sha256_path(path) if path.is_file() else "missing"
+  if request["target"] == "two-slot-progress":
+    for rel in (
+      "pipeline_validator/tests/case_cli.py",
+      "pipeline_validator/tests/test_boa_multi_engine.py",
+      "pipeline_validator/tests/test_boa_affinity.py",
+      "hardware/configs/boa-1engine.yaml",
+      "hardware/configs/boa-2engine.yaml",
+      "hardware/configs/boa-4engine.yaml",
+    ):
+      path = repo / rel
+      fixtures[rel] = sha256_path(path) if path.is_file() else "missing"
+  if request["target"] == "shared-am-cycle":
+    for rel in (
+      "pipeline_validator/tests/case_cli.py",
+      "pipeline_validator/tests/test_am_terminal_order.py",
+      "plan/evidence/P07/trace-audit.sql",
+      "examples/artifacts/tools/trace_processor_shell",
+      "examples/workloads/boa_am_matmul.mlir",
+      "examples/workloads/boa_am_inputs/boa_am_matmul/A.bin",
+      "examples/workloads/boa_am_inputs/boa_am_matmul/B.bin",
     ):
       path = repo / rel
       fixtures[rel] = sha256_path(path) if path.is_file() else "missing"
