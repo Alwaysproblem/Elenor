@@ -1,6 +1,8 @@
 # Preserve pinned sources, generated golden bytes and raw evidence; evidence/*.md remains checked.
 # P06 test data preserves the actual v4 artifact and P03-generated golden bytes verbatim.
-exclude: ^(?:[^/]+\.json|examples/artifacts/|plan/evidence/P[0-9]+/|hardware/boa/reference/vectors/|pipeline_validator/tests/data/(?:legacy_v4_boa_am|numeric_profile_directed_golden)\.json$|hardware/gemmini/upstream/|hardware/toolchain/chipyard-native\.lock\.yml\.txt$)
+# Soft-conv .bin bindings are exact-size binary fixture inputs (P03-frozen weight bytes may
+# contain no NUL, so the text hooks would otherwise append bytes and corrupt the binding size).
+exclude: ^(?:[^/]+\.json|examples/artifacts/|plan/evidence/P[0-9]+/|hardware/boa/reference/vectors/|pipeline_validator/tests/data/(?:legacy_v4_boa_am|numeric_profile_directed_golden)\.json$|examples/workloads/soft_conv_inputs/.*\.bin$|hardware/gemmini/upstream/|hardware/toolchain/chipyard-native\.lock\.yml\.txt$)
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks

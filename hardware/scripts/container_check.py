@@ -34,6 +34,7 @@ from typing import NoReturn
 
 import numeric_cases
 import numeric_profile_cases
+import soft_conv_cases
 
 EXIT_OK = 0
 EXIT_CONFIG = 6
@@ -386,9 +387,9 @@ def validate_config(text: str, registry_entry: dict, request: dict) -> dict:
       config["numeric"] = numeric_cases.validate_numeric_config(config.get("numeric", {}))
     except ValueError as exc:
       fail_config(str(exc))
-  if target == "numeric-profile" and overrides:
+  if target in ("numeric-profile", "soft-conv") and overrides:
     fail_config(
-      "numeric-profile golden vectors pin each case's boa_numeric_tile_k; "
+      f"{target} golden vectors pin each case's boa_numeric_tile_k; "
       "validator.hw_overrides must be empty (nothing is silently discarded)"
     )
   return config
@@ -891,6 +892,11 @@ CASE_RUNNERS = {
   "vector-parity": (numeric_profile_cases.case_vector_parity, "F"),
   "zero-k": (numeric_profile_cases.case_zero_k, "F"),
   "cutover-reject": (numeric_profile_cases.case_cutover_reject, "F"),
+  "int8-chain": (soft_conv_cases.case_int8_chain, "F"),
+  "param-reject": (soft_conv_cases.case_param_reject, "F"),
+  "stage-matrix": (soft_conv_cases.case_stage_matrix, "F"),
+  "conv-pad-stride-dilation": (soft_conv_cases.case_conv_pad_stride_dilation, "F"),
+  "conv-traffic": (soft_conv_cases.case_conv_traffic, "F"),
 }
 
 
@@ -1105,6 +1111,17 @@ def main() -> int:
       "hardware/boa/reference/vectors/matmul.json",
       "pipeline_validator/tests/data/numeric_profile_directed_golden.json",
       "pipeline_validator/tests/data/legacy_v4_boa_am.json",
+    ):
+      path = repo / rel
+      fixtures[rel] = sha256_path(path) if path.is_file() else "missing"
+  if request["target"] == "soft-conv":
+    for rel in (
+      "hardware/boa/reference/vectors/conv.json",
+      "hardware/boa/reference/vectors/epilogue.json",
+      "hardware/boa/reference/vectors/matmul.json",
+      "examples/workloads/soft_conv_inputs/pad1_stride1/golden.json",
+      "examples/generators/generate_soft_conv.py",
+      "pipeline_validator/tests/test_soft_conv.py",
     ):
       path = repo / rel
       fixtures[rel] = sha256_path(path) if path.is_file() else "missing"

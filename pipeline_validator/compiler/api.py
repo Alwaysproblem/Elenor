@@ -10,6 +10,8 @@ from itertools import pairwise
 from xdsl.dialects.builtin import ModuleOp
 
 from ..compiled_program import (
+  COMPILER_ABI,
+  SCHEMA_VERSION,
   BindingGuard,
   CompiledProgram,
   Relocation,
@@ -68,12 +70,7 @@ def _finalize_program_identities(
       role = task.role_bindings[role_id]
       program = finalized_objects.get(id(role.tile_program))
       if program is None:
-        text_bytes = max(
-            len(role.tile_program.insts) * 4
-            + len(role.tile_program.descriptors) * 16
-            + len(role.tile_program.am_buffers) * 16,
-            1024,
-        )
+        text_bytes = role.tile_program.required_text_bytes
         if text_bytes > hw.tile_program_sram_bytes:
           raise ValueError(
             f"Tile Program {role.tile_program.name!r} text requires {text_bytes} bytes, "
@@ -414,8 +411,8 @@ def compile_program(
   from ..execution_verifier import target_fingerprint, verify_compiled_program
 
   program = CompiledProgram(
-    5,
-    "v5",
+    SCHEMA_VERSION,
+    COMPILER_ABI,
     source_hash,
     source_ir,
     registry,

@@ -60,9 +60,9 @@ result = Simulator(hw, sim).run(loaded)
 Registry, target/artifact hashes, frozen executable, call bindings,
 relocations, source map, dependency proofs, readonly import references, entry/exit
 Profiles, resource budgets, binding guards, and workload metadata. The compiled
-package format has `schema_version=5` and `compiler_abi="v5"` (P06); this is
+package format has `schema_version=6` and `compiler_abi="v6"` (P08); this is
 distinct from hardware YAML schema 2. All earlier schema/ABI artifacts, including
-P05's v4 packages, are rejected and must be rebuilt from source. Parsing uses an explicit type/opcode
+P06/P07's v5 packages, are rejected and must be rebuilt from source. Parsing uses an explicit type/opcode
 allowlist and rejects unknown fields/types, duplicate JSON keys, non-finite
 numbers, unknown versions, and a mismatched artifact hash.
 
@@ -373,7 +373,7 @@ For byte-checked profiled Gather, each request additionally needs
 seeding is available through `seed_cache_line(...)`. Without `ByteStore`,
 Gather remains a deterministic source-authored `L1_HIT`/`L2_HIT`/`HBM_MISS`
 timing profile. Cache capacity never predicts a hit rate. Typed
-`tile.boa.async` executes BF16→FP32 arithmetic and f32/BF16 final conversion
+`tile.boa.async` executes BF16→FP32 arithmetic and f32/BF16/INT8 FINAL conversion
 in `full_memory`; `tile.boa.estimate.async` and EVU/USE remain timing models
 and do not compute tensor values. Estimate BOA alone does not make a workload
 timing-only: PagedAttention still requires `full_memory` for its Gather/Scatter
@@ -406,8 +406,9 @@ steps/accesses, frees slot/quota, then publishes `chain_done` (trace
 `am_commit` (step_committed) and write no L1 nor terminal. Each accepted step
 is an in-flight AM access; a fault/cancel moves the lease to
 `fault_quiescing`, keeps slot/quota until every access retires, then frees and
-publishes the failure terminal. Reset quiesces all accesses itself and does
-not clear the terminal ring. The ring (`terminal_capacity`, default 256) is a
+publishes the failure terminal. Reset quiesces all accesses itself, passes the
+actual cycle through queued-step cancellation, and does not clear the terminal
+ring. The ring (`terminal_capacity`, default 256) is a
 bounded diagnostic that overwrites the oldest and counts
 `terminal_overflow_count`; correctness never depends on it. The report check
 `am_terminal_order` joins retained FINAL result records with terminals by
@@ -441,7 +442,7 @@ snapshot counters accumulate until engine reset; report utilization uses the
 current run's PMU deltas. The older overall utilization heuristic is unchanged.
 
 All five geometry/pool fields and fixed `boa_engine_affinity="least_live_v1"`
-enter target identity. P05 preserved the then-v4 codec; P06 now requires v5.
+enter target identity. P05 preserved the then-v4 codec; P08 now requires v6.
 Recompile source; old target YAML containing `engines.boa.opa` is independently
 rejected as unknown configuration.
 
@@ -489,11 +490,24 @@ hardware/scripts/check numeric-profile --out /tmp/boa-p06/container --seed 20261
 bash examples/run.sh boa-am-matmul --hw-override boa_numeric_tile_k=16 --json
 ```
 
-The profile gate compares frozen P03 golden bytes through source/codec replay
-and `full_memory` execution. P08 bias/scale/ReLU/clip/INT8 cases are observed as
-raw FP32 AM and explicitly labelled pre-epilogue; their FINAL bytes are not
-claimed. INT8 conversion remains unsupported, EVU combine remains timing-only,
-and this is not Gemmini RTL/Verilator co-simulation.
+The profile gate compares frozen P03 golden FINAL bytes through source/codec
+replay and `full_memory` execution, including bias/scale/ReLU/clip and INT8.
+The optional stages belong to immutable AM-allocation configuration and run
+exactly once, after FINAL commit: bias → scale → ReLU → clip → conversion.
+INT8 uses a finite positive `inv_scale`, RNE before adding `zero_point`, then
+saturation; NaN maps to `zero_point` and infinities to the signed endpoints.
+
+Inline epilogue constants consume program SRAM. The existing software footprint
+model counts instructions (4 B), engine/AM descriptors (16 B each), and explicit
+constant words (4 B each), with a 1024 B minimum. Bias contributes `4*n` B;
+scale contributes 4 B, clip 8 B, and INT8 inv_scale/zero_point 8 B. The compiler
+checks capacity and the loader recomputes the declared footprint. These are
+software-model sizing rules, not a frozen hardware binary encoding.
+
+`soft-conv-*` examples materialize im2col bytes with address-driven Gather;
+padding reads an explicit +0 source. `hardware/scripts/check soft-conv` checks
+output/A bytes and transfer counts against P03. EVU combine remains timing-only;
+neither this gate nor numeric-profile is Gemmini RTL/Verilator co-simulation.
 
 ## Hardware YAML schema 2 and default experimental modes
 

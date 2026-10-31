@@ -264,12 +264,33 @@ class ExecL1Buffer:
 
 
 @dataclass(frozen=True)
+class ExecBoaEpilogue:
+  """Immutable FINAL-only post-processing of one AM chain (P03 §4).
+
+  FP32 values are raw 32-bit patterns.  ``None``/False disables a stage.
+  ``bias`` has exactly one word per output column; ``inv_scale`` and
+  ``zero_point`` exist only for an ``i8`` destination, where ``inv_scale``
+  is required.  The output dtype is the bound L1 output view's dtype.
+  """
+
+  bias: tuple[int, ...] | None = None
+  scale: int | None = None
+  relu: bool = False
+  clip: tuple[int, int] | None = None
+  inv_scale: int | None = None
+  zero_point: int = 0
+
+
+@dataclass(frozen=True)
 class ExecAmBuffer:
   """Software-managed BOA accumulator capability, never an L1 heap object.
 
   ``logical_slot`` is the software-selected 0/1 position; the runtime
   chooses the physical group/slot and bound engine only when the lease is
   actually granted.  ``output`` is the reserved final L1 destination view.
+  ``epilogue`` is the chain's grant-time immutable FINAL configuration; every
+  step of the chain references it through the AM name, so it cannot change
+  mid-chain.
   """
 
   name: str
@@ -280,6 +301,7 @@ class ExecAmBuffer:
   bytes: int
   logical_slot: int
   output: ExecMemoryView
+  epilogue: ExecBoaEpilogue
 
 
 @dataclass(frozen=True)
@@ -290,10 +312,11 @@ class ExecBoaMatmulDesc:
   step adds into the existing partial.  ``final`` is the single step that
   writes the bound L1 output and releases the AM lease.
 
-  Storage K is NOT stored here: it is inferred from the A/B view shapes
-  (``a.dims[1] == b.dims[0] >= k``).  ``k_mask`` is the optional
-  ``storage_k``-length boolean activity mask; lanes at or after ``k``
-  must be False, and a tail lane without a mask is implicitly inactive.
+  Storage K is NOT stored here: it is inferred from the A/B view shapes.
+  A is stored ``[m, K]`` or, with ``transpose_a``, ``[K, m]``; B is stored
+  ``[K, n]`` or, with ``transpose_b``, ``[n, K]``.  ``k_mask`` is the
+  optional ``storage_k``-length boolean activity mask; lanes at or after
+  ``k`` must be False, and a tail lane without a mask is implicitly inactive.
   """
 
   a: ExecMemoryView
@@ -306,7 +329,13 @@ class ExecBoaMatmulDesc:
   seq: int
   init: bool
   final: bool
-  k_mask: tuple[bool, ...] | None = None
+  k_mask: tuple[bool, ...] | None
+  transpose_a: bool
+  transpose_b: bool
+
+  @property
+  def storage_k(self) -> int:
+    return self.a.dims[0] if self.transpose_a else self.a.dims[1]
 
 
 @dataclass(frozen=True)
@@ -480,6 +509,26 @@ class ExecTileProgram(FrozenRecord):
   layout: ArenaLayout | None = None
   text_bytes: int = 0
   am_buffers: tuple[ExecAmBuffer, ...] = ()
+
+  @property
+  def required_text_bytes(self) -> int:
+    """Resident software-model footprint, including inline epilogue constants.
+
+    Fixed instruction/descriptor sizes retain the existing capacity model;
+    this is not a frozen hardware encoding.  Stage flags fit in the AM
+    descriptor, while FP32 literals and the INT8 zero point occupy words.
+    """
+    literal_words = 0
+    for am in self.am_buffers:
+      epilogue = am.epilogue
+      literal_words += len(epilogue.bias) if epilogue.bias is not None else 0
+      literal_words += int(epilogue.scale is not None)
+      literal_words += len(epilogue.clip) if epilogue.clip is not None else 0
+      literal_words += 2 if epilogue.inv_scale is not None else 0
+    return max(
+      len(self.insts) * 4 + len(self.descriptors) * 16 + len(self.am_buffers) * 16 + literal_words * 4,
+      1024,
+    )
 
   def label_index(self, label: str) -> int:
     return self.labels[label]

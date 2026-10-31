@@ -1,0 +1,996 @@
+{
+  "expected": {
+    "a_bits": [
+      "0x0000",
+      "0x0000",
+      "0x0000",
+      "0x0000",
+      "0xbf92",
+      "0x3f5b",
+      "0x0000",
+      "0xbedb",
+      "0xbf5b",
+      "0x0000",
+      "0x0000",
+      "0x0000",
+      "0xbf92",
+      "0x3f5b",
+      "0x3edb",
+      "0xbedb",
+      "0xbf5b",
+      "0x3f92",
+      "0x0000",
+      "0x0000",
+      "0x0000",
+      "0x3f5b",
+      "0x3edb",
+      "0x0000",
+      "0xbf5b",
+      "0x3f92",
+      "0x3f37",
+      "0x0000",
+      "0x0000",
+      "0x0000",
+      "0x3edb",
+      "0x0000",
+      "0x0000",
+      "0x3f92",
+      "0x3f37",
+      "0x0000",
+      "0x0000",
+      "0xbf92",
+      "0x3f5b",
+      "0x0000",
+      "0xbedb",
+      "0xbf5b",
+      "0x0000",
+      "0x3e92",
+      "0xbe12",
+      "0xbf92",
+      "0x3f5b",
+      "0x3edb",
+      "0xbedb",
+      "0xbf5b",
+      "0x3f92",
+      "0x3e92",
+      "0xbe12",
+      "0xbf12",
+      "0x3f5b",
+      "0x3edb",
+      "0x0000",
+      "0xbf5b",
+      "0x3f92",
+      "0x3f37",
+      "0xbe12",
+      "0xbf12",
+      "0xbf80",
+      "0x3edb",
+      "0x0000",
+      "0x0000",
+      "0x3f92",
+      "0x3f37",
+      "0x0000",
+      "0xbf12",
+      "0xbf80",
+      "0x0000",
+      "0x0000",
+      "0xbedb",
+      "0xbf5b",
+      "0x0000",
+      "0x3e92",
+      "0xbe12",
+      "0x0000",
+      "0x3f80",
+      "0x3f12",
+      "0xbedb",
+      "0xbf5b",
+      "0x3f92",
+      "0x3e92",
+      "0xbe12",
+      "0xbf12",
+      "0x3f80",
+      "0x3f12",
+      "0x3e12",
+      "0xbf5b",
+      "0x3f92",
+      "0x3f37",
+      "0xbe12",
+      "0xbf12",
+      "0xbf80",
+      "0x3f12",
+      "0x3e12",
+      "0xbe92",
+      "0x3f92",
+      "0x3f37",
+      "0x0000",
+      "0xbf12",
+      "0xbf80",
+      "0x0000",
+      "0x3e12",
+      "0xbe92",
+      "0x0000",
+      "0x0000",
+      "0x3e92",
+      "0xbe12",
+      "0x0000",
+      "0x3f80",
+      "0x3f12",
+      "0x0000",
+      "0x0000",
+      "0x0000",
+      "0x3e92",
+      "0xbe12",
+      "0xbf12",
+      "0x3f80",
+      "0x3f12",
+      "0x3e12",
+      "0x0000",
+      "0x0000",
+      "0x0000",
+      "0xbe12",
+      "0xbf12",
+      "0xbf80",
+      "0x3f12",
+      "0x3e12",
+      "0xbe92",
+      "0x0000",
+      "0x0000",
+      "0x0000",
+      "0xbf12",
+      "0xbf80",
+      "0x0000",
+      "0x3e12",
+      "0xbe92",
+      "0x0000",
+      "0x0000",
+      "0x0000",
+      "0x0000"
+    ],
+    "a_hex": "000000000000000092bf5b3f0000dbbe5bbf00000000000092bf5b3fdb3edbbe5bbf923f0000000000005b3fdb3e00005bbf923f373f000000000000db3e00000000923f373f0000000092bf5b3f0000dbbe5bbf0000923e12be92bf5b3fdb3edbbe5bbf923f923e12be12bf5b3fdb3e00005bbf923f373f12be12bf80bfdb3e00000000923f373f000012bf80bf00000000dbbe5bbf0000923e12be0000803f123fdbbe5bbf923f923e12be12bf803f123f123e5bbf923f373f12be12bf80bf123f123e92be923f373f000012bf80bf0000123e92be00000000923e12be0000803f123f000000000000923e12be12bf803f123f123e00000000000012be12bf80bf123f123e92be00000000000012bf80bf0000123e92be0000000000000000",
+    "am_add_count": 32,
+    "b_bits": [
+      "0xbfe6",
+      "0xbf9a",
+      "0x3f4d",
+      "0x3fb3",
+      "0xbecd",
+      "0x3e4d",
+      "0xbfcd",
+      "0xbf80",
+      "0x3f80",
+      "0x3fcd",
+      "0xbe4d",
+      "0x3ecd",
+      "0xbfb3",
+      "0xbf4d",
+      "0x3f9a",
+      "0x3fe6",
+      "0x0000",
+      "0x3f1a"
+    ],
+    "b_hex": "e6bf9abf4d3fb33fcdbe4d3ecdbf80bf803fcd3f4dbecd3eb3bf4dbf9a3fe63f00001a3f",
+    "c_bits": [
+      "0xbfe9cae0",
+      "0xc0311e20",
+      "0x400a9848",
+      "0x400b1a50",
+      "0x3fd02a00",
+      "0x403fa100",
+      "0xbfb5c580",
+      "0xbd680000",
+      "0xbf95abe0",
+      "0xc00195f0",
+      "0x3fcc10a0",
+      "0x3faba570",
+      "0x3f2fa9c0",
+      "0x3f833a80",
+      "0xc0124f80",
+      "0xbfecdf00",
+      "0x3fc22750",
+      "0x3fe29400",
+      "0xbfc90740",
+      "0xbf62ac00",
+      "0x3fb2c2c0",
+      "0x3f9cb260",
+      "0xc006cc00",
+      "0xc001f320",
+      "0x3f95ebe0",
+      "0x400ccf18",
+      "0xbfbaa010",
+      "0xbf2fa840",
+      "0xbf038ac0",
+      "0xbfa423c0",
+      "0xbe943a00",
+      "0xbfa7e100"
+    ],
+    "dilation": [1, 1],
+    "epilogue_trace": [
+      {
+        "col": 0,
+        "index": 0,
+        "input": "0xbfe9cae0",
+        "row": 0,
+        "stages": [
+          {
+            "after": "0xbfe9cae0",
+            "before": "0xbfe9cae0",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0xbfe9cae0",
+            "before": "0xbfe9cae0",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 1,
+        "index": 1,
+        "input": "0xc0311e20",
+        "row": 0,
+        "stages": [
+          {
+            "after": "0xc0311e20",
+            "before": "0xc0311e20",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0xc0311e20",
+            "before": "0xc0311e20",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 0,
+        "index": 2,
+        "input": "0x400a9848",
+        "row": 1,
+        "stages": [
+          {
+            "after": "0x400a9848",
+            "before": "0x400a9848",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0x400a9848",
+            "before": "0x400a9848",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 1,
+        "index": 3,
+        "input": "0x400b1a50",
+        "row": 1,
+        "stages": [
+          {
+            "after": "0x400b1a50",
+            "before": "0x400b1a50",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0x400b1a50",
+            "before": "0x400b1a50",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 0,
+        "index": 4,
+        "input": "0x3fd02a00",
+        "row": 2,
+        "stages": [
+          {
+            "after": "0x3fd02a00",
+            "before": "0x3fd02a00",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0x3fd02a00",
+            "before": "0x3fd02a00",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 1,
+        "index": 5,
+        "input": "0x403fa100",
+        "row": 2,
+        "stages": [
+          {
+            "after": "0x403fa100",
+            "before": "0x403fa100",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0x403fa100",
+            "before": "0x403fa100",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 0,
+        "index": 6,
+        "input": "0xbfb5c580",
+        "row": 3,
+        "stages": [
+          {
+            "after": "0xbfb5c580",
+            "before": "0xbfb5c580",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0xbfb5c580",
+            "before": "0xbfb5c580",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 1,
+        "index": 7,
+        "input": "0xbd680000",
+        "row": 3,
+        "stages": [
+          {
+            "after": "0xbd680000",
+            "before": "0xbd680000",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0xbd680000",
+            "before": "0xbd680000",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 0,
+        "index": 8,
+        "input": "0xbf95abe0",
+        "row": 4,
+        "stages": [
+          {
+            "after": "0xbf95abe0",
+            "before": "0xbf95abe0",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0xbf95abe0",
+            "before": "0xbf95abe0",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 1,
+        "index": 9,
+        "input": "0xc00195f0",
+        "row": 4,
+        "stages": [
+          {
+            "after": "0xc00195f0",
+            "before": "0xc00195f0",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0xc00195f0",
+            "before": "0xc00195f0",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 0,
+        "index": 10,
+        "input": "0x3fcc10a0",
+        "row": 5,
+        "stages": [
+          {
+            "after": "0x3fcc10a0",
+            "before": "0x3fcc10a0",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0x3fcc10a0",
+            "before": "0x3fcc10a0",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 1,
+        "index": 11,
+        "input": "0x3faba570",
+        "row": 5,
+        "stages": [
+          {
+            "after": "0x3faba570",
+            "before": "0x3faba570",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0x3faba570",
+            "before": "0x3faba570",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 0,
+        "index": 12,
+        "input": "0x3f2fa9c0",
+        "row": 6,
+        "stages": [
+          {
+            "after": "0x3f2fa9c0",
+            "before": "0x3f2fa9c0",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0x3f2fa9c0",
+            "before": "0x3f2fa9c0",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 1,
+        "index": 13,
+        "input": "0x3f833a80",
+        "row": 6,
+        "stages": [
+          {
+            "after": "0x3f833a80",
+            "before": "0x3f833a80",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0x3f833a80",
+            "before": "0x3f833a80",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 0,
+        "index": 14,
+        "input": "0xc0124f80",
+        "row": 7,
+        "stages": [
+          {
+            "after": "0xc0124f80",
+            "before": "0xc0124f80",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0xc0124f80",
+            "before": "0xc0124f80",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 1,
+        "index": 15,
+        "input": "0xbfecdf00",
+        "row": 7,
+        "stages": [
+          {
+            "after": "0xbfecdf00",
+            "before": "0xbfecdf00",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0xbfecdf00",
+            "before": "0xbfecdf00",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 0,
+        "index": 16,
+        "input": "0x3fc22750",
+        "row": 8,
+        "stages": [
+          {
+            "after": "0x3fc22750",
+            "before": "0x3fc22750",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0x3fc22750",
+            "before": "0x3fc22750",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 1,
+        "index": 17,
+        "input": "0x3fe29400",
+        "row": 8,
+        "stages": [
+          {
+            "after": "0x3fe29400",
+            "before": "0x3fe29400",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0x3fe29400",
+            "before": "0x3fe29400",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 0,
+        "index": 18,
+        "input": "0xbfc90740",
+        "row": 9,
+        "stages": [
+          {
+            "after": "0xbfc90740",
+            "before": "0xbfc90740",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0xbfc90740",
+            "before": "0xbfc90740",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 1,
+        "index": 19,
+        "input": "0xbf62ac00",
+        "row": 9,
+        "stages": [
+          {
+            "after": "0xbf62ac00",
+            "before": "0xbf62ac00",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0xbf62ac00",
+            "before": "0xbf62ac00",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 0,
+        "index": 20,
+        "input": "0x3fb2c2c0",
+        "row": 10,
+        "stages": [
+          {
+            "after": "0x3fb2c2c0",
+            "before": "0x3fb2c2c0",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0x3fb2c2c0",
+            "before": "0x3fb2c2c0",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 1,
+        "index": 21,
+        "input": "0x3f9cb260",
+        "row": 10,
+        "stages": [
+          {
+            "after": "0x3f9cb260",
+            "before": "0x3f9cb260",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0x3f9cb260",
+            "before": "0x3f9cb260",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 0,
+        "index": 22,
+        "input": "0xc006cc00",
+        "row": 11,
+        "stages": [
+          {
+            "after": "0xc006cc00",
+            "before": "0xc006cc00",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0xc006cc00",
+            "before": "0xc006cc00",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 1,
+        "index": 23,
+        "input": "0xc001f320",
+        "row": 11,
+        "stages": [
+          {
+            "after": "0xc001f320",
+            "before": "0xc001f320",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0xc001f320",
+            "before": "0xc001f320",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 0,
+        "index": 24,
+        "input": "0x3f95ebe0",
+        "row": 12,
+        "stages": [
+          {
+            "after": "0x3f95ebe0",
+            "before": "0x3f95ebe0",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0x3f95ebe0",
+            "before": "0x3f95ebe0",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 1,
+        "index": 25,
+        "input": "0x400ccf18",
+        "row": 12,
+        "stages": [
+          {
+            "after": "0x400ccf18",
+            "before": "0x400ccf18",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0x400ccf18",
+            "before": "0x400ccf18",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 0,
+        "index": 26,
+        "input": "0xbfbaa010",
+        "row": 13,
+        "stages": [
+          {
+            "after": "0xbfbaa010",
+            "before": "0xbfbaa010",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0xbfbaa010",
+            "before": "0xbfbaa010",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 1,
+        "index": 27,
+        "input": "0xbf2fa840",
+        "row": 13,
+        "stages": [
+          {
+            "after": "0xbf2fa840",
+            "before": "0xbf2fa840",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0xbf2fa840",
+            "before": "0xbf2fa840",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 0,
+        "index": 28,
+        "input": "0xbf038ac0",
+        "row": 14,
+        "stages": [
+          {
+            "after": "0xbf038ac0",
+            "before": "0xbf038ac0",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0xbf038ac0",
+            "before": "0xbf038ac0",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 1,
+        "index": 29,
+        "input": "0xbfa423c0",
+        "row": 14,
+        "stages": [
+          {
+            "after": "0xbfa423c0",
+            "before": "0xbfa423c0",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0xbfa423c0",
+            "before": "0xbfa423c0",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 0,
+        "index": 30,
+        "input": "0xbe943a00",
+        "row": 15,
+        "stages": [
+          {
+            "after": "0xbe943a00",
+            "before": "0xbe943a00",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0xbe943a00",
+            "before": "0xbe943a00",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      },
+      {
+        "col": 1,
+        "index": 31,
+        "input": "0xbfa7e100",
+        "row": 15,
+        "stages": [
+          {
+            "after": "0xbfa7e100",
+            "before": "0xbfa7e100",
+            "flags": 0,
+            "stage": "input"
+          },
+          {
+            "after": "0xbfa7e100",
+            "before": "0xbfa7e100",
+            "dtype": "f32",
+            "flags": 0,
+            "stage": "output"
+          }
+        ]
+      }
+    ],
+    "in_shape": [1, 1, 4, 4],
+    "initialization_count": 32,
+    "k": 9,
+    "k_flatten_order": "(ic, kh, kw)",
+    "kernel_shape": [2, 1, 3, 3],
+    "m": 16,
+    "mac_count": 288,
+    "n": 2,
+    "out_shape": [1, 2, 4, 4],
+    "output_bits": [
+      "0xbfe9cae0",
+      "0xc0311e20",
+      "0x400a9848",
+      "0x400b1a50",
+      "0x3fd02a00",
+      "0x403fa100",
+      "0xbfb5c580",
+      "0xbd680000",
+      "0xbf95abe0",
+      "0xc00195f0",
+      "0x3fcc10a0",
+      "0x3faba570",
+      "0x3f2fa9c0",
+      "0x3f833a80",
+      "0xc0124f80",
+      "0xbfecdf00",
+      "0x3fc22750",
+      "0x3fe29400",
+      "0xbfc90740",
+      "0xbf62ac00",
+      "0x3fb2c2c0",
+      "0x3f9cb260",
+      "0xc006cc00",
+      "0xc001f320",
+      "0x3f95ebe0",
+      "0x400ccf18",
+      "0xbfbaa010",
+      "0xbf2fa840",
+      "0xbf038ac0",
+      "0xbfa423c0",
+      "0xbe943a00",
+      "0xbfa7e100"
+    ],
+    "output_hex": "e0cae9bf201e31c048980a40501a0b40002ad03f00a13f4080c5b5bf000068bde0ab95bff09501c0a010cc3f70a5ab3fc0a92f3f803a833f804f12c000dfecbf5027c23f0094e23f4007c9bf00ac62bfc0c2b23f60b29c3f00cc06c020f301c0e0eb953f18cf0c4010a0babf40a82fbfc08a03bfc023a4bf003a94be00e1a7bf",
+    "padding": [1, 1, 1, 1],
+    "stride": [1, 1],
+    "tile_k": 8,
+    "traffic": {
+      "assumptions": "Logical one-materialization payload counts: every valid patch element is read once from the input feature map, every padding position contributes one zero BF16 element written into the expanded matrix, the expanded A matrix is written once by im2col and read once by the Matmul, B is read once as a full KxO pass, and the output is written once in the epilogue dtype.  No reuse, cache retention, L2/L1 overlap, split-K folding or multi-batch sharing is credited, so these are not physical burst or cycle lower bounds.",
+      "expanded_elements": 144,
+      "im2col_write_bytes": 288,
+      "matmul_a_read_bytes": 288,
+      "matmul_b_read_bytes": 36,
+      "output_bytes": 128,
+      "padding_zero_bytes": 88,
+      "padding_zero_elements": 44,
+      "valid_patch_elements": 100,
+      "valid_patch_read_bytes": 200
+    },
+    "traffic_direct": {
+      "expanded_elements": 144,
+      "padding_zero_elements": 44,
+      "valid_patch_elements": 100
+    }
+  },
+  "id": "soft-conv-pad1_stride1",
+  "input": {
+    "dilation": [1, 1],
+    "epilogue": null,
+    "kernel": [2, 1, 3, 3],
+    "padding": [1, 1, 1, 1],
+    "shape": [1, 1, 4, 4],
+    "stride": [1, 1],
+    "tile_k": 8,
+    "weights": [
+      "0xbfe6",
+      "0x3f4d",
+      "0xbecd",
+      "0xbfcd",
+      "0x3f80",
+      "0xbe4d",
+      "0xbfb3",
+      "0x3f9a",
+      "0x0000",
+      "0xbf9a",
+      "0x3fb3",
+      "0x3e4d",
+      "0xbf80",
+      "0x3fcd",
+      "0x3ecd",
+      "0xbf4d",
+      "0x3fe6",
+      "0x3f1a"
+    ],
+    "x": [
+      "0xbf92",
+      "0x3f5b",
+      "0x3edb",
+      "0x0000",
+      "0xbedb",
+      "0xbf5b",
+      "0x3f92",
+      "0x3f37",
+      "0x3e92",
+      "0xbe12",
+      "0xbf12",
+      "0xbf80",
+      "0x3f80",
+      "0x3f12",
+      "0x3e12",
+      "0xbe92"
+    ]
+  },
+  "schema": 1,
+  "source": "boa_reference.conv2d_reference (P03, generator-invoked)"
+}

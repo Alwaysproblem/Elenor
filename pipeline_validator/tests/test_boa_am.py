@@ -831,28 +831,14 @@ def test_old_operandless_boa_syntax_is_rejected():
     _verify_program_text(text)
 
 
-def test_am_i8_output_is_accepted_by_source_but_rejected_numerically():
+def test_am_i8_output_requires_quantization_parameters():
   text = _fixture_text().replace(
     '%out = tile.alloc memory_space = "l1" shape = [64, 256] dtype = "f32"',
     '%out = tile.alloc memory_space = "l1" shape = [64, 256] dtype = "i8"',
   )
   text = text.replace("!tile.l1_buffer<64x256xf32>", "!tile.l1_buffer<64x256xi8>", 1)
-  text = (
-    text.replace("!nest.l2_buffer<64x256xf32>", "!nest.l2_buffer<64x256xi8>")
-    .replace("!nest.l2_view<64x256xf32>", "!nest.l2_view<64x256xi8>")
-    .replace("!nest.global_memref<64x256xf32>", "!nest.global_memref<64x256xi8>")
-    .replace("!nest.global_view<64x256xf32>", "!nest.global_view<64x256xi8>")
-    .replace(
-      '%c_l2_1 = nest.alloc slot = "c" role = "out" shape = [64, 256] dtype = "f32"',
-      '%c_l2_1 = nest.alloc slot = "c" role = "out" shape = [64, 256] dtype = "i8"',
-    )
-  )
-  _artifact, simulator, _store, result = _compile_and_run(text, c_bytes=16384)
-  assert not result.completed
-  assert "INT8 AM output conversion policy" in result.reason
-  snapshot = simulator.group.tiles[0].shared_am.snapshot()
-  assert snapshot["fault_count"] == 1
-  assert snapshot["live_leases"] == 0
+  with pytest.raises((ParseError, VerifyException), match="inv_scale is required for i8"):
+    _verify_program_text(text)
 
 
 def test_missing_output_binding_is_rejected():

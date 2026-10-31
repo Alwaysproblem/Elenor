@@ -127,10 +127,17 @@ LoadedProgram → Simulator.run`；Simulator 不包含源码 lowering fallback�
 
 - `tile.boa.estimate.async` 与 EVU/USE 不执行 tensor 算术；这些 op 的 bytes/ops 只驱动
   时序与资源模型。
-- P06 的 P03 向量对拍区分完整 f32/BF16 输出与 pre-epilogue FP32 AM 观察。
-  bias/scale/ReLU/clip/INT8 仍归 P08；不能把这些病例的 AM 一致说成 FINAL
-  后处理已实现。split-K 只证明全部 BOA partial bytes，不证明 EVU combine C。
-  numeric-profile 是 Python 模型验证，不是完整 Gemmini RTL / C ABI 联仿。
+- P08 起 FINAL epilogue（bias/scale/ReLU/clip）与 INT8 输出由 AM 分配上的
+  不可变链配置实现（v6）。numeric-profile 的合法 Matmul 向量按完整 FINAL bytes
+  对拍；P06 时期的 pre-epilogue AM 观察口径已移除（历史）。独立 epilogue 向量中
+  的 sNaN/非规范 NaN payload 无法由规范化 NaN 的 BF16 MAC 链产生，须分别标注
+  函数级对拍与真实全链证明，不能将函数级结果称作 Simulator 全链通过。
+- 内联 bias/scale/clip/quant 常量计入 program SRAM，编译时检查容量，加载时重算
+  占用下界；其字节计数沿现有软件模型，不代表硬件 descriptor 编码已冻结。
+- 软件 Conv 为 byte-true im2col（gather + typed Matmul），不是硬件 Conv；BOA 的
+  A 操作数读取无字节计数器，仅以捕获的 A bytes 证明。split-K 只证明全部 BOA
+  partial bytes，不证明 EVU combine C。numeric-profile 是 Python 模型验证，
+  不是完整 Gemmini RTL / C ABI 联仿。
 - Gather 仍由源码 `tile.profiled.access` 显式给出
   `L1_HIT`/`L2_HIT`/`HBM_MISS`。Cache 容量不会推导命中率，也不会把 hit
   改写成 miss；`line`/`merge` 在非 oracle 模式是 opaque profile identity。

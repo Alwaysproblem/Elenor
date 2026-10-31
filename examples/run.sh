@@ -39,6 +39,16 @@ Runnable workloads:
                                  (typed software-managed AM：A[64,128]bf16 x
                                  B[128,256]bf16 -> C[64,256]f32，K 两步 64；
                                  首步 INIT，末步 accumulate output；64 KiB AM）
+  soft-conv-ones-2x2|soft-conv-asymmetric|soft-conv-pad-poison|soft-conv-k-order|
+  soft-conv-tile4|soft-conv-tile8|soft-conv-i8-out
+                                 workloads/soft_conv_*.mlir
+                                 (软件 im2col Conv：tile.gather.global.async 逐元素
+                                 展开 X（padding 读 X 绑定末尾显式 +0 字），typed
+                                 BOA AM 链按 P03 tile_k 分块，对照 P03 conv golden；
+                                 无 EVU 数值参与)
+  soft-conv-pad1-stride1        workloads/soft_conv_pad1_stride1.mlir
+                                 (固定 alias：pad=1 stride=1 dilation=1 的生成 case,
+                                 golden 由 P03 conv2d_reference 生成并提交)
   matmul-2048x512-boa256          workloads/matmul_2048x512x64_boa256x256x32.mlir
                                  (2048x512x64 matmul, BOA 256x256x32, K tile 内
                                  展开, 4 context x placement=15 x 4 task)
@@ -181,6 +191,9 @@ scenario_fidelity() {
     gather|gather-matmul|matmul-gather-add|gather-matmul-4tiles-2contexts|matmul-gather-add-4tiles-2contexts|indexed-memory|paged-attention-decode|paged-attention-decode-baseline|matmul-2048x512-boa256|matmul-pow-parallel|matmul-pow-free-slot|matmul-pow-data-dep|matmul17-pow-tail-overlap|matmul-splitk-pipeline|matmul-splitk-multicontext-pipeline|boa-am-matmul)
       echo full_memory
       ;;
+    soft-conv-*)
+      echo full_memory
+      ;;
     *)
       echo ""
       ;;
@@ -289,6 +302,118 @@ case "$name" in
       --input-binding C=0x300000:65536:w \
       --input-data A="$ROOT_DIR/examples/workloads/boa_am_inputs/boa_am_matmul/A.bin" \
       --input-data B="$ROOT_DIR/examples/workloads/boa_am_inputs/boa_am_matmul/B.bin" \
+      --max-cycles 200000 \
+      "$@"
+    ;;
+  soft-conv-ones-2x2)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/soft_conv_ones_2x2.mlir" \
+      --hw-override boa_numeric_tile_k=8 \
+      --input-binding X=0x100000:20:r \
+      --input-binding B=0x100200:8:r \
+      --input-binding IDX=0x100400:64:r \
+      --input-binding C=0x101000:16:w \
+      --input-data X="$ROOT_DIR/examples/workloads/soft_conv_inputs/ones_2x2/X.bin" \
+      --input-data B="$ROOT_DIR/examples/workloads/soft_conv_inputs/ones_2x2/B.bin" \
+      --input-data IDX="$ROOT_DIR/examples/workloads/soft_conv_inputs/ones_2x2/IDX.bin" \
+      --max-cycles 200000 \
+      "$@"
+    ;;
+  soft-conv-asymmetric)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/soft_conv_asymmetric.mlir" \
+      --hw-override boa_numeric_tile_k=8 \
+      --input-binding X=0x100000:162:r \
+      --input-binding B=0x100200:72:r \
+      --input-binding IDX=0x100400:1728:r \
+      --input-binding C=0x101000:432:w \
+      --input-data X="$ROOT_DIR/examples/workloads/soft_conv_inputs/asymmetric/X.bin" \
+      --input-data B="$ROOT_DIR/examples/workloads/soft_conv_inputs/asymmetric/B.bin" \
+      --input-data IDX="$ROOT_DIR/examples/workloads/soft_conv_inputs/asymmetric/IDX.bin" \
+      --max-cycles 200000 \
+      "$@"
+    ;;
+  soft-conv-pad-poison)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/soft_conv_pad_poison.mlir" \
+      --hw-override boa_numeric_tile_k=8 \
+      --input-binding X=0x100000:10:r \
+      --input-binding B=0x100200:8:r \
+      --input-binding IDX=0x100400:64:r \
+      --input-binding C=0x101000:16:w \
+      --input-data X="$ROOT_DIR/examples/workloads/soft_conv_inputs/pad_poison/X.bin" \
+      --input-data B="$ROOT_DIR/examples/workloads/soft_conv_inputs/pad_poison/B.bin" \
+      --input-data IDX="$ROOT_DIR/examples/workloads/soft_conv_inputs/pad_poison/IDX.bin" \
+      --max-cycles 200000 \
+      "$@"
+    ;;
+  soft-conv-k-order)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/soft_conv_k_order.mlir" \
+      --hw-override boa_numeric_tile_k=8 \
+      --input-binding X=0x100000:18:r \
+      --input-binding B=0x100200:32:r \
+      --input-binding IDX=0x100400:32:r \
+      --input-binding C=0x101000:8:w \
+      --input-data X="$ROOT_DIR/examples/workloads/soft_conv_inputs/k_order/X.bin" \
+      --input-data B="$ROOT_DIR/examples/workloads/soft_conv_inputs/k_order/B.bin" \
+      --input-data IDX="$ROOT_DIR/examples/workloads/soft_conv_inputs/k_order/IDX.bin" \
+      --max-cycles 200000 \
+      "$@"
+    ;;
+  soft-conv-tile4)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/soft_conv_tile4.mlir" \
+      --hw-override boa_numeric_tile_k=8 \
+      --input-binding X=0x100000:18:r \
+      --input-binding B=0x100200:16:r \
+      --input-binding IDX=0x100400:32:r \
+      --input-binding C=0x101000:4:w \
+      --input-data X="$ROOT_DIR/examples/workloads/soft_conv_inputs/tile4/X.bin" \
+      --input-data B="$ROOT_DIR/examples/workloads/soft_conv_inputs/tile4/B.bin" \
+      --input-data IDX="$ROOT_DIR/examples/workloads/soft_conv_inputs/tile4/IDX.bin" \
+      --max-cycles 200000 \
+      "$@"
+    ;;
+  soft-conv-tile8)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/soft_conv_tile8.mlir" \
+      --hw-override boa_numeric_tile_k=8 \
+      --input-binding X=0x100000:18:r \
+      --input-binding B=0x100200:16:r \
+      --input-binding IDX=0x100400:32:r \
+      --input-binding C=0x101000:4:w \
+      --input-data X="$ROOT_DIR/examples/workloads/soft_conv_inputs/tile8/X.bin" \
+      --input-data B="$ROOT_DIR/examples/workloads/soft_conv_inputs/tile8/B.bin" \
+      --input-data IDX="$ROOT_DIR/examples/workloads/soft_conv_inputs/tile8/IDX.bin" \
+      --max-cycles 200000 \
+      "$@"
+    ;;
+  soft-conv-i8-out)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/soft_conv_i8_out.mlir" \
+      --hw-override boa_numeric_tile_k=8 \
+      --input-binding X=0x100000:20:r \
+      --input-binding B=0x100200:8:r \
+      --input-binding IDX=0x100400:64:r \
+      --input-binding C=0x101000:4:w \
+      --input-data X="$ROOT_DIR/examples/workloads/soft_conv_inputs/i8_out/X.bin" \
+      --input-data B="$ROOT_DIR/examples/workloads/soft_conv_inputs/i8_out/B.bin" \
+      --input-data IDX="$ROOT_DIR/examples/workloads/soft_conv_inputs/i8_out/IDX.bin" \
+      --max-cycles 200000 \
+      "$@"
+    ;;
+  soft-conv-pad1-stride1)
+    set -- \
+      --ir-file "$ROOT_DIR/examples/workloads/soft_conv_pad1_stride1.mlir" \
+      --hw-override boa_numeric_tile_k=8 \
+      --input-binding X=0x100000:34:r \
+      --input-binding B=0x100200:36:r \
+      --input-binding IDX=0x100400:576:r \
+      --input-binding C=0x101000:128:w \
+      --input-data X="$ROOT_DIR/examples/workloads/soft_conv_inputs/pad1_stride1/X.bin" \
+      --input-data B="$ROOT_DIR/examples/workloads/soft_conv_inputs/pad1_stride1/B.bin" \
+      --input-data IDX="$ROOT_DIR/examples/workloads/soft_conv_inputs/pad1_stride1/IDX.bin" \
       --max-cycles 200000 \
       "$@"
     ;;

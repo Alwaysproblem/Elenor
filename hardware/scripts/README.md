@@ -218,6 +218,43 @@ bytes。每 case 产物：`{case}.report.json`、`{case}.vectors.json`（含
 actual/golden hex）、`sources/*.mlir`（deterministic）与 `{case}.timing.json`
 （`deterministic: false`，wall-clock 永不进入离线对比；cycles 为确定性指标）。
 
+## soft-conv target（owner P08）
+
+软件 im2col Conv 与 FINAL epilogue 的生产路径 gate：
+`pipeline_validator.tests.test_soft_conv` 在锁定容器内执行真实
+`parse -> compile -> serialize -> parse -> load -> Simulator`（full_memory
+ByteStore），把观测 bytes 与 committed golden 逐 bit 对拍。golden 权威是
+P03 `vectors/{conv,epilogue,matmul}.json`（不变）与生成 case 的
+`examples/workloads/soft_conv_inputs/pad1_stride1/golden.json`（由未改动的
+P03 reference 在生成器进程中产出）；模块不 import
+`hardware/boa/reference`，也不自行推导期望 bytes。
+
+```bash
+hardware/scripts/check soft-conv --out /tmp/boa-p08/all --seed 20261028
+hardware/scripts/check soft-conv --case conv-pad-stride-dilation --out /tmp/boa-p08/conv --seed 20261028
+hardware/scripts/reproduce /tmp/boa-p08/all/manifest.json --out /tmp/boa-p08/offline --offline
+```
+
+| case                       | layer | 实际检查                                                                                                                                                                                                                                                                                                                                                                                               |
+| -------------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `int8-chain`               | F     | i8 输出 AM 链全程对拍：matmul.json i8 链（含 2 步链）、conv-i8-out 经 gather-im2col、以及每个链可达的 epilogue.json i8 向量（A/B 由 golden AM 精确因式分解合成、两个因子都保留）；每条合成链跑两次：无 epilogue 的 f32 FINAL 先逐 byte 对拍 committed golden AM（量化绝不掩盖错误操作数），再跑向量自身的 INIT+ADD(k=0,FINAL) 链对拍 output_hex；golden AM 含链不可达字的向量逐条记 blocked 及证明类别 |
+| `param-reject`             | F     | epilogue.json 全部非法参数向量在真实边界拒绝（source parse，或 source 文法无法表达的字段走 v6 artifact 解码），另加 codec tamper（bias 长度、zero_point bool）                                                                                                                                                                                                                                         |
+| `stage-matrix`             | F     | epilogue.json 的 bias/scale/relu/clip/inv_scale 全组合 × f32/bf16/i8 输出，在拥有该合同的边界（生产 `boa_numeric.apply_epilogue`，即 runtime FINAL 路径调用的函数）对 committed AM 做 full bytes 对拍；另有 Simulator 全链 wiring 向量                                                                                                                                                                 |
+| `conv-pad-stride-dilation` | F     | 8 个 conv fixture（含 asymmetric 与 pad1-stride1）：C bytes 与捕获的 im2col A 操作数 bytes 均等于 golden                                                                                                                                                                                                                                                                                               |
+| `conv-traffic`             | F     | 逐阶段流量：transfer/gather 计数器（issued_by_op、byte_counters、gather PMU）与独立解析计数逐 dict 相等（模块 docstring 的 counter<->analytic 映射表）                                                                                                                                                                                                                                                 |
+
+架构事实（记入 report 的 blocked 类别）：生产 AM 只承载 bf16 FMA 链计算出的
+值，没有 AM 注入 op。numeric_freeze §2 将算术 NaN 输出统一 canonical 化
+（sNaN/payload NaN 不可达）、零符号规则使 −0 不可进入 AM、有限字必须是精确
+bf16 乘积。因此 epilogue.json 中 golden AM 含 sNaN/−0/非 bf16 乘积尾数的
+i8 向量（本轮 21 个：17 sNaN/payload、3 尾数、1 −0）以显式 blocked 记录
+（含证明类别与首坏字），绝不静默跳过；counts 分列 reached/blocked。
+
+配置：`soft-conv.yaml` 只有空 section。committed 向量固定了每条链自身的
+`boa_numeric_tile_k`，因此 `validator.hw_overrides` 必须为空——容器内配置
+校验对非空 overrides 直接 exit 6。每 case 产物与 numeric-profile 相同
+（report/vectors/sources/timing，timing 为 deterministic: false）。
+
 ## reproduce 算法
 
 1. 读取 manifest，要求 schema 1 / status PASS / 结构完整，且 task_id 与注册表中已实现 target 的 owner 一致（否则 exit 9）。

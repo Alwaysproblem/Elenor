@@ -61,6 +61,7 @@ from ..dialects.elenor import (
 )
 from ..execution_ir import (
   ExecAmBuffer,
+  ExecBoaEpilogue,
   ExecBoaMatmulDesc,
   ExecDeviceOp,
   ExecDispatchRequest,
@@ -851,17 +852,19 @@ def _lower_engine_descriptor(
     if am_name is None:
       raise VerifyException("tile.boa.async accumulator is not a lowered AM allocation")
     matmul = ExecBoaMatmulDesc(
-      _memory_view(objects, op.a, op.name),
-      _memory_view(objects, op.b, op.name),
-      _memory_view(objects, op.out, op.name),
-      am_name,
-      int(op.m.value.data),
-      int(op.n.value.data),
-      int(op.k.value.data),
-      int(op.seq.value.data),
-      op.accumulate is None,
-      op.output is not None,
-      None if op.k_mask is None else tuple(bool(value) for value in _int_list(op.k_mask)),
+      a=_memory_view(objects, op.a, op.name),
+      b=_memory_view(objects, op.b, op.name),
+      output=_memory_view(objects, op.out, op.name),
+      am=am_name,
+      m=int(op.m.value.data),
+      n=int(op.n.value.data),
+      k=int(op.k.value.data),
+      seq=int(op.seq.value.data),
+      init=op.accumulate is None,
+      final=op.output is not None,
+      k_mask=None if op.k_mask is None else tuple(bool(value) for value in _int_list(op.k_mask)),
+      transpose_a=op.transpose_a is not None,
+      transpose_b=op.transpose_b is not None,
     )
     return ExecEngineDesc(name, "BOA", "matmul", {"matmul": matmul}), ExecTileOp.LAUNCH_BOA
   if isinstance(op, TileBoaEstimateOp):
@@ -928,6 +931,8 @@ def _lower_program(op: TileProgramDefOp, source_name: str, binding_id: str) -> E
           raise VerifyException("AM allocation output is not an L1 view")
         name = f"am:{len(am_buffers)}"
         logical_slot = int(body_op.logical_slot.value.data) if body_op.logical_slot is not None else -1
+        source_epilogue = body_op.epilogue_fields()
+        clip = source_epilogue["clip"]
         am_buffers.append(
           ExecAmBuffer(
             name,
@@ -938,6 +943,14 @@ def _lower_program(op: TileProgramDefOp, source_name: str, binding_id: str) -> E
             _view_bytes(dims, dtype),
             logical_slot,
             output_view,
+            ExecBoaEpilogue(
+              bias=source_epilogue["bias"],
+              scale=source_epilogue["scale"],
+              relu=source_epilogue["relu"],
+              clip=None if clip is None else (clip[0], clip[1]),
+              inv_scale=source_epilogue["inv_scale"],
+              zero_point=source_epilogue["zero_point"] or 0,
+            ),
           )
         )
         am_objects[body_op.result] = name

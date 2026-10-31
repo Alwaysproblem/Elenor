@@ -15,10 +15,9 @@ observed HBM output bytes against committed golden bytes.  Golden authority:
   v4 artifact): legacy-version rejection.
 
 This module never imports ``hardware/boa/reference`` and never derives
-expected numeric bytes itself.  P08 FINAL epilogues (bias/scale/ReLU/clip and
-INT8 output) are explicitly deferred: vectors carrying those stages compare
-the frozen pre-epilogue AM bits only and are labelled ``pre-epilogue``;
-INT8 cases are observed as raw f32 AM, not as implemented INT8 conversion.
+expected numeric bytes itself.  Since P08 every legal vector, including FINAL
+epilogues (bias/scale/ReLU/clip) and INT8 output, is emitted with the source
+AM-allocation epilogue syntax and compared against the golden FINAL bytes.
 
 Standalone CLI (same engine as the pytest tests):
 
@@ -49,6 +48,7 @@ import re
 import struct
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -57,6 +57,8 @@ from xdsl.utils.exceptions import ParseError, VerifyException
 from pipeline_validator.boa_numeric import matmul_f32
 from pipeline_validator.compiled_program import (
   parse_compiled_program,
+  program_digest,
+  seal_program,
   serialize_compiled_program,
 )
 from pipeline_validator.compiler import compile_program
@@ -80,15 +82,7 @@ L2_BASE = 0x100000
 ALIGN = 256
 _DTYPE_BYTES = {"f32": 4, "bf16": 2, "i8": 1}
 
-# P08 FINAL epilogue stage keys; any of these present means the golden's
-# final output bytes are NOT claimed by P06.
-_P08_STAGE_KEYS = ("bias", "scale", "clip", "inv_scale")
-_ZERO_WORK_IDS = (
-  "mm-add-k0-negzero",
-  "mm-init-k0-bias-scale",
-  "mm-m0-empty",
-  "mm-n0-empty",
-)
+_ZERO_WORK_IDS = ("mm-add-k0-negzero", "mm-init-k0-bias-scale", "mm-m0-empty", "mm-n0-empty")
 
 # Illegal golden vectors -> production contract check.  ``kind`` selects the
 # mechanism: ``config`` (hardware field validation), ``module`` (source/IR
@@ -103,43 +97,19 @@ _NEGATIVE_PLAN: dict[str, dict] = {
     "pattern": "output|AM|FINAL|boa",
   },
   "mm-illegal-seq-gap": {"kind": "module", "stage": ("compile",), "pattern": "seq"},
-  "mm-illegal-init-not-first": {
-    "kind": "module",
-    "stage": ("compile",),
-    "pattern": "INIT|accumulate|seq",
-  },
-  "mm-illegal-init-on-add": {
-    "kind": "module",
-    "stage": ("compile",),
-    "pattern": "INIT|accumulate|seq",
-  },
+  "mm-illegal-init-not-first": {"kind": "module", "stage": ("compile",), "pattern": "INIT|accumulate|seq"},
+  "mm-illegal-init-on-add": {"kind": "module", "stage": ("compile",), "pattern": "INIT|accumulate|seq"},
   "mm-illegal-final-missing": {
     "kind": "module",
     "stage": ("compile",),
     "pattern": "terminate with one output|output|FINAL",
   },
-  "mm-illegal-final-early": {
-    "kind": "module",
-    "stage": ("compile",),
-    "pattern": "finalized|output|FINAL",
-  },
-  "mm-illegal-storage-below-k": {
-    "kind": "module",
-    "stage": ("compile",),
-    "pattern": "storage|k ",
-  },
+  "mm-illegal-final-early": {"kind": "module", "stage": ("compile",), "pattern": "finalized|output|FINAL"},
+  "mm-illegal-storage-below-k": {"kind": "module", "stage": ("compile",), "pattern": "storage|k "},
   "mm-illegal-a-length": {"kind": "binding", "binding": "A0", "stage": ("load",), "pattern": "binding"},
   "mm-illegal-b-length": {"kind": "binding", "binding": "B0", "stage": ("load",), "pattern": "binding"},
-  "mm-illegal-mask-length": {
-    "kind": "module",
-    "stage": ("compile",),
-    "pattern": "mask|k_mask",
-  },
-  "mm-illegal-mask-tail-true": {
-    "kind": "module",
-    "stage": ("compile",),
-    "pattern": "mask|tail",
-  },
+  "mm-illegal-mask-length": {"kind": "module", "stage": ("compile",), "pattern": "mask|k_mask"},
+  "mm-illegal-mask-tail-true": {"kind": "module", "stage": ("compile",), "pattern": "mask|tail"},
   "mm-illegal-mask-not-bool": {"kind": "scalar"},
   "mm-illegal-word-range": {"kind": "input"},
   "mm-illegal-word-negative": {"kind": "input"},
@@ -212,16 +182,24 @@ def _pack_operands(words: list[str]) -> bytes:
   return struct.pack(f"<{len(values)}H", *values)
 
 
-def _pre_epilogue_bytes(am_bits: list[str]) -> bytes:
-  """Read frozen pre-epilogue FP32 words without applying a P08 operation."""
-  return b"".join(int(word, 16).to_bytes(4, "little") for word in am_bits)
-
-
-def _staged(epilogue: dict | None) -> bool:
-  """True when the golden FINAL applies a P08 epilogue stage."""
+def _epilogue_text(epilogue: dict | None) -> str:
+  """Source AM-allocation epilogue keywords mirroring a golden epilogue."""
   if not epilogue:
-    return False
-  return bool(any(epilogue.get(key) is not None for key in _P08_STAGE_KEYS) or epilogue.get("relu"))
+    return ""
+  parts = []
+  if epilogue.get("bias") is not None:
+    parts.append("bias = [" + ", ".join(epilogue["bias"]) + "]")
+  if epilogue.get("scale") is not None:
+    parts.append(f"scale = {epilogue['scale']}")
+  if epilogue.get("relu"):
+    parts.append("relu")
+  if epilogue.get("clip") is not None:
+    parts.append("clip = [" + ", ".join(epilogue["clip"]) + "]")
+  if epilogue.get("inv_scale") is not None:
+    parts.append(f"inv_scale = {epilogue['inv_scale']}")
+  if epilogue.get("output_dtype") == "i8":
+    parts.append(f"zero_point = {epilogue.get('zero_point', 0)}")
+  return "".join(f" {part}" for part in parts)
 
 
 def _plan_steps(steps: list[dict]) -> list[dict]:
@@ -244,8 +222,6 @@ def _plan_steps(steps: list[dict]) -> list[dict]:
   return planned
 
 
-
-
 # ---------------------------------------------------------------------------
 # Source module builder (one tile.program / nest.context per vector)
 # ---------------------------------------------------------------------------
@@ -259,7 +235,36 @@ def _shape(left: int, right: int, dtype: str) -> str:
   return f"{left}x{right}x{dtype}"
 
 
-def build_case_module(record_id: str, m: int, n: int, steps: list[dict], out_dtype: str) -> str:
+Transpose = tuple[bool, bool] | list[tuple[bool, bool]]
+
+
+def _step_transpose(transpose: Transpose, index: int) -> tuple[bool, bool]:
+  """One (transpose_a, transpose_b) pair for all steps, or one per step."""
+  return transpose[index] if isinstance(transpose, list) else transpose
+
+
+def _a_shape(m: int, step: dict, transpose: tuple[bool, bool]) -> tuple[int, int]:
+  return (step["storage_k"], m) if transpose[0] else (m, step["storage_k"])
+
+
+def _b_shape(n: int, step: dict, transpose: tuple[bool, bool]) -> tuple[int, int]:
+  return (n, step["storage_k"]) if transpose[1] else (step["storage_k"], n)
+
+
+def _transpose_words(words: list[str], rows: int, cols: int) -> list[str]:
+  """Row-major ``[rows, cols]`` words re-stored as row-major ``[cols, rows]``."""
+  return [words[r * cols + c] for c in range(cols) for r in range(rows)]
+
+
+def build_case_module(
+  record_id: str,
+  m: int,
+  n: int,
+  steps: list[dict],
+  out_dtype: str,
+  epilogue: dict | None = None,
+  transpose: Transpose = (False, False),
+) -> str:
   """Emit one typed BOA matmul module for a golden vector.
 
   Each step gets its own A[m, storage_k] / B[storage_k, n] BF16 buffers; the
@@ -277,8 +282,14 @@ def build_case_module(record_id: str, m: int, n: int, steps: list[dict], out_dty
 
   program_params = ["%task: !nest.task"]
   for index, step in enumerate(planned):
-    program_params.append(f"%a{index}_l2: !nest.l2_buffer<{_shape(m, step['storage_k'], 'bf16')}>")
-    program_params.append(f"%b{index}_l2: !nest.l2_buffer<{_shape(step['storage_k'], n, 'bf16')}>")
+    program_params.append(
+      f"%a{index}_l2: !nest.l2_buffer<"
+      f"{_shape(*_a_shape(m, step, _step_transpose(transpose, index)), 'bf16')}>"
+    )
+    program_params.append(
+      f"%b{index}_l2: !nest.l2_buffer<"
+      f"{_shape(*_b_shape(n, step, _step_transpose(transpose, index)), 'bf16')}>"
+    )
   program_params.append(f"%c_l2: !nest.l2_buffer<{_shape(m, n, out_dtype)}>")
   lines.append("builtin.module {")
   lines.append(f"  tile.program @{name}({', '.join(program_params)})")
@@ -287,7 +298,10 @@ def build_case_module(record_id: str, m: int, n: int, steps: list[dict], out_dty
     f"    tile_l1_spm_bytes_per_context = {L1_CONTRACT_BYTES}> {{"
   )
   for index, step in enumerate(planned):
-    a_shape, b_shape = (m, step["storage_k"]), (step["storage_k"], n)
+    a_shape, b_shape = (
+      _a_shape(m, step, _step_transpose(transpose, index)),
+      _b_shape(n, step, _step_transpose(transpose, index)),
+    )
     lines.append(
       f"    %a{index}_v = tile.subview %a{index}_l2 offsets = [0, 0] "
       f"sizes = [{a_shape[0]}, {a_shape[1]}] strides = [1, 1]\n"
@@ -303,32 +317,31 @@ def build_case_module(record_id: str, m: int, n: int, steps: list[dict], out_dty
     f"      : !nest.l2_view<{_shape(m, n, out_dtype)}>"
   )
   for index, step in enumerate(planned):
-    a_shape, b_shape = (m, step["storage_k"]), (step["storage_k"], n)
+    a_shape, b_shape = (
+      _a_shape(m, step, _step_transpose(transpose, index)),
+      _b_shape(n, step, _step_transpose(transpose, index)),
+    )
     lines.append(
-      f"    %a{index} = tile.alloc shape = [{a_shape[0]}, {a_shape[1]}] dtype = \"bf16\" "
+      f'    %a{index} = tile.alloc shape = [{a_shape[0]}, {a_shape[1]}] dtype = "bf16" '
       f"alignment = {ALIGN} : !tile.l1_buffer<{_shape(*a_shape, 'bf16')}>"
     )
     lines.append(
-      f"    %b{index} = tile.alloc shape = [{b_shape[0]}, {b_shape[1]}] dtype = \"bf16\" "
+      f'    %b{index} = tile.alloc shape = [{b_shape[0]}, {b_shape[1]}] dtype = "bf16" '
       f"alignment = {ALIGN} : !tile.l1_buffer<{_shape(*b_shape, 'bf16')}>"
     )
   lines.append(
-    f"    %out = tile.alloc memory_space = \"l1\" shape = [{m}, {n}] dtype = \"{out_dtype}\" "
+    f'    %out = tile.alloc memory_space = "l1" shape = [{m}, {n}] dtype = "{out_dtype}" '
     f"alignment = {ALIGN}\n      : !tile.l1_buffer<{_shape(m, n, out_dtype)}>"
   )
   lines.append(
-    "    %acc = tile.alloc memory_space = \"am\" logical_slot = 0 output(%out) "
-    f"shape = [{m}, {n}]\n      dtype = \"f32\" alignment = {ALIGN}"
+    '    %acc = tile.alloc memory_space = "am" logical_slot = 0 output(%out) '
+    f'shape = [{m}, {n}]\n      dtype = "f32" alignment = {ALIGN}{_epilogue_text(epilogue)}'
     f" : !tile.am_buffer<{_shape(m, n, 'f32')}>"
   )
   load_events: list[str] = []
   for index in range(len(planned)):
-    lines.append(
-      f"    %la{index} = tile.load.async %a{index}_v into %a{index} : !tile.event<\"la{index}\">"
-    )
-    lines.append(
-      f"    %lb{index} = tile.load.async %b{index}_v into %b{index} : !tile.event<\"lb{index}\">"
-    )
+    lines.append(f'    %la{index} = tile.load.async %a{index}_v into %a{index} : !tile.event<"la{index}">')
+    lines.append(f'    %lb{index} = tile.load.async %b{index}_v into %b{index} : !tile.event<"lb{index}">')
     load_events.extend((f"%la{index}", f"%lb{index}"))
   if load_events:
     lines.append(f"    tile.await {', '.join(load_events)}")
@@ -343,17 +356,19 @@ def build_case_module(record_id: str, m: int, n: int, steps: list[dict], out_dty
     if step["mask"] is not None:
       entries = ", ".join("1" if flag else "0" for flag in step["mask"])
       mask_text = f" k_mask = [{entries}]"
-    tail = " ".join(modifiers)
+    step_tr = _step_transpose(transpose, index)
+    flags = [name for name, on in (("transpose_a", step_tr[0]), ("transpose_b", step_tr[1])) if on]
+    tail = " ".join(flags + modifiers)
     lines.append(
-      f"    %k{index} = tile.boa.async \"matmul\" ins(%a{index}, %b{index}) outs(%out) acc(%acc)\n"
+      f'    %k{index} = tile.boa.async "matmul" ins(%a{index}, %b{index}) outs(%out) acc(%acc)\n'
       f"        m = {m} n = {n} k = {step['k']} seq = {step['seq']}{mask_text}"
-      f"{(' ' + tail) if tail else ''} : !tile.event<\"k{index}\">"
+      f'{(" " + tail) if tail else ""} : !tile.event<"k{index}">'
     )
     lines.append(f"    tile.await %k{index}")
   for index in range(len(planned)):
     lines.append(f"    tile.free %a{index}")
     lines.append(f"    tile.free %b{index}")
-  lines.append("    %stored = tile.store.async %out into %c_v : !tile.event<\"stored\">")
+  lines.append('    %stored = tile.store.async %out into %c_v : !tile.event<"stored">')
   lines.append("    tile.await %stored")
   lines.append("    tile.signal output_ready(%task)")
   lines.append("    tile.return")
@@ -363,8 +378,10 @@ def build_case_module(record_id: str, m: int, n: int, steps: list[dict], out_dty
     parameter
     for index, step in enumerate(planned)
     for parameter in (
-      f"%A{index}: !nest.global_memref<{_shape(m, step['storage_k'], 'bf16')}>",
-      f"%B{index}: !nest.global_memref<{_shape(step['storage_k'], n, 'bf16')}>",
+      f"%A{index}: !nest.global_memref<"
+      f"{_shape(*_a_shape(m, step, _step_transpose(transpose, index)), 'bf16')}>",
+      f"%B{index}: !nest.global_memref<"
+      f"{_shape(*_b_shape(n, step, _step_transpose(transpose, index)), 'bf16')}>",
     )
   ]
   context_params.append(f"%C: !nest.global_memref<{_shape(m, n, out_dtype)}>")
@@ -382,7 +399,10 @@ def build_case_module(record_id: str, m: int, n: int, steps: list[dict], out_dty
   )
   pref_events: list[str] = []
   for index, step in enumerate(planned):
-    a_shape, b_shape = (m, step["storage_k"]), (step["storage_k"], n)
+    a_shape, b_shape = (
+      _a_shape(m, step, _step_transpose(transpose, index)),
+      _b_shape(n, step, _step_transpose(transpose, index)),
+    )
     lines.append(
       f"    %a{index}_blk = nest.subview %A{index} offsets = [0, 0] "
       f"sizes = [{a_shape[0]}, {a_shape[1]}] strides = [1, 1]\n"
@@ -394,22 +414,22 @@ def build_case_module(record_id: str, m: int, n: int, steps: list[dict], out_dty
       f"      : !nest.global_view<{_shape(*b_shape, 'bf16')}>"
     )
     lines.append(
-      f"    %a{index}_l2_1 = nest.alloc slot = \"a{index}\" role = \"in\" "
-      f"shape = [{a_shape[0]}, {a_shape[1]}] dtype = \"bf16\" alignment = {ALIGN}"
+      f'    %a{index}_l2_1 = nest.alloc slot = "a{index}" role = "in" '
+      f'shape = [{a_shape[0]}, {a_shape[1]}] dtype = "bf16" alignment = {ALIGN}'
       f" : !nest.l2_buffer<{_shape(*a_shape, 'bf16')}>"
     )
     lines.append(
-      f"    %b{index}_l2_1 = nest.alloc slot = \"b{index}\" role = \"in\" "
-      f"shape = [{b_shape[0]}, {b_shape[1]}] dtype = \"bf16\" alignment = {ALIGN}"
+      f'    %b{index}_l2_1 = nest.alloc slot = "b{index}" role = "in" '
+      f'shape = [{b_shape[0]}, {b_shape[1]}] dtype = "bf16" alignment = {ALIGN}'
       f" : !nest.l2_buffer<{_shape(*b_shape, 'bf16')}>"
     )
     lines.append(
       f"    %a{index}_pref = nest.dma.prefetch.async %a{index}_blk into %a{index}_l2_1"
-      f" : !nest.event<\"a{index}_pref\">"
+      f' : !nest.event<"a{index}_pref">'
     )
     lines.append(
       f"    %b{index}_pref = nest.dma.prefetch.async %b{index}_blk into %b{index}_l2_1"
-      f" : !nest.event<\"b{index}_pref\">"
+      f' : !nest.event<"b{index}_pref">'
     )
     pref_events.extend((f"%a{index}_pref", f"%b{index}_pref"))
   lines.append(
@@ -417,14 +437,12 @@ def build_case_module(record_id: str, m: int, n: int, steps: list[dict], out_dty
     f"      : !nest.global_view<{_shape(m, n, out_dtype)}>"
   )
   lines.append(
-    f"    %c_l2_1 = nest.alloc slot = \"c\" role = \"out\" shape = [{m}, {n}] "
-    f"dtype = \"{out_dtype}\" alignment = {ALIGN} : !nest.l2_buffer<{_shape(m, n, out_dtype)}>"
+    f'    %c_l2_1 = nest.alloc slot = "c" role = "out" shape = [{m}, {n}] '
+    f'dtype = "{out_dtype}" alignment = {ALIGN} : !nest.l2_buffer<{_shape(m, n, out_dtype)}>'
   )
   lines.append("    %tasks = nest.task.range from = 0 to = 1 : !nest.task_range")
   binding_names = [
-    name_part
-    for index in range(len(planned))
-    for name_part in (f"%a{index}_l2_1", f"%b{index}_l2_1")
+    name_part for index in range(len(planned)) for name_part in (f"%a{index}_l2_1", f"%b{index}_l2_1")
   ]
   bindings_list = ", ".join([*binding_names, "%c_l2_1"])
   ins_list = ", ".join(binding_names)
@@ -437,11 +455,10 @@ def build_case_module(record_id: str, m: int, n: int, steps: list[dict], out_dty
     "        input_released = #nest.aggregate<all_tasks>\n"
     "        output_ready = #nest.aggregate<all_tasks>\n"
     f"      }}{depends}\n"
-    "      : (!nest.event<\"grid\">, !nest.event<\"read\">, !nest.event<\"ready\">)"
+    '      : (!nest.event<"grid">, !nest.event<"read">, !nest.event<"ready">)'
   )
   lines.append(
-    "    %c_store = nest.dma.store.async %c_l2_1 into %c_blk depends_on(%ready)"
-    " : !nest.event<\"c_store\">"
+    '    %c_store = nest.dma.store.async %c_l2_1 into %c_blk depends_on(%ready) : !nest.event<"c_store">'
   )
   for index in range(len(planned)):
     lines.append(f"    nest.release %a{index}_l2_1 depends_on(%read, %a{index}_pref)")
@@ -452,16 +469,11 @@ def build_case_module(record_id: str, m: int, n: int, steps: list[dict], out_dty
   lines.append("  }")
 
   program_formals = context_params
-  submit_args = [
-    name_part
-    for index in range(len(planned))
-    for name_part in (f"%A{index}", f"%B{index}")
-  ]
+  submit_args = [name_part for index in range(len(planned)) for name_part in (f"%A{index}", f"%B{index}")]
   submit_args.append("%C")
   lines.append(f"  nexus.program @{name}_entry({', '.join(program_formals)}) {{")
   lines.append(
-    f"    %done_1 = nexus.submit_context.async @{name}_ctx({', '.join(submit_args)})"
-    " : !nexus.event<\"done\">"
+    f'    %done_1 = nexus.submit_context.async @{name}_ctx({", ".join(submit_args)}) : !nexus.event<"done">'
   )
   lines.append("    nexus.await %done_1")
   lines.append("    nexus.return")
@@ -470,7 +482,7 @@ def build_case_module(record_id: str, m: int, n: int, steps: list[dict], out_dty
   return "\n".join(lines) + "\n"
 
 
-def _layout(m: int, n: int, steps: list[dict], out_dtype: str):
+def _layout(m: int, n: int, steps: list[dict], out_dtype: str, transpose: Transpose = (False, False)):
   """Bindings, HBM seed data and the C output location for one module.
 
   Buffer sizes come from declared shapes. Operand bytes stay verbatim, so
@@ -496,13 +508,21 @@ def _layout(m: int, n: int, steps: list[dict], out_dtype: str):
       f"A{index}",
       a_count * 2,
       "r",
-      _pack_operands(step["a"]),
+      _pack_operands(
+        _transpose_words(step["a"], m, step["storage_k"])
+        if _step_transpose(transpose, index)[0]
+        else step["a"]
+      ),
     )
     reserve(
       f"B{index}",
       b_count * 2,
       "r",
-      _pack_operands(step["b"]),
+      _pack_operands(
+        _transpose_words(step["b"], step["storage_k"], n)
+        if _step_transpose(transpose, index)[1]
+        else step["b"]
+      ),
     )
   c_size = m * n * dtype_bytes
   reserve("C", c_size, "w", b"")
@@ -616,9 +636,13 @@ def _run_negative(record_id: str, inp: dict, plan: dict, seed: int, sources: lis
     pattern = plan.get("pattern")
     passed = error is not None and (pattern is None or re.search(pattern, str(error), re.I) is not None)
     return _record(
-      record_id, label="negative", passed=passed,
+      record_id,
+      label="negative",
+      passed=passed,
       detail=f"invalid vector must be rejected at {stage}",
-      inp=inp, stage=stage, error="" if error is None else str(error),
+      inp=inp,
+      stage=stage,
+      error="" if error is None else str(error),
     )
 
   if kind == "config":
@@ -634,9 +658,16 @@ def _run_negative(record_id: str, inp: dict, plan: dict, seed: int, sources: lis
       a, b = _pack_operands(step["a"]), _pack_operands(step["b"])
       if kind == "scalar":
         matmul_f32(
-          a, b, m=inp["m"], n=inp["n"], k=step["k"],
-          accumulate=not step["init"], partial=None, tile_k=inp["tile_k"],
-          storage_k=step.get("storage_k"), mask=step.get("mask"),
+          a,
+          b,
+          m=inp["m"],
+          n=inp["n"],
+          k=step["k"],
+          accumulate=not step["init"],
+          partial=None,
+          tile_k=inp["tile_k"],
+          storage_k=step.get("storage_k"),
+          mask=step.get("mask"),
         )
     except ValueError as exc:
       return outcome(stage, exc)
@@ -653,8 +684,15 @@ def _run_negative(record_id: str, inp: dict, plan: dict, seed: int, sources: lis
     actual[target] = GlobalBinding(target, bindings[target].base_iova, supplied, "r")
     try:
       _compile_load_run(
-        module, bindings, seeds, c_address, c_bytes, tile_k=inp["tile_k"],
-        seed=seed, steps=len(inp["steps"]), actual_bindings=actual,
+        module,
+        bindings,
+        seeds,
+        c_address,
+        c_bytes,
+        tile_k=inp["tile_k"],
+        seed=seed,
+        steps=len(inp["steps"]),
+        actual_bindings=actual,
       )
     except ValueError as exc:
       return outcome("load", exc)
@@ -666,9 +704,11 @@ def _run_negative(record_id: str, inp: dict, plan: dict, seed: int, sources: lis
     return outcome("parse", exc)
   try:
     compile_program(
-      parsed, HardwareConfig().with_overrides(boa_numeric_tile_k=inp["tile_k"]),
+      parsed,
+      HardwareConfig().with_overrides(boa_numeric_tile_k=inp["tile_k"]),
       SimConfig(fidelity="full_memory", context_count=1, seed=seed),
-      binding_assumptions=bindings, source_name="numeric-profile",
+      binding_assumptions=bindings,
+      source_name="numeric-profile",
     )
   except (ValueError, VerifyException) as exc:
     return outcome("compile", exc)
@@ -693,13 +733,11 @@ def _run_golden_case(case: dict, seed: int, sources: list[tuple[str, str]]) -> d
 
   m, n = inp["m"], inp["n"]
   epilogue = inp.get("epilogue") or {}
-  original_dtype = epilogue.get("output_dtype") or "f32"
-  deferred = _staged(epilogue) or original_dtype == "i8"
-  out_dtype = "f32" if deferred else original_dtype
+  out_dtype = epilogue.get("output_dtype") or "f32"
   tile_k = inp["tile_k"]
   golden_final_hex = expected_block.get("output_hex", "")
   golden_final = _hex_bytes(golden_final_hex)
-  module = build_case_module(record_id, m, n, inp["steps"], out_dtype)
+  module = build_case_module(record_id, m, n, inp["steps"], out_dtype, epilogue)
   sources.append((f"{_ssa(record_id)}.mlir", module))
   bindings, seeds, c_address, c_bytes = _layout(m, n, inp["steps"], out_dtype)
   try:
@@ -718,50 +756,25 @@ def _run_golden_case(case: dict, seed: int, sources: list[tuple[str, str]]) -> d
       error=str(exc),
     )
   fingerprint = target_fingerprint(hw, sim)
-
-  def attach(record: dict) -> dict:
-    record["executed_tile_k"] = hw.boa_numeric_tile_k
-    record["target_fingerprint"] = fingerprint
-    record["observed_output_dtype"] = out_dtype
-    record["golden_output_dtype"] = original_dtype
-    return record
-
-  if deferred:
-    expected = _pre_epilogue_bytes(expected_block.get("am_bits") or [])
-    passed = result.completed and actual == expected
-    difference = "differs" if golden_final != expected else "is byte-identical"
-    detail = (
-      "P08 epilogue deferred: compared against frozen pre-epilogue AM bits; "
-      f"golden FINAL output {difference} from that AM and is not claimed"
-    )
-    return attach(
-      _record(
-        record_id,
-        label="pre-epilogue",
-        passed=passed,
-        detail=detail,
-        inp=inp,
-        golden_hex=golden_final_hex,
-        expected_hex=expected.hex(),
-        actual_hex=actual.hex(),
-        cycles=result.cycles,
-      )
-    )
-
   passed = result.completed and actual == golden_final
-  return attach(
-    _record(
-      record_id,
-      label="full-golden-bytes",
-      passed=passed,
-      detail="completed production run must equal the golden output bytes",
-      inp=inp,
-      golden_hex=golden_final_hex,
-      expected_hex=golden_final_hex,
-      actual_hex=actual.hex(),
-      cycles=result.cycles,
-    )
+  record = _record(
+    record_id,
+    label="full-golden-bytes",
+    passed=passed,
+    detail="completed production run (FINAL epilogue included) must equal the golden output bytes",
+    inp=inp,
+    golden_hex=golden_final_hex,
+    expected_hex=golden_final_hex,
+    actual_hex=actual.hex(),
+    cycles=result.cycles,
   )
+  record["executed_tile_k"] = hw.boa_numeric_tile_k
+  record["target_fingerprint"] = fingerprint
+  record["output_dtype"] = out_dtype
+  record["epilogue_stages"] = sorted(
+    key for key in ("bias", "scale", "clip", "inv_scale") if epilogue.get(key) is not None
+  ) + (["relu"] if epilogue.get("relu") else [])
+  return record
 
 
 def _run_directed_case(case: dict, seed: int, sources: list[tuple[str, str]]):
@@ -794,6 +807,7 @@ def _binary64_whole_step_bits(a_words: list[str], b_words: list[str]) -> int:
   """The deliberately wrong pre-P06 model: binary64 accumulation of the whole
   step with one final FP32 encode.  Used only to prove the counterexample
   still separates the old model from the frozen profile."""
+
   def value(word: str) -> float:
     bits = int(word, 16)
     return struct.unpack("<f", struct.pack("<I", bits << 16))[0]
@@ -816,7 +830,6 @@ def _finish_report(case: str, config: dict, checks: list[dict], vectors: list[di
     "failed": sum(1 for item in vectors if not item["pass"]),
     "full_bytes": sum(1 for item in vectors if item["label"] == "full-golden-bytes"),
     "directed": sum(1 for item in vectors if item["label"] == "directed-golden-bytes"),
-    "pre_epilogue": sum(1 for item in vectors if item["label"] == "pre-epilogue"),
     "negative": sum(1 for item in vectors if item["label"] == "negative"),
     "cycles_total": sum(item.get("cycles", 0) for item in vectors),
   }
@@ -902,10 +915,7 @@ def _engine_vectors(
     step = separator["input"]["steps"][0]
     old_bits = _binary64_whole_step_bits(step["a"], step["b"])
     golden_bits = int(separator["expected"]["output_bits"][0], 16)
-    production_bits = int(
-      next(item["actual_hex"] for item in vectors if item["id"] == separator["id"]),
-      16,
-    )
+    production_bits = int(next(item["actual_hex"] for item in vectors if item["id"] == separator["id"]), 16)
     contrast_ok = old_bits == 0x3F800000 and golden_bits == 0x00000000 and production_bits == golden_bits
     checks.append(
       {
@@ -1008,9 +1018,8 @@ def _engine_cutover(config: dict, seed: int):
     wrong_target_rejection = None
   except ValueError as exc:
     wrong_target_rejection = exc
-  wrong_ok = (
-    wrong_target_rejection is not None
-    and "target fingerprint mismatch" in str(wrong_target_rejection)
+  wrong_ok = wrong_target_rejection is not None and "target fingerprint mismatch" in str(
+    wrong_target_rejection
   )
   checks.append(
     {
@@ -1060,7 +1069,7 @@ def _write_outputs(
       indent=2,
       sort_keys=True,
     )
-      + "\n",
+    + "\n",
     encoding="utf-8",
   )
   sources_dir = out / "sources"
@@ -1111,7 +1120,7 @@ def main(argv: list[str] | None = None) -> int:
       indent=2,
       sort_keys=True,
     )
-      + "\n",
+    + "\n",
     encoding="utf-8",
   )
   failed_checks = [item["id"] for item in report["checks"] if not item["pass"]]
@@ -1142,7 +1151,6 @@ def test_vector_parity_matches_committed_goldens(tmp_path):
   report = _run_case("vector-parity", Path(tmp_path), seed=20261028)
   assert report["status"] == "PASS", [c for c in report["checks"] if not c["pass"]]
   assert report["counts"]["full_bytes"] > 0
-  assert report["counts"]["pre_epilogue"] > 0
   assert report["counts"]["directed"] == 3
   assert report["counts"]["negative"] > 0
 
@@ -1158,6 +1166,119 @@ def test_cutover_rejections(tmp_path):
   assert report["status"] == "PASS", [c for c in report["checks"] if not c["pass"]]
 
 
+@pytest.mark.parametrize("m", [0, 1])
+def test_inline_epilogue_constants_respect_program_sram_capacity(m):
+  """Constants occupy resident bytes even when the Matmul has no MAC work."""
+  n = 300
+  steps = [{
+    "seq": 0, "k": 0, "storage_k": 1, "init": True, "final": True,
+    "a": ["0x3f80"] * m, "b": ["0x3f80"] * n,
+  }]
+  epilogue = {
+    "output_dtype": "i8", "bias": ["0x3fc00000"] * n, "scale": "0x40000000",
+    "relu": True, "clip": ["0x00000000", "0x40400000"],
+    "inv_scale": "0x3f000000", "zero_point": 1,
+  }
+  source = parse_workload_ir(build_case_module("epi_capacity", m, n, steps, "i8", epilogue))
+  bindings, seeds, c_address, c_bytes = _layout(m, n, steps, "i8")
+  sim = SimConfig(fidelity="full_memory", context_count=1)
+  hw = HardwareConfig()
+  artifact = compile_program(source, hw, sim, binding_assumptions=bindings)
+  task = next(iter(artifact.entry.tasks.values()))
+  program = next(iter(task.role_bindings.values())).tile_program
+  # Bias alone needs 1200 B; the old estimate incorrectly remained 1024 B.
+  for capacity in (1024, program.text_bytes - 1):
+    with pytest.raises(ValueError, match="target program SRAM"):
+      compile_program(
+        source, hw.with_overrides(tile_program_sram_bytes=capacity), sim, binding_assumptions=bindings
+      )
+  exact_hw = hw.with_overrides(tile_program_sram_bytes=program.text_bytes)
+  exact = compile_program(source, exact_hw, sim, binding_assumptions=bindings)
+  replay = parse_compiled_program(serialize_compiled_program(exact))
+  loaded = load_program(replay, exact_hw, sim, actual_bindings=bindings)
+  store = ByteStore()
+  for address, data in seeds:
+    store.seed_hbm(address, data)
+  result = Simulator(exact_hw, sim, byte_store=store).run(loaded)
+  assert result.completed, result.reason
+  # INIT K0: bias 1.5 * scale 2 = 3; quantize 3 * 0.5 -> RNE 2, + zp 1 = 3.
+  assert store.read_hbm(c_address, c_bytes) == bytes([3]) * (m * n)
+  pools = result.group_snapshot["shared_am_per_tile"]
+  assert sum(pool["final_count"] for pool in pools) == 1
+  assert all(pool["live_leases"] == 0 and pool["free_slots"] == pool["total_slots"] for pool in pools)
+
+
+def test_loader_rejects_resealed_underreported_epilogue_footprint():
+  steps = [{"seq": 0, "k": 0, "init": True, "final": True, "a": [], "b": []}]
+  source = build_case_module("epi_tamper", 1, 300, steps, "f32", {"bias": ["0x3f800000"] * 300})
+  bindings, _seeds, _address, _size = _layout(1, 300, steps, "f32")
+  hw, sim = HardwareConfig(), SimConfig(fidelity="full_memory", context_count=1)
+  artifact = compile_program(parse_workload_ir(source), hw, sim, binding_assumptions=bindings)
+  task = next(iter(artifact.entry.tasks.values()))
+  role = next(iter(task.role_bindings.values()))
+  underreported = replace(role.tile_program, text_bytes=1024)
+  underreported = replace(underreported, program_hash=program_digest(underreported))
+  task = replace(task, role_bindings={role.role_id: replace(role, tile_program=underreported)})
+  tampered = seal_program(replace(
+    artifact, entry=replace(artifact.entry, tasks={task.binding_id: task}),
+    static_effects={**artifact.static_effects, "program_text_bytes": {task.binding_id: (1024,)}},
+  ))
+  replay = parse_compiled_program(serialize_compiled_program(tampered))
+  with pytest.raises(ValueError, match=r"text_bytes.*epilogue constants"):
+    load_program(replay, hw, sim, actual_bindings=bindings)
+
+
+def _typed_steps(artifact) -> list:
+  task = next(iter(artifact.entry.tasks.values()))
+  program = next(iter(task.role_bindings.values())).tile_program
+  steps = [desc.params["matmul"] for desc in program.descriptors.values() if desc.kind == "BOA"]
+  return sorted(steps, key=lambda matmul: matmul.seq)
+
+
+@pytest.mark.parametrize("transpose", [(False, False), (True, False), (False, True), (True, True)])
+def test_e_p08_11_transposed_layouts_replay_golden_bytes(transpose):
+  """E-P08-11: asymmetric (m=3, n=2) storage-padded (storage_k=16 > k) A/B
+  in all four stored layouts, through the serialized v6 artifact, must
+  reproduce the frozen untransposed P03 golden bytes: the logical product
+  is layout-independent."""
+  case = next(item for item in _load_json(DEFAULT_VECTORS)["cases"] if item["id"] == "mm-rand-04")
+  inp = case["input"]
+  m, n, steps = inp["m"], inp["n"], inp["steps"]
+  module = build_case_module("tr", m, n, steps, "f32", transpose=transpose)
+  bindings, seeds, c_address, c_bytes = _layout(m, n, steps, "f32", transpose)
+  result, actual, _hw, _sim, artifact = _compile_load_run(
+    module, bindings, seeds, c_address, c_bytes, tile_k=inp["tile_k"], seed=20261028, steps=len(steps)
+  )
+  assert result.completed, result.reason
+  assert actual == _hex_bytes(case["expected"]["output_hex"])
+  replay = parse_compiled_program(serialize_compiled_program(artifact))
+  descriptors = _typed_steps(replay)
+  assert [(d.transpose_a, d.transpose_b) for d in descriptors] == [transpose] * len(steps)
+  assert all(d.storage_k == 16 and d.k < d.storage_k for d in descriptors)
+
+
+def test_e_p08_11_transpose_is_per_step_descriptor_state():
+  """Transposing only step 0's A in a two-step chain must still give the
+  golden bytes: flags live on each step's descriptor and never leak into the
+  next step or the AM chain.  A flag contradicting the stored shape is a
+  source-verifier error."""
+  case = next(item for item in _load_json(DEFAULT_VECTORS)["cases"] if item["id"] == "mm-rand-04")
+  inp = case["input"]
+  m, n, steps = inp["m"], inp["n"], inp["steps"]
+  per_step = [(True, False), (False, False)]
+  module = build_case_module("tr", m, n, steps, "f32", transpose=per_step)
+  bindings, seeds, c_address, c_bytes = _layout(m, n, steps, "f32", per_step)
+  result, actual, _hw, _sim, artifact = _compile_load_run(
+    module, bindings, seeds, c_address, c_bytes, tile_k=inp["tile_k"], seed=1, steps=len(steps)
+  )
+  assert result.completed, result.reason
+  assert actual == _hex_bytes(case["expected"]["output_hex"])
+  assert [(d.transpose_a, d.transpose_b) for d in _typed_steps(artifact)] == per_step
+  plain = build_case_module("tr", m, n, steps, "f32")
+  with pytest.raises((ParseError, ValueError, VerifyException)):
+    parse_workload_ir(plain.replace("k = 6 seq = 1", "k = 6 seq = 1 transpose_a"))
+
+
 def test_cli_rejects_unknown_case(tmp_path):
   with pytest.raises(SystemExit) as excinfo:
     main(["--case", "bogus", "--out", str(tmp_path), "--seed", "1"])
@@ -1167,15 +1288,14 @@ def test_cli_rejects_unknown_case(tmp_path):
 def test_cli_rejects_unknown_config_key(tmp_path):
   config_path = Path(tmp_path) / "bad.json"
   config_path.write_text(json.dumps({"schema": 1, "bogus": True}), encoding="utf-8")
-  assert main(
-    ["--case", "zero-k", "--out", str(tmp_path / "o"), "--seed", "1", "--config", str(config_path)]
-  ) == 2
+  assert (
+    main(["--case", "zero-k", "--out", str(tmp_path / "o"), "--seed", "1", "--config", str(config_path)])
+    == 2
+  )
 
 
 def test_empty_actual_binding_does_not_hide_nonempty_overlap():
-  case = next(
-    item for item in _load_json(DEFAULT_VECTORS)["cases"] if item["id"] == "mm-add-k0-negzero"
-  )
+  case = next(item for item in _load_json(DEFAULT_VECTORS)["cases"] if item["id"] == "mm-add-k0-negzero")
   inp = case["input"]
   source = build_case_module(case["id"], inp["m"], inp["n"], inp["steps"], "f32")
   bindings, _seeds, _address, _size = _layout(inp["m"], inp["n"], inp["steps"], "f32")

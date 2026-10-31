@@ -244,6 +244,48 @@ def test_group_fault_reset_with_pending_final_records_actual_cycle():
   assert validity == bytes(C_BYTES)
 
 
+def test_group_fault_reset_with_unissued_boa_records_actual_cycle(monkeypatch):
+  """A queued step must retire at FREEZE_DISPATCH, not the default cycle 0."""
+  from pipeline_validator.runtime.fault_ring import FaultCode
+  from pipeline_validator.runtime.reset_domain import ResetState
+
+  injected: list[int] = []
+  cancelled: list[int] = []
+
+  def inject(simulator, cycle):
+    tile = simulator.group.tiles[0]
+    queued = any(
+      entry.am_lease_id is not None
+      for fifo in tile.uce._engine_queues.values()
+      for entry in fifo
+    )
+    if queued and not injected:
+      injected.append(cycle)
+      simulator.group.trigger_fault(FaultCode.ENGINE_INTERNAL_FAULT, tile_id=0, cycle=cycle)
+    if simulator.group.reset_domain.state is ResetState.FREEZE_DISPATCH:
+      cancelled.append(cycle)
+
+  # Keep the request UCE-accepted but unissued, as with a full result FIFO.
+  monkeypatch.setattr(BoaResultService, "has_capacity", lambda self: False)
+  simulator, store, result, marks = _run_fixture(on_cycle=inject)
+  assert len(injected) == len(cancelled) == 1 and not result.completed
+  tile = simulator.group.tiles[0]
+  manager = tile.shared_am.snapshot()
+  assert manager["live_leases"] == manager["pending_requests"] == 0
+  assert manager["free_slots"] == manager["total_slots"]
+  (terminal,) = manager["terminals"]
+  assert (terminal["kind"], terminal["success"]) == ("fault", False)
+  release = _one(marks, "am_release", lease_id=terminal["lease_id"])
+  chain_terminal = _one(marks, "am_chain_terminal", lease_id=terminal["lease_id"])
+  assert terminal["cycle"] == release["cycle"] == chain_terminal["cycle"] == cancelled[0]
+  assert cancelled[0] >= injected[0] > 0 and chain_terminal["seq"] > release["seq"]
+  service = tile.boa_results.snapshot()
+  assert service["pending"] == service["reservations"] == service["output_write_count"] == 0
+  assert service["credits"] == service["credit_capacity"]
+  _data, validity = store._read_relaxed("hbm", C_BASE, C_BYTES)
+  assert validity == bytes(C_BYTES)
+
+
 
 # --- manager / result-service units -------------------------------------------
 
@@ -299,7 +341,7 @@ def test_fault_with_inflight_access_holds_slot_until_quiesced():
   lease = _request(manager, owner, "a", 0)
   manager.begin_step(lease.lease_id, seq=0, init=True, final=True, cycle=1)
   woken: list[tuple[int, int]] = []
-  waiter_wake = lambda new, cycle: woken.append((new.generation, cycle))  # noqa: E731
+  waiter_wake = lambda new, cycle: woken.append((new.generation, cycle))
   assert _request(manager, waiter, "w", 2, wake=waiter_wake) is None
   service = BoaResultService(HardwareConfig())
   service.set_output_blocked(True)
@@ -365,7 +407,7 @@ def test_terminal_ring_is_bounded_and_never_blocks_grants(capacity):
   granted = [lease.lease_id]
   for index, owner in enumerate(owners[1:], start=1):
     woken: list = []
-    wake = lambda new, _c, w=woken: w.append(new)  # noqa: E731
+    wake = lambda new, _c, w=woken: w.append(new)
     assert _request(manager, owner, f"c{index}", 10 * index, wake=wake) is None
     manager.begin_step(lease.lease_id, seq=0, init=True, final=True, cycle=10 * index + 1)
     manager.commit_step(lease.lease_id, seq=0, data=PAYLOAD, final=True, cycle=10 * index + 2)

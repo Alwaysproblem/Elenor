@@ -53,6 +53,7 @@ from .dialects.elenor import (
   TileSignalOp,
   TileSubviewOp,
   _int_list,
+  check_am_epilogue,
 )
 
 
@@ -1337,13 +1338,18 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
           raise VerifyException("tile.boa.async accumulate flag must be present exactly once")
         if op.output is not None and int(op.output.value.data) != 1:
           raise VerifyException("tile.boa.async output flag must be present exactly once")
+        transpose_a = op.transpose_a is not None
+        transpose_b = op.transpose_b is not None
         if not isinstance(op.a.type, TileL1Buffer) or not isinstance(op.b.type, TileL1Buffer):
           raise VerifyException("tile.boa.async A/B inputs must be L1 buffers")
         a_dims = tuple(_int_list(op.a.type.dims))
         b_dims = tuple(_int_list(op.b.type.dims))
         if len(a_dims) != 2 or len(b_dims) != 2:
           raise VerifyException("tile.boa.async A/B inputs must be rank-2 L1 buffers")
-        storage_k_a, storage_k_b = a_dims[1], b_dims[0]
+        # Stored layout: A is [m, K] or (transpose_a) [K, m]; B is [K, n] or
+        # (transpose_b) [n, K].  K is the shared storage K.
+        storage_k_a = a_dims[0] if transpose_a else a_dims[1]
+        storage_k_b = b_dims[1] if transpose_b else b_dims[0]
         if storage_k_a != storage_k_b:
           raise VerifyException(
             f"tile.boa.async A storage K ({storage_k_a}) and B storage K ({storage_k_b}) must match"
@@ -1378,8 +1384,12 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
           raise VerifyException(
             "tile.boa.async L1 output must differ from its A/B input buffers"
           )
-        require_matmul_shape(op.a, (m, storage_k), "bf16", "tile.boa.async A input")
-        require_matmul_shape(op.b, (storage_k, n), "bf16", "tile.boa.async B input")
+        require_matmul_shape(
+          op.a, (storage_k, m) if transpose_a else (m, storage_k), "bf16", "tile.boa.async A input"
+        )
+        require_matmul_shape(
+          op.b, (n, storage_k) if transpose_b else (storage_k, n), "bf16", "tile.boa.async B input"
+        )
         require_matmul_shape(op.acc, (m, n), "f32", "tile.boa.async AM accumulator")
         if op.out.type.dtype.data not in TileAllocOp.OUTPUT_DTYPES:
           raise VerifyException(
@@ -1468,6 +1478,15 @@ def _verify_program(prog: TileProgramDefOp) -> tuple[frozenset[int], frozenset[i
         result_type = op.result.type
         if not isinstance(result_type, TileAmBuffer) or result_type.dtype.data != "f32":
           raise VerifyException("AM allocation dtype must be f32")
+        try:
+          epilogue = op.epilogue_fields()
+          check_am_epilogue(
+            output_type.dtype.data, output_dims[1] if len(output_dims) == 2 else -1,
+            epilogue["bias"], epilogue["scale"], epilogue["clip"],
+            epilogue["inv_scale"], epilogue["zero_point"],
+          )
+        except ValueError as exc:
+          raise VerifyException(str(exc)) from exc
         am_live[op.result] = {
           "output": output,
           "dims": output_dims,

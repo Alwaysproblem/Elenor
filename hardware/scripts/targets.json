@@ -37,13 +37,19 @@
     },
     "soft-conv": {
       "owner": "P08",
-      "implemented": false,
+      "implemented": true,
       "board": null,
-      "cases": [],
+      "cases": [
+        "int8-chain",
+        "param-reject",
+        "stage-matrix",
+        "conv-pad-stride-dilation",
+        "conv-traffic"
+      ],
       "config": {
         "required_target": "soft-conv",
-        "consumed_sections": [],
-        "default_config": null
+        "consumed_sections": ["validator"],
+        "default_config": "hardware/configs/soft-conv.yaml"
       }
     },
     "shared-am-functional": {

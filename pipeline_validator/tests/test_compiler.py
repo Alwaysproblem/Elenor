@@ -154,11 +154,11 @@ class TestExplicitCompileLoadReplay:
       simulator.run(workload.module)
 
     text = serialize_compiled_program(artifact)
-    assert artifact.schema_version == 5
-    assert artifact.compiler_abi == "v5"
-    # P06: clean cutover from the previous v4/v4 ABI - every earlier
-    # schema/ABI pair (including the incoming v4/v4) is rejected with a
-    # recompile hint; no upgrade shim exists.
+    assert artifact.schema_version == 6
+    assert artifact.compiler_abi == "v6"
+    # P08: clean cutover from the previous v5/v5 ABI (epilogue + transpose
+    # fields) - every earlier schema/ABI pair is rejected with a recompile
+    # hint; no upgrade shim exists.
     for schema_version, compiler_abi in (
       (1, "v0"),
       (2, "v0"),
@@ -169,6 +169,9 @@ class TestExplicitCompileLoadReplay:
       (4, "v4"),
       (4, "v5"),
       (5, "v4"),
+      (5, "v5"),
+      (6, "v5"),
+      (5, "v6"),
     ):
       legacy = json.loads(text)
       legacy["schema_version"] = schema_version
@@ -745,8 +748,8 @@ class TestIndependentSharedArtifactVerification:
 
     loaded = load_program(replay, hw, sim, actual_bindings=bindings)
 
-    assert loaded.compiled.schema_version == 5
-    assert loaded.compiled.compiler_abi == "v5"
+    assert loaded.compiled.schema_version == 6
+    assert loaded.compiled.compiler_abi == "v6"
     assert serialize_compiled_program(loaded.compiled) == text
 
 

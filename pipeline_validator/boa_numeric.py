@@ -30,8 +30,17 @@ or tail lanes beyond ``k`` perform no MAC, and a block without active lanes
 performs no AM update at all (never ``AM + (+0)``).  An INIT step with no
 active lanes initializes every cell to ``+0``; an ADD step with no active
 lanes preserves the partial bytes bit-for-bit, including ``-0`` and sNaN
-payloads.  Validation runs even for empty work.  INT8 output stays rejected
-until P08 freezes the conversion policy.
+payloads.  Validation runs even for empty work.
+
+FINAL epilogue (P08, P03 numeric_freeze §4): per element, optional per-column
+bias ``add_f32_rne`` -> scalar ``mul_f32_rne`` scale -> ReLU -> clip -> one
+output conversion.  Disabled stages execute nothing; an enabled scale of
+exactly 1.0 still multiplies.  ReLU and clip return canonical NaN for NaN
+input; ReLU maps -0/negatives/-Inf to +0; clip comparisons are strict so an
+input equal to a bound keeps its bits.  ``i8`` output computes
+``mul_f32_rne(y, inv_scale)``, rounds a finite product to an exact integer
+under RNE, adds ``zero_point`` and saturates to ``[-128, 127]``; a NaN
+product yields ``zero_point`` and +/-Inf yields 127 / -128.
 
 This module does not import ``hardware/boa/reference`` (or anything outside
 the standard library); parity with the frozen oracle is enforced only through
@@ -44,13 +53,17 @@ import struct
 from collections.abc import Sequence
 
 __all__ = [
+  "BoaEpilogueSpec",
   "add_f32_rne",
+  "apply_epilogue",
   "convert_output",
   "decode_f32_bits",
   "encode_f32_bits",
   "f32_to_bf16_rne",
   "fma_f32_rne",
   "matmul_f32",
+  "mul_f32_rne",
+  "validate_epilogue",
 ]
 
 # Diagnostic exception flags; NV=16 OF=4 UF=2 NX=1 per the frozen profile.
@@ -266,6 +279,18 @@ def add_f32_rne(a_bits: int, b_bits: int) -> tuple[int, int]:
   return _add_bits(_bits_word(a_bits), _bits_word(b_bits))
 
 
+def _mul_bits(a: int, b: int) -> tuple[int, int]:
+  # A product's exact zero sign is the operand sign XOR; adding a zero of that
+  # same sign is exact, so FMA with it rounds the product exactly once.
+  product_negative = (a >> 31) ^ (b >> 31)
+  return _fma_bits(a, b, product_negative << 31)
+
+
+def mul_f32_rne(a_bits: int, b_bits: int) -> tuple[int, int]:
+  """Single-rounded RNE FP32 multiplication of raw bit patterns."""
+  return _mul_bits(_bits_word(a_bits), _bits_word(b_bits))
+
+
 def f32_to_bf16_rne(bits: int) -> tuple[int, int]:
   """RNE FP32 -> BF16 conversion of a raw bit pattern.
 
@@ -299,12 +324,145 @@ def encode_f32_bits(words) -> bytes:
   return struct.pack(f"<{len(words)}I", *(_bits_word(word) for word in words))
 
 
+def _f32_less(a: int, b: int) -> bool:
+  """Ordered IEEE ``a < b`` for non-NaN words (``-0 == +0``)."""
+  if _is_zero(a) and _is_zero(b):
+    return False
+  a_negative, b_negative = a >> 31, b >> 31
+  if a_negative != b_negative:
+    return bool(a_negative)
+  return (a < b) if not a_negative else (a > b)
+
+
+def _round_to_int_rne(bits: int) -> int:
+  """Exact RNE integer of a finite FP32 word (unbounded result)."""
+  negative, magnitude, shift = _decode_finite(bits)
+  value, _ = _rne_quotient(magnitude, 1 << shift) if shift else (magnitude, False)
+  return -value if negative else value
+
+
+class BoaEpilogueSpec:
+  """Validated FINAL-only epilogue parameters (all FP32 values as raw bits)."""
+
+  __slots__ = ("bias", "clip", "inv_scale", "output_dtype", "relu", "scale", "zero_point")
+
+  def __init__(
+    self,
+    output_dtype: str,
+    *,
+    bias: Sequence[int] | None = None,
+    scale: int | None = None,
+    relu: bool = False,
+    clip: tuple[int, int] | None = None,
+    inv_scale: int | None = None,
+    zero_point: int = 0,
+  ):
+    self.output_dtype = output_dtype
+    self.bias = None if bias is None else tuple(bias)
+    self.scale = scale
+    self.relu = relu
+    self.clip = None if clip is None else tuple(clip)
+    self.inv_scale = inv_scale
+    self.zero_point = zero_point
+
+
+def validate_epilogue(spec: BoaEpilogueSpec, n: int) -> None:
+  """Reject illegal parameters before any output exists (P03 §4)."""
+  _dimension(n, "n")
+  if spec.output_dtype not in ("f32", "bf16", "i8"):
+    raise ValueError(f"unsupported AM output dtype '{spec.output_dtype}'")
+  if not isinstance(spec.relu, bool):
+    raise ValueError("epilogue relu must be a boolean")
+  if spec.bias is not None:
+    if len(spec.bias) != n:
+      raise ValueError(f"epilogue bias has {len(spec.bias)} words but n={n}")
+    for word in spec.bias:
+      _bits_word(word)
+  if spec.scale is not None:
+    _bits_word(spec.scale)
+  if spec.clip is not None:
+    if len(spec.clip) != 2:
+      raise ValueError("epilogue clip must be a (lo, hi) pair")
+    lo, hi = (_bits_word(word) for word in spec.clip)
+    if _is_nan(lo) or _is_nan(hi):
+      raise ValueError("epilogue clip bounds must not be NaN")
+    if _f32_less(hi, lo):
+      raise ValueError("epilogue clip bounds are unordered (lo > hi)")
+  if spec.output_dtype == "i8":
+    if spec.inv_scale is None:
+      raise ValueError("i8 output requires epilogue inv_scale")
+    inv = _bits_word(spec.inv_scale)
+    if _is_nan(inv) or _is_inf(inv):
+      raise ValueError("epilogue inv_scale must be finite")
+    if inv >> 31 or _is_zero(inv):
+      raise ValueError("epilogue inv_scale must be > +0")
+    if isinstance(spec.zero_point, bool) or not isinstance(spec.zero_point, int):
+      raise ValueError("epilogue zero_point must be an integer")
+    if not -128 <= spec.zero_point <= 127:
+      raise ValueError(f"epilogue zero_point {spec.zero_point} is outside [-128, 127]")
+  else:
+    if spec.inv_scale is not None:
+      raise ValueError("epilogue inv_scale is only valid for i8 output")
+    if spec.zero_point != 0:
+      raise ValueError("epilogue zero_point is only valid for i8 output")
+
+
+def _i8_word(value: int, inv_scale: int, zero_point: int) -> int:
+  scaled, _ = _mul_bits(value, inv_scale)
+  if _is_nan(scaled):
+    result = zero_point
+  elif _is_inf(scaled):
+    result = -128 if scaled >> 31 else 127
+  else:
+    result = _round_to_int_rne(scaled) + zero_point
+    result = -128 if result < -128 else 127 if result > 127 else result
+  return result & 0xFF
+
+
+def apply_epilogue(words: Sequence[int], m: int, n: int, spec: BoaEpilogueSpec) -> bytes:
+  """Apply the frozen FINAL epilogue once and convert to output bytes."""
+  validate_epilogue(spec, n)
+  _dimension(m, "m")
+  if len(words) != m * n:
+    raise ValueError(f"AM has {len(words)} words but m*n={m * n}")
+  bias, scale, relu, clip = spec.bias, spec.scale, spec.relu, spec.clip
+  dtype = spec.output_dtype
+  out = bytearray()
+  for index, word in enumerate(words):
+    value = _bits_word(word)
+    if bias is not None:
+      value, _ = _add_bits(value, bias[index % n])
+    if scale is not None:
+      value, _ = _mul_bits(value, scale)
+    if relu:
+      if _is_nan(value):
+        value = _CANONICAL_F32_NAN
+      elif value >> 31:
+        value = 0
+    if clip is not None:
+      if _is_nan(value):
+        value = _CANONICAL_F32_NAN
+      elif _f32_less(value, clip[0]):
+        value = clip[0]
+      elif _f32_less(clip[1], value):
+        value = clip[1]
+    if dtype == "f32":
+      out += value.to_bytes(4, "little")
+    elif dtype == "bf16":
+      out += _bf16_bits(value)[0].to_bytes(2, "little")
+    else:
+      assert spec.inv_scale is not None
+      out.append(_i8_word(value, spec.inv_scale, spec.zero_point))
+  return bytes(out)
+
+
 def convert_output(words, dtype: str) -> bytes:
-  """Convert final AM words (raw FP32 bit patterns) to the output dtype.
+  """Convert final AM words with no optional stage enabled.
 
   ``f32`` writes the raw bits verbatim (sNaN payloads and ``-0`` survive);
-  ``bf16`` canonicalizes NaN to ``0x7fc0`` and applies one final RNE; ``i8``
-  stays rejected until the P08 conversion policy lands.
+  ``bf16`` canonicalizes NaN to ``0x7fc0`` and applies one final RNE.  ``i8``
+  needs quantization parameters and therefore goes through
+  :func:`apply_epilogue`.
   """
   if dtype == "f32":
     return encode_f32_bits(words)
@@ -313,7 +471,7 @@ def convert_output(words, dtype: str) -> bytes:
       _bf16_bits(_bits_word(word))[0].to_bytes(2, "little") for word in words
     )
   if dtype == "i8":
-    raise ValueError("INT8 AM output conversion policy is not frozen")
+    raise ValueError("i8 output requires epilogue inv_scale/zero_point")
   raise ValueError(f"unsupported AM output dtype '{dtype}'")
 
 
@@ -376,11 +534,16 @@ def matmul_f32(
   storage_k: int | None = None,
   mask=None,
   block_trace: list | None = None,
+  transpose_a: bool = False,
+  transpose_b: bool = False,
 ) -> bytes:
   """Evaluate one typed matmul step under ``bf16_fp32_mac_rne_v1``.
 
-  ``a`` is row-major ``[m, storage_k]`` BF16 and ``b`` is row-major
-  ``[storage_k, n]`` BF16 (``storage_k`` defaults to ``k``).  ``k`` is the
+  ``a`` is row-major ``[m, storage_k]`` BF16 (``[storage_k, m]`` with
+  ``transpose_a``) and ``b`` is row-major ``[storage_k, n]`` BF16
+  (``[n, storage_k]`` with ``transpose_b``); ``storage_k`` defaults to ``k``.
+  Transposition only changes which stored word is read for logical element
+  ``A[i,k]`` / ``B[k,j]``; MAC order and rounding are unchanged.  ``k`` is the
   logical K extent before masking; ``mask`` is an optional boolean sequence
   of ``storage_k`` length whose tail at ``k..storage_k`` must be inactive.
   ``accumulate=False`` marks the INIT step: the first non-empty contribution
@@ -398,6 +561,8 @@ def matmul_f32(
   Callers that need a step ``seq`` attach it outside this call.  Leaving it
   ``None`` keeps the default path free of per-block allocations.
   """
+  if not isinstance(transpose_a, bool) or not isinstance(transpose_b, bool):
+    raise ValueError("transpose_a/transpose_b must be booleans")
   _dimension(m, "m")
   _dimension(n, "n")
   _dimension(k, "k")
@@ -453,14 +618,19 @@ def matmul_f32(
 
   a_words = _bf16_operand_words(a, m * storage)
   b_words = _bf16_operand_words(b, storage * n)
+  # Logical A[row, lane] = a_words[row * a_row + lane * a_lane];
+  # logical B[lane, col] = b_words[lane * b_lane + col * b_col].
+  a_row, a_lane = (1, m) if transpose_a else (storage, 1)
+  b_lane, b_col = (1, storage) if transpose_b else (n, 1)
   fma = _fma_bits
   add = _add_bits
   init = not accumulate
   out = [0] * cells
   for row in range(m):
-    a_base = row * storage
+    a_base = row * a_row
     out_base = row * n
     for col in range(n):
+      b_base = col * b_col
       am = partial_words[out_base + col] if partial_words is not None else 0
       first = init
       for start, lanes in blocks:
@@ -468,7 +638,7 @@ def matmul_f32(
         fma_flags = 0
         partial_bits: list[int] | None = [] if block_trace is not None else None
         for lane in lanes:
-          p, flags = fma(a_words[a_base + lane], b_words[lane * n + col], p)
+          p, flags = fma(a_words[a_base + lane * a_lane], b_words[b_base + lane * b_lane], p)
           if partial_bits is not None:
             fma_flags |= flags
             partial_bits.append(p)

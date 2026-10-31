@@ -1,0 +1,9 @@
+schema: 1
+target: soft-conv
+topology: {}
+# P08 soft-conv golden vectors pin their own boa_numeric_tile_k (the
+# matmul.json chains carry per-vector tile_k 2/4/8/16; the conv fixtures
+# assume the default 8), so no hardware overrides are consumed here; the
+# container runner rejects non-empty hw_overrides.
+validator: {}
+board: {}

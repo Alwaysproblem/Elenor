@@ -150,7 +150,7 @@ class ResetDomain:
       cancel = getattr(uce, "_clear_engine_queues", None)
       if not callable(cancel):
         raise MemoryInvariantError("Tile UCE lacks unissued engine-request cancellation")
-      cancel(unregister=True)
+      cancel(unregister=True, cycle=cycle)
       mfe = getattr(tile, "mfe", None)
       begin_mfe_drain = getattr(mfe, "begin_reset_drain", None)
       if not callable(begin_mfe_drain):

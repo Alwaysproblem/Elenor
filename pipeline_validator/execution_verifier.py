@@ -16,7 +16,16 @@ from enum import Enum
 from itertools import pairwise
 from typing import NoReturn
 
-from .compiled_program import BindingGuard, CompiledProgram, WorkloadInfo, artifact_digest, program_digest
+from .boa_numeric import BoaEpilogueSpec, validate_epilogue
+from .compiled_program import (
+  COMPILER_ABI,
+  SCHEMA_VERSION,
+  BindingGuard,
+  CompiledProgram,
+  WorkloadInfo,
+  artifact_digest,
+  program_digest,
+)
 from .config import HardwareConfig, SimConfig
 from .execution_ir import (
   ExecAmBuffer,
@@ -478,6 +487,8 @@ def _verify_program(
   if not isinstance(program.resource_contract, TileResources):
     _fail(f"{where} is missing TileResources")
   _uint(program.text_bytes, f"{where}.text_bytes", positive=True)
+  if program.text_bytes < program.required_text_bytes:
+    _fail(f"{where}.text_bytes does not account for its instructions, descriptors and epilogue constants")
   if program.text_bytes > hw.tile_program_sram_bytes:
     _fail(f"{where}.text_bytes exceeds Tile Program SRAM capacity")
   contract = program.resource_contract
@@ -704,15 +715,19 @@ def _verify_boa_matmul(
     _fail(f"{where} init/final must be bool")
   if len(a.dims) != 2 or len(b.dims) != 2:
     _fail(f"{where} A/B must be rank-2 L1 views")
-  storage_k = a.dims[1]
-  if b.dims[0] != storage_k:
+  if type(matmul.transpose_a) is not bool or type(matmul.transpose_b) is not bool:
+    _fail(f"{where} transpose_a/transpose_b must be bool")
+  storage_k = a.dims[0] if matmul.transpose_a else a.dims[1]
+  if (b.dims[1] if matmul.transpose_b else b.dims[0]) != storage_k:
     _fail(f"{where} A and B storage K dims must match")
   if matmul.k > storage_k:
     _fail(f"{where} k must not exceed its storage K")
   if a.dtype != "bf16" or b.dtype != "bf16":
     _fail(f"{where} inputs must be bf16 L1 views")
-  if a.dims != (matmul.m, storage_k) or b.dims != (storage_k, matmul.n):
-    _fail(f"{where} A/B shapes must be (m, storage_k) and (storage_k, n)")
+  a_stored = (storage_k, matmul.m) if matmul.transpose_a else (matmul.m, storage_k)
+  b_stored = (matmul.n, storage_k) if matmul.transpose_b else (storage_k, matmul.n)
+  if a.dims != a_stored or b.dims != b_stored:
+    _fail(f"{where} A/B shapes do not match (m, n, storage_k) and their transpose flags")
   if output.dims != (matmul.m, matmul.n) or output.dims != am.dims:
     _fail(f"{where} output/AM shape mismatch")
   if matmul.init != (matmul.seq == 0):
@@ -721,6 +736,24 @@ def _verify_boa_matmul(
     _fail(f"{where} output differs from its AM binding")
   if output.dtype not in ("f32", "bf16", "i8"):
     _fail(f"{where}.output dtype is invalid")
+  epilogue = am.epilogue
+  try:
+    if output.dtype != "i8" and epilogue.zero_point != 0:
+      raise ValueError("zero_point is only valid for i8 output")
+    validate_epilogue(
+      BoaEpilogueSpec(
+        output.dtype,
+        bias=epilogue.bias,
+        scale=epilogue.scale,
+        relu=epilogue.relu,
+        clip=epilogue.clip,
+        inv_scale=epilogue.inv_scale,
+        zero_point=epilogue.zero_point,
+      ),
+      matmul.n,
+    )
+  except (ValueError, TypeError) as exc:
+    _fail(f"{where} AM epilogue is invalid: {exc}")
   if output.base in (a.base, b.base):
     _fail(f"{where}.output must differ from its A/B input buffers")
   if matmul.k_mask is not None:
@@ -2761,7 +2794,11 @@ def verify_compiled_program(program: CompiledProgram, hw: HardwareConfig, sim: S
   """Verify package integrity and executable semantics without graph mutation."""
   if not isinstance(program, CompiledProgram):
     _fail("expected CompiledProgram")
-  if type(program.schema_version) is not int or program.schema_version != 5 or program.compiler_abi != "v5":
+  if (
+    type(program.schema_version) is not int
+    or program.schema_version != SCHEMA_VERSION
+    or program.compiler_abi != COMPILER_ABI
+  ):
     _fail("unsupported compiled schema or compiler ABI; recompile from source")
   _fail_indexed_memory_fidelity(program, sim)
   if not _is_frozen(program):

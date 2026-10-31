@@ -680,6 +680,70 @@ def _parse_opt_str_kw(parser: Parser, keyword: str) -> str | None:
   return parser.parse_str_literal()
 
 
+def _print_hex_kw(printer: Printer, keyword: str, value: int) -> None:
+  printer.print_string(f" {keyword} = 0x{value:08x}")
+
+
+def _print_hex_list_kw(printer: Printer, keyword: str, values: Sequence[int]) -> None:
+  printer.print_string(f" {keyword} = [" + ", ".join(f"0x{value:08x}" for value in values) + "]")
+
+
+def _check_f32_word(value, name: str) -> int:
+  if type(value) is not int or not 0 <= value <= 0xFFFFFFFF:
+    raise ValueError(f"{name} must be a 32-bit FP32 bit pattern")
+  return value
+
+
+def _f32_word_is_nan(bits: int) -> bool:
+  return bits & 0x7F800000 == 0x7F800000 and bits & 0x007FFFFF != 0
+
+
+def _f32_word_key(bits: int) -> int:
+  """Total order key for non-NaN FP32 words with -0 == +0."""
+  if bits & 0x7FFFFFFF == 0:
+    return 0
+  return -(bits & 0x7FFFFFFF) if bits >> 31 else bits
+
+
+def check_am_epilogue(
+  out_dtype: str, n: int, bias, scale, clip, inv_scale, zero_point
+) -> None:
+  """Static FINAL epilogue legality (P03 numeric_freeze §4), with parameter names."""
+  if bias is not None:
+    words = tuple(bias)
+    if len(words) != n:
+      raise ValueError(f"AM epilogue bias has {len(words)} words but the output has n={n} columns")
+    for index, word in enumerate(words):
+      _check_f32_word(word, f"AM epilogue bias[{index}]")
+  if scale is not None:
+    _check_f32_word(scale, "AM epilogue scale")
+  if clip is not None:
+    bounds = tuple(clip)
+    if len(bounds) != 2:
+      raise ValueError("AM epilogue clip must be [lo, hi]")
+    lo = _check_f32_word(bounds[0], "AM epilogue clip lo")
+    hi = _check_f32_word(bounds[1], "AM epilogue clip hi")
+    if _f32_word_is_nan(lo) or _f32_word_is_nan(hi):
+      raise ValueError("AM epilogue clip bounds must not be NaN")
+    if _f32_word_key(lo) > _f32_word_key(hi):
+      raise ValueError("AM epilogue clip bounds are unordered (lo > hi)")
+  if out_dtype == "i8":
+    if inv_scale is None:
+      raise ValueError("AM epilogue inv_scale is required for i8 output")
+    _check_f32_word(inv_scale, "AM epilogue inv_scale")
+    if inv_scale & 0x7F800000 == 0x7F800000:
+      raise ValueError("AM epilogue inv_scale must be finite")
+    if inv_scale >> 31 or inv_scale & 0x7FFFFFFF == 0:
+      raise ValueError("AM epilogue inv_scale must be > +0")
+    if zero_point is not None and (type(zero_point) is not int or not -128 <= zero_point <= 127):
+      raise ValueError(f"AM epilogue zero_point {zero_point} is outside [-128, 127]")
+  else:
+    if inv_scale is not None:
+      raise ValueError("AM epilogue inv_scale is only valid for i8 output")
+    if zero_point is not None:
+      raise ValueError("AM epilogue zero_point is only valid for i8 output")
+
+
 def _print_body_region(printer: Printer, region: Region) -> None:
   printer.print_string(" ")
   printer.print_region(region, print_entry_block_args=False, print_empty_block=False)
@@ -2021,12 +2085,21 @@ class TileAllocOp(IRDLOperation):
 
     %acc = tile.alloc memory_space = "am" logical_slot = 0 output(%out)
         shape = [64, 256] dtype = "f32" alignment = 256
+        [bias = [0x..]] [scale = 0x..] [relu] [clip = [0x.., 0x..]]
+        [inv_scale = 0x..] [zero_point = Z]
         : !tile.am_buffer<64x256xf32>
 
   AM allocation is a source-level request for one lower-level lease; it is
   not a plain L1 allocation and never enters the L1 Arena/Frame.  ``%out``
   must be defined earlier and stays reserved as the unique final write
   destination while the chain is live.
+
+  The optional epilogue keywords are the chain's immutable FINAL-only
+  post-processing configuration (P03 numeric_freeze §4): FP32 values are raw
+  32-bit patterns, ``bias`` has one word per output column, ``inv_scale``
+  and ``zero_point`` exist only for an ``i8`` output buffer (where
+  ``inv_scale`` is required).  The output dtype is the bound ``%out``
+  buffer's dtype; there is no second dtype field.
   """
 
   name = "tile.alloc"
@@ -2036,6 +2109,12 @@ class TileAllocOp(IRDLOperation):
   alignment = opt_prop_def(IntegerAttr)
   memory_space = opt_prop_def(StringAttr)
   logical_slot = opt_prop_def(IntegerAttr)
+  bias = opt_prop_def(ArrayAttr)
+  scale = opt_prop_def(IntegerAttr)
+  relu = opt_prop_def(IntegerAttr)
+  clip = opt_prop_def(ArrayAttr)
+  inv_scale = opt_prop_def(IntegerAttr)
+  zero_point = opt_prop_def(IntegerAttr)
   output = opt_operand_def(TileL1Buffer)
 
   result = result_def(AnyOf((BaseAttr(TileL1Buffer), BaseAttr(TileAmBuffer))))
@@ -2051,6 +2130,12 @@ class TileAllocOp(IRDLOperation):
     memory_space: str | None = None,
     logical_slot: int | None = None,
     output=None,
+    bias: Sequence[int] | None = None,
+    scale: int | None = None,
+    relu: bool = False,
+    clip: Sequence[int] | None = None,
+    inv_scale: int | None = None,
+    zero_point: int | None = None,
   ):
     if memory_space not in (None, "l1", "am"):
       raise ValueError(f"unsupported tile.alloc memory_space '{memory_space}'")
@@ -2070,10 +2155,19 @@ class TileAllocOp(IRDLOperation):
         raise ValueError("AM allocation shape must match its bound L1 output shape")
       if output_type.dtype.data not in self.OUTPUT_DTYPES:
         raise ValueError("AM output dtype must be one of " + ", ".join(self.OUTPUT_DTYPES))
+      check_am_epilogue(
+        output_type.dtype.data, int(shape[1]) if len(shape) == 2 else -1,
+        bias, scale, clip, inv_scale, zero_point,
+      )
       result_type: TileL1Buffer | TileAmBuffer = TileAmBuffer.of(shape, dtype)
     else:
       if logical_slot is not None or output is not None:
         raise ValueError("L1 allocation may not declare logical_slot/output")
+      if (
+        bias is not None or scale is not None or relu or clip is not None
+        or inv_scale is not None or zero_point is not None
+      ):
+        raise ValueError("only an AM allocation may declare a FINAL epilogue")
       result_type = TileL1Buffer.of(shape, dtype)
     super().__init__(
       operands=[output],
@@ -2085,6 +2179,12 @@ class TileAllocOp(IRDLOperation):
           "alignment": None if alignment is None else _index_attr(alignment),
           "memory_space": None if memory_space is None else StringAttr(memory_space),
           "logical_slot": None if logical_slot is None else _index_attr(logical_slot),
+          "bias": None if bias is None else ArrayAttr([_index_attr(word) for word in bias]),
+          "scale": None if scale is None else _index_attr(scale),
+          "relu": _index_attr(1) if relu else None,
+          "clip": None if clip is None else ArrayAttr([_index_attr(word) for word in clip]),
+          "inv_scale": None if inv_scale is None else _index_attr(inv_scale),
+          "zero_point": None if zero_point is None else _index_attr(zero_point),
         }
       ),
     )
@@ -2102,6 +2202,18 @@ class TileAllocOp(IRDLOperation):
     _print_str_kw(printer, "dtype", self.dtype.data)
     if self.alignment is not None:
       _print_int_kw(printer, "alignment", self.alignment.value.data)
+    if self.bias is not None:
+      _print_hex_list_kw(printer, "bias", _int_list(self.bias))
+    if self.scale is not None:
+      _print_hex_kw(printer, "scale", self.scale.value.data)
+    if self.relu is not None:
+      printer.print_string(" relu")
+    if self.clip is not None:
+      _print_hex_list_kw(printer, "clip", _int_list(self.clip))
+    if self.inv_scale is not None:
+      _print_hex_kw(printer, "inv_scale", self.inv_scale.value.data)
+    if self.zero_point is not None:
+      _print_int_kw(printer, "zero_point", self.zero_point.value.data)
     _print_event_type(printer, self.result.type)
 
   @classmethod
@@ -2116,6 +2228,12 @@ class TileAllocOp(IRDLOperation):
     shape = _parse_int_list_kw(parser, "shape")
     dtype = _parse_str_kw(parser, "dtype")
     alignment = _parse_opt_int_kw(parser, "alignment")
+    bias = _parse_opt_int_list_kw(parser, "bias")
+    scale = _parse_opt_int_kw(parser, "scale")
+    relu = parser.parse_optional_keyword("relu") is not None
+    clip = _parse_opt_int_list_kw(parser, "clip")
+    inv_scale = _parse_opt_int_kw(parser, "inv_scale")
+    zero_point = _parse_opt_int_kw(parser, "zero_point")
     parser.parse_punctuation(":")
     buf_type = parser.parse_attribute()
     if not isinstance(buf_type, (TileL1Buffer, TileAmBuffer)):
@@ -2147,9 +2265,26 @@ class TileAllocOp(IRDLOperation):
         memory_space=memory_space,
         logical_slot=logical_slot,
         output=output,
+        bias=bias,
+        scale=scale,
+        relu=relu,
+        clip=clip,
+        inv_scale=inv_scale,
+        zero_point=zero_point,
       )
     except ValueError as exc:
       parser.raise_error(str(exc))
+
+  def epilogue_fields(self) -> dict:
+    """Source epilogue configuration with raw-bit FP32 words."""
+    return {
+      "bias": None if self.bias is None else tuple(_int_list(self.bias)),
+      "scale": None if self.scale is None else int(self.scale.value.data),
+      "relu": self.relu is not None,
+      "clip": None if self.clip is None else tuple(_int_list(self.clip)),
+      "inv_scale": None if self.inv_scale is None else int(self.inv_scale.value.data),
+      "zero_point": None if self.zero_point is None else int(self.zero_point.value.data),
+    }
 
 
 @irdl_op_definition
@@ -2563,6 +2698,11 @@ class TileBoaOp(_TileAsyncOp):
   inactive.  A tail lane without a mask is implicitly inactive; masks
   never compact operands.  ``m``/``n``/``k`` must be non-negative.
 
+  Optional ``transpose_a`` / ``transpose_b`` (after ``k_mask``) declare the
+  operand's stored layout: a transposed A buffer is ``[storage_k, m]`` and a
+  transposed B buffer is ``[n, storage_k]``; the logical product is always
+  ``A[m,k] x B[k,n]``.  The flags are per-step typed descriptor fields.
+
   Flags are orthogonal:
 
   - no flag: INIT, ``acc := A x B``, no L1 output write;
@@ -2584,6 +2724,8 @@ class TileBoaOp(_TileAsyncOp):
   k = prop_def(IntegerAttr)
   seq = prop_def(IntegerAttr)
   k_mask = opt_prop_def(ArrayAttr)
+  transpose_a = opt_prop_def(IntegerAttr)
+  transpose_b = opt_prop_def(IntegerAttr)
   accumulate = opt_prop_def(IntegerAttr)
   output = opt_prop_def(IntegerAttr)
 
@@ -2600,6 +2742,8 @@ class TileBoaOp(_TileAsyncOp):
     tag: str,
     *,
     k_mask: Sequence[int] | None = None,
+    transpose_a: bool = False,
+    transpose_b: bool = False,
     accumulate: bool = False,
     output: bool = False,
   ):
@@ -2626,6 +2770,8 @@ class TileBoaOp(_TileAsyncOp):
             if k_mask is None
             else ArrayAttr([_index_attr(value) for value in k_mask])
           ),
+          "transpose_a": _index_attr(1) if transpose_a else None,
+          "transpose_b": _index_attr(1) if transpose_b else None,
           "accumulate": None if not accumulate else _index_attr(1),
           "output": None if not output else _index_attr(1),
         }
@@ -2650,6 +2796,10 @@ class TileBoaOp(_TileAsyncOp):
     _print_int_kw(printer, "seq", self.seq.value.data)
     if self.k_mask is not None:
       _print_int_list_kw(printer, "k_mask", _int_list(self.k_mask))
+    if self.transpose_a is not None:
+      printer.print_string(" transpose_a")
+    if self.transpose_b is not None:
+      printer.print_string(" transpose_b")
     if self.accumulate is not None:
       printer.print_string(" accumulate")
     if self.output is not None:
@@ -2680,6 +2830,8 @@ class TileBoaOp(_TileAsyncOp):
     k = _parse_int_kw(parser, "k")
     seq = _parse_int_kw(parser, "seq")
     k_mask = _parse_opt_int_list_kw(parser, "k_mask")
+    transpose_a = parser.parse_optional_keyword("transpose_a") is not None
+    transpose_b = parser.parse_optional_keyword("transpose_b") is not None
     accumulate = parser.parse_optional_keyword("accumulate") is not None
     output = parser.parse_optional_keyword("output") is not None
     event_type = _parse_event_type(parser, TileEvent)
@@ -2696,6 +2848,8 @@ class TileBoaOp(_TileAsyncOp):
         seq,
         tag,
         k_mask=k_mask,
+        transpose_a=transpose_a,
+        transpose_b=transpose_b,
         accumulate=accumulate,
         output=output,
       )

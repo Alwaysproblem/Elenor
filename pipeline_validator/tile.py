@@ -1450,6 +1450,24 @@ class TileUCE:
     views = resolved.launch_params.get("matmul_views")
     manager = self.shared_am
     transfer_manager = tile.mfe.transfer_manager
+    epilogue_spec = None
+    if matmul is not None and matmul.final and ctx.program is not None:
+      # Grant-time immutable chain configuration, shared by every step of the
+      # chain through the AM name; validated again before any output exists.
+      am_buffer = next((item for item in ctx.program.am_buffers if item.name == matmul.am), None)
+      if am_buffer is None:
+        raise ValueError(f"typed matmul FINAL has no AM buffer {matmul.am!r}")
+      epilogue = am_buffer.epilogue
+      epilogue_spec = boa_numeric.BoaEpilogueSpec(
+        matmul.output.dtype,
+        bias=epilogue.bias,
+        scale=epilogue.scale,
+        relu=epilogue.relu,
+        clip=epilogue.clip,
+        inv_scale=epilogue.inv_scale,
+        zero_point=epilogue.zero_point,
+      )
+      boa_numeric.validate_epilogue(epilogue_spec, matmul.n)
 
     def completion(job: EngineJob) -> BoaPreparedResult:
       if manager is None or matmul is None or lease_id is None or views is None:
@@ -1472,23 +1490,27 @@ class TileUCE:
         accumulate=not matmul.init,
         partial=lease.partial,
         tile_k=tile.cfg.boa_numeric_tile_k,
-        storage_k=matmul.a.dims[1],
+        storage_k=matmul.storage_k,
         mask=matmul.k_mask,
-      )
-      out_bytes = (
-        # Raw-bit conversion: f32 output preserves partial bits exactly
-        # (including sNaN payloads); bf16 applies the frozen RNE rules.
-        boa_numeric.convert_output(boa_numeric.decode_f32_bits(partial), matmul.output.dtype)
-        if matmul.final
-        else None
+        transpose_a=matmul.transpose_a,
+        transpose_b=matmul.transpose_b,
       )
 
       def commit(cycle: int) -> None:
         manager.commit_step(lease_id, seq=matmul.seq, data=partial, final=False, cycle=cycle)
 
       def write_output(cycle: int) -> None:
-        assert out_bytes is not None
-        store.write_view(out_view, out_bytes)
+        # Runs only after commit_final: the FINAL epilogue reads the committed
+        # AM partial exactly once and the output view receives its bytes.
+        assert epilogue_spec is not None
+        committed = manager.lease(lease_id).partial
+        assert committed is not None
+        store.write_view(
+          out_view,
+          boa_numeric.apply_epilogue(
+            boa_numeric.decode_f32_bits(committed), matmul.m, matmul.n, epilogue_spec
+          ),
+        )
 
       def commit_final(cycle: int) -> None:
         manager.commit_step(lease_id, seq=matmul.seq, data=partial, final=True, cycle=cycle)
@@ -1792,7 +1814,7 @@ class TileUCE:
     owner.events_done.discard(ref.local_name)
     owner.wait_refs = tuple(r for r in owner.wait_refs if r.runtime_id != ref.runtime_id)
 
-  def _clear_engine_queues(self, unregister: bool, cycle: int = 0) -> None:
+  def _clear_engine_queues(self, unregister: bool, cycle: int) -> None:
     for fifo in self._engine_queues.values():
       while fifo:
         entry = fifo.popleft()

@@ -41,7 +41,9 @@ def _l1_view() -> ExecMemoryView:
 
 
 def _typed(m: int, n: int, k: int, *, final: bool = False) -> ExecEngineDesc:
-  matmul = ExecBoaMatmulDesc(_l1_view(), _l1_view(), _l1_view(), "acc0", m, n, k, 0, True, final)
+  matmul = ExecBoaMatmulDesc(
+    _l1_view(), _l1_view(), _l1_view(), "acc0", m, n, k, 0, True, final, None, False, False
+  )
   return ExecEngineDesc(name="k", kind="BOA", op="matmul", params={"matmul": matmul})
 
 

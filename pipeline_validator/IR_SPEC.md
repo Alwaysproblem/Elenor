@@ -673,10 +673,31 @@ P06 uses exact integer `bf16_fp32_mac_rne_v1` evaluation. Each original-index
 for each active K lane, then overwrites AM for the INIT step's first active
 block or adds to AM with FP32 RNE otherwise. Runtime AM commit remains once
 per complete step. f32 FINAL writes raw AM bits; BF16 FINAL converts once.
-INT8 and optional FINAL epilogue stages remain P08 work.
+
+P08 (schema/ABI v6) adds the FINAL epilogue as immutable chain configuration
+on the AM allocation: `tile.alloc memory_space = "am" ... [bias = [0x..]]
+[scale = 0x..] [relu] [clip = [0x.., 0x..]] [inv_scale = 0x..]
+[zero_point = Z]`. Values are raw FP32 bit patterns; `bias` has exactly `n`
+words. Stages run once, after the FINAL commit, in the frozen order
+bias (`add_f32_rne`) -> scale (`mul_f32_rne`) -> ReLU -> clip -> output
+conversion (P03 `numeric_freeze.md` §4). The output dtype is the bound L1
+destination's (`f32`, `bf16`, `i8`). `i8` requires `inv_scale` and takes
+`zero_point` (default 0); `zero_point` on non-`i8` output is rejected. Before
+P08 an `i8` destination was rejected at runtime as a missing quantization
+policy (historical v5 behaviour, removed by the v6 cutover).
+
+Inline epilogue constants are resident program data, not unbounded metadata.
+The software capacity model adds `4*n` bytes for bias, 4 for an enabled scale,
+8 for clip, and 8 for INT8 inv_scale/zero_point to the existing instruction and
+descriptor footprint (1024-byte minimum). Compilation rejects program-SRAM
+overflow; loading recomputes `text_bytes` and rejects understated artifacts,
+including zero-work chains. This accounting does not freeze a hardware encoding.
 
 A/B storage shapes are `[m, storage_k]` and `[storage_k, n]`; storage K is
-inferred from the views and must agree. M/N/K are non-negative, with
+inferred from the views and must agree. The optional per-step flags
+`transpose_a` / `transpose_b` (after `k_mask`) declare stored `[storage_k, m]`
+/ `[n, storage_k]` layouts; the logical product, MAC order and rounding are
+unchanged. M/N/K are non-negative, with
 `k <= storage_k`. An optional `k_mask = [1, 0, ...]` appears after `seq`,
 has exactly `storage_k` boolean-int entries and no active lane at/after `k`.
 Tail and masked lanes execute no MAC; masks do not compact indices or move
@@ -944,7 +965,7 @@ compile_program(
 ) -> CompiledProgram
 ```
 
-The result has compiled schema 5 and compiler ABI `v5`. It contains canonical
+The result has compiled schema 6 and compiler ABI `v6`. It contains canonical
 `source_ir`/`source_hash`, embedded `ProfileRegistry`/`registry_hash`, static
 `target_hash`, `artifact_hash`, `"standalone"|"model"` entry kind, immutable
 entry/prefix, call bindings, explicit relocations, instruction source map,
@@ -1277,9 +1298,9 @@ They enter target identity together with fixed `boa_engine_affinity="least_live_
 and P04's `boa_am_topology="per_tile_v1"`. OPA aliases are removed. M/N geometry
 changes spatial timing; numeric K changes rounding boundaries. The only
 numerical profile is `bf16_fp32_mac_rne_v1`, with default numeric K=8.
-P06 upgrades the numerical/descriptor contract to v5: v4 and older packages
-fail the version gate; a valid v5 package with the wrong target fails target
-validation independently. Neither path upgrades or reinterprets old packages.
+P08 upgrades the epilogue/transpose descriptor contract to v6: v5 and older
+packages fail the version gate; a valid v6 package with the wrong target fails
+target validation independently. Neither path upgrades or reinterprets old packages.
 
 ## 11. Fidelity and Byte Semantics
 

@@ -8,7 +8,7 @@
 
 “前置”是通过门，不是仅存在文件。所有状态初始化为“未开始”；真实实施完成后更新本表并写 `evidence/Pnn.md`。没有硬件工具/板卡时按总则记录阻塞，不提前标通过。
 
-P01 补跑软件 gate 已通过，首次失败仍保留在 [P01 证据](evidence/P01.md)。[P02 工具链与离线复现](evidence/P02.md) 已通过；Vivado 未提供，FPGA 子能力仍为 blocked。[P03 独立数值 oracle](evidence/P03.md)、[P04 每 Tile AM](evidence/P04.md)、[P05 多 engine/affinity](evidence/P05.md)、[P06 逐 MAC 数值与 v5 cutover](evidence/P06.md)、[P07 终态时序与安全释放](evidence/P07.md) 已通过。下一默认任务为 **P08：软件后处理、四转置与 im2col Conv**。P06/P07 是生产 Python 功能/周期模型的证据，不代表 Gemmini/BOA RTL、C ABI 联仿或 FPGA 通过。
+P01 补跑软件 gate 已通过，首次失败仍保留在 [P01 证据](evidence/P01.md)。[P02 工具链与离线复现](evidence/P02.md) 已通过；Vivado 未提供，FPGA 子能力仍为 blocked。[P03 独立数值 oracle](evidence/P03.md)、[P04 每 Tile AM](evidence/P04.md)、[P05 多 engine/affinity](evidence/P05.md)、[P06 逐 MAC 数值与 v5 cutover](evidence/P06.md)、[P07 终态时序与安全释放](evidence/P07.md)、[P08 软件后处理、四转置与 im2col Conv](evidence/P08.md) 已通过；P08 独立复核补修后全量 gate 为 822 passed / 1 skipped。下一默认任务为 **P09：软件全链路 gate**。这些软件证据不代表 Gemmini/BOA RTL、C ABI 联仿或 FPGA 通过。
 
 | ID  | 对应原方案         | 独立任务文件                                                    | 前置                         | 状态   |
 | --- | ------------------ | --------------------------------------------------------------- | ---------------------------- | ------ |
@@ -19,7 +19,7 @@ P01 补跑软件 gate 已通过，首次失败仍保留在 [P01 证据](evidence
 | P05 | SW-A2              | [多 engine 与固定 affinity](P05_SWA2_多Engine与Affinity.md)     | P04                          | 通过   |
 | P06 | SW-A3              | [逐 MAC 数值与 artifact 切换](P06_SWA3_数值与Artifact迁移.md)   | P03、P05                     | 通过   |
 | P07 | SW-A4              | [终态时序与安全释放](P07_SWA4_终态与释放顺序.md)                | P04                          | 通过   |
-| P08 | C6-S / C3 软件前置 | [软件后处理、四转置与 im2col Conv](P08_C6S_后处理与软件Conv.md) | P06                          | 未开始 |
+| P08 | C6-S / C3 软件前置 | [软件后处理、四转置与 im2col Conv](P08_C6S_后处理与软件Conv.md) | P06                          | 通过   |
 | P09 | C7-A / SW-A gate   | [软件全链路 gate](P09_C7A_软件集成Gate.md)                      | P04、P05、P06、P07、P08      | 未开始 |
 | P10 | C4 / §4 ABI        | [协议 schema 与接口冻结](P10_C4_协议Schema与接口.md)            | P02、P09                     | 未开始 |
 | P11 | C2-A               | [dataflow 选择与 FP32 PE](P11_C2A_数据流与FP32PE.md)            | P02、P03、P10                | 未开始 |

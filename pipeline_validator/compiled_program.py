@@ -12,6 +12,7 @@ from enum import Enum
 from typing import NoReturn, TypeGuard, TypeVar
 
 from . import execution_ir as execution, profiles
+from .boa_numeric import BoaEpilogueSpec, validate_epilogue
 from .execution_ir import ExecDeviceOp, ExecModel, ExecTileGroupTask, GlobalBinding
 from .immutable import FrozenMap, digest, freeze
 from .profiles import CallBinding, ProfileRegistry, ProfileState, ResourceBudget, SourceRef
@@ -265,6 +266,7 @@ _CLASSES = (
   execution.ExecL2Buffer,
   execution.ExecL1Buffer,
   execution.ExecAmBuffer,
+  execution.ExecBoaEpilogue,
   execution.ExecBoaMatmulDesc,
   execution.ExecTileFormal,
   execution.ExecTaskDomain,
@@ -308,6 +310,32 @@ _ENUMS = {
   for cls in (execution.ExecTileOp, execution.ExecGroupActionOp)
 }
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
+
+# Compiled artifact format identity.  P08 added the FINAL epilogue on AM
+# allocations and typed A/B transpose flags, so 5/v5 artifacts are rejected.
+SCHEMA_VERSION = 6
+COMPILER_ABI = "v6"
+
+
+def _validate_am_epilogue(epilogue, output_dtype: str, dims: tuple[int, ...], name: str) -> None:
+  """Frozen P03 §4 parameter legality, enforced on every decoded artifact."""
+  if output_dtype != "i8" and epilogue.zero_point != 0:
+    raise ValueError(f"{name}.epilogue.zero_point is only valid for i8 output")
+  spec = BoaEpilogueSpec(
+    output_dtype,
+    bias=epilogue.bias,
+    scale=epilogue.scale,
+    relu=epilogue.relu,
+    clip=epilogue.clip,
+    inv_scale=epilogue.inv_scale,
+    zero_point=epilogue.zero_point,
+  )
+  try:
+    validate_epilogue(spec, dims[1] if len(dims) == 2 else -1)
+  except ValueError as exc:
+    raise ValueError(f"{name}.epilogue: {exc}") from exc
+
+
 _PROFILE_VALUES = (
   profiles.MemoryLevelTarget,
   profiles.MemoryTargetConfig,
@@ -701,6 +729,27 @@ def _validate_executable_value(value: object, name: str) -> None:
       raise ValueError(f"{name}.output shape must match the AM shape")
     if value.output.dtype not in ("f32", "bf16", "i8"):
       raise ValueError(f"{name}.output dtype is invalid")
+    _validate_executable_value(value.epilogue, f"{name}.epilogue")
+    _validate_am_epilogue(value.epilogue, value.output.dtype, dims, name)
+    return
+  if _is_exact_type(value, execution.ExecBoaEpilogue):
+    if value.bias is not None and (
+      type(value.bias) is not tuple or any(type(word) is not int for word in value.bias)
+    ):
+      raise ValueError(f"{name}.bias must be a tuple of FP32 bit patterns")
+    for field_name in ("scale", "inv_scale"):
+      word = getattr(value, field_name)
+      if word is not None and type(word) is not int:
+        raise ValueError(f"{name}.{field_name} must be an FP32 bit pattern")
+    if type(value.relu) is not bool:
+      raise ValueError(f"{name}.relu must be bool")
+    if value.clip is not None and (
+      type(value.clip) is not tuple or len(value.clip) != 2
+      or any(type(word) is not int for word in value.clip)
+    ):
+      raise ValueError(f"{name}.clip must be a (lo, hi) pair of FP32 bit patterns")
+    if type(value.zero_point) is not int:
+      raise ValueError(f"{name}.zero_point must be an int")
     return
   if _is_exact_type(value, execution.ExecBoaMatmulDesc):
     _validate_view(value.a, f"{name}.a", spaces={"l1"})
@@ -714,15 +763,20 @@ def _validate_executable_value(value: object, name: str) -> None:
       raise ValueError(f"{name} init/final must be bool")
     if len(value.a.dims) != 2 or len(value.b.dims) != 2:
       raise ValueError(f"{name} A/B must be rank-2 L1 views")
-    storage_k = value.a.dims[1]
-    if value.b.dims[0] != storage_k:
+    if type(value.transpose_a) is not bool or type(value.transpose_b) is not bool:
+      raise ValueError(f"{name} transpose_a/transpose_b must be bool")
+    storage_k = value.storage_k
+    b_storage_k = value.b.dims[1] if value.transpose_b else value.b.dims[0]
+    if b_storage_k != storage_k:
       raise ValueError(f"{name} A and B storage K dims must match")
     if value.k > storage_k:
       raise ValueError(f"{name} k must not exceed its storage K")
     if value.a.dtype != "bf16" or value.b.dtype != "bf16":
       raise ValueError(f"{name} inputs must be bf16 L1 views")
-    if value.a.dims != (value.m, storage_k) or value.b.dims != (storage_k, value.n):
-      raise ValueError(f"{name} A/B shapes must be (m, storage_k) and (storage_k, n)")
+    a_dims = (storage_k, value.m) if value.transpose_a else (value.m, storage_k)
+    b_dims = (value.n, storage_k) if value.transpose_b else (storage_k, value.n)
+    if value.a.dims != a_dims or value.b.dims != b_dims:
+      raise ValueError(f"{name} A/B shapes do not match (m, n, storage_k) and their transpose flags")
     if value.output.dims != (value.m, value.n):
       raise ValueError(f"{name}.output shape must be (m, n)")
     if value.output.dtype not in ("f32", "bf16", "i8"):
@@ -1004,7 +1058,11 @@ def _validate_executable_value(value: object, name: str) -> None:
 
 
 def _validate_compiled_program_value(program: CompiledProgram, *, allow_unsealed: bool) -> None:
-  if type(program.schema_version) is not int or program.schema_version != 5 or program.compiler_abi != "v5":
+  if (
+    type(program.schema_version) is not int
+    or program.schema_version != SCHEMA_VERSION
+    or program.compiler_abi != COMPILER_ABI
+  ):
     raise ValueError("unsupported compiled schema or ABI; recompile the source with this compiler")
   _text(program.source_ir, "source_ir")
   _digest_text(program.source_hash, "source_hash")
@@ -1199,7 +1257,7 @@ def parse_compiled_program(text: str) -> CompiledProgram:
     if (
       isinstance(encoded, dict)
       and encoded.get("$type") == "CompiledProgram"
-      and (encoded.get("schema_version") != 5 or encoded.get("compiler_abi") != "v5")
+      and (encoded.get("schema_version") != SCHEMA_VERSION or encoded.get("compiler_abi") != COMPILER_ABI)
     ):
       raise ValueError("unsupported compiled schema or ABI; recompile from source")
     program = _decode(encoded)

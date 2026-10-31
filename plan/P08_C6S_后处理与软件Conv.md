@@ -1,6 +1,6 @@
 # P08 · C6-S 软件后处理与 im2col 软件 Conv
 
-状态：未开始
+状态：通过（2026-10-31 独立复核补修后，822 passed / 1 skipped；见 [evidence/P08.md](evidence/P08.md)，证明边界见其 §4–§5）
 前置：P06 通过（逐 MAC profile 与旧 artifact 拒绝机制落地；实施时以仓库实际 artifact 版本为基）；P03 冻结的 INT8/epilogue/零 K 语义与 vectors。
 对应原方案：C6-S（[设计 v0.5](../design/proposal/BOA_Gemmini_Integration_Design.md) §3.2 后处理段、§7.2 C6 行）；总则 §3.2、§4.1、§5、§6。
 
@@ -18,7 +18,7 @@
 
 ## 3. 当前证据与修改文件
 
-现状（符号定位）：
+实施前历史快照（现行实现与复核结果见 evidence，不以本段描述当前状态）：
 
 - `pipeline_validator/boa_numeric.py::convert_output`：`i8` 分支 raise "INT8 AM output conversion policy is not frozen"（本任务删除该占位）。
 - `pipeline_validator/tests/test_boa_am.py::test_am_i8_output_is_accepted_by_source_but_rejected_numerically`（~626 行）：断言拒绝与本任务相反，需翻转为成功用例。
