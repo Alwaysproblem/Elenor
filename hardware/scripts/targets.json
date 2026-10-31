@@ -191,6 +191,17 @@
         "consumed_sections": [],
         "default_config": null
       }
+    },
+    "boa-protocol": {
+      "owner": "P10",
+      "implemented": true,
+      "board": null,
+      "cases": ["PC01", "PC02", "PC03", "PC04", "PC05", "PC06", "PC07"],
+      "config": {
+        "required_target": "boa-protocol",
+        "consumed_sections": ["topology"],
+        "default_config": "hardware/configs/protocol-v0.yaml"
+      }
     }
   }
 }

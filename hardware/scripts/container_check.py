@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import NoReturn
 
 import am_gate_cases
+import boa_protocol_cases
 import numeric_cases
 import numeric_profile_cases
 import soft_conv_cases
@@ -220,8 +221,15 @@ class CaseContext:
     code, _ = self._run(argv, cwd, name, env=env, timeout=timeout)
     return code
 
-  def run_capture(self, argv: list[str], cwd: Path, name: str, timeout: int = 600) -> tuple[int, str]:
-    return self._run(argv, cwd, name, timeout=timeout, capture=True)
+  def run_capture(
+    self,
+    argv: list[str],
+    cwd: Path,
+    name: str,
+    timeout: int = 600,
+    env: dict | None = None,
+  ) -> tuple[int, str]:
+    return self._run(argv, cwd, name, timeout=timeout, capture=True, env=env)
 
   def _run(
     self,
@@ -912,6 +920,13 @@ CASE_RUNNERS = {
   "stage-matrix": (soft_conv_cases.case_stage_matrix, "F"),
   "conv-pad-stride-dilation": (soft_conv_cases.case_conv_pad_stride_dilation, "F"),
   "conv-traffic": (soft_conv_cases.case_conv_traffic, "F"),
+  "PC01": (boa_protocol_cases.case_pc01_cross_codec_roundtrip, "F"),
+  "PC02": (boa_protocol_cases.case_pc02_negative_fields, "F"),
+  "PC03": (boa_protocol_cases.case_pc03_event_independence, "F"),
+  "PC04": (boa_protocol_cases.case_pc04_config_consistency, "F"),
+  "PC05": (boa_protocol_cases.case_pc05_clean_regeneration, "F"),
+  "PC06": (boa_protocol_cases.case_pc06_boundaries_and_wraparound, "F"),
+  "PC07": (boa_protocol_cases.case_pc07_real_descriptors, "F"),
 }
 
 
@@ -1157,6 +1172,21 @@ def main() -> int:
       "hardware/configs/boa-1engine.yaml",
       "hardware/configs/boa-2engine.yaml",
       "hardware/configs/boa-4engine.yaml",
+    ):
+      path = repo / rel
+      fixtures[rel] = sha256_path(path) if path.is_file() else "missing"
+  if request["target"] == "boa-protocol":
+    for rel in (
+      "hardware/boa/protocol/boa_protocol_v0.json",
+      "hardware/boa/protocol/gen_protocol.py",
+      "hardware/boa/protocol/py/boa_protocol.py",
+      "hardware/boa/src/main/scala/boa/protocol/BoaProtocol.scala",
+      "hardware/boa/src/main/scala/boa/protocol/BoaProtocolSelftest.scala",
+      "hardware/boa/sim/c/boa_protocol.h",
+      "hardware/boa/sim/c/boa_protocol_selftest.c",
+      "hardware/configs/protocol-v0.yaml",
+      "examples/workloads/boa_am_matmul.mlir",
+      "examples/workloads/soft_conv_i8_out.mlir",
     ):
       path = repo / rel
       fixtures[rel] = sha256_path(path) if path.is_file() else "missing"

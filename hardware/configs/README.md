@@ -45,6 +45,15 @@ section/字段中显式注册映射，不得隐式复用。
   smoke 配置外，`target:` 必须指向已实现 target；容器分派器仍拒绝未实现 target。
 - manifest 保存完整解析后的配置对象（不是路径），reproduce 从 manifest 重建。
 
+## topology section（P10）
+
+`hardware/configs/protocol-v0.yaml` 是 `boa-protocol` target 的默认配置，也是
+`topology` section 的第一个注册消费者（P05 格式实例）：Tile-local AM
+group/slot/quota/容量、context/engine 域、事件身份与 numeric profile 身份在此
+声明，由 PC04 与 `pipeline_validator/hardware_config.yaml` 及
+`boa-{1,2,4}engine.yaml` 做同语义一致性比对；软件 step 粒度与 P16 拥有的硬件
+微块参数（reserved 范围）各自带单位，不强行求数值相等。
+
 ## numeric section（P03）
 
 `hardware/configs/numeric.yaml` 为 numeric target 的默认配置：

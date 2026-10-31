@@ -343,6 +343,41 @@ hardware/scripts/reproduce /tmp/p09/cycle-all/manifest.json --out /tmp/p09/cycle
 exit 6。manifest fixtures 记录 `trace-audit.sql` 与 trace_processor_shell 的
 sha256。free/blocked cycles 为确定性 metrics（本次 11332 / 21410）。
 
+## boa-protocol target（owner P10）
+
+`hardware/boa/protocol/boa_protocol_v0.json` 是 wire/descriptor 的唯一权威
+schema（wire ABI `v0`，与 pipeline_validator 软件 artifact 版本域互不联动）。
+`gen_protocol.py` 从它生成三份 codec（Python `hardware/boa/protocol/py/`、
+Scala `boa.protocol.BoaProtocol`、C `hardware/boa/sim/c/boa_protocol.h`），
+并内置可执行 schema lint（`lint_schema`）；下游 P14–P19/P21 只准消费生成物。
+生成物是 generator-canonical 字节：`boa_protocol.h` 加入 pre-commit 排除
+（clang-format 会改注释折行，导致 PC05 的干净重生成比对漂移），Python 生成物
+通过 ruff check/mypy。RoCC opcode/funct 只在 schema 的 `encoding_slots` 预留，
+由 P21 冻结；P16 拥有的 FIFO/credit 深度在 capacities 中以 reserved+范围预留。
+
+```bash
+hardware/scripts/check boa-protocol \
+  --config hardware/configs/protocol-v0.yaml --out /tmp/p10 --seed 1
+hardware/scripts/check boa-protocol --case PC02 \
+  --config hardware/configs/protocol-v0.yaml --out /tmp/p10-case --seed 1
+hardware/scripts/reproduce /tmp/p10/manifest.json --out /tmp/p10-repro --offline
+```
+
+| case   | layer | 实际检查（真实编译执行，非源码字符串比对）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------ | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PC01` | F     | 18 条 golden 消息（覆盖全部 16 个 kind + epilogue/dtype 变体）：Python 编码，Scala（sbt 2.13.12 离线编译 BoaProtocol+driver）与 C（gcc `-Wall -Wextra -Werror`）解码再编码，三方逐 byte 相同，per-kind 计数一致                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `PC02` | F     | 非法字段集（logical_am=2、bundle=3、未知 reason、截断流、未知 wire 版本）三 codec 全部非零拒绝且指明字段                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `PC03` | F     | 旧事件未 reap + slot 换代消息三 codec 往返：request/wake 与静态 event_id 独立保留；schema lint 放行本体、拒绝三个负例（授予前提含 event_slot、completion_token 变资源、WAKE token 角色改写）                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `PC04` | F     | protocol-v0.yaml ↔ hardware_config.yaml ↔ boa-{1,2,4}engine.yaml 同语义参数（AM 组/槽/配额/容量、numeric profile、事件身份）一致才通过；group_count=5 错配被拒；step/microblock 两种粒度各自合法并完整编码                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `PC05` | F     | 干净重生成（两次 `--out` 逐字节相同、`--check` exit 0、与 committed 一致）后用再生 Scala/C codec 重跑 PC01 向量，结果 byte-identical                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `PC06` | F     | 全部有限位宽最大值精确编码（request_seq/generation/event_id=0xFFFF、ctx_id=7、byte_count=262144 等），0x10000/8/262145 越界拒绝；wraparound 规则逐计数器机检（step seq 禁止回绕）                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `PC07` | F     | 真实 fixture（`boa_am_matmul.mlir`、`soft_conv_i8_out.mlir`、内嵌四转置 4-step 模块）经 `pipeline_validator.compiler` 编译并以 full_memory **实际运行**：`input_ready_tokens` 取自可执行程序中被 await 的真实 MFE 生产者事件（tile.load 到 A/B L1 view），绝不使用自身完成事件（codec 以 `not_contains_token` 静态拒绝自引用，三 codec 负例一致）；L1 `allocation/generation` 与 owner epoch 取自运行时真实绑定（观察 `l1_allocator.bind_view` 的 AllocationHandle 与 shared_am 终态），同一 fixture 第二次 launch 复用 l1:0 时 generation 1→2；四转置、i8 quant、mask 保真往返；未知 dtype/越界 mask/NaN inv_scale/zero_point=200 拒绝 |
+
+配置：`protocol-v0.yaml` 的 `topology` section 由本 target 消费（P05 格式实例）。
+seed 记录进 manifest；向量本身是固定字面值。Scala 侧每次 run 在
+`/out/work/sbt-*` 全新项目里从 `/opt/sbt-bundle` 拷贝依赖离线编译；C 侧用镜像
+native gcc 编译 committed driver + 生成 header。
+
 ## reproduce 算法
 
 1. 读取 manifest，要求 schema 1 / status PASS / 结构完整，且 task_id 与注册表中已实现 target 的 owner 一致（否则 exit 9）。

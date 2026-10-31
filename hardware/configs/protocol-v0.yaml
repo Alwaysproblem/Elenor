@@ -1,0 +1,38 @@
+# P10 protocol-v0 target: Tile-local AM capacity/identity constants consumed by
+# the boa-protocol consistency check (PC04).  Same-semantics parameters are
+# compared against pipeline_validator/hardware_config.yaml and the
+# hardware/configs/boa-*engine.yaml instances; a disagreement between two
+# same-semantics sources is rejected.  Granularity-owning values (software
+# step vs hardware microblock) carry their own units and are never forced
+# equal.  Reserved P16 fields carry legal ranges, not values.
+schema: 1
+target: boa-protocol
+topology:
+  am:
+    group_count: 4 # AM groups per Tile (pure physical slot addressing)
+    slots_per_group: 2
+    slots_per_context: 2 # hard constraint; counted across all Tile engines
+    total_slots_per_tile: 8
+    slot_capacity_bytes: 262144 # software model default; physical macro later
+  contexts_per_tile: 4 # default; acceptance covers 1/2/4/8
+  engines_per_tile: 1 # software default; V1 target 4; exploration cap 8
+  pending_request_fifo_depth: 4 # == contexts per Tile; one parked per owner
+  next_step_mailboxes_per_live_chain: 1 # plus one current execution record
+  terminal_ring_capacity: 256 # bounded diagnostic ring; overwrite + count
+  event_slot_allocation: program_static # per Tile Program, at context admission
+  event_identity: [ctx_id, ctx_epoch, event_id]
+  numeric_profile: bf16_fp32_mac_rne_v1 # P03 frozen identity, by reference
+  software_step:
+    result_fifo_depth: 4 # software step granularity (BoaResultService)
+    am_credit_capacity: 8
+    l1_output_credits: 1
+    result_commit_cycles: 2
+    output_drain_cycles: 1
+  hardware_microblock:
+    # P16 owns the values; ranges mirror the schema reserved fields.
+    result_fifo_depth_range: [1, 64]
+    am_credit_capacity_range: [2, 256]
+    l1_output_credits_range: [1, 16]
+numeric: {}
+validator: {}
+board: {}

@@ -1,0 +1,1446 @@
+{
+  "schema": 1,
+  "abi": {
+    "name": "boa_protocol",
+    "wire_version": "v0",
+    "wire_version_int": 0,
+    "min_reader_version": "v0",
+    "version_domain": "wire ABI domain; independent of the pipeline_validator software artifact schema/ABI (currently 6/v6 after the P08 cutover); no automatic fallback between the two domains",
+    "semantic_sources": [
+      "design/proposal/BOA_Gemmini_Integration_Design.md 2.2/2.3/3.5/4.1-4.5/6.1/7.2/8.1/8.1b",
+      "pipeline_validator/runtime/shared_am.py (request/_grantable/_allocate_lease/begin_step/commit_step/release_final/abort_owner/snapshot)",
+      "pipeline_validator/runtime/boa_result.py BoaResultService",
+      "pipeline_validator/execution_ir.py ExecBoaMatmulDesc/ExecAmBuffer/ExecBoaEpilogue (schema 6 / ABI v6)"
+    ],
+    "numeric_reference": "hardware/boa/reference/numeric_freeze.md (P03; brought in by reference, not re-frozen here)"
+  },
+  "frame": {
+    "magic": "0x4250",
+    "version_bits": 8,
+    "kind_bits": 8,
+    "length_bits": 16,
+    "byte_order": "little",
+    "note": "magic 'BP', version byte, kind byte, payload byte length, then payload; decoders reject unknown version, unknown kind, truncated payload and trailing bytes inside one frame"
+  },
+  "enums": {
+    "AccFormat": {
+      "underlying": "u8",
+      "values": {
+        "f32": 0
+      },
+      "note": "V1 AM always carries f32 partial sums (bf16_fp32_mac_rne_v1); new formats are a schema version bump, not a silent value"
+    },
+    "Layout": {
+      "underlying": "u8",
+      "values": {
+        "row_major": 0
+      }
+    },
+    "Dtype": {
+      "underlying": "u8",
+      "values": {
+        "f32": 0,
+        "bf16": 1,
+        "i8": 2,
+        "i32": 3
+      },
+      "element_bytes": {
+        "f32": 4,
+        "bf16": 2,
+        "i8": 1,
+        "i32": 4
+      }
+    },
+    "Space": {
+      "underlying": "u8",
+      "values": {
+        "global": 0,
+        "l2": 1,
+        "l1": 2
+      }
+    },
+    "StepMode": {
+      "underlying": "u8",
+      "values": {
+        "init": 0,
+        "add": 1
+      }
+    },
+    "Transpose": {
+      "underlying": "u8",
+      "values": {
+        "nn": 0,
+        "tn": 1,
+        "nt": 2,
+        "tt": 3
+      },
+      "note": "tn = transpose_a (A stored [K,m]), nt = transpose_b (B stored [n,K]); per-step descriptor state, never chain state"
+    },
+    "AmError": {
+      "underlying": "u8",
+      "values": {
+        "logical_am_invalid": 0,
+        "slot_capacity_exceeded": 1,
+        "bundle_slots_invalid": 2,
+        "owner_already_parked": 3,
+        "logical_slot_live_unfinalized": 4,
+        "bundle_changed_while_holding": 5,
+        "bundle_self_lock": 6
+      },
+      "source_of_truth": "pipeline_validator/runtime/shared_am.py::request permanent errors; closed enum, unknown values are decode errors"
+    },
+    "StepError": {
+      "underlying": "u8",
+      "values": {
+        "handle_unknown": 0,
+        "seq_invalid": 1,
+        "shape_layout_invalid": 2,
+        "range_mask_invalid": 3,
+        "input_token_not_ready": 4,
+        "descriptor_version_unsupported": 5
+      }
+    },
+    "TermStatus": {
+      "underlying": "u8",
+      "values": {
+        "success": 0,
+        "error": 1,
+        "cancelled": 2
+      }
+    },
+    "EvtRecordKind": {
+      "underlying": "u8",
+      "values": {
+        "wake": 0,
+        "step_terminal": 1,
+        "chain_terminal": 2
+      },
+      "note": "EVT_TAKE record discriminator (design 4.5)"
+    },
+    "AccessType": {
+      "underlying": "u8",
+      "values": {
+        "read": 0,
+        "write": 1
+      }
+    },
+    "MemStatus": {
+      "underlying": "u8",
+      "values": {
+        "ok": 0,
+        "fault": 1
+      }
+    },
+    "FieldTag": {
+      "underlying": "u8",
+      "values": {
+        "none": 0,
+        "logical_am": 1,
+        "bundle_slots": 2,
+        "byte_count": 3,
+        "owner": 4,
+        "slot_capacity": 5,
+        "version": 6,
+        "stream": 7,
+        "reason": 8,
+        "request_seq": 9,
+        "seq": 10,
+        "lease_handle": 11,
+        "generation": 12,
+        "shape": 13,
+        "layout": 14,
+        "dtype": 15,
+        "epilogue": 16,
+        "k_mask": 17,
+        "transpose": 18,
+        "engine": 19,
+        "event": 20,
+        "ctx": 21,
+        "credits": 22,
+        "mailbox": 23
+      },
+      "note": "machine-readable error attribution: every rejection names a field"
+    }
+  },
+  "structs": {
+    "EventToken": {
+      "note": "Static event slot identity allocated at context admission.",
+      "fields": [
+        {
+          "name": "ctx_id",
+          "type": "u8",
+          "range": [
+            0,
+            7
+          ]
+        },
+        {
+          "name": "ctx_epoch",
+          "type": "u8"
+        },
+        {
+          "name": "event_id",
+          "type": "u16"
+        }
+      ]
+    },
+    "ClipPair": {
+      "fields": [
+        {
+          "name": "lo",
+          "type": "u32",
+          "predicate": "fp32_not_nan"
+        },
+        {
+          "name": "hi",
+          "type": "u32",
+          "predicate": "fp32_not_nan"
+        }
+      ],
+      "predicates": [
+        {
+          "kind": "fp32_le",
+          "left": "lo",
+          "right": "hi"
+        }
+      ],
+      "note": "Raw FP32 clip bounds; not NaN, lo <= hi as FP32 values."
+    },
+    "QuantConfig": {
+      "fields": [
+        {
+          "name": "inv_scale",
+          "type": "u32",
+          "predicate": "fp32_pos"
+        },
+        {
+          "name": "zero_point",
+          "type": "i8",
+          "range": [
+            -128,
+            127
+          ]
+        }
+      ],
+      "note": "P03/P08 INT8 quantization parameters."
+    },
+    "EpilogueConfig": {
+      "note": "FINAL-only post-processing block (P03 section 4, P08 production contract); order bias -> scale -> ReLU -> clip -> convert is frozen by reference in numeric_freeze.md.  Fixed wire layout: n_cols (u16), enables (u8 presence bits bias=0/scale=1/relu=2/clip=3/quant=4, bits 5..7 reserved zero), then the n_cols bias words, scale, clip lo/hi and quant inv_scale+zero_point.  The enables byte is derived from parameter presence; a disabled stage executes nothing (no identity op) and serializes canonical zeros, and decoders reject non-zero disabled stages, so the encoding is canonical and round-trips byte-identically",
+      "fields": [
+        {
+          "name": "n_cols",
+          "type": "u16",
+          "note": "bias word count == output columns"
+        },
+        {
+          "name": "bias",
+          "type": "list:u32",
+          "count_expr": "n_cols"
+        },
+        {
+          "name": "scale",
+          "type": "u32"
+        },
+        {
+          "name": "relu",
+          "type": "bool8"
+        },
+        {
+          "name": "clip",
+          "type": "struct:ClipPair"
+        },
+        {
+          "name": "quant",
+          "type": "struct:QuantConfig"
+        }
+      ]
+    },
+    "OperandView": {
+      "note": "Typed input view with serialized byte count. allocation is the runtime-bound L1 allocation identity (slot index of the view base); generation is the arena allocation_generation the runtime stamped on the bound AllocationHandle at ALLOC_L1, so a reused allocation across dispatches carries a different generation.",
+      "fields": [
+        {
+          "name": "space",
+          "type": "enum:Space"
+        },
+        {
+          "name": "base_slot",
+          "type": "u16"
+        },
+        {
+          "name": "allocation",
+          "type": "u16",
+          "note": "runtime-bound L1 allocation slot"
+        },
+        {
+          "name": "generation",
+          "type": "u16",
+          "note": "arena allocation generation bound at ALLOC_L1"
+        },
+        {
+          "name": "dim0",
+          "type": "u16"
+        },
+        {
+          "name": "dim1",
+          "type": "u16"
+        },
+        {
+          "name": "offset0",
+          "type": "u32"
+        },
+        {
+          "name": "offset1",
+          "type": "u32"
+        },
+        {
+          "name": "stride0",
+          "type": "u32"
+        },
+        {
+          "name": "stride1",
+          "type": "u32"
+        },
+        {
+          "name": "dtype",
+          "type": "enum:Dtype"
+        },
+        {
+          "name": "element_bytes",
+          "type": "u8",
+          "predicate": "dtype_width"
+        },
+        {
+          "name": "bytes",
+          "type": "u32"
+        },
+        {
+          "name": "task_dim",
+          "type": "i16",
+          "range": [
+            -1,
+            32767
+          ],
+          "note": "-1 = not task indexed"
+        }
+      ],
+      "predicates": [
+        {
+          "kind": "eq_product",
+          "target": "bytes",
+          "factors": [
+            "dim0",
+            "dim1",
+            "element_bytes"
+          ],
+          "constant": 1
+        }
+      ]
+    },
+    "AllocationRef": {
+      "note": "One runtime-bound L1 usage reference.",
+      "fields": [
+        {
+          "name": "allocation",
+          "type": "u16",
+          "note": "L1 allocation slot of the referenced view"
+        },
+        {
+          "name": "generation",
+          "type": "u16",
+          "note": "arena allocation_generation bound at ALLOC_L1"
+        }
+      ]
+    }
+  },
+  "messages": {
+    "AM_REQUEST": {
+      "kind": 1,
+      "direction": "uce_to_am",
+      "contract": "issued exactly once per allocation; GRANTED | PARKED(later exactly one WAKE) | ERROR(permanent, context faults, never parks)",
+      "fields": [
+        {
+          "name": "tile_id",
+          "type": "u8",
+          "range": [
+            0,
+            15
+          ]
+        },
+        {
+          "name": "ctx_id",
+          "type": "u8",
+          "range": [
+            0,
+            7
+          ]
+        },
+        {
+          "name": "ctx_epoch",
+          "type": "u8"
+        },
+        {
+          "name": "request_seq",
+          "type": "u16",
+          "note": "replay protection key together with owner"
+        },
+        {
+          "name": "logical_am",
+          "type": "u8",
+          "range": [
+            0,
+            1
+          ]
+        },
+        {
+          "name": "bundle_slots",
+          "type": "u8",
+          "range": [
+            1,
+            2
+          ],
+          "note": "compiler-written Tile Program metadata; upper bound == capacities.am_slots_per_context"
+        },
+        {
+          "name": "output_rows",
+          "type": "u16"
+        },
+        {
+          "name": "output_cols",
+          "type": "u16"
+        },
+        {
+          "name": "acc_format",
+          "type": "enum:AccFormat"
+        },
+        {
+          "name": "layout",
+          "type": "enum:Layout"
+        },
+        {
+          "name": "output_l1_slot",
+          "type": "u16",
+          "note": "admitted L1 output destination binding"
+        },
+        {
+          "name": "output_dtype",
+          "type": "enum:Dtype"
+        },
+        {
+          "name": "byte_count",
+          "type": "u32",
+          "range": [
+            0,
+            262144
+          ],
+          "note": "upper bound == capacities.am_slot_capacity_bytes default; runtime rejects against the configured capacity"
+        },
+        {
+          "name": "chain_config",
+          "type": "struct:EpilogueConfig"
+        }
+      ],
+      "predicates": [
+        {
+          "kind": "eq_product",
+          "target": "byte_count",
+          "factors": [
+            "output_rows",
+            "output_cols"
+          ],
+          "constant": 4
+        },
+        {
+          "kind": "eq_field",
+          "left": "chain_config.n_cols",
+          "right": "output_cols"
+        },
+        {
+          "kind": "quant_i8",
+          "dtype_field": "output_dtype",
+          "quant_field": "chain_config.quant"
+        }
+      ]
+    },
+    "AM_GRANTED": {
+      "kind": 2,
+      "direction": "am_to_uce",
+      "contract": "grant linearization point atomically acquires the granted resource manifest below; affinity fixed until slot_free",
+      "fields": [
+        {
+          "name": "lease_handle",
+          "type": "u16"
+        },
+        {
+          "name": "slot_generation",
+          "type": "u16"
+        },
+        {
+          "name": "group",
+          "type": "u8",
+          "range": [
+            0,
+            3
+          ]
+        },
+        {
+          "name": "slot_index",
+          "type": "u8",
+          "range": [
+            0,
+            1
+          ]
+        },
+        {
+          "name": "chain_id",
+          "type": "u16"
+        },
+        {
+          "name": "bound_engine",
+          "type": "u8",
+          "range": [
+            0,
+            7
+          ]
+        },
+        {
+          "name": "completion_token",
+          "type": "struct:EventToken",
+          "role": "reference_only",
+          "note": "reference to the chain completion event; NOT a granted resource, never waited on to grant"
+        }
+      ]
+    },
+    "AM_PARKED": {
+      "kind": 3,
+      "direction": "am_to_uce",
+      "contract": "no slot/quota/generation side effect; exactly one WAKE or one cancel later",
+      "fields": [
+        {
+          "name": "request_id",
+          "type": "u16"
+        }
+      ]
+    },
+    "AM_ERROR": {
+      "kind": 4,
+      "direction": "am_to_uce",
+      "contract": "permanent contract error; the owner context faults; never parks",
+      "fields": [
+        {
+          "name": "reason",
+          "type": "enum:AmError"
+        },
+        {
+          "name": "field",
+          "type": "enum:FieldTag"
+        }
+      ]
+    },
+    "AM_WAKE": {
+      "kind": 5,
+      "direction": "am_to_uce",
+      "contract": "delivers an already-granted lease exactly once per parked request; not a retry permission",
+      "fields": [
+        {
+          "name": "request_id",
+          "type": "u16"
+        },
+        {
+          "name": "lease_handle",
+          "type": "u16"
+        },
+        {
+          "name": "slot_generation",
+          "type": "u16"
+        },
+        {
+          "name": "bound_engine",
+          "type": "u8",
+          "range": [
+            0,
+            7
+          ]
+        },
+        {
+          "name": "completion_token",
+          "type": "struct:EventToken",
+          "role": "reference_only"
+        }
+      ]
+    },
+    "AM_CANCEL": {
+      "kind": 6,
+      "direction": "uce_to_am",
+      "contract": "drop the owner's parked request (never woken) and reclaim the owner's leases",
+      "fields": [
+        {
+          "name": "tile_id",
+          "type": "u8",
+          "range": [
+            0,
+            15
+          ]
+        },
+        {
+          "name": "ctx_id",
+          "type": "u8",
+          "range": [
+            0,
+            7
+          ]
+        },
+        {
+          "name": "ctx_epoch",
+          "type": "u8"
+        }
+      ]
+    },
+    "SUBMIT_STEP": {
+      "kind": 7,
+      "direction": "uce_to_boa",
+      "contract": "one typed Matmul step; ACCEPTED snapshots the descriptor, FULL changes no state, ERROR names the field",
+      "fields": [
+        {
+          "name": "lease_handle",
+          "type": "u16"
+        },
+        {
+          "name": "seq",
+          "type": "u16",
+          "note": "0-contiguous; INIT iff seq==0; FINAL at most once, closes new-step admission"
+        },
+        {
+          "name": "mode",
+          "type": "enum:StepMode"
+        },
+        {
+          "name": "final",
+          "type": "bool8"
+        },
+        {
+          "name": "transpose",
+          "type": "enum:Transpose",
+          "note": "typed per-step field (P08); storage_k is derived from the stored shapes"
+        },
+        {
+          "name": "a",
+          "type": "struct:OperandView"
+        },
+        {
+          "name": "b",
+          "type": "struct:OperandView"
+        },
+        {
+          "name": "k_extent",
+          "type": "u16"
+        },
+        {
+          "name": "input_ready_tokens",
+          "type": "list:struct:EventToken",
+          "count_field": "u8",
+          "note": "must correspond to already-ready inputs or accepted producer operations"
+        },
+        {
+          "name": "input_usage_handles",
+          "type": "list:struct:AllocationRef",
+          "count_field": "u8",
+          "note": "one typed AllocationRef per operand view: a reference to the runtime-bound allocation and its generation (AllocationHandle stamped at ALLOC_L1), released at the step's completion boundary; ordinary reader references are aggregated by the device"
+        },
+        {
+          "name": "k_mask",
+          "type": "list:u8",
+          "count_field": "u16",
+          "item_range": [
+            0,
+            1
+          ],
+          "note": "storage_k-length activity mask, one byte per lane"
+        },
+        {
+          "name": "completion_event",
+          "type": "struct:EventToken",
+          "note": "static event slot this step signals; program-static, compiler-written"
+        }
+      ],
+      "predicates": [
+        {
+          "kind": "not_contains_token",
+          "list_field": "input_ready_tokens",
+          "token_field": "completion_event"
+        }
+      ]
+    },
+    "STEP_ACCEPTED": {
+      "kind": 8,
+      "direction": "boa_to_uce",
+      "fields": [
+        {
+          "name": "step_token",
+          "type": "u32"
+        }
+      ]
+    },
+    "STEP_FULL": {
+      "kind": 9,
+      "direction": "boa_to_uce",
+      "contract": "mailbox/result-credit shortage; zero state change; UCE parks the context in WAIT_ENGINE_QUEUE and resubmits the same step",
+      "fields": [
+        {
+          "name": "lease_handle",
+          "type": "u16"
+        }
+      ]
+    },
+    "STEP_ERROR": {
+      "kind": 10,
+      "direction": "boa_to_uce",
+      "fields": [
+        {
+          "name": "reason",
+          "type": "enum:StepError"
+        },
+        {
+          "name": "field",
+          "type": "enum:FieldTag"
+        }
+      ]
+    },
+    "EVT_STATUS": {
+      "kind": 11,
+      "direction": "uce_evt",
+      "contract": "level, non-destructive read of per-context wake/event ready bitmaps of this hart",
+      "fields": [
+        {
+          "name": "wake_bitmap",
+          "type": "u64"
+        },
+        {
+          "name": "event_bitmap",
+          "type": "u64"
+        }
+      ]
+    },
+    "EVT_TAKE": {
+      "kind": 12,
+      "direction": "uce_evt",
+      "contract": "destructive take of one wake record or one event slot's step/chain terminal; sticky until taken",
+      "union": {
+        "tag_field": "record",
+        "tag_type": "enum:EvtRecordKind",
+        "variants": {
+          "wake": [
+            {
+              "name": "request_id",
+              "type": "u16"
+            },
+            {
+              "name": "lease_handle",
+              "type": "u16"
+            },
+            {
+              "name": "slot_generation",
+              "type": "u16"
+            },
+            {
+              "name": "bound_engine",
+              "type": "u8",
+              "range": [
+                0,
+                7
+              ]
+            }
+          ],
+          "step_terminal": [
+            {
+              "name": "token",
+              "type": "struct:EventToken"
+            },
+            {
+              "name": "status",
+              "type": "enum:TermStatus"
+            },
+            {
+              "name": "seq",
+              "type": "u16"
+            },
+            {
+              "name": "success",
+              "type": "bool8"
+            },
+            {
+              "name": "detail",
+              "type": "enum:FieldTag"
+            }
+          ],
+          "chain_terminal": [
+            {
+              "name": "token",
+              "type": "struct:EventToken"
+            },
+            {
+              "name": "status",
+              "type": "enum:TermStatus"
+            },
+            {
+              "name": "seq",
+              "type": "u16"
+            },
+            {
+              "name": "success",
+              "type": "bool8"
+            },
+            {
+              "name": "detail",
+              "type": "enum:FieldTag"
+            }
+          ]
+        }
+      },
+      "fields": [
+        {
+          "name": "record",
+          "type": "enum:EvtRecordKind"
+        }
+      ]
+    },
+    "REC_REAP": {
+      "kind": 13,
+      "direction": "uce_evt",
+      "contract": "retire one observed event slot; optional (auto at context retirement); never affects AM resources",
+      "fields": [
+        {
+          "name": "token",
+          "type": "struct:EventToken"
+        }
+      ]
+    },
+    "CTX_CANCEL": {
+      "kind": 14,
+      "direction": "uce_to_am",
+      "contract": "fault/reset/rebind: cancel parked request, quiesce and reclaim the owner's leases, publish failure terminal",
+      "fields": [
+        {
+          "name": "tile_id",
+          "type": "u8",
+          "range": [
+            0,
+            15
+          ]
+        },
+        {
+          "name": "ctx_id",
+          "type": "u8",
+          "range": [
+            0,
+            7
+          ]
+        },
+        {
+          "name": "ctx_epoch",
+          "type": "u8"
+        }
+      ]
+    },
+    "MEM_REQ": {
+      "kind": 15,
+      "direction": "boa_mem",
+      "contract": "real participation in L1 arbitration; accepting a command never substitutes the data transfer",
+      "fields": [
+        {
+          "name": "req_id",
+          "type": "u32"
+        },
+        {
+          "name": "ctx_id",
+          "type": "u8",
+          "range": [
+            0,
+            7
+          ]
+        },
+        {
+          "name": "ctx_epoch",
+          "type": "u8"
+        },
+        {
+          "name": "generation",
+          "type": "u16"
+        },
+        {
+          "name": "address",
+          "type": "u64"
+        },
+        {
+          "name": "access",
+          "type": "enum:AccessType"
+        },
+        {
+          "name": "length",
+          "type": "u16",
+          "range": [
+            1,
+            65535
+          ]
+        },
+        {
+          "name": "byte_mask",
+          "type": "u32"
+        }
+      ]
+    },
+    "MEM_RESP": {
+      "kind": 16,
+      "direction": "mem_boa",
+      "contract": "old responses must never pollute a new generation",
+      "fields": [
+        {
+          "name": "req_id",
+          "type": "u32"
+        },
+        {
+          "name": "status",
+          "type": "enum:MemStatus"
+        },
+        {
+          "name": "data",
+          "type": "list:u8",
+          "count_field": "u16"
+        }
+      ]
+    }
+  },
+  "descriptor_groups": {
+    "note": "design 4.2 five field groups; every group must be covered by serialized message/struct fields (lint typed_fields_serialized)",
+    "version_identity": {
+      "fields": [
+        "frame.version",
+        "tile_id",
+        "ctx_id/ctx_epoch",
+        "request_seq",
+        "lease_handle/slot_generation",
+        "chain_id",
+        "seq"
+      ]
+    },
+    "invariant_chain_config": {
+      "fields": [
+        "output_rows/output_cols",
+        "acc_format",
+        "layout",
+        "output_l1_slot/output_dtype",
+        "EpilogueConfig"
+      ],
+      "frozen_at": "grant"
+    },
+    "input_view": {
+      "fields": [
+        "OperandView(dims/offsets/strides/dtype/element_bytes/bytes)",
+        "transpose",
+        "k_mask",
+        "allocation/generation"
+      ]
+    },
+    "step": {
+      "fields": [
+        "k_extent",
+        "mode(INIT_or_ADD)",
+        "final",
+        "input_ready_tokens",
+        "input_usage_handles",
+        "completion_event"
+      ]
+    },
+    "internal_state": {
+      "fields": [
+        "bound_engine",
+        "group/slot_index",
+        "result credits"
+      ],
+      "maintained_by": "device; the compiler never guesses these"
+    }
+  },
+  "identities": {
+    "ctx_key": {
+      "fields": [
+        "ctx_id",
+        "ctx_epoch"
+      ],
+      "scope": "physical Compute Tile; cross-tile messages also carry tile_id",
+      "not": "never conflated with TaskIdentity (Grid/Task), physical slot, or engine"
+    },
+    "lease_handle": {
+      "fields": [
+        "lease_handle",
+        "slot_generation"
+      ],
+      "note": "opaque (entry, generation) pair; slot_generation is per physical slot"
+    },
+    "event_token": {
+      "fields": [
+        "ctx_id",
+        "ctx_epoch",
+        "event_id"
+      ],
+      "note": "event slots allocated at context admission from the Tile Program static event count; content associates handle/generation/seq/kind"
+    },
+    "logical_am": {
+      "values": [
+        0,
+        1
+      ],
+      "note": "software-selected logical position, not a physical slot"
+    }
+  },
+  "grant": {
+    "linearization": "one serialization point checks grantability, selects the (group,index)-first free slot, takes the ChainTable entry, one next-step mailbox, binds the admitted L1 output destination, sets owner/generation/immutable bound_engine, registers the bundle on the first lease; never returns a handle before the resources are held",
+    "preconditions": [
+      {
+        "id": "am_slot",
+        "kind": "am_slot",
+        "acquires": true,
+        "capacity": "am_slots_per_group"
+      },
+      {
+        "id": "per_context_quota",
+        "kind": "per_context_quota",
+        "acquires": true,
+        "capacity": "am_slots_per_context"
+      },
+      {
+        "id": "chain_table_entry",
+        "kind": "chain_table_entry",
+        "acquires": true,
+        "capacity": "am_total_slots_per_tile"
+      },
+      {
+        "id": "mailbox_current_and_next",
+        "kind": "mailbox",
+        "acquires": true,
+        "capacity": "next_step_mailboxes_per_live_chain"
+      },
+      {
+        "id": "admitted_output_binding",
+        "kind": "output_binding",
+        "acquires": true
+      },
+      {
+        "id": "bundle_registration",
+        "kind": "bundle",
+        "acquires": false,
+        "note": "first lease registers the owner bundle; a reservation, not a physical resource"
+      }
+    ],
+    "forbidden_precondition_kinds": [
+      "event",
+      "event_slot",
+      "event_record",
+      "event_wait",
+      "await_event",
+      "completion_event",
+      "event_table",
+      "event_reap"
+    ],
+    "completion_token": {
+      "role": "reference_only",
+      "refers_to": "static event slot identity (ctx_id, ctx_epoch, event_id) allocated at context admission",
+      "never_a_grant_resource": true,
+      "note": "AM grant never acquires, waits on, or is blocked by any event slot; old-chain events not yet awaited/reaped never block a new grant of the same logical_am (Q09)"
+    }
+  },
+  "replay": {
+    "request_identity": "(owner, request_seq)",
+    "rules": [
+      "a replayed AM_REQUEST returns the same result and never grants twice",
+      "each owner has at most one parked request at a time",
+      "the interconnect must not duplicate AM_REQUEST; deduplication behavior is accepted at P14"
+    ],
+    "behavioral_acceptance": "P14"
+  },
+  "capacities": {
+    "am_group_count": {
+      "value": 4,
+      "unit": "AM groups per Tile (pure physical slot addressing; neither engine nor L2 Tile Group)",
+      "frozen": "P10 review-frozen 2026-10-31",
+      "source": "hardware_config.yaml engines.boa.am.group_count; design 6.1"
+    },
+    "am_slots_per_group": {
+      "value": 2,
+      "frozen": "P10 review-frozen 2026-10-31",
+      "source": "hardware_config.yaml engines.boa.am.slots_per_group"
+    },
+    "am_slots_per_context": {
+      "value": 2,
+      "note": "hard constraint; counted across all engines of the Tile; V1 forbids raising it",
+      "frozen": "P10 review-frozen 2026-10-31",
+      "source": "hardware_config.yaml engines.boa.am.slots_per_context; shared_am.py slots_per_context"
+    },
+    "am_total_slots_per_tile": {
+      "value": 8,
+      "derived": "am_group_count * am_slots_per_group",
+      "frozen": "P10 review-frozen 2026-10-31"
+    },
+    "am_slot_capacity_bytes": {
+      "value": 262144,
+      "legal_range": [
+        1024,
+        262144
+      ],
+      "note": "software default 256 KiB f32; typed fixture 64 KiB; effective lower bound 1024 bytes (16x16 f32); physical macro frozen later by SRAM profile",
+      "frozen": "candidate; value is the software model default, physical capacity owner is the SRAM profile task",
+      "source": "hardware_config.yaml engines.boa.am.slot_capacity_bytes"
+    },
+    "contexts_per_tile": {
+      "default": 4,
+      "legal_range": [
+        1,
+        8
+      ],
+      "note": "default 4; acceptance covers 1/2/4/8; a hart is not a context; AM slots are never permanently partitioned by context count",
+      "frozen": "P10 review-frozen 2026-10-31",
+      "source": "design 6.1 context_count"
+    },
+    "pending_request_fifo_depth": {
+      "value": "contexts_per_tile",
+      "note": "pending queue depth equals the per-Tile context count; at most one parked request per owner; cannot overflow, no BUSY needed",
+      "frozen": "P10 review-frozen 2026-10-31",
+      "source": "design 4.1; shared_am.py _pending_requests"
+    },
+    "pending_requests_per_owner": {
+      "value": 1,
+      "frozen": "P10 review-frozen 2026-10-31"
+    },
+    "next_step_mailboxes_per_live_chain": {
+      "value": 1,
+      "note": "one next-step mailbox plus one current execution record per live chain; no unbounded step queue",
+      "frozen": "P10 review-frozen 2026-10-31",
+      "source": "design 6.1"
+    },
+    "terminal_ring": {
+      "value": 256,
+      "policy": "bounded diagnostic ring; overwrite oldest and count overflow when full; never carries correctness",
+      "frozen": "P10 review-frozen 2026-10-31",
+      "source": "shared_am.py terminal_capacity; design 2.3"
+    },
+    "event_slots": {
+      "value": "tile_program_static",
+      "note": "event slot count is the Tile Program's static event count, allocated at context admission; not a global constant",
+      "frozen": "P10 review-frozen 2026-10-31"
+    },
+    "engines_per_tile": {
+      "default": 1,
+      "legal_range": [
+        1,
+        8
+      ],
+      "note": "software default 1 (V1 multi-array target 4, exploration cap MAX_BOA_ENGINES=8); engine id domain independent of AM group id domain",
+      "frozen": "candidate; physical engine count frozen by the array tasks",
+      "source": "hardware_config.yaml engines.boa.arrays_per_tile"
+    },
+    "result_fifo_depth": {
+      "status": "reserved",
+      "owner": "P16",
+      "software_step_default": 4,
+      "unit": "per-engine result FIFO entries, hardware microblock granularity",
+      "legal_range": [
+        1,
+        64
+      ]
+    },
+    "am_credit_capacity": {
+      "status": "reserved",
+      "owner": "P16",
+      "software_step_default": 8,
+      "unit": "O/R credits per engine (A/B reads + AM RMW writeback), hardware microblock granularity",
+      "legal_range": [
+        2,
+        256
+      ]
+    },
+    "l1_output_credits": {
+      "status": "reserved",
+      "owner": "P16",
+      "software_step_default": 1,
+      "unit": "concurrent FINAL L1 output drains",
+      "legal_range": [
+        1,
+        16
+      ]
+    },
+    "software_step_timing": {
+      "domain": "software_model",
+      "result_commit_cycles": 2,
+      "output_drain_cycles": 1,
+      "unit": "software step-granularity cycles (BoaResultService); hardware microblock timing is a separate domain and the two are compared per-unit, never forced equal",
+      "frozen": "software model values only"
+    }
+  },
+  "wraparound": {
+    "slot_generation": {
+      "width": 16,
+      "rule": "monotonic per physical slot, incremented at each grant",
+      "quiescence": "wrap 0xffff->0 only when the Tile AM pool has no live lease, no pending request and no in-flight access of any earlier generation",
+      "validated_by": "P14"
+    },
+    "ctx_epoch": {
+      "width": 8,
+      "rule": "incremented at context retirement; reuse only after commands, input references, AM accesses and event references are all safely closed",
+      "quiescence": "wrap 0xff->0 additionally requires context-id quiescence (no outstanding event token of any epoch)",
+      "validated_by": "P15"
+    },
+    "request_seq": {
+      "width": 16,
+      "rule": "per-owner monotonic; (owner, request_seq) unique; replay returns the same result",
+      "quiescence": "wrap requires owner quiescence: no parked request and no live lease",
+      "validated_by": "P14"
+    },
+    "request_id": {
+      "width": 16,
+      "rule": "allocator-assigned monotonic",
+      "quiescence": "wrap requires Tile AM quiescence",
+      "validated_by": "P14"
+    },
+    "lease_handle": {
+      "width": 16,
+      "rule": "allocator counter; opaque (entry, generation) pair identity",
+      "quiescence": "wrap requires Tile AM quiescence",
+      "validated_by": "P14"
+    },
+    "chain_id": {
+      "width": 16,
+      "rule": "per-Tile chain counter",
+      "quiescence": "wrap requires Tile AM quiescence",
+      "validated_by": "P14"
+    },
+    "step_seq": {
+      "width": 16,
+      "rule": "0-contiguous per chain; NO wraparound: a chain longer than 65534 steps is a contract error (STEP_ERROR seq_invalid)",
+      "quiescence": "not applicable (wrap forbidden)",
+      "validated_by": "P14"
+    },
+    "mem_req_id": {
+      "width": 32,
+      "rule": "monotonic request id per memory service",
+      "quiescence": "wrap requires memory-service quiescence (no outstanding MEM_REQ); old responses never pollute a new generation",
+      "validated_by": "P16"
+    },
+    "step_token": {
+      "width": 32,
+      "rule": "monotonic accepted-step token",
+      "quiescence": "wrap requires engine quiescence",
+      "validated_by": "P16"
+    },
+    "no_width_escape": "large widths never substitute a wraparound/quiescence rule"
+  },
+  "freeze": {
+    "status": "P10 review-frozen 2026-10-31",
+    "origin": "widths below are candidates derived from the section 6.1 capacity domains and frozen by the P10 review; the original design did NOT give them (design 2.2: ID/register/event widths are frozen by a later spec, which is this schema)",
+    "widths": {
+      "tile_id": {
+        "bits": 8,
+        "legal": [
+          0,
+          15
+        ],
+        "rationale": "4-Tile software Group, 1-Tile FPGA V1; 16 values headroom"
+      },
+      "ctx_id": {
+        "bits": 8,
+        "legal": [
+          0,
+          7
+        ],
+        "rationale": "8-context acceptance ceiling (design 6.1 context_count 1/2/4/8)"
+      },
+      "ctx_epoch": {
+        "bits": 8,
+        "legal": [
+          0,
+          255
+        ],
+        "rationale": "epoch churn is per retirement; wrap rule above"
+      },
+      "logical_am": {
+        "bits": 1,
+        "legal": [
+          0,
+          1
+        ],
+        "rationale": "two logical AM positions per context"
+      },
+      "request_seq": {
+        "bits": 16,
+        "rationale": "per-owner request volume; wrap under owner quiescence"
+      },
+      "request_id": {
+        "bits": 16,
+        "rationale": "per-Tile pending queue is bounded by context count"
+      },
+      "lease_handle": {
+        "bits": 16,
+        "rationale": "lease churn bounded by chain count; wrap rule above"
+      },
+      "slot_generation": {
+        "bits": 16,
+        "rationale": "per-slot churn; wrap rule above"
+      },
+      "chain_id": {
+        "bits": 16,
+        "rationale": "per-Tile chain counter"
+      },
+      "bound_engine": {
+        "bits": 8,
+        "legal": [
+          0,
+          7
+        ],
+        "rationale": "MAX_BOA_ENGINES=8 exploration cap; V1 target 4"
+      },
+      "group": {
+        "bits": 8,
+        "legal": [
+          0,
+          3
+        ],
+        "rationale": "4 groups per Tile"
+      },
+      "slot_index": {
+        "bits": 8,
+        "legal": [
+          0,
+          1
+        ],
+        "rationale": "2 slots per group"
+      },
+      "event_id": {
+        "bits": 16,
+        "rationale": "static per Tile Program event count"
+      },
+      "seq": {
+        "bits": 16,
+        "rationale": "step index; wrap forbidden by contract"
+      },
+      "step_token": {
+        "bits": 32,
+        "rationale": "accepted-step churn"
+      },
+      "mem_req_id": {
+        "bits": 32,
+        "rationale": "memory service throughput id"
+      },
+      "address": {
+        "bits": 64,
+        "rationale": "resolved physical address domain (IOVA)"
+      },
+      "byte_count": {
+        "bits": 32,
+        "rationale": "slot capacity up to 256 KiB with headroom"
+      }
+    },
+    "not_frozen_here": [
+      "RoCC opcode/funct encodings (P21; see encoding_slots)",
+      "NaN/INT8 numeric encodings (P03 numeric_freeze.md, by reference)",
+      "physical SRAM/bank/adder/drain service capacities (SRAM profile / PPA tasks)",
+      "hardware microblock FIFO/credit depths (P16; see capacities reserved entries)"
+    ]
+  },
+  "encoding_slots": {
+    "owner": "P21",
+    "status": "reserved",
+    "note": "the design section 4.5 'opcode/funct frozen by a later spec' resolves to these reserved slots plus the P21 freeze action; a slot is NOT a frozen encoding",
+    "instructions": {
+      "AM_REQ": {
+        "rocc_opcode_slot": "reserved",
+        "funct7_slot": "reserved"
+      },
+      "BOA_SUBMIT": {
+        "rocc_opcode_slot": "reserved",
+        "funct7_slot": "reserved"
+      },
+      "EVT_STATUS": {
+        "rocc_opcode_slot": "reserved",
+        "funct7_slot": "reserved"
+      },
+      "EVT_TAKE": {
+        "rocc_opcode_slot": "reserved",
+        "funct7_slot": "reserved"
+      },
+      "REC_REAP": {
+        "rocc_opcode_slot": "reserved",
+        "funct7_slot": "reserved"
+      },
+      "CTX_CANCEL": {
+        "rocc_opcode_slot": "reserved",
+        "funct7_slot": "reserved"
+      }
+    },
+    "constraints": [
+      "opcode must come from the RoCC custom-0..3 funct3 space",
+      "funct7 values must be unique per instruction and frozen only by P21 with review evidence",
+      "downstream tasks must not treat any slot as a frozen encoding before P21"
+    ]
+  },
+  "consumers": {
+    "P14": [
+      "AM_REQUEST",
+      "AM_GRANTED",
+      "AM_PARKED",
+      "AM_ERROR",
+      "AM_WAKE",
+      "AM_CANCEL",
+      "identities",
+      "replay",
+      "slot/quota/bundle/pending capacities"
+    ],
+    "P15": [
+      "EVT_STATUS",
+      "EVT_TAKE",
+      "REC_REAP",
+      "CTX_CANCEL",
+      "EventToken identity",
+      "terminal ring fields"
+    ],
+    "P16": [
+      "SUBMIT_STEP",
+      "STEP_ACCEPTED",
+      "STEP_FULL",
+      "STEP_ERROR",
+      "MEM_REQ",
+      "MEM_RESP",
+      "reserved capacity fields"
+    ],
+    "P17": [
+      "EpilogueConfig",
+      "SUBMIT_STEP.final",
+      "EVT_TAKE chain_terminal ordering fields"
+    ],
+    "P18": [
+      "single-array top integration consumes the generated codecs only"
+    ],
+    "P19": [
+      "C header boa_protocol.h"
+    ],
+    "P20": [
+      "generated Python codec for backend wiring"
+    ],
+    "P21": [
+      "encoding_slots freeze of RoCC opcode/funct"
+    ]
+  },
+  "lint": {
+    "rules": [
+      "schema_frame_matches_abi",
+      "enum_values_unique",
+      "message_kinds_unique",
+      "grant_preconditions_exclude_event_slots",
+      "completion_token_reference_only",
+      "capacities_explicit",
+      "wraparound_rule_for_every_counter",
+      "typed_fields_serialized",
+      "field_ranges_agree_with_capacities",
+      "operand_allocation_generation_serialized",
+      "submit_step_completion_event_bans_self_reference",
+      "usage_references_are_typed_allocation_refs"
+    ],
+    "note": "executable in hardware/boa/protocol/gen_protocol.py::lint_schema; the check target runs it on the committed schema and on negative fixtures"
+  }
+}
