@@ -494,12 +494,23 @@ class EpilogueConfig:
     _o.u8(self.enables())
     bias = self.bias if self.bias_present else ()
     for _i in range(self.n_cols):
-      _o.u32(bias[_i] if _i < len(bias) else 0)
-    _o.u32(self.scale if self.scale_present else 0)
-    clip = self.clip if self.clip_present else ClipPair(0, 0)
-    clip._encode(_o)
-    quant = self.quant if self.quant_present else QuantConfig(0, 0)
-    quant._encode(_o)
+      word = bias[_i] if bias is not None and _i < len(bias) else 0
+      _o.u32(word)
+    if self.scale_present:
+      assert self.scale is not None
+      _o.u32(self.scale)
+    else:
+      _o.u32(0)
+    if self.clip_present:
+      assert self.clip is not None
+      self.clip._encode(_o)
+    else:
+      ClipPair(0, 0)._encode(_o)
+    if self.quant_present:
+      assert self.quant is not None
+      self.quant._encode(_o)
+    else:
+      QuantConfig(0, 0)._encode(_o)
 
   @classmethod
   def _decode(cls, _r: _Reader, _p: str) -> EpilogueConfig:
