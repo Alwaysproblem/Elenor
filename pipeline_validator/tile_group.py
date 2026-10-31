@@ -1334,6 +1334,7 @@ class TileGroup:
         admission.context_id,
         memory,
         task,
+        cycle=cycle,
       )
       if context != admission.context_id:
         raise MemoryInvariantError("UCE binding failed after Arena commit")
@@ -2301,6 +2302,7 @@ class TileGroup:
       "total_slots", "free_slots", "live_leases", "pending_requests", "reserved_slots",
       "request_count", "parked_count", "wake_count", "cancelled_request_count",
       "acquire_count", "commit_count", "final_count", "fault_count", "slot_free_count",
+      "terminal_overflow_count",
     )
     shared_am = {
       "topology": "per_tile_v1",

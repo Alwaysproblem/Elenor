@@ -663,7 +663,10 @@ ADD; `output` = INIT+FINAL; `accumulate output` = ADD+FINAL including this
 product. The first step must INIT (`seq = 0`); later steps must `accumulate`
 with consecutive `seq`; exactly one step must be FINAL. `ops` is derived as
 `2*m*n*k`. The event means step_committed for non-final steps and chain_done
-for FINAL (output visible, AM lease released).
+for FINAL: output visible, AM slot/quota freed and the chain_done terminal
+published, in the order `compute_done <= step_committed <= output_visible <=
+slot_free <= chain_done <= event`. A faulted chain quiesces its in-flight AM
+accesses, frees the slot, and only then publishes its failure terminal.
 
 P06 uses exact integer `bf16_fp32_mac_rne_v1` evaluation. Each original-index
 `numeric_tile_k` contribution block starts at FP32 +0, applies fused FP32 RNE

@@ -397,6 +397,22 @@ FINAL output waits for a bounded L1 output credit, writes/drains, and only then
 releases AM and signals the event. L1 output backpressure leaves the lease live
 in `WAIT_OUTPUT`/`DRAINING`; recovery needs no UCE polling.
 
+Terminal ordering (P07): every successful FINAL satisfies
+`compute_done <= step_committed <= output_visible <= slot_free <= chain_done
+<= UCE event`. The FINAL commit and output write share the output stage
+(commit first); `release_final` runs after the drain, refuses pending
+steps/accesses, frees slot/quota, then publishes `chain_done` (trace
+`am_chain_terminal`) before waking parked requests. Non-FINAL steps only emit
+`am_commit` (step_committed) and write no L1 nor terminal. Each accepted step
+is an in-flight AM access; a fault/cancel moves the lease to
+`fault_quiescing`, keeps slot/quota until every access retires, then frees and
+publishes the failure terminal. Reset quiesces all accesses itself and does
+not clear the terminal ring. The ring (`terminal_capacity`, default 256) is a
+bounded diagnostic that overwrites the oldest and counts
+`terminal_overflow_count`; correctness never depends on it. The report check
+`am_terminal_order` joins retained FINAL result records with terminals by
+Tile/lease identity.
+
 ### BOA engine pools (P05)
 
 Each `ComputeTile` owns `boa_engines`, one physical array per engine; the old

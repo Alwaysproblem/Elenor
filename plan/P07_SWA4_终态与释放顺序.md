@@ -1,6 +1,6 @@
 # P07 · SW-A4 终态时序与安全释放
 
-状态：未开始
+状态：通过（2026-10-31，见 [evidence/P07.md](evidence/P07.md)）
 前置：P04通过。P05/P06没有语义前置关系，但会改shared_am.py/tile.py，不能并发写；默认依索引顺序执行。
 对应原方案：SW-A4（[设计 v0.5](../design/proposal/BOA_Gemmini_Integration_Design.md) §1.3、§3.3、§3.5、§4.3、§7.2 SW-A 表）；Q07（§8.1b）；总则 §3.3。
 

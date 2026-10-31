@@ -506,6 +506,43 @@ def _expected_am_faults(wl: WorkloadInfo, tiles: list[Mapping]) -> dict[int, int
   return expected
 
 
+def _terminal_order_rows(result: SimResult, am_tiles: list[Mapping]) -> list[dict]:
+  """Join retained FINAL result records with retained chain terminals.
+
+  Both are bounded diagnostic rings, so only pairs present in both are
+  checked; the row count is reported rather than claimed complete.
+  """
+  terminals = {
+    (tile["tile_id"], entry["lease_id"]): entry
+    for tile in am_tiles
+    for entry in tile.get("terminals", ())
+    if entry.get("kind") == "chain_done"
+  }
+  rows: list[dict] = []
+  tiles = result.group_snapshot.get("tiles", ())
+  for tile in tiles if isinstance(tiles, (list, tuple)) else ():
+    service = tile.get("boa_results", {}) if isinstance(tile, Mapping) else {}
+    for record in service.get("records", ()):
+      if not record.get("final") or record.get("status") != "chain_done":
+        continue
+      terminal = terminals.get((tile.get("tile_id"), record.get("lease_id")))
+      if terminal is None:
+        continue
+      chain = (
+        record["compute_done_cycle"], record["commit_cycle"], record["output_cycle"],
+        record["slot_free_cycle"], terminal["cycle"], record["event_cycle"],
+      )
+      ordered = all(isinstance(value, int) for value in chain) and all(
+        a <= b for a, b in pairwise(chain)
+      )
+      rows.append({
+        "tile_id": tile.get("tile_id"), "lease_id": record["lease_id"],
+        "event_id": record["event_id"], "cycles": list(chain),
+        "pass": ordered and record["slot_free_cycle"] == terminal["cycle"],
+      })
+  return rows
+
+
 def _run_checks(
   wl: WorkloadInfo, result: SimResult, engine_active: dict, total: int, boa_capacity_cycles: int
 ) -> list[dict]:
@@ -598,6 +635,16 @@ def _run_checks(
       "check": "boa_affinity_accounting",
       "expected": True, "actual": affinity_ok, "pass": affinity_ok,
       "per_tile": affinity_checks,
+    })
+    order_rows = _terminal_order_rows(result, am_tiles)
+    order_ok = all(row["pass"] for row in order_rows)
+    checks.append({
+      "check": "am_terminal_order",
+      "expected": "commit<=output<=slot_free==chain_done<=event",
+      "actual": order_ok,
+      "pass": order_ok,
+      "joined_finals": len(order_rows),
+      "violations": [row for row in order_rows if not row["pass"]][:_REPORT_RECORD_LIMIT],
     })
 
   boa_ratio = engine_active.get("BOA", 0) / boa_capacity_cycles if boa_capacity_cycles else 0
@@ -894,7 +941,8 @@ def report_to_text(r: WorkloadReport, *, detailed: bool = False) -> str:
         f"    Tile{tile['tile_id']} AM: "
         f"free={tile['free_slots']}/{tile['total_slots']} live={tile['live_leases']} "
         f"pending={tile['pending_requests']} reserved={tile['reserved_slots']} "
-        f"acquire={tile['acquire_count']} fault={tile['fault_count']}"
+        f"acquire={tile['acquire_count']} fault={tile['fault_count']} "
+        f"terminal_overflow={tile.get('terminal_overflow_count', 0)}"
       )
   if r.boa_results:
     services = [item for item in r.boa_results.values() if isinstance(item, Mapping)]

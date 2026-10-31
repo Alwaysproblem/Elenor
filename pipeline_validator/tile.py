@@ -39,7 +39,7 @@ from .memory.l1_slot_frame import SlotFrame
 from .pmu import PMUCounter, StallReason
 from .profiles import build_registry
 from .runtime.boa_result import BoaPreparedResult, BoaResultService
-from .runtime.shared_am import AmLease, AmOwner, SharedAmManager
+from .runtime.shared_am import AmLease, AmLeaseState, AmOwner, SharedAmManager
 from .stream_queue import StreamQueue, StreamToken
 from .trace import Tracer
 
@@ -285,6 +285,8 @@ class TileUCE:
     context_id: int | None = None,
     memory: _TileContextMemory | None = None,
     task_identity: TaskIdentity | None = None,
+    *,
+    cycle: int,
   ) -> int | None:
     candidates = self.contexts if context_id is None else (self.contexts[context_id],)
     for ctx in candidates:
@@ -292,7 +294,7 @@ class TileUCE:
         continue
       self._unregister_context_events(ctx)
       if self.shared_am is not None:
-        self.shared_am.abort_owner(self._am_owner(ctx), 0, "context rebind")
+        self.shared_am.abort_owner(self._am_owner(ctx), cycle, "context rebind")
       ctx.epoch += 1
       ctx.am_leases.clear()
       ctx.am_waiting = None
@@ -319,13 +321,13 @@ class TileUCE:
       return ctx.ctx_id
     return None
 
-  def rollback_context(self, context_id: int) -> None:
+  def rollback_context(self, context_id: int, cycle: int) -> None:
     """Undo an atomic-dispatch bind before the context has executed."""
     ctx = self.contexts[context_id]
     self._unregister_context_events(ctx)
     for key, fifo in self._engine_queues.items():
       self._engine_queues[key] = deque(entry for entry in fifo if entry.ctx_id != context_id)
-    self._reset_context(ctx)
+    self._reset_context(ctx, cycle)
 
   def step(self, cycle: int, tile: ComputeTile, freeze_new_work: bool = False) -> None:
     self.pmu.add_cycle("total", 1)
@@ -413,10 +415,7 @@ class TileUCE:
           kept.append(entry)
           continue
         if entry.am_lease_id is not None and self.shared_am is not None:
-          try:
-            self.shared_am.abort_lease(entry.am_lease_id, cycle, "context fault")
-          except ValueError:
-            pass
+          self._abort_queued_step(entry, cycle, "context fault")
         self._drop_event_ref(entry.event_ref)
       self._engine_queues[key] = kept
 
@@ -493,10 +492,10 @@ class TileUCE:
       ],
     }
 
-  def reset(self) -> None:
+  def reset(self, cycle: int) -> None:
     for ctx in self.contexts:
-      self._close_context_trace(ctx, 0)
-      self._reset_context(ctx)
+      self._close_context_trace(ctx, cycle)
+      self._reset_context(ctx, cycle)
     self._current_ctx = 0
     self._rr_next_ctx = 0
     self._boa_estimate_rr = 0
@@ -508,7 +507,7 @@ class TileUCE:
     self._completion_queue.clear()
     self._event_done_callback = None
     self._phase_signal_callback = None
-    self._clear_engine_queues(unregister=False)
+    self._clear_engine_queues(unregister=False, cycle=cycle)
     self.pmu.reset()
 
   def _runtime_event_id(self, ctx: _UCEContext, local_name: str) -> str:
@@ -1428,9 +1427,11 @@ class TileUCE:
             )
       except (ValueError, MemoryInvariantError) as exc:
         fifo.popleft()
+        if entry.am_lease_id is not None and self.shared_am is not None:
+          self._abort_queued_step(entry, cycle, str(exc))
         self._drop_event_ref(entry.event_ref)
         self._fault_context(ctx, str(exc), cycle)
-        self._clear_engine_queues(unregister=True)
+        self._clear_engine_queues(unregister=True, cycle=cycle)
         return
       if job is None:
         if entry.engine_kind == "BOA":
@@ -1458,6 +1459,10 @@ class TileUCE:
         raise ValueError("typed matmul requires full_memory ByteStore data")
       a_view, b_view, out_view = views
       lease = manager.lease(lease_id)
+      if lease.state is AmLeaseState.FAULT_QUIESCING:
+        # The owner faulted while this step was executing: retire the access
+        # without reading operands or producing a result for the old chain.
+        raise ValueError(f"AM lease {lease_id} faulted before compute_done")
       partial = boa_numeric.matmul_f32(
         store.read_view(a_view),
         store.read_view(b_view),
@@ -1488,13 +1493,15 @@ class TileUCE:
       def commit_final(cycle: int) -> None:
         manager.commit_step(lease_id, seq=matmul.seq, data=partial, final=True, cycle=cycle)
 
-      def release(cycle: int) -> None:
-        manager.release_final(lease_id, cycle)
+      def release(cycle: int) -> int:
+        released = manager.release_final(lease_id, cycle)
         ctx.am_leases.pop(matmul.am, None)
+        assert released.free_cycle is not None
+        return released.free_cycle
 
       def abort(cycle: int, reason: str) -> None:
         try:
-          manager.abort_lease(lease_id, cycle, reason)
+          manager.abort_lease(lease_id, cycle, reason, retire_access=True)
         finally:
           ctx.am_leases.pop(matmul.am, None)
 
@@ -1507,6 +1514,7 @@ class TileUCE:
         write_output,
         release,
         abort,
+        lambda: lease.state is AmLeaseState.FAULT_QUIESCING,
       )
 
     return completion
@@ -1789,17 +1797,32 @@ class TileUCE:
       while fifo:
         entry = fifo.popleft()
         if entry.am_lease_id is not None and self.shared_am is not None:
-          try:
-            self.shared_am.abort_lease(
-              entry.am_lease_id, cycle, "queued AM step discarded"
-            )
-          except ValueError:
-            pass
+          self._abort_queued_step(entry, cycle, "queued AM step discarded")
           self.contexts[entry.ctx_id].am_leases.pop(
             entry.matmul.am if entry.matmul is not None else "", None
           )
         if unregister:
           self._drop_event_ref(entry.event_ref)
+
+  def _abort_queued_step(self, entry: _EngineQueueEntry, cycle: int, reason: str) -> None:
+    """Fault an accepted but never-launched typed step and retire its access."""
+    assert self.shared_am is not None and entry.am_lease_id is not None
+    try:
+      self.shared_am.abort_lease(
+        entry.am_lease_id, cycle, reason, retire_access=entry.matmul is not None
+      )
+    except ValueError:
+      pass
+
+  def retire_failed_boa_job(self, job, cycle: int, reason: str) -> None:
+    """A launched typed step ended without a result: fault and retire its access."""
+    lease_id = job.desc.params.get("lease_id") if job.desc is not None else None
+    if self.shared_am is None or not isinstance(lease_id, int):
+      return
+    try:
+      self.shared_am.abort_lease(lease_id, cycle, reason, retire_access=True)
+    except ValueError:
+      pass
 
   def _unregister_context_events(self, ctx: _UCEContext) -> None:
     runtime_ids = [
@@ -1812,9 +1835,9 @@ class TileUCE:
     ctx.wait_refs = ()
     ctx.wait_all = False
 
-  def _reset_context(self, ctx: _UCEContext) -> None:
+  def _reset_context(self, ctx: _UCEContext, cycle: int) -> None:
     if self.shared_am is not None:
-      self.shared_am.abort_owner(self._am_owner(ctx), 0, "context reset")
+      self.shared_am.abort_owner(self._am_owner(ctx), cycle, "context reset")
     ctx.epoch += 1
     ctx.am_leases.clear()
     ctx.am_waiting = None
@@ -2109,6 +2132,8 @@ class ComputeTile:
     context_id: int | None = None,
     memory: _TileContextMemory | None = None,
     task_identity: TaskIdentity | None = None,
+    *,
+    cycle: int,
   ) -> int | None:
     return self.uce.bind_context(
       program,
@@ -2118,6 +2143,7 @@ class ComputeTile:
       context_id=context_id,
       memory=memory,
       task_identity=task_identity,
+      cycle=cycle,
     )
 
   def available_context_id(self, preferred: int | None = None) -> int | None:
@@ -2134,8 +2160,8 @@ class ComputeTile:
       None,
     )
 
-  def rollback_program(self, context_id: int, cycle: int = 0) -> None:
-    self.uce.rollback_context(context_id)
+  def rollback_program(self, context_id: int, cycle: int) -> None:
+    self.uce.rollback_context(context_id, cycle)
     frame = self.l1_frames[context_id]
     generation = frame.generation
     frame.release()
@@ -2165,6 +2191,7 @@ class ComputeTile:
         if getattr(job, "error", None) is not None:
           if getattr(job, "result_reserved", False):
             self.boa_results.cancel_reservation()
+          self.uce.retire_failed_boa_job(job, cycle, str(job.error))
           self.uce.notify_engine_failure(job.event_id, str(job.error), cycle)
         elif isinstance(job.payload, BoaPreparedResult):
           try:
@@ -2174,9 +2201,11 @@ class ComputeTile:
           except ValueError as exc:
             if getattr(job, "result_reserved", False):
               self.boa_results.cancel_reservation()
+            self.uce.retire_failed_boa_job(job, cycle, str(exc))
             self.uce.notify_engine_failure(job.event_id, str(exc), cycle)
         elif getattr(job, "result_reserved", False):
           self.boa_results.cancel_reservation()
+          self.uce.retire_failed_boa_job(job, cycle, "typed BOA result payload is missing")
           self.uce.notify_engine_failure(job.event_id, "typed BOA result payload is missing", cycle)
         else:
           self.uce.notify_event(job.event_id)
@@ -2208,9 +2237,9 @@ class ComputeTile:
       )
     )
 
-  def reset(self, cycle: int = 0) -> None:
-    self.uce.reset()
-    self.boa_results.reset()
+  def reset(self, cycle: int) -> None:
+    self.uce.reset(cycle)
+    self.boa_results.reset(cycle)
     for eng in self.engines:
       eng.reset()
     self.pmu.reset()

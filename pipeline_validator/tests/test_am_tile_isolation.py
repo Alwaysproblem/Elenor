@@ -176,7 +176,7 @@ def _bind(tile, program_name: str, role_event_id: str, context_id: int) -> None:
     name=program_name, insts=(ExecTileInst(op=ExecTileOp.RET, instruction_id=f"{program_name}.ret"),)
   )
   bound = tile.uce.bind_context(
-    program, role_id=0, role_event_id=role_event_id, context_id=context_id
+    program, role_id=0, role_event_id=role_event_id, context_id=context_id, cycle=0
   )
   assert bound == context_id, f"Tile{tile.tile_id} must bind hardware context {context_id}"
 
@@ -378,7 +378,7 @@ def _case_q08b_tile_reset() -> dict:
   assert waiter0 is None, "Tile0 waiter must park while Tile0 is full"
   tile1_before, tile1_wakes = _fill_and_park(managers[1], 1, _FILL_CYCLE)
   tile0 = group.tiles[0]
-  tile0.reset()
+  tile0.reset(_RESET_CYCLE)
   tile0_after = managers[0].snapshot()
   reborn = _request(managers[0], _owner("ctx", 0, 0, epoch=1), "t0reborn", 0, _RESET_CYCLE)
   assert reborn is not None, "Tile0 allocator must serve a fresh incarnation right after reset"
@@ -389,7 +389,9 @@ def _case_q08b_tile_reset() -> dict:
       "live_leases": tile0_after["live_leases"],
       "pending_requests": tile0_after["pending_requests"],
       "reserved_slots": tile0_after["reserved_slots"],
-      "terminal_count": len(tile0_after["terminals"]),
+      "terminals": [
+        (entry["kind"], entry["success"], entry["detail"], entry["cycle"]) for entry in tile0_after["terminals"]
+      ],
       # 8 allocation bumps (one per granted slot) plus exactly one reset bump.
       "slot_generations": sorted({slot["generation"] for slot in tile0_after["slots"]}),
       "request_count": tile0_after["request_count"],
@@ -424,11 +426,12 @@ def _case_q08b_rebind() -> dict:
     role_id=0,
     role_event_id="role0",
     context_id=0,
+    cycle=55,
   )
   assert rebound == 0, "a retired context must be re-bindable"
   tile0_after = managers[0].snapshot()
   rebind_terminals = [
-    {"tile_id": entry["tile_id"], "kind": entry["kind"], "owner_epoch": entry["owner_epoch"]}
+    {"tile_id": entry["tile_id"], "kind": entry["kind"], "owner_epoch": entry["owner_epoch"], "cycle": entry["cycle"]}
     for entry in tile0_after["terminals"]
     if entry["detail"] == "context rebind"
   ]
@@ -488,7 +491,7 @@ def _case_group_reset_recovery() -> dict:
         "live_leases": after["live_leases"],
         "pending_requests": after["pending_requests"],
         "reserved_slots": after["reserved_slots"],
-        "terminal_count": len(after["terminals"]),
+        "terminals": [(entry["kind"], entry["detail"]) for entry in after["terminals"]],
         "slots_reset_exactly_once": not drifted,
         "drifted_slots": drifted,
       }
@@ -778,7 +781,9 @@ def test_q08b_tile_reset_clears_only_its_own_allocator():
   assert tile0["live_leases"] == 0
   assert tile0["pending_requests"] == 0
   assert tile0["reserved_slots"] == 0
-  assert tile0["terminal_count"] == 0
+  # Reset quiesces and frees all 8 leases, then publishes one failure terminal
+  # per lease; the bounded ring is not cleared, so no failure record is lost.
+  assert tile0["terminals"] == [("fault", False, "reset", _RESET_CYCLE)] * 8
   assert tile0["slot_generations"] == [2]
   assert tile0["request_count"] == 9
   assert tile0["uce_active_contexts"] is False
@@ -798,7 +803,7 @@ def test_q08b_rebind_aborts_only_previous_incarnation_via_tile_allocator():
   assert tile0["next_epoch"] == 2
   assert tile0["stale_owner_live"] == 0
   assert tile0["free_slots_at_rebind"] == 8
-  assert tile0["rebind_terminals"] == [{"tile_id": 0, "kind": "fault", "owner_epoch": 1}]
+  assert tile0["rebind_terminals"] == [{"tile_id": 0, "kind": "fault", "owner_epoch": 1, "cycle": 55}]
   assert tile0["fault_count"] == 1
   assert tile0["next_logical_slot"] == 0
   assert tile0["uce_faulted"] is False
@@ -814,7 +819,10 @@ def test_group_reset_reaches_every_tile_allocator_exactly_once():
     assert tile["live_leases"] == 0
     assert tile["pending_requests"] == 0
     assert tile["reserved_slots"] == 0
-    assert tile["terminal_count"] == 0
+    # Terminals survive reset: Tile0's finished chain stays chain_done and
+    # Tile2's live lease publishes exactly one reset failure.
+    expected = {0: [("chain_done", "")], 2: [("fault", "reset")]}.get(tile["tile_id"], [])
+    assert tile["terminals"] == expected
     assert tile["slots_reset_exactly_once"] is True, f"tile {tile['tile_id']}: {tile['drifted_slots']}"
 
 

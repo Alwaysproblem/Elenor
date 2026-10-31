@@ -803,11 +803,21 @@ def test_am_release_before_final_and_fault_cleanup():
   manager.begin_step(lease.lease_id, seq=0, init=True, final=False, cycle=1)
   with pytest.raises(ValueError, match="not ready for final release"):
     manager.release_final(lease.lease_id, 2)
+  # The accepted step is still an in-flight AM access: the fault quiesces,
+  # keeps slot/quota and publishes no terminal until that access retires.
   manager.abort_owner(owner, 3, "fault")
+  held = manager.snapshot()
+  assert held["live_leases"] == 1
+  assert held["leases"][0]["state"] == "fault_quiescing"
+  assert held["fault_count"] == 1
+  assert held["terminals"] == []
+  manager.abort_lease(lease.lease_id, 5, "late result dropped", retire_access=True)
   snapshot = manager.snapshot()
   assert snapshot["live_leases"] == 0
   assert snapshot["fault_count"] == 1
-  assert snapshot["terminals"][-1]["kind"] == "fault"
+  terminal = snapshot["terminals"][-1]
+  assert (terminal["kind"], terminal["success"], terminal["detail"]) == ("fault", False, "fault")
+  assert terminal["cycle"] == 5
   assert snapshot["free_slots"] == snapshot["total_slots"]
 
 
@@ -926,16 +936,19 @@ def _prepared_final(manager, lease_id, *, final: bool, events: list):
     manager.commit_step(lease_id, seq=0, data=payload, final=True, cycle=cycle)
     events.append(("commit_final", cycle))
 
-  def release(cycle: int) -> None:
-    manager.release_final(lease_id, cycle)
+  def release(cycle: int) -> int:
+    released = manager.release_final(lease_id, cycle)
     events.append(("release", cycle))
+    assert released.free_cycle is not None
+    return released.free_cycle
 
   def abort(cycle: int, reason: str) -> None:
-    manager.abort_lease(lease_id, cycle, reason)
+    manager.abort_lease(lease_id, cycle, reason, retire_access=True)
     events.append(("abort", cycle))
 
   return BoaPreparedResult(
-    matmul, payload, final, commit, commit_final, write_output, release, abort
+    matmul, payload, final, commit, commit_final, write_output, release, abort,
+    lambda: manager.lease(lease_id).state.value == "fault_quiescing",
   )
 
 
@@ -1033,16 +1046,23 @@ def test_ir14_final_output_backpressure_defers_release_and_event():
   for cycle in range(51, 70):
     ready.extend(service.advance(cycle))
   assert ready == [job]
-  assert [name for name, _ in events] == ["write", "commit_final", "release"]
+  # Autonomous recovery order: step_committed -> output_visible -> slot_free
+  # (chain_done published inside the free) -> event.
+  assert [name for name, _ in events] == ["commit_final", "write", "release"]
   assert events[0][1] >= 51
   assert events[0][1] <= events[1][1] <= events[2][1]
   assert job.event_cycle == events[2][1]
-  assert manager.snapshot()["live_leases"] == 0
-  assert manager.snapshot()["terminals"][-1]["kind"] == "chain_done"
+  snapshot = manager.snapshot()
+  assert snapshot["live_leases"] == 0
+  terminal = snapshot["terminals"][-1]
+  assert terminal["kind"] == "chain_done" and terminal["success"] is True
+  assert terminal["cycle"] == events[2][1]
   record = service.snapshot()["records"][-1]
   assert record["compute_done_cycle"] == 0
-  assert record["output_cycle"] is not None
-  assert record["event_cycle"] >= record["output_cycle"]
+  assert (
+    record["compute_done_cycle"] <= record["commit_cycle"] <= record["output_cycle"]
+    <= record["slot_free_cycle"] <= terminal["cycle"] <= record["event_cycle"]
+  )
 
 
 def test_ir14_runtime_final_output_backpressure_recovers_without_polling():

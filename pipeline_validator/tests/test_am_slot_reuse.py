@@ -9,8 +9,9 @@ once, and is granted by the autonomous slot_free BEFORE the UCE awaits chain
 both chains drain, and both HBM outputs match an independent integer oracle
 built from small BF16 operands (every partial sum is an exact small integer,
 so pre-P06 whole-step accumulation and any future per-MAC RNE profile agree).
-The final makespan is intentionally not pinned; the chain_done terminal record
-stays at FINAL commit until P07 and no terminal timestamp is asserted.
+The final makespan is intentionally not pinned.  Since P07 each chain_done
+terminal is published at its slot_free, never before, and no later than its
+event.
 
 pytest:  conda run -n elenor-validator python -m pytest pipeline_validator/tests/test_am_slot_reuse.py -q
 smoke:   conda run -n elenor-validator python -m pipeline_validator.tests.test_am_slot_reuse
@@ -307,8 +308,7 @@ def test_q09_same_owner_reuses_slot0_before_awaiting_old_completion():
   assert snapshot["peak_pending"] == 1
 
   # Both chain_done terminals belong to the SAME owner identity and to two
-  # generations of the same physical slot 0.0 (no terminal timestamp claims:
-  # the record stays at FINAL commit until P07).
+  # generations of the same physical slot 0.0.
   terminals = snapshot["terminals"]
   assert len(terminals) == 2
   old_term, new_term = terminals
@@ -338,6 +338,10 @@ def test_q09_same_owner_reuses_slot0_before_awaiting_old_completion():
     assert record["final"] is True
     assert record["status"] == "chain_done"
     assert record["compute_done_cycle"] < record["output_cycle"] <= record["event_cycle"]
+    terminal = old_term if record is old_rec else new_term
+    assert terminal["lease_id"] == record["lease_id"]
+    assert record["output_cycle"] <= record["slot_free_cycle"] == terminal["cycle"]
+    assert terminal["cycle"] <= record["event_cycle"]
   assert old_rec["output_cycle"] >= BLOCKED_UNTIL
   assert old_rec["event_cycle"] < new_rec["event_cycle"]
   # The new chain only ran after the old chain's event had fired.

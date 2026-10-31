@@ -7,14 +7,20 @@ only then releases the AM lease and signals the event.  If the L1 output port
 is blocked, the FINAL remains live in ``WAIT_OUTPUT``/``DRAINING`` -- the AM
 slot and quota are not returned early, and no UCE polling is required for the
 event to fire after recovery.
+
+Successful FINAL order (P07): ``compute_done <= step_committed <=
+output_visible <= slot_free <= chain_done <= UCE event``.  ``release`` returns
+the manager's slot_free cycle (the chain_done terminal is published inside
+that free); the event is only scheduled after it and the order is asserted.
 """
 
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
+from itertools import pairwise
 from typing import Any
 
 from ..config import HardwareConfig
@@ -24,6 +30,14 @@ from ..trace import Tracer
 
 def _optional_cycle(value: int | None) -> int:
   return -1 if value is None else value
+
+
+def _job_lease_id(job: Any) -> int | None:
+  """AM lease identity the Tile runtime stamped on the launched descriptor."""
+  desc = getattr(job, "desc", None)
+  params = getattr(desc, "params", None)
+  value = params.get("lease_id") if isinstance(params, Mapping) else None
+  return value if isinstance(value, int) else None
 
 
 class BoaResultState(Enum):
@@ -42,8 +56,11 @@ class BoaPreparedResult:
   commit: Callable[[int], None]
   commit_final: Callable[[int], None]
   write_output: Callable[[int], None]
-  release: Callable[[int], None]
+  release: Callable[[int], int]
   abort: Callable[[int, str], None]
+  # True once the owning lease entered FAULT_QUIESCING: the service then
+  # retires the result at its next stage instead of waiting for output credit.
+  faulted: Callable[[], bool] = lambda: False
 
 
 @dataclass
@@ -68,6 +85,8 @@ class BoaResultRecord:
   event_cycle: int
   status: str
   engine_id: int | None = None
+  lease_id: int | None = None
+  slot_free_cycle: int | None = None
 
 
 class BoaResultService:
@@ -189,6 +208,10 @@ class BoaResultService:
     ready: list[Any] = []
     for pending in list(self._pending):
       try:
+        if pending.prepared.faulted() and pending.state is not BoaResultState.DRAINING:
+          # Owner fault: retire this in-flight AM access now so the lease can
+          # quiesce and free; never commit or publish output for it.
+          raise ValueError("AM lease faulted before commit")
         if pending.state is BoaResultState.WAIT_COMMIT:
           if cycle < pending.commit_due_cycle:
             continue
@@ -213,12 +236,14 @@ class BoaResultService:
             continue
           self._output_in_use += 1
           pending.claimed_output_credit = True
-          pending.prepared.write_output(cycle)
-          pending.job.output_cycle = cycle
+          # step_committed precedes output_visible within the same stage: a
+          # faulted lease rejects the commit and never publishes its output.
           pending.prepared.commit_final(cycle)
-          self.output_write_count += 1
           self.commit_count += 1
           pending.job.commit_cycle = cycle
+          pending.prepared.write_output(cycle)
+          pending.job.output_cycle = cycle
+          self.output_write_count += 1
           pending.state = BoaResultState.DRAINING
           pending.drain_end_cycle = cycle + self.drain_cycles
           self._trace(
@@ -233,34 +258,54 @@ class BoaResultService:
             },
           )
         if pending.state is BoaResultState.DRAINING:
-          if cycle < (pending.drain_end_cycle or cycle):
+          assert pending.drain_end_cycle is not None
+          if cycle < pending.drain_end_cycle:
             continue
-          pending.prepared.release(cycle)
+          # The output is visible and drained; the manager checks that no
+          # step or AM access remains before slot_free.
+          slot_free_cycle = pending.prepared.release(cycle)
           self.release_count += 1
           if pending.claimed_output_credit:
             self._output_in_use -= 1
           self._credits += 2
-          self._finish(pending, cycle, "chain_done")
+          self._finish(pending, cycle, "chain_done", slot_free_cycle)
           ready.append(pending.job)
       except Exception as exc:
         self._fail_pending(pending, cycle, str(exc))
     return ready
 
-  def _finish(self, pending: _PendingResult, cycle: int, status: str) -> None:
+  def _finish(
+    self, pending: _PendingResult, cycle: int, status: str, slot_free_cycle: int | None = None
+  ) -> None:
+    job = pending.job
+    stages = (
+      getattr(job, "compute_done_cycle", None),
+      getattr(job, "commit_cycle", None),
+      getattr(job, "output_cycle", None) if pending.prepared.final else None,
+      slot_free_cycle,
+      cycle,
+    )
+    present = [value for value in stages if value is not None]
+    if pending.prepared.final and slot_free_cycle is None:
+      raise ValueError("FINAL event scheduled without slot_free")
+    if any(later < earlier for earlier, later in pairwise(present)):
+      raise ValueError(f"BOA result stage order violated: {stages}")
     self._pending.remove(pending)
-    pending.job.event_cycle = cycle
+    job.event_cycle = cycle
     self.event_count += 1
     self._records.append(
       BoaResultRecord(
-        getattr(pending.job, "event_id", ""),
+        getattr(job, "event_id", ""),
         pending.prepared.matmul.am,
         pending.prepared.final,
-        _optional_cycle(getattr(pending.job, "compute_done_cycle", None)),
-        _optional_cycle(getattr(pending.job, "commit_cycle", None)),
-        getattr(pending.job, "output_cycle", None),
+        _optional_cycle(getattr(job, "compute_done_cycle", None)),
+        _optional_cycle(getattr(job, "commit_cycle", None)),
+        getattr(job, "output_cycle", None),
         cycle,
         status,
-        getattr(pending.job, "engine_id", None),
+        getattr(job, "engine_id", None),
+        _job_lease_id(job),
+        slot_free_cycle,
       )
     )
     if len(self._records) > self._record_capacity:
@@ -269,10 +314,14 @@ class BoaResultService:
       cycle,
       "boa_result_ready",
       {
-        "event_id": getattr(pending.job, "event_id", ""),
-        "engine_id": getattr(pending.job, "engine_id", None),
+        "event_id": getattr(job, "event_id", ""),
+        "engine_id": getattr(job, "engine_id", None),
         "am": pending.prepared.matmul.am,
+        "lease_id": _job_lease_id(job),
         "status": status,
+        "commit_cycle": getattr(job, "commit_cycle", None),
+        "output_cycle": getattr(job, "output_cycle", None),
+        "slot_free_cycle": slot_free_cycle,
         "event_cycle": cycle,
       },
     )
@@ -300,8 +349,11 @@ class BoaResultService:
         cycle,
         "fault",
         getattr(pending.job, "engine_id", None),
+        _job_lease_id(pending.job),
       )
     )
+    if len(self._records) > self._record_capacity:
+      del self._records[: len(self._records) - self._record_capacity]
 
   def reset(self, cycle: int = 0) -> None:
     for pending in tuple(self._pending):
@@ -312,7 +364,6 @@ class BoaResultService:
     self._pending.clear()
     self._failures.clear()
     self._credits = self.credit_capacity
-    self._reservations = 0
     self._reservations = 0
     self._output_in_use = 0
     self._output_blocked = False
@@ -355,6 +406,8 @@ class BoaResultService:
           "compute_done_cycle": record.compute_done_cycle,
           "commit_cycle": record.commit_cycle,
           "output_cycle": record.output_cycle,
+          "lease_id": record.lease_id,
+          "slot_free_cycle": record.slot_free_cycle,
           "event_cycle": record.event_cycle,
           "status": record.status,
         }

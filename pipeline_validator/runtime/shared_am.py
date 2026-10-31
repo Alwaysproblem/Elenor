@@ -95,6 +95,12 @@ class AmLease:
   last_seq: int = -1
   partial: bytes | None = None
   final_issued: bool = False
+  # Accepted engine steps whose AM read/commit/output drain has not retired.
+  # slot_free waits for zero: a faulted lease stays FAULT_QUIESCING until its
+  # last access drains, so no old response reaches a new generation.
+  accesses: int = 0
+  fault_reason: str = ""
+  free_cycle: int | None = None
 
 
 @dataclass(frozen=True)
@@ -104,7 +110,7 @@ class AmTerminalRecord:
   chain_id: int
   generation: int
   seq: int
-  kind: str  # "chain_done" | "fault"
+  kind: str  # "chain_done" | "fault"; published only after slot_free
   success: bool
   detail: str
   cycle: int
@@ -196,6 +202,7 @@ class SharedAmManager:
     self.final_count = 0
     self.fault_count = 0
     self.slot_free_count = 0
+    self.terminal_overflow_count = 0
     self._engine_handles: dict[int, int] = {}
 
   # -- introspection -------------------------------------------------
@@ -509,6 +516,10 @@ class SharedAmManager:
     # An accepted FINAL drains and frees the slot with no further UCE
     # instruction, so the owner may already wait on it for a new chain.
     lease.final_issued = final
+    # The accepted step is an in-flight AM access until its commit (non-FINAL)
+    # or its output drain + slot_free (FINAL), or until its owner retires it
+    # through ``abort_lease(..., retire_access=True)``.
+    lease.accesses += 1
     self._trace(
       cycle,
       "am_step",
@@ -544,11 +555,14 @@ class SharedAmManager:
     lease.next_seq = seq + 1
     self.commit_count += 1
     if final:
+      # step_committed only: the FINAL access stays open through the output
+      # write and drain; chain_done is published by release_final after
+      # slot_free, never here.
       lease.state = AmLeaseState.FINAL_READY
       self.final_count += 1
-      self._record_terminal(lease, seq, "chain_done", True, "", cycle)
     else:
       lease.state = AmLeaseState.RUNNING
+      self._retire_access(lease)
     self._trace(
       cycle,
       "am_commit",
@@ -565,21 +579,50 @@ class SharedAmManager:
     )
     return lease
 
+  @staticmethod
+  def _retire_access(lease: AmLease) -> None:
+    if lease.accesses < 1:
+      raise ValueError(f"AM lease {lease.lease_id} has no in-flight access to retire")
+    lease.accesses -= 1
+
   def release_final(self, lease_id: int, cycle: int) -> AmLease:
-    """Free the slot after the FINAL output is visible and quiescent."""
+    """slot_free after the FINAL output is visible and its drain ended.
+
+    The caller (the BOA result service) has already written and drained the
+    output.  The FINAL step is the only remaining access; no later step can
+    exist.  The success terminal is published inside the free linearization
+    point, after region/quota return and before parked requests are woken.
+    """
     lease = self.lease(lease_id)
     if lease.state is not AmLeaseState.FINAL_READY:
       raise ValueError(f"AM lease {lease_id} is not ready for final release")
+    if lease.accesses != 1 or lease.next_seq != lease.last_seq + 1:
+      raise ValueError(f"AM lease {lease_id} has pending steps or accesses at slot_free")
     lease.state = AmLeaseState.DRAINING
-    self._free_slot(lease, cycle, "chain_done")
+    self._retire_access(lease)
+    self._free_slot(lease, cycle, "chain_done", ("chain_done", True, ""))
     return lease
 
-  def abort_lease(self, lease_id: int, cycle: int, reason: str) -> AmLease:
+  def abort_lease(
+    self, lease_id: int, cycle: int, reason: str, *, retire_access: bool = False
+  ) -> AmLease:
+    """Fault one lease: quiesce in-flight accesses, then free, then publish.
+
+    ``retire_access`` is set by a caller that owned one of the in-flight
+    accesses (a dropped result or failed engine job).  While other accesses
+    remain the lease keeps its slot/quota in FAULT_QUIESCING; the failure
+    terminal is recorded only after the slot is actually reclaimed.
+    Repeated aborts keep the first reason and count one fault.
+    """
     lease = self.lease(lease_id)
-    lease.state = AmLeaseState.FAULT_QUIESCING
-    self._record_terminal(lease, lease.last_seq, "fault", False, reason, cycle)
-    self.fault_count += 1
-    self._free_slot(lease, cycle, "fault")
+    if lease.state is not AmLeaseState.FAULT_QUIESCING:
+      lease.state = AmLeaseState.FAULT_QUIESCING
+      lease.fault_reason = reason
+      self.fault_count += 1
+    if retire_access:
+      self._retire_access(lease)
+    if lease.accesses == 0:
+      self._free_slot(lease, cycle, "fault", ("fault", False, lease.fault_reason))
     return lease
 
   def abort_owner(self, owner: AmOwner, cycle: int, reason: str = "context abort") -> int:
@@ -591,40 +634,72 @@ class SharedAmManager:
     return count
 
   def reset(self, cycle: int = 0) -> None:
+    """Controlled domain reset: the reset itself quiesces every access.
+
+    Failure terminals are published like any fault; the bounded diagnostic
+    ring is not cleared, so reset never erases the only failure record.
+    """
     self._pending_requests.clear()
     for lease in tuple(self._leases.values()):
+      lease.accesses = 0
       self.abort_lease(lease.lease_id, cycle, "reset")
     self._bundles.clear()
-    self._terminals.clear()
     for slot in self._slots:
       slot.generation += 1
     self._engine_handles.clear()
 
   def _record_terminal(
-    self, lease: AmLease, seq: int, kind: str, success: bool, detail: str, cycle: int
+    self, lease: AmLease, kind: str, success: bool, detail: str, cycle: int
   ) -> None:
-    self._terminals.append(
-      AmTerminalRecord(
-        lease.lease_id,
-        lease.owner,
-        lease.chain_id,
-        lease.generation,
-        seq,
-        kind,
-        success,
-        detail,
-        cycle,
-      )
+    record = AmTerminalRecord(
+      lease.lease_id,
+      lease.owner,
+      lease.chain_id,
+      lease.generation,
+      lease.last_seq,
+      kind,
+      success,
+      detail,
+      cycle,
     )
+    self._terminals.append(record)
     if len(self._terminals) > self.terminal_capacity:
-      del self._terminals[: len(self._terminals) - self.terminal_capacity]
+      dropped = len(self._terminals) - self.terminal_capacity
+      del self._terminals[:dropped]
+      self.terminal_overflow_count += dropped
+    self._trace(
+      cycle,
+      "am_chain_terminal",
+      {
+        "lease_id": lease.lease_id,
+        "chain_id": lease.chain_id,
+        "owner": lease.owner.context_name,
+        "ctx_id": lease.owner.ctx_id,
+        "tile_id": lease.owner.tile_id,
+        "owner_epoch": lease.owner.epoch,
+        "slot": f"{lease.group}.{lease.slot}",
+        "generation": lease.generation,
+        "bound_engine": lease.bound_engine,
+        "seq": lease.last_seq,
+        "kind": kind,
+        "success": success,
+        "detail": detail,
+        "slot_free_cycle": lease.free_cycle,
+        "terminal_overflow_count": self.terminal_overflow_count,
+      },
+    )
 
-  def _free_slot(self, lease: AmLease, cycle: int, reason: str) -> None:
+  def _free_slot(
+    self, lease: AmLease, cycle: int, reason: str, terminal: tuple[str, bool, str]
+  ) -> None:
+    if lease.accesses:
+      raise ValueError(f"AM lease {lease.lease_id} freed with in-flight accesses")
     slot = self._slots[lease.group * self.slots_per_group + lease.slot]
     if slot.lease_id != lease.lease_id:
       raise ValueError("AM physical slot ownership mismatch")
     slot.lease_id = None
     lease.state = AmLeaseState.FREE
+    lease.free_cycle = cycle
     self._leases.pop(lease.lease_id, None)
     # The engine handle dies with the lease, exactly once, strictly before
     # any parked request is woken: the wake grant must weigh the freed
@@ -653,6 +728,9 @@ class SharedAmManager:
         "reason": reason,
       },
     )
+    # Terminal linearization: region and quota are already returned; the
+    # old chain's terminal is published before any parked owner is woken.
+    self._record_terminal(lease, *terminal, cycle)
     self._grant_pending(cycle)
 
   # -- snapshots -----------------------------------------------------
@@ -691,6 +769,8 @@ class SharedAmManager:
       "final_count": self.final_count,
       "fault_count": self.fault_count,
       "slot_free_count": self.slot_free_count,
+      "terminal_capacity": self.terminal_capacity,
+      "terminal_overflow_count": self.terminal_overflow_count,
       # Every engine id appears, zero counts included; the values always sum
       # to ``live_leases`` because each lease contributes exactly one handle
       # from grant until its single safe free.
@@ -733,6 +813,7 @@ class SharedAmManager:
           "state": lease.state.value,
           "next_seq": lease.next_seq,
           "last_seq": lease.last_seq,
+          "accesses": lease.accesses,
           "logical_slot": lease.logical_slot,
           "bytes": lease.byte_count,
           "output": lease.output_base,
