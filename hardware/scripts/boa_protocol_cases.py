@@ -959,7 +959,43 @@ def case_pc03_event_independence(ctx) -> bool:
     any("completion_token" in problem for problem in problems),
     f"lint must reject a non-reference completion_token role, got {problems}",
   )
-  _write_report(ctx, "pc03", {"event_ids": [3, 5, 6], "generations": generations})
+  # Round-5 negative: the presence rules must fire, not just pass.  Stripping
+  # one stage's presence marker must trip epilogue_presence_enable_bit, and
+  # dropping the implicit enables field must trip the implicit-field check;
+  # no_presence_by_emptiness is enforced by the same enable-bit audit (a rule
+  # that fires whenever an enable-bit stage exists without the presence
+  # declaration — i.e. presence would silently derive from the value).
+  negative_presence = copy.deepcopy(schema)
+  for field in negative_presence["structs"]["EpilogueConfig"]["fields"]:
+    if field["name"] == "bias":
+      del field["presence"]
+  problems = _generator_lint(ctx, negative_presence)
+  ok &= ctx.check(
+    "pc03-lint-rejects-missing-presence-marker",
+    any("epilogue presence" in problem and "bias" in problem for problem in problems),
+    f"lint must reject an enable-bit stage without presence=enable_bit, got {problems}",
+  )
+  negative_enables = copy.deepcopy(schema)
+  negative_enables["structs"]["EpilogueConfig"].pop("implicit_fields")
+  problems = _generator_lint(ctx, negative_enables)
+  ok &= ctx.check(
+    "pc03-lint-rejects-missing-implicit-enables",
+    any("epilogue presence" in problem and "enables" in problem for problem in problems),
+    f"lint must reject a missing implicit enables field, got {problems}",
+  )
+  negative_all_presence = copy.deepcopy(schema)
+  for field in negative_all_presence["structs"]["EpilogueConfig"]["fields"]:
+    field.pop("presence", None)
+  negative_all_presence["structs"]["EpilogueConfig"].pop("implicit_fields")
+  problems = _generator_lint(ctx, negative_all_presence)
+  ok &= ctx.check(
+    "pc03-lint-rejects-presence-by-emptiness-shape",
+    sum(1 for problem in problems if "epilogue presence" in problem) == 5,
+    f"removing every presence declaration must fall back to presence-by-"
+    f"emptiness and yield exactly 5 epilogue-presence problems (4 stages +"
+    f" implicit enables), got {problems}",
+  )
+  _write_report(ctx, "pc03", {"event_ids": [3, 5, 6], "generations": generations, "lint_negatives": 6})
   return bool(ok)
 
 
