@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 800" width="960" height="800" style="font-family:'Noto Sans CJK SC','PingFang SC','Microsoft YaHei','Source Han Sans SC',sans-serif;font-size:15px" role="img" aria-labelledby="title desc">
+<title id="title">共享 AM 顶层结构</title>
+<desc id="desc">从 UCE / Context Scheduler 到共享 AM 表与设备 Ready 仲裁，再分发到 Engine 0 至 3；各 Engine 结果经结果路由与仲裁写入 AM group 0 至 3，再汇入输出 drain 写到已准入的 L1 输出区域；输出 drain 以虚线通知共享 AM 表。</desc>
+<defs><marker id="m-e" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#374151"/></marker><marker id="m-s" viewBox="0 0 10 10" refX="0" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M10 0 L0 5 L10 10 Z" fill="#374151"/></marker></defs>
+<rect x="0" y="0" width="960" height="800" fill="#ffffff"/>
+<text x="20" y="30" font-size="20" font-weight="bold" fill="#111827">共享 AM 顶层结构</text>
+<path d="M470 114 L470 160" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M139 204 L139 270" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M139 314 L139 380" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M139 424 L139 490" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M139 534 L139 600" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M353 204 L353 270" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M353 314 L353 380" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M353 424 L353 490" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M353 534 L353 600" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M567 204 L567 270" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M567 314 L567 380" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M567 424 L567 490" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M567 534 L567 600" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M781 204 L781 270" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M781 314 L781 380" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M781 424 L781 490" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M781 534 L781 600" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M470 644 L470 710" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M876 622 L918 622 L918 182 L876 182" fill="none" stroke="#374151" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#m-e)"/>
+<rect x="370" y="70" width="200" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="470" y="97" font-size="15" text-anchor="middle" fill="#111827">UCE / Context Scheduler</text>
+<rect x="44" y="160" width="832" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="460" y="187" font-size="15" text-anchor="middle" fill="#111827">共享 AM 表与设备 Ready 仲裁</text>
+<rect x="44" y="270" width="190" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="139" y="297" font-size="15" text-anchor="middle" fill="#111827">Engine 0 + 结果接收</text>
+<rect x="258" y="270" width="190" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="353" y="297" font-size="15" text-anchor="middle" fill="#111827">Engine 1 + 结果接收</text>
+<rect x="472" y="270" width="190" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="567" y="297" font-size="15" text-anchor="middle" fill="#111827">Engine 2 + 结果接收</text>
+<rect x="686" y="270" width="190" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="781" y="297" font-size="15" text-anchor="middle" fill="#111827">Engine 3 + 结果接收</text>
+<rect x="44" y="380" width="832" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="460" y="407" font-size="15" text-anchor="middle" fill="#111827">结果路由与仲裁</text>
+<rect x="44" y="490" width="190" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="139" y="517" font-size="15" text-anchor="middle" fill="#111827">AM group 0：2 slots</text>
+<rect x="258" y="490" width="190" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="353" y="517" font-size="15" text-anchor="middle" fill="#111827">AM group 1：2 slots</text>
+<rect x="472" y="490" width="190" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="567" y="517" font-size="15" text-anchor="middle" fill="#111827">AM group 2：2 slots</text>
+<rect x="686" y="490" width="190" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="781" y="517" font-size="15" text-anchor="middle" fill="#111827">AM group 3：2 slots</text>
+<rect x="44" y="600" width="832" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="460" y="627" font-size="15" text-anchor="middle" fill="#111827">输出 drain</text>
+<rect x="370" y="710" width="200" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="470" y="737" font-size="15" text-anchor="middle" fill="#111827">已准入的 L1 输出区域</text>
+</svg>

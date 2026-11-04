@@ -211,28 +211,7 @@ FINAL_READY/DRAINING 仍计配额，因此两个槽都被占用时，实际正�
 
 ### 5.1 顶层结构
 
-~~~mermaid
-flowchart TB
-    U["UCE / Context Scheduler"] --> T["共享 AM 表与设备 Ready 仲裁"]
-    T --> E0["Engine 0 + 结果接收"]
-    T --> E1["Engine 1 + 结果接收"]
-    T --> E2["Engine 2 + 结果接收"]
-    T --> E3["Engine 3 + 结果接收"]
-    E0 --> X["结果路由与仲裁"]
-    E1 --> X
-    E2 --> X
-    E3 --> X
-    X --> A0["AM group 0：2 slots"]
-    X --> A1["AM group 1：2 slots"]
-    X --> A2["AM group 2：2 slots"]
-    X --> A3["AM group 3：2 slots"]
-    A0 --> D["输出 drain"]
-    A1 --> D
-    A2 --> D
-    A3 --> D
-    D --> L["已准入的 L1 输出区域"]
-    D -.-> T
-~~~
+![共享 AM 顶层结构：UCE 经共享 AM 表分发到 Engine 0-3，结果经路由仲裁写入 AM group 0-3，再由输出 drain 写回 L1](./design/image/nexus_shared_am_top_structure.svg)
 
 每个 AM group 包含 SRAM、局部 RMW 累加通路、请求控制和写回状态。group 可以内部拆分多个物理 SRAM bank，逻辑 slot 不必对应一块宏。
 
@@ -401,19 +380,7 @@ FINISHING 的硬件收尾不得依赖已经返回的原 context 再运行并亲�
 
 ### 7.1 每条链的状态
 
-~~~mermaid
-stateDiagram-v2
-    [*] --> FREE
-    FREE --> RESERVED: TRY_OPEN granted
-    RESERVED --> WAIT_STEP: 等待首步
-    WAIT_STEP --> WAIT_READY: STEP accepted
-    WAIT_READY --> RUNNING: 输入与资源满足
-    RUNNING --> COMMITTING: 结果产出结束
-    COMMITTING --> WAIT_STEP: 非 FINAL 且全部写入提交
-    COMMITTING --> FINAL_READY: FINAL 且全部写入提交
-    FINAL_READY --> DRAINING: 输出服务可用
-    DRAINING --> FREE: 输出可见且旧访问结束
-~~~
+![AM slot 每条链的状态机：FREE、RESERVED、WAIT_STEP、WAIT_READY、RUNNING、COMMITTING、FINAL_READY、DRAINING](./design/image/nexus_shared_am_slot_state_machine.svg)
 
 next-step mailbox 可以在 RUNNING/COMMITTING 时预先收到下一步。状态机里的 WAIT_STEP 表示当前链没有可发射步骤；若已有 mailbox，前步提交后可直接转 WAIT_READY。
 

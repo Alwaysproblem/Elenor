@@ -27,21 +27,7 @@ Alwaysproblem/Elenor 当前更像一套**系统级架构评审文档集合**，�
 
 Elenor 的核心架构原则是把 **Compute、Control、Data Movement** 三件事强制拆开；芯片把高层 graph 降为 graph schedule、Region Program、Tile Program、descriptor table 和 command sequence 后执行，而不让硬件直接解释高层 IR。这种“执行对象前移到 descriptor/program，硬件不直接看 graph”的做法，本质上是在把复杂性前置给 compiler/runtime，以换取硬件 deterministic 和可验证性。这个原则本身是成立的，而且与现代 serving 系统把静态 plan、runtime metadata 和低层 kernel artifact 分离的做法一致。citeturn3view0turn5view6turn14view5
 
-```mermaid
-flowchart LR
-    A[High-level Graph] --> B[StableHLO / Torch-MLIR]
-    B --> C[Shape Specialization]
-    C --> D[Engine Partition]
-    D --> E[Descriptor Templates]
-    E --> F[Command Buffer]
-    F --> G[Global Scheduler]
-    G --> H[Tile Group Region Sequencer]
-    H --> I[Tile Program]
-    I --> J[BOA Dense Compute]
-    I --> K[EVU Irregular Compute]
-    I --> L[MFE Page/Segment Stream]
-    I --> M[USE State/Recurrence]
-```
+![高层 Graph 到 Tile Program 的编译与调度流程，再分发到 BOA、EVU、MFE、USE](../design/image/elenor_compile_to_tile_program_flow.svg)
 
 从微架构上看，Elenor 的分层相当清晰：chip 级有 host interface、runtime processor、global scheduler、global DMA、memory controller、collective、NoC；tile-group 级负责 region sequencing、stream queue、barrier/event、group DMA、collective、shared SRAM/L2；tile 级则承载 Tile UCE、USE、MFE、BOA、EVU、L1 SRAM 和 tile DMA。对于一个目标是长期服务 LLM inference 的架构来说，这种“以 tile group 作为局部数据复用和局部同步域”的方案，比纯 flat-manycore 更合理，因为它天然把 group 内广播、局部 reduce、pipeline producer-consumer 和 L2 复用放在一个近距离域里，有助于降低全局 NoC 压力。citeturn4view3turn4view4turn6view5
 
@@ -127,19 +113,7 @@ NoC 上，Elenor 的架构思路是对的：它把命令/事件、DMA read respo
 
 编程模型上，Elenor 采用的是一种**受控的、多层 program model**：Graph Schedule 负责 region 依赖，Region Program 推进 device pipeline，Tile Program 负责 tile-local kernel pipeline，descriptor 则承载各引擎的形参。这个模型的优点是 deterministic、好做 PMU 归因，也有利于多模型并发和故障隔离；缺点是对于新算子、新 epilogue、新数据布局的适配成本很可能高于 GPU kernel model，因为你不是只写一个 kernel，而是在同时维护 package、descriptor、command、region、tile program 五层契约。citeturn3view0turn5view6turn11view2turn15view3
 
-```mermaid
-flowchart TD
-    A[PyTorch / JAX / ONNX] --> B[StableHLO / Torch-MLIR]
-    B --> C[Tensor / Linalg]
-    C --> D[Shape Class Specialization]
-    D --> E[Engine Partition]
-    E --> F[BOA / EVU / MFE / USE Dialects]
-    F --> G[Descriptor Templates]
-    G --> H[Command Templates]
-    H --> I[Executable Package]
-    I --> J[Runtime Load/Patch/Submit]
-    J --> K[Scheduler + Region + Tile Programs]
-```
+![从前端框架到 Executable Package 与运行时的编译流水线](../design/image/elenor_frontend_to_runtime_flow.svg)
 
 从社区生态看，Elenor 目前最大的利好，是它显式拥抱了 MLIR/LLVM、StableHLO、Torch-MLIR、FileCheck/lit、Verilator/Yosys/OpenSTA/OpenROAD 这些“现实中有人用、有人维护、有人愿意贡献”的基础设施，而不是另起炉灶做闭门 IR 和私有工具链。StableHLO 的官方定位就是跨框架与 ML 编译器的可移植层；MLIR 天生支持 dialect conversion、bufferization、diagnostic 和 testing；Torch-MLIR 则在 PyTorch 到 MLIR 之间提供桥梁，虽然它仍处于 LLVM incubator 阶段，意味着稳定性和官方背书还不等价于主线 LLVM 组件。Elenor 如果走对这条路，生态成本会远低于重新发明一套前端体系。citeturn26view3turn26view4turn26view5
 
@@ -214,13 +188,7 @@ NoC/floorplan 上，我赞成仓库提出的 VC 划分和层级 floorplan 原则
 | 单巨芯片/超大片上存储 | Cerebras WSE-3                      | 超大片上存储与极高片上带宽，系统简化强       | Elenor 更现实、可做普通芯片或 chiplet                       | 无法靠普通片上 SRAM 复制 wafer-scale 优势 citeturn26view0turn26view9          |
 | 开放软件栈 + manycore | Tenstorrent                         | 开源软件栈、现货硬件、mesh 扩展、RISC-V 友好 | Elenor 若尽快放出 simulator/runtime/ABI，可在开放社区上追赶 | 目前只有文档，没有可玩硬件或工具链 citeturn26view1turn26view2turn27view1     |
 
-```mermaid
-flowchart LR
-    A[现在<br/>文档驱动架构阶段] --> B[短期<br/>冻结 V1 cutline / ABI / SRAM profile]
-    B --> C[中期<br/>打通 GEMM + softmax + paged attention canonical path]
-    C --> D[中长期<br/>MoE / 多模型并发 / 多芯片扩展]
-    D --> E[远期<br/>更强 collective / HBM cache / chiplet / 轻训练]
-```
+![Elenor 演进路线：现在、短期、中期、中长期、远期](../design/image/elenor_roadmap.svg)
 
 从未来发展上，我建议分三层看：
 

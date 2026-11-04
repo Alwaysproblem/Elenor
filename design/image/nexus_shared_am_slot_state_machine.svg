@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 740 940" width="740" height="940" style="font-family:'Noto Sans CJK SC','PingFang SC','Microsoft YaHei','Source Han Sans SC',sans-serif;font-size:15px" role="img" aria-labelledby="title desc">
+<title id="title">AM slot 每条链的状态机</title>
+<desc id="desc">AM slot 状态：FREE、RESERVED、WAIT_STEP、WAIT_READY、RUNNING、COMMITTING、FINAL_READY、DRAINING。TRY_OPEN 获批后 FREE→RESERVED→WAIT_STEP；STEP 接收后 WAIT_READY，输入与资源满足后 RUNNING，结果产出结束后 COMMITTING。非 FINAL 且全部写入提交则回 WAIT_STEP，FINAL 则 FINAL_READY→DRAINING，输出可见且旧访问结束后回到 FREE。</desc>
+<defs><marker id="m-e" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#374151"/></marker><marker id="m-s" viewBox="0 0 10 10" refX="0" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M10 0 L0 5 L10 10 Z" fill="#374151"/></marker></defs>
+<rect x="0" y="0" width="740" height="940" fill="#ffffff"/>
+<text x="20" y="30" font-size="20" font-weight="bold" fill="#111827">AM slot 每条链的状态机</text>
+<path d="M330 85 L330 120" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M330 164 L330 220" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M330 264 L330 320" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M330 364 L330 420" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M330 464 L330 520" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M330 564 L330 620" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M330 664 L330 720" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M330 764 L330 820" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M420 642 L510 642 L510 342 L420 342" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M240 842 L60 842 L60 142 L240 142" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<circle cx="330" cy="78" r="7" fill="#374151"/>
+<rect x="240" y="120" width="180" height="44" rx="18" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="330" y="147" font-size="15" text-anchor="middle" fill="#111827">FREE</text>
+<rect x="240" y="220" width="180" height="44" rx="18" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="330" y="247" font-size="15" text-anchor="middle" fill="#111827">RESERVED</text>
+<rect x="240" y="320" width="180" height="44" rx="18" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="330" y="347" font-size="15" text-anchor="middle" fill="#111827">WAIT_STEP</text>
+<rect x="240" y="420" width="180" height="44" rx="18" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="330" y="447" font-size="15" text-anchor="middle" fill="#111827">WAIT_READY</text>
+<rect x="240" y="520" width="180" height="44" rx="18" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="330" y="547" font-size="15" text-anchor="middle" fill="#111827">RUNNING</text>
+<rect x="240" y="620" width="180" height="44" rx="18" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="330" y="647" font-size="15" text-anchor="middle" fill="#111827">COMMITTING</text>
+<rect x="240" y="720" width="180" height="44" rx="18" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="330" y="747" font-size="15" text-anchor="middle" fill="#111827">FINAL_READY</text>
+<rect x="240" y="820" width="180" height="44" rx="18" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="330" y="847" font-size="15" text-anchor="middle" fill="#111827">DRAINING</text>
+<text x="338" y="197" font-size="13" text-anchor="start" fill="#374151">TRY_OPEN granted</text>
+<text x="338" y="297" font-size="13" text-anchor="start" fill="#374151">等待首步</text>
+<text x="338" y="397" font-size="13" text-anchor="start" fill="#374151">STEP accepted</text>
+<text x="338" y="497" font-size="13" text-anchor="start" fill="#374151">输入与资源满足</text>
+<text x="338" y="597" font-size="13" text-anchor="start" fill="#374151">结果产出结束</text>
+<text x="338" y="697" font-size="13" text-anchor="start" fill="#374151">FINAL 且全部写入提交</text>
+<text x="338" y="797" font-size="13" text-anchor="start" fill="#374151">输出服务可用</text>
+<text x="518" y="497" font-size="13" text-anchor="start" fill="#374151">非 FINAL 且全部写入提交</text>
+<text x="68" y="500" font-size="13" text-anchor="start" fill="#374151">输出可见且旧访问结束</text>
+</svg>

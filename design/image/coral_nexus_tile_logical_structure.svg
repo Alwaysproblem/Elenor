@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 800" width="760" height="800" style="font-family:'Noto Sans CJK SC','PingFang SC','Microsoft YaHei','Source Han Sans SC',sans-serif;font-size:15px" role="img" aria-labelledby="title desc">
+<title id="title">Nexus Tile 逻辑结构（Coral 派生）</title>
+<desc id="desc">Group 准入到 Tile 任务接收、Context 状态表与 UCE；程序驻留与独立装载服务经本地指令存储进入 UCE；UCE 调度 Scalar、RVV、LSU/MFE，RVV 驱动 VME；LSU/MFE 与 Tile 本地存储、Group L2 互连往返；各执行单元汇聚到完成与事件，再回到 Context 状态表和 Tile 任务接收，并向 Group 上报。逻辑职责图，非物理布局。</desc>
+<defs><marker id="tile-arr" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#374151"/></marker><marker id="tile-arr-s" viewBox="0 0 10 10" refX="0" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M10 0 L0 5 L10 10 Z" fill="#374151"/></marker></defs>
+<rect x="0" y="0" width="760" height="800" fill="#ffffff"/>
+<text x="20" y="30" font-size="20" fill="#111827" font-weight="bold">Nexus Tile 逻辑结构（Coral 派生）</text>
+<text x="20" y="54" font-size="13" fill="#4b5563">逻辑职责图，不要求物理独立；程序装载路径与数据路径分离，见 RES-17／RES-18。</text>
+<path d="M180 120 L180 160" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)"/>
+<path d="M240 160 L240 120" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)"/>
+<path d="M360 120 L360 160" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)"/>
+<path d="M90 200 L90 240" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)"/>
+<path d="M430 200 L430 240" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)"/>
+<path d="M160 280 L160 320" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)"/>
+<path d="M420 280 L420 320" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)"/>
+<path d="M130 360 L130 400" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)"/>
+<path d="M340 360 L340 400" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)"/>
+<path d="M460 340 L580 340 L580 400" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)"/>
+<path d="M420 420 L480 420" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)"/>
+<path d="M300 440 L300 480" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)"/>
+<path d="M620 440 L620 480" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)" marker-start="url(#tile-arr-s)"/>
+<path d="M680 420 L725 420 L725 580 L700 580" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)" marker-start="url(#tile-arr-s)"/>
+<path d="M100 440 L100 640" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)"/>
+<path d="M405 440 L405 640" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)"/>
+<path d="M315 520 L315 640" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)"/>
+<path d="M500 440 L500 640" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)"/>
+<path d="M50 660 L22 660 L22 180 L50 180" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)"/>
+<path d="M22 260 L50 260" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#tile-arr)"/>
+<circle cx="22" cy="260" r="3" fill="#374151"/>
+<rect x="140" y="80" width="250" height="40" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="265" y="105" text-anchor="middle" fill="#111827">Group ready-action 与准入</text>
+<rect x="50" y="160" width="230" height="40" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="165" y="185" text-anchor="middle" fill="#111827">Tile 任务接收与生命周期</text>
+<rect x="330" y="160" width="220" height="40" rx="6" fill="#ffffff" stroke="#d97706" stroke-width="2"/>
+<text x="440" y="185" text-anchor="middle" fill="#111827">程序驻留与独立装载服务</text>
+<rect x="50" y="240" width="150" height="40" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="125" y="265" text-anchor="middle" fill="#111827">Context 状态表</text>
+<rect x="350" y="240" width="150" height="40" rx="6" fill="#ffffff" stroke="#d97706" stroke-width="2"/>
+<text x="425" y="265" text-anchor="middle" fill="#111827">本地指令存储</text>
+<rect x="120" y="320" width="340" height="40" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="290" y="345" text-anchor="middle" fill="#111827">UCE 调度与 scalar 前端</text>
+<rect x="50" y="400" width="170" height="40" rx="6" fill="#ffffff" stroke="#16a34a" stroke-width="2"/>
+<text x="135" y="425" text-anchor="middle" fill="#111827">Scalar 执行与退休</text>
+<rect x="260" y="400" width="160" height="40" rx="6" fill="#ffffff" stroke="#16a34a" stroke-width="2"/>
+<text x="340" y="425" text-anchor="middle" fill="#111827">RVV 前端与后端</text>
+<rect x="480" y="400" width="200" height="40" rx="6" fill="#ffffff" stroke="#0891b2" stroke-width="2"/>
+<text x="580" y="425" text-anchor="middle" fill="#111827">LSU 与 MFE 请求管理</text>
+<rect x="240" y="480" width="150" height="40" rx="6" fill="#ffffff" stroke="#16a34a" stroke-width="2"/>
+<text x="315" y="505" text-anchor="middle" fill="#111827">VME 矩阵执行</text>
+<rect x="540" y="480" width="160" height="40" rx="6" fill="#ffffff" stroke="#0891b2" stroke-width="2"/>
+<text x="620" y="505" text-anchor="middle" fill="#111827">Tile 本地存储</text>
+<rect x="540" y="560" width="160" height="40" rx="6" fill="#ffffff" stroke="#0891b2" stroke-width="2"/>
+<text x="620" y="585" text-anchor="middle" fill="#111827">Group L2 与互连</text>
+<rect x="50" y="640" width="650" height="40" rx="6" fill="#ffffff" stroke="#dc2626" stroke-width="2"/>
+<text x="375" y="665" text-anchor="middle" fill="#111827">完成与事件汇聚</text>
+<rect x="50" y="714" width="16" height="16" rx="3" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="74" y="727" font-size="13" fill="#111827">控制与准入</text>
+<rect x="185" y="714" width="16" height="16" rx="3" fill="#ffffff" stroke="#d97706" stroke-width="2"/>
+<text x="209" y="727" font-size="13" fill="#111827">程序装载路径</text>
+<rect x="320" y="714" width="16" height="16" rx="3" fill="#ffffff" stroke="#16a34a" stroke-width="2"/>
+<text x="344" y="727" font-size="13" fill="#111827">执行引擎</text>
+<rect x="455" y="714" width="16" height="16" rx="3" fill="#ffffff" stroke="#0891b2" stroke-width="2"/>
+<text x="479" y="727" font-size="13" fill="#111827">访存与存储</text>
+<rect x="590" y="714" width="16" height="16" rx="3" fill="#ffffff" stroke="#dc2626" stroke-width="2"/>
+<text x="614" y="727" font-size="13" fill="#111827">完成与事件</text>
+<text x="50" y="762" font-size="13" fill="#4b5563">箭头：主要请求／数据／完成方向；双头箭头：往返访问；左侧通道：完成汇聚回到 Context 状态表与 Tile 任务接收。</text>
+<text x="50" y="782" font-size="13" fill="#4b5563">Tile 任务接收 → Group 的上行箭头：完成／阶段信号上报。</text>
+</svg>

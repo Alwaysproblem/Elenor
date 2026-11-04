@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 440 800" width="440" height="800" style="font-family:'Noto Sans CJK SC','PingFang SC','Microsoft YaHei','Source Han Sans SC',sans-serif;font-size:15px" role="img" aria-labelledby="title desc">
+<title id="title">从前端框架到 Executable Package 与运行时</title>
+<desc id="desc">自上而下：PyTorch / JAX / ONNX、StableHLO / Torch-MLIR、Tensor / Linalg、Shape Class Specialization、Engine Partition、BOA / EVU / MFE / USE Dialects、Descriptor Templates、Command Templates、Executable Package、Runtime Load/Patch/Submit、Scheduler + Region + Tile Programs。</desc>
+<defs><marker id="m-e" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#374151"/></marker><marker id="m-s" viewBox="0 0 10 10" refX="0" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M10 0 L0 5 L10 10 Z" fill="#374151"/></marker></defs>
+<rect x="0" y="0" width="440" height="800" fill="#ffffff"/>
+<text x="20" y="30" font-size="20" font-weight="bold" fill="#111827">从前端框架到 Executable Package 与运行时</text>
+<path d="M220 100 L220 126" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M220 166 L220 192" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M220 232 L220 258" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M220 298 L220 324" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M220 364 L220 390" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M220 430 L220 456" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M220 496 L220 522" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M220 562 L220 588" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M220 628 L220 654" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M220 694 L220 720" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<rect x="60" y="60" width="320" height="40" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="220" y="85" font-size="15" text-anchor="middle" fill="#111827">PyTorch / JAX / ONNX</text>
+<rect x="60" y="126" width="320" height="40" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="220" y="151" font-size="15" text-anchor="middle" fill="#111827">StableHLO / Torch-MLIR</text>
+<rect x="60" y="192" width="320" height="40" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="220" y="217" font-size="15" text-anchor="middle" fill="#111827">Tensor / Linalg</text>
+<rect x="60" y="258" width="320" height="40" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="220" y="283" font-size="15" text-anchor="middle" fill="#111827">Shape Class Specialization</text>
+<rect x="60" y="324" width="320" height="40" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="220" y="349" font-size="15" text-anchor="middle" fill="#111827">Engine Partition</text>
+<rect x="60" y="390" width="320" height="40" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="220" y="415" font-size="15" text-anchor="middle" fill="#111827">BOA / EVU / MFE / USE Dialects</text>
+<rect x="60" y="456" width="320" height="40" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="220" y="481" font-size="15" text-anchor="middle" fill="#111827">Descriptor Templates</text>
+<rect x="60" y="522" width="320" height="40" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="220" y="547" font-size="15" text-anchor="middle" fill="#111827">Command Templates</text>
+<rect x="60" y="588" width="320" height="40" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="220" y="613" font-size="15" text-anchor="middle" fill="#111827">Executable Package</text>
+<rect x="60" y="654" width="320" height="40" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="220" y="679" font-size="15" text-anchor="middle" fill="#111827">Runtime Load/Patch/Submit</text>
+<rect x="60" y="720" width="320" height="40" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="220" y="745" font-size="15" text-anchor="middle" fill="#111827">Scheduler + Region + Tile Programs</text>
+</svg>

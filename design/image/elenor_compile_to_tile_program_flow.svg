@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 560" width="960" height="560" style="font-family:'Noto Sans CJK SC','PingFang SC','Microsoft YaHei','Source Han Sans SC',sans-serif;font-size:15px" role="img" aria-labelledby="title desc">
+<title id="title">高层 Graph 到 Tile Program 的编译与调度流</title>
+<desc id="desc">高层 Graph 经 StableHLO / Torch-MLIR、Shape Specialization、Engine Partition、Descriptor Templates、Command Buffer、Global Scheduler、Tile Group Region Sequencer 到 Tile Program，再分发到 BOA、EVU、MFE、USE 四类引擎。</desc>
+<defs><marker id="m-e" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10 Z" fill="#374151"/></marker><marker id="m-s" viewBox="0 0 10 10" refX="0" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M10 0 L0 5 L10 10 Z" fill="#374151"/></marker></defs>
+<rect x="0" y="0" width="960" height="560" fill="#ffffff"/>
+<text x="20" y="30" font-size="20" font-weight="bold" fill="#111827">高层 Graph 到 Tile Program 的编译与调度流</text>
+<path d="M210 102 L250 102" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M460 102 L500 102" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M690 102 L730 102" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M230 242 L270 242" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M420 242 L460 242" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M620 242 L660 242" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M815 124 L815 172 L140 172 L140 220" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M780 264 L780 340" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M780 384 L780 427 L135 427 L135 470" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M780 384 L780 427 L350 427 L350 470" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M780 384 L780 427 L590 427 L590 470" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<path d="M780 384 L780 427 L825 427 L825 470" fill="none" stroke="#374151" stroke-width="1.5" marker-end="url(#m-e)"/>
+<rect x="50" y="80" width="160" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="130" y="107" font-size="15" text-anchor="middle" fill="#111827">High-level Graph</text>
+<rect x="250" y="80" width="210" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="355" y="107" font-size="15" text-anchor="middle" fill="#111827">StableHLO / Torch-MLIR</text>
+<rect x="500" y="80" width="190" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="595" y="107" font-size="15" text-anchor="middle" fill="#111827">Shape Specialization</text>
+<rect x="730" y="80" width="170" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="815" y="107" font-size="15" text-anchor="middle" fill="#111827">Engine Partition</text>
+<rect x="50" y="220" width="180" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="140" y="247" font-size="15" text-anchor="middle" fill="#111827">Descriptor Templates</text>
+<rect x="270" y="220" width="150" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="345" y="247" font-size="15" text-anchor="middle" fill="#111827">Command Buffer</text>
+<rect x="460" y="220" width="160" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="540" y="247" font-size="15" text-anchor="middle" fill="#111827">Global Scheduler</text>
+<rect x="660" y="220" width="240" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="780" y="247" font-size="15" text-anchor="middle" fill="#111827">Tile Group Region Sequencer</text>
+<rect x="695" y="340" width="170" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="780" y="367" font-size="15" text-anchor="middle" fill="#111827">Tile Program</text>
+<rect x="50" y="470" width="170" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="135" y="497" font-size="15" text-anchor="middle" fill="#111827">BOA Dense Compute</text>
+<rect x="250" y="470" width="200" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="350" y="497" font-size="15" text-anchor="middle" fill="#111827">EVU Irregular Compute</text>
+<rect x="480" y="470" width="220" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="590" y="497" font-size="15" text-anchor="middle" fill="#111827">MFE Page/Segment Stream</text>
+<rect x="730" y="470" width="190" height="44" rx="6" fill="#ffffff" stroke="#2563eb" stroke-width="2"/>
+<text x="825" y="497" font-size="15" text-anchor="middle" fill="#111827">USE State/Recurrence</text>
+</svg>
