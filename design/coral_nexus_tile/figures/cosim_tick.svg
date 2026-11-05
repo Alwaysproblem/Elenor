@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 370" width="960" height="370" role="img" aria-labelledby="title desc">
+<title id="title">一个 co-sim tick 的采样与提交</title>
+<desc id="desc">P0驱动已到期输入，P1唯一沿前采样握手，P2单一上升沿，P3只提交P1接受集，P4推进外部服务并排队下一周期输入；P2后新输出只能下一周期被接受。</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/></marker></defs>
+<style>text{font-family:"Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:currentColor;font-size:15px}.title{font-size:23px;font-weight:700}.heading{font-size:18px;font-weight:600}.note{font-size:13px;fill:var(--muted,currentColor)}rect{fill:none;stroke:var(--border,currentColor);stroke-width:1.5}path.edge{fill:none;stroke:currentColor;stroke-width:1.5;marker-end:url(#arrow)}</style>
+<text x="480" y="35" text-anchor="middle" class="title">一个 co-sim tick 的采样与提交</text>
+<rect id="p0" x="15" y="100" width="170" height="112" rx="8"/>
+<text x="100.0" y="149.0" text-anchor="middle" data-box="p0">P0 · DRIVE</text>
+<text x="100.0" y="173.0" text-anchor="middle" data-box="p0">驱动到期消息</text>
+<rect id="p1" x="205" y="100" width="170" height="112" rx="8"/>
+<text x="290.0" y="137.0" text-anchor="middle" data-box="p1">P1 · SAMPLE</text>
+<text x="290.0" y="161.0" text-anchor="middle" data-box="p1">沿前 valid &amp; ready</text>
+<text x="290.0" y="185.0" text-anchor="middle" data-box="p1">保存 payload 快照</text>
+<path class="edge" data-source="p0" data-target="p1" d="M 185 156 L 205 156"/>
+<rect id="p2" x="395" y="100" width="170" height="112" rx="8"/>
+<text x="480.0" y="149.0" text-anchor="middle" data-box="p2">P2 · EDGE</text>
+<text x="480.0" y="173.0" text-anchor="middle" data-box="p2">恰好一个上升沿</text>
+<path class="edge" data-source="p1" data-target="p2" d="M 375 156 L 395 156"/>
+<rect id="p3" x="585" y="100" width="170" height="112" rx="8"/>
+<text x="670.0" y="149.0" text-anchor="middle" data-box="p3">P3 · COMMIT</text>
+<text x="670.0" y="173.0" text-anchor="middle" data-box="p3">只提交 P1 接受集</text>
+<path class="edge" data-source="p2" data-target="p3" d="M 565 156 L 585 156"/>
+<rect id="p4" x="775" y="100" width="170" height="112" rx="8"/>
+<text x="860.0" y="137.0" text-anchor="middle" data-box="p4">P4 · EXTERNAL</text>
+<text x="860.0" y="161.0" text-anchor="middle" data-box="p4">外部服务推进一次</text>
+<text x="860.0" y="185.0" text-anchor="middle" data-box="p4">生成下一 tick 输入</text>
+<path class="edge" data-source="p3" data-target="p4" d="M 755 156 L 775 156"/>
+<path class="edge" data-source="p4" data-target="p0" d="M 860 212 L 860 267 L 100 267 L 100 212" stroke-dasharray="5 4"/>
+<text x="480" y="253" text-anchor="middle" class="note">最早 tick c+1 接受新请求的响应</text>
+<text x="480" y="310" text-anchor="middle" class="heading">禁止：沿前 payload + 沿后 ready；未握手输出；同 tick 递归响应；重复推进 Tile。</text>
+<text x="480" y="344" text-anchor="middle" class="note">图中相位是拟议 adapter 合同，不是现有 validator 或 Coral RTL 的实测波形。</text>
+</svg>

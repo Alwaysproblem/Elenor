@@ -1636,6 +1636,7 @@ hardware YAML schema 2、Registry/hash、硬件 command/event ABI v0
 的 Task 总数。Grid done 表示所有 Task 安全退役；`input_released`
 只说明相关输入读取结束，`output_ready` 只说明相关 L1→L2 输出完成，
 都不是 HBM 持久化或 Arena 退休。当前仅 `#nest.aggregate<all_tasks>`。
+输入消费通知、L2 pin 解除与物理空间归还的区别见 §16.3.1；输入早释放不必等 Task 计算结束。
 
 ### 15.3 隐式 Program Residency
 
@@ -1762,10 +1763,23 @@ admission 是不同仲裁层，不推出全局无饥饿保证。
 
 ### 16.3 生命周期与 Stream Queue 边界
 
-Task 完成后等待在途 transfer/view 关闭、L1 Arena 退休、L2 pin 释放、
-Frame 释放及 R lease 归还；Grid 全部所选 Task 退休才 done；root
-等待其动作/事件与 L2 Arena/backing claim 安全收敛才完成。
-`input_released` / `output_ready` 为方向性 signal，并非全 Task done。
+Task 正常结束时等待在途 transfer/view 关闭、L1 Arena 退休、**剩余 L2 pin** 释放、Frame 释放及 R lease 归还；已沿输入早释放路径解除的 pin 不重复释放。Grid 全部所选 Task 退休才 done；root 在其 Route、Task、租约与 outstanding 关闭、自己的 L2 view 全 release、Arena 预留与 slack 退休后才完成。仍被其他 root 的共享 claim 持有的 backing 可继续存活，不阻止 producer root 完成。
+
+#### 16.3.1 输入消费通知与 L2 提前回收
+
+Tile 通知的是“本消费者不再读取输入”，不是直接命令 L2 释放地址。Group 的阶段聚合器与 L2 资源管理器分别负责关闭访问引用和归还物理空间；在 Coral CS1 联仿中二者仍由 Python 执行，Tile 经可靠 EVENT 通道发送 `PHASE_SIGNAL`，不由 testbench 猜测读完成。
+
+1. **发信号条件**：编译器在该 Task 全部 L2 load 的完成事件均已按 SSA 身份 `await`、且后续不再有 L2 load 的位置生成 `tile.signal input_released(%task)`，Loader 核查此合同。MFE 接受 descriptor 或单次 job 最后一次源读取完成都不能自动替代该信号。输入已搬到 L1/staging 后，Tile 可以继续计算，不必等待计算、输出或 Task 退休。
+2. **Group 聚合与解除纯读 pin**：信号携带逻辑 Task 身份与 phase；Group 按 `(root launch generation, GridInstanceId, phase, task_id)` 校验，只在全部期望 Task 已发出信号时完成 `all_tasks` 聚合，并解除该 Grid 尚存的纯读 L2 pin。单个未退休 Task 发信号不会立即解 pin；安全退休的 Task 可由退休链清理其剩余 pin。读写 pin 不能仅凭 `input_released` 解除，还须满足写阶段及 publish/release 的条件，或走安全退休路径。重复 live 信号故障、旧代信号忽略，不二次归还引用。
+3. **按 buffer 放弃所有权**：Group 程序的 `nest.release %buffer` 依赖相关 reader Grid 的 `input_released`、writer 的 `output_ready` 及相关 DMA 完成事件；先核查 owner、权限、依赖、pin 与在途/未确认传输，再使该 owner 的 view 永久失效。解除纯读 pin 不自动执行 `nest.release`；一个消费者退出也不代表共享源可被覆盖。
+4. **物理 final-free**：仅在 producer 所有权已撤销、所有共享 claim 已 RELEASED/CANCELLED、所有 view 已失效、pin 与 in-flight 均为零时，L2 唯一 finalizer 才归还该 backing 的整段 stripe-rounded padded span，推进 `pool_version`、记录 `l2_extent_release` 并唤醒容量等待者。这个时刻可早于 Task/root 完成；共享 backing 也可能晚于 producer root 退休。
+
+**粒度边界**：当前每 Task 每方向至多一个信号，且只支持 `#nest.aggregate<all_tasks>`。Group 已可分别释放完整 buffer，因此可先回收输入 buffer、保留输出等其他 L2 数据；但不支持同一 Task 在仍需读取输入 B 时先报告输入 A 已消费，也不支持一个 backing 内按已消费地址范围分批归还。细粒度通知与子范围回收需要另行扩展合同，本次勘误不新增该能力。输入早释放不归还 L1 Arena、Frame、UCE 槽位或 R lease，也不等于 `output_ready`、HBM 可见或 Task done。
+
+实现依据：[`tile_group.py`](../pipeline_validator/tile_group.py) 的 `_on_phase_signal`、`_unpin_grid_readers`、`_close_l2_access`，以及 [`arena.py`](../pipeline_validator/memory/arena.py) 的 `_try_release_l2_backing`。可运行示例见 [`l2_admission_wait.mlir`](../examples/scenarios/l2_admission_wait.mlir)：输入 backing 先回收并供另一 root 复用，原 Task 仍继续计算。
+
+#### 16.3.2 Stream Queue 边界
+
 Stream Queue 仅是可选 producer-consumer credit/backpressure/EOS/error
 overlay；显式 L2 buffer/view/event 可直接交接，不要求所有 role
 经过 block token。下面结构仅是尚未冻结的硬件 binary ABI v0 示意：

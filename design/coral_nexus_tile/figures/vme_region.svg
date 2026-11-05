@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 900" width="940" height="900" role="img" aria-labelledby="title desc">
+<title id="title">VME：区域与累加链是两个独立合同</title>
+<desc id="desc">软件显式提交START、seed、FIRST/CONTINUE/FINAL、drain/output、END；后端仅在输出可见和旧访问结束之后释放；可靠region_done之后才转交。</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/></marker></defs>
+<style>text{font-family:"Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:currentColor;font-size:15px}.title{font-size:23px;font-weight:700}.heading{font-size:18px;font-weight:600}.note{font-size:13px;fill:var(--muted,currentColor)}rect{fill:none;stroke:var(--border,currentColor);stroke-width:1.5}path.edge{fill:none;stroke:currentColor;stroke-width:1.5;marker-end:url(#arrow)}</style>
+<text x="470" y="34" text-anchor="middle" class="title">VME：区域与累加链是两个独立合同</text>
+<rect id="start" x="35" y="85" width="420" height="72" rx="8"/>
+<text x="245.0" y="126.0" text-anchor="middle" data-box="start">START / grant → seed 初始化</text>
+<rect id="chain" x="35" y="185" width="420" height="72" rx="8"/>
+<text x="245.0" y="226.0" text-anchor="middle" data-box="chain">FIRST → CONTINUE… → FINAL</text>
+<path class="edge" data-source="start" data-target="chain" d="M 245 157 L 245 185"/>
+<rect id="drain" x="35" y="285" width="420" height="72" rx="8"/>
+<text x="245.0" y="326.0" text-anchor="middle" data-box="drain">显式受控 drain / output</text>
+<path class="edge" data-source="chain" data-target="drain" d="M 245 257 L 245 285"/>
+<rect id="end" x="35" y="385" width="420" height="72" rx="8"/>
+<text x="245.0" y="426.0" text-anchor="middle" data-box="end">END：关闭本区域操作集合</text>
+<path class="edge" data-source="drain" data-target="end" d="M 245 357 L 245 385"/>
+<rect id="finish" x="35" y="485" width="420" height="72" rx="8"/>
+<text x="245.0" y="514.0" text-anchor="middle" data-box="finish">等待 FINAL 提交、输出可见</text>
+<text x="245.0" y="538.0" text-anchor="middle" data-box="finish">及全部旧访问结束</text>
+<path class="edge" data-source="end" data-target="finish" d="M 245 457 L 245 485"/>
+<rect id="free" x="35" y="585" width="420" height="72" rx="8"/>
+<text x="245.0" y="626.0" text-anchor="middle" data-box="free">state_free：回收原生状态</text>
+<path class="edge" data-source="finish" data-target="free" d="M 245 557 L 245 585"/>
+<rect id="done" x="35" y="685" width="420" height="72" rx="8"/>
+<text x="245.0" y="726.0" text-anchor="middle" data-box="done">可靠 region_done → 本地事件</text>
+<path class="edge" data-source="free" data-target="done" d="M 245 657 L 245 685"/>
+<rect id="next" x="35" y="785" width="420" height="72" rx="8"/>
+<text x="245.0" y="826.0" text-anchor="middle" data-box="next">为等待 Context 授予空闲实例</text>
+<path class="edge" data-source="done" data-target="next" d="M 245 757 L 245 785"/>
+<rect id="nstart" x="525" y="85" width="380" height="72" rx="8"/>
+<text x="715.0" y="114.0" text-anchor="middle" data-box="nstart">第一条 mt 访问前申请</text>
+<text x="715.0" y="138.0" text-anchor="middle" data-box="nstart">无空闲则 park，不进入共享队列</text>
+<rect id="nchain" x="525" y="185" width="380" height="72" rx="8"/>
+<text x="715.0" y="214.0" text-anchor="middle" data-box="nchain">每条 matmul 显式声明位置</text>
+<text x="715.0" y="238.0" text-anchor="middle" data-box="nchain">单步 = FIRST | FINAL</text>
+<rect id="ndrain" x="525" y="285" width="380" height="72" rx="8"/>
+<text x="715.0" y="314.0" text-anchor="middle" data-box="ndrain">FINAL 不释放、不自动 drain</text>
+<text x="715.0" y="338.0" text-anchor="middle" data-box="ndrain">只允许已声明的最终输出路径</text>
+<rect id="nend" x="525" y="385" width="380" height="72" rx="8"/>
+<text x="715.0" y="414.0" text-anchor="middle" data-box="nend">同 Context 下一个 START</text>
+<text x="715.0" y="438.0" text-anchor="middle" data-box="nend">停靠到旧 region_done，不嵌套</text>
+<rect id="nfinish" x="525" y="485" width="380" height="72" rx="8"/>
+<text x="715.0" y="514.0" text-anchor="middle" data-box="nfinish">输出背压期间继续持有 lease</text>
+<text x="715.0" y="538.0" text-anchor="middle" data-box="nfinish">不等软件 poll / free 才收尾</text>
+<rect id="nnext" x="525" y="785" width="380" height="72" rx="8"/>
+<text x="715.0" y="814.0" text-anchor="middle" data-box="nnext">硬件选空闲同构实例</text>
+<text x="715.0" y="838.0" text-anchor="middle" data-box="nnext">软件不指定或观察实例号</text>
+<text x="715" y="625" text-anchor="middle" class="heading">其他 Context 可继续独立</text>
+<text x="715" y="654" text-anchor="middle" class="heading">scalar / RVV / MFE 工作</text>
+<text x="715" y="700" text-anchor="middle" class="note">N = 1 为实现基线；N &gt; 1 合同现在设计。</text>
+<text x="470" y="887" text-anchor="middle" class="note">此图表示提交与释放条件，不表示固定延迟；同周期动作仍保持逻辑先后。</text>
+</svg>

@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 745" width="960" height="745" role="img" aria-labelledby="title desc">
+<title id="title">CS1：完整 Tile RTL 与 Python 环境</title>
+<desc id="desc">四条逻辑路径连接Python执行owner、版本化边界与Tile RTL；仿真Host只读观测。</desc>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/></marker></defs>
+<style>text{font-family:"Noto Sans CJK SC","Microsoft YaHei",sans-serif;fill:currentColor;font-size:15px}.title{font-size:23px;font-weight:700}.heading{font-size:18px;font-weight:600}.note{font-size:13px;fill:var(--muted,currentColor)}rect{fill:none;stroke:var(--border,currentColor);stroke-width:1.5}path.edge{fill:none;stroke:currentColor;stroke-width:1.5;marker-end:url(#arrow)}</style>
+<text x="480" y="34" text-anchor="middle" class="title">CS1：完整 Tile RTL 与 Python 环境</text>
+<text x="160" y="78" text-anchor="middle" class="heading">Python 执行 owner</text>
+<text x="480" y="78" text-anchor="middle" class="heading">有界、版本化消息</text>
+<text x="800" y="78" text-anchor="middle" class="heading">Tile RTL 执行 owner</text>
+<rect id="r0c0" x="20" y="110" width="280" height="102" rx="8"/>
+<text x="160.0" y="154.0" text-anchor="middle" data-box="r0c0">Group / Device / Host</text>
+<text x="160.0" y="178.0" text-anchor="middle" data-box="r0c0">ready-action · 准入 · Profile</text>
+<rect id="r0c1" x="360" y="110" width="240" height="102" rx="8"/>
+<text x="480.0" y="154.0" text-anchor="middle" data-box="r0c1">CTRL / EVENT</text>
+<text x="480.0" y="178.0" text-anchor="middle" data-box="r0c1">Task · phase · 终态</text>
+<rect id="r0c2" x="660" y="110" width="280" height="102" rx="8"/>
+<text x="800.0" y="154.0" text-anchor="middle" data-box="r0c2">多 Context UCE / scalar</text>
+<text x="800.0" y="178.0" text-anchor="middle" data-box="r0c2">寄存器 · 退休 · 本地事件</text>
+<path class="edge" data-source="r0c0" data-target="r0c1" d="M 300 143 L 360 143" stroke-dasharray="5 4"/>
+<path class="edge" data-source="r0c1" data-target="r0c0" d="M 360 180 L 300 180" stroke-dasharray="5 4"/>
+<path class="edge" data-source="r0c1" data-target="r0c2" d="M 600 143 L 660 143" stroke-dasharray="5 4"/>
+<path class="edge" data-source="r0c2" data-target="r0c1" d="M 660 180 L 600 180" stroke-dasharray="5 4"/>
+<rect id="r1c0" x="20" y="250" width="280" height="102" rx="8"/>
+<text x="160.0" y="294.0" text-anchor="middle" data-box="r1c0">真实程序映像服务</text>
+<text x="160.0" y="318.0" text-anchor="middle" data-box="r1c0">image · binding · manifest</text>
+<rect id="r1c1" x="360" y="250" width="240" height="102" rx="8"/>
+<text x="480.0" y="294.0" text-anchor="middle" data-box="r1c1">PROGRAM</text>
+<text x="480.0" y="318.0" text-anchor="middle" data-box="r1c1">装载 bytes · installed · ready</text>
+<rect id="r1c2" x="660" y="250" width="280" height="102" rx="8"/>
+<text x="800.0" y="294.0" text-anchor="middle" data-box="r1c2">有限本地指令存储</text>
+<text x="800.0" y="318.0" text-anchor="middle" data-box="r1c2">真实安装 · resident 引用</text>
+<path class="edge" data-source="r1c0" data-target="r1c1" d="M 300 283 L 360 283"/>
+<path class="edge" data-source="r1c1" data-target="r1c0" d="M 360 320 L 300 320"/>
+<path class="edge" data-source="r1c1" data-target="r1c2" d="M 600 283 L 660 283"/>
+<path class="edge" data-source="r1c2" data-target="r1c1" d="M 660 320 L 600 320"/>
+<rect id="r2c0" x="20" y="390" width="280" height="102" rx="8"/>
+<text x="160.0" y="434.0" text-anchor="middle" data-box="r2c0">外部存储服务</text>
+<text x="160.0" y="458.0" text-anchor="middle" data-box="r2c0">L2/cache/MSHR · NoC · HBM</text>
+<rect id="r2c1" x="360" y="390" width="240" height="102" rx="8"/>
+<text x="480.0" y="434.0" text-anchor="middle" data-box="r2c1">MEMORY</text>
+<text x="480.0" y="458.0" text-anchor="middle" data-box="r2c1">请求 · 数据 · 终态 ACK</text>
+<rect id="r2c2" x="660" y="390" width="280" height="102" rx="8"/>
+<text x="800.0" y="422.0" text-anchor="middle" data-box="r2c2">Tile 数据与计算路径</text>
+<text x="800.0" y="446.0" text-anchor="middle" data-box="r2c2">L1/cache/MSHR · LSU/MFE</text>
+<text x="800.0" y="470.0" text-anchor="middle" data-box="r2c2">RVV · 同构 VME 实例</text>
+<path class="edge" data-source="r2c0" data-target="r2c1" d="M 300 423 L 360 423"/>
+<path class="edge" data-source="r2c1" data-target="r2c0" d="M 360 460 L 300 460"/>
+<path class="edge" data-source="r2c1" data-target="r2c2" d="M 600 423 L 660 423"/>
+<path class="edge" data-source="r2c2" data-target="r2c1" d="M 660 460 L 600 460"/>
+<rect id="r3c0" x="20" y="530" width="280" height="102" rx="8"/>
+<text x="160.0" y="574.0" text-anchor="middle" data-box="r3c0">Host 独立 checker</text>
+<text x="160.0" y="598.0" text-anchor="middle" data-box="r3c0">数值 · 偏序 · 资源闭包</text>
+<rect id="r3c1" x="360" y="530" width="240" height="102" rx="8"/>
+<text x="480.0" y="574.0" text-anchor="middle" data-box="r3c1">只读捕获 / DEBUG</text>
+<text x="480.0" y="598.0" text-anchor="middle" data-box="r3c1">完整窗口或明确缺口</text>
+<rect id="r3c2" x="660" y="530" width="280" height="102" rx="8"/>
+<text x="800.0" y="574.0" text-anchor="middle" data-box="r3c2">验证插桩 / 小 debug FIFO</text>
+<text x="800.0" y="598.0" text-anchor="middle" data-box="r3c2">功能完成不依赖日志</text>
+<path class="edge" data-source="r3c2" data-target="r3c1" d="M 660 581 L 600 581" stroke-dasharray="5 4"/>
+<path class="edge" data-source="r3c1" data-target="r3c0" d="M 360 581 L 300 581" stroke-dasharray="5 4"/>
+<text x="480" y="678" text-anchor="middle" class="heading">一个可变状态只有一个执行 owner；checker 不代写数据、不代发完成。</text>
+<text x="480" y="715" text-anchor="middle" class="note">唯一时间权威：Python Simulator cycle；一个 tick 对应一个 RTL 核心时钟周期。</text>
+</svg>
