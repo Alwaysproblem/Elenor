@@ -1,0 +1,31 @@
+# Single registry of implemented cn commands (C003).
+# Each command declares an executor and a handler; the dispatcher refuses
+# anything not listed here with exit 3 (unknown) or exit 4 (registered but
+# not yet implemented). Exit-code semantics live here, not in handlers.
+schema: cn_commands/v1
+exit_codes:
+  0: success
+  1: checker or assertion failure
+  2: usage error
+  3: unknown command, suite or missing prerequisite
+  4: registered but not implemented yet
+commands:
+  env:
+    summary: build/verify the locked container
+    executor: host
+    handler: scripts/handlers/env.sh
+    subcommands: [build, verify]
+  sources:
+    summary: verify the pinned source lock
+    executor: host
+    handler: scripts/handlers/sources.sh
+    pass_through: true
+  unit:
+    summary: run a registered unit suite
+    executor: host
+    handler: scripts/handlers/unit.sh
+    suites:
+      environment:
+        tests:
+          - hardware/coral_nexus/verification/environment/test_sources.py
+          - hardware/coral_nexus/verification/environment/test_environment.py

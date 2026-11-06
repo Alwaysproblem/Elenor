@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# cn — in-container dispatcher (mounted at /workspace by docker_run.sh).
+#
+# Mirrors the host registry (scripts/commands.yaml): a command whose
+# executor is not "container" is not executable here and exits 3. This keeps
+# a single source of truth for what is implemented; no shadow registry.
+set -uo pipefail
+
+self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$self_dir/commands.yaml" ] || self_dir="/workspace/hardware/coral_nexus/scripts"
+
+python3 - "$self_dir" "$@" <<'PY'
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(sys.argv[1]) / "lib"))
+from sources_tool import load_yaml_limited  # noqa: E402
+
+scripts = Path(sys.argv[1])
+words = sys.argv[2:]
+registry = load_yaml_limited(scripts / "commands.yaml")
+if not words:
+    print("usage: cn <command> [args]", file=sys.stderr)
+    raise SystemExit(2)
+command, rest = words[0], words[1:]
+spec = (registry["commands"] or {}).get(command)
+if spec is None:
+    known = ", ".join(sorted(registry["commands"] or {}))
+    print(f"error: unknown command {command!r}; known: {known}", file=sys.stderr)
+    raise SystemExit(3)
+if spec.get("executor") != "container":
+    print(
+        f"error: {command!r} runs on the host ({spec.get('executor')}), "
+        "not inside the container",
+        file=sys.stderr,
+    )
+    raise SystemExit(3)
+handler = scripts.parent / spec["handler"]
+print(f"error: container executor registered for {command!r} but no "
+      f"in-container handler exists yet (C005+)", file=sys.stderr)
+raise SystemExit(4)
+PY

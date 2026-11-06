@@ -32,7 +32,7 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, cast
 
 LOCK_SCHEMA = "cn_sources_lock/v1"
 OVERLAY_SCHEMA = "cn_overlay/v1"
@@ -192,7 +192,7 @@ def load_yaml_limited(path: Path) -> dict:
   result, next_idx = parse_block(0, lines[0][1])
   if next_idx != len(lines):
     _fail(f"{path}:{lines[next_idx][0]} unexpected trailing content")
-  return result
+  return cast(dict, result)
 
 
 def archive_digest(repo: Path, commit: str) -> str:
