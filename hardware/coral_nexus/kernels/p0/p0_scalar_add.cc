@@ -14,10 +14,10 @@
 #include <string.h>
 
 float input1[8] __attribute__((section(".data"))) = {
-  1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f,
+    1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f,
 };
 float input2[8] __attribute__((section(".data"))) = {
-  0.5f, 1.0f, 1.5f, 2.0f, 0.25f, 0.5f, 1.0f, 2.0f,
+    0.5f, 1.0f, 1.5f, 2.0f, 0.25f, 0.5f, 1.0f, 2.0f,
 };
 float output[8] __attribute__((section(".data")));
 
@@ -26,7 +26,7 @@ int main() {
     output[i] = input1[i] + input2[i];
   }
   const float expected[8] = {
-    1.5f, 3.0f, 4.5f, 6.0f, 5.25f, 6.5f, 8.0f, 10.0f,
+      1.5f, 3.0f, 4.5f, 6.0f, 5.25f, 6.5f, 8.0f, 10.0f,
   };
   int ok = 1;
   for (int i = 0; i < 8; i++) {

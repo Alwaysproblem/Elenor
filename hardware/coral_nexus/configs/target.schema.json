@@ -4,28 +4,31 @@
   "type": "object",
   "required": ["schema", "kind", "name"],
   "properties": {
-    "schema": {"type": "string", "const": "cn_target/v1"},
-    "kind": {"type": "string", "enum": ["p0_upstream", "cs1_target"]},
-    "name": {"type": "string"},
-    "config": {"type": "object"},
+    "schema": { "type": "string", "const": "cn_target/v1" },
+    "kind": { "type": "string", "enum": ["p0_upstream", "cs1_target"] },
+    "name": { "type": "string" },
+    "config": { "type": "object" },
     "constraints": {
       "type": "object",
       "properties": {
-        "context_count": {"type": "integer", "minimum": 1},
-        "tile_count": {"type": "integer", "minimum": 1},
-        "user_spm_per_bank": {"type": "integer", "minimum": 0},
-        "system_reserved_spm_per_bank": {"type": "integer", "minimum": 0},
-        "retirement_buffer_mode": {"type": "string", "enum": ["full", "mini"]},
-        "l1_cache_enabled": {"type": "boolean"},
-        "max_in_flight_per_context": {"type": "integer", "minimum": 0}
+        "context_count": { "type": "integer", "minimum": 1 },
+        "tile_count": { "type": "integer", "minimum": 1 },
+        "user_spm_per_bank": { "type": "integer", "minimum": 0 },
+        "system_reserved_spm_per_bank": { "type": "integer", "minimum": 0 },
+        "retirement_buffer_mode": {
+          "type": "string",
+          "enum": ["full", "mini"]
+        },
+        "l1_cache_enabled": { "type": "boolean" },
+        "max_in_flight_per_context": { "type": "integer", "minimum": 0 }
       }
     },
     "provenance": {
       "type": "object",
       "properties": {
-        "source": {"type": "string"},
-        "file": {"type": "string"},
-        "line": {"type": "integer"}
+        "source": { "type": "string" },
+        "file": { "type": "string" },
+        "line": { "type": "integer" }
       }
     }
   }

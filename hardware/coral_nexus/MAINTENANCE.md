@@ -46,6 +46,43 @@ Verification evidence lives under `out/coral_nexus/<CARD>/attempt-NNN/`;
   (`out/coral_nexus/cache/seeds/`), verifies every sha256, and fails if any
   seed is missing or mismatched. The manifest is `export_manifest.json`.
 
+## Gates (C007 / C008)
+
+```bash
+cn gate --stage G0 --out out/coral_nexus/C007/gate
+```
+
+G0 verifies five evidence sets (`sources_verify`, `environment_verify`,
+`seed_export`, `baseline_run`, `bf16_baseline`) against
+**`verification/expected_evidence.json`** — a committed pin holding the
+sha256 of every required report _and_ artifact plus the expected verdict.
+The pin is the root of trust: re-hashing against a manifest rebuilt from
+the same directory proves nothing, and a directory containing only
+`{"pass": true}` fails. A missing or incomplete pin fails closed
+(`pin.present` / `pin.coverage`).
+
+Exit codes: `0` pass, `1` evidence mismatch, `2` usage, `4` stage not
+implemented. `--evidence-index DIR` and `--pin FILE` override the
+defaults (used by the negative tests in
+`verification/contracts/test_g0_gate.py`).
+
+### Refreshing the pin
+
+After a legitimate re-run of any evidence producer, the recorded hashes
+change and the gate fails until the pin is updated **in a reviewed
+commit**:
+
+```bash
+cn gate --stage G0 --out out/coral_nexus/C007/gate            # see which hashes moved
+python3 hardware/coral_nexus/verification/gates.py \
+  --evidence-index out/coral_nexus/C007/evidence_index \
+  --pin hardware/coral_nexus/verification/expected_evidence.json --write-pin
+```
+
+Never refresh the pin merely to make a red gate green: an unchanged
+verdict with changed bytes means the producer changed, and that is a
+review event.
+
 ## Devcontainer
 
 `.devcontainer/coral_nexus/devcontainer.json` builds the same locked image

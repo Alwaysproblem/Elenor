@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # gate handler (C007): runs a registered stage gate.
-# Usage: gate.sh --stage <G0|G1|...> [--out DIR]
+# Usage: gate.sh --stage <G0|G1|...> [--out DIR] [--evidence-index DIR] [--pin FILE]
 #
-# For G0: builds the evidence manifest (real sha256 of report files +
-# required artifact list), then runs the gate which RE-HASHES and
-# compares. A directory containing only {"pass":true} with no real
-# artifacts cannot pass.
+# For G0: verifies every required evidence report and artifact against a
+# COMMITTED pin (verification/expected_evidence.json). Re-hashing against a
+# manifest rebuilt from the same directory proves nothing, so the pin is the
+# root of trust: a directory containing only {"pass": true} cannot pass.
+# A manifest is still written for the record (what was evaluated), but it is
+# never the pass criterion.
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 H="$(cd "$here/../.." && pwd)"
@@ -13,10 +15,14 @@ ROOT="$(cd "$H/../.." && pwd)"
 
 STAGE=""
 OUT="${OUT:-out/coral_nexus/C007/gate}"
+EVIDENCE_INDEX=""
+PIN=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --stage) STAGE="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
+    --evidence-index) EVIDENCE_INDEX="$2"; shift 2 ;;
+    --pin) PIN="$2"; shift 2 ;;
     *) echo "error: gate: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -25,25 +31,22 @@ mkdir -p "$OUT"
 
 case "$STAGE" in
   G0)
-    EVIDENCE_INDEX="$ROOT/out/coral_nexus/C007/evidence_index"
-    mkdir -p "$EVIDENCE_INDEX"
-    # Symlink real evidence directories into the index.
-    ln -sfn "$ROOT/out/coral_nexus/C001/attempt-001/sources" "$EVIDENCE_INDEX/sources_verify" 2>/dev/null || true
-    ln -sfn "$ROOT/out/coral_nexus/C002/verify" "$EVIDENCE_INDEX/environment_verify" 2>/dev/null || true
-    ln -sfn "$ROOT/out/coral_nexus/C004/export-001" "$EVIDENCE_INDEX/seed_export" 2>/dev/null || true
-    ln -sfn "$ROOT/out/coral_nexus/C005/baseline" "$EVIDENCE_INDEX/baseline_run" 2>/dev/null || true
-    ln -sfn "$ROOT/out/coral_nexus/C006/attempt-001" "$EVIDENCE_INDEX/bf16_baseline" 2>/dev/null || true
-    # Build the evidence manifest with real hashes + artifact lists.
-    python3 "$H/verification/gates.py" --build-manifest --evidence-index "$EVIDENCE_INDEX" 2>/dev/null || \
-      python3 -c "
-import sys; sys.path.insert(0, '$H/verification')
-from gates import build_evidence_manifest
-from pathlib import Path
-m = build_evidence_manifest(Path('$EVIDENCE_INDEX'))
-print('manifest built:', len(m['entries']), 'entries')
-"
-    # Run the gate: re-hash + compare + check artifacts.
-    exec python3 "$H/verification/gates.py" --evidence-index "$EVIDENCE_INDEX" --out "$OUT"
+    if [ -z "$EVIDENCE_INDEX" ]; then
+      EVIDENCE_INDEX="$ROOT/out/coral_nexus/C007/evidence_index"
+      mkdir -p "$EVIDENCE_INDEX"
+      # Symlink real evidence directories into the index.
+      ln -sfn "$ROOT/out/coral_nexus/C001/attempt-001/sources" "$EVIDENCE_INDEX/sources_verify" 2>/dev/null || true
+      ln -sfn "$ROOT/out/coral_nexus/C002/verify" "$EVIDENCE_INDEX/environment_verify" 2>/dev/null || true
+      ln -sfn "$ROOT/out/coral_nexus/C004/export-001" "$EVIDENCE_INDEX/seed_export" 2>/dev/null || true
+      ln -sfn "$ROOT/out/coral_nexus/C005/baseline" "$EVIDENCE_INDEX/baseline_run" 2>/dev/null || true
+      ln -sfn "$ROOT/out/coral_nexus/C006/attempt-001" "$EVIDENCE_INDEX/bf16_baseline" 2>/dev/null || true
+    fi
+    [ -n "$PIN" ] || PIN="$H/verification/expected_evidence.json"
+    # Record what was evaluated (never the pass criterion).
+    python3 "$H/verification/gates.py" --build-manifest --evidence-index "$EVIDENCE_INDEX" >/dev/null 2>&1 || true
+    # Verify against the committed pin; fail closed if it is absent.
+    exec python3 "$H/verification/gates.py" \
+      --evidence-index "$EVIDENCE_INDEX" --pin "$PIN" --out "$OUT"
     ;;
   *)
     echo "error: gate stage '$STAGE' not implemented yet" >&2; exit 4
