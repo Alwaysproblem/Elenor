@@ -22,13 +22,19 @@
       "name": "l1_spm_bytes_per_bank_mode0",
       "value": 65536,
       "unit": "B",
-      "provenance": { "file": "pipeline_validator/hardware_config.yaml", "line": 39 }
+      "provenance": {
+        "file": "pipeline_validator/hardware_config.yaml",
+        "line": 39
+      }
     },
     {
       "name": "l1_system_reserved_spm_per_bank",
       "value": 2048,
       "unit": "B",
-      "provenance": { "file": "pipeline_validator/hardware_config.yaml", "line": 21 }
+      "provenance": {
+        "file": "pipeline_validator/hardware_config.yaml",
+        "line": 21
+      }
     }
   ]
 }

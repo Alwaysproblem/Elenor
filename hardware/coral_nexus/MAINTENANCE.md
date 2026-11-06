@@ -4,6 +4,44 @@ Operational handbook for the `hardware/coral_nexus` workspace (CN-G0 onward).
 Verification evidence lives under `out/coral_nexus/<CARD>/attempt-NNN/`;
 `out/` is gitignored and never constitutes an archive by itself.
 
+## Fresh-machine bootstrap (full sequence)
+
+Every step below is a verified entry on a new clone. The G0 gate only turns
+green after the evidence producers have actually run on THIS machine (or
+their archived outputs were restored and re-pinned — the pin verifies bytes,
+it does not create them).
+
+```bash
+git clone --recurse-submodules <repo> && cd coral-npu-nexus
+alias cn="$PWD/hardware/coral_nexus/scripts/cn.sh"
+
+cn env build        # or: docker load < archived image, then cn env verify
+cn sources verify   # 19 checks; the bare form defaults --lock/--out
+
+# Evidence producers (fresh attempts under out/coral_nexus/...):
+cn baseline --config hardware/coral_nexus/configs/p0_coral.yaml \
+  --out out/coral_nexus/C005/baseline
+cn bf16-baseline --out out/coral_nexus/C006/attempt-001  # ~10 min, two-seed KAT
+
+# Offline archive: needs ONE online build first to produce the vendor source
+# tree (see Offline seeds), then export and the two proofs:
+cn env export --out out/coral_nexus/C004/export-001
+python3 hardware/coral_nexus/scripts/lib/sources_tool.py materialize \
+  --lock hardware/coral_nexus/env/sources.lock \
+  --out out/coral_nexus/C004/offline/work
+cn env offline-rebuild --export out/coral_nexus/C004/export-001 \
+  --work out/coral_nexus/C004/offline/work \
+  --out out/coral_nexus/C004/offline/rebuild
+cn env devcontainer-probe --out out/coral_nexus/C004/devcontainer
+
+cn gate --stage G0 --out out/coral_nexus/C007/gate  # 31 checks, exit 0
+```
+
+Known gap on a new machine: the ~7 GB vendor archive bytes are NOT in git
+(only the pinned digest is). Rebuilding them requires one online C005-style
+build followed by `bazel vendor`, or fetching the archive from an artifact
+store that does not exist yet.
+
 ## Two dispatchers, one registry
 
 | Where     | Entry point                                  | Behaviour                                                                                    |
