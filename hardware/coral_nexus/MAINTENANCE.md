@@ -4,6 +4,24 @@ Operational handbook for the `hardware/coral_nexus` workspace (CN-G0 onward).
 Verification evidence lives under `out/coral_nexus/<CARD>/attempt-NNN/`;
 `out/` is gitignored and never constitutes an archive by itself.
 
+## Two dispatchers, one registry
+
+| Where     | Entry point                                  | Behaviour                                                                                    |
+| --------- | -------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Host      | `hardware/coral_nexus/scripts/cn.sh`         | runs host commands (`env`, `sources`, `gate`, `unit`, `baseline`, `bf16-baseline`, `verify`) |
+| Container | `/workspace/hardware/coral_nexus/scripts/cn` | refuses any command whose `executor` is not `container` (exit 3)                             |
+
+Both read the same registry (`scripts/commands.yaml`); there is no shadow
+list. For convenience on the host:
+
+```bash
+alias cn="$PWD/hardware/coral_nexus/scripts/cn.sh"   # or: export PATH
+```
+
+Exit codes are part of the contract: `0` success, `1` checker/assertion
+failure, `2` usage error, `3` unknown command or suite, `4` registered but
+not implemented.
+
 ## Environment
 
 - One locked build image: `coral-nexus-builder:c002` built from

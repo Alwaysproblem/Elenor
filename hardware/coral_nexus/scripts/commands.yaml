@@ -57,3 +57,4 @@ commands:
       contracts:
         tests:
           - hardware/coral_nexus/verification/contracts/test_target_constraints.py
+          - hardware/coral_nexus/verification/contracts/test_g0_gate.py
