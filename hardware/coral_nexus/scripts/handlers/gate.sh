@@ -39,7 +39,7 @@ case "$STAGE" in
       ln -sfn "$ROOT/out/coral_nexus/C002/verify" "$EVIDENCE_INDEX/environment_verify" 2>/dev/null || true
       ln -sfn "$ROOT/out/coral_nexus/C004/export-005" "$EVIDENCE_INDEX/seed_export" 2>/dev/null || true
       ln -sfn "$ROOT/out/coral_nexus/C005/baseline" "$EVIDENCE_INDEX/baseline_run" 2>/dev/null || true
-      ln -sfn "$ROOT/out/coral_nexus/C006/attempt-001" "$EVIDENCE_INDEX/bf16_baseline" 2>/dev/null || true
+      ln -sfn "$ROOT/out/coral_nexus/C006/attempt-008" "$EVIDENCE_INDEX/bf16_baseline" 2>/dev/null || true
       # C004 closeout: offline rebuild + devcontainer launch are part of G0.
       ln -sfn "$ROOT/out/coral_nexus/C004/offline/rebuild4" "$EVIDENCE_INDEX/offline_rebuild" 2>/dev/null || true
       ln -sfn "$ROOT/out/coral_nexus/C004/devcontainer" "$EVIDENCE_INDEX/devcontainer_probe" 2>/dev/null || true

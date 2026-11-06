@@ -37,8 +37,8 @@ BASELINE = (
 )
 BF16 = (
   "bf16_baseline",
-  "bf16_baseline_report.json",
-  {"test_result": "PASSED", "bf16_cases": ["vtfmm_bf16_mt0", "vtfmm_bf16_mt8"]},
+  "bf16_kat_record.json",
+  {"replay_identical": True, "elf_sha256": "3e" * 32, "cases": []},
 )
 OFFLINE = (
   "offline_rebuild",
@@ -55,7 +55,7 @@ ARTIFACTS = {
   "environment_verify": {"verify_inside.log": "PASS env\n"},
   "seed_export": {},
   "baseline_run": {"summary.txt": "PASS hello\nPASS p0\n"},
-  "bf16_baseline": {},
+  "bf16_baseline": {"bf16_kat_run_a.json": "{}", "bf16_kat_run_b.json": "{}"},
   "offline_rebuild": {"build.log": "Build completed successfully\n"},
   "devcontainer_probe": {"probes.log": "builder\nbazel 9.1.0\n/workspace\n"},
 }
@@ -199,10 +199,12 @@ def test_gate_fails_on_missing_seed_export(tmp_path: Path) -> None:
 
 
 def test_gate_rejects_pin_of_failing_verdict(tmp_path: Path) -> None:
-  """Re-pinning a FAILED BF16 verdict must still fail: pass is not opt-in."""
+  """Re-pinning a non-replaying BF16 record must still fail: pass is not opt-in."""
   idx = _make_evidence_index(tmp_path / "evidence")
-  (idx / "bf16_baseline/bf16_baseline_report.json").write_text(
-    json.dumps({"test_result": "FAILED", "bf16_cases": []}) + "\n"
+  (idx / "bf16_baseline/bf16_kat_record.json").write_text(
+    json.dumps(
+      {"replay_identical": False, "elf_sha256": "3e" * 32, "cases": []}
+    ) + "\n"
   )
   pin = tmp_path / "pin.json"
   _write_pin(idx, pin)

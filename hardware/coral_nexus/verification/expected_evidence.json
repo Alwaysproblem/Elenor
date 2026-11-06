@@ -12,12 +12,14 @@
     },
     "bf16_baseline": {
       "artifacts": {
-        "bf16_baseline_report.json": "e2d0591e968c56662326e355ce05b4b034d362c9f067f760dfc9823d7b385093"
+        "bf16_kat_record.json": "03b63e54a2a9839c48470037aa3793e3bd1ad7ef1e7bc02ed48fc5e7675154c3",
+        "bf16_kat_run_a.json": "ebe32820e6829ab64380b1f3312bd5091f6267183fb0bfb001eea5b08c4dd8c1",
+        "bf16_kat_run_b.json": "ebe32820e6829ab64380b1f3312bd5091f6267183fb0bfb001eea5b08c4dd8c1"
       },
-      "expected_verdict": "PASSED",
-      "report": "bf16_baseline/bf16_baseline_report.json",
-      "report_sha256": "e2d0591e968c56662326e355ce05b4b034d362c9f067f760dfc9823d7b385093",
-      "verdict_field": "test_result"
+      "expected_verdict": true,
+      "report": "bf16_baseline/bf16_kat_record.json",
+      "report_sha256": "03b63e54a2a9839c48470037aa3793e3bd1ad7ef1e7bc02ed48fc5e7675154c3",
+      "verdict_field": "replay_identical"
     },
     "devcontainer_probe": {
       "artifacts": {
@@ -68,7 +70,7 @@
       "verdict_field": "pass"
     }
   },
-  "producer_commit": "eac1156654b4bc9bdbb2502672a45b4b4216ee73",
+  "producer_commit": "e14fa645be87365ba875a877738999e073706a96",
   "schema": "cn_evidence_pin/v1",
   "stage": "G0"
 }
