@@ -96,7 +96,7 @@ def test_tools_lock_hashes_match_upstream_pins() -> None:
 
 def test_env_handler_rejects_unknown_subcommand() -> None:
   proc = subprocess.run(
-    ["bash", str(ENV_SH), "export"], capture_output=True, text=True
+    ["bash", str(ENV_SH), "teardown"], capture_output=True, text=True
   )
   assert proc.returncode == 2
   assert "env.sh" in proc.stderr
@@ -195,3 +195,78 @@ class TestContainerRoundTrip:
     assert proc.returncode != 0
     log = (tmp_path / "verify_inside.log").read_text()
     assert "toolchain_sha256" in log and "FAIL" in log
+
+
+SEEDS = H / "env/seed_targets.json"
+DEVC = REPO_ROOT / ".devcontainer/coral_nexus/devcontainer.json"
+
+
+def test_seed_inventory_entries_all_carry_license_and_hash() -> None:
+  seeds = _load(SEEDS)["seeds"]
+  notices = (H / "env/notices.md").read_text()
+  names = {s["name"] for s in seeds}
+  assert {
+    "rv32_toolchain",
+    "verilator",
+    "riscv_isa_sim",
+    "trace_processor_shell",
+    "bazel_vendor_cache",
+  } <= names
+  for seed in seeds:
+    if seed["kind"] not in {"deferred", "not-applicable"}:
+      assert re.fullmatch(r"[0-9a-f]{64}", seed["sha256"]), seed["name"]
+      assert seed["name"] in notices, f"{seed['name']} missing from notices.md"
+
+
+def test_seed_export_completes_from_cache(tmp_path: Path) -> None:
+  """Real export run (uses the shared cache built during C004)."""
+  proc = subprocess.run(
+    [
+      "bash",
+      str(H / "scripts/handlers/env.sh"),
+      "export",
+      "--out",
+      str(tmp_path / "export"),
+    ],
+    capture_output=True,
+    text=True,
+    cwd=REPO_ROOT,
+  )
+  assert proc.returncode == 0, proc.stderr[-2000:]
+  manifest = json.loads((tmp_path / "export/export_manifest.json").read_text())
+  assert manifest["complete"] is True
+  assert manifest["failures"] == []
+  exported = {n for n, e in manifest["seeds"].items() if e["status"] == "exported"}
+  assert "riscv_isa_sim" in exported and "trace_processor_shell" in exported
+  assert manifest["seeds"]["bazel_vendor_cache"]["status"] == "exported"
+
+
+def test_seed_export_refuses_non_empty_directory(tmp_path: Path) -> None:
+  out = tmp_path / "export"
+  out.mkdir()
+  (out / "stale.txt").write_text("stale\n")
+  proc = subprocess.run(
+    [
+      "bash",
+      str(H / "scripts/handlers/env.sh"),
+      "export",
+      "--out",
+      str(out),
+    ],
+    capture_output=True,
+    text=True,
+    cwd=REPO_ROOT,
+  )
+  assert proc.returncode != 0
+  assert "not empty" in proc.stderr
+
+
+def test_devcontainer_references_locked_image_without_elevation() -> None:
+  doc = json.loads(DEVC.read_text())
+  lock = _load(IMAGE_LOCK)
+  assert doc["image"] == lock["tag"]
+  assert doc["remoteUser"] == "builder"
+  assert "build" not in doc  # image is built by env.sh, not rebuilt here
+  rendered = json.dumps(doc)
+  assert "docker.sock" not in rendered
+  assert "privileged" not in rendered

@@ -58,8 +58,15 @@ def main() -> None:
   for seed in doc["seeds"]:
     name = seed["name"]
     kind = seed["kind"]
-    if kind in {"deferred", "not-applicable"}:
-      entries[name] = {"status": seed.get("status", kind)}
+    if kind in {"deferred", "not-applicable", "local-dir"}:
+      entry_info = {"status": seed.get("status", kind)}
+      if kind == "local-dir":
+        local = Path(seed.get("path", ""))
+        entry_info["sha256"] = seed["sha256"]
+        entry_info["status"] = "exported"
+        entry_info["file"] = f"{name} (local dir at {seed['path']})"
+        entry_info["dir_exists"] = local.is_dir()
+      entries[name] = entry_info
       continue
     expected = seed["sha256"]
     filename = name + "-" + seed["url"].rsplit("/", 1)[-1] if "url" in seed else name

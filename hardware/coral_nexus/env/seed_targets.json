@@ -68,9 +68,11 @@
     },
     {
       "name": "bazel_vendor_cache",
-      "kind": "deferred",
-      "status": "pending-on-C005",
-      "notes": "bazel vendor/distdir cache for the P0 simulation targets can only be produced after the first successful in-container bazel build (C005). Export records this entry as pending; it must flip to exported before C073 exec-repro."
+      "kind": "local-dir",
+      "path": "out/coral_nexus/C005/work-coralnpu/vendor-cache",
+      "sha256": "d3eb92776053c5e5cba26b6f8803e8d0165437f3cd6dbb60dfd6d92a344fe02d",
+      "license": "aggregated from vendored externals (see notices.md)",
+      "notes": "Produced by bazel --output_user_root=/work/bazel-root vendor --vendor_dir=/work/vendor-cache inside the locked container on the C005 work root. 6.0G; offline rebuild with --vendor_dir is exercised in C073 exec-repro."
     },
     {
       "name": "python_wheels",

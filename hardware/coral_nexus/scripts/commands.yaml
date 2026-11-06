@@ -30,15 +30,15 @@ commands:
     executor: host
     handler: scripts/handlers/gate.sh
     pass_through: true
-  bf16-baseline:
-    summary: run BF16 VME matmul test on the unmodified core
-    executor: host
-    handler: scripts/handlers/bf16_baseline.sh
   baseline:
     summary: run P0 workloads on the unmodified upstream core
     executor: host
     handler: scripts/handlers/baseline.sh
     requires_config: true
+  bf16-baseline:
+    summary: run BF16 VME matmul test on the unmodified core
+    executor: host
+    handler: scripts/handlers/bf16_baseline.sh
   unit:
     summary: run a registered unit suite
     executor: host
@@ -51,11 +51,7 @@ commands:
       dispatch:
         tests:
           - hardware/coral_nexus/verification/environment/test_dispatch.py
-      bf16-baseline:
-    summary: run BF16 VME matmul test on the unmodified core
-    executor: host
-    handler: scripts/handlers/bf16_baseline.sh
-  baseline:
+      baseline:
         tests:
           - hardware/coral_nexus/verification/baseline/test_baseline.py
       contracts:
