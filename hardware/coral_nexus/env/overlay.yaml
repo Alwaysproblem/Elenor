@@ -1,0 +1,9 @@
+# Overlay files copied into the derived work root at materialize time.
+# Entries:
+#   source: lock source name (coralnpu | coralnpu-compiler)
+#   src:    repository-root-relative path of the overlay file
+#   dst:    path inside that source's work tree
+#   mode:   add        -> dst must NOT exist in the upstream tree
+#          overwrite  -> dst MUST exist in the upstream tree
+schema: cn_overlay/v1
+entries: []

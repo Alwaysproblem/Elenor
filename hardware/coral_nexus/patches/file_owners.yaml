@@ -1,0 +1,14 @@
+# Which package may patch which upstream paths. Any file touched by a patch
+# in the series must match exactly one owner; two different owners claiming
+# the same file is rejected by verify_sources.sh. Globs are disjoint by
+# package ownership (execution_guide.md §3.1): W2 owns the scalar core
+# entities (top-level Chisel), W3 owns RVV/Zvt, W4 owns LSU/memory, W6 owns
+# event/reset logic. New patch families must extend their owner's list, not
+# add overlapping globs.
+# Glob syntax: fnmatch with '**' for any-depth suffix, anchored at the left.
+schema: cn_patch_owners/v1
+owners:
+  W2: [hdl/chisel/src/coralnpu/*.scala]
+  W3: [hdl/verilog/rvv/**]
+  W4: [hdl/chisel/src/coralnpu/scalar/**]
+  W6: [utils/**, tests/verilator_sim/**]

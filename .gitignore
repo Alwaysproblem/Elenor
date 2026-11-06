@@ -1,16 +1,2 @@
-*.pyc
-__pycache__
-logs
-.mypy_cache
-build
-tensorflow/
-serving/
-bazel-*
-*.whl
-node_modules
-
-# Generated pipeline-validator traces/reports.
-/*.json
-/examples/artifacts/
-/examples/traces/
-*.sql
+/out/
+__pycache__/

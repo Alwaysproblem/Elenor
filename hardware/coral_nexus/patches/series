@@ -1,0 +1,4 @@
+# Patch series for the derived work root. One entry per line:
+#   <source-name>:<patch-path-under-hardware/coral_nexus/patches/>
+# Patches apply with `git apply` (strict context, no fuzz) inside the
+# materialized work tree of the named source. Entries apply in file order.

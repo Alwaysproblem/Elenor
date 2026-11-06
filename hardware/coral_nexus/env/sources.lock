@@ -1,0 +1,65 @@
+{
+  "schema": "cn_sources_lock/v1",
+  "notes": [
+    "Paths are relative to the repository root (the git work tree containing",
+    "this lock). archive_sha256 is the sha256 of 'git archive --format=tar'",
+    "at the pinned commit; it pins upstream content independently of the",
+    "gitlink. embedded_pins are recorded, never silently aligned: the",
+    "compiler embeds its own coralnpu pin which intentionally differs from",
+    "the hardware pin."
+  ],
+  "sources": [
+    {
+      "name": "coralnpu",
+      "kind": "submodule",
+      "url": "https://github.com/google-coral/coralnpu.git",
+      "path": "hardware/coral_nexus/upstream/coralnpu",
+      "commit": "f79522157fc0f1d7311f44e209fc36c9c8b7a039",
+      "archive_sha256": "77b2868ebde74702d23d2e1efcae89982a01f27ba5016a4a2adac26340f0dab7",
+      "licenses": ["LICENSE"],
+      "bazelversion": "9.1.0",
+      "notes": "Coral RTL (Chisel + Verilog), verilator sims, cocotb, toolchain defs."
+    },
+    {
+      "name": "coralnpu-compiler",
+      "kind": "submodule",
+      "url": "https://github.com/google-coral/coralnpu-compiler.git",
+      "path": "hardware/coral_nexus/upstream/coralnpu-compiler",
+      "commit": "d715556c3853719e414182c0bf5f4a10f248f1d9",
+      "archive_sha256": "b8a89dfbfadccf49ff9f0a51b3fd9877b69fb0e08698238caabc5888b5271958",
+      "licenses": ["LICENSE"],
+      "notes": "Compiler/runtime sources. third_party submodules (iree, llvm-project, coralnpu) are NOT initialized; their pins are recorded below."
+    }
+  ],
+  "embedded_pins": [
+    {
+      "holder": "coralnpu-compiler",
+      "path": "third_party/coralnpu",
+      "url": "https://github.com/google-coral/coralnpu",
+      "commit": "782675ac1af7cefd7612c5bdae5445796b62a7f6",
+      "policy": "record-only",
+      "notes": "Compiler's own coralnpu pin. Differs from the hardware pin f795221 by design; never aligned silently."
+    },
+    {
+      "holder": "coralnpu-compiler",
+      "path": "third_party/iree",
+      "url": "https://github.com/iree-org/iree.git",
+      "commit": "2b05c5dbb2f2ecb27c0d3941e80ee8d2f16e890d",
+      "policy": "record-only",
+      "notes": "Not materialized for CN-G0; compiler-side dependency."
+    },
+    {
+      "holder": "coralnpu-compiler",
+      "path": "third_party/llvm-project",
+      "url": "https://github.com/iree-org/llvm-project",
+      "commit": "6cce5bca3b901ec32e250fb43e88eb0fe511af93",
+      "policy": "record-only",
+      "notes": "Not materialized for CN-G0; compiler-side dependency."
+    }
+  ],
+  "overlay": "hardware/coral_nexus/env/overlay.yaml",
+  "patches": {
+    "series": "hardware/coral_nexus/patches/series",
+    "owners": "hardware/coral_nexus/patches/file_owners.yaml"
+  }
+}
