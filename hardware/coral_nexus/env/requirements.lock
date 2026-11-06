@@ -1,0 +1,18 @@
+{
+  "schema": "cn_requirements_lock/v1",
+  "notes": [
+    "Python environments are deliberately split: the validator runs in the",
+    "conda env 'elenor-validator' defined by pipeline_validator/environment.yml",
+    "(hash below); the hardware container uses distro python3 (trixie) with",
+    "only python3-numpy from apt. Neither side pip-installs floating packages."
+  ],
+  "validator_conda_env": {
+    "file": "pipeline_validator/environment.yml",
+    "sha256": "2ebb7fee3004f70f59b696cfae80bbb3e504908d7ef509f6e7b0adde46def081",
+    "python": "3.11"
+  },
+  "container_python": {
+    "provider": "debian trixie apt (python3, python3-numpy, python3-pip, python3-setuptools, python3-venv)",
+    "pip_freeze": "none: no pip packages are installed in the image"
+  }
+}

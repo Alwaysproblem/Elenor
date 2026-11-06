@@ -1,0 +1,37 @@
+{
+  "schema": "cn_image_lock/v1",
+  "tag": "coral-nexus-builder:c002",
+  "base": {
+    "repo": "debian",
+    "tag": "trixie",
+    "digest": "sha256:bfc36aecdece0387418759dba474aa856c026ca8087da3606b41b90ab0509c99",
+    "digest_source": "docker manifest inspect debian:trixie (linux/amd64), resolved 2026-11-06"
+  },
+  "bazel": {
+    "apt_repo": "https://storage.googleapis.com/bazel-apt stable jdk1.8",
+    "package": "bazel-9.1.0",
+    "symlink": "/usr/local/bin/bazel -> /usr/bin/bazel-9.1.0",
+    "upstream_bazelversion": "coralnpu/.bazelversion @ f795221 = 9.1.0"
+  },
+  "expected_versions": {
+    "clang": "19.x (debian clang-19)",
+    "openjdk": "21",
+    "buildifier": "7.3.1",
+    "verible": "v0.0-4051-g9fdb4057",
+    "scalafmt": "3.10.7"
+  },
+  "rv32_cross": {
+    "march": "rv32imf_zve32f_zicsr_zifencei_zbb_zfbfmin_zvfbfmin_zvfbfwma",
+    "mabi": "ilp32",
+    "mcmodel": "medany",
+    "source": "coralnpu/toolchain/cc_toolchain_config.bzl:164-175 @ f795221"
+  },
+  "deviations_from_upstream_dockerfile": [
+    "Base pinned by amd64 digest instead of the floating :trixie tag.",
+    "No sudo/sudoers entries: jobs run as the caller UID/GID and never elevate.",
+    "Only bazel-9.1.0 installed (upstream also installs bazel 8.6.0 and the meta package).",
+    "Lint-only tools dropped from the apt set: markdownlint, shfmt, shellcheck, yapf3.",
+    "Added flex/bison/gperf/perl/zlib1g-dev/libfl2/libfl-dev/file needed to build the verilator external from source.",
+    "verify_inside.sh, host_probe.c and rv32_probe.S copied to /opt/coral_nexus for standalone use; env.sh verify executes the current script from the read-only repository mount so verification always exercises the committed source."
+  ]
+}
