@@ -1,0 +1,6 @@
+[submodule "hardware/coral_nexus/upstream/coralnpu"]
+	path = hardware/coral_nexus/upstream/coralnpu
+	url = https://github.com/google-coral/coralnpu.git
+[submodule "hardware/coral_nexus/upstream/coralnpu-compiler"]
+	path = hardware/coral_nexus/upstream/coralnpu-compiler
+	url = https://github.com/google-coral/coralnpu-compiler.git
