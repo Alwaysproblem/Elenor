@@ -134,10 +134,19 @@ def load_yaml_limited(path: Path) -> dict:
           items.append(scalar(rest, lineno))
           idx += 1
           continue
-        item: dict = {}
+        # Distinguish scalar-with-colon (e.g. bazel labels //path:target) from
+        # mapping items: if the part before the first ':' contains '/' or
+        # starts with '//', it is not a YAML key, so treat the whole rest as a
+        # scalar string.
+        pre_colon = rest.partition(":")[0].strip()
+        if "/" in pre_colon or pre_colon.startswith("//"):
+          items.append(scalar(rest, lineno))
+          idx += 1
+          continue
         key, sep, value = rest.partition(":")
         if not sep or not key.strip():
           _fail(f"{path}:{lineno} malformed mapping item")
+        item: dict = {}
         items.append(item)
         idx += 1
         item_indent = indent + 2

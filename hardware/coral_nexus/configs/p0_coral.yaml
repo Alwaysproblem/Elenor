@@ -1,0 +1,17 @@
+schema: cn_baseline_config/v1
+kind: p0_upstream
+source: hardware/coral_nexus/env/sources.lock (coralnpu @ f795221)
+container_image: coral-nexus-builder:c002
+full_retirement_buffer: true
+bazel:
+  output_user_root: /work/bazel-root
+  build_flags: [opt]
+  targets:
+    - //tests/verilator_sim:core_mini_axi_sim
+    - //examples:coralnpu_v2_hello_world_add_floats
+    - //nexus_p0:p0_scalar_add
+sim:
+  binary_flag: --binary
+  cycles_cap: 200000
+  exit_success: 0
+clock_gate_note: "SystemC tb releases clock gating and reset itself (LoadElfSync -> ClockGateSync(false) -> ResetAsync(false)); the baseline records this initialization order as part of the evidence."

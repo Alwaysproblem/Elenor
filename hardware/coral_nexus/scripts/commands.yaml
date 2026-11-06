@@ -20,6 +20,11 @@ commands:
     executor: host
     handler: scripts/handlers/sources.sh
     pass_through: true
+  baseline:
+    summary: run P0 workloads on the unmodified upstream core
+    executor: host
+    handler: scripts/handlers/baseline.sh
+    requires_config: true
   unit:
     summary: run a registered unit suite
     executor: host

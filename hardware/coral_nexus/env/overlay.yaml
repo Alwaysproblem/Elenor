@@ -6,4 +6,12 @@
 #   mode:   add        -> dst must NOT exist in the upstream tree
 #          overwrite  -> dst MUST exist in the upstream tree
 schema: cn_overlay/v1
-entries: []
+entries:
+  - source: coralnpu
+    src: hardware/coral_nexus/env/overlay/coralnpu/nexus_p0/BUILD.bazel
+    dst: nexus_p0/BUILD.bazel
+    mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/kernels/p0/p0_scalar_add.cc
+    dst: nexus_p0/p0_scalar_add.cc
+    mode: add

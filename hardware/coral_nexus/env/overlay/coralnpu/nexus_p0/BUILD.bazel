@@ -1,0 +1,12 @@
+# P0 workload overlay (C005): builds the hand-computable scalar kernel with
+# the same upstream rule and toolchain as examples/. Applied by
+# materialize.sh as an 'add' overlay onto the pinned coralnpu work root.
+
+load("//rules:coralnpu_v2.bzl", "coralnpu_v2_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+coralnpu_v2_binary(
+    name = "p0_scalar_add",
+    srcs = ["p0_scalar_add.cc"],
+)
