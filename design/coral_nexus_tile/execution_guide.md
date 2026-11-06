@@ -1,6 +1,6 @@
 # Coral Nexus CS1：按 commit 拆分的执行 guide
 
-> 版本：执行拆分 v1。**76 个计划 commit，覆盖原计划全部 42 个任务；当前均未实施、未创建 Git commit。**  
+> 版本：执行拆分 v1。**76 个计划 commit，覆盖原计划全部 42 个任务；当前均未实施、未创建 Git commit。**
 > 用途：把本文件及一个 commit 卡交给实现模型，按明确依赖完成代码、验证与交接。架构范围仍以用户已批准的[总体设计](Coral_Nexus_Tile_Design.md)与[总计划](plan.md)为准；本 guide 只细化施工顺序、文件边界与 commit 退出条件。
 
 ## 1. 从哪里开始

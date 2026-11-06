@@ -1,7 +1,7 @@
 # Coral Nexus Tile CS1 详细实施计划
 
-> 状态：**设计已通过用户 review；按推荐方案编制的实施计划 v1**。本轮授权为列计划，不自动开始 RTL／Python 实现。  
-> 基线：[总体设计](Coral_Nexus_Tile_Design.md)、[W0–W7 组件设计](#work-packages)、[Tile 需求 r5＋输入早释放勘误](../../Coral_NPU_to_Nexus_Tile_Requirements_v0.1.md)。  
+> 状态：**设计已通过用户 review；按推荐方案编制的实施计划 v1**。本轮授权为列计划，不自动开始 RTL／Python 实现。
+> 基线：[总体设计](Coral_Nexus_Tile_Design.md)、[W0–W7 组件设计](#work-packages)、[Tile 需求 r5＋输入早释放勘误](../../Coral_NPU_to_Nexus_Tile_Requirements_v0.1.md)。
 > 本文件保留范围、42 个原任务与设计裁决；**实际逐 commit 执行入口改为 [execution_guide.md](execution_guide.md)**（76 张 commit 卡、前置依赖、文件边界、可用验证命令与交接模板）。批准方案不等于能力已实现，参数冻结与实际验收仍须完成。
 
 ## 1. 交付范围与执行纪律

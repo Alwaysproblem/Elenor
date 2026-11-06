@@ -1,9 +1,9 @@
 # 基于 Coral NPU 的 Nexus Tile 改造需求规格书
 
-> 文档版本：v0.1（修订 r5）· 设计评审草案  
-> 整理日期：2026-11-01（Asia/Shanghai）；r3～r5 修订于 2026-11-03；输入释放勘误于 2026-11-05  
-> 适用对象：架构、RTL、编译器、运行时、Python 模拟器与验证  
-> 目标：以 Coral NPU 的 scalar、RVV、VME 为实现基础，构建符合既有 Nexus 体系的硬件多 Context Tile。  
+> 文档版本：v0.1（修订 r5）· 设计评审草案
+> 整理日期：2026-11-01（Asia/Shanghai）；r3～r5 修订于 2026-11-03；输入释放勘误于 2026-11-05
+> 适用对象：架构、RTL、编译器、运行时、Python 模拟器与验证
+> 目标：以 Coral NPU 的 scalar、RVV、VME 为实现基础，构建符合既有 Nexus 体系的硬件多 Context Tile。
 > 修订说明：r1 核对本仓库 validator 与 design 合同；r2 增加冷／热程序装载和分级联仿；r3 按七项实现 review 反馈修订：计算绑定与映像先做简版，后续 RVV 程序 dialect 及 Coral compiler／LLVM 支持；参考当前 Nexus 的生命周期选择原生 VME 区域 lease；采用消息边界与唯一状态 owner、设备页授权、程序／数据分离取装、小 FIFO 与 debug-only HBM 日志；r4 按用户确认的方向把 Tile 内多 VME 执行实例作为设计维度（MAT-18～MAT-24）：硬件在区域开始时自动选择空闲实例，区域起止与累加链位置显式声明，并行只来自不同 Context；r5 按实现可行性评审补齐 store 完成／故障的 PC 匹配问题、L1 存储子系统归属、L1 issue gate 与准入、配置转移的硬件可检查表示及若干一致性修正。范围与裁决见 §1.4、§9.4、§23.7。
 >
 > r5 勘误：明确 `input_released` 的 Group 聚合、纯读 pin 早解除、按 buffer release 与 backing final-free；Task 退休只清理剩余 pin，不新增按 buffer／范围分批通知能力，不改变需求 ID 或 ABI。
