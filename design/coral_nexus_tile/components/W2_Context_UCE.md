@@ -1,6 +1,6 @@
 # W2 Context 与 UCE（取指、调度、寄存器、配置、依赖、退休）详细设计
 
-> 本组件为设计评审稿，跨包合同与用户裁决见[总体设计](../Coral_Nexus_Tile_Design.md)；r5 指[需求规格](../../../Coral_NPU_to_Nexus_Tile_Requirements_v0.1.md)。本轮检查见[设计验证记录](../Design_Validation.md)，不代表组件已实现。
+> 本组件设计已通过用户 review，推荐方案采用情况与参数冻结任务见[实施总计划](../plan.md)；跨包合同见[总体设计](../Coral_Nexus_Tile_Design.md)，r5 指[需求规格](../../../Coral_NPU_to_Nexus_Tile_Requirements_v0.1.md)。[设计验证记录](../Design_Validation.md)不代表组件已实现。
 
 ## 1. 定位、目标和 First Silicon cutline
 
@@ -15,7 +15,7 @@
 5. 正常调度、Context park（WFI）与 fail-stop 终止三套机制分离（ISA-04、CTX-07、SCH-11/FLT-01）。
 6. 本轮 BF16 I/O 收窄只约束张量数据通路；UCE 的标量整数控制、地址/索引计算与地址 CSR 照常保留，不因 BF16 决策删除或降级（本轮范围确认，见总体设计）。
 
-本设计只到可执行级 guide，不冻结硬件规模；所有带 **[待review]** 的机械参数需评审确认。
+本组件方案已选；首版提供 C1/C2 配置，四 lane、复制 RF 与私有 ROB。机械深度／位宽／端口预算由实施计划的前置合同与配置任务冻结，不将未实测参数称为硅片规模结论。
 
 ## 2. 职责、非职责和 ownership
 
@@ -79,11 +79,11 @@
 
 发射选择（推荐策略，非指纹，PAR-07）：
 
-1. 每 Tile 每周期至多选择 1 个 Context，发射 1 个 bundle；bundle 全部 lane 来自该 Context 且为程序顺序连续前缀（§7.5）。保留 Coral 4 lane 还是收窄 **[待review]**。
-2. 轮转：从上次选中槽位的下一个 Context 起扫描，取第一个 eligible 的头；**阻塞头不使指针前移**（validator `_select_context` 语义，tile.py L635-653）；可加 aging/固定量子 **[待review]**，但须满足 SCH-03 有界服务（延伸到取指端口 FET-07 与 LSU/MFE 选择 MEM-02）。
+1. 每 Tile 每周期至多选择 1 个 Context，发射 1 个 bundle；bundle 全部 lane 来自该 Context 且为程序顺序连续前缀（§7.5）。已选保留 Coral 4 lane；不混发多个 Context。
+2. 轮转：从上次选中槽位的下一个 Context 起扫描，取第一个 eligible 的头；**阻塞头不使指针前移**（validator `_select_context` 语义，tile.py L635-653）；本轮不加 aging/固定量子，须证明 RR 满足 SCH-03 有界服务（延伸到取指端口 FET-07 与 LSU/MFE 选择 MEM-02）。
 3. `eligible(c)` 按 §7.1 分级预计算（槽态+取指头可用 → 源依赖+目的资源 → engine 队列容量探测 → 合法性），分级重试不得在检查与接受之间转移资源所有权。
 4. 补位语义：A 的头等待事件/引擎队列/region 时不选 A，但 A 已接受工作照常执行；B 独立就绪即获服务（SCH-02）。region 等待的 Context：START 声明指令位于头部即 park（不进共享向量队列之前申请，MAT-20），其后续指令按 SCH-01 不得越过；授予后由 W3 的授予信号唤醒 A 在原头部继续（事件驱动，不做逐 tick 轮询，对齐 总体设计 的 L1 gate 原则与 MAT-12）。
-5. 同周期竞争（新唤醒、资源释放、新准入）确定优先级： 完成回写/flags 落账 → 可退休处理 → 新发射授予 → 状态推进；具体序固定进实现规格 **[待review]**（SCH-08）。
+5. 同周期竞争（新唤醒、资源释放、新准入）确定优先级： 完成回写/flags 落账 → 可退休处理 → 新发射授予 → 状态推进；已选此逻辑序，具体阶段由 W2-01／W2-04 固定并验证（SCH-08）。
 
 发射 bundle 部分接受：接受 lane 数 k 后，仅前 k 条推进 next-PC/seq/scoreboard/发射计数；未接受 lane 的 payload（含操作数读出与配置快照）保持稳定直至接受或按协议取消（SCH-05/SCH-06）；Coral 已有"首拒后不得再接受"断言（RetirementBuffer L106-110），按 Context 保留。
 
@@ -91,14 +91,14 @@
 
 RF 组织候选（不冻结，§8.1 允许任一）：
 
-- **候选 A（推荐，CS1）**：GPR(32×XLEN)/FPR(32) 每 Context 全复制；scoreboard 为每 Context 一份 32 位位图（DispatchV2 位图的按 Context 实例化）。隔离结构直接（STA-02），代价为每 Context 存储与写口路由；面积/时序尚无实现证据。
-- **候选 B**：共享分 bank 存储以 `{ctx, regnum}` 寻址，scoreboard 按 `(ctx,reg)` 键。是否节省面积取决于端口/mux/实现库；需 bank 冲突显式背压（STA-07）与无跨 Context 假依赖证明。
+- **已选 A（CS1）**：GPR(32×XLEN)/FPR(32) 每 Context 全复制；scoreboard 为每 Context 一份 32 位位图（DispatchV2 位图的按 Context 实例化）。隔离结构直接（STA-02），代价为每 Context 存储与写口路由；面积/时序尚无实现证据。
+- **未采用 B**：共享分 bank 存储以 `{ctx, regnum}` 寻址，scoreboard 按 `(ctx,reg)` 键。是否节省面积取决于端口/mux/实现库；需 bank 冲突显式背压（STA-07）与无跨 Context 假依赖证明。
 - VRF 物理与读出归 W3；W2 维护每 Context 的向量目的 busy 摘要（向量 scoreboard），uop 级跟踪在 RVV ROB（RET-02 的 RVV 侧逻辑队首同样按 Context，见 §7 SV 改造）。
 
-ROB 组织候选：
+ROB 组织选择：
 
-- **候选 1（推荐，CS1）**：每 Context **静态私有分区**＋独立 head/free 指针与在途 credit。回收判定只依赖本分区，无跨 Context tail 推进问题，隔离与 credit 守恒证明最直白；代价是分区容量静态划分（某 Context 满不侵害他人，也不能互相借用）。
-- **候选 2（可评审替代）**：共享 free-list＋每 Context 私用链表（动态借还）。容量利用更好，但 free-list 仲裁、借还与回绕隔离需要额外证明。
+- **已选 1（CS1）**：每 Context **静态私有分区**＋独立 head/free 指针与在途 credit。回收判定只依赖本分区，无跨 Context tail 推进问题，隔离与 credit 守恒证明最直白；代价是分区容量静态划分（某 Context 满不侵害他人，也不能互相借用）。
+- **未采用 2（以后另行评审）**：共享 free-list＋每 Context 私用链表（动态借还）。容量利用更好，但 free-list 仲裁、借还与回绕隔离需要额外证明。
 - **否决**：单一共享环形结构＋每 Context 逻辑队首——已退休条目的物理回收仍要等全局 tail 越过其他 Context 的更老条目，重新引入跨 Context 回收 HOL，RET-03 不成立；且"共享省面积"未经 PPA 证实，不作断言。
 
 匹配键改造（RET-01 核心，全部替换 Coral 的 PC/寄存器号匹配）：
@@ -128,10 +128,10 @@ ROB 组织候选：
 ### 3.6 配置快照与 CSR 顺序
 
 - 每 Context 一份配置影子：`vtype/vl/vstart`（架构态）、`frm`、`vxrm/vxsat/fflags`（带 owner 的累加器）、矩阵 `mset*` 字段；Tile 只读能力/时间基准 CSR 共享不复制（§6.4）。
-- 快照机制：SV 域已有 RVV 先例（H14）——dispatch 时刻把 `vector_csr` 快照随 uop 带走（rvv_backend_dispatch L332 等）；**本文提案（未决，[待review]）**：scalar/CSR 侧把同一原则推广为"dispatch 时刻快照＋架构态按 Context 内程序序在退休点提交"，Coral 单 Context 现状不含此机制，不得写成保留既有行为。后执行 Context 的 `vset*/mset*` 不改已接受操作（CFG-02），同 Context 配置写与相关操作严格有序、不穿透在途操作（CFG-03）。
+- 快照机制：SV 域已有 RVV 先例（H14）——dispatch 时刻把 `vector_csr` 快照随 uop 带走（rvv_backend_dispatch L332 等）；**本轮已选方案**：scalar/CSR 侧把同一原则推广为"dispatch 时刻快照＋架构态按 Context 内程序序在退休点提交"，Coral 单 Context 现状不含此机制，不得写成保留既有行为。后执行 Context 的 `vset*/mset*` 不改已接受操作（CFG-02），同 Context 配置写与相关操作严格有序、不穿透在途操作（CFG-03）。
 - `mset*` 字段虽取自 GPR，仍属有限位域＋快照机制管辖（MAT-10 的运行期检查归 W3，W2 只保证快照时机一致）；配置转移越界由 W3 判定并回报故障。
 - 异步 flags（fflags/vxsat）归属发起操作的 Context（CFG-04）：每 Context 一份架构累加器；异常更新作为带 `(ContextKey, op_seq)` 的 **delta 记录在所属 ROB 条目上**（早到的年轻 delta 挂条目等待，不直写累加器），架构累加器只在**该条目自己的退休点**按本 Context 程序序合并；软件清零是清零指令位置上的写、在其退休点生效。由此"older FP→clear→younger FP、年轻者提前完成"时，older delta 先合并、clear 随后覆写、young delta 在其条目退休时再合并，不会被清零抹掉；禁止"先到先合并"。
-- **CSR 读值与配置可见性互锁**：退休点合并/提交意味着**提前执行读不到新值**——`csrr fflags/vxsat/vl/vtype` 等架构态读须等本 Context 更老的未合并 delta/未提交配置全部结算（或转发合并中的值，forwarding 为增强 **[待review]**）；`vset*/mset*` 未提交时，后续依赖该配置的向量/矩阵 op 的快照须等其提交。Coral 先例：DispatchV2 `canDispatch` 的 `isCsr ⇒ retirement_buffer_empty`（Decode.scala L707-708，单 Context 用全 ROB 排空换正确性）与 RVV `configInvalid` 互锁（L524-533，挡 vset 后的向量 LSU dispatch）。**本文提案**：把"全 ROB 空"改为**每 Context** 的 CSR/pending-config gate——只在"本 Context 存在未结算的 flags delta 或未提交配置写"时挡住 CSR 读与依赖快照的后续 op。该屏障是本 Context 程序序必要串行化，不违反 CFG-05（该条只禁无关 Context 引起的全核串行化）。备选：清零/读 flags 时直接形成同款 Context 局部屏障，实现更简单但挡住本 Context 年轻 FP 提前完成 **[待review]**。
+- **CSR 读值与配置可见性互锁**：退休点合并/提交意味着**提前执行读不到新值**——`csrr fflags/vxsat/vl/vtype` 等架构态读须等本 Context 更老的未合并 delta/未提交配置全部结算（本轮不实现 forwarding）；`vset*/mset*` 未提交时，后续依赖该配置的向量/矩阵 op 的快照须等其提交。Coral 先例：DispatchV2 `canDispatch` 的 `isCsr ⇒ retirement_buffer_empty`（Decode.scala L707-708，单 Context 用全 ROB 排空换正确性）与 RVV `configInvalid` 互锁（L524-533，挡 vset 后的向量 LSU dispatch）。**已选实现**：把"全 ROB 空"改为**每 Context** 的 CSR/pending-config gate——只在"本 Context 存在未结算的 flags delta 或未提交配置写"时挡住 CSR 读与依赖快照的后续 op。该屏障是本 Context 程序序必要串行化，不违反 CFG-05（该条只禁无关 Context 引起的全核串行化）。不采用以全面局部排空代替 ordered-delta 的备选方案；保留本条 CSR 读／pending-config 必需互锁。
 - Context-local CSR 访问不得因无关 Context 在途而全核串行化（CFG-05）；Tile-global 特权清单（CFG-06）**非空**：profile 切换、reset、program invalidate、debug 控制属管理侧特权路径（W6/管理面持有，小 debug FIFO 与特权导出控制归 W6），普通 Context 禁止触发；只读能力/时间基准 CSR 共享。
 
 ### 3.7 等待、WFI 与终止的分离
@@ -179,20 +179,20 @@ ROB 组织候选：
 
 ## 6. 配置、PPA、性能模型和 PMU
 
-| 参数                  | 建议值/策略                                                                                                                                     | 状态                                 |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
-| `context_count`       | ≥2（validator 支持 1..8，非硅片规模承诺）                                                                                                       | 由后续规格冻结                       |
-| 发射 bundle 宽度      | 沿用 4 lane 单 Context 前缀或收窄                                                                                                               | [待review]，变更属指纹变更（PAR-06） |
-| ROB 组织              | 每 Context 静态私有分区＋独立 head/free/credit（候选 1，推荐）；共享 free-list＋每 Context list（候选 2）为可评审替代                           | [待review]                           |
-| GPR/FPR 组织          | 候选 A 全复制（推荐）                                                                                                                           | [待review]                           |
-| 取指缓冲/ROB/seq 位宽 | 覆盖最大在途×最大响应存活期；否则受控排空后回绕（CTX-06）                                                                                       | 由后续规格冻结                       |
-| 停顿归因优先序        | wait_event > engine_queue > stream（validator 序），扩展类（wait_region/wait_fetch/wait_operand/wait_dest）注册进 PMU manifest（SCH-10/OBS-07） | 固定进实现规格 [待review]            |
+| 参数                  | 建议值/策略                                                                                                                                | 状态                                                 |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------- |
+| `context_count`       | 首版 C1=1、C2=2；更多 Context 不自动列为 supported                                                                                         | 目标配置已选；状态深度仍需资源证明                   |
+| 发射 bundle 宽度      | 保留 Coral 4 lane，单 Context 连续前缀                                                                                                     | 已选；进入 target 指纹                               |
+| ROB 组织              | 每 Context 静态私有分区＋独立 head/free/credit                                                                                             | 已选候选 1；深度由 W2-01 冻结                        |
+| GPR/FPR 组织          | 每 Context 全复制                                                                                                                          | 已选 A；写回端口预算仍须验证                         |
+| 取指缓冲/ROB/seq 位宽 | 覆盖最大在途×最大响应存活期；否则受控排空后回绕（CTX-06）                                                                                  | 由后续规格冻结                                       |
+| 停顿归因优先序        | 既有 wait_event > engine_queue > stream 相对顺序保留；新增 wait_region/wait_fetch/wait_operand/wait_dest 按实际 eligibility 拦截点唯一归因 | W2-01 与 W7-01 冻结完整枚举表，禁止 UNKNOWN fallback |
 
 性能观测：per-Context 发射/退休/停顿计数、`ctx_switch`、取指饥饿计数、拒收旧回包计数、`task_retirement_wait` 对应计数。比较口径：RTL 的 per-Context **原生指令序**对拍**独立 ISA oracle**（golden model，W7 建）；validator 只对拍 **abstract contract 节点**（launch/wait/signal/RET 等合同节点序列）与跨 Context 依赖偏序——不做 raw 指令序等价、不比较 PC，也不要求全局 interleave 逐周期一致（总体设计 时间权威条款）。不承诺利用率估算、无 PPA 宣称。
 
 ## 7. RTL/软件实现建议
 
-目标 RTL 目录 `hardware/coral_nexus/`（本轮只设计；现有 `hardware/` 其他目录不动、不依赖）。
+目标 RTL 目录 `hardware/coral_nexus/` 待 W0 创建；本轮仅设计批准同步与计划，不依赖历史 hardware 工程。
 
 Chisel 侧（scalar 域）：
 
@@ -236,10 +236,10 @@ SV 侧（RVV 域）：
 
 ## 9. 风险、取舍和后续细化方向
 
-1. **[待review]** context_count、bundle 宽度、ROB 组织（候选 1 私有分区推荐／候选 2 free-list）、RF 组织（A/B）：候选与推荐已给，未冻结；面积/端口代价未做 PPA 评估（本轮不做，不作省面积断言）。
-2. **[待review]** RVV 侧定向取消（替代全 FIFO 冲刷）的具体机制（按 ctx 位图 clear vs 退休屏障）——需与 W3 联合定案；Coral 现状 trap 冲刷连标量/RVV 两域一起动（SCore `rvvFlushReg`），拆分面大。
-3. **[待review]** wait_region 新停顿类别在 OBS-07 owner 枚举中的注册方式；停顿优先序的实现规格化。
-4. **[待review]** fflags/vxsat 的 ordered-delta 合并与备选"局部 CSR 屏障"二选一（§3.6）；mset\* 快照与 MAT-10 检查点的责任切分（W3 主责，W2 保证快照时机）。
+1. 首版已选 C1/C2、四 lane、私有分区 ROB 与复制 RF；深度／端口与面积代价仍须实际配置和验证，不作省面积断言。
+2. RVV 定向取消采用按 owner 标记并排空／隔离已接受项，不整队列 clear；W3 实现，W2 集成 scalar/顶层接口。CS1 仍为 Group fail-stop，不能据此宣称 Context 局部故障恢复。
+3. wait_region 等新增停顿类别由 W2-01／W7-01 注册进唯一枚举表，按实际拦截点固定优先序并做重叠原因负例。
+4. 已选 fflags/vxsat ordered-delta 合并＋CSR 读／pending-config 局部互锁；mset 快照归 W2，MAT-10 合法转移检查归 W3，W5 封印同一张表。
 5. 写回端口预算：全复制 RF＋N Context 写回路由可能成为时序瓶颈，需在实现规格中给出端口数与仲裁表。
 6. 取指端口与冷装载争用本地指令存储（RES-17/T-58/T-66）由 W4/W5 主责，W2 只提有界服务需求；若仲裁失效表现为 FET-07 饥饿计数。
 7. validator 不建模取指/寄存器/译码（程序为 insts 列表＋label 跳转，tile.py L716/L733-740）；validator 对拍只用合同节点/依赖（§8），RTL 指令序对独立 ISA oracle；仅当需要把 RTL 合同节点对回 validator 节点时，才由 W7 定义两者的锚点映射。

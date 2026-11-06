@@ -1,8 +1,8 @@
-# W4 内存子系统详细设计评审稿（LSU／MFE／L1 bank SPM+cache／MSHR／gather-scatter／Profile／Arena）
+# W4 内存子系统已评审设计（LSU／MFE／L1 bank SPM+cache／MSHR／gather-scatter／Profile／Arena）
 
-> 本组件为设计评审稿，跨包合同与用户裁决见[总体设计](../Coral_Nexus_Tile_Design.md)；r5 指[需求规格](../../../Coral_NPU_to_Nexus_Tile_Requirements_v0.1.md)。本轮检查见[设计验证记录](../Design_Validation.md)，不代表组件已实现。
+> 本组件设计已通过用户 review，推荐方案采用情况与参数冻结任务见[实施总计划](../plan.md)；跨包合同见[总体设计](../Coral_Nexus_Tile_Design.md)，r5 指[需求规格](../../../Coral_NPU_to_Nexus_Tile_Requirements_v0.1.md)。[设计验证记录](../Design_Validation.md)不代表组件已实现。
 
-状态: 待review（评审稿，非获批实施计划；机械参数未经本轮用户确认者一律标注）。
+状态：设计已获用户 review 通过；推荐机制用于实施计划。机械深度／位宽／预算由具体前置任务冻结，未开始实现。
 范围: CS1 Tile 内存相关全部 owner。**Tile 内一切可变内存状态的唯一执行 owner 是本包 RTL**（LSU/MFE/L1 bank/SPM+cache/MSHR/Arena 账本/Frame/program SRAM 物理；本地事件归 W6）；Python 只保留 Tile 外部服务（Group 调度、L2/cache/MSHR 存储器服务、NoC、HBM）与父资源账本（R lease、L2 pin、页授权权威、root retirement），并提供只读 shadow/静态 plan 镜像，**不代执行、不代写 L1、不代发本地完成**（总体设计 §2；W1 全 Tile 联仿口径）。
 需求基线: `../../../Coral_NPU_to_Nexus_Tile_Requirements_v0.1.md` r5 §10（MEM-01…13、DMA-01…13、GAT-01…20、ADR-01…07）与 §11（PRO-01…17、ADM-01…12、ARN-01…09、FRM-01…04、RES-09…19）；RST-07/08 排空、FLT-02/04/05 取消合同；模块入口见 r5 §20.1 `scalar/Lsu.scala` 行、§20.1.1 "本地 L1 存储子系统"/"scope 授权服务" 新增行。
 

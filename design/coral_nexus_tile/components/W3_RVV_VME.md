@@ -1,8 +1,8 @@
 # W3 组件设计：RVV / VME 执行与矩阵区域（BF16 数值、区域 lease）
 
-> 本组件为设计评审稿，跨包合同与用户裁决见[总体设计](../Coral_Nexus_Tile_Design.md)；r5 指[需求规格](../../../Coral_NPU_to_Nexus_Tile_Requirements_v0.1.md)。本轮检查见[设计验证记录](../Design_Validation.md)，不代表组件已实现。
+> 本组件设计已通过用户 review，推荐方案采用情况与参数冻结任务见[实施总计划](../plan.md)；跨包合同见[总体设计](../Coral_Nexus_Tile_Design.md)，r5 指[需求规格](../../../Coral_NPU_to_Nexus_Tile_Requirements_v0.1.md)。[设计验证记录](../Design_Validation.md)不代表组件已实现。
 
-状态：设计评审稿（未获批实施计划）。对应需求：`Coral_NPU_to_Nexus_Tile_Requirements_v0.1.md` r5 §9（VEC-01～06、MAT-01～24）、§9.3/§9.4、§16.1/16.2（PAR-06）、D-21、D-26、D-29、X-26。本文只写设计 guide，不改 RTL/Python。上游固定版本：coralnpu `f795221`、coralnpu-compiler `d715556`（需求文档 §3.1）；本文全部数值/结构证据来自该 pin 的源码阅读，**均未 RTL 实跑**。数值口径以用户确认为准：**BF16 输入/输出、FP32 内部累加；VME 内部 BF16 乘/累加保留上游 round-to-odd（ROD）及实际有限宽/归约/overflow/flags 语义，不做 RNE 算术改造**（2026-11-05 用户确认）；最终 BF16 输出收窄推荐 frm=RNE，仍待review。r5 §9.3 “FP32 对外输出”的旧口径按用户决定分离为单列语料（见 §6.4），不改现存 fixture。
+状态：已评审设计（详细实施计划已编制，未开始实现）。对应需求：`Coral_NPU_to_Nexus_Tile_Requirements_v0.1.md` r5 §9（VEC-01～06、MAT-01～24）、§9.3/§9.4、§16.1/16.2（PAR-06）、D-21、D-26、D-29、X-26。本文只写设计 guide，不改 RTL/Python。上游固定版本：coralnpu `f795221`、coralnpu-compiler `d715556`（需求文档 §3.1）；本文全部数值/结构证据来自该 pin 的源码阅读，**均未 RTL 实跑**。数值口径以用户确认为准：**BF16 输入/输出、FP32 内部累加；VME 内部 BF16 乘/累加保留上游 round-to-odd（ROD）及实际有限宽/归约/overflow/flags 语义，不做 RNE 算术改造**（2026-11-05 用户确认）；最终 BF16 输出收窄已按用户选择的推荐方案采用 frm=RNE。r5 §9.3 “FP32 对外输出”的旧口径按用户决定分离为单列语料（见 §6.4），不改现存 fixture。
 
 ## 1. 定位、目标和 First Silicon cutline
 
@@ -31,7 +31,7 @@
 
 ### 3.1 实例与路由（MAT-18～MAT-23）
 
-- 结构：`vme_region_lease`（模块名建议，待review）维护每实例 `{busy, owner ContextKey, region_id, generation}` 表 + 每 Context 一条等待记录；实例数据面为上游 `zvt` 的完整复制维度（`ZVT_RS` 入口、mt、PE 阵列、vme2lsu/lsu2vme、fpexp、retire 命令队列各自独立）。
+- 结构：`vme_region_lease`（已选逻辑模块名）维护每实例 `{busy, owner ContextKey, region_id, generation}` 表 + 每 Context 一条等待记录；实例数据面为上游 `zvt` 的完整复制维度（`ZVT_RS` 入口、mt、PE 阵列、vme2lsu/lsu2vme、fpexp、retire 命令队列各自独立）。
 - 授予：START 到达且有空闲实例 → 硬件选择（work-conserving，平局确定轮转）；无空闲 → 停靠（FIFO）。同周期竞争规则按 MAT-12：多实例同周期释放、多等待者同周期到达时，每实例至多授予一个等待者、每等待者至多得一个实例；释放-授予同周期不丢唤醒、不重复授予、不提前转交。
 - 绑定：授予即建立 Context→实例绑定，矩阵 uop 按绑定分发；每实例入口队列独立背压，一实例满不阻塞其他 Context 的无关 uop（MAT-22）。绑定保持到 region_done，不迁移不拆分；跨区域不读 mt 残留（MAT-10），故无需亲和性。
 - 上游现状（改造量依据，X-26）：`rvv_backend_define.svh` L113-117 `NUM_VME=1`；`rvv_backend.sv` L1056-1084 仅实例化一个 `zvt`，ZVT_RS/res_vme2rvv/vmeRt/fpexp/vme2lsu/flush 均单路；`zvt.sv` L251-274 为单条按序 retire 命令队列（深度 8）；flush 为全局单路。N>1 是真实结构改造（每实例队列、owner+实例号关联返回/退休/fpexp/访存/flush），接口按 N 维书写，实现后延且不宣称 N≥2 通过。
@@ -80,14 +80,14 @@ ACTIVE ──END 声明被接受（已接受操作集合关闭）──▶ END_D
 | 接口        | 对端  | 方向 | 内容（要点）                                                                                                                             | 背压/错误                                                                                                         |
 | ----------- | ----- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | uop 发射    | W2    | 入   | 矩阵/向量 uop（含 owner、配置快照、START/END、FIRST/CONTINUE/FINAL 声明、rob_tag、op_seq）                                               | START 在入共享队列前由 lease 检查：授予或停靠；实例入口队列满只阻塞该 Context（`engine_queue_full` 归因，OBS-07） |
-| mt 类操作   | 内部  | —    | `vtzero/vtmv/tile load/drain`（isZero/isMv2Vme/isLoad/isStore/isPe，zvt_ctrl.sv L102-134）                                               | 上游 tile 访存被 `!peBusy` 全局门控（L105-106）——多 Context 需按 owner/实例化改造（待review 项 §9）               |
+| mt 类操作   | 内部  | —    | `vtzero/vtmv/tile load/drain`（isZero/isMv2Vme/isLoad/isStore/isPe，zvt_ctrl.sv L102-134）                                               | 上游 tile 访存被 `!peBusy` 全局门控（L105-106）——多 Context 需按 owner/实例化改造（W3-02～04 的实现项）           |
 | 访存        | W4    | 双向 | 操作数 tile load、drain 输出 store（经 LSU/MFE），携带 owner+region_id+实例标识                                                          | 输出背压期间持 lease；drain 有界服务（MEM-02，与 W4 仲裁合同对接）                                                |
 | region 终态 | W6/W2 | 出   | region_done（成功）/失败终态记录（唯一、可靠、有界）；W3 向 W2 提供 region 排空证据；W2 汇发 EXEC_DRAINED 至 W6，由 W6 判定 RETIRE_READY | 不等待软件消费事件（MAT-15）；W3 为 VME 区域等待记录唯一 writer（W6 管事件等待）                                  |
 | 插桩        | W7    | 出   | grant（含实例号+触发指令身份）/park/wake/state_free/region_done、fpexp、链跟踪（MAT-17、OBS-10）                                         | debug FIFO 满不影响释放/唤醒；正常模式不留历史 trace                                                              |
 | 配置表      | W5    | 入   | 封印 kernel/region 描述符：链表、转移表、drain 指令白名单、资源包络                                                                      | 静态越界在构建/加载拒绝（CMP-19）                                                                                 |
 | 指纹        | W5/W7 | 出   | N、TE、NUM_MT、subtile、管线深度、numeric profile 标识（PAR-06，见 §6.3）                                                                | 变化＝artifact 作废重编译                                                                                         |
 
-上游固定源码（pin `f79522157fc0f1d7311f44e209fc36c9c8b7a039`，实施入口参考，最终命名待review；实现目标目录 `hardware/coral_nexus/`）：[zvt.sv][H12]、[zvt_ctrl.sv][H15]、[zvt_mt.sv][H16]、[zvt_pe_array.sv][H17]、[zvt_pe_block.sv][H18]、[zvt_pe_mulbulk_fp_lane.sv][H19]、[zvt_pe_adder_fp_lane.sv][H20]、[fp_rounding.sv][H21]、[rvv_backend.sv][H13]、[rvv_backend_dispatch.sv][H14]、[RvvFrontEnd.sv][H11]、[rvv_backend_define.svh][H09]、[inc/rvv_backend.svh][H22]、[rvv_backend_falu_unit.sv][H23]、[RvvCore.scala][H24]、[Core.scala][H01]、[Parameters.scala][H08]、[flags.bzl][H25]、[rules/repos.bzl][H26]、[cvfpu pin fpnew_pkg.sv][H27]、[matrix_codegen.md][C01]、[官方 VME 文档][S04]。
+上游固定源码（pin `f79522157fc0f1d7311f44e209fc36c9c8b7a039`，实施入口参考，具体文件名见实施计划；实现目标目录 `hardware/coral_nexus/`）：[zvt.sv][H12]、[zvt_ctrl.sv][H15]、[zvt_mt.sv][H16]、[zvt_pe_array.sv][H17]、[zvt_pe_block.sv][H18]、[zvt_pe_mulbulk_fp_lane.sv][H19]、[zvt_pe_adder_fp_lane.sv][H20]、[fp_rounding.sv][H21]、[rvv_backend.sv][H13]、[rvv_backend_dispatch.sv][H14]、[RvvFrontEnd.sv][H11]、[rvv_backend_define.svh][H09]、[inc/rvv_backend.svh][H22]、[rvv_backend_falu_unit.sv][H23]、[RvvCore.scala][H24]、[Core.scala][H01]、[Parameters.scala][H08]、[flags.bzl][H25]、[rules/repos.bzl][H26]、[cvfpu pin fpnew_pkg.sv][H27]、[matrix_codegen.md][C01]、[官方 VME 文档][S04]。
 
 ## 5. 数据流、控制流和时序路径
 
@@ -108,7 +108,7 @@ ACTIVE ──END 声明被接受（已接受操作集合关闭）──▶ END_D
 | ----------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | VME matmul（主）        | BF16 | FP32（mt 内，内部 ROD 已用户确认）                                                                                                                                                    | FP32→BF16 收窄（RVV 侧）                 | 固定 RTL 与编译器源码证据（§1）；尚未构建/执行                                                                                                  |
 | VME matmul（FP32）      | —    | —                                                                                                                                                                                     | —                                        | **历史参考、当前不交付**：上游存在该路径，但本轮不列入主支持矩阵、不需为其补编译/执行证据；splitk 的 FP32 对外输出亦非 D-21 关闭前置（见 §6.4） |
-| BF16 输出收窄           | FP32 | `vfncvtbf16.f.f.w`＝fpnew F2F（src2=FP32→dst=FP16ALT，`rvv_backend_falu_unit.sv` L442-447，`ZVFBFWMA_ON` 门控）；rnd=frm（L238）⇒ frm=RNE 可实现；NaN/Inf/subnormal 按 fpnew F2F 合同 | BF16                                     | 代码证据（未 RTL 实跑）；**推荐 frm=RNE，待review 未确认**；与 VME 内部 ROD 分开单列                                                            |
+| BF16 输出收窄           | FP32 | `vfncvtbf16.f.f.w`＝fpnew F2F（src2=FP32→dst=FP16ALT，`rvv_backend_falu_unit.sv` L442-447，`ZVFBFWMA_ON` 门控）；rnd=frm（L238）⇒ frm=RNE 可实现；NaN/Inf/subnormal 按 fpnew F2F 合同 | BF16                                     | 代码证据（未 RTL 实跑）；**已选 frm=RNE；尚需 RTL 验证**；与 VME 内部 ROD 分开单列                                                              |
 | vecmat BF16（宽化 FMA） | BF16 | RVV `vfwmaccbf16.vf`＝FMADD src=FP16ALT→dst=FP32（`rvv_backend_falu_unit.sv` L312-318，rnd=frm）                                                                                      | 内部 FP32；完成绑定输出前必须收窄为 BF16 | [C01] L92；代码证据，待执行证据                                                                                                                 |
 | EVU 类算子              | BF16 | RVV（Zve32f+Zvfbfmin 转换，按 actual march flag 集）                                                                                                                                  | BF16                                     | 映射设计（VEC-04），W5 binding                                                                                                                  |
 | INT8/FP16               | —    | —                                                                                                                                                                                     | —                                        | 本轮不支持，能力矩阵显式标注（不静默降级）                                                                                                      |
@@ -124,7 +124,7 @@ ACTIVE ──END 声明被接受（已接受操作集合关闭）──▶ END_D
 
 ### 6.3 参数与指纹（PAR-06/PAR-08）
 
-进入 target 指纹的 VME/RVV 字段（建议名，映射现行 `boa_*`，CMP-16）：`vme_instance_count`（=N）、`vme_te`（=VLEN/8，默认构建 VLEN=128→TE=16，`Parameters.scala` L100-121）、`vme_num_mt`（16）、`vme_subtile_bytes`（16）、`vme_pipe_mulbulk/adder`（上游默认 3/3，`zvt_pe_block.sv` L34-35）、`rvv_vlen`、`rvv_queue_depths`、`numeric_profile_id`。现行 validator 指纹字段 `boa_dtype_bytes=2`/`boa_acc_bytes=4`（`config.py` L252-253、`execution_verifier.py` L82-83）语义上与 BF16-in/FP32-acc 一致，须重命名映射并保持数值语义（BF16 I/O：input_bytes=2、accumulator_bytes=4、**output_bytes=2** 为新增字段，待review）。validator 现状 BOA 仅 latency 模型（`engines.py` L205 `latency = launch_overhead + ceil(ops/peak_macs)`），launch 进 `opaque_events`、FREE_L1 前须全部 await（`execution_verifier.py` L791/L827）——RTL 接入后该保守保护由真实 VME 完成点替代（对齐 W5/W7 改造，不在本组件内改 Python）。
+进入 target 指纹的 VME/RVV 字段（建议名，映射现行 `boa_*`，CMP-16）：`vme_instance_count`（=N）、`vme_te`（=VLEN/8，默认构建 VLEN=128→TE=16，`Parameters.scala` L100-121）、`vme_num_mt`（16）、`vme_subtile_bytes`（16）、`vme_pipe_mulbulk/adder`（上游默认 3/3，`zvt_pe_block.sv` L34-35）、`rvv_vlen`、`rvv_queue_depths`、`numeric_profile_id`。现行 validator 指纹字段 `boa_dtype_bytes=2`/`boa_acc_bytes=4`（`config.py` L252-253、`execution_verifier.py` L82-83）语义上与 BF16-in/FP32-acc 一致，在新 RTL target 中使用明确的 RVV／VME 字段；Python-only 模型原 BOA 时序字段保留原义，不作为 VME 别名，映射由 W5-01 校验（BF16 I/O：input_bytes=2、accumulator_bytes=4、**output_bytes=2** 为真实 RTL target 新字段，由 W5-01／W0-04 落地）。validator 现状 BOA 仅 latency 模型（`engines.py` L205 `latency = launch_overhead + ceil(ops/peak_macs)`），launch 进 `opaque_events`、FREE_L1 前须全部 await（`execution_verifier.py` L791/L827）——RTL 接入后该保守保护由真实 VME 完成点替代（对齐 W5/W7 改造，不在本组件内改 Python）。
 
 ### 6.4 旧 FP32 输出语料（单列，不修改现存 fixture）
 
@@ -132,8 +132,8 @@ ACTIVE ──END 声明被接受（已接受操作集合关闭）──▶ END_D
 
 ## 7. RTL/软件实现建议
 
-1. 新增 `vme_region_lease`（名待review）：实例表+等待记录+链表+转移表检查+终态次序编码；上游 zvt 数据面按实例参数化复制（N=1 时退化为单实例字面行为）。retire 命令队列、fpexp、vme2lsu/lsu2vme 每实例独立并携带 owner+实例号（MAT-22）。
-2. START/END/FIRST/CONTINUE/FINAL 声明编码：三种载体候选——指令内标志位、伴随 CSR 写、自定义指令——**并列待review，首版评审定一种**（Coral Zvt 现有编码是否有可用位未核对，MAT-20 原文）；无论选哪种，声明快照必须**一次性原子采集**并与所属指令/区域绑定，不被中断/异常/Context 切换污染或重复消费（本设计不预设先后实现顺序）。
+1. 新增 `vme_region_lease`：实例表+等待记录+链表+转移表检查+终态次序编码；上游 zvt 数据面按实例参数化复制（N=1 时退化为单实例字面行为）。retire 命令队列、fpexp、vme2lsu/lsu2vme 每实例独立并携带 owner+实例号（MAT-22）。
+2. START／链位置声明采用受控 helper 写入每 Context 的 pending CSR metadata，并在其目标 mt 指令 accepted 时一次原子绑定、消费；停顿时保持，redirect/cancel 时按身份撤销，不跨 Context 污染。END 通过显式 helper 关闭已接受区域操作集合，位于最终输出操作提交之后；不自动 drain 或释放。具体 CSR 地址／权限／字段由 W1-01、W3-01、W5-01 核查固定上游空间后冻结，不占未经核实的 Zvt 保留位；不是仅在 manifest 写声明而机器码无对应动作。
 3. 配置转移检查挂在 `RvvFrontEnd.sv` 结算点（§3.4），表由封印产物下发（与 W5 的 manifest 字段对齐）；静态拒绝在 Loader（CMP-19）。
 4. flush 按 owner 化：上游 `flush` 全局清空（`zvt.sv` L273 `clear(flush)` 等），多 Context 下改为 per-owner 取消路径（MAT-16/22），Group fail-stop 域仍由 W6/W2 主导。
 5. tile 访存 `!peBusy` 门控（`zvt_ctrl.sv` L105-106）改 per-owner/per-instance 判定，避免 A 的 drain 被 B 的 PE 占用无界阻塞（MEM-02 有界服务）。
@@ -148,7 +148,7 @@ ACTIVE ──END 声明被接受（已接受操作集合关闭）──▶ END_D
 
 ### 8.2 恶性用例（数值）
 
-ROD 边界（guard/round/sticky 全组合、恰好半 ULP 奇偶差）；Inf×0、Inf−Inf、±Inf 累加溢出（两级不对称各验）；subnormal×subnormal（负批归一化指数）；BF16 最大值累加到 FP32 溢出；K=1（TK=1 模式 16418）与 K=2（16450）混合及**TK=1/TK=2 分组差**（同一 K 序列不同分组逐比特对比）；**乘树有限宽专项**：大指数差乘积对、异号大幅抵消、round/sticky jam 边界（`zvt_pe_mulbulk_fp_lane.sv` L415-419），与数学 exact 的差异按 §8.1 作诊断并给出量化；K 尾奇数；mask 全零/半 mask（断言路径）及 **masked lane 配 Inf/NaN 对侧操作数**（验证 mask 先于 special 分类：不得出现 0×Inf→NaN/NV，无 mask-before-op 证据时为专项 gate）；**链跨物理 mt**（基址 mt0 的 16×16 块占 mt0..mt3）与**多基址布局**（mt0/4/8/12 四个独立 accumulator，[C01] L9-14）；FP32 seed（含非零 `vtmv` 初值）→BF16 运算→FP32 drain 切换；收窄 `vfncvtbf16` 的 RNE/ties 边界（若 frm=RNE 获批）；FRDYN 静态拒绝；链未 FINAL 即 END。
+ROD 边界（guard/round/sticky 全组合、恰好半 ULP 奇偶差）；Inf×0、Inf−Inf、±Inf 累加溢出（两级不对称各验）；subnormal×subnormal（负批归一化指数）；BF16 最大值累加到 FP32 溢出；K=1（TK=1 模式 16418）与 K=2（16450）混合及**TK=1/TK=2 分组差**（同一 K 序列不同分组逐比特对比）；**乘树有限宽专项**：大指数差乘积对、异号大幅抵消、round/sticky jam 边界（`zvt_pe_mulbulk_fp_lane.sv` L415-419），与数学 exact 的差异按 §8.1 作诊断并给出量化；K 尾奇数；mask 全零/半 mask（断言路径）及 **masked lane 配 Inf/NaN 对侧操作数**（验证 mask 先于 special 分类：不得出现 0×Inf→NaN/NV，无 mask-before-op 证据时为专项 gate）；**链跨物理 mt**（基址 mt0 的 16×16 块占 mt0..mt3）与**多基址布局**（mt0/4/8/12 四个独立 accumulator，[C01] L9-14）；FP32 seed（含非零 `vtmv` 初值）→BF16 运算→FP32 drain 切换；收窄 `vfncvtbf16` 的 RNE/ties 边界（已选 frm=RNE）；FRDYN 静态拒绝；链未 FINAL 即 END。
 
 ### 8.3 区域/多实例用例（T 映射）
 
@@ -165,10 +165,10 @@ CS1 出口：T-62/T-68（N=1）全过；§8.2 数值恶性用例 bitwise oracle 
 
 1. **cvfpu 有公开固定 pin（更正先前结论）**：`rules/repos.bzl` `cvfpu_repos()`（L97-116）`http_archive` 指向 openhwgroup/cvfpu `bb65bdedd07711dfd41c621382f940a5cbb93046`（sha256=0723e6a6…，带 0001-0010 patch 列表）；该 pin 的 `src/fpnew_pkg.sv` 可公开读取，含 `FP16ALT`={8,7}（L27/L45/L55）与 `ROD=3'b101`（L146）。本文数值证据统一引用该 pin（+patch 后的语义仍以仓内 `Zvt/fp_*.sv` 实现为准），manifest 记录 pin+patch 集（PAR-01）。
 2. **Zvt v0.4 规范 PDF 不可达**：lists.riscv.org attachment 本环境无法下载；以官方 VME 页面（developers.google.com/coral/guides/hardware/vme-matrix-engine，已核对引文）+ 固定 RTL 内 “Zvt §12.1.1.x” 注释为准；如后续可获取 PDF 再补规范级引用。
-3. 声明编码空间（START/END/链位置）未核对 Zvt 编码余量（MAT-20）：三种载体（指令内标志/伴随 CSR 写/自定义指令）并列待review，首版定一种并一次性原子快照（§7.2）。
-4. `boa_*`→VME 指纹字段重命名与 `output_bytes=2` 新增、`frm=DYN` 静态拒绝位置（前端 vs Loader）——均待review，不视为用户已确认。
+3. 声明载体已选每 Context 伴随 CSR＋受控 helper；编码空间、原子消费、分支／取消和同拍发射边界由 W1-01／W3-01／W5-01 冻结并验证，不再并列保留三种待选实现。
+4. 真实 target 使用 RVV／VME 指纹及 input_bytes=2、accumulator_bytes=4、output_bytes=2；旧 Python BOA 时序字段不成为别名。`frm=DYN` 在构建与 Loader 拒绝，RTL 运行期仍检查；具体版本映射由 W5-01／W0-04 闭合。
 5. 上游单路结构（全局 flush、`!peBusy` 门控、单 retire 命令队列）在多 Context/多实例下的改造规模是主要进度风险；接口已按 N 维设计，但任何 N≥2 的时序/面积结论本轮不做（含利用率，D-29）。
-6. BF16 输出收窄在 RVV（`vfncvtbf16.f.f.w`＝fpnew F2F，rnd=frm，代码证据未实跑）而非 VME 内：**推荐 frm=RNE，待review 未确认**；获批后与内部 ROD 一并进 profile 与 oracle。
+6. BF16 输出收窄在 RVV（`vfncvtbf16.f.f.w`＝fpnew F2F，rnd=frm）而非 VME 内，已采用 `frm=RNE`；与内部 ROD 一并进入 profile 与 oracle，仍须真实指令实跑。
 7. **数值决策已定项（2026-11-05 用户确认）**：VME 内部 BF16 保留上游 ROD 及实际有限宽（jam）/归约顺序/overflow 不对称/仅 OF·NV flags 语义，不做 RNE 算术改造；本文 ROD 条目按 pin 源码书写并标“未 RTL 实跑”，profile 定义/ID 先冻结供构建封印，能力在实跑＋bitwise oracle 通过后才标 supported（§8.4）。
 8. 构建口径：actual march＝`rv32imf_zve32f_zicsr_zifencei_zbb_zfbfmin_zvfbfmin_zvfbfwma`（W0 核对，与 README 字串不同，以 actual 构建规则为准）；`ZVTBF16FMM_ON`/`ZVFBFWMA_ON` 经 Chisel 生成 config 头启用（§1），若新 Tile 改用自建构建须显式重下发这些宏并进 manifest（PAR-01/PAR-02）。
 

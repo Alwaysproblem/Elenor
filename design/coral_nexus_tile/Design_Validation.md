@@ -6,7 +6,7 @@
 
 初次交付位于 `design/coral_nexus_tile/`：总体设计、8 份组件设计、本文及 3 张架构图的 SVG 源／PNG 展示版。随后按用户 review 同步输入释放勘误：总架构 §16.3.1、需求 ARN-05／09 与 §12、Coral 总体 §4.4 及 W1／W2／W4／W5／W6／W7，明确阶段通知、纯读 pin 解除、按 buffer release、物理 final-free 与剩余资源退休相互独立；不新增按范围释放能力。未修改 `prompt.md`、`prompt_temp.md`、现有 Python／RTL／测试／fixture、图示或系统配置。
 
-用户确认的设计方向：Coral 派生完整 Tile RTL 与 pipeline validator CS1；BF16 张量输入／输出、FP32 内部累加；沿用 Coral BF16 VME 内部 ROD。最终 BF16 转换推荐 RNE，仍是待 review 项。
+用户确认的设计方向：Coral 派生完整 Tile RTL 与 pipeline validator CS1；BF16 张量输入／输出、FP32 内部累加；沿用 Coral BF16 VME 内部 ROD。最终 BF16 转换已随用户通过设计 review、采用推荐方案而确定为 RNE；此批准不是 RTL 实跑证据。
 
 本轮未运行：pytest／pre-commit 全库门、Coral Bazel 构建、RTL elaboration／simulation、容器镜像构建、综合、FPGA 或 PPA。没有依赖安装。所列未来命令只属于设计接口，不代表已有脚本。
 

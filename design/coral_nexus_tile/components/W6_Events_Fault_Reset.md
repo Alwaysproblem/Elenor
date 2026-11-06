@@ -1,6 +1,6 @@
 # W6 事件、故障、取消、复位与时钟门控（Events / Fault / Cancel / Reset / Clock-gating）
 
-> 本组件为设计评审稿，跨包合同与用户裁决见[总体设计](../Coral_Nexus_Tile_Design.md)；r5 指[需求规格](../../../Coral_NPU_to_Nexus_Tile_Requirements_v0.1.md)。本轮检查见[设计验证记录](../Design_Validation.md)，不代表组件已实现。
+> 本组件设计已通过用户 review，推荐方案采用情况与参数冻结任务见[实施总计划](../plan.md)；跨包合同见[总体设计](../Coral_Nexus_Tile_Design.md)，r5 指[需求规格](../../../Coral_NPU_to_Nexus_Tile_Requirements_v0.1.md)。[设计验证记录](../Design_Validation.md)不代表组件已实现。
 
 ## 1. 定位、目标和 First Silicon cutline
 
@@ -199,13 +199,13 @@ Context park 请求（WAIT/WFI/停靠）→门控控制块验证无同周期到�
 
 ## 9. 风险、取舍和后续细化方向
 
-1. 同周期"完成优先"仲裁对 UCE 关键路径的影响（CAM 匹配与 park 判定同拍）——待 review，可选"park+wake 同周期"等价实现，但必须二者择一固定。
-2. Tile 侧复位端点与 Python Group FSM 的职责切分（端点只执行本地段、Group 持顺序权威）是否会在 CS1 联仿中引入双 FSM 漂移——待 review（与 W0/W1 联合）。
-3. frontier 配额的 RTL 承载（每 Context 槽 vs 全局池）与编译器 manifest 字段格式——依赖 W5 manifest 冻结。
+1. 同周期采用“完成优先”的原子 check-register，不采用 park+wake 备选；W6-02 验证 CAM 匹配、错误终态与背压，不把同拍语义变成全核屏障。
+2. Group 唯一持有复位顺序／watchdog，Tile 端点只执行本地段并确认；W6-03 与 W1 验证相位 ACK、timeout 升级及无双 FSM 推进。
+3. 已选每 Context frontier 事件槽；容量与 manifest 字段由 W6-01／W5-01 共同冻结，不设置另一全局借槽池。
 4. `VME_REGION_DONE` 映射到本地事件命名空间的确切形式（`ctx{N}:<name>`）与 manifest 映射——依赖 W3 接口定稿。
 5. debug FIFO 与 first-fault 摘要的物理边界（寄存器数、always-on 域功耗）——`由后续规格冻结`。
 6. WFI 语义改造对既有 Coral 软件流（FPGA 每次 Run 重写起始 PC）的兼容影响——本阶段无 FPGA，仅记录。
-7. ABA 位型复用的机制选择（受控排空阻止回绕 vs 保留未回绕外层 epoch）、外层 epoch 位宽与寿命上界——待 review，依赖 W1 通道重放/ACK 寿命证据。
+7. ABA 采用受控排空后回绕：覆盖通道在途／重放／ACK 的旧身份寿命，未闭合不得复用位型；字段宽度与排空域由 W1-01／W6-01 冻结，W6-03 强制小位宽验收。
 
 依赖：W2（UCE/Context 状态机、发射握手）、W3（VME region/实例清理钩子）、W4（传输取消/隔离确认、MSHR/accepted 计数）、W5（manifest 事件声明、驻留失效）、W1（CTRL/EVENT 通道与信用）、W0/W7（联仿对拍与观测）。接口先共审、单元可独立验证；集成依赖按总体设计 §7.3，不把双向接口误作循环开工顺序。
 

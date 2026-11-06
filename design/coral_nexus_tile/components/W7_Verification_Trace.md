@@ -1,8 +1,8 @@
-# W7 验证、68 场景追踪与 Trace／重放／性能（评审稿）
+# W7 验证、68 场景追踪与 Trace／重放／性能（已评审设计）
 
-> 本组件为设计评审稿，跨包合同与用户裁决见[总体设计](../Coral_Nexus_Tile_Design.md)；r5 指[需求规格](../../../Coral_NPU_to_Nexus_Tile_Requirements_v0.1.md)。本轮检查见[设计验证记录](../Design_Validation.md)，不代表组件已实现。
+> 本组件设计已通过用户 review，推荐方案采用情况与参数冻结任务见[实施总计划](../plan.md)；跨包合同见[总体设计](../Coral_Nexus_Tile_Design.md)，r5 指[需求规格](../../../Coral_NPU_to_Nexus_Tile_Requirements_v0.1.md)。[设计验证记录](../Design_Validation.md)不代表组件已实现。
 
-上游需求：`../../../Coral_NPU_to_Nexus_Tile_Requirements_v0.1.md`（r5）§16.3～16.4、§17、§18、§19、§22；NEST 语料规范：`../../../examples/scenarios/nest_subgraphs/NEST_Context_Scheduling_Test_Spec.md`。本文件是详细设计评审稿，仅写文档，不含任何已运行证据；文中"当前代码"证据均为仓库现状引用，未在本轮执行。
+上游需求：`../../../Coral_NPU_to_Nexus_Tile_Requirements_v0.1.md`（r5）§16.3～16.4、§17、§18、§19、§22；NEST 语料规范：`../../../examples/scenarios/nest_subgraphs/NEST_Context_Scheduling_Test_Spec.md`。本文件是已评审详细设计，仅写文档，不含任何已运行证据；文中"当前代码"证据均为仓库现状引用，未在本轮执行。
 
 ## 1. 定位、目标和 First Silicon cutline
 
@@ -157,7 +157,7 @@ Host 经 W1 adapter 被动监听边界端口（VER-12），每条观测一行版
 | T-26 | W6    | CS1                      | reset/debug halt 与在途访存/完成同窗竞争；oracle＝每已接受命令终态唯一；无 double-settle                                                                                                                                                                                                                                                                                                           |
 | T-27 | W6    | CS1                      | 全部 Context 等待+后端在途+边界到达事件；oracle＝唤醒链闭合（全部被唤醒或显式终态）                                                                                                                                                                                                                                                                                                                |
 | T-28 | W3    | CS1                      | A 矩阵长链+B scalar/RVV/访存交错+并发矩阵请求；oracle＝数值独立对拍；lease 授予互斥且公平性在承诺界内                                                                                                                                                                                                                                                                                              |
-| T-29 | W3    | 单元+CS1                 | 尾部 K%VL、mask=0 行、±Inf/NaN/subnormal、seed 三来源（vtzero/vtmv/tile load）；oracle＝FP32 累加＋BF16 输出转换逐元素判据（内部已确认 ROD＋实际有限宽/归约顺序按真实指令证据建模；输出转换舍入单列待review；构建/oracle/实跑 gate 未过前本行不能 PASS，见 §8.4）                                                                                                                                  |
+| T-29 | W3    | 单元+CS1                 | 尾部 K%VL、mask=0 行、±Inf/NaN/subnormal、seed 三来源（vtzero/vtmv/tile load）；oracle＝FP32 累加＋BF16 输出转换逐元素判据（内部已确认 ROD＋实际有限宽/归约顺序按真实指令证据建模；输出转换单列为已选 RNE；构建/oracle/实跑 gate 未过前本行不能 PASS，见 §8.4）                                                                                                                                    |
 | T-30 | W5    | CS1                      | 同 image 双 Context+可写 static/stack/scratch manifest；oracle＝可写区地址集合不相交；只读代码共享合法                                                                                                                                                                                                                                                                                             |
 | T-31 | W5    | CS1+CS2                  | 并发 runtime 提交/barrier/event/输出；oracle＝barrier 同步遵循既有 root action 语义（不再是 no-op、与 validator 合同一致）；一次全局 init 后各 Context 独立启动（偏序）                                                                                                                                                                                                                            |
 | T-32 | W5    | CS1                      | 形状/布局变更与 fallback 变体；oracle＝报告的 kernel/backend 映射与实际映像 hash、反汇编路径一致；搬运量入资源账                                                                                                                                                                                                                                                                                   |
@@ -215,7 +215,7 @@ Host 经 W1 adapter 被动监听边界端口（VER-12），每条观测一行版
 
 - 实验前冻结：工作负载集（含内存等待可隐藏、VME 饱和、控制密集、随机访存）、基线（P0/P1/PN/PS 定义）、统计边界（PERF-03/06）；不事后挑选。
 - 度量：PERF-01（吞吐/makespan/单任务延迟/尾延迟/单 Context 回归）、PERF-02（等待原因/有效发射/退休/引擎活动/访存占用）、PERF-04（gather 有用/实际字节、合并率、outstanding）、PERF-05（计时终点含输出写回与完成语义）、PERF-07（调度机会 vs 固定加速比分列）。允许部分饱和负载不加速，但必须解释。
-- 数值判据（T-01/T-29/T-39/T-61/T-68 共用）：独立参考必须建模**已确认的**数值 profile——内部 BF16×BF16→FP32 路径为 ROD（用户已确认保留 Coral 内部 ROD），并按真实证据建模实际有限宽与累加归约顺序，不作 generic FP32 FMA 顺序假设；BF16 最终输出转换舍入**单列待review**（建议 RNE 尚未批准）。C4 相关行仍受 gate：封印构建完成、独立 oracle 就绪、实跑对拍完成前不得记 PASS。冻结后默认判据＝结果比特一致（含 flags/越界行为），**不自降通过标准**：参考无法复现须评审冻结参考语义或记 BLOCKED/FAIL，不得降 ULP 或修改参考以迎合 DUT；ULP 类判据仅在评审显式批准后作为独立补充，不替代 bitwise 合同；不得默换 FP16 或以 RVV/scalar 冒充 VME。
+- 数值判据（T-01/T-29/T-39/T-61/T-68 共用）：独立参考必须建模**已确认的**数值 profile——内部 BF16×BF16→FP32 路径为 ROD（用户已确认保留 Coral 内部 ROD），并按真实证据建模实际有限宽与累加归约顺序，不作 generic FP32 FMA 顺序假设；BF16 最终输出转换舍入**已选 RNE 并单列入 profile**。C4 相关行仍受 gate：封印构建完成、独立 oracle 就绪、实跑对拍完成前不得记 PASS。冻结后默认判据＝结果比特一致（含 flags/越界行为），**不自降通过标准**：参考无法复现须评审冻结参考语义或记 BLOCKED/FAIL，不得降 ULP 或修改参考以迎合 DUT；ULP 类判据仅在评审显式批准后作为独立补充，不替代 bitwise 合同；不得默换 FP16 或以 RVV/scalar 冒充 VME。
 - 精度范围澄清：BF16 收窄只针对张量 I/O 与内部 FP32 累加路径；i32 标量地址／索引／控制整数是既有 ISA 能力，不构成新增数值精度，也不在 C4 的 BF16 化范围内（共享合同）。
 - 禁止出现在报告：Fmax/面积/功耗宣称、多 VME 利用率估算、validator 周期当 RTL 真值、debug 扰动混入正常性能。
 
@@ -229,7 +229,7 @@ Host 经 W1 adapter 被动监听边界端口（VER-12），每条观测一行版
 
 ## 9. 风险、取舍和后续细化方向
 
-1. 数值 profile：内部 BF16×BF16→FP32 已确认保留 Coral ROD（用户裁决），实际有限宽与累加归约顺序须以真实指令/微架构证据建模；BF16 最终输出转换舍入仍单列待review（建议 RNE 尚未批准）。C4 相关行在构建、独立 oracle 与实跑完成前不得记 PASS（gate 不因 profile 确认而解除）；冻结后 bitwise 合同下不匹配只能是 FAIL，**不得把 oracle 降为 ULP 或修改参考来迎合 DUT**；ULP 类判据只能在评审显式批准后作为独立补充项。
+1. 数值 profile：内部 BF16×BF16→FP32 已确认保留 Coral ROD（用户裁决），实际有限宽与累加归约顺序须以真实指令/微架构证据建模；BF16 最终输出转换舍入已选 RNE，仍与内部 ROD 分列。C4 相关行在构建、独立 oracle 与实跑完成前不得记 PASS（gate 不因 profile 确认而解除）；冻结后 bitwise 合同下不匹配只能是 FAIL，**不得把 oracle 降为 ULP 或修改参考来迎合 DUT**；ULP 类判据只能在评审显式批准后作为独立补充项。
 2. payload blob 规模、hash 算法、记录二进制编码：由后续规格冻结，先以逻辑 schema 评审。
 3. RTL 插桩端口（OBS-10/12）与 W6 debug FIFO 的容量/扰动边界需 W1/W6 联合评审，避免 checker 依赖改变被测行为（OBS-05）。
 4. `StallReason` 扩展枚举（RVV 队列满、VME 忙[N>1 按实例]、LSU slot 满）须评审映射表后固定，避免 UNKNOWN 漂移。

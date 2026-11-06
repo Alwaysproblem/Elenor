@@ -1,9 +1,9 @@
 # Coral 派生 Nexus Tile：RTL 与 pipeline validator 联合仿真详细设计
 
-> 状态：**设计评审稿 v0.1，尚未获批实施**。本稿仅涉及设计文档与图示，不改 RTL／Python 实现，不建立代码脚手架。
+> 状态：**设计 v0.1 已通过用户 review，推荐方案用于详细实施计划**。执行入口见 [plan.md](plan.md)；本轮只列计划与同步决策，不改 RTL／Python 实现，不建立代码脚手架。
 > 输入：[prompt_temp.md](../../prompt_temp.md)、[prompt.md](../../prompt.md)、[Tile 需求规格 r5](../../Coral_NPU_to_Nexus_Tile_Requirements_v0.1.md)。
 > 本轮用户确认：**Coral Tile RTL 联仿；BF16 张量输入／输出，内部 FP32 累加；保留 Coral BF16 VME 内部 ROD 舍入**。
-> 评审顺序：本文件 §1、§2、§4、§9 → 各组件设计 → §8 验收。用户 review 且明确同意后，另写中文详细实施计划；本稿不等于实现授权。
+> 阅读顺序：[实施总计划](plan.md)的已选决策与依赖 → 本文件及负责组件 → 分包任务与验收。设计获批不代表任何目标已实现或验证通过；本次不自动开始代码开发。
 
 ## 1. 定位、目标和 First Silicon cutline
 
@@ -16,7 +16,7 @@
 | 项目         | 本次裁定                                                              | 不可误读为                                            |
 | ------------ | --------------------------------------------------------------------- | ----------------------------------------------------- |
 | 技术路线     | Coral 派生 Tile，按 r5 设计                                           | Gemmini 阵列或 Rocket＋RoCC BOA 项目                  |
-| 工程方式     | 当前仓库内独立子项目，建议路径 `hardware/coral_nexus/`；沿用 monorepo | 本轮已创建 RTL／容器脚手架                            |
+| 工程方式     | 当前仓库内独立子项目，目标路径 `hardware/coral_nexus/`；沿用 monorepo | 本轮已创建 RTL／容器脚手架                            |
 | 精度         | BF16 张量输入／输出；FP32 partial、累加及必要内部暂存                 | FP32／INT8 张量模式；把 BF16 偷换成 FP16              |
 | 内部数值语义 | 保留固定 Coral BF16 VME 的 ROD（round-to-odd）及实际归约／累加路径    | 普通 FP32 RNE FMA oracle；额外改造为内部 RNE          |
 | 标量／索引   | 整数地址、i32 索引、控制与配置保留                                    | “只做 BF16”意味着删除整数 ISA                         |
@@ -25,7 +25,7 @@
 | 环境         | Docker 为默认运行载体；dev container 引用同一锁定镜像                 | 宿主 apt／sudo／全局 pip／系统配置修改                |
 | 验证         | 真实映像、真实端口激励、独立数值参考、偏序和资源闭包                  | Python 算出结果塞回 RTL；周期估算当真实执行           |
 
-`prompt_temp.md` 的需求章节为空；经用户确认，目标采用 `prompt.md` 与 r5。其 Gemmini／BOA 分目录条款视为旧模板，**不**引入另一套实现。现有 `hardware/gemmini/`、`hardware/boa/` 不修改、不依赖。
+`prompt_temp.md` 的需求章节为空；经用户确认，目标采用 `prompt.md` 与 r5。其 Gemmini／BOA 分目录条款视为旧模板，**不**引入另一套实现。计划编制时仓库已无 `hardware/`；新建 `hardware/coral_nexus/`，不恢复或依赖旧 Gemmini／BOA 路线。
 
 r5 §9.3 的参考负载原要求 FP32 输出；本轮明确改为 BF16 对外输出。内部 FP32 seed／drain／scratch 合法，但不能作为新增的对外 FP32 运算模式。原 FP32 fixture 保持原样，另建 BF16 派生语料并重算 output shape／dtype／字节数、绑定、资源和 oracle；不能改输出 buffer 的标签后继续声称同一程序已覆盖。
 
@@ -126,7 +126,7 @@ r5 §9.3 的参考负载原要求 FP32 输出；本轮明确改为 BF16 对外�
 
 `FREE → HELD → ACCEPTED/INIT → READY → WAIT_EVENT/WAIT_RESOURCE → READY → DRAINING → RETIRE_READY → TERMINAL → FREE` 为本稿的逻辑状态；`HELD` 只属有界提交事务，不执行用户指令。
 
-- 每 Context 独立 PC、配置、寄存器语义与逻辑退休头。推荐首个设计采用易证明的静态分区 RF／ROB；共享物理存储可作为待评审替代，不能只给全局 FIFO 加多个 head 就声称无 HOL。
+- 每 Context 独立 PC、配置、寄存器语义与逻辑退休头。已选 GPR／FPR／VRF 按 Context 复制存储 bank，scalar／RVV ROB 静态私有分区＋独立 head/free/credit；共享 free-list 与全局回收 tail 不在本轮实现，不能只给全局 FIFO 加多个 head 就声称无 HOL。
 - 每次发射 bundle 来自一个 Context，只接受程序序的连续前缀。部分接受后只推进已接受指令；PC 按各指令实际长度推进，不假定“接受两条就加 2 字节”。
 - wait／region park 不能被该 Context 的年轻指令越过；其他 eligible Context、等待者已接受在途操作、返回与故障路径继续运行。
 - `RET` 停止新发射，不立即释放资源。W2 的 `EXEC_DRAINED` 是内部进度，非外部成功终态；还要走 §4.4 的 Group 驱动退休。
@@ -183,13 +183,13 @@ L1 是新增子系统，不把 Coral ITCM／DTCM 当成已具备 bank、SPM／ca
 ### 4.2 接受、可见性与重复
 
 - `valid && ready` 是一次 beat 的接受；发送方被阻塞时保持 `valid/payload`，不推进发送游标。命令接受、事务完成、数据可见和信用归还不是同一时刻。
-- 推荐 CS1 使用进程内 C ABI、固定宽度 POD／显式长度、单线程调用；本地可靠握手不引入 ACK 超时自动重试。显式 status 查询可幂等；重复已接受命令须按事务身份识别，不再执行。未来若改为可能丢消息的传输，重传／去重窗口另行评审。
+- CS1 已选进程内 C ABI、固定宽度 POD／显式长度、单线程调用；本地可靠握手不引入 ACK 超时自动重试。显式 status 查询可幂等；重复已接受命令须按事务身份识别，不再执行。未来若改为可能丢消息的传输，重传／去重窗口另行评审。
 - 控制 transport 的去重与语义重复不同：传输重播不得重复副作用，两个不同事务重复发布同一活 Task phase 仍是协议错误。不得把当前 `GroupPortAdapter` 的重复 CPU request 异常改成静默成功。
 - 不统一规定“收到 ACK 即全局可见”。MEMORY 响应必须声明 read／write／isolated／fault 及可见 scope；源读在真实服务点采样，目标写在对应 owner 的实际提交点发生。
 
 ### 4.3 准入：跨 owner 协调，不跨 Tile 成组
 
-以下为待评审的逻辑实现，遵守 IF-13／ADM-02；没有伪造 CSR 或 opcode：
+以下为已通过 review 的逻辑实现，遵守 IF-13／ADM-02；没有伪造 CSR 或 opcode：
 
 1. Group 创建有界 ticket，执行无副作用 PLAN，记录资源／Profile 版本；未成功的排队请求只占有界元数据。
 2. commit 事务内准备父 L2 pin／R 及控制预算，向 RTL 申请本地 Arena／Frame／Context slot hold。hold 排他占用容量（逐 bank `allocated=held+bound`），但不绑定可执行 UCE、不取指；终态／补偿记录同时预留，不能超卖给并发 ticket。
@@ -285,7 +285,7 @@ Context park／WFI、单元 idle 与 Tile quiescence 分别定义。返回、事
 
 profile 应记录上游实际归约／舍入／溢出／特殊值／mask 语义，独立参考先按该合同建立，不在不匹配之后改 oracle 迎合 DUT。源码疑似缺陷与 ISA 规范冲突要单独上报，不借“保留上游”免除验证。
 
-最终 FP32→BF16 输出转换是另一处舍入边界：上游 RVV `vfncvtbf16.f.f.w` 的 rounding 由 `frm` 决定，W3 已核对真实解码路径。**建议输出转换使用 RNE，尚待设计 review**；它不改变已确认的 VME 内部 ROD。NaN／Inf／subnormal／signed zero、无效 lane、flags、初值与 K 尾的精确合同、profile ID 与执行证据仍须在实现前闭合。
+最终 FP32→BF16 输出转换是另一处舍入边界：上游 RVV `vfncvtbf16.f.f.w` 的 rounding 由 `frm` 决定，W3 已核对真实解码路径。**输出转换已按用户选择的推荐方案确定为 RNE**；它不改变已确认的 VME 内部 ROD。NaN／Inf／subnormal／signed zero、无效 lane、flags、初值与 K 尾的精确合同、profile ID 与执行证据仍须在实现前闭合。
 
 不能用 BLAS／Python binary64 的“数值差不多”替代指令语义。独立 oracle 读取原始 BF16 bits，按受检 profile 执行并比较真实输出 bytes；profile 不匹配属于阻断项，不能放宽容差迎合 DUT。上游某 dtype 可译码不等于该构建配置已经数值验证。
 
@@ -299,7 +299,7 @@ RTL cycle 给出被测 Tile 的周期证据；Python HBM／L2 延迟仍是环境
 
 ### 7.1 Monorepo 结构建议
 
-下列是**待评审目标布局**，本轮只创建 `design/coral_nexus_tile/` 文档包，不创建其余目录脚手架。
+下列为已选目标布局；计划编制时仅设计文档存在，代码和环境目录由 [W0 实施计划](implementation/W0_Baseline_Environment_Plan.md)创建，本轮不建立脚手架。
 
 ```text
 hardware/coral_nexus/
@@ -319,7 +319,7 @@ out/coral_nexus/             未来运行产物，不混入源码
 .devcontainer/              引用同一环境，不维护第二套工具链
 ```
 
-选择 submodule＋可审补丁序列，或固定 fork，两者均需 review。前者便于公开来源复核，后者适合持续多 Context 重构；不能用未锁定分支名／latest 代替源码身份。任何许可与传递依赖声明随产物保留。
+已选 **pristine submodule＋可审补丁序列**；在 `out/` 的派生工作树应用补丁，不直接修改来源 submodule。固定 fork 为以后单独评审的迁移路径，不自动切换。不能用未锁定分支名／latest 代替源码身份；许可与传递依赖声明随产物保留。
 
 ### 7.2 可复现环境合同
 
@@ -334,7 +334,7 @@ W0 已核对 Coral 的 Bazel／Bzlmod 与上游容器路径。正式环境在容
 
 ### 7.3 任务概览与依赖排序
 
-此表是设计工作包概览；不含文件级提交序、代码 patch 或“现在开始实现”的指令。各包 §7／§8 给实现方式、输入输出、约束与验证 guide，详细实施计划在 review 后另立。
+此表保留设计工作包概览；文件级任务、优先级、依赖、命令与独立验证见 [plan.md](plan.md)及其 W0–W7 分包计划。用户已批准按推荐方案列计划，本轮不执行实现。
 
 | 包／优先级 | 输入与前置合同                              | 输出                                         | 独立验证出口                                           |
 | ---------- | ------------------------------------------- | -------------------------------------------- | ------------------------------------------------------ |
@@ -418,25 +418,25 @@ python -m pipeline_validator --workload pow --context-mode 2 \
 
 ## 9. 风险、取舍和后续细化方向
 
-### 9.1 已裁定与待评审事项
+### 9.1 已选方案与实施证据门
 
-| 项                                          | 当前状态／推荐                                             | 冻结前必须有的依据                                              |
-| ------------------------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------- |
-| Coral 路线、BF16 I/O＋FP32 内部             | **用户已确认**                                             | 本稿 §1；不再继承 Gemmini／对外 FP32／INT8                      |
-| 完整 Tile 替换、唯一 owner、无跨 Tile gang  | 继承 r5 硬合同                                             | W1／W4 的消息与状态清单、T-20／T-64                             |
-| VME 单区域 lease／显式链声明／同构 N 维接口 | 继承 r5；N>1 RTL 时机未定                                  | W3 合法／非法序列与 T-62／T-68                                  |
-| VME 内部 ROD                                | **用户已确认保留固定 Coral 数值路径**，不改内部 RNE        | 实际有限宽／归约／舍入／溢出／flags 合同与独立 oracle、RTL 实跑 |
-| 最终 BF16 输出转换                          | 建议 RVV `frm=RNE`，尚待 review；与内部 ROD 分列           | 真实转换指令、特殊值及逐比特用例；不能把建议写成已确认          |
-| C ABI／单线程相位 driver                    | 推荐，待 review                                            | W1 握手与跨边界闭包；不新增丢包重试                             |
-| Group 驱动本地退休、可靠完成再关剩余父资源  | 本稿 §4.4.2 的细化方案，待 review；输入早释放独立按 §4.4.1 | 无循环等待、无双回收、独立终态记录容量与取消竞争                |
-| RF／ROB／程序 slot 组织、调度公平界         | 选易证明实现为候选，不冻结参数                             | W2／W5 的容量、并存、进展与接口证明                             |
-| 固定 C／汇编 kernel 首行、完整后端后审      | 继承简版交付方向                                           | W5 真实 image、stack／scratch／spill 上界、可重入与配置检查     |
-| compiler 自带 Coral pin 与目标 RTL 不同     | 保留原来源并设兼容性 gate                                  | 不同 pin 产物在目标 ISA／数值上的实跑证据，未过不标 supported   |
-| L1／cache／MSHR 与页授权不是 Coral 既有能力 | 新增必要实现，不能省略                                     | W4 单元＋CS1；不用 Host 页池测试冒充设备授权                    |
-| 容器包源与镜像锁                            | 不可变来源／可校验离线缓存，待 review                      | W0 清缓存重建与离线执行两类证据                                 |
-| ISA 声明编码、CSR／地址位宽                 | `由后续规格冻结`                                           | 解码空间、编译器／汇编器、返回身份与回绕证明；不臆造 opcode     |
-| NEST N05 与现行逐 Tile 提交冲突             | 继承 r5 的 T-20 裁决，测试 manifest 必须显式覆盖旧期望     | W7 的 N05→T-20 映射；实现时同步原规范，本轮不改旧文档           |
-| CS2／CS3、PPA／FPGA                         | 后续独立评审                                               | CS1 出口之后才讨论下一层，不能由本文自动授权                    |
+| 项                                          | 已选方案／范围                                                                 | 仍须完成的实施证据                                                    |
+| ------------------------------------------- | ------------------------------------------------------------------------------ | --------------------------------------------------------------------- |
+| Coral 路线、BF16 I/O＋FP32 内部             | **用户已确认**                                                                 | 本稿 §1；不再继承 Gemmini／对外 FP32／INT8                            |
+| 完整 Tile 替换、唯一 owner、无跨 Tile gang  | 继承 r5 硬合同                                                                 | W1／W4 的消息与状态清单、T-20／T-64                                   |
+| VME 单区域 lease／显式链声明／同构 N 维接口 | 继承 r5；N>1 RTL 时机未定                                                      | W3 合法／非法序列与 T-62／T-68                                        |
+| VME 内部 ROD                                | **用户已确认保留固定 Coral 数值路径**，不改内部 RNE                            | 实际有限宽／归约／舍入／溢出／flags 合同与独立 oracle、RTL 实跑       |
+| 最终 BF16 输出转换                          | **已选 RVV `frm=RNE`**，与 VME 内部 ROD 分列                                   | 真实转换指令、特殊值及逐比特用例；选择已定不等于测试通过              |
+| C ABI／单线程相位 driver                    | **采用推荐方案**；Python 为唯一时间权威                                        | W1 握手与跨边界闭包；不新增丢包重试                                   |
+| Group 驱动本地退休、可靠完成再关剩余父资源  | **采用 §4.4.2**；输入早释放独立按 §4.4.1                                       | 无循环等待、无双回收、独立终态记录容量与取消竞争                      |
+| RF／ROB／程序 slot、调度                    | Context 独立 RF、静态私有 ROB、多固定预链接 slot、四 lane 单 Context 前缀与 RR | 深度／容量／端口由 plan.md 冻结任务产生；公平界、并存与回绕证据不省略 |
+| 固定 C／汇编 kernel 首行、完整后端后审      | 继承简版交付方向                                                               | W5 真实 image、stack／scratch／spill 上界、可重入与配置检查           |
+| compiler 自带 Coral pin 与目标 RTL 不同     | 保留原来源并设兼容性 gate                                                      | 不同 pin 产物在目标 ISA／数值上的实跑证据，未过不标 supported         |
+| L1／cache／MSHR 与页授权不是 Coral 既有能力 | 新增必要实现，不能省略                                                         | W4 单元＋CS1；不用 Host 页池测试冒充设备授权                          |
+| 容器包源与镜像锁                            | 已选 Debian trixie digest＋不可变 apt snapshot＋可校验离线种子                 | W0 清缓存重建与断网执行两类证据                                       |
+| ISA 声明载体、CSR／地址位宽                 | 已选受控 helper＋每 Context 伴随 CSR 声明；具体编码／位宽由计划前置任务冻结    | 解码空间无冲突、声明一次原子消费、返回身份与回绕证明；不臆造 opcode   |
+| NEST N05 与现行逐 Tile 提交冲突             | 继承 r5 的 T-20 裁决，测试 manifest 必须显式覆盖旧期望                         | W7 的 N05→T-20 映射；实现时同步原规范，本轮不改旧文档                 |
+| CS2／CS3、PPA／FPGA                         | 后续独立评审                                                                   | CS1 出口之后才讨论下一层，不能由本文自动授权                          |
 
 ### 9.2 禁止“看起来能跑”的替代方案
 
@@ -448,9 +448,9 @@ python -m pipeline_validator --workload pow --context-mode 2 \
 - 在 completion、取消、日志满、Profile gate 关闭时提前释放身份／地址／引用。
 - 用旧 proposal、历史版本号、未被消费参数、没有 output bytes 的 trace 宣称支持。
 
-### 9.3 Review 之后的动作边界
+### 9.3 设计批准后的执行边界
 
-请先 review 本稿中的范围、状态 owner、消息／准入／退休、数值与候选机制。反馈只修改设计稿；**只有用户明确同意列计划后**，才把已获批设计展开为中文文件级任务：每项含输入／输出、具体改造点、依赖、实现 guide、可运行命令、负例、验收证据与退出条件，再按授权实施。
+用户已 review 通过设计并要求可选项采用推荐方案，详细中文实施计划见 [plan.md](plan.md)。本次交付文件级任务、输入／输出、实现 guide、命令、负例与退出条件，不自动开始代码或环境建设；批准方案不替代参数冻结、能力验证和实际验收。
 
 本次按用户 review 同步输入早释放勘误到总架构与根需求规格，不新增细粒度释放能力；不修改旧 proposal、现有用例、实现代码、系统文件或运行环境。其他范围差异与已知漂移仍按本稿显式记录；批准后的实现必须同步受影响合同与调用方，不能依赖两份互相矛盾的规范。
 
