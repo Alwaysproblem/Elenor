@@ -23,7 +23,7 @@ P0_REGISTRY = H / "configs/p0_workloads.yaml"
 CN = H / "scripts/cn.sh"
 
 
-def _load_yaml(path: Path) -> dict:
+def _load_yaml(path: Path | str) -> dict:
   import sys
 
   sys.path.insert(0, str(H / "scripts/lib"))

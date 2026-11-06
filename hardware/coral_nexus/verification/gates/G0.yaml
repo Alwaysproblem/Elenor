@@ -1,0 +1,12 @@
+schema: cn_gate_config/v1
+stage: G0
+required_evidence:
+  - sources_verify
+  - environment_verify
+  - seed_export
+  - baseline_run
+exit_codes:
+  0: all required evidence present and verified
+  1: evidence missing or stale
+  2: gate not fully configured
+  3: evidence hash mismatch

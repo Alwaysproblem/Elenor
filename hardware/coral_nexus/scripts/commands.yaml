@@ -19,6 +19,16 @@ commands:
     summary: verify the pinned source lock
     executor: host
     handler: scripts/handlers/sources.sh
+    subcommands: [verify]
+  verify:
+    summary: validate evidence identity from a manifest
+    executor: host
+    handler: scripts/handlers/verify.sh
+    pass_through: true
+  gate:
+    summary: run a registered stage gate
+    executor: host
+    handler: scripts/handlers/gate.sh
     pass_through: true
   baseline:
     summary: run P0 workloads on the unmodified upstream core
@@ -34,3 +44,12 @@ commands:
         tests:
           - hardware/coral_nexus/verification/environment/test_sources.py
           - hardware/coral_nexus/verification/environment/test_environment.py
+      dispatch:
+        tests:
+          - hardware/coral_nexus/verification/environment/test_dispatch.py
+      baseline:
+        tests:
+          - hardware/coral_nexus/verification/baseline/test_baseline.py
+      contracts:
+        tests:
+          - hardware/coral_nexus/verification/contracts/test_target_constraints.py
