@@ -14,7 +14,7 @@ commands:
     summary: build/verify the locked container
     executor: host
     handler: scripts/handlers/env.sh
-    subcommands: [build, verify]
+    subcommands: [build, verify, export]
   sources:
     summary: verify the pinned source lock
     executor: host

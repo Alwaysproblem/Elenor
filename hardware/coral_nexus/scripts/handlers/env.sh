@@ -103,6 +103,15 @@ do_verify() {
   echo "[env] verification report: $out/environment_checks.json"
 }
 
+do_export() {
+  local out="${OUT:?--out is required for export}"
+  python3 "$H/scripts/lib/seed_export.py" \
+    --seeds "$H/env/seed_targets.json" \
+    --cache "$H/../../out/coral_nexus/cache/seeds" \
+    --out "$out"
+}
+
+
 usage() {
   sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
   exit 2
@@ -121,5 +130,6 @@ done
 case "$sub" in
   build) do_build "$@" ;;
   verify) do_verify "$@" ;;
+  export) do_export "$@" ;;
   *) usage ;;
 esac

@@ -63,7 +63,6 @@ def main() -> None:
     print(f"error: handler {handler_rel} missing", file=sys.stderr)
     raise SystemExit(EXIT_UNKNOWN)
 
-  argv: list[str]
   if command == "unit":
     # unit: --suite NAME [...] is validated against the registry here.
     suite = None

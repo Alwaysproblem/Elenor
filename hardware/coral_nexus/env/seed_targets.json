@@ -1,0 +1,81 @@
+{
+  "schema": "cn_seed_targets/v1",
+  "notes": [
+    "Offline seed inventory exported by 'env.sh export' into a fresh",
+    "versioned directory under out/coral_nexus/C004/export-<stamp>/. Every",
+    "seed carries a source URL or repository path plus a sha256; export",
+    "fails if any seed is missing or fails its hash. Seeds marked",
+    "status=pending are tracked work items, not silent omissions."
+  ],
+  "seeds": [
+    {
+      "name": "rv32_toolchain",
+      "kind": "url-archive",
+      "url": "https://storage.googleapis.com/shodan-public-artifacts/toolchain_coralnpu_v2-2026-06-29.tar.xz",
+      "sha256": "de06690c2da5cd783d76b2998208bd4db4dcdc22dec146c7b0a5ee1af40d3db7",
+      "license": "GPL-3.0-or-later with GCC runtime library exception (see notices.md)"
+    },
+    {
+      "name": "verilator",
+      "kind": "url-archive",
+      "url": "https://github.com/verilator/verilator/archive/refs/tags/v5.052.tar.gz",
+      "sha256": "8c8d2e11e6ad32f641dd250742a94195ddecb912e2e2dabe2f42ddbbb99c1092",
+      "license": "LGPL-3.0-only OR Artistic-2.0"
+    },
+    {
+      "name": "svdpi_header",
+      "kind": "url-file",
+      "url": "https://raw.githubusercontent.com/verilator/verilator/v5.028/include/vltstd/svdpi.h",
+      "sha256": "2528c8e529b66dd8e795c8a0fee326166cc51f7dee8fc6a0c6c930534fc780a6",
+      "license": "LGPL-3.0-only OR Artistic-2.0"
+    },
+    {
+      "name": "buildifier",
+      "kind": "url-file",
+      "url": "https://github.com/bazelbuild/buildtools/releases/download/v7.3.1/buildifier-linux-amd64",
+      "sha256": "5474cc5128a74e806783d54081f581662c4be8ae65022f557e9281ed5dc88009",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "verible",
+      "kind": "url-archive",
+      "url": "https://github.com/chipsalliance/verible/releases/download/v0.0-4051-g9fdb4057/verible-v0.0-4051-g9fdb4057-linux-static-x86_64.tar.gz",
+      "sha256": "f52e5920ef63f70620a6086e09dea8bd778147cd7a9ff827bb7de5d6316b1754",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "scalafmt",
+      "kind": "url-archive",
+      "url": "https://github.com/scalameta/scalafmt/releases/download/v3.10.7/scalafmt-x86_64-pc-linux.zip",
+      "sha256": "a238a4e73141538a2a2e4e834f80154906b8a3f654ff14b6752fc3a3feeb5be1",
+      "license": "Apache-2.0"
+    },
+    {
+      "name": "riscv_isa_sim",
+      "kind": "url-archive",
+      "url": "https://github.com/riscv-software-src/riscv-isa-sim/archive/93a10ae6.tar.gz",
+      "sha256": "064f4c1f22005899fa5106b822bfdc7034ffc9babc2f5821771589047f028a66",
+      "license": "BSD-3-Clause",
+      "consumer": "C021 scalar ISA reference driver"
+    },
+    {
+      "name": "trace_processor_shell",
+      "kind": "repo-file",
+      "path": "examples/artifacts/tools/trace_processor_shell",
+      "sha256": "58042408e6cc861fb1a731c26bb082dc222285561eaa4e12a48a8b2b90dca7b9",
+      "license": "Apache-2.0",
+      "consumer": "C070 Perfetto trace audit"
+    },
+    {
+      "name": "bazel_vendor_cache",
+      "kind": "deferred",
+      "status": "pending-on-C005",
+      "notes": "bazel vendor/distdir cache for the P0 simulation targets can only be produced after the first successful in-container bazel build (C005). Export records this entry as pending; it must flip to exported before C073 exec-repro."
+    },
+    {
+      "name": "python_wheels",
+      "kind": "not-applicable",
+      "notes": "Container python is distro-managed (requirements.lock); the validator runs in the conda env defined by pipeline_validator/environment.yml whose hash is locked in requirements.lock. No floating pip wheels exist to seed."
+    }
+  ]
+}
