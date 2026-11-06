@@ -11,7 +11,7 @@
     "constraints": {
       "type": "object",
       "properties": {
-        "context_count": { "type": "integer", "minimum": 1 },
+        "context_count": { "type": "integer", "minimum": 1, "maximum": 8 },
         "tile_count": { "type": "integer", "minimum": 1 },
         "user_spm_per_bank": { "type": "integer", "minimum": 0 },
         "system_reserved_spm_per_bank": { "type": "integer", "minimum": 0 },

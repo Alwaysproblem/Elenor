@@ -1,0 +1,28 @@
+{
+  "schema": "cn_params/v1",
+  "source": {
+    "repo": "coralnpu",
+    "kind": "upstream_default",
+    "note": "未改造上游原核的几何常量（p0_upstream 基线直接继承）"
+  },
+  "params": [
+    {
+      "name": "vme_tile_elements_te",
+      "value": 16,
+      "unit": "elements",
+      "provenance": {
+        "file": "tests/cocotb/vme_test/vme_matmul_test.cc",
+        "line": 35
+      }
+    },
+    {
+      "name": "rvv_vlen_bits",
+      "value": 128,
+      "unit": "bits",
+      "provenance": {
+        "file": "tests/cocotb/vme_test/vme_matmul_test.cc",
+        "line": 21
+      }
+    }
+  ]
+}

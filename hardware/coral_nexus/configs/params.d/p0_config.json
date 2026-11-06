@@ -1,0 +1,19 @@
+{
+  "schema": "cn_params/v1",
+  "source": {
+    "repo": "coral_nexus",
+    "kind": "p0_config",
+    "note": "P0 基线运行配置登记的派生值（C005 证据记录）"
+  },
+  "params": [
+    {
+      "name": "retirement_buffer_mode_p0",
+      "value": "full",
+      "unit": "enum",
+      "provenance": {
+        "file": "hardware/coral_nexus/configs/p0_coral.yaml",
+        "line": 5
+      }
+    }
+  ]
+}
