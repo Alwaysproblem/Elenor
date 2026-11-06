@@ -4,6 +4,19 @@
 # Usage:
 #   env.sh build  [--out DIR]   Build the locked image (caller UID/GID).
 #   env.sh verify [--out DIR]   Run the in-container verification once.
+#   env.sh export [--out DIR]   Export the offline seed archive.
+#   env.sh offline-rebuild --export DIR --out DIR [--work DIR]
+#                               Rebuild P0 targets with --network none and
+#                               empty build caches, using only the exported
+#                               vendor archive.
+#   env.sh devcontainer-probe --out DIR
+#                               Launch the devcontainer for real and run the
+#                               identity/version/mount/compile probes inside
+#                               it; records a blocker (exit 3) when the CLI is
+#                               unavailable instead of passing on static JSON.
+#   env.sh offline-rebuild --export DIR --out DIR [--work DIR]
+#                               Rebuild P0 targets with --network none and
+#                               empty caches, using only the exported vendor dir.
 #
 # Registered subcommands only; anything else exits 2 with usage. The script
 # never mounts the Docker socket, never uses --privileged, and runs jobs as
@@ -103,6 +116,68 @@ do_verify() {
   echo "[env] verification report: $out/environment_checks.json"
 }
 
+
+do_offline_rebuild() {
+  require_docker
+  local export_dir="${EXPORT:?--export is required}"
+  local out="${OUT:?--out is required}"
+  local work="${WORK:-$out/work}"
+  local tag
+  tag="$(image_tag)"
+  if ! docker image inspect "$tag" >/dev/null 2>&1; then
+    echo "error: image $tag not built; run 'env.sh build' first" >&2
+    exit 3
+  fi
+  if [ ! -d "$export_dir/bazel_vendor_cache" ]; then
+    echo "error: $export_dir/bazel_vendor_cache missing; run 'env.sh export'" >&2
+    exit 1
+  fi
+  mkdir -p "$out" "$work"
+  local repo_root out_abs export_abs work_abs vendor_sha
+  repo_root="$(cd "$H/../.." && pwd)"
+  out_abs="$(cd "$out" && pwd)"
+  export_abs="$(cd "$export_dir" && pwd)"
+  work_abs="$(cd "$work" && pwd)"
+  vendor_sha="$(python3 -c "
+import json
+seeds = json.load(open('$H/env/seed_targets.json'))['seeds']
+print(next(s['sha256'] for s in seeds if s['name'] == 'bazel_vendor_cache'))
+")"
+  echo "[env] offline rebuild: network=none, empty caches, vendor from $export_abs"
+  docker run --rm \
+    --user "$(id -u):$(id -g)" \
+    --network none \
+    --env WORK_DIR=/work \
+    --env VENDOR_DIR=/vendor/bazel_vendor_cache \
+    --env VENDOR_SHA256="$vendor_sha" \
+    --env REPORT_DIR=/report \
+    -v "$work_abs:/work" \
+    -v "$export_abs:/vendor:ro" \
+    -v "$out_abs:/report" \
+    -v "$repo_root:/workspace:ro" \
+    "$tag" \
+    bash /workspace/hardware/coral_nexus/env/offline_rebuild_inside.sh
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "error: offline rebuild failed (rc=$rc); log: $out/build.log" >&2
+    exit 1
+  fi
+  echo "[env] offline rebuild report: $out/offline_rebuild.json"
+}
+
+do_devcontainer_probe() {
+  local out="${OUT:?--out is required}"
+  local repo_root
+  repo_root="$(cd "$H/../.." && pwd)"
+  local work="${WORK:-$repo_root/out/coral_nexus/C004/offline/work}"
+  bash "$H/env/devcontainer_probe.sh" \
+    --repo "$repo_root" \
+    --config "$repo_root/.devcontainer/coral_nexus/devcontainer.json" \
+    --image "$(image_tag)" \
+    --work "/workspace/out/coral_nexus/C004/offline/work" \
+    --out "$out"
+}
+
 do_export() {
   local out="${OUT:?--out is required for export}"
   python3 "$H/scripts/lib/seed_export.py" \
@@ -121,9 +196,13 @@ usage() {
 sub="$1"
 shift
 OUT=""
+EXPORT=""
+WORK=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --out) OUT="$2"; shift 2 ;;
+    --export) EXPORT="$2"; shift 2 ;;
+    --work) WORK="$2"; shift 2 ;;
     *) echo "error: env $sub: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -131,5 +210,7 @@ case "$sub" in
   build) do_build "$@" ;;
   verify) do_verify "$@" ;;
   export) do_export "$@" ;;
+  offline-rebuild) do_offline_rebuild "$@" ;;
+  devcontainer-probe) do_devcontainer_probe "$@" ;;
   *) usage ;;
 esac

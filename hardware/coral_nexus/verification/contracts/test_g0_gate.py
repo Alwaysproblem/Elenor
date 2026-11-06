@@ -21,6 +21,8 @@ GATES_PY = H / "verification/gates.py"
 GATE_SH = H / "scripts/handlers/gate.sh"
 REPO_PIN = H / "verification/expected_evidence.json"
 
+ELF_HASH = "a9f9d0b4124cf4beab7037f889850a76f44566482ed0f6f61d992909c22336ea"
+
 SOURCES = ("sources_verify", "sources_report.json", {"pass": True, "checks": []})
 ENVIRONMENT = (
   "environment_verify",
@@ -28,11 +30,25 @@ ENVIRONMENT = (
   {"pass": True, "passed": 12, "failed": 0},
 )
 SEED_EXPORT = ("seed_export", "export_manifest.json", {"complete": True, "seeds": {}})
-BASELINE = ("baseline_run", "report.json", {"pass": True, "workloads": []})
+BASELINE = (
+  "baseline_run",
+  "report.json",
+  {"pass": True, "workloads": [{"name": "p0_scalar_add", "elf_sha256": ELF_HASH}]},
+)
 BF16 = (
   "bf16_baseline",
   "bf16_baseline_report.json",
   {"test_result": "PASSED", "bf16_cases": ["vtfmm_bf16_mt0", "vtfmm_bf16_mt8"]},
+)
+OFFLINE = (
+  "offline_rebuild",
+  "offline_rebuild.json",
+  {"pass": True, "network": "none", "elfs": {"p0_scalar_add.elf": ELF_HASH}},
+)
+DEVCONTAINER = (
+  "devcontainer_probe",
+  "devcontainer_report.json",
+  {"pass": True, "status": "passed", "checks": {"up": True}},
 )
 ARTIFACTS = {
   "sources_verify": {},
@@ -40,6 +56,8 @@ ARTIFACTS = {
   "seed_export": {},
   "baseline_run": {"summary.txt": "PASS hello\nPASS p0\n"},
   "bf16_baseline": {},
+  "offline_rebuild": {"build.log": "Build completed successfully\n"},
+  "devcontainer_probe": {"probes.log": "builder\nbazel 9.1.0\n/workspace\n"},
 }
 
 
@@ -71,7 +89,16 @@ def _write_pin(evidence_index: Path, pin: Path) -> None:
 
 
 def _make_evidence_index(base: Path) -> Path:
-  for name, report_name, content in (SOURCES, ENVIRONMENT, SEED_EXPORT, BASELINE, BF16):
+  groups = (
+    SOURCES,
+    ENVIRONMENT,
+    SEED_EXPORT,
+    BASELINE,
+    BF16,
+    OFFLINE,
+    DEVCONTAINER,
+  )
+  for name, report_name, content in groups:
     d = base / name
     d.mkdir(parents=True)
     (d / report_name).write_text(json.dumps(content, indent=2) + "\n")
@@ -99,8 +126,8 @@ def test_gate_passes_when_evidence_matches_pin(tmp_path: Path) -> None:
   assert proc.returncode == 0, proc.stdout + proc.stderr
   report = json.loads((tmp_path / "out/g0_gate_report.json").read_text())
   assert report["pass"] is True
-  # pin.present, pin.coverage + 4 checks per evidence * 5
-  assert len(report["checks"]) == 22
+  # pin.present, pin.coverage, 4 per evidence * 7, plus the cross-check
+  assert len(report["checks"]) == 31
 
 
 def test_gate_fails_closed_without_pin(tmp_path: Path) -> None:
@@ -114,7 +141,8 @@ def test_gate_fails_closed_without_pin(tmp_path: Path) -> None:
 def test_gate_fails_on_forged_pass_boolean(tmp_path: Path) -> None:
   """A directory holding only {"pass": true} must fail against a real pin."""
   idx = tmp_path / "forged"
-  for name, report_name, _ in (SOURCES, ENVIRONMENT, SEED_EXPORT, BASELINE, BF16):
+  groups = (SOURCES, ENVIRONMENT, SEED_EXPORT, BASELINE, BF16, OFFLINE, DEVCONTAINER)
+  for name, report_name, _ in groups:
     d = idx / name
     d.mkdir(parents=True)
     (d / report_name).write_text(json.dumps({"pass": True}) + "\n")
@@ -206,3 +234,31 @@ def test_repo_pin_verifies_repo_evidence_index() -> None:
     pytest.skip("recorded evidence index absent in this checkout")
   proc = _run_gate(index, REPO_ROOT / "out/coral_nexus/C007/gate-test", REPO_PIN)
   assert proc.returncode == 0, proc.stdout[-2000:] + proc.stderr[-2000:]
+
+
+def test_gate_fails_when_offline_rebuild_differs_from_baseline(tmp_path: Path) -> None:
+  """An offline rebuild with different bytes than the baseline is not a rebuild."""
+  idx = _make_evidence_index(tmp_path / "evidence")
+  offline = idx / "offline_rebuild/offline_rebuild.json"
+  data = json.loads(offline.read_text())
+  data["elfs"]["p0_scalar_add.elf"] = "de" * 32
+  offline.write_text(json.dumps(data) + "\n")
+  pin = tmp_path / "pin.json"
+  _write_pin(idx, pin)
+  proc = _run_gate(idx, tmp_path / "out", pin)
+  assert proc.returncode != 0
+  assert any(
+    c["check"] == "offline_rebuild.matches_baseline"
+    for c in _failed_checks(tmp_path / "out")
+  )
+
+
+def test_gate_fails_on_missing_devcontainer_evidence(tmp_path: Path) -> None:
+  idx, pin = _pinned_fixture(tmp_path)
+  shutil.rmtree(idx / "devcontainer_probe")
+  proc = _run_gate(idx, tmp_path / "out", pin)
+  assert proc.returncode != 0
+  assert any(
+    c["check"] == "devcontainer_probe.present"
+    for c in _failed_checks(tmp_path / "out")
+  )

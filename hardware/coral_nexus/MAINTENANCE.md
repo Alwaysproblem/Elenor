@@ -52,17 +52,51 @@ not implemented.
 ## Offline seeds (C004)
 
 - Inventory: `env/seed_targets.json` — every seed has URL/path + sha256 +
-  license row in `env/notices.md`. `bazel_vendor_cache` is explicitly
-  `pending-on-C005` until the first in-container build exists.
-- Export into a fresh versioned directory:
+  license row in `env/notices.md`. `bazel_vendor_cache` is a `local-dir`
+  seed whose sha256 is the tree digest of the **archived** copy.
+- Directory seeds are archived by copying the tree and re-hashing it. In-tree
+  relative symlinks are preserved (bazel uses them for interpreters and tool
+  aliases); absolute or escaping links are dropped and listed under
+  `dropped_links`, because they point at a producer-local path and would make
+  the archive non-self-contained. A missing source or a digest mismatch is a
+  hard failure that names the seed — the exporter never refills silently.
+- Export into a fresh versioned directory (refuses a non-empty one):
 
   ```bash
   cn env export --out out/coral_nexus/C004/export-<stamp>
   ```
 
-  Export reuses the shared download cache
-  (`out/coral_nexus/cache/seeds/`), verifies every sha256, and fails if any
-  seed is missing or mismatched. The manifest is `export_manifest.json`.
+  Export reuses `out/coral_nexus/cache/seeds/`, verifies every sha256, and
+  fails if any seed is missing or mismatched. Report: `export_manifest.json`.
+
+### Offline rebuild proof (C004)
+
+Rebuild the P0 targets with no network and empty build caches, using only the
+exported vendor archive:
+
+```bash
+python3 hardware/coral_nexus/scripts/lib/sources_tool.py materialize \
+  --lock hardware/coral_nexus/env/sources.lock --out out/coral_nexus/C004/offline/work
+cn env offline-rebuild --export out/coral_nexus/C004/export-<stamp> \
+  --work out/coral_nexus/C004/offline/work --out out/coral_nexus/C004/offline/rebuild
+```
+
+The probe runs `docker --network none`, asserts the bazel output root, disk
+cache and repository cache are empty, re-verifies the archive digest, then
+builds `-c opt`. It copies the two ELFs into `artifacts/` and records their
+hashes; the G0 gate refuses an offline rebuild whose ELF bytes differ from the
+recorded baseline (`offline_rebuild.matches_baseline`).
+
+### Devcontainer proof (C004)
+
+```bash
+cn env devcontainer-probe --out out/coral_nexus/C004/devcontainer
+```
+
+Launches the container through `@devcontainers/cli` (fresh, from the current
+JSON), then probes the non-root user, tool versions, the `/workspace` mount
+and a real `bazel build` inside it. A static JSON check is not acceptance:
+when the CLI is missing the command records a blocker and exits 3.
 
 ## Gates (C007 / C008)
 

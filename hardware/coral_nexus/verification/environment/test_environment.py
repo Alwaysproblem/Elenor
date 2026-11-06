@@ -270,3 +270,122 @@ def test_devcontainer_references_locked_image_without_elevation() -> None:
   rendered = json.dumps(doc)
   assert "docker.sock" not in rendered
   assert "privileged" not in rendered
+
+
+def _export(seeds: Path, cache: Path, out: Path) -> subprocess.CompletedProcess:
+  return subprocess.run(
+    [
+      "python3",
+      str(H / "scripts/lib/seed_export.py"),
+      "--seeds",
+      str(seeds),
+      "--cache",
+      str(cache),
+      "--out",
+      str(out),
+    ],
+    capture_output=True,
+    text=True,
+  )
+
+
+def test_seed_export_fails_precisely_when_a_directory_seed_is_missing(
+  tmp_path: Path,
+) -> None:
+  """Deleting a required archive must fail, naming it (no silent refill)."""
+  seeds = tmp_path / "seeds.json"
+  seeds.write_text(
+    json.dumps(
+      {
+        "seeds": [
+          {
+            "name": "bazel_vendor_cache",
+            "kind": "local-dir",
+            "path": str(tmp_path / "absent"),
+            "sha256": "0" * 64,
+            "license": "test",
+          }
+        ]
+      }
+    )
+  )
+  proc = _export(seeds, tmp_path / "cache", tmp_path / "export")
+  assert proc.returncode == 1
+  manifest = json.loads((tmp_path / "export/export_manifest.json").read_text())
+  assert manifest["complete"] is False
+  assert any("bazel_vendor_cache" in f and "missing" in f for f in manifest["failures"])
+
+
+def test_seed_export_fails_on_directory_digest_mismatch(tmp_path: Path) -> None:
+  src = tmp_path / "src"
+  (src / "bin").mkdir(parents=True)
+  (src / "bin/tool").write_text("payload\n")
+  seeds = tmp_path / "seeds.json"
+  seeds.write_text(
+    json.dumps(
+      {
+        "seeds": [
+          {
+            "name": "dirseed",
+            "kind": "local-dir",
+            "path": str(src),
+            "sha256": "1" * 64,
+            "license": "test",
+          }
+        ]
+      }
+    )
+  )
+  proc = _export(seeds, tmp_path / "cache", tmp_path / "export")
+  assert proc.returncode == 1
+  manifest = json.loads((tmp_path / "export/export_manifest.json").read_text())
+  assert any("dirseed" in f and "digest" in f for f in manifest["failures"])
+
+
+def test_directory_seed_archive_preserves_in_tree_symlinks(tmp_path: Path) -> None:
+  """bazel vendor aliases (bin/python3 -> python3.11) must survive archiving."""
+  import hashlib
+  import os
+
+  src = tmp_path / "src"
+  (src / "bin").mkdir(parents=True)
+  (src / "bin/python3.11").write_text("interp\n")
+  os.symlink("python3.11", src / "bin/python3")
+  os.symlink("/nonexistent/outside", src / "bin/dead")
+
+  digest = hashlib.sha256()
+  for rel, h in sorted(
+    [
+      ("bin/python3.11", hashlib.sha256(b"interp\n").hexdigest()),
+      ("bin/python3", "symlink:python3.11"),
+    ]
+  ):
+    digest.update(rel.encode())
+    digest.update(b"\0")
+    digest.update(h.encode())
+    digest.update(b"\0")
+
+  seeds = tmp_path / "seeds.json"
+  seeds.write_text(
+    json.dumps(
+      {
+        "seeds": [
+          {
+            "name": "dirseed",
+            "kind": "local-dir",
+            "path": str(src),
+            "sha256": digest.hexdigest(),
+            "license": "test",
+          }
+        ]
+      }
+    )
+  )
+  proc = _export(seeds, tmp_path / "cache", tmp_path / "export")
+  assert proc.returncode == 0, proc.stdout + proc.stderr
+  archive = tmp_path / "export/dirseed"
+  assert (archive / "bin/python3").is_symlink()
+  assert os.readlink(archive / "bin/python3") == "python3.11"
+  assert not (archive / "bin/dead").exists()
+  manifest = json.loads((tmp_path / "export/export_manifest.json").read_text())
+  assert manifest["seeds"]["dirseed"]["dropped_links"] == ["bin/dead"]

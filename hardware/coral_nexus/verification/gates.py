@@ -39,6 +39,10 @@ EVIDENCE_SPECS = [
   ("baseline_run", "report.json", "pass", ["report.json", "summary.txt"]),
   ("bf16_baseline", "bf16_baseline_report.json", "test_result",
    ["bf16_baseline_report.json"]),
+  ("offline_rebuild", "offline_rebuild.json", "pass",
+   ["offline_rebuild.json", "build.log"]),
+  ("devcontainer_probe", "devcontainer_report.json", "pass",
+   ["devcontainer_report.json", "probes.log"]),
 ]
 
 REQUIRED_G0_EVIDENCE = [spec[0] for spec in EVIDENCE_SPECS]
@@ -106,19 +110,6 @@ def sha256_file(path: Path) -> str:
   with path.open("rb") as handle:
     for chunk in iter(lambda: handle.read(1 << 20), b""):
       digest.update(chunk)
-  return digest.hexdigest()
-
-
-def tree_digest(root: Path) -> str:
-  """Deterministic sha256 over every regular file in root."""
-  digest = hashlib.sha256()
-  for path in sorted(root.rglob("*")):
-    if path.is_file():
-      rel = path.relative_to(root).as_posix()
-      digest.update(rel.encode())
-      digest.update(b"\0")
-      digest.update(sha256_file(path).encode())
-      digest.update(b"\0")
   return digest.hexdigest()
 
 
@@ -298,6 +289,33 @@ class G0Gate:
         f"{name}.artifacts",
         not bad_artifacts,
         "; ".join(bad_artifacts) if bad_artifacts else "all match pin",
+      )
+
+    # Cross-evidence invariant: an offline rebuild that produces different
+    # bytes than the recorded baseline did not reproduce the baseline.
+    baseline_report = evidence_index / "baseline_run" / "report.json"
+    offline_report = evidence_index / "offline_rebuild" / "offline_rebuild.json"
+    try:
+      baseline = json.loads(baseline_report.read_text())
+      offline = json.loads(offline_report.read_text())
+      by_name = {
+        w["name"] + ".elf": w["elf_sha256"] for w in baseline.get("workloads", [])
+      }
+      rebuilt = offline.get("elfs", {})
+      mismatched = [
+        f"{elf}: {digest[:12]} != {by_name[elf][:12]}"
+        for elf, digest in rebuilt.items()
+        if elf in by_name and digest != by_name[elf]
+      ]
+      compared = [elf for elf in rebuilt if elf in by_name]
+      any_failed |= not self._record(
+        "offline_rebuild.matches_baseline",
+        bool(compared) and not mismatched,
+        "; ".join(mismatched) if mismatched else f"{len(compared)} elf(s) identical",
+      )
+    except (json.JSONDecodeError, OSError, KeyError) as exc:
+      any_failed |= not self._record(
+        "offline_rebuild.matches_baseline", False, f"unreadable: {exc}"
       )
 
     return self._report(not any_failed)

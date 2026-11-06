@@ -19,6 +19,16 @@
       "report_sha256": "e2d0591e968c56662326e355ce05b4b034d362c9f067f760dfc9823d7b385093",
       "verdict_field": "test_result"
     },
+    "devcontainer_probe": {
+      "artifacts": {
+        "devcontainer_report.json": "897c97ee4804d101588e823d77478670e27cfed583cb71189afae88919ef7b93",
+        "probes.log": "7aa822c3579d9a14c566f9536d5abe9c3893afdeb5dd53d751d3b1a985411aae"
+      },
+      "expected_verdict": true,
+      "report": "devcontainer_probe/devcontainer_report.json",
+      "report_sha256": "897c97ee4804d101588e823d77478670e27cfed583cb71189afae88919ef7b93",
+      "verdict_field": "pass"
+    },
     "environment_verify": {
       "artifacts": {
         "environment_checks.json": "79bb561f15256fe901a89ad93e8a5b09a45ea51deb8863a673d202c961df7b23",
@@ -29,13 +39,23 @@
       "report_sha256": "79bb561f15256fe901a89ad93e8a5b09a45ea51deb8863a673d202c961df7b23",
       "verdict_field": "pass"
     },
+    "offline_rebuild": {
+      "artifacts": {
+        "build.log": "640071be14f8962e3275145ccfa99218696c61ec4b27e64c3dc2b9337d49db4d",
+        "offline_rebuild.json": "5e19e578c960bde9f9f7eb8d172530cbaf0b65f47793e159b66dac7ece9f0218"
+      },
+      "expected_verdict": true,
+      "report": "offline_rebuild/offline_rebuild.json",
+      "report_sha256": "5e19e578c960bde9f9f7eb8d172530cbaf0b65f47793e159b66dac7ece9f0218",
+      "verdict_field": "pass"
+    },
     "seed_export": {
       "artifacts": {
-        "export_manifest.json": "13ebb19b7983d86c9e098e6a84f530818ecdd7380a47377d4c17e617066b2a1a"
+        "export_manifest.json": "507e9de2cb5c74d8de99daea24ac4ce304bd1ab002e8b0673b603d9af07a436b"
       },
       "expected_verdict": true,
       "report": "seed_export/export_manifest.json",
-      "report_sha256": "13ebb19b7983d86c9e098e6a84f530818ecdd7380a47377d4c17e617066b2a1a",
+      "report_sha256": "507e9de2cb5c74d8de99daea24ac4ce304bd1ab002e8b0673b603d9af07a436b",
       "verdict_field": "complete"
     },
     "sources_verify": {
@@ -48,7 +68,7 @@
       "verdict_field": "pass"
     }
   },
-  "producer_commit": "f6781147d85b372fac7fd6bfb141c3998c5959f0",
+  "producer_commit": "eac1156654b4bc9bdbb2502672a45b4b4216ee73",
   "schema": "cn_evidence_pin/v1",
   "stage": "G0"
 }

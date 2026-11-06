@@ -70,7 +70,7 @@
       "name": "bazel_vendor_cache",
       "kind": "local-dir",
       "path": "out/coral_nexus/C005/work-coralnpu/vendor-cache",
-      "sha256": "d3eb92776053c5e5cba26b6f8803e8d0165437f3cd6dbb60dfd6d92a344fe02d",
+      "sha256": "a64beb68b01e2a9305027d78541a08b1c31f77e1f78dba0ceec4ae40177ec0ee",
       "license": "aggregated from vendored externals (see notices.md)",
       "notes": "Produced by bazel --output_user_root=/work/bazel-root vendor --vendor_dir=/work/vendor-cache inside the locked container on the C005 work root. 6.0G; offline rebuild with --vendor_dir is exercised in C073 exec-repro."
     },

@@ -8,9 +8,6 @@
   },
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind,consistency=cached",
   "workspaceFolder": "/workspace",
-  "mounts": [
-    "source=coral-nexus-bazel-cache,target=/home/builder/.cache/bazel,type=volume"
-  ],
   "customizations": {
     "vscode": {
       "extensions": []
