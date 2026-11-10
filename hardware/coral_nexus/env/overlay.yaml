@@ -23,3 +23,11 @@ entries:
     src: hardware/coral_nexus/env/overlay/coralnpu/tests/cocotb/vme_test/p0_kat/p0_bf16_kat_bench.py
     dst: tests/cocotb/vme_test/p0_kat/p0_bf16_kat_bench.py
     mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/env/overlay/coralnpu/tests/cocotb/vme_test/p0_numeric/BUILD
+    dst: tests/cocotb/vme_test/p0_numeric/BUILD
+    mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/env/overlay/coralnpu/tests/cocotb/vme_test/p0_numeric/p0_numeric_probe_bench.py
+    dst: tests/cocotb/vme_test/p0_numeric/p0_numeric_probe_bench.py
+    mode: add

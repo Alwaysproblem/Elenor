@@ -1,0 +1,888 @@
+{
+ "schema": "cn_numeric_vectors/v1",
+ "profile": "w3_bf16_fp32_rod_v1",
+ "status": "experimental",
+ "note": "expected bits were derived by hand from the rule statements; the reference model is checked AGAINST them, and they are not generated from it",
+ "vectors": [
+  {
+   "id": "mul_basic_exact",
+   "kind": "cell",
+   "rules": [
+    "MUL-01"
+   ],
+   "old_fp32_bits": 0,
+   "pairs_bf16_bits": [
+    [
+     16256,
+     16384
+    ],
+    [
+     0,
+     0
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 1073741824,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "1*2=2 exactly; 2.0 = exp 128 man 0"
+  },
+  {
+   "id": "mul_two_lane_sum",
+   "kind": "cell",
+   "rules": [
+    "MUL-01"
+   ],
+   "old_fp32_bits": 0,
+   "pairs_bf16_bits": [
+    [
+     16256,
+     16384
+    ],
+    [
+     16448,
+     16256
+    ]
+   ],
+   "tk": 2,
+   "expected_fp32_bits": 1084227584,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "1*2+3*1=5 = 1.25*2^2 -> exp 129, man .01b = 0x200000"
+  },
+  {
+   "id": "jam_large_exponent_gap",
+   "kind": "cell",
+   "rules": [
+    "JAM-01",
+    "MUL-01"
+   ],
+   "old_fp32_bits": 0,
+   "pairs_bf16_bits": [
+    [
+     18816,
+     16256
+    ],
+    [
+     13696,
+     13696
+    ]
+   ],
+   "tk": 2,
+   "expected_fp32_bits": 1233125377,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "2^20 + 2^-40: the small lane is below the 26-bit grid (gap 60) and is jammed into the LSB; ROD then rounds up to odd -> mantissa 1"
+  },
+  {
+   "id": "rod_odd_sticky",
+   "kind": "cell",
+   "rules": [
+    "ROD-01"
+   ],
+   "old_fp32_bits": 1065353216,
+   "pairs_bf16_bits": [
+    [
+     14720,
+     14720
+    ],
+    [
+     0,
+     0
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 1065353217,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "1.0 + 2^-24: half an ulp, guard 0, round 1 -> ROD rounds up to the odd mantissa 1"
+  },
+  {
+   "id": "rod_exact",
+   "kind": "cell",
+   "rules": [
+    "ROD-01"
+   ],
+   "old_fp32_bits": 1065353216,
+   "pairs_bf16_bits": [
+    [
+     14720,
+     14848
+    ],
+    [
+     0,
+     0
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 1065353217,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "1.0 + 2^-12*2^-11 = 1.0 + 2^-23: exactly one ulp, representable, no rounding"
+  },
+  {
+   "id": "rod_guard_set_no_round",
+   "kind": "cell",
+   "rules": [
+    "ROD-01"
+   ],
+   "old_fp32_bits": 1065353217,
+   "pairs_bf16_bits": [
+    [
+     14720,
+     14720
+    ],
+    [
+     0,
+     0
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 1065353217,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "old mantissa 1 has guard bit 1; +2^-24 gives round 1 but ~guard=0, so ROD does not round up"
+  },
+  {
+   "id": "rod_vs_rne",
+   "kind": "cell",
+   "rules": [
+    "ROD-01"
+   ],
+   "old_fp32_bits": 1065353219,
+   "pairs_bf16_bits": [
+    [
+     14720,
+     14720
+    ],
+    [
+     0,
+     0
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 1065353219,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "guard=1, round=1, sticky=0: RNE would tie-to-even and round UP to mantissa 4; ROD requires guard=0 so it does not. Contract result keeps mantissa 3.",
+   "contrast_rne_fp32_bits": 1065353220
+  },
+  {
+   "id": "mul_overflow_two_lane_sum",
+   "kind": "cell",
+   "rules": [
+    "OVF-MUL-01"
+   ],
+   "old_fp32_bits": 0,
+   "pairs_bf16_bits": [
+    [
+     32639,
+     16256
+    ],
+    [
+     32639,
+     16256
+    ]
+   ],
+   "tk": 2,
+   "expected_fp32_bits": 2139095040,
+   "expected_flags": {
+    "nv": 0,
+    "of": 1
+   },
+   "derivation": "2*(2-2^-7)*2^127 > FP32 max; widening multiply overflow is +Inf (OF), not max-normal"
+  },
+  {
+   "id": "acc_overflow_to_max_normal",
+   "kind": "cell",
+   "rules": [
+    "OVF-ACC-01"
+   ],
+   "old_fp32_bits": 2139095039,
+   "pairs_bf16_bits": [
+    [
+     32639,
+     16256
+    ],
+    [
+     0,
+     0
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 2139095039,
+   "expected_flags": {
+    "nv": 0,
+    "of": 1
+   },
+   "derivation": "FP32 max + ~2^128 overflows; the accumulate stage under ROD saturates to max-normal 0x7F7FFFFF with OF"
+  },
+  {
+   "id": "acc_overflow_negative",
+   "kind": "cell",
+   "rules": [
+    "OVF-ACC-01"
+   ],
+   "old_fp32_bits": 4286578687,
+   "pairs_bf16_bits": [
+    [
+     65407,
+     16256
+    ],
+    [
+     0,
+     0
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 4286578687,
+   "expected_flags": {
+    "nv": 0,
+    "of": 1
+   },
+   "derivation": "sign-symmetric: -max-normal 0xFF7FFFFF"
+  },
+  {
+   "id": "spc_inf_times_zero",
+   "kind": "cell",
+   "rules": [
+    "SPC-01"
+   ],
+   "old_fp32_bits": 0,
+   "pairs_bf16_bits": [
+    [
+     32640,
+     0
+    ],
+    [
+     0,
+     0
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 2143289344,
+   "expected_flags": {
+    "nv": 1,
+    "of": 0
+   },
+   "derivation": "Inf*0 -> canonical qNaN 0x7FC00000, NV"
+  },
+  {
+   "id": "spc_snan_sets_nv",
+   "kind": "cell",
+   "rules": [
+    "SPC-01"
+   ],
+   "old_fp32_bits": 0,
+   "pairs_bf16_bits": [
+    [
+     32641,
+     16256
+    ],
+    [
+     0,
+     0
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 2143289344,
+   "expected_flags": {
+    "nv": 1,
+    "of": 0
+   },
+   "derivation": "signalling NaN (quiet bit clear) -> qNaN and NV"
+  },
+  {
+   "id": "spc_qnan_no_nv",
+   "kind": "cell",
+   "rules": [
+    "SPC-01"
+   ],
+   "old_fp32_bits": 0,
+   "pairs_bf16_bits": [
+    [
+     32704,
+     16256
+    ],
+    [
+     0,
+     0
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 2143289344,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "quiet NaN propagates with no NV"
+  },
+  {
+   "id": "spc_inf_minus_inf_lanes",
+   "kind": "cell",
+   "rules": [
+    "SPC-01"
+   ],
+   "old_fp32_bits": 0,
+   "pairs_bf16_bits": [
+    [
+     32640,
+     16256
+    ],
+    [
+     65408,
+     16256
+    ]
+   ],
+   "tk": 2,
+   "expected_fp32_bits": 2143289344,
+   "expected_flags": {
+    "nv": 1,
+    "of": 0
+   },
+   "derivation": "+Inf lane and -Inf lane -> qNaN, NV"
+  },
+  {
+   "id": "spc_acc_inf_minus_inf",
+   "kind": "cell",
+   "rules": [
+    "SPC-01"
+   ],
+   "old_fp32_bits": 4286578688,
+   "pairs_bf16_bits": [
+    [
+     32640,
+     16256
+    ],
+    [
+     0,
+     0
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 2143289344,
+   "expected_flags": {
+    "nv": 1,
+    "of": 0
+   },
+   "derivation": "adder: +Inf product with -Inf accumulator -> qNaN, NV"
+  },
+  {
+   "id": "spc_single_inf",
+   "kind": "cell",
+   "rules": [
+    "SPC-01"
+   ],
+   "old_fp32_bits": 0,
+   "pairs_bf16_bits": [
+    [
+     32640,
+     16384
+    ],
+    [
+     0,
+     0
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 2139095040,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "one +Inf lane, no flag"
+  },
+  {
+   "id": "msk_masked_inf_isolated",
+   "kind": "cell",
+   "rules": [
+    "MSK-01"
+   ],
+   "old_fp32_bits": 0,
+   "pairs_bf16_bits": [
+    [
+     16256,
+     16384
+    ],
+    [
+     32640,
+     0
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 1073741824,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "tk=1 masks lane 1 (an Inf*0 pair): masked lane is zeroed before classify, so no NV and result is 1*2=2"
+  },
+  {
+   "id": "msk_masked_nan_isolated",
+   "kind": "cell",
+   "rules": [
+    "MSK-01"
+   ],
+   "old_fp32_bits": 0,
+   "pairs_bf16_bits": [
+    [
+     16256,
+     16384
+    ],
+    [
+     32704,
+     16256
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 1073741824,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "tk=1 masks lane 1 (a qNaN lane): result stays 2.0, not NaN"
+  },
+  {
+   "id": "msk_live_inf_other_masked",
+   "kind": "cell",
+   "rules": [
+    "MSK-01",
+    "SPC-01"
+   ],
+   "old_fp32_bits": 0,
+   "pairs_bf16_bits": [
+    [
+     32640,
+     16384
+    ],
+    [
+     16256,
+     16256
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 2139095040,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "live lane Inf*2=+Inf; the masked lane contributes nothing"
+  },
+  {
+   "id": "tkg_grouping_differs",
+   "kind": "tk_sequence",
+   "rules": [
+    "TKG-01",
+    "ROD-01"
+   ],
+   "old_fp32_bits": 1065353219,
+   "pairs_bf16_bits": [
+    [
+     14720,
+     14720
+    ],
+    [
+     14720,
+     14720
+    ]
+   ],
+   "tk": 2,
+   "expected_fp32_bits": 1065353220,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "old=1+3*2^-23. One tk=2 tree sums 2^-24+2^-24=2^-23 and adds once: 1+4*2^-23 = mantissa 4. Split into two tk=1 steps each adds 2^-24 with guard=1 so ROD never rounds up: mantissa stays 3. Same K sequence, different bits.",
+   "expected_split_fp32_bits": 1065353219
+  },
+  {
+   "id": "tkg_tk1_single_lane",
+   "kind": "cell",
+   "rules": [
+    "TKG-01"
+   ],
+   "old_fp32_bits": 0,
+   "pairs_bf16_bits": [
+    [
+     16256,
+     16384
+    ],
+    [
+     16448,
+     16448
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 1073741824,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "tk=1 keeps lane 0 only: 1*2 = 2; lane 1 (3*3) is masked off"
+  },
+  {
+   "id": "can_tree_cancel",
+   "kind": "cell",
+   "rules": [
+    "CAN-01"
+   ],
+   "old_fp32_bits": 0,
+   "pairs_bf16_bits": [
+    [
+     16256,
+     16256
+    ],
+    [
+     49024,
+     16256
+    ]
+   ],
+   "tk": 2,
+   "expected_fp32_bits": 0,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "1 + -1 = 0 exactly; the tree forces sign +, so +0"
+  },
+  {
+   "id": "can_accumulate_cancel",
+   "kind": "cell",
+   "rules": [
+    "CAN-01"
+   ],
+   "old_fp32_bits": 3212836864,
+   "pairs_bf16_bits": [
+    [
+     16256,
+     16256
+    ],
+    [
+     0,
+     0
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 0,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "-1.0 + 1.0 = exact zero; effective subtraction and not RDN -> +0"
+  },
+  {
+   "id": "can_signed_zero_same_sign",
+   "kind": "cell",
+   "rules": [
+    "CAN-01"
+   ],
+   "old_fp32_bits": 2147483648,
+   "pairs_bf16_bits": [
+    [
+     32768,
+     16256
+    ],
+    [
+     0,
+     0
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 0,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "old=-0, product=-0 operands: the tree forces the product sign to + when zero, so a_sign=0 and the sum is +0 (NOT IEEE -0)"
+  },
+  {
+   "id": "sub_input_times_normal",
+   "kind": "cell",
+   "rules": [
+    "SUB-01"
+   ],
+   "old_fp32_bits": 0,
+   "pairs_bf16_bits": [
+    [
+     1,
+     16384
+    ],
+    [
+     0,
+     0
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 131072,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "min BF16 subnormal is 2^-133; times 2 is 2^-132; FP32 subnormals sit on a 2^-149 grid so that is 2^17 units = mantissa 0x20000, exact"
+  },
+  {
+   "id": "sub_times_sub_underflow",
+   "kind": "cell",
+   "rules": [
+    "SUB-01"
+   ],
+   "old_fp32_bits": 0,
+   "pairs_bf16_bits": [
+    [
+     1,
+     1
+    ],
+    [
+     0,
+     0
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 1,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "2^-133*2^-133 = 2^-266 << 2^-149; ROD rounds a nonzero underflow to the odd value 1 ulp = 0x00000001 (UF/NX are not exposed by the VME)"
+  },
+  {
+   "id": "flg_nx_not_exposed",
+   "kind": "cell",
+   "rules": [
+    "FLG-01"
+   ],
+   "old_fp32_bits": 1065353216,
+   "pairs_bf16_bits": [
+    [
+     14720,
+     14720
+    ],
+    [
+     0,
+     0
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 1065353217,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "inexact result: NX is raised internally but only OF and NV leave the VME, so flags stay 0"
+  },
+  {
+   "id": "flg_of_exposed",
+   "kind": "cell",
+   "rules": [
+    "FLG-01"
+   ],
+   "old_fp32_bits": 2139095039,
+   "pairs_bf16_bits": [
+    [
+     32639,
+     16256
+    ],
+    [
+     0,
+     0
+    ]
+   ],
+   "tk": 1,
+   "expected_fp32_bits": 2139095039,
+   "expected_flags": {
+    "nv": 0,
+    "of": 1
+   },
+   "derivation": "overflow IS exposed"
+  },
+  {
+   "id": "jam_ablation_truncate",
+   "kind": "ablation",
+   "rules": [
+    "JAM-01"
+   ],
+   "ablation": "truncate",
+   "old_fp32_bits": 0,
+   "pairs_bf16_bits": [
+    [
+     18816,
+     16256
+    ],
+    [
+     13696,
+     13696
+    ]
+   ],
+   "tk": 2,
+   "expected_fp32_bits": 1233125377,
+   "ablated_fp32_bits": 1233125376,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "2^20 + 2^-40. Contract (jam): the lost lane sets the LSB, ROD rounds up to odd, mantissa 1. Plain truncation drops it and returns exactly 2^20, mantissa 0."
+  },
+  {
+   "id": "jam_ablation_rne",
+   "kind": "ablation",
+   "rules": [
+    "JAM-01",
+    "ROD-01"
+   ],
+   "ablation": "rne_internal",
+   "old_fp32_bits": 0,
+   "pairs_bf16_bits": [
+    [
+     16256,
+     16256
+    ],
+    [
+     14784,
+     14848
+    ]
+   ],
+   "tk": 2,
+   "expected_fp32_bits": 1065353217,
+   "ablated_fp32_bits": 1065353218,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0
+   },
+   "derivation": "1 + 1.5*2^-23: guard=1, round=1, sticky=0. ROD keeps mantissa 1; RNE ties to even and rounds up to mantissa 2."
+  },
+  {
+   "id": "nar_tie_to_even",
+   "kind": "narrow",
+   "rules": [
+    "NAR-01"
+   ],
+   "frm": 0,
+   "input_fp32_bits": 1065385984,
+   "expected_bf16_bits": 16256,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0,
+    "nx": 1
+   },
+   "derivation": "1+2^-8 is exactly half a BF16 ulp; kept mantissa bits are 0000000 (even) -> stays 0x3F80"
+  },
+  {
+   "id": "nar_tie_odd",
+   "kind": "narrow",
+   "rules": [
+    "NAR-01"
+   ],
+   "frm": 0,
+   "input_fp32_bits": 1065451520,
+   "expected_bf16_bits": 16258,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0,
+    "nx": 1
+   },
+   "derivation": "kept mantissa 0000001 (odd) and an exact tie -> RNE rounds up to the even mantissa 0000010 = 0x3F82"
+  },
+  {
+   "id": "nar_overflow_inf",
+   "kind": "narrow",
+   "rules": [
+    "NAR-01"
+   ],
+   "frm": 0,
+   "input_fp32_bits": 2139095039,
+   "expected_bf16_bits": 32640,
+   "expected_flags": {
+    "nv": 0,
+    "of": 1,
+    "nx": 1
+   },
+   "derivation": "FP32 max rounds past BF16 max-normal under RNE -> +Inf, OF"
+  },
+  {
+   "id": "nar_snan",
+   "kind": "narrow",
+   "rules": [
+    "NAR-01"
+   ],
+   "frm": 0,
+   "input_fp32_bits": 2139095041,
+   "expected_bf16_bits": 32704,
+   "expected_flags": {
+    "nv": 1,
+    "of": 0,
+    "nx": 0
+   },
+   "derivation": "signalling NaN -> canonical BF16 qNaN 0x7FC0 with NV"
+  },
+  {
+   "id": "nar_min_sub_exact",
+   "kind": "narrow",
+   "rules": [
+    "NAR-01"
+   ],
+   "frm": 0,
+   "input_fp32_bits": 65536,
+   "expected_bf16_bits": 1,
+   "expected_flags": {
+    "nv": 0,
+    "of": 0,
+    "nx": 0
+   },
+   "derivation": "2^-133 is exactly the smallest BF16 subnormal; no rounding"
+  },
+  {
+   "id": "frm_dyn_rejected",
+   "kind": "frm",
+   "rules": [
+    "FRM-01"
+   ],
+   "frm": 7,
+   "expected_error": "FRM_DYN",
+   "derivation": "frm=7: rejected as FRM_DYN"
+  },
+  {
+   "id": "frm_rod_rejected",
+   "kind": "frm",
+   "rules": [
+    "FRM-01"
+   ],
+   "frm": 5,
+   "expected_error": "FRM_ROD",
+   "derivation": "frm=5: rejected as FRM_ROD"
+  },
+  {
+   "id": "frm_unassigned_rejected",
+   "kind": "frm",
+   "rules": [
+    "FRM-01"
+   ],
+   "frm": 6,
+   "expected_error": "FRM_UNASSIGNED",
+   "derivation": "frm=6: rejected as FRM_UNASSIGNED"
+  },
+  {
+   "id": "til_tail_9x11",
+   "kind": "record_case",
+   "rules": [
+    "TIL-01"
+   ],
+   "record": "bf16_kat_record.json",
+   "case": 3,
+   "derivation": "tm=9,tn=11,tk=2: the 99 cells inside the tile are updated and the other 157 keep the preloaded accumulator, as recorded from the real RTL"
+  }
+ ]
+}

@@ -39,6 +39,10 @@ commands:
     summary: run BF16 VME matmul test on the unmodified core
     executor: host
     handler: scripts/handlers/bf16_baseline.sh
+  numeric-probe:
+    summary: run directed BF16 numeric vectors on the unmodified core and compare to the reference
+    executor: host
+    handler: scripts/handlers/numeric_probe.sh
   unit:
     summary: run a registered unit suite
     executor: host
@@ -60,3 +64,7 @@ commands:
           - hardware/coral_nexus/verification/contracts/test_g0_gate.py
           - hardware/coral_nexus/verification/contracts/test_protocol_c009.py
           - hardware/coral_nexus/verification/contracts/test_native_owner_c010.py
+          - hardware/coral_nexus/verification/contracts/test_numeric_c011.py
+      numeric-bootstrap:
+        tests:
+          - hardware/coral_nexus/verification/numerics/test_numeric_bootstrap.py

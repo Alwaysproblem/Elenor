@@ -1,0 +1,15 @@
+{
+  "cells_compared": 768,
+  "errors": [],
+  "groups": 3,
+  "pass": true,
+  "placed_vectors": 30,
+  "schema": "cn_numeric_probe_verdict/v1",
+  "tamper_self_test": {
+    "detected": true,
+    "location": [
+      0,
+      5
+    ]
+  }
+}
