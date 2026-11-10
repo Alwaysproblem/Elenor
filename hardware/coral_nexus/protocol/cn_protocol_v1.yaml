@@ -1,0 +1,147 @@
+# Coral Nexus boundary protocol, DRAFT (C009).
+#
+# Logical fields only. No silicon opcode or bit encoding is frozen here
+# (r5 13.1): `protocol_only: true` opcodes exist solely to order cosim messages.
+# Nothing in this file is sealed; PROTOCOL_FREEZE.json is produced once, jointly,
+# by C020. Every field names its owner package and the design section it came
+# from, so a missing `source` is a validator failure, not a silent hole.
+schema: cn_protocol/v1
+status: draft
+protocol_only: true
+
+# ---------------------------------------------------------------------------
+# Identity domains. Domains are separate on purpose: collapsing two of them
+# (e.g. matching a completion by PC, or reusing op_seq as a transport counter)
+# is exactly the ABA/duplicate-effect hazard the validator rejects.
+# ---------------------------------------------------------------------------
+identity_domains:
+  task_key:
+    source: components/W1_Boundary_Cosimulation.md#2.3
+    fields:
+      - {name: launch_generation, owner: W1, note: "equals root_launch_generation; both are carried and must be equal"}
+      - {name: root_launch_generation, owner: W1, equals: launch_generation}
+      - {name: dispatch_ordinal, owner: W1}
+      - {name: task_id, owner: W1}
+      - {name: context_handle, owner: W1, note: "small-int handle for Python context_name/device_slot; mapping lives in the run manifest"}
+  context_key:
+    source: components/W1_Boundary_Cosimulation.md#2.3
+    fields:
+      - {name: tile_id, owner: W1, note: "physical tile; single routing column, not part of logical TaskKey"}
+      - {name: ctx_slot, owner: W2}
+      - {name: ctx_generation, owner: W2, note: "bumps on slot reuse so an old transaction cannot match a new occupant"}
+  op:
+    source: components/W1_Boundary_Cosimulation.md#2.3
+    fields:
+      - {name: op_seq, owner: W2, note: "parent instruction within one Context; NEVER a transport counter"}
+      - {name: subop_id, owner: W2, note: "expansion of one op_seq"}
+  txn:
+    source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2
+    fields:
+      - {name: txn_id, owner: W1}
+      - {name: seg_idx, owner: W1, note: "fragment index of one message type"}
+      - {name: seg_last, owner: W1}
+  transport:
+    source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2
+    fields:
+      - {name: message_seq, owner: W1, note: "per (tile, channel, direction), contiguous from 0; transport loss/replay detection only"}
+  epochs:
+    source: components/W1_Boundary_Cosimulation.md#2.3
+    fields:
+      - {name: run_generation, owner: W6}
+      - {name: program_epoch, owner: W5}
+      - {name: profile_l1_gen, owner: W4}
+      - {name: profile_l2_gen, owner: W4}
+      - {name: arena_alloc_gen, owner: W4, note: "separate from ctx_generation; carried on resource/lease messages only"}
+      - {name: fetch_epoch, owner: W2, field_visibility: hidden, note: "W2-internal; never on the boundary wire"}
+
+# Version ticket carried on the wire and re-validated at COMMIT. The Python
+# ArenaPlan.pool_token object never crosses the boundary (IF-11).
+version_ticket:
+  source: components/W1_Boundary_Cosimulation.md#2.3
+  fields: [pool_id, pool_epoch, pool_version, extent_pool_version, profile_mode, profile_generation]
+
+# ---------------------------------------------------------------------------
+# Duplicate-effect rules.
+# ---------------------------------------------------------------------------
+dedup:
+  semantic_key: [txn_id, message_type]
+  rules:
+    - id: DUP-01
+      text: "HOLD and FINAL of one txn are different legal messages; txn_id alone is never a dedup hit."
+    - id: DUP-02
+      text: "An ACK must reference the (txn_id, message_type) of the request it answers."
+    - id: DUP-03
+      text: "seg_idx/seg_last distinguish retransmitted fragments of the SAME message type only."
+    - id: DUP-04
+      text: "message_seq never participates in semantic dedup; a gap or replay is a transport fault (INCOMPLETE), not a Tile verdict."
+    - id: DUP-05
+      text: "A transport replay must not repeat any side effect."
+  transport_replay_outcome: INCOMPLETE
+
+# ---------------------------------------------------------------------------
+# Channels. Stream traffic is a sub-queue of MEMORY (no sixth physical channel).
+# ---------------------------------------------------------------------------
+channels:
+  - {name: CTRL, directions: [G2T, T2G], source: components/W1_Boundary_Cosimulation.md#3.2}
+  - {name: EVENT, directions: [T2G, G2T], source: components/W1_Boundary_Cosimulation.md#3.2}
+  - {name: PROGRAM, directions: [G2T, T2G], source: components/W1_Boundary_Cosimulation.md#3.2}
+  - {name: MEMORY, directions: [T2G, G2T], source: components/W1_Boundary_Cosimulation.md#3.2, subqueues: [STREAM]}
+  - {name: DEBUG, directions: [T2H], source: components/W1_Boundary_Cosimulation.md#3.2, lossy: true}
+
+# ---------------------------------------------------------------------------
+# Phase model (single Python tick == one RTL core clock).
+# ---------------------------------------------------------------------------
+phases:
+  source: components/W1_Boundary_Cosimulation.md#3.1
+  order: [P0, P1, P2, P3, P4]
+  rules:
+    - {phase: P1, text: "the ONLY handshake decision point; accepted set = valid&&ready at the stable point, both directions; payload/identity snapshot freezes here"}
+    - {phase: P3, text: "commits ONLY the P1-accepted snapshot into the Python queue, exactly once; anything first visible after P2 is staged for the next tick's P1"}
+    - {phase: P4, text: "Group control steps exactly once; a response to a request accepted this tick is driven no earlier than the next tick's P0 (no same-tick recursion)"}
+
+# ---------------------------------------------------------------------------
+# Message catalog. `protocol_only: true` opcodes order the cosim only.
+# ---------------------------------------------------------------------------
+messages:
+  - {name: QUERY_CAPS, channel: CTRL, dir: G2T, owner: W2, status: draft, source: components/W1_Boundary_Cosimulation.md#4.2, key: [txn_id]}
+  - {name: CAPS_RESP, channel: CTRL, dir: T2G, owner: W2, status: draft, source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2, key: [txn_id]}
+  - {name: RUN_BEGIN, channel: CTRL, dir: G2T, owner: W6, status: draft, source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2, key: [run_generation],
+     note: "advances run_generation only; MUST NOT bump program_epoch (would cold-load warm programs)"}
+  - {name: TASK_PLAN, channel: CTRL, dir: G2T, owner: W1, status: draft, source: components/W1_Boundary_Cosimulation.md#4.2, key: [task_key, txn_id]}
+  - {name: TASK_COMMIT, channel: CTRL, dir: G2T, owner: W2, status: draft, source: components/W1_Boundary_Cosimulation.md#4.2, key: [task_key, txn_id], stage: HOLD}
+  - {name: TASK_COMMIT_FINAL, channel: CTRL, dir: G2T, owner: W2, status: draft, source: components/W1_Boundary_Cosimulation.md#4.2, key: [task_key, txn_id], stage: FINAL}
+  - {name: ACK, channel: CTRL, dir: T2G, owner: W2, status: draft, source: components/W1_Boundary_Cosimulation.md#4.2, key: [txn_id, ack_for_message_type]}
+  - {name: RETIRE_READY, channel: CTRL, dir: T2G, owner: W2, status: draft, source: components/W1_Boundary_Cosimulation.md#4.2, key: [task_key]}
+  - {name: RETIRE, channel: CTRL, dir: G2T, owner: W4, status: draft, source: components/W1_Boundary_Cosimulation.md#4.2, key: [task_key]}
+  - {name: TASK_COMPLETION, channel: CTRL, dir: T2G, owner: W6, status: draft, source: components/W1_Boundary_Cosimulation.md#4.2, key: [task_key]}
+  - {name: GATE_NOTIFY, channel: CTRL, dir: G2T, owner: W4, status: draft, source: components/W1_Boundary_Cosimulation.md#4.2, key: [level, profile_generation]}
+  - {name: RESOURCE_UPDATE, channel: EVENT, dir: T2G, owner: W4, status: draft, source: components/W1_Boundary_Cosimulation.md#4.2, key: [tile_id, version]}
+  - {name: POST_EVENT, channel: EVENT, dir: T2G, owner: W6, status: draft, source: components/W1_Boundary_Cosimulation.md#4.2, key: [owner, generation, sequence, scope],
+     note: "only a sealed-manifest-authorized Group-event producer may send; unauthorized is a protocol fault, not a no-op"}
+  - {name: PHASE_SIGNAL, channel: EVENT, dir: T2G, owner: W6, status: draft, source: components/W1_Boundary_Cosimulation.md#4.2, key: [task_key, direction]}
+  - {name: EVENT_NOTIFY, channel: EVENT, dir: G2T, owner: W6, status: draft, source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2, key: [owner, generation, sequence],
+     note: "late status=RESET handling aligns with event_table.signal"}
+  - {name: EVENT_RETIRE, channel: EVENT, dir: G2T, owner: W6, status: draft, source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2, key: [task_key]}
+  - {name: PROGRAM_INSTALL, channel: PROGRAM, dir: G2T, owner: W5, status: draft, source: components/W1_Boundary_Cosimulation.md#4.2, key: [program_id, program_epoch]}
+  - {name: PROGRAM_READ_REQ, channel: PROGRAM, dir: T2G, owner: W5, status: draft, source: components/W1_Boundary_Cosimulation.md#3.2, key: [program_id, program_epoch]}
+  - {name: PROGRAM_READ_RESP, channel: PROGRAM, dir: G2T, owner: W5, status: draft, source: components/W1_Boundary_Cosimulation.md#3.2, key: [program_id, program_epoch]}
+  - {name: PROGRAM_INSTALL_ACK, channel: PROGRAM, dir: T2G, owner: W5, status: draft, source: components/W1_Boundary_Cosimulation.md#3.2, key: [program_id, program_epoch]}
+  - {name: PROGRAM_READY, channel: PROGRAM, dir: G2T, owner: W5, status: draft, source: components/W1_Boundary_Cosimulation.md#4.2, key: [program_id, program_epoch],
+     note: "never alone authorizes execution of a Task that is not accepted"}
+  - {name: PROGRAM_INVALIDATE, channel: PROGRAM, dir: G2T, owner: W5, status: draft, source: components/W1_Boundary_Cosimulation.md#4.2, key: [program_id, program_epoch]}
+  - {name: INVALIDATE_ACK, channel: PROGRAM, dir: T2G, owner: W5, status: draft, source: components/W1_Boundary_Cosimulation.md#3.2, key: [program_id, program_epoch]}
+  - {name: MEM_REQ, channel: MEMORY, dir: T2G, owner: W4, status: draft, source: components/W1_Boundary_Cosimulation.md#4.2, key: [txn_id]}
+  - {name: MEM_RSP, channel: MEMORY, dir: G2T, owner: W4, status: draft, source: components/W1_Boundary_Cosimulation.md#4.2, key: [txn_id]}
+  - {name: TERMINAL_ACK, channel: MEMORY, dir: T2G, owner: W4, status: draft, source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2, key: [txn_id],
+     note: "returns the terminal reference; aligns with transfer_manager.acknowledge"}
+  # STREAM family: MEMORY sub-queue, Group StreamQueue is the only writer.
+  - {name: STREAM_ACQUIRE, channel: MEMORY, subqueue: STREAM, dir: T2G, owner: W4, status: draft, source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2, key: [token_id, queue_generation, seq]}
+  - {name: STREAM_POP, channel: MEMORY, subqueue: STREAM, dir: T2G, owner: W4, status: draft, source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2, key: [token_id, queue_generation, seq]}
+  - {name: STREAM_PUSH, channel: MEMORY, subqueue: STREAM, dir: T2G, owner: W4, status: draft, source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2, key: [token_id, queue_generation, seq]}
+  - {name: STREAM_RELEASE, channel: MEMORY, subqueue: STREAM, dir: T2G, owner: W4, status: draft, source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2, key: [token_id, queue_generation, seq]}
+  - {name: STREAM_PUSH_EOS, channel: MEMORY, subqueue: STREAM, dir: T2G, owner: W4, status: draft, source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2, key: [token_id, queue_generation, seq]}
+  - {name: STREAM_EOS, channel: MEMORY, subqueue: STREAM, dir: G2T, owner: W4, status: draft, source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2, key: [token_id, queue_generation, seq]}
+  - {name: STREAM_ERROR, channel: MEMORY, subqueue: STREAM, dir: G2T, owner: W4, status: draft, source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2, key: [token_id, queue_generation, seq, first_fault_index]}
+  - {name: GEN_WRAP_QUIESCE, channel: CTRL, dir: G2T, owner: W6, status: draft, source: implementation/W1_Boundary_Cosimulation_Plan.md#7.4, key: [context_key],
+     note: "Tile only answers (QUIESCE_RESP); it neither times out nor clears itself"}
+  - {name: QUIESCE_RESP, channel: CTRL, dir: T2G, owner: W6, status: draft, source: implementation/W1_Boundary_Cosimulation_Plan.md#7.4, key: [context_key]}

@@ -1,0 +1,324 @@
+{
+  "internal_invalid_address": 0,
+  "occupied": [
+    {
+      "address": 1,
+      "line": 49,
+      "name": "FFLAGS",
+      "width_bits": 12
+    },
+    {
+      "address": 2,
+      "line": 50,
+      "name": "FRM",
+      "width_bits": 12
+    },
+    {
+      "address": 3,
+      "line": 51,
+      "name": "FCSR",
+      "width_bits": 12
+    },
+    {
+      "address": 8,
+      "line": 52,
+      "name": "VSTART",
+      "width_bits": 12
+    },
+    {
+      "address": 9,
+      "line": 53,
+      "name": "VXSAT",
+      "width_bits": 12
+    },
+    {
+      "address": 10,
+      "line": 54,
+      "name": "VXRM",
+      "width_bits": 12
+    },
+    {
+      "address": 768,
+      "line": 55,
+      "name": "MSTATUS",
+      "width_bits": 12
+    },
+    {
+      "address": 769,
+      "line": 56,
+      "name": "MISA",
+      "width_bits": 12
+    },
+    {
+      "address": 772,
+      "line": 57,
+      "name": "MIE",
+      "width_bits": 12
+    },
+    {
+      "address": 773,
+      "line": 58,
+      "name": "MTVEC",
+      "width_bits": 12
+    },
+    {
+      "address": 784,
+      "line": 59,
+      "name": "MSTATUSH",
+      "width_bits": 12
+    },
+    {
+      "address": 832,
+      "line": 60,
+      "name": "MSCRATCH",
+      "width_bits": 12
+    },
+    {
+      "address": 833,
+      "line": 61,
+      "name": "MEPC",
+      "width_bits": 12
+    },
+    {
+      "address": 834,
+      "line": 62,
+      "name": "MCAUSE",
+      "width_bits": 12
+    },
+    {
+      "address": 835,
+      "line": 63,
+      "name": "MTVAL",
+      "width_bits": 12
+    },
+    {
+      "address": 836,
+      "line": 64,
+      "name": "MIP",
+      "width_bits": 12
+    },
+    {
+      "address": 1952,
+      "line": 65,
+      "name": "TSELECT",
+      "width_bits": 12
+    },
+    {
+      "address": 1953,
+      "line": 66,
+      "name": "TDATA1",
+      "width_bits": 12
+    },
+    {
+      "address": 1954,
+      "line": 67,
+      "name": "TDATA2",
+      "width_bits": 12
+    },
+    {
+      "address": 1956,
+      "line": 68,
+      "name": "TINFO",
+      "width_bits": 12
+    },
+    {
+      "address": 1968,
+      "line": 69,
+      "name": "DCSR",
+      "width_bits": 12
+    },
+    {
+      "address": 1969,
+      "line": 70,
+      "name": "DPC",
+      "width_bits": 12
+    },
+    {
+      "address": 1970,
+      "line": 71,
+      "name": "DSCRATCH0",
+      "width_bits": 12
+    },
+    {
+      "address": 1971,
+      "line": 72,
+      "name": "DSCRATCH1",
+      "width_bits": 12
+    },
+    {
+      "address": 1984,
+      "line": 73,
+      "name": "MCONTEXT0",
+      "width_bits": 12
+    },
+    {
+      "address": 1985,
+      "line": 74,
+      "name": "MCONTEXT1",
+      "width_bits": 12
+    },
+    {
+      "address": 1986,
+      "line": 75,
+      "name": "MCONTEXT2",
+      "width_bits": 12
+    },
+    {
+      "address": 1987,
+      "line": 76,
+      "name": "MCONTEXT3",
+      "width_bits": 12
+    },
+    {
+      "address": 1988,
+      "line": 77,
+      "name": "MCONTEXT4",
+      "width_bits": 12
+    },
+    {
+      "address": 1989,
+      "line": 78,
+      "name": "MCONTEXT5",
+      "width_bits": 12
+    },
+    {
+      "address": 1990,
+      "line": 79,
+      "name": "MCONTEXT6",
+      "width_bits": 12
+    },
+    {
+      "address": 1991,
+      "line": 80,
+      "name": "MCONTEXT7",
+      "width_bits": 12
+    },
+    {
+      "address": 2016,
+      "line": 81,
+      "name": "MPC",
+      "width_bits": 12
+    },
+    {
+      "address": 2017,
+      "line": 82,
+      "name": "MSP",
+      "width_bits": 12
+    },
+    {
+      "address": 2816,
+      "line": 83,
+      "name": "MCYCLE",
+      "width_bits": 12
+    },
+    {
+      "address": 2818,
+      "line": 84,
+      "name": "MINSTRET",
+      "width_bits": 12
+    },
+    {
+      "address": 2944,
+      "line": 85,
+      "name": "MCYCLEH",
+      "width_bits": 12
+    },
+    {
+      "address": 2946,
+      "line": 86,
+      "name": "MINSTRETH",
+      "width_bits": 12
+    },
+    {
+      "address": 3104,
+      "line": 87,
+      "name": "VL",
+      "width_bits": 12
+    },
+    {
+      "address": 3105,
+      "line": 88,
+      "name": "VTYPE",
+      "width_bits": 12
+    },
+    {
+      "address": 3106,
+      "line": 89,
+      "name": "VLENB",
+      "width_bits": 12
+    },
+    {
+      "address": 3107,
+      "line": 90,
+      "name": "MTYPE",
+      "width_bits": 12
+    },
+    {
+      "address": 3857,
+      "line": 91,
+      "name": "MVENDORID",
+      "width_bits": 12
+    },
+    {
+      "address": 3858,
+      "line": 92,
+      "name": "MARCHID",
+      "width_bits": 12
+    },
+    {
+      "address": 3859,
+      "line": 93,
+      "name": "MIMPID",
+      "width_bits": 12
+    },
+    {
+      "address": 3860,
+      "line": 94,
+      "name": "MHARTID",
+      "width_bits": 12
+    },
+    {
+      "address": 4032,
+      "line": 95,
+      "name": "KISA",
+      "width_bits": 12
+    },
+    {
+      "address": 4036,
+      "line": 96,
+      "name": "KSCM0",
+      "width_bits": 12
+    },
+    {
+      "address": 4040,
+      "line": 97,
+      "name": "KSCM1",
+      "width_bits": 12
+    },
+    {
+      "address": 4044,
+      "line": 98,
+      "name": "KSCM2",
+      "width_bits": 12
+    },
+    {
+      "address": 4048,
+      "line": 99,
+      "name": "KSCM3",
+      "width_bits": 12
+    },
+    {
+      "address": 4052,
+      "line": 100,
+      "name": "KSCM4",
+      "width_bits": 12
+    }
+  ],
+  "schema": "cn_upstream_csr/v1",
+  "source": {
+    "commit": "f79522157fc0f1d7311f44e209fc36c9c8b7a039",
+    "file": "hdl/chisel/src/coralnpu/scalar/Csr.scala",
+    "file_sha256": "fc7717a465fdc5a09b56af1ac3a35d9c45b441c73c60c53c63c5b7e5aad7e349",
+    "repo": "coralnpu"
+  }
+}

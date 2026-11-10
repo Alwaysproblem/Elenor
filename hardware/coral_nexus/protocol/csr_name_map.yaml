@@ -1,0 +1,39 @@
+# CSR logical-name map, DRAFT (C009).
+#
+# Registers LOGICAL names only. No bit encoding and no CSR address is chosen
+# here: addresses are produced later by csr_allocator from W2-01/W3-01 ISA
+# freezes. Upstream-occupied addresses are NOT listed by hand -- they live in
+# upstream_csr_occupied.json, parsed from the pinned Csr.scala by
+# extract_upstream_csr.py.
+#
+# `access` is `unspecified` where no sourced document defines it. It is left
+# visibly open (and reported by the validator) instead of being invented.
+# `address` must be absent: any value here is an assignment this card may not make.
+schema: cn_csr_name_map/v1
+status: draft
+upstream_table: upstream_csr_occupied.json
+declared:
+  - {name: nexus.mctx.dispatch_snapshot, owner: W2, scope: per_context, access: unspecified,
+     purpose: "configuration dispatch snapshot (vset/mset/frm/float)",
+     source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4}
+  - {name: nexus.msnap.config, owner: W2, scope: per_context, access: unspecified,
+     purpose: "snapshot state registered alongside mctx",
+     source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4}
+  - {name: nexus.mregion.start, owner: W3, scope: per_context, access: unspecified,
+     purpose: "region START pending metadata binding",
+     source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4}
+  - {name: nexus.mregion.end, owner: W3, scope: per_context, access: unspecified,
+     purpose: "region END pending metadata binding",
+     source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4}
+  - {name: nexus.mregion.first, owner: W3, scope: per_context, access: unspecified,
+     purpose: "region FIRST pending metadata binding",
+     source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4}
+  - {name: nexus.mregion.continue, owner: W3, scope: per_context, access: unspecified,
+     purpose: "region CONTINUE pending metadata binding",
+     source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4}
+  - {name: nexus.mregion.final, owner: W3, scope: per_context, access: unspecified,
+     purpose: "region FINAL pending metadata binding",
+     source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4}
+  - {name: nexus.missue.control, owner: W3, scope: per_context, access: unspecified,
+     purpose: "VME issue metadata (W3-01/02)",
+     source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4}

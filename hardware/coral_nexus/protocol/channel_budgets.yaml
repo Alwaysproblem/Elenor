@@ -1,0 +1,54 @@
+# Boundary budgets, DRAFT (C009).
+#
+# Three ledgers are kept SEPARATE and may not lend to each other (W1 design 6):
+#   1. channel_credit      flow control per (channel, direction)
+#   2. transaction_capacity concurrent admission tickets / transactions
+#   3. terminal_ack_refs   references kept until a terminal record is consumed
+# Capacities below are the CURRENT validator model constants, recorded with
+# file:line. They are exploration parameters, not frozen silicon values; the
+# freeze check reconciles them against the generated C1/C2 configs (C019).
+# An entry without `source` is a validation failure -- never an empty TBD.
+schema: cn_channel_budgets/v1
+status: draft
+ledgers:
+  channel_credit:
+    # Credit per channel/direction is NOT sourced from any current constant: the
+    # Python model has no boundary credit today (W1 design 3.2). Declaring a
+    # number here would be invented, so the ledger records the CONSERVATION
+    # RULE and leaves capacity to be derived in C019 from the entries below.
+    capacity: derived
+    derived_from: [transaction_capacity, terminal_ack_refs]
+    conservation: "sender decrements on P1 accept; receiver returns on P3 consume (or ACK crossing); a duplicate or mismatched return is an error (IF-10)"
+    independent_of: [noc_vc_credit]
+    note: "must not reuse NoC VC0-3 data-plane credit (IF-09); merging channels needs a fresh deadlock analysis"
+  transaction_capacity:
+    conservation: "in_flight_tickets <= capacity at every P1; admission refused with WAIT_CONTROL_RESOURCE when full"
+    entries:
+      - {name: dispatch_capacity, value: 16, unit: count, applies_to: [CTRL],
+         source: {file: pipeline_validator/config.py, line: 462}, usage: {file: pipeline_validator/tile_group.py, line: 1173}}
+      - {name: context_pending_capacity, value: 32, unit: count, applies_to: [CTRL],
+         source: {file: pipeline_validator/config.py, line: 454}, usage: {file: pipeline_validator/runtime/group_port.py, line: 203}}
+      - {name: active_context_capacity, value: 8, unit: count, applies_to: [CTRL],
+         source: {file: pipeline_validator/config.py, line: 453}, usage: {file: pipeline_validator/tile_group.py, line: 2121}}
+      - {name: inflight_capacity, value: 32, unit: count, applies_to: [CTRL, MEMORY],
+         source: {file: pipeline_validator/config.py, line: 459}}
+      - {name: event_capacity, value: 4096, unit: count, applies_to: [EVENT],
+         source: {file: pipeline_validator/config.py, line: 458}, usage: {file: pipeline_validator/tile_group.py, line: 285}}
+      - {name: hbm_outstanding_limit, value: 32, unit: count, applies_to: [MEMORY],
+         source: {file: pipeline_validator/hardware_config.yaml, line: 55}}
+      - {name: stream_depth_default, value: 3, unit: count, applies_to: [MEMORY],
+         subqueue: STREAM, source: {file: pipeline_validator/hardware_config.yaml, line: 147}}
+  terminal_ack_refs:
+    conservation: "a terminal record keeps one reference until TERMINAL_ACK/TASK_COMPLETION is consumed; refs_outstanding <= completion_capacity"
+    entries:
+      - {name: completion_capacity, value: 4096, unit: count, applies_to: [CTRL, MEMORY],
+         source: {file: pipeline_validator/config.py, line: 438}}
+# Per-tick issue/accept rates (messages per tick). Used by lifetime_bounds.
+rates:
+  - {name: task_commits_per_tile_per_tick, value: 1, unit: msg_per_tick,
+     source: {file: pipeline_validator/tile_group.py, line: 1230},
+     note: "docstring: 'One commit per Tile per Tick'"}
+  - {name: device_issue_width, value: 1, unit: msg_per_tick,
+     source: {file: pipeline_validator/config.py, line: 439}}
+  - {name: scheduler_scan_width, value: 4, unit: msg_per_tick,
+     source: {file: pipeline_validator/config.py, line: 457}}

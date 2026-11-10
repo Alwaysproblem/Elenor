@@ -1,0 +1,45 @@
+# Sequence/ID domain lifetime bounds, DRAFT (C009).
+#
+# Width rule (W1-01 7.2 item 3):   2**w  >  max_in_flight + rate * lifetime
+# with EVERY term in MESSAGE COUNTS. `lifetime` is in ticks and must be
+# multiplied by that domain's per-tick `rate` (msg/tick) first. Adding a tick
+# count to an entry count is a unit error and is rejected, not "corrected".
+#
+# A domain whose bound has no sourced term is `derivable: false` with a reason;
+# it is NOT given a guessed width. Wrap safety is by controlled quiesce
+# (GEN_WRAP_QUIESCE), never by "the width is big enough" (CTX-06).
+schema: cn_lifetime_bounds/v1
+status: draft
+domains:
+  - name: txn_id
+    max_in_flight: {ref: channel_budgets.transaction_capacity.dispatch_capacity}
+    rate: {ref: channel_budgets.rates.task_commits_per_tile_per_tick}
+    lifetime_ticks: {value: 100, unit: tick,
+                     source: {file: pipeline_validator/runtime/reset_domain.py, line: 89,
+                              note: "getattr(cfg, 'max_drain_cycles', 100): literal default, not a config field"}}
+    wrap_rule: GEN_WRAP_QUIESCE
+  - name: ctx_generation
+    max_in_flight: {ref: channel_budgets.transaction_capacity.active_context_capacity}
+    rate: {ref: channel_budgets.rates.task_commits_per_tile_per_tick}
+    lifetime_ticks: {value: 100, unit: tick,
+                     source: {file: pipeline_validator/runtime/reset_domain.py, line: 89}}
+    wrap_rule: GEN_WRAP_QUIESCE
+  - name: message_seq
+    # transport counter: window is the in-flight messages of one (tile, channel, dir)
+    max_in_flight: {ref: channel_budgets.transaction_capacity.inflight_capacity}
+    rate: {ref: channel_budgets.rates.task_commits_per_tile_per_tick}
+    lifetime_ticks: {value: 100, unit: tick,
+                     source: {file: pipeline_validator/runtime/reset_domain.py, line: 89}}
+    wrap_rule: GEN_WRAP_QUIESCE
+    note: "gap/replay is a transport fault (INCOMPLETE); never used for semantic dedup"
+  - name: event_sequence
+    # stale judgement is by event_table.signal expected_sequence, bounded by event_capacity
+    max_in_flight: {ref: channel_budgets.transaction_capacity.event_capacity}
+    rate: {ref: channel_budgets.rates.device_issue_width}
+    lifetime_ticks: {value: 100, unit: tick,
+                     source: {file: pipeline_validator/runtime/reset_domain.py, line: 89}}
+    wrap_rule: GEN_WRAP_QUIESCE
+  - name: run_generation
+    derivable: false
+    reason: "advances once per launch (begin_launch); no in-flight bound or rate constant exists in current code, so a width cannot be derived without inventing one. Needs a measured launch-rate bound (capacity task) before a width is emitted."
+    source: {file: pipeline_validator/runtime/group_port.py, line: 84}
