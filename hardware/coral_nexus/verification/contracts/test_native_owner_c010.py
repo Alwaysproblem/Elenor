@@ -460,6 +460,55 @@ def test_invented_width_on_unsourced_field_is_caught(docs: dict) -> None:
   assert any("invented width" in e for e in _errors(vo.check_width_rules, docs))
 
 
+_INVENTED_RULES = [
+  "8",
+  "8+8",
+  "log2Ceil(16)",
+  "max(8, 8)",
+  "retirementBufferSize",
+  "ctx_bits * 2",
+  "0x8",
+  "",
+]
+
+
+def _unsourced_sites(docs: dict) -> list[tuple[str, dict]]:
+  sites = [(w, f) for w, f in vo._all_fields(docs) if f["name"] in vo._UNSOURCED_WIDTH_FIELDS]
+  assert {f["name"] for _, f in sites} == set(vo._UNSOURCED_WIDTH_FIELDS), (
+    "every unsourced field has a site"
+  )
+  return sites
+
+
+@pytest.mark.parametrize("rule", _INVENTED_RULES)
+def test_unsourced_width_accepts_only_the_word_unresolved(docs: dict, rule: str) -> None:
+  """Literals, expressions over literals and borrowed parameters are all invention; each site alone."""
+  sites = _unsourced_sites(docs)
+  assert len(sites) >= 8, "the contract names these fields in several files"
+  for where, field in sites:
+    original = field["width_rule"]
+    field["width_rule"] = rule
+    errors = _errors(vo.check_width_rules, docs)
+    assert any(f"{where}.{field['name']}" in e and "invented width" in e for e in errors), (
+      f"{where}.{field['name']} = {rule!r} was not rejected"
+    )
+    field["width_rule"] = original
+
+
+@pytest.mark.parametrize("rule", _INVENTED_RULES)
+def test_unsourced_width_invention_is_rejected_when_applied_everywhere(docs: dict, rule: str) -> None:
+  """The bypass the advisory found: rewrite every same-name site together so no conflict is visible."""
+  for _, field in _unsourced_sites(docs):
+    field["width_rule"] = rule
+  assert any("invented width" in e for e in _errors(vo.check_width_rules, docs))
+  assert vo.validate_with(docs)["valid"] is False
+
+
+def test_unsourced_fields_stay_unresolved_in_the_committed_files(docs: dict) -> None:
+  for where, field in _unsourced_sites(docs):
+    assert field["width_rule"] == "unresolved", f"{where}.{field['name']}"
+
+
 def test_derivable_width_cannot_be_hidden_as_unresolved(docs: dict) -> None:
   field = next(f for f in docs["rob_tag"]["rob_tag"]["fields"] if f["name"] == "rob_slot")
   field["width_rule"] = "unresolved"

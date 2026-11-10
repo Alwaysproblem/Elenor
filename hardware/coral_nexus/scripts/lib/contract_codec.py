@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import ast
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,7 +46,7 @@ def log2_ceil(n: int) -> int:
   return (n - 1).bit_length()
 
 
-_ALLOWED_FUNCS = {"log2Ceil": log2_ceil, "max": max, "min": min}
+_ALLOWED_FUNCS: dict[str, Callable[..., int]] = {"log2Ceil": log2_ceil, "max": max, "min": min}
 _ALLOWED_NODES = (
   ast.Expression,
   ast.BinOp,

@@ -140,8 +140,13 @@ def check_width_rules(docs: dict[str, Any], errors: list[str]) -> None:
   seen: dict[str, str] = {}
   for where, f in _all_fields(docs):
     name, rule = str(f.get("name")), str(f.get("width_rule"))
-    if name in _UNSOURCED_WIDTH_FIELDS and rule.strip().isdigit():
-      errors.append(f"{where}.{name}: width {rule} is a literal but no source bounds it (invented width)")
+    if name in _UNSOURCED_WIDTH_FIELDS and rule.strip() != cc.UNRESOLVED:
+      # Any other rule is invention: a literal, an expression over literals (8+8,
+      # max(8,8), log2Ceil(16)), or a borrowed parameter. No source bounds these.
+      errors.append(
+        f"{where}.{name}: width rule {rule!r} is not 'unresolved'; "
+        "no source bounds this field (invented width)"
+      )
     if rule.strip() == cc.UNRESOLVED and name not in _UNSOURCED_WIDTH_FIELDS:
       errors.append(f"{where}.{name}: declared unresolved but its width derives from sourced parameters")
     if name in seen and seen[name] != rule:
@@ -364,7 +369,11 @@ def check_field_request(request: dict, protocol: dict, docs: dict[str, Any], err
 
 
 def validate(docs_dir: Path = DOC, protocol_dir: Path = PROTOCOL) -> dict:
-  docs = load_docs(docs_dir)
+  return validate_with(load_docs(docs_dir), protocol_dir)
+
+
+def validate_with(docs: dict[str, Any], protocol_dir: Path = PROTOCOL) -> dict:
+  """Run every check on already-loaded docs (so tests can validate a mutated copy)."""
   proto = load_all(protocol_dir)
   request = yaml.safe_load((protocol_dir / "field_requests" / "w2.yaml").read_text())
   errors: list[str] = []
@@ -384,12 +393,19 @@ def validate(docs_dir: Path = DOC, protocol_dir: Path = PROTOCOL) -> dict:
   check_oracle(docs, errors)
   check_field_request(request, proto["protocol"], docs, errors)
   open_widths = sorted({f["name"] for _, f in _all_fields(docs) if f.get("width_rule") == "unresolved"})
+  layouts: dict[int, Any] = {}
+  for count in (1, 2):
+    try:
+      layouts[count] = layout(docs, params, count)
+    except cc.ContractError as exc:
+      # A rejected rule must surface as a failed report, never as a crash.
+      errors.append(f"layout(context_count={count}): {exc}")
   return {
     "schema": "cn_native_owner_report/v1",
     "valid": not errors,
     "errors": errors,
     "open_widths": open_widths,
-    "layouts": {n: layout(docs, params, n) for n in (1, 2)},
+    "layouts": layouts,
   }
 
 
