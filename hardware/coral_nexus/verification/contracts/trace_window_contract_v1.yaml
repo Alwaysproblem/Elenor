@@ -1,0 +1,163 @@
+version: 1
+# W7 trace window / sealing contract, DRAFT (C016 / W7-01).
+#
+# Logical contract only: no binary line encoding, no CSR, no width and no quota number is assigned here (those
+# belong to W1/C017 and the capacity proof). A number is either read back from the pinned tree or `unresolved`
+# with an owner. The validator holds the required set in code, so one edit cannot weaken the contract and the
+# check that would notice it together.
+#
+# The raw boundary log is NEVER quantized and NEVER filtered: integer cycle/phase/seq and original payload bytes.
+# A display view may convert units and drop the Profile initialization; it is not evidence and not a sort key.
+status: draft
+schema_ver: cn_trace/v1
+
+header:
+  required_fields:
+    - schema_ver
+    - run_id
+    - window_id
+    - scenario_id
+    - t_id
+    - window_kind
+    - startup_epoch
+    - first_seq
+    - last_seq
+    - record_count
+    - gap_status
+    - end_boundary
+    - blob_manifest
+    - config_refs
+    - seal
+  window_kinds: [full, partial, fault_segment]
+  window_kind_meaning:
+    full: "from the declared start to the run terminal"
+    partial: "a declared capture interval; never claimed as a full run"
+    fault_segment: "a window that ends at a declared fault or deadlock point; the DUT may still hold pending work"
+  unknown_fields: reject
+
+time:
+  cycle: { type: int, unit: cycles, quantized: false }
+  phase: { type: enum, from: protocol/cn_protocol_v1.yaml#phases.order }
+  seq: { type: int, monotonic: strict, wraps: false }
+  float_or_bool_or_str_in_integer_field: reject
+  position_is_cycle_and_phase: true
+  display_view:
+    may_convert_units: true
+    may_drop_profile_initialization: true
+    is_evidence: false
+    is_sort_key: false
+  display_conversion_source:
+    { file: pipeline_validator/trace.py, line: 213, needle: "def cycle_to_us" }
+  profile_init_discard_source:
+    {
+      file: pipeline_validator/trace.py,
+      line: 197,
+      needle: "def discard_profile_initialization",
+    }
+  cycle_ns_source:
+    { file: pipeline_validator/config.py, line: 366, needle: "def cycle_ns" }
+
+sequence_domains:
+  seq:
+    scope: window
+    meaning: "position in this window's record stream"
+    gap: window_incomplete
+  message_seq:
+    scope: "per (tile, channel, direction)"
+    ref: protocol/cn_protocol_v1.yaml#identity_domains.transport.fields
+    meaning: "transport loss and replay detection only"
+    gap: transport_incomplete
+  never_substitute: true
+  continuous_message_seq_does_not_repair_a_seq_gap: true
+  continuous_seq_does_not_repair_a_message_seq_gap: true
+
+startup_epoch:
+  required_fields: [includes_startup, clock_ref]
+  startup_segments:
+    [profile_init, first_program_install, first_cold_start_after_reset]
+  rule: "a startup segment is either inside the window or the window says it is not (includes_startup false) and the manifest records the difference"
+  raw_log_applies_profile_init_discard: false
+
+end_boundary:
+  types: [run_terminal, declared_capture_point]
+  required_fields: [type, cycle]
+  run_terminal:
+    last_record: RUN_END
+  declared_capture_point:
+    declared_by: scenario_or_inject_plan
+    dut_may_hold_pending: true
+  reached_when: "the last record's cycle equals the declared end cycle"
+  declared_end_is_held_outside_the_window: true
+  why: "a re-sealed truncation cannot move the declaration that the scenario holds"
+
+seal:
+  required_fields:
+    [
+      first_seq,
+      last_seq,
+      record_count,
+      end_boundary,
+      gap_status,
+      records_sha256,
+    ]
+  records_sha256:
+    algorithm: sha256
+    over: "the records in seq order, each in canonical JSON"
+    canonical_form: "json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)"
+  must_agree_with_header:
+    [first_seq, last_seq, record_count, end_boundary, gap_status]
+  seal_is_itself_in_the_window: true
+  missing_seal: not_replayable
+  seal_mismatch: not_replayable
+  records_before_seal_are_immutable: true
+
+blob_manifest:
+  entry_required_fields: [sha256, len, blob_kind]
+  blob_kinds: [payload, initial_memory, image_ref, prefetched_state]
+  content_addressed: true
+  dedupe: true
+  hash_only_is_not_a_blob: true
+  hash_is_a_derived_check_value: true
+
+gap_status:
+  values: [none, quota, drop, truncate]
+  replayable_only_when: none
+  quota:
+    policy: "stop writing at the configured quota and mark the remainder as a gap"
+    limit:
+      {
+        value: unresolved,
+        owner: C019,
+        reason: "no sourced capture budget; frozen with the capacity proof",
+      }
+    never_unbounded: true
+  drop: "a record was lost"
+  truncate: "records at the end are missing"
+
+completeness:
+  replayable_requires:
+    - seq_contiguous
+    - every_blob_ref_retrievable
+    - every_hash_matches
+    - initial_snapshot_and_image_listed
+    - seal_present_and_valid
+    - end_boundary_reached
+    - gap_status_none
+    - seed_and_backpressure_config_present
+  any_missing: not_fully_replayable
+  prefix_still_contiguous_is_not_enough: true
+  replayable_is_not_task_settled: true
+  not_replayable_keeps: summary_only
+
+single_side_replay:
+  drives: request_side
+  response_returned_only_when: issued_request_matches_logged_identity
+  compared_on: [partial_order, terminal_state, handshake_legality]
+  both_sides: not_promised
+  required_for: known_fault_in_a_complete_window
+  normal_mode_without_log_is_a_failure: false
+
+host_passive:
+  drives_dut_ports: false
+  writes_dut_state: false
+  source_requirement: VER-12

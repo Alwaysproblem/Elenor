@@ -69,6 +69,7 @@ commands:
           - hardware/coral_nexus/verification/contracts/test_vme_decl_c012.py
           - hardware/coral_nexus/verification/contracts/test_package_c014.py
           - hardware/coral_nexus/verification/contracts/test_w6_c015.py
+          - hardware/coral_nexus/verification/contracts/test_w7_c016.py
       numeric-bootstrap:
         tests:
           - hardware/coral_nexus/verification/numerics/test_numeric_bootstrap.py

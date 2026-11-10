@@ -1,0 +1,72 @@
+# W7 field request to W1-01, DRAFT (C016).
+#
+# A REQUEST, not an implementation: W1-01 (C017) merges it into the ABI and W7 defines no bits. No width,
+# opcode, CSR address or bit position appears here. Every log field names a field of
+# verification/contracts/log_record_contract_v1.yaml, identity fields come from the C009 catalog by name,
+# and the phase enum is the catalog's own: W7 defines no second phase meaning. Joint freeze with C020; a
+# missing request blocks the seal and is never filled in by W1.
+schema: cn_field_request/v1
+package: W7
+status: draft
+log_fields:
+  - {
+      name: seq,
+      why: "window-scoped record position; strictly monotonic, never wraps",
+    }
+  - { name: cycle, why: "integer core cycle; the raw log is never quantized" }
+  - { name: phase, why: "the catalog phase enum, P0..P4" }
+  - { name: protocol, why: "logical channel namespace of the record" }
+  - { name: dir, why: "req or resp" }
+  - { name: port, why: "the observed boundary port" }
+  - { name: len, why: "payload length in bytes" }
+  - {
+      name: payload_hash,
+      why: "sha256 of the observed payload; a derived check value, never a substitute for the bytes",
+    }
+  - {
+      name: payload_bytes,
+      why: "the bytes the Host actually observed on the port",
+    }
+  - { name: blob_ref, why: "content-addressed reference to a retrievable blob" }
+  - {
+      name: message_seq,
+      from_identity: true,
+      why: "transport sequence; never reused as seq",
+    }
+  - {
+      name: r1_seq,
+      why: "contiguous sequence of reliable functional events, so a lost R1 record is visible",
+    }
+  - {
+      name: identity,
+      from_identity: true,
+      why: "TaskKey, ContextKey, op and txn identity as the catalog defines them",
+    }
+  - { name: reliability, why: "R1 functional or R2 diagnostic" }
+phase_enum:
+  from: protocol/cn_protocol_v1.yaml#phases.order
+contract_refs:
+  - {
+      contract: window,
+      key: seal.required_fields,
+      why: "the sealing record the capture must produce",
+    }
+  - {
+      contract: window,
+      key: end_boundary.types,
+      why: "run terminal or a declared capture point",
+    }
+  - {
+      contract: bundle,
+      key: replay_gate.parts_that_make_it_not_replayable,
+      why: "what the capture must never leave out",
+    }
+  - {
+      contract: record,
+      key: reliability.R1.channels,
+      why: "R1 travels only on the reliable channels",
+    }
+consumes:
+  w6_contracts:
+    - protocol/w6_event_facility.contract.yaml
+    - protocol/w6_terminal_reset.contract.yaml

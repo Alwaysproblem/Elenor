@@ -1,0 +1,133 @@
+version: 1
+# W7 checker verdict / T-row evidence contract, DRAFT (C016 / W7-01). The checkers C1..C7 are specified here by
+# what they decide and what they refuse; their implementation is C040+ . No check here is a claim that a
+# checker exists in RTL co-simulation.
+status: draft
+schema: cn_verdict/1
+
+verdict:
+  required_fields:
+    - schema
+    - run_id
+    - scenario_id
+    - t_id
+    - t_verdict
+    - phase
+    - checker
+    - evidence
+    - t_scope
+    - notes
+  t_verdict_values:
+    [PASS, FAIL, BLOCKED, DEFERRED_NOT_APPLICABLE, NOT_RUN, REJECTED]
+  not_run_is_never_pass: true
+  rejected_reasons:
+    - INSUFFICIENT_EVIDENCE
+    - NOT_FULLY_REPLAYABLE
+    - HASH_MISMATCH
+    - DANGLING_REF
+    - BAD_DEFERRAL
+    - BAD_BLOCKED
+    - KIND_NOT_ALLOWED
+  t_scope_values: [mandatory, deferred, cs1_subset, harness_only]
+  harness_only_is_cs1_evidence: false
+  checker_entry_required_fields: [name, status, reason, evidence]
+  checker_status_values: [PASS, FAIL, BLOCKED]
+  evidence_entry_required_fields: [kind, path, sha256, t_id]
+  unknown_fields: reject
+
+checkers:
+  C1:
+    {
+      decides: format_and_uniqueness,
+      fails_on:
+        [
+          SEQ_GAP,
+          DUPLICATE_KEY,
+          BAD_TYPE,
+          R1_MISSING,
+          UNSTABLE_PAYLOAD,
+          HANDSHAKE_MISMATCH,
+          BAD_PHASE,
+          UNKNOWN_FIELD,
+          R1_ON_DEBUG,
+          CYCLE_REGRESSION,
+        ],
+      reports_separately: [MESSAGE_SEQ_GAP],
+    }
+  C2: { decides: partial_order }
+  C3: { decides: conservation }
+  C4: { decides: numerics, oracle: independent, bitwise: true }
+  C5: { decides: termination }
+  C6: { decides: replay_gate }
+  C7: { decides: manifest_gate }
+  all_seven_required_for_a_cs1_log_pass: true
+  checkers_are_read_only: true
+  checker_may_write_functional_state: false
+  fail_carries: [window_id, seed, inject_plan_ref]
+
+not_empty_pass:
+  a_pass_row_needs:
+    - cs1_log_window_with_c1_to_c7_pass
+    - evidence_files_exist_and_rehash
+    - evidence_t_id_equals_row
+    - kinds_required_by_the_row
+    - scenario_retrievable
+  pass_without_retrievable_evidence: forbidden
+  pass_from_a_file_that_merely_exists: forbidden
+
+outcome_classes:
+  CASE_PASS: "the case ran as designed; an injected legal fault that ends in the expected DUT ERROR is a PASS"
+  DUT_ERROR: "the DUT ended in an error the scenario did not expect"
+  NUMERIC_FAIL: "a bitwise comparison with the independent oracle failed"
+  CHECKER_FAIL: "a C1/C2/C3/C5 check failed"
+  PENDING_NOT_COMPLETE: "work is still pending at the declared end; pending is not completed"
+  NOT_FULLY_REPLAYABLE: "the window cannot be replayed completely; a gap is not a numeric failure and not a pass"
+  distinct: true
+  legal_injected_fault_is_a_case_pass: true
+  replay_gap_is_a_numeric_fail: false
+  replayable_window_is_task_success: false
+  maps_to_t_verdict:
+    CASE_PASS: PASS
+    DUT_ERROR: FAIL
+    NUMERIC_FAIL: FAIL
+    CHECKER_FAIL: FAIL
+    PENDING_NOT_COMPLETE: FAIL
+    NOT_FULLY_REPLAYABLE: REJECTED
+
+c4:
+  bitwise_only: true
+  tolerance_allowed: false
+  ulp_relaxation: forbidden
+  oracle_independent_of_dut_and_validator: true
+  upstream_spike_or_mpact_as_dut_pass: forbidden
+  reference_cannot_reproduce: "review the reference semantics or record BLOCKED/FAIL; never lower the bar"
+  supported_needs: independent_oracle_run
+
+evidence:
+  kinds: [CS1_LOG, CS1_PY, BUILD, PERF, REPLAY, BIT_ORACLE, PMU, ORACLE, CS2]
+  priority: [CS1_LOG, CS1_PY, BUILD]
+  cs1_py_overrides_a_missing_cs1_log: false
+  cs1_py_alone_allowed_for:
+    - { t_id: T-49, part: "python cold/warm epoch baseline" }
+    - { t_id: T-35, part: "P0 comparison row" }
+    - { t_id: T-37, part: "build-time matrix" }
+    - { t_id: T-33, part: "build-time rejection boundary" }
+    - { t_id: T-53, part: "loader-level part" }
+  validator_layer_rows_state_why: true
+  python_cycles_as_rtl_cycles: forbidden
+  python_display_conversion_as_a_judgement: forbidden
+
+c7_gate:
+  needed_but_not_sufficient: all_68_rows_have_a_status
+  all_applicable_mandatory_rows: PASS
+  deferred:
+    allowed_only_for:
+      [level_not_started, review_not_started, n2_subitem_before_n_ge_2_claim]
+    needs: [defer_reason, start_condition]
+  blocked:
+    needs: [missing_environment_assumption_or_unfrozen_spec]
+  evidence_refs_closed: true
+  evidence_missing_or_hash_mismatch: manifest_invalid
+  every_fail_carries_min_repro: true
+  deadline_counts_as_pass: false
+  pending_counts_as_complete: false

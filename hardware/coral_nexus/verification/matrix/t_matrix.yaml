@@ -1,0 +1,1767 @@
+version: 1
+status: draft
+schema: cn_t_matrix/v1
+source:
+  file: Coral_NPU_to_Nexus_Tile_Requirements_v0.1.md
+  section: "19.1"
+  row_pattern: "| T-NN |"
+  count: 68
+initial_status_rule: every executable row starts NOT_RUN; no row is pre-set to PASS
+n05_override:
+  nest_id: N05
+  t_id: T-20
+  rule: the T-20 two-phase admission expectation replaces the NEST rollback expectation
+  applies_in: CS2 (T-59)
+deferral_conditions:
+  cs2: D-24 review after the CS1 exit decides CS2 start
+  cs3: D-25 review after the CS2 exit or its recorded substitute
+  n2: before any claim of N>=2 support
+rows:
+  - t_id: T-01
+    title: 单 Context 上游/项目必需指令回归
+    req_line: 1441
+    req_text_sha256: 860343ec4cbd592c37273b90d98740c32a58989d77c5518cc7a9663d9d4ef1f7
+    owner_packages:
+      - W2
+      - W3
+    impl_tasks: W2-05, W3-04, W5-03, W7-02
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.1
+      gate: G2
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+      - BIT_ORACLE
+    oracle:
+      kind: bit_oracle
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-02
+    title: 两个任务使用相同逻辑 PC、GPR/FPR/VRF 编号
+    req_line: 1442
+    req_text_sha256: 2893b6c88bc27ee13ec7bcf234bef928645218780e15e932ff8ce9a447e93c2c
+    owner_packages:
+      - W2
+    impl_tasks: W2-02/02-05, W7-04
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.1
+      gate: G2
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-03
+    title: A 长延迟 load
+    req_line: 1443
+    req_text_sha256: 9919b78c6217c70187c79196dbed269a6ef61c24e3ba92992c935dcca541e8c8
+    owner_packages:
+      - W4
+    impl_tasks: W4-03
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.1
+      gate: G2
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace:
+      - PERF-01
+      - PERF-02
+      - PERF-03
+      - PERF-04
+      - PERF-05
+      - PERF-06
+      - PERF-07
+    notes: ""
+  - t_id: T-04
+    title: A 阻塞于 await
+    req_line: 1444
+    req_text_sha256: 22777933b0cd4e632674d1a526b43da1297c2eca9c2fec2343562d7ed6840b18
+    owner_packages:
+      - W2
+    impl_tasks: W2-03, W6-02
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.1
+      gate: G2
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-05
+    title: A 有 scalar/RVV/VME 在途时切到 B
+    req_line: 1445
+    req_text_sha256: a8aba6344484cb63b02e2a37d8bd115ec2f7a5e57660c2bdb85bf1c4fedece5a
+    owner_packages:
+      - W2
+    impl_tasks: W2-05, W3-02
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.1
+      gate: G2
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-06
+    title: 不同 Context 交替修改 vector/matrix/FP 配置与状态标志
+    req_line: 1446
+    req_text_sha256: 07a85a7d55d440ffe19220d0ad1b50f24456c404c8ee286698a1e2ce5e0caf34
+    owner_packages:
+      - W2
+      - W3
+    impl_tasks: W2-05, W3-04, W5-03
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.1
+      gate: G2
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-07
+    title: 分支重定向时更早 load 仍未返回
+    req_line: 1447
+    req_text_sha256: 676f340ce818b136352216ae7db5e44094db8852b94d509f6aa5b1e4116ac6ad
+    owner_packages:
+      - W2
+    impl_tasks: W2-01/02-04/02-05
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.1
+      gate: G2
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-08
+    title: 槽位快速复用、旧通知/响应注入、代际回绕边界
+    req_line: 1448
+    req_text_sha256: cb9264dd59f5342f43d51eaf4d340cf8834f589b28ef8b93ac572429f5dd61e3
+    owner_packages:
+      - W2
+    impl_tasks: W2-05, W6-01
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.1
+      gate: G2
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-09
+    title: A 的 scalar 或 RVV 退休头被延迟
+    req_line: 1449
+    req_text_sha256: c366b07500a1a91dcf136c5d92e3447eedf5aff6f7d81ec1d9021d429344543f
+    owner_packages:
+      - W2
+    impl_tasks: W2-05
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.1
+      gate: G2
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-10
+    title: 多 Context 访存、多拍/分片、协议允许的乱序与错误
+    req_line: 1450
+    req_text_sha256: 640e560cdb27eefc8124c79f75520878e76ad8300c499e26f119d903607db58e
+    owner_packages:
+      - W4
+    impl_tasks: W4-03, W1-03
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.1
+      gate: G2
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-11
+    title: issue 接口随机背压、bundle 部分接受
+    req_line: 1451
+    req_text_sha256: 599c7e3f54dc12e07b54bd214b41313a9cbc8dcfedecb59b63c59bd10c3622e1
+    owner_packages:
+      - W2
+    impl_tasks: W2-03
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.1
+      gate: G2
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-12
+    title: 执行/退休/请求队列接近满负荷
+    req_line: 1452
+    req_text_sha256: e9ab965c267e99e1ed7e1f285a9f9a15ae0368ddfc828fc3cfcbd9fde897a624
+    owner_packages:
+      - W2
+    impl_tasks: W2-01/02-04/02-05, W1-02
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.1
+      gate: G2
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-13
+    title: event 在 wait 前、同周期和后到达
+    req_line: 1453
+    req_text_sha256: c1a747f5795a68552dc09e2ae7511582d3959c6015447ea00fd47d65f049a71a
+    owner_packages:
+      - W6
+    impl_tasks: W6-01/06-02
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.1
+      gate: G2
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-14
+    title: 多消费者共享输入
+    req_line: 1454
+    req_text_sha256: 56c3d6ffd3de547d6e0ad55520b8df9fa5053943e1107522007674e9f5af1b39
+    owner_packages:
+      - W6
+    impl_tasks: W6-02, W1-04, W4-01/04-05, W7-03
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-15
+    title: Tile 输出已 ready
+    req_line: 1455
+    req_text_sha256: f0d91e2b215b2406f767c1daf22ef2068c06f804a16c619f03dbc9a81e9a1a04
+    owner_packages:
+      - W6
+    impl_tasks: W6-02, W4-02/04-05, W1-02
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: cs1_subset
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems:
+      - id: cs1_subset
+        scope: mandatory
+        evidence_kinds:
+          - CS1_LOG
+        status: NOT_RUN
+      - id: cs2_completion
+        scope: deferred
+        evidence_kinds:
+          - CS2
+        status: DEFERRED_NOT_APPLICABLE
+        defer_reason: CS2 completion of this row belongs to the Group-level exit; CS2 is not started
+        start_condition: D-24 review after the CS1 exit decides CS2 start
+    perf_trace: []
+    notes: ""
+  - t_id: T-16
+    title: gather/scatter 连续、stride、随机、重复索引、mask、跨界
+    req_line: 1456
+    req_text_sha256: 315a573a4ac70e406d705ccfdb25aea5d8596e6f86c760a5ece54cb112681a26
+    owner_packages:
+      - W4
+    impl_tasks: W4-04
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.1
+      gate: G2
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+      - BIT_ORACLE
+    oracle:
+      kind: bit_oracle
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace:
+      - PERF-01
+      - PERF-02
+      - PERF-03
+      - PERF-04
+      - PERF-05
+      - PERF-06
+      - PERF-07
+    notes: ""
+  - t_id: T-17
+    title: 高物理地址、窗口切换、加法溢出和越界
+    req_line: 1457
+    req_text_sha256: c900bc8efd03ee4e9af1732a968863b38e0e65ad60623718e9154ebba67832f2
+    owner_packages:
+      - W4
+    impl_tasks: W4-01/04-03/04-04
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.1
+      gate: G2
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-18
+    title: SAME／COMPATIBLE 的新任务并发准入
+    req_line: 1458
+    req_text_sha256: 60f9291fc9e7336e21c24b4e704b56db81be31de801f8b5b81abae522274928a
+    owner_packages:
+      - W1
+    impl_tasks: W1-04, W4-05
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-19
+    title: 活数据跨不兼容 profile
+    req_line: 1459
+    req_text_sha256: 2894acc0ff583e2d0cfc6233733392a920eafe5fe64da58f795aef011c343b8f
+    owner_packages:
+      - W1
+    impl_tasks: W1-04, W4-02/04-05, W4-01
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: cs1_subset
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems:
+      - id: cs1_subset
+        scope: mandatory
+        evidence_kinds:
+          - CS1_LOG
+        status: NOT_RUN
+      - id: cs2_completion
+        scope: deferred
+        evidence_kinds:
+          - CS2
+        status: DEFERRED_NOT_APPLICABLE
+        defer_reason: CS2 completion of this row belongs to the Group-level exit; CS2 is not started
+        start_condition: D-24 review after the CS1 exit decides CS2 start
+    perf_trace: []
+    notes: ""
+  - t_id: T-20
+    title: DISPATCH_ROLE／Task 提交各步骤故障注入
+    req_line: 1460
+    req_text_sha256: 7717285a0b7a87a046ba8dd93ceb5f8154704e8c9e82ba3cf777522f22f7dc0f
+    owner_packages:
+      - W1
+    impl_tasks: W1-04, W4-01/04-02, W5-04
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: N05 expectation follows this row (two-phase admission), see N05 override
+  - t_id: T-21
+    title: WAIT_CAPACITY 后资源释放与 SAME／COMPATIBLE 队首重试
+    req_line: 1461
+    req_text_sha256: eb6dded364245ccf317348dabf6e5431e703ae736ef820a5246440a9751bf904
+    owner_packages:
+      - W1
+    impl_tasks: W1-04, W4-02
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-22
+    title: resident consumer 依赖未准入 producer
+    req_line: 1462
+    req_text_sha256: 8a77ba6e9b1b83ff0bdab07adb265ee90a7c6eb63e2661902e0536682b3d6400
+    owner_packages:
+      - W1
+    impl_tasks: W1-04
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-23
+    title: completion queue/event table 满或持续有界背压
+    req_line: 1463
+    req_text_sha256: c6b14e1aa75d02df13b00b0c0ffe2617e89a55266318a31d3117666892ab966c
+    owner_packages:
+      - W6
+    impl_tasks: W6-01/06-02, W2
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.1
+      gate: G2
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-24
+    title: 取消发生在 store 发出后、响应前
+    req_line: 1464
+    req_text_sha256: 1005c24d32bd297ba1d331f95de4657f8e7fd16b9aff86baf0097d125e162f95
+    owner_packages:
+      - W6
+    impl_tasks: W6-03
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-25
+    title: 一个 Context 非法指令/访问异常
+    req_line: 1465
+    req_text_sha256: 446a2fe2c6d42068a29778992a188242b11d3e62dca31bfd5f8be69ac4ccb77e
+    owner_packages:
+      - W6
+    impl_tasks: W6-03
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-26
+    title: reset/debug halt 与在途访存/完成竞争
+    req_line: 1466
+    req_text_sha256: d8ef2824ca7874a7b250d6d679908026c93901686f065de3de6b15813de2b83f
+    owner_packages:
+      - W6
+    impl_tasks: W6-03, W2
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-27
+    title: 所有 Context 等待、后端仍在途
+    req_line: 1467
+    req_text_sha256: 607c2fb4225a2d5de4892c3e10eca6173446e1ba0912f1e539c9224252b8cd31
+    owner_packages:
+      - W6
+    impl_tasks: W6-02/06-04/06-05, W1
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-28
+    title: A 矩阵运行
+    req_line: 1468
+    req_text_sha256: 130bd7ebe795aaf466a39d11125a67e28e684d55ae6aa3bd467f3d533ae73119
+    owner_packages:
+      - W3
+    impl_tasks: W3-03/03-05, W2
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.3
+      gate: G3
+    cs1_scope: n2_conditional
+    applicability: rtl_cs1
+    evidence_kinds: &id001
+      - CS1_LOG
+      - BIT_ORACLE
+    oracle:
+      kind: bit_oracle
+      independent: true
+    status: NOT_RUN
+    subitems:
+      - id: n1
+        scope: mandatory
+        evidence_kinds: *id001
+        status: NOT_RUN
+      - id: n2
+        scope: deferred
+        evidence_kinds: *id001
+        status: DEFERRED_NOT_APPLICABLE
+        defer_reason: multi-instance (N>=2) part; the N=1 part is mandatory now
+        start_condition: before any claim of N>=2 support
+    perf_trace: []
+    notes: ""
+  - t_id: T-29
+    title: matmul/vecmat/向量运算的尾部、mask、特殊数值与累加初始化
+    req_line: 1469
+    req_text_sha256: b6fcdb72b96626b9bc550e13a5e3c617c91cfb476c67d7622ccf8f1c51597f78
+    owner_packages:
+      - W3
+    impl_tasks: W3-04/03-05, W7-02, W5-03
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.3
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+      - BIT_ORACLE
+    oracle:
+      kind: bit_oracle
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-30
+    title: 多 Context 同时执行同一 image
+    req_line: 1470
+    req_text_sha256: d3ab04b88c29269e9b277df7a3ccb9a328c86b967e58630fbfbfbdc76ce88485
+    owner_packages:
+      - W5
+    impl_tasks: W5-04
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.1
+      gate: G2
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-31
+    title: 真正并发 runtime 的提交、barrier、event、输出完成
+    req_line: 1471
+    req_text_sha256: fcd457c53d294456311ad62d41de15abec26d6249de3d90f58b19b9c74310a47
+    owner_packages:
+      - W5
+    impl_tasks: W5-05
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: cs1_subset
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems:
+      - id: cs1_subset
+        scope: mandatory
+        evidence_kinds:
+          - CS1_LOG
+        status: NOT_RUN
+      - id: cs2_completion
+        scope: deferred
+        evidence_kinds:
+          - CS2
+        status: DEFERRED_NOT_APPLICABLE
+        defer_reason: CS2 completion of this row belongs to the Group-level exit; CS2 is not started
+        start_condition: D-24 review after the CS1 exit decides CS2 start
+    perf_trace: []
+    notes: ""
+  - t_id: T-32
+    title: 编译形状/布局变更和 fallback
+    req_line: 1472
+    req_text_sha256: 70d1363ff3ca060b0a94d87ba25953cf610609573e3f7f171a674016be473279
+    owner_packages:
+      - W5
+    impl_tasks: W5-03/05-05
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-33
+    title: 非法 ISA、ABI 不匹配、资源超限和不支持参数组合
+    req_line: 1473
+    req_text_sha256: 97ba43704172d55306f7791f26b513b3e5cf5f9846e3e89eebd4f2ffb625bb73
+    owner_packages:
+      - W5
+    impl_tasks: W5-05, W0-04
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.1
+      gate: G2
+    cs1_scope: mandatory
+    applicability: build_and_rtl
+    evidence_kinds:
+      - BUILD
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems:
+      - id: build_rejection_boundary
+        scope: mandatory
+        evidence_kinds:
+          - BUILD
+        py_alone_allowed: true
+        status: NOT_RUN
+      - id: cs1_execution
+        scope: mandatory
+        evidence_kinds:
+          - CS1_LOG
+        status: NOT_RUN
+    perf_trace: []
+    notes: ""
+  - t_id: T-34
+    title: 长任务、短任务、频繁唤醒任务和饱和 VME 混合
+    req_line: 1474
+    req_text_sha256: 49c7de3790438c6eea5eaa393dedb2ee5dbadbb5657c778a5a1b8c87e9a3fd15
+    owner_packages:
+      - W2
+    impl_tasks: W2-03, W3
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+      - PMU
+    oracle:
+      kind: pmu_counter_table
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace:
+      - PERF-01
+      - PERF-02
+      - PERF-03
+      - PERF-04
+      - PERF-05
+      - PERF-06
+      - PERF-07
+    notes: ""
+  - t_id: T-35
+    title: P0/P1/PN/PS 相同工作量比较
+    req_line: 1475
+    req_text_sha256: 9769812ca52bc95830bb83f55f8f798c1aa11fecfe90a97536e1acc690cab6d2
+    owner_packages:
+      - W7
+    impl_tasks: W7-05
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.8
+      gate: G5
+    cs1_scope: mandatory
+    applicability: perf
+    evidence_kinds:
+      - PERF
+    oracle:
+      kind: perf_metrics
+      independent: true
+    status: NOT_RUN
+    subitems:
+      - id: p0
+        scope: mandatory
+        evidence_kinds:
+          - PERF
+        py_alone_allowed: true
+        status: NOT_RUN
+      - id: p1
+        scope: mandatory
+        evidence_kinds:
+          - PERF
+        status: NOT_RUN
+      - id: pn
+        scope: mandatory
+        evidence_kinds:
+          - PERF
+        status: NOT_RUN
+      - id: ps
+        scope: approved_scope_not_run
+        evidence_kinds: []
+        status: NOT_RUN
+        start_condition: after the larger configuration is reviewed
+    perf_trace:
+      - PERF-01
+      - PERF-02
+      - PERF-03
+      - PERF-04
+      - PERF-05
+      - PERF-06
+      - PERF-07
+    notes: ""
+  - t_id: T-36
+    title: 定向事件/活动触发计数器
+    req_line: 1476
+    req_text_sha256: 6e1b314e0f9937a7c100663c38cf96b320175faa40032f8f7ca652500623b171
+    owner_packages:
+      - W7
+    impl_tasks: W7-05, W6-04
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.8
+      gate: G5
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+      - PMU
+    oracle:
+      kind: pmu_counter_table
+      independent: true
+    status: NOT_RUN
+    subitems:
+      - id: cs1
+        scope: mandatory
+        evidence_kinds:
+          - CS1_LOG
+          - PMU
+        status: NOT_RUN
+      - id: p0_compare
+        scope: mandatory
+        evidence_kinds:
+          - CS1_PY
+        py_alone_allowed: true
+        status: NOT_RUN
+    perf_trace:
+      - PERF-01
+      - PERF-02
+      - PERF-03
+      - PERF-04
+      - PERF-05
+      - PERF-06
+      - PERF-07
+    notes: ""
+  - t_id: T-37
+    title: 所有宣称 supported 的构建配置
+    req_line: 1477
+    req_text_sha256: 312ec263b21f2b8abc3d47281b877d6ab5c4e95f2833c19506d5923d87182fe9
+    owner_packages:
+      - W5
+      - W0
+    impl_tasks: W5-01, W0-04, W7-02
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.6
+      gate: build
+    cs1_scope: build_time
+    applicability: build_time
+    evidence_kinds:
+      - BUILD
+    oracle:
+      kind: build_manifest_hash
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-38
+    title: 任务执行中才出现大量 gather 请求且容量耗尽
+    req_line: 1478
+    req_text_sha256: e9bebc5858f5b7c4167548e87a72106fe6ede4d92322763a57e4ed17fa904305
+    owner_packages:
+      - W4
+    impl_tasks: W4-04/06-04, W1
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.5
+      gate: G4
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-39
+    title: "CS1：Python 与 RTL 联合运行相同任务及随机背压（含 VER-13 "
+    req_line: 1479
+    req_text_sha256: a0424e73d9f9d108dc7c13ad25b324b75c36c9606c210fbe1a80071f8ecfcd5e
+    owner_packages:
+      - W1
+    impl_tasks: W1-05, W5-03
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.4
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+      - BIT_ORACLE
+    oracle:
+      kind: bit_oracle
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-40
+    title: CS1：Device→Group→Tile 完整任务批，任务乱序完成（Devic
+    req_line: 1480
+    req_text_sha256: 0a50d80131ed9bec727cb03ff845ee9fcf1e4c18f5b7ef48a539e2cfbd3274d5
+    owner_packages:
+      - W1
+    impl_tasks: W1-05
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.4
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-41
+    title: R lease 生命周期
+    req_line: 1481
+    req_text_sha256: ffae26ea1539eda3fcb8cd579b6f3151a5d1892c053c7d7a50bf432b9683fdd7
+    owner_packages:
+      - W1
+    impl_tasks: W1-04
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-42
+    title: 逐 Tile 独立提交
+    req_line: 1482
+    req_text_sha256: bf089a9356443b46c9c1555fb1b11b923479185de10cd1aa26dd998502c13a0c
+    owner_packages:
+      - W1
+    impl_tasks: W1-05, W4-05
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.6
+      gate: G4
+    cs1_scope: cs1_subset
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems:
+      - id: cs1_subset
+        scope: mandatory
+        evidence_kinds:
+          - CS1_LOG
+        status: NOT_RUN
+      - id: cs2_completion
+        scope: deferred
+        evidence_kinds:
+          - CS2
+        status: DEFERRED_NOT_APPLICABLE
+        defer_reason: CS2 completion of this row belongs to the Group-level exit; CS2 is not started
+        start_condition: D-24 review after the CS1 exit decides CS2 start
+    perf_trace: []
+    notes: ""
+  - t_id: T-43
+    title: 准入等待分类与零持有
+    req_line: 1483
+    req_text_sha256: d6c2ebcade077bcbfee221f9018a1e62bf0ae7079cfa1c18e1c56ec2f286c109
+    owner_packages:
+      - W1
+    impl_tasks: W1-05, W4-05
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.6
+      gate: G4
+    cs1_scope: cs1_subset
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems:
+      - id: cs1_subset
+        scope: mandatory
+        evidence_kinds:
+          - CS1_LOG
+        status: NOT_RUN
+      - id: cs2_completion
+        scope: deferred
+        evidence_kinds:
+          - CS2
+        status: DEFERRED_NOT_APPLICABLE
+        defer_reason: CS2 completion of this row belongs to the Group-level exit; CS2 is not started
+        start_condition: D-24 review after the CS1 exit decides CS2 start
+    perf_trace: []
+    notes: ""
+  - t_id: T-44
+    title: UCE 钉住
+    req_line: 1484
+    req_text_sha256: d9811d64cc577d0eb32a1aea2247be6a6e1a45f22cd792eb67c48d2f16476d4a
+    owner_packages:
+      - W1
+    impl_tasks: W1-04, W5-01
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-45
+    title: 阶段信号
+    req_line: 1485
+    req_text_sha256: fccb2fe7d710a6a4e865d6c90e7267d76fd3057c271bde6dc82c436ef439ac7d
+    owner_packages:
+      - W1
+    impl_tasks: W1-04, W6-02
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-46
+    title: Profile 切换事务
+    req_line: 1486
+    req_text_sha256: b4f4ac330568a6a4037f63a09f6ffe3b51f16b08398a80804bbdd7db0db6f507
+    owner_packages:
+      - W1
+    impl_tasks: W1-04, W4-05
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: cs1_subset
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems:
+      - id: cs1_subset
+        scope: mandatory
+        evidence_kinds:
+          - CS1_LOG
+        status: NOT_RUN
+      - id: cs2_completion
+        scope: deferred
+        evidence_kinds:
+          - CS2
+        status: DEFERRED_NOT_APPLICABLE
+        defer_reason: CS2 completion of this row belongs to the Group-level exit; CS2 is not started
+        start_condition: D-24 review after the CS1 exit decides CS2 start
+    perf_trace: []
+    notes: ""
+  - t_id: T-47
+    title: 范围维护
+    req_line: 1487
+    req_text_sha256: 9634a27f839f7f4d45c39dea9e7af3545a78312abb55f48eb8b1c561234428e6
+    owner_packages:
+      - W4
+    impl_tasks: W4-06, W1
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.5
+      gate: G4
+    cs1_scope: cs1_subset
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems:
+      - id: cs1_subset
+        scope: mandatory
+        evidence_kinds:
+          - CS1_LOG
+        status: NOT_RUN
+      - id: cs2_completion
+        scope: deferred
+        evidence_kinds:
+          - CS2
+        status: DEFERRED_NOT_APPLICABLE
+        defer_reason: CS2 completion of this row belongs to the Group-level exit; CS2 is not started
+        start_condition: D-24 review after the CS1 exit decides CS2 start
+    perf_trace: []
+    notes: ""
+  - t_id: T-48
+    title: 迟到回包与代际
+    req_line: 1488
+    req_text_sha256: 40c201710c42793e79eb9649fd076d65b7662adc9bb97590ccabbdcae410a230
+    owner_packages:
+      - W4
+    impl_tasks: W4-06, W1
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.5
+      gate: G4
+    cs1_scope: cs1_subset
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems:
+      - id: cs1_subset
+        scope: mandatory
+        evidence_kinds:
+          - CS1_LOG
+        status: NOT_RUN
+      - id: cs2_completion
+        scope: deferred
+        evidence_kinds:
+          - CS2
+        status: DEFERRED_NOT_APPLICABLE
+        defer_reason: CS2 completion of this row belongs to the Group-level exit; CS2 is not started
+        start_condition: D-24 review after the CS1 exit decides CS2 start
+    perf_trace: []
+    notes: ""
+  - t_id: T-49
+    title: 程序驻留合同
+    req_line: 1489
+    req_text_sha256: 1bcc8e897eea597d42cf43d3334245606ba7df016803d9f6bc2e210634ae88b4
+    owner_packages:
+      - W5
+    impl_tasks: W5-04, W1（`program_table`/ensure_resident 侧接线）
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.7
+      gate: G4
+    cs1_scope: validator_layer
+    applicability: validator_layer
+    evidence_kinds:
+      - CS1_PY
+    oracle:
+      kind: validator_baseline
+      independent: false
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: Python cold/warm epoch baseline only; the RTL cold/warm path is T-58
+  - t_id: T-50
+    title: gather／scatter 引用语义
+    req_line: 1490
+    req_text_sha256: 0fdf5dc2cefc24bffa27824100a80809c3d6a959e449d6ac565afb63d0828be3
+    owner_packages:
+      - W4
+    impl_tasks: W4-04/04-06
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.5
+      gate: G4
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+      - BIT_ORACLE
+    oracle:
+      kind: bit_oracle
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-51
+    title: 同周期多故障、first-fault 摘要保留、debug 诊断 FIFO／外部 ring 溢出、故障后事件状态
+    req_line: 1491
+    req_text_sha256: 33262feb69fedb1a70d7077023b220ed2e780c9430c6c246f48b6ce175e33b53
+    owner_packages:
+      - W6
+    impl_tasks: W6-03, W2
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-52
+    title: 复位状态机
+    req_line: 1492
+    req_text_sha256: 29b879a9179cacb52059a433783c21e772550306058f7cc10cf9bdcd40dab8db
+    owner_packages:
+      - W6
+    impl_tasks: W6-03, W4-06/4-02
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.5
+      gate: G4
+    cs1_scope: cs1_subset
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems:
+      - id: cs1_subset
+        scope: mandatory
+        evidence_kinds:
+          - CS1_LOG
+        status: NOT_RUN
+      - id: cs2_completion
+        scope: deferred
+        evidence_kinds:
+          - CS2
+        status: DEFERRED_NOT_APPLICABLE
+        defer_reason: CS2 completion of this row belongs to the Group-level exit; CS2 is not started
+        start_condition: D-24 review after the CS1 exit decides CS2 start
+    perf_trace: []
+    notes: ""
+  - t_id: T-53
+    title: Artifact／Loader
+    req_line: 1493
+    req_text_sha256: 1cd5533574898c880ab97b0c6be04a9fae28222b68390197f04c7f21a7d1a549
+    owner_packages:
+      - W5
+    impl_tasks: W5-05
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.7
+      gate: G4
+    cs1_scope: mandatory
+    applicability: build_and_rtl
+    evidence_kinds:
+      - BUILD
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems:
+      - id: loader_level
+        scope: mandatory
+        evidence_kinds:
+          - BUILD
+        py_alone_allowed: true
+        status: NOT_RUN
+      - id: cs1_execution
+        scope: mandatory
+        evidence_kinds:
+          - CS1_LOG
+        status: NOT_RUN
+    perf_trace: []
+    notes: ""
+  - t_id: T-54
+    title: 控制通道独立性
+    req_line: 1494
+    req_text_sha256: 4ba4814a3905ab2fe8720f90dc3d5718cb51d20e518f5afb573109d7cc67e3d5
+    owner_packages:
+      - W1
+    impl_tasks: W1-02/01-03, W6
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.2
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-55
+    title: Arena 条带与碎片
+    req_line: 1495
+    req_text_sha256: 33b496071804f6b2e71ad04b296fac8eeafaad2f74a39489f78ab7f4d46c0aba
+    owner_packages:
+      - W4
+    impl_tasks: W4-01, W4-02
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.5
+      gate: G4
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-56
+    title: 简版直线生命周期控制加受控 kernel 内部循环
+    req_line: 1496
+    req_text_sha256: 3e5ad389c6c949c7f86b3a592c598532aff339d56787b618fa5d9d232ee809d7
+    owner_packages:
+      - W5
+    impl_tasks: W5-02/05-05
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.6
+      gate: G4
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-57
+    title: L2 release 与 final-free
+    req_line: 1497
+    req_text_sha256: dcf6066bf3c79f7c0105ad2dff9c40c4f7673dbd65e195e5b171b808f5459967
+    owner_packages:
+      - W1
+    impl_tasks: W1-04, W4-06
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.5
+      gate: G4
+    cs1_scope: cs1_subset
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems:
+      - id: cs1_subset
+        scope: mandatory
+        evidence_kinds:
+          - CS1_LOG
+        status: NOT_RUN
+      - id: cs2_completion
+        scope: deferred
+        evidence_kinds:
+          - CS2
+        status: DEFERRED_NOT_APPLICABLE
+        defer_reason: CS2 completion of this row belongs to the Group-level exit; CS2 is not started
+        start_condition: D-24 review after the CS1 exit decides CS2 start
+    perf_trace: []
+    notes: ""
+  - t_id: T-58
+    title: 冷／热装载
+    req_line: 1498
+    req_text_sha256: bf5bcf12b0aa6ce775bce0258454ad2acd1d9dab389c03914e5c30b8560d9378
+    owner_packages:
+      - W4
+      - W5
+    impl_tasks: W4-02/05-04, W1-04, W7-03
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.7
+      gate: G4
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-59
+    title: Group 级联仿
+    req_line: 1499
+    req_text_sha256: 14f593a60d66d9effafc39e7383d3a376771ddcea60a3e87ac35d72decb762ad
+    owner_packages:
+      - W1
+    impl_tasks: W1-05, W4/W5/W6
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.9
+      gate: null
+    cs1_scope: cs2_only
+    applicability: deferred
+    evidence_kinds: []
+    oracle:
+      kind: none
+      independent: true
+    status: DEFERRED_NOT_APPLICABLE
+    subitems: []
+    perf_trace: []
+    notes: ""
+    defer_reason: CS2 completion of this row belongs to the Group-level exit; CS2 is not started
+    start_condition: D-24 review after the CS1 exit decides CS2 start
+  - t_id: T-60
+    title: 整芯片仿真
+    req_line: 1500
+    req_text_sha256: 113f0d0f8034ce5970e77c5f3a1511bd57e3fa23039a16cc25a196ea4a362b8e
+    owner_packages:
+      - W1
+    impl_tasks: W1-05, W4/W5/W6
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.9
+      gate: null
+    cs1_scope: cs3_only
+    applicability: deferred
+    evidence_kinds: []
+    oracle:
+      kind: none
+      independent: true
+    status: DEFERRED_NOT_APPLICABLE
+    subitems: []
+    perf_trace: []
+    notes: ""
+    defer_reason: CS3 whole-chip exit; CS3 is not started
+    start_condition: D-25 review after the CS2 exit or its recorded substitute
+  - t_id: T-61
+    title: 简版计算绑定
+    req_line: 1501
+    req_text_sha256: 25bc3a7323469b3ba55d3ab4545b1ec7d175245beb365d9316d807ebf3bcbd3c
+    owner_packages:
+      - W5
+    impl_tasks: W5-01/05-05
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.7
+      gate: G4
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+      - BIT_ORACLE
+    oracle:
+      kind: bit_oracle
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-62
+    title: VME 区域 lease
+    req_line: 1502
+    req_text_sha256: 722c27cddce4d02773c2b96ce5067f750019349acc33a92e3414e179adda2a2f
+    owner_packages:
+      - W3
+    impl_tasks: W3-03/03-04/03-05, W7-02
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.3
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-63
+    title: 简版 kernel 映像＋binding／资源 manifest
+    req_line: 1503
+    req_text_sha256: a4aae3ddd389fadb38c06ef844636dc9fd2078f45a269c8afc35f5cfbdefc608
+    owner_packages:
+      - W5
+    impl_tasks: W5-04, W0-04
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.7
+      gate: G4
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-64
+    title: CS1 消息边界
+    req_line: 1504
+    req_text_sha256: fbfd2ef49e66fc85d3a020b6904cfe9d9d16939e98167deb656122b4f3945a0a
+    owner_packages:
+      - W1
+    impl_tasks: W1-05, W4/W6, W7-03
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.4
+      gate: G3
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-65
+    title: 不同 scope 的运行时索引指向同一页
+    req_line: 1505
+    req_text_sha256: c036127965bf3c0ebcdc567c2d876e85e48c8860d571ca2e78e07f65af61e32b
+    owner_packages:
+      - W4
+    impl_tasks: W4-04/04-05, W6
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.5
+      gate: G4
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+      - ORACLE
+    oracle:
+      kind: scenario_oracle
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-66
+    title: 用户 L1／L2 Arena 满或数据 DMA 饱和时处理冷装载
+    req_line: 1506
+    req_text_sha256: 86afd6803d6712da1b073a844998564027e02555f46c6a6975446bf7a33050a9
+    owner_packages:
+      - W4
+      - W5
+    impl_tasks: W4-02/05-04
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.7
+      gate: G4
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: ""
+  - t_id: T-67
+    title: 正常模式、debug FIFO 满、HBM 导出背压／越界、关闭 debug／reset
+    req_line: 1507
+    req_text_sha256: 4aa6d0f74c96437edec5b34e78ae8a7ce4e9e7795d7c0f830a299c9546ef6ba5
+    owner_packages:
+      - W6
+      - W7
+    impl_tasks: W6-04, W7-05
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.8
+      gate: G5
+    cs1_scope: mandatory
+    applicability: rtl_cs1
+    evidence_kinds:
+      - CS1_LOG
+      - REPLAY
+      - PERF
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems: []
+    perf_trace: []
+    notes: "REPLAY: the complete window replays on one side; PERF: the gate rejects gap windows"
+  - t_id: T-68
+    title: VME 区域与累加链声明、实例路由
+    req_line: 1508
+    req_text_sha256: 76fb59f3d4681f63bb23d3df60fb559294da844f771ae0165a90fb8ea6816d76
+    owner_packages:
+      - W3
+    impl_tasks: W3-03/03-05, W7-02
+    scenario_source:
+      kind: plan_id
+      ref: W7-04.3
+      gate: G3
+    cs1_scope: n2_conditional
+    applicability: rtl_cs1
+    evidence_kinds: &id002
+      - CS1_LOG
+    oracle:
+      kind: observed_invariants
+      independent: true
+    status: NOT_RUN
+    subitems:
+      - id: n1
+        scope: mandatory
+        evidence_kinds: *id002
+        status: NOT_RUN
+      - id: n2
+        scope: deferred
+        evidence_kinds: *id002
+        status: DEFERRED_NOT_APPLICABLE
+        defer_reason: multi-instance (N>=2) part; the N=1 part is mandatory now
+        start_condition: before any claim of N>=2 support
+    perf_trace: []
+    notes: ""

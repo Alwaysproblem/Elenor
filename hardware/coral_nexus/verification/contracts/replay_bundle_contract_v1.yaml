@@ -1,0 +1,95 @@
+version: 1
+# W7 replay bundle contract, DRAFT (C016 / W7-01). A bundle is what lets one side be replayed; it is complete
+# only when everything the replay needs is listed AND retrievable AND hashes. This contract specifies the
+# bundle and what a missing part means; the replay driver is a later card.
+status: draft
+schema: cn_replay_bundle/v1
+
+bundle:
+  required_fields:
+    - schema
+    - run_id
+    - window_id
+    - t_id
+    - window_ref
+    - seal_ref
+    - blob_manifest
+    - initial_state
+    - image
+    - package
+    - config
+    - seed_list
+    - backpressure_config_ref
+    - inject_plan_ref
+    - oracle_ref
+    - rtl_sha
+    - compiler_sha
+    - fidelity
+  unknown_fields: reject
+  only_referenced_blobs: true
+  blob_manifest_is_a_subset_of_the_window_manifest: true
+
+identity_sources:
+  package:
+    {
+      from: protocol/w5_package.contract.yaml,
+      fields: [package_hash, image_sha256, target_fingerprint],
+    }
+  image_is_sealed_image: true
+  image_hash_and_length_listed: true
+  binding_and_resource_manifest_hash_listed: true
+
+initial_state:
+  required_fields: [memory_blob_refs, register_state_ref, epoch_ref]
+  listed: true
+  without_it: not_fully_replayable
+
+config:
+  required:
+    [seed_list, backpressure_config_ref, inject_plan_ref, delay_config_ref]
+  seed_list_empty: reject
+  fidelity_values: [timing_only, runtime, full_memory]
+  fidelity_for_byte_checks: full_memory
+
+oracle_ref:
+  independent: true
+  kinds: [bit_oracle, instruction_reference, none]
+  none_allowed_when_row_has_no_numeric_check: true
+  validator_as_numeric_oracle: forbidden
+  upstream_spike_or_mpact_as_dut_pass: forbidden
+
+replay_gate:
+  parts_that_make_it_not_replayable:
+    - missing_blob
+    - blob_hash_mismatch
+    - missing_initial_snapshot
+    - missing_image
+    - missing_seal
+    - seal_mismatch
+    - seq_gap
+    - quota_gap
+    - truncated_end
+    - missing_seed_or_backpressure_config
+  verdict_when_any: NOT_FULLY_REPLAYABLE
+  exit_code_when_any: 3
+  summary_kept: true
+  gap_is_a_numeric_fail: false
+  reject_before_driving_any_port: true
+
+single_side:
+  request_side_driven_by: log
+  response_returned_when: issued_request_matches_logged_identity
+  mismatching_request: stop_and_report
+  compare_on: [partial_order, terminal_state, handshake_legality]
+  cycle_equality_required: false
+  replayed_trace_must_be_equivalent_to_original_window: true
+
+replay_verdict:
+  values: [EQUIVALENT, DIVERGED, NOT_FULLY_REPLAYABLE]
+  merged_into: manifest
+  equivalent_is_task_success: false
+
+known_fault_replay:
+  required_by: "CS1 exit item 5"
+  window_kinds: [fault_segment, full]
+  needs_complete_window: true

@@ -1,0 +1,197 @@
+version: 1
+# W7 performance gate contract, DRAFT (C016 / W7-01). It fixes WHAT is measured, the order (register, then
+# measure), and what may never be claimed. It sets no threshold: a threshold is registered before the
+# measurement by the card that measures, with a stated reason; a number here would be a guess.
+status: draft
+schema: cn_perf_gates/v1
+
+rows:
+  baselines:
+    - { id: P0, meaning: "unmodified pinned Coral", run: required }
+    - { id: P1, meaning: "modified hardware, one Context", run: required }
+    - {
+        id: PN,
+        meaning: "same modified hardware and config, more active Contexts",
+        run: required,
+      }
+    - {
+        id: PS,
+        meaning: "a separately selected larger configuration",
+        run: not_run,
+        start_condition: "after the larger configuration is reviewed",
+      }
+  ps_row_status: not_run
+  ps_is_not_a_deferral_of_a_mandatory_row: true
+  p0_p1_pn_are_mandatory: true
+  same_for_all:
+    [work_amount, precision, memory_config, clock_condition, compile_strategy]
+  pn_differs_from_p1_only_in: active_context_count
+  precision: { tensor_io: bf16, internal: fp32 }
+
+workload_classes:
+  required:
+    - memory_wait_hideable
+    - vme_saturated
+    - control_dense
+    - random_access
+  must_not_pick_only_the_favourable: true
+  saturated_load_may_show_no_speedup: true
+  no_speedup_must_be_explained: true
+
+metrics:
+  required:
+    - {
+        id: PERF-01,
+        covers:
+          [
+            throughput,
+            batch_makespan,
+            single_task_latency,
+            tail_latency,
+            single_context_regression,
+          ],
+      }
+    - {
+        id: PERF-02,
+        covers:
+          [
+            wait_reasons_by_context,
+            effective_issue,
+            retire,
+            engine_activity,
+            memory_occupancy,
+          ],
+      }
+    - {
+        id: PERF-04,
+        covers:
+          [
+            gather_useful_bytes,
+            gather_actual_bytes,
+            coalescing_rate,
+            outstanding_avg,
+            outstanding_peak,
+            return_wait,
+          ],
+      }
+    - { id: PERF-05, covers: [end_includes_output_writeback_and_completion] }
+    - {
+        id: PERF-07,
+        covers:
+          [
+            scheduling_opportunity,
+            fixed_speedup,
+            lifetime_overlap,
+            engine_interval_overlap,
+          ],
+      }
+  perf_06_is_a_process_rule: true
+  each_metric_records: [measurement_method, source_fields, statistic]
+  source_fields_come_from: raw_log_or_byte_counters
+  from_source_text_or_file_existence: forbidden
+  needs_reverse_control: true
+  reverse_control: "an injected worse condition must make the metric worse, so it is not a constant or an existence test"
+
+timing:
+  authority: python_simulator_cycle
+  one_tick_is_one_core_cycle: true
+  core_cycles_and_elapsed_time_reported_separately: true
+  gated_cycles_counted: true
+  debug_perturbation: reported_separately
+  debug_in_normal_performance: forbidden
+
+report_keys:
+  required:
+    - cycles
+    - completed
+    - utilization
+    - credit_invariant_ok
+    - stall_breakdown
+    - stall_categories
+    - traffic
+    - events
+    - memory
+    - scheduler
+    - resources
+    - profile
+    - arenas
+    - task_leases
+    - checks
+  requirement: OBS-12
+  source:
+    {
+      file: pipeline_validator/report.py,
+      line: 34,
+      needle: "credit_invariant_ok: bool",
+    }
+  stall_categories_is_an_aggregate_of_stall_breakdown: true
+  never_add_stall_categories_to_stall_breakdown: true
+  stall_categories_keys:
+    [
+      admission_stall_cycles,
+      dependency_stall_cycles,
+      engine_queue_stall_cycles,
+      memory_stall_cycles,
+    ]
+  stall_categories_source:
+    {
+      file: pipeline_validator/report.py,
+      line: 335,
+      needle: "stall_categories = {",
+    }
+
+stall_reasons:
+  count: 12
+  names:
+    - NONE
+    - WAIT_EVENT
+    - WAIT_OPERAND
+    - STREAM_CREDIT
+    - WAIT_L1_BANK
+    - WAIT_L2_BANK
+    - WAIT_NOC_CREDIT
+    - WAIT_DMA_QUEUE
+    - WAIT_HBM_OUTSTANDING
+    - UCE_PROGRAM_DESC
+    - UNKNOWN
+    - WAIT_MSHR
+  source:
+    { file: pipeline_validator/pmu.py, line: 29, needle: "WAIT_MSHR = 11" }
+  one_primary_owner_per_stall_cycle: true
+  exclusive_attribution_and_overlapping_counts_never_added: true
+  unknown_nonzero_means: coverage_gap
+  new_reason_must: map_to_existing_owner_or_be_reviewed
+
+pre_registration:
+  order: register_then_measure
+  required_fields_per_row:
+    [
+      baseline_ref,
+      threshold_source,
+      pre_registered_threshold,
+      pre_registration_sha256,
+    ]
+  threshold_value:
+    {
+      value: unresolved,
+      owner: C019,
+      reason: "registered by the measuring card before any measurement",
+    }
+  threshold_needs_a_stated_reason: true
+  zero_placeholder: forbidden
+  threshold_chosen_after_the_data: forbidden
+  hash_goes_into: final_manifest
+  experiment_freeze: [workload_set, baselines, statistical_bounds]
+
+gate_rejects:
+  - truncated_window
+  - gap_window
+  - missing_blob
+  - missing_seal
+  - quota_window
+  - debug_perturbed_run_in_normal_numbers
+  - unregistered_threshold
+  - python_cycles_reported_as_rtl_cycles
+
+forbidden_claims:
+  [fmax, area, power, multi_vme_utilization, ppa, python_cycles_as_rtl_truth]

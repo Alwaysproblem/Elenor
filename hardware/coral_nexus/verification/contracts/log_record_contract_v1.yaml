@@ -1,0 +1,117 @@
+version: 1
+# W7 host-side log record contract, DRAFT (C016 / W7-01). Holds records the Host observed passively on the
+# boundary. It is NOT a wire encoding: the on-wire layout belongs to W1/C017. Identity fields are taken from
+# protocol/cn_protocol_v1.yaml BY REFERENCE and are read back, never copied.
+status: draft
+schema_ver: cn_trace/v1
+
+fields:
+  - { name: seq, group: timing, type: int, required: true }
+  - { name: cycle, group: timing, type: int, required: true }
+  - { name: phase, group: timing, type: enum, required: true }
+  - { name: protocol, group: header, type: enum, required: true }
+  - { name: dir, group: header, type: enum, required: true }
+  - { name: port, group: handshake, type: str, required: true }
+  - { name: valid, group: handshake, type: bool, required: true }
+  - { name: ready, group: handshake, type: bool, required: true }
+  - { name: accepted, group: handshake, type: bool, required: true }
+  - { name: len, group: data, type: int, required: true }
+  - { name: payload_hash, group: data, type: sha256, required: true }
+  - { name: reliability, group: header, type: enum, required: true }
+  - { name: kind, group: header, type: str, required: true }
+  - { name: payload_bytes, group: data, type: bytes, required: false }
+  - { name: blob_ref, group: data, type: sha256, required: false }
+  - { name: message_seq, group: timing, type: int, required: false }
+  - {
+      name: r1_seq,
+      group: timing,
+      type: int,
+      required: false,
+      required_when: "reliability is R1",
+    }
+  - { name: identity, group: identity, type: map, required: false }
+  - { name: t_id, group: header, type: str, required: false }
+
+protocol:
+  from: protocol/cn_protocol_v1.yaml#channels
+  names: [CTRL, EVENT, PROGRAM, MEMORY, DEBUG]
+  dir: [req, resp]
+  own_budget_per_channel: true
+
+identity:
+  refs:
+    - protocol/cn_protocol_v1.yaml#identity_domains.task_key
+    - protocol/cn_protocol_v1.yaml#identity_domains.context_key
+    - protocol/cn_protocol_v1.yaml#identity_domains.op
+    - protocol/cn_protocol_v1.yaml#identity_domains.txn
+  carried_when_the_message_has_them: true
+  generation_domains_distinct: true
+  generation_domains:
+    [
+      ctx_generation,
+      arena_alloc_gen,
+      program_epoch,
+      profile_l1_gen,
+      run_generation,
+    ]
+  physical_tile_is_routing_only: true
+  vme_instance_visible_to: [validation_only]
+  vme_instance_visible_to_software: false
+  mapping_detail_lives_in: host_manifest
+
+handshake:
+  accepted_is: "valid and ready"
+  accepted_must_equal_valid_and_ready: true
+  valid_without_ready:
+    records: stalled_valid
+    payload_must_stay_stable_until_accepted: true
+    code: UNSTABLE_PAYLOAD
+  accepted_record_per_key: 1
+
+uniqueness:
+  key: [window_id, protocol, port, dir, cycle, phase]
+  at_most_one_record_per_key: true
+  req_and_resp_are_different_keys: true
+  functional_events_also_carry: r1_seq
+
+reliability:
+  classes: [R1, R2]
+  R1:
+    meaning: "functional event: task, phase, completion, fault, credit, lease, grant"
+    reliable: true
+    ordered: true
+    lossless: true
+    absence: FAIL
+    channels: [CTRL, EVENT, PROGRAM, MEMORY]
+  R2:
+    meaning: "diagnostic copy"
+    lossy: true
+    channels: [DEBUG]
+    loss_changes_functional_verdict: false
+  r1_on_debug_channel: forbidden
+  functional_message_on_lossy_path: forbidden
+  r1_kinds: [task, phase, completion, fault, credit, lease, grant, run_end]
+  decided_on: R1
+  r1_seq:
+    contiguous_per_window: true
+    gap: R1_MISSING
+
+data:
+  hash:
+    algorithm: sha256
+    derived_from: payload_bytes
+    must_match_when_bytes_present: true
+  len_must_equal_bytes_when_present: true
+  replay_needs: "payload_bytes or a retrievable blob_ref; a hash alone cannot rebuild the data"
+  hash_only_record_replayable: false
+  blob_is: "the bytes the Host actually observed on the port, not a value the RTL sent only as a hash"
+
+raw_log_forbidden_fields:
+  [ts_us, ts_ns, ts, quantized_cycle, rounded_cycle, wall_time]
+unknown_fields: reject
+
+normal_mode:
+  keeps_history_on_chip: false
+  hbm_log_writes: 0
+  host_passive_recording_is_not_on_chip_retention: true
+  debug_perturbation_counted_separately: true
