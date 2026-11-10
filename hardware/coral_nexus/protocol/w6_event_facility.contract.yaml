@@ -1,0 +1,379 @@
+version: 1
+# W6 local event facility contract, DRAFT (C015 / W6-01), fragment 1 of 2.
+#
+# Logical contract only: no silicon encoding, no CSR address, no bit width and no capacity is assigned
+# here. A number is either read back from the pinned tree or the validator, or it is `unresolved` with an
+# owner and a reason. The validator builds its structures FROM this file and holds the required set in
+# code, so one edit cannot weaken the contract and the check that would notice it together.
+#
+# Source precedence (validator code wins). Where this contract differs from the validator, the
+# difference is written down next to the field, never silently adopted.
+status: draft
+
+# ---------------------------------------------------------------------------
+# 1. Identity. Hardware matches the FULL key; the validator's `ctx{N}:<name>` string is a model name,
+#    declared in the manifest and never used as a match key (EVT-16).
+# ---------------------------------------------------------------------------
+identity:
+  context_key_ref: protocol/cn_protocol_v1.yaml#identity_domains.context_key
+  event_key_fields:
+    [
+      tile_id,
+      ctx_slot,
+      ctx_generation,
+      local_event_id,
+      event_generation,
+      sequence,
+    ]
+  scopes: [task_private, tile_shared, group_l2, external]
+  match_rule: "a completion matches an entry only on the full key AND the same scope; a name string never matches"
+  widths:
+    local_event_id:
+      {
+        value: unresolved,
+        owner: C017,
+        reason: "derived from the frontier bound and the lifetime bound; neither is sourced yet",
+      }
+    event_generation:
+      {
+        value: unresolved,
+        owner: C017,
+        reason: "lifetime_bounds.yaml event_sequence is derivable:false",
+      }
+    sequence:
+      {
+        value: unresolved,
+        owner: C017,
+        reason: "lifetime_bounds.yaml event_sequence is derivable:false",
+      }
+  generation_domains_distinct: [ctx_generation, event_generation, sequence]
+
+# ---------------------------------------------------------------------------
+# 2. Kinds. The five completions are DIFFERENT semantics, not one enum, and none substitutes for another.
+# ---------------------------------------------------------------------------
+event_kinds:
+  local_waitable: [compute_done, transfer_done, store_done, region_done]
+  kind_fixed_at_registration: true
+  producer_unique_at_registration: true
+  not_local_events:
+    - { name: INPUT_RELEASED, carried_by: PHASE_SIGNAL }
+    - { name: OUTPUT_READY, carried_by: PHASE_SIGNAL }
+    - { name: TASK_COMPLETION, carried_by: TASK_COMPLETION }
+  not_waitable: [RESOURCE_RELEASED]
+  no_substitution:
+    [INPUT_RELEASED, OUTPUT_READY, STORE_DONE, TASK_COMPLETION, VME_REGION_DONE]
+  drift_noted: "W6 plan 5.1 item 1 lists TASK_COMPLETION as a local event kind; W6 design 3.1/3.3 and the C015 card say it is an external terminal report. The card wins: it is not a local-event kind and a Task cannot wait for an event that only exists after its own retirement."
+  region_done:
+    produced_by: W3
+    on_failure: "kind region_done with status ERROR or RESET; a failed region NEVER publishes success (MAT-16)"
+    wait_record_writer: W3
+
+# ---------------------------------------------------------------------------
+# 3. States. Terminal states are sticky and never return to PENDING (EVT-16, FLT-14).
+# ---------------------------------------------------------------------------
+states:
+  values: [PENDING, DONE, ERROR, TIMEOUT, RESET]
+  terminal: [DONE, ERROR, TIMEOUT, RESET]
+  sticky_terminal: true
+  no_return_to_pending: true
+  source:
+    {
+      file: pipeline_validator/runtime/event_table.py,
+      line: 18,
+      needle: "PENDING = 0",
+    }
+  no_cancelled_state:
+    {
+      file: pipeline_validator/runtime/event_table.py,
+      line: 22,
+      needle: "RESET = 4",
+    }
+  reset_conversion:
+    only_from: PENDING
+    to: RESET
+    terminal_unchanged: true
+    source:
+      {
+        file: pipeline_validator/runtime/event_table.py,
+        line: 552,
+        needle: "entry.status is EventStatus.PENDING",
+      }
+  fault_triggered_error_event:
+    status: not_in_validator
+    rule: "if hardware raises an ERROR event for a fault, the fault record is visible BEFORE that event (FLT-14, SHOULD); the validator baseline goes PENDING -> RESET at MARK_EVENTS"
+
+entry:
+  fields:
+    [
+      key,
+      scope,
+      kind,
+      status,
+      producer_id,
+      error_code,
+      consumer_refs,
+      future_uses,
+    ]
+  consumer_refs: "registered, not yet settled dependency references"
+  future_uses: "compiler-proved remaining references"
+  source:
+    {
+      file: pipeline_validator/runtime/event_table.py,
+      line: 44,
+      needle: "consumer_refs: int = 0",
+    }
+
+reclaim:
+  predicate: [terminal, consumer_refs_zero, future_uses_zero]
+  source:
+    {
+      file: pipeline_validator/runtime/event_table.py,
+      line: 499,
+      needle: "entry.consumer_refs or entry.future_uses",
+    }
+  validator_difference: "EventTable.reset() converts PENDING to RESET but does not reclaim; the hardware table reclaims only by the predicate, so a RESET entry with live references stays"
+  abandon:
+    refused_while: consumer_refs_nonzero
+    source:
+      {
+        file: pipeline_validator/runtime/event_table.py,
+        line: 372,
+        needle: "cannot abandon future uses",
+      }
+
+# ---------------------------------------------------------------------------
+# 4. Counters. Every counter has an exact increment condition. A reject path changes counters only, never
+#    entry state (I3). Check order is the order the validator applies.
+# ---------------------------------------------------------------------------
+signal:
+  check_order:
+    [
+      unknown_event_notify,
+      wrong_owner,
+      stale_sequence,
+      wrong_producer,
+      duplicate_signal,
+    ]
+  at_most_one_state_change_per_signal: true
+  reject_changes_state: false
+  source:
+    {
+      file: pipeline_validator/runtime/event_table.py,
+      line: 441,
+      needle: "entry.sequence != sequence",
+    }
+
+counters:
+  stale_sequence:
+    increment: "event_generation or sequence differs from the live entry"
+    source:
+      {
+        file: pipeline_validator/runtime/event_table.py,
+        line: 442,
+        needle: "pmu_stale_sequence_count += 1",
+      }
+  wrong_owner:
+    increment: "ctx_generation, tile, ctx_slot or scope differs from the live entry, or the signalling producer is not the bound producer"
+    source:
+      {
+        file: pipeline_validator/runtime/event_table.py,
+        line: 436,
+        needle: "pmu_wrong_owner_count += 1",
+      }
+  duplicate_signal:
+    increment: "the entry is already terminal"
+    source:
+      {
+        file: pipeline_validator/runtime/event_table.py,
+        line: 448,
+        needle: "pmu_duplicate_signal_count += 1",
+      }
+  capacity_reject:
+    increment: "an allocation found the Context frontier full; the allocation is a backpressure stall, not a fault"
+    source:
+      {
+        file: pipeline_validator/runtime/event_table.py,
+        line: 126,
+        needle: "pmu_capacity_reject_count += 1",
+      }
+  protocol_error:
+    increment: "an operand, producer, quota or identity violates the registration protocol"
+    source:
+      {
+        file: pipeline_validator/runtime/event_table.py,
+        line: 116,
+        needle: "pmu_protocol_error_count += 1",
+      }
+  unknown_event_notify:
+    increment: "a completion names an entry that has no live slot (reclaimed or never registered)"
+    note: "the validator folds this into stale_sequence (event_table.py:423); the hardware keeps it separate so a reclaimed name is distinguishable from a stale sequence"
+saturation:
+  sticky_bit_per_counter: true
+  wrap: forbidden
+  width: { value: unresolved, owner: C017, reason: "no sourced counter rate" }
+
+# ---------------------------------------------------------------------------
+# 5. Capacity. Everything is `entries`. The Group model default is NOT a Tile configuration.
+# ---------------------------------------------------------------------------
+capacity:
+  unit: entries
+  group_model_default:
+    value: 4096
+    not_tile_capacity: true
+    source:
+      {
+        file: pipeline_validator/config.py,
+        line: 458,
+        needle: "event_capacity: int = 4096",
+      }
+  frontier_slots_per_context:
+    {
+      value: unresolved,
+      owner: C018,
+      reason: "the per-kernel static activity bound is measured by C018; the validator budget.event_frontier is a Group figure and not a per-Context proof",
+    }
+  tile_global_slots:
+    {
+      value: unresolved,
+      owner: C019,
+      reason: "frozen by the C1/C2 capacity proof",
+    }
+  terminal_reserve_per_context:
+    minimum: 1
+    separate_from_frontier: true
+    reason: "completion, retire and fault records must always be storable, so a full frontier cannot block them (EVT-17, FLT-13)"
+  budget_derivation:
+    expression: "contexts * (frontier_slots_per_context + terminal_reserve_per_context) + response_inflight_entries"
+    inputs:
+      contexts:
+        {
+          unit: scalar,
+          owner: C019,
+          note: "Context count of the C1/C2 configuration",
+        }
+      frontier_slots_per_context: { unit: entries, owner: C018 }
+      terminal_reserve_per_context: { unit: entries, owner: C019 }
+      response_inflight_entries:
+        {
+          unit: entries,
+          owner: C019,
+          note: "completions that can be in flight toward the table, counted in entries and not in cycles",
+        }
+    result_unit: entries
+    must_not_exceed: tile_global_slots
+    rule: "every term is in entries; a cycle count is never added to an entry count"
+  full_table:
+    behavior: backpressure_the_context
+    fault: false
+    drop_terminal: false
+    release_identity_before_send: false
+    completion_and_credit_blocked: false
+  load_time_rejection:
+    when: "a Task's static live-event bound exceeds frontier_slots_per_context"
+    code: PERMANENT_CAPACITY
+    runtime_fault: false
+  static_bound_source: static_analysis
+  group_figure_is_not_per_context_proof:
+    {
+      file: pipeline_validator/execution_verifier.py,
+      line: 2030,
+      needle: "budget.event_frontier != required_frontier",
+    }
+
+# ---------------------------------------------------------------------------
+# 6. WAIT / WAITALL. One wait record per Context, one writer (W6). Check and register are one atomic
+#    step; a completion in the same cycle wins.
+# ---------------------------------------------------------------------------
+wait:
+  kinds: [WAIT, WAITALL]
+  record_per_context: 1
+  record_writer: W6
+  wait_operands: 1
+  waitall_operands: { min: 2, max: unresolved, max_owner: C018 }
+  waitall_over_max: decode_reject
+  no_or_mode: true
+  no_wait_any: true
+  lowering:
+    wait_when_one_operand: true
+    source:
+      {
+        file: pipeline_validator/compiler/lowering.py,
+        line: 967,
+        needle: "ExecTileOp.WAIT if len(events) == 1",
+      }
+  check_register:
+    atomic: true
+    check_reads: persistent_entry_state
+    same_cycle_priority: completion_first
+    park_then_wake_same_cycle: forbidden
+    source:
+      {
+        file: pipeline_validator/tile.py,
+        line: 572,
+        needle: "if ctx.wait_all:",
+      }
+  operand_must_resolve: "every operand names a live entry by its full key; an unresolvable operand is rejected, never parked on"
+  verdict:
+    waitall_success: all_operands_done
+    any_terminal_failure: fail_exit_immediately
+    failure_via_success_wake: forbidden
+    armed_cleared_when: record_verdict_reached
+    wake_restores: issue_eligibility_only
+  fault_voids_record:
+    true
+    # a faulted Context's record is voided and can match nothing later
+  fault_voids_source:
+    {
+      file: pipeline_validator/tile.py,
+      line: 1323,
+      needle: "ctx.wait_refs = ()",
+    }
+  semantics_not_a_fence: [fence, store_done, release, group_barrier]
+  validator_difference: "the validator waits on one name for WAIT (tile.py:577) and does not fan out per-operand ERROR; waiters end through MARK_EVENTS RESET. The hardware adds an explicit failure exit, but never a success wake"
+
+# ---------------------------------------------------------------------------
+# 7. Phase signals and POST_EVENT. One accepted instruction is one message; the Tile never dedups.
+# ---------------------------------------------------------------------------
+phase_signal:
+  directions: [input_released, output_ready]
+  one_instruction_one_message: true
+  tile_dedup: forbidden
+  at_most_once_per_task_direction: "a static guarantee of the compiler and Loader (EVT-15), not a Tile gate"
+  aggregation_key: [root_launch_generation, GridInstanceId, phase, task]
+  physical_tile_in_key: false
+  group_decides:
+    [stale_ignored, duplicate_protocol_fault, unknown_protocol_fault]
+  duplicate_source:
+    {
+      file: pipeline_validator/tile_group.py,
+      line: 1436,
+      needle: "tile_signal_duplicate",
+    }
+  early_release_returns:
+    [l1_arena, frame, uce_slot, r_lease, program_residency_reference]
+  early_release_returns_none: true
+
+post_event:
+  logical_interface: true
+  never_noop: true
+  scope_allowed: [group_l2, external]
+  authorization: sealed_manifest_grant
+  unauthorized: protocol_fault
+  fields_symmetric_with: EVENT_NOTIFY
+  channel: EVENT
+  manifest_field_owner: W5
+  manifest_field_status: "not in the C014 draft binding manifest; requested in field_requests/w6.yaml and resolved at C020"
+
+# ---------------------------------------------------------------------------
+# 8. Ownership of every writer. A resource has exactly one writer.
+# ---------------------------------------------------------------------------
+writers:
+  local_event_table: tile
+  wait_record: tile
+  vme_region_wait_record: W3
+  group_event_table: group
+  first_fault_latch: tile
+  poison_state: group
+  max_drain_cycles: group
+  reset_phase_order: group
+  tile_timers: none

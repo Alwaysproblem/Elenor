@@ -1,0 +1,488 @@
+version: 1
+# W6 terminal / cancel / reset / fault / gating / debug contract, DRAFT (C015 / W6-01), fragment 2 of 2.
+#
+# Logical contract only: no silicon encoding, no CSR address, no bit width, no depth and no timer value
+# is assigned here. A number is either read back from the pinned tree or the validator, or it is
+# `unresolved` with an owner and a reason. The validator builds its structures FROM this file and holds the
+# required set in code, so one edit cannot weaken the contract and the check that would notice it together.
+#
+# This is the ONLY place debug gating, FIFO derivation and restricted-export fields are registered. They are
+# sealed with this fragment at C020; a later card must not append them to an already sealed contract.
+status: draft
+
+# ---------------------------------------------------------------------------
+# 1. first-fault latch. One per Tile, always-on / reset-safe (FLT-10, FLT-11, RST-09).
+# ---------------------------------------------------------------------------
+first_fault_latch:
+  per_tile: 1
+  domain: always_on_reset_safe
+  record_fields:
+    - code
+    - source_id
+    - severity
+    - task
+    - context
+    - command
+    - event
+    - program
+    - descriptor
+    - group
+    - tile
+    - queue
+    - slot
+    - patch
+    - engine_id
+    - offending_addr
+    - aux0
+    - aux1
+    - cycle
+  attribution_ref:
+    file: rtl/scalar/doc/rob_tag.yaml
+    section: owner_tag
+    fields: [ctx_slot, ctx_generation, owner_op_seq]
+    rule: "the fault's task/context/op attribution is the OwnerTag by reference, never a copy"
+  arm_condition: "no reset is active and none has completed"
+  arm_source:
+    {
+      file: pipeline_validator/tile_group.py,
+      line: 2359,
+      needle: "self.reset_domain.is_active or self.reset_domain.is_done",
+    }
+  first_fault_wins: true
+  later_fault: count_only
+  suppressed_fault_count: { saturating: true, sticky_bit: true }
+  same_cycle_arbitration:
+    order: [source_id, engine_id, ctx_slot, op_seq]
+    lexicographic: true
+    hash_allowed: false
+    deterministic: true
+  cleared_only_by: [FAULT_ACK, privileged_fault_clear]
+  cleared_by_reset: false
+  cleared_by_functional_reset: false
+  validator_difference:
+    ring_overwrites: true
+    ring_source:
+      {
+        file: pipeline_validator/runtime/fault_ring.py,
+        line: 85,
+        needle: "self._head = (self._head + 1) % maxlen",
+      }
+    rule: "the validator FaultRing overwrites and is a count reference only; the latch never inherits overwrite as semantics"
+  fault_codes:
+    count: 11
+    covers: all_validator_codes
+    current_production_codes_are_not_a_hardware_limit: true
+    names:
+      - INVALID_DESCRIPTOR
+      - UNSUPPORTED_ABI
+      - ADDRESS_FAULT
+      - DMA_TIMEOUT
+      - EVENT_DEPENDENCY_TIMEOUT
+      - STREAM_PROTOCOL_ERROR
+      - ENGINE_INTERNAL_FAULT
+      - RESET_DURING_EXECUTION
+      - L2_CAPACITY_FAULT
+      - INVALID_LAYOUT_FAULT
+      - SLOT_PERMISSION_FAULT
+    source:
+      {
+        file: pipeline_validator/runtime/fault_ring.py,
+        line: 28,
+        needle: "SLOT_PERMISSION_FAULT = 11",
+      }
+    code_width:
+      { value: unresolved, owner: C017, reason: "no sourced encoding" }
+  summary_width: { value: unresolved, owner: C017, reason: "no sourced width" }
+  record_before_error_event: "if hardware raises a fault-triggered ERROR event, the latch is visible first (FLT-14, SHOULD)"
+  reliable_path_independent_of: [debug_fifo, bulk_data_channel, hbm_log]
+
+# ---------------------------------------------------------------------------
+# 2. Fault domain. Production faults reset the whole Group; Tile attribution never selects the domain.
+# ---------------------------------------------------------------------------
+fault_domain:
+  production_domain: GROUP
+  tile_domain: test_injection_only
+  fault_report_tile_id: attribution_only
+  never_selects_domain: true
+  fault_in_one_context_other_continues: forbidden
+  source_function_supports_tile:
+    {
+      file: pipeline_validator/tile_group.py,
+      line: 2371,
+      needle: "FaultDomain.TILE if tile_id >= 0 else FaultDomain.GROUP",
+    }
+  local_isolation_flt_02a: not_implemented
+
+# ---------------------------------------------------------------------------
+# 3. Reset endpoint. Group is the sole authority on order and on time; the Tile endpoint executes the Tile
+#    segment passively and acknowledges. The Tile has no timer that changes functional state.
+# ---------------------------------------------------------------------------
+reset_endpoint:
+  authority: group
+  tile_executes: passively
+  tile_advances_unprompted: false
+  tile_timers: none
+  resume_decided_by: group
+  phases:
+    - { name: FREEZE_ISSUE, requires: [], validator: FREEZE_DISPATCH }
+    - {
+        name: CANCEL_UNISSUED,
+        requires: [FREEZE_ISSUE],
+        validator: FREEZE_DISPATCH,
+      }
+    - { name: DRAIN, requires: [CANCEL_UNISSUED], validator: DRAIN_SAFE }
+    - { name: MARK_EVENTS, requires: [DRAIN], validator: MARK_EVENTS }
+    - {
+        name: INVALIDATE_RESIDENCY,
+        requires: [MARK_EVENTS],
+        validator: RESET_DOMAIN,
+      }
+    - {
+        name: REBUILD_CREDIT,
+        requires: [INVALIDATE_RESIDENCY],
+        validator: CLEAR_CREDIT_CACHE,
+      }
+    - { name: RESUME_DONE, requires: [REBUILD_CREDIT], validator: RESUME }
+  validator_mapping_note: "the validator folds CANCEL_UNISSUED into the FREEZE_DISPATCH step and does context-memory release and residency invalidation inside RESET_DOMAIN; the endpoint keeps them as separate observable phases so they can be compared one to one"
+  validator_sources:
+    cancel_unissued:
+      {
+        file: pipeline_validator/runtime/reset_domain.py,
+        line: 75,
+        needle: "_cancel_unissued_engine_requests",
+      }
+    mark_events:
+      {
+        file: pipeline_validator/runtime/reset_domain.py,
+        line: 101,
+        needle: "group.event_table.reset()",
+      }
+  stop_new_work_until_done: true
+  new_task_during_reset: rejected_and_observable
+  one_observable_signal_per_phase: true
+  drain:
+    evidence_required:
+      - engine_accepted_zero
+      - engine_queue_empty
+      - l1_mshr_empty
+      - transfer_quiescent
+      - no_pending_debug_export
+      - no_unaccepted_phase_or_post_event
+    evidence_excluded: [pending_events_zero]
+    why_pending_excluded: "PENDING becomes RESET only in MARK_EVENTS, so requiring PENDING==0 before DRAIN waits on an effect of a later phase: a wait-for cycle"
+    success_when: all_evidence_true
+    timeout_means_success: false
+    source:
+      {
+        file: pipeline_validator/runtime/reset_domain.py,
+        line: 86,
+        needle: "self.state = ResetState.MARK_EVENTS",
+      }
+  max_drain_cycles:
+    owner: group
+    tile_copy: forbidden
+    upper_limit_action: "Group forces cancellation of in-flight transfers; the drain is still complete only on real evidence or isolation"
+    config_key_exists: false
+    source:
+      {
+        file: pipeline_validator/runtime/reset_domain.py,
+        line: 89,
+        needle: 'getattr(cfg, "max_drain_cycles", 100)',
+      }
+    value:
+      {
+        value: unresolved,
+        owner: C019,
+        reason: "the model value 100 is a getattr default and not a config key; frozen by the capacity proof",
+      }
+  mark_events:
+    writer: tile
+    scope: local_event_table
+    pending_to: RESET
+    terminal_unchanged: true
+    ack_carries: pending_to_reset_count
+    tile_marks_error: false
+    group_writes_tile_table: false
+  poison:
+    owner: group
+    tile_after_poison: reject_all_new_starts
+    cleared_by: [explicit_quiescent_reset, zero_evidence, explicit_recovery]
+    poison_source:
+      {
+        file: pipeline_validator/tile_group.py,
+        line: 1992,
+        needle: "self.poisoned_reason is not None",
+      }
+    recovery_source:
+      {
+        file: pipeline_validator/tile_group.py,
+        line: 2235,
+        needle: "def reset(self)",
+      }
+  invalidate_residency:
+    ack_after_references_cleared: true
+    ack_early: forbidden
+    precedes: RESUME_DONE
+  rebuild_credit:
+    credit_from: local_initial_value
+    generation_bump_after: settled_or_isolated_old_transactions
+    reuse_before_settlement: forbidden
+  global_wait_for_acyclic: true
+
+# ---------------------------------------------------------------------------
+# 4. Cancel. Stop NEW issue only. Accepted work runs to real completion or confirmed isolation.
+# ---------------------------------------------------------------------------
+cancel:
+  scope: task
+  cancel_task:
+    key: [task_key, ctx_generation]
+    effect: stop_new_issue_of_that_tasks_context
+    clears_unaccepted_ingress_only: true
+    accepted_work_dropped_silently: forbidden
+    accepted_work_ends_as: failure_terminal
+  classification:
+    matches_live_task: apply
+    no_live_binding_for_task_key:
+      { class: stale, effect: count_and_ack_idempotent }
+    task_known_but_ctx_generation_conflicts:
+      {
+        class: protocol_error,
+        effect: fault_or_reset_chain,
+        dropped_arbitrarily: false,
+      }
+    duplicate_command: idempotent
+  generation_as_cancellation: forbidden
+  external_write_settlement:
+    ref: protocol/w4_memory.contract.yaml#terminal.states
+    states: [COMPLETED, ISOLATED, FAULTED]
+    accepted_write_cancelled_by_timeout: forbidden
+    isolation_failure:
+      returns_isolated: false
+      releases_resources: false
+      stays: unclosed_placeholder
+      effect: poison
+  timeout_is_success: false
+
+# ---------------------------------------------------------------------------
+# 5. Task terminal and retirement chain.
+# ---------------------------------------------------------------------------
+task_terminal:
+  states: [DONE, ERROR, TIMEOUT, RESET]
+  success_state: none
+  timeout_published_only_after: w4_real_completion_or_confirmed_isolation
+  timeout_from_local_timer: forbidden
+  unique_per_accepted_command: true
+  fault_chain_produces_success: false
+  first_fault_reference_carried: true
+  retire_ready:
+    is_task_success: false
+    requires: [exec_drained, no_old_in_flight, vme_region_ended]
+    cannot_be_skipped: true
+  chain:
+    - { step: exec_drained, requires: [] }
+    - { step: retire_ready, requires: [exec_drained] }
+    - { step: retire_authorized, requires: [retire_ready] }
+    - { step: local_reclaim, requires: [retire_authorized] }
+    - { step: task_completion_stored, requires: [local_reclaim] }
+    - { step: task_completion_sent, requires: [task_completion_stored] }
+    - { step: parent_pin_cleanup, requires: [task_completion_sent] }
+    - { step: parent_r_return, requires: [task_completion_sent] }
+    - {
+        step: root_arena_retire,
+        requires: [parent_pin_cleanup, parent_r_return],
+      }
+    - { step: root_completion, requires: [root_arena_retire] }
+  # `from` must never depend (transitively) on `to`: that would be the banned wait-for edge.
+  forbidden_edges:
+    - { from: task_completion_stored, to: parent_r_return }
+    - { from: retire_authorized, to: parent_r_return }
+    - { from: task_completion_stored, to: parent_pin_cleanup }
+  python_executes_l1_retire: false
+  root_arena_before_root_success: true
+  root_arena_source:
+    {
+      file: pipeline_validator/tile_group.py,
+      line: 1523,
+      needle: "def retire_context_arena",
+    }
+  record_storage:
+    stable_under_backpressure: true
+    identity_released_before_send: false
+    lost: never
+  slot_reuse_requires:
+    [old_obligations_closed, record_isolated_by_generation, completion_consumed]
+
+# ---------------------------------------------------------------------------
+# 6. Settlement ownership. Every accepted class has a settlement owner for success, cancel and failure.
+# ---------------------------------------------------------------------------
+settlement:
+  classes:
+    - {
+        name: engine_job,
+        success: engine,
+        cancelled: tile_endpoint,
+        failed: tile_endpoint,
+      }
+    - { name: external_write, success: W4, cancelled: W4, failed: W4 }
+    - { name: transfer, success: W4, cancelled: W4, failed: W4 }
+    - { name: local_event, success: tile, cancelled: tile, failed: tile }
+    - { name: wait_record, success: tile, cancelled: tile, failed: tile }
+    - { name: vme_region, success: W3, cancelled: W3, failed: W3 }
+    - { name: phase_signal, success: tile, cancelled: group, failed: group }
+    - { name: post_event, success: tile, cancelled: group, failed: group }
+    - { name: retire_ready, success: tile, cancelled: group, failed: group }
+    - { name: task_completion, success: tile, cancelled: tile, failed: tile }
+    - { name: debug_write, success: W4, cancelled: W4, failed: W4 }
+    - { name: program_reference, success: W5, cancelled: W5, failed: W5 }
+  every_class_has_all_three: true
+  unsettled_class_rejected: true
+
+# ---------------------------------------------------------------------------
+# 7. Generation-wrap reuse. Authority is the Group. Local quiescence alone never authorizes reuse.
+# ---------------------------------------------------------------------------
+wrap_quiesce:
+  messages: [GEN_WRAP_QUIESCE, QUIESCE_RESP]
+  reuse_authorized_by: group
+  tile_local_quiescence_sufficient: false
+  covers:
+    [in_flight_completions, late_acks, event_queues, protocol_replay_cache]
+  identical_bit_pattern_old_copy_may_arrive: reuse_forbidden
+  outer_epoch_alternative: allowed
+  query_idempotent: true
+  tile_timeout: forbidden
+  response_verifiable_by: [drain_bitmap, evidence_sequence]
+  wire_direction:
+    status: unresolved
+    owner: C017
+    reason: "protocol/cn_protocol_v1.yaml lists GEN_WRAP_QUIESCE as G2T with the Tile only answering, while W6 plan 5.1 has the Tile ask and the Group answer. The authority rule above holds in both; the wire direction is decided by C017/C020 and is not assumed here."
+  channel_and_idempotency_key_owner: W1
+
+# ---------------------------------------------------------------------------
+# 8. Clock gating. Layered; WFI is a park hint only.
+# ---------------------------------------------------------------------------
+clock_gating:
+  layers: [context_park, unit_idle, tile_quiescence]
+  context_park:
+    gates: [that_contexts_front_end_fetch_decode]
+    must_exclude: [rf_writeback_port, vrf_writeback_port, config_writeback]
+    affects_other_contexts: false
+    affects_in_flight_work: false
+  unit_idle:
+    driven_by: [accepted_count, occupancy]
+    mfe_rvv_idle_in_park_gate: false
+  tile_quiescence:
+    requires:
+      [
+        all_contexts_parked,
+        lsu_in_flight_empty,
+        mfe_in_flight_empty,
+        rvv_in_flight_empty,
+        vme_in_flight_empty,
+        completion_channel_empty,
+      ]
+  wfi:
+    meaning: context_park_hint
+    enters_tile_gate_condition: false
+    other_context_keeps_running: true
+  upstream_direct_wfi_gate:
+    removed_by_request: CR-W6-W2-01
+    source:
+      {
+        file: hdl/chisel/src/coralnpu/CoreAxi.scala,
+        line: 109,
+        needle: "(!csr.io.cg && !core.io.wfi)",
+      }
+    clock_gate_module:
+      { file: hdl/verilog/ClockGate.sv, line: 20, needle: "module ClockGate (" }
+  wake_alive_while_gated:
+    [wait_record_match, completion_broadcast_receive, reset_cancel_decode]
+  gating_boundary:
+    excludes_same_cycle_arrival: true
+    arrival_between_decision_and_stop: treated_as_not_gated
+  force_wake_on: [freeze, cancel, reset]
+  gated_cycles_counted: true
+  tile_condition_from: per_unit_quiescent_and_not_single_global_register
+
+# ---------------------------------------------------------------------------
+# 9. Debug. Default off, lossy, never on the reliable path.
+# ---------------------------------------------------------------------------
+debug:
+  default_mode: "off"
+  off_state:
+    on_chip_history_memory: none
+    hbm_log_ring: none
+    hbm_log_dma: none
+    kept: [pmu_counters, first_fault_summary, overflow_sticky]
+  after_reset: "off"
+  enable_requires: privileged_control
+  privileged_list_ref:
+    requirement: CFG-06
+    ops: [debug_enable, debug_quota, debug_capture_config, debug_export_target]
+  ordinary_kernel_may_enable: false
+  fifo:
+    full_policy: drop_new_record
+    counters: [dropped_count, overflow_sticky, window_incomplete]
+    dropped_count_saturating: true
+    blocks: none
+    never_blocks:
+      [issue, response, state_free, wakeup, task_terminal, fault_handling]
+    functional_message_on_this_path: forbidden
+    depth:
+      value: unresolved
+      owner: C019
+      reason: "frozen by evidence, never defaulted"
+      derivation:
+        expression: "record_burst_entries - export_rate * export_latency"
+        inputs:
+          record_burst_entries:
+            { unit: entries, status: unresolved, owner: C019 }
+          export_rate:
+            { unit: "entries/cycle", status: unresolved, owner: C019 }
+          export_latency: { unit: cycles, status: unresolved, owner: C019 }
+        result_unit: entries
+        note: "the burst the producer can emit minus what the export path drains while it is busy; the product is entries, so the difference is in one unit and cycles are never added to entries"
+      boundary_test_depth: 1
+  export:
+    privileged_only: true
+    target:
+      independent_reserved_ring: true
+      permission_and_range_checked: true
+      may_overwrite_program_or_user_data: false
+      bounded_capacity: true
+      throttleable_low_priority: true
+      may_exhaust_reserved_progress_resources: false
+    on_full_or_write_failure: stop_capture_and_drop_diagnostics
+    on_chip_buffer_growth: forbidden
+    executed_by: W4
+  restricted_export_fields:
+    allowed:
+      - key_identity
+      - kind
+      - status
+      - cycle
+      - code
+      - counters
+      - first_fault_summary_fields
+    forbidden: [user_data_bytes, program_text_bytes, descriptor_payload]
+    derived_from: [FLT-11, OBS-15, OBS-18]
+    full_payload_kept_in: simulation_host_or_debug_external_store
+  close_or_cancel_or_reset:
+    stop_new_capture_first: true
+    accepted_writes_keep: [owner, address, credit]
+    resolved_by: real_completion_or_confirmed_isolation
+    status_while_unresolved: [pending, poison]
+    clearing_fifo_counts_as_complete: false
+    timeout_clears: false
+    ring_reuse_before_settlement: forbidden
+  window_incomplete_marks_replay: cannot_fully_replay
+
+# ---------------------------------------------------------------------------
+# 10. Reliable channel. Control, event, fault and barrier messages never wait on bulk data.
+# ---------------------------------------------------------------------------
+reliable_channel:
+  independent_of: [data_channel, debug_channel]
+  channels: [CTRL, EVENT]
+  no_head_of_line_behind_data: true
+  credit_conservation: "credits + inflight + occupancy == capacity; a late or duplicate return is an error"
+  physical_sharing_requires: isolation_proof
+  carries: [first_fault_summary, event_terminal, task_completion]

@@ -1,0 +1,152 @@
+# W6 field request to W1-01 / W5-01, DRAFT (C015).
+#
+# A REQUEST, not an implementation: W1-01 (C017) merges it into the ABI and W6 defines no bits. No CSR
+# address, opcode, width or bit position appears here. Every item names a key of one of the two W6
+# contracts, so the validator checks the request against the contract it points at. Joint freeze with
+# C020; a missing request blocks the seal and is never filled in by W1.
+schema: cn_field_request/v1
+package: W6
+status: draft
+messages:
+  - {
+      message: EVENT_NOTIFY,
+      new: false,
+      from: protocol/w6_event_facility.contract.yaml,
+      key: identity.event_key_fields,
+      why: "carries the full event key plus scope; a name string is never a match key",
+    }
+  - {
+      message: POST_EVENT,
+      new: false,
+      from: protocol/w6_event_facility.contract.yaml,
+      key: post_event.authorization,
+      why: "sent only for a sealed-manifest-granted Group producer; an unauthorized post is a protocol fault",
+    }
+  - {
+      message: PHASE_SIGNAL,
+      new: false,
+      from: protocol/w6_event_facility.contract.yaml,
+      key: phase_signal.aggregation_key,
+      why: "one accepted instruction is one message; the physical Tile is routing only",
+    }
+  - {
+      message: RETIRE_READY,
+      new: false,
+      from: protocol/w6_terminal_reset.contract.yaml,
+      key: task_terminal.retire_ready.requires,
+      why: "not a Task success; carries the drain evidence reference",
+    }
+  - {
+      message: TASK_COMPLETION,
+      new: false,
+      from: protocol/w6_terminal_reset.contract.yaml,
+      key: task_terminal.states,
+      why: "four terminal states and the first-fault reference; no success state",
+    }
+  - {
+      message: GEN_WRAP_QUIESCE,
+      new: false,
+      from: protocol/w6_terminal_reset.contract.yaml,
+      key: wrap_quiesce.reuse_authorized_by,
+      why: "the Group authorizes bit-pattern reuse; wire direction is unresolved in the contract and decided at C017",
+    }
+  - {
+      message: QUIESCE_RESP,
+      new: false,
+      from: protocol/w6_terminal_reset.contract.yaml,
+      key: wrap_quiesce.response_verifiable_by,
+      why: "drain bitmap plus evidence sequence, so the answer can be checked",
+    }
+  - {
+      message: PROGRAM_INVALIDATE,
+      new: false,
+      from: protocol/w6_terminal_reset.contract.yaml,
+      key: reset_endpoint.invalidate_residency,
+      why: "the reset endpoint invalidates residency and acknowledges only after references clear",
+    }
+  - {
+      message: INVALIDATE_ACK,
+      new: false,
+      from: protocol/w6_terminal_reset.contract.yaml,
+      key: reset_endpoint.invalidate_residency.ack_early,
+      why: "an early acknowledgement is forbidden",
+    }
+  - {
+      message: CANCEL_TASK,
+      new: true,
+      from: protocol/w6_terminal_reset.contract.yaml,
+      key: cancel.cancel_task,
+      why: "Group to Tile; targets one Task by key and ctx_generation; stale, live-unknown and conflicting generations are three different outcomes",
+    }
+  - {
+      message: RESET_PHASE_REQ,
+      new: true,
+      from: protocol/w6_terminal_reset.contract.yaml,
+      key: reset_endpoint.phases,
+      why: "Group to Tile; one request per reset phase; the Tile executes passively and acknowledges",
+    }
+  - {
+      message: RESET_PHASE_ACK,
+      new: true,
+      from: protocol/w6_terminal_reset.contract.yaml,
+      key: reset_endpoint.mark_events.ack_carries,
+      why: "Tile to Group; the MARK_EVENTS acknowledgement carries the PENDING to RESET count; DRAIN carries the evidence set",
+    }
+  - {
+      message: FAULT_REPORT,
+      new: true,
+      from: protocol/w6_terminal_reset.contract.yaml,
+      key: first_fault_latch.record_fields,
+      why: "Tile to Group; attribution only, the Tile id never selects the reset domain",
+    }
+  - {
+      message: FAULT_ACK,
+      new: true,
+      from: protocol/w6_terminal_reset.contract.yaml,
+      key: first_fault_latch.cleared_only_by,
+      why: "Host or Group acknowledgement is the only way the latch clears",
+    }
+  - {
+      message: POISON,
+      new: true,
+      from: protocol/w6_terminal_reset.contract.yaml,
+      key: reset_endpoint.poison,
+      why: "Group to Tile; after it the Tile rejects every new start until an explicit quiescent reset",
+    }
+package_fields:
+  - {
+      name: frontier_slots_per_context,
+      owner: W5,
+      from: protocol/w6_event_facility.contract.yaml,
+      key: capacity.frontier_slots_per_context,
+      why: "the per-kernel static activity bound, measured by C018; a Task above the hardware slot count is rejected at load",
+    }
+  - {
+      name: waitall_operand_max,
+      owner: W5,
+      from: protocol/w6_event_facility.contract.yaml,
+      key: wait.waitall_operands,
+      why: "the larger of the lowered WAITALL operand peak and the declared value; above it is a decode reject",
+    }
+  - {
+      name: post_event_grant,
+      owner: W5,
+      from: protocol/w6_event_facility.contract.yaml,
+      key: post_event.authorization,
+      why: "the sealed-manifest grant that lets one Task act as a Group event producer; absent in the C014 draft binding manifest",
+    }
+parameters:
+  - {
+      name: max_drain_cycles,
+      owner: C019,
+      from: protocol/w6_terminal_reset.contract.yaml,
+      key: reset_endpoint.max_drain_cycles.value,
+      why: "no config key exists today; frozen with a measured baseline",
+    }
+  - {
+      name: debug_fifo_depth,
+      owner: C019,
+      from: protocol/w6_terminal_reset.contract.yaml,
+      key: debug.fifo.depth,
+      why: "frozen by burst and export-latency evidence, never defaulted",
+    }
