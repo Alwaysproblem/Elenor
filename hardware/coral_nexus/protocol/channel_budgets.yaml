@@ -24,31 +24,94 @@ ledgers:
   transaction_capacity:
     conservation: "in_flight_tickets <= capacity at every P1; admission refused with WAIT_CONTROL_RESOURCE when full"
     entries:
-      - {name: dispatch_capacity, value: 16, unit: count, applies_to: [CTRL],
-         source: {file: pipeline_validator/config.py, line: 462}, usage: {file: pipeline_validator/tile_group.py, line: 1173}}
-      - {name: context_pending_capacity, value: 32, unit: count, applies_to: [CTRL],
-         source: {file: pipeline_validator/config.py, line: 454}, usage: {file: pipeline_validator/runtime/group_port.py, line: 203}}
-      - {name: active_context_capacity, value: 8, unit: count, applies_to: [CTRL],
-         source: {file: pipeline_validator/config.py, line: 453}, usage: {file: pipeline_validator/tile_group.py, line: 2121}}
-      - {name: inflight_capacity, value: 32, unit: count, applies_to: [CTRL, MEMORY],
-         source: {file: pipeline_validator/config.py, line: 459}}
-      - {name: event_capacity, value: 4096, unit: count, applies_to: [EVENT],
-         source: {file: pipeline_validator/config.py, line: 458}, usage: {file: pipeline_validator/tile_group.py, line: 285}}
-      - {name: hbm_outstanding_limit, value: 32, unit: count, applies_to: [MEMORY],
-         source: {file: pipeline_validator/hardware_config.yaml, line: 55}}
-      - {name: stream_depth_default, value: 3, unit: count, applies_to: [MEMORY],
-         subqueue: STREAM, source: {file: pipeline_validator/hardware_config.yaml, line: 147}}
+      - {
+          name: dispatch_capacity,
+          value: 16,
+          unit: count,
+          applies_to: [CTRL],
+          source: { file: pipeline_validator/config.py, line: 462 },
+          usage: { file: pipeline_validator/tile_group.py, line: 1173 },
+        }
+      - {
+          name: context_pending_capacity,
+          value: 32,
+          unit: count,
+          applies_to: [CTRL],
+          source: { file: pipeline_validator/config.py, line: 454 },
+          usage: { file: pipeline_validator/runtime/group_port.py, line: 203 },
+        }
+      - {
+          name: active_context_capacity,
+          value: 8,
+          unit: count,
+          applies_to: [CTRL],
+          source: { file: pipeline_validator/config.py, line: 453 },
+          usage: { file: pipeline_validator/tile_group.py, line: 2121 },
+        }
+      - {
+          name: inflight_capacity,
+          value: 32,
+          unit: count,
+          applies_to: [CTRL, MEMORY],
+          source: { file: pipeline_validator/config.py, line: 459 },
+        }
+      - {
+          name: event_capacity,
+          value: 4096,
+          unit: count,
+          applies_to: [EVENT],
+          source: { file: pipeline_validator/config.py, line: 458 },
+          usage: { file: pipeline_validator/tile_group.py, line: 285 },
+        }
+      - {
+          name: hbm_outstanding_limit,
+          value: 32,
+          unit: count,
+          applies_to: [MEMORY],
+          source: { file: pipeline_validator/hardware_config.yaml, line: 55 },
+        }
+      - {
+          name: stream_depth_default,
+          value: 3,
+          unit: count,
+          applies_to: [MEMORY],
+          subqueue: STREAM,
+          source: { file: pipeline_validator/hardware_config.yaml, line: 147 },
+        }
   terminal_ack_refs:
     conservation: "a terminal record keeps one reference until TERMINAL_ACK/TASK_COMPLETION is consumed; refs_outstanding <= completion_capacity"
     entries:
-      - {name: completion_capacity, value: 4096, unit: count, applies_to: [CTRL, MEMORY],
-         source: {file: pipeline_validator/config.py, line: 438}}
-# Per-tick issue/accept rates (messages per tick). Used by lifetime_bounds.
+      - {
+          name: completion_capacity,
+          value: 4096,
+          unit: count,
+          applies_to: [CTRL, MEMORY],
+          source: { file: pipeline_validator/config.py, line: 438 },
+        }
+# Per-tick rates. These bound task COMMITS / host ISSUE / scheduler SCAN only.
+# They are NOT arrival rates of txn, message_seq, event or generation domains
+# and must not be used as such (see lifetime_bounds.yaml). Each carries
+# `bounds:` so the validator can refuse a mismatched use.
 rates:
-  - {name: task_commits_per_tile_per_tick, value: 1, unit: msg_per_tick,
-     source: {file: pipeline_validator/tile_group.py, line: 1230},
-     note: "docstring: 'One commit per Tile per Tick'"}
-  - {name: device_issue_width, value: 1, unit: msg_per_tick,
-     source: {file: pipeline_validator/config.py, line: 439}}
-  - {name: scheduler_scan_width, value: 4, unit: msg_per_tick,
-     source: {file: pipeline_validator/config.py, line: 457}}
+  - {
+      name: task_commits_per_tile_per_tick,
+      value: 1,
+      unit: msg_per_tick,
+      bounds: task_commit_issue,
+      source: { file: pipeline_validator/tile_group.py, line: 1230 },
+      note: "docstring: 'One commit per Tile per Tick'",
+    }
+  - {
+      name: device_issue_width,
+      value: 1,
+      unit: msg_per_tick,
+      bounds: host_command_issue,
+      source: { file: pipeline_validator/config.py, line: 439 },
+    }
+  - {
+      name: scheduler_scan_width,
+      value: 4,
+      unit: msg_per_tick,
+      bounds: scheduler_scan_window,
+      source: { file: pipeline_validator/config.py, line: 457 },
+    }

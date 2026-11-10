@@ -81,7 +81,7 @@ def check_structure(protocol: dict, errors: list[str]) -> None:
     if msg.get("channel") not in channels:
       errors.append(f"message {msg.get('name')}: unknown channel {msg.get('channel')!r}")
     if "subqueue" in msg:
-      allowed = next(
+      allowed: list[str] = next(
         (c.get("subqueues", []) for c in protocol["channels"] if c["name"] == msg["channel"]), []
       )
       if msg["subqueue"] not in allowed:
@@ -176,31 +176,60 @@ def derive_width(
   return Width(name=name, window=window, bits=bits)
 
 
+def _evidence_bounds(item: dict) -> str | None:
+  """What a rate/lifetime term declares it bounds (None when undeclared)."""
+  return item.get("bounds") or item.get("source", {}).get("bounds")
+
+
 def derive_all(budgets: dict, lifetimes: dict) -> tuple[list[Width], list[str]]:
+  """Derive widths ONLY for domains whose rate and lifetime are evidence for them.
+
+  A term derives a domain's width only if it declares `bounds: <that domain>`.
+  A constant that bounds something else (reset-drain threshold, task-commit
+  rate, host issue width) is refused. A domain with no such evidence must say
+  `derivable: false` with a reason and `needs`; it emits no width (fail closed).
+  """
   widths: list[Width] = []
   errors: list[str] = []
   for dom in lifetimes["domains"]:
+    name = dom["name"]
     if dom.get("derivable") is False:
       if "reason" not in dom:
-        errors.append(f"lifetime {dom['name']}: not derivable but gives no reason")
+        errors.append(f"lifetime {name}: not derivable but gives no reason")
+      if not dom.get("needs"):
+        errors.append(f"lifetime {name}: not derivable but lists no `needs` evidence")
       continue
+    # A domain that claims to be derivable must supply domain-specific evidence.
     try:
       mif = _resolve_ref(dom["max_in_flight"]["ref"], budgets)
-      rate = _resolve_ref(dom["rate"]["ref"], budgets)
-    except KeyError as exc:
-      errors.append(f"lifetime {dom['name']}: unresolved ref {exc}")
+    except (KeyError, TypeError) as exc:
+      errors.append(f"lifetime {name}: unresolved max_in_flight ref {exc}")
       continue
-    life = dom["lifetime_ticks"]
-    if "source" not in life or "file" not in life["source"]:
-      errors.append(f"lifetime {dom['name']}: lifetime has no sourced file")
+    rate = dom.get("rate")
+    life = dom.get("lifetime_ticks")
+    if not isinstance(rate, dict) or "value" not in rate:
+      errors.append(f"lifetime {name}: no domain rate evidence; mark derivable: false")
       continue
-    for label, item in (("max_in_flight", mif), ("rate", rate)):
-      if "source" not in item or "file" not in item["source"]:
-        errors.append(f"lifetime {dom['name']}: {label} {item['name']} has no sourced file")
+    if not isinstance(life, dict) or "value" not in life:
+      errors.append(f"lifetime {name}: no domain lifetime evidence; mark derivable: false")
+      continue
+    for label, item in (("rate", rate), ("lifetime", life), ("max_in_flight", mif)):
+      source = item.get("source", {})
+      if "file" not in source:
+        errors.append(f"lifetime {name}: {label} has no sourced file")
+    for label, item in (("rate", rate), ("lifetime", life)):
+      declared = _evidence_bounds(item)
+      if declared != name:
+        errors.append(
+          f"lifetime {name}: {label} bounds {declared!r}, not {name!r}; "
+          "a constant for another quantity is not evidence for this domain"
+        )
+    if any(e.startswith(f"lifetime {name}:") for e in errors):
+      continue
     try:
       widths.append(
         derive_width(
-          dom["name"],
+          name,
           mif["value"],
           rate["value"],
           life["value"],

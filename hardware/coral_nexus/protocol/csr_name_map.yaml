@@ -13,27 +13,67 @@ schema: cn_csr_name_map/v1
 status: draft
 upstream_table: upstream_csr_occupied.json
 declared:
-  - {name: nexus.mctx.dispatch_snapshot, owner: W2, scope: per_context, access: unspecified,
-     purpose: "configuration dispatch snapshot (vset/mset/frm/float)",
-     source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4}
-  - {name: nexus.msnap.config, owner: W2, scope: per_context, access: unspecified,
-     purpose: "snapshot state registered alongside mctx",
-     source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4}
-  - {name: nexus.mregion.start, owner: W3, scope: per_context, access: unspecified,
-     purpose: "region START pending metadata binding",
-     source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4}
-  - {name: nexus.mregion.end, owner: W3, scope: per_context, access: unspecified,
-     purpose: "region END pending metadata binding",
-     source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4}
-  - {name: nexus.mregion.first, owner: W3, scope: per_context, access: unspecified,
-     purpose: "region FIRST pending metadata binding",
-     source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4}
-  - {name: nexus.mregion.continue, owner: W3, scope: per_context, access: unspecified,
-     purpose: "region CONTINUE pending metadata binding",
-     source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4}
-  - {name: nexus.mregion.final, owner: W3, scope: per_context, access: unspecified,
-     purpose: "region FINAL pending metadata binding",
-     source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4}
-  - {name: nexus.missue.control, owner: W3, scope: per_context, access: unspecified,
-     purpose: "VME issue metadata (W3-01/02)",
-     source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4}
+  - {
+      name: nexus.mctx.dispatch_snapshot,
+      owner: W2,
+      scope: per_context,
+      access: unspecified,
+      purpose: "configuration dispatch snapshot (vset/mset/frm/float)",
+      source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4,
+    }
+  - {
+      name: nexus.msnap.config,
+      owner: W2,
+      scope: per_context,
+      access: unspecified,
+      purpose: "snapshot state registered alongside mctx",
+      source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4,
+    }
+  - {
+      name: nexus.mregion.start,
+      owner: W3,
+      scope: per_context,
+      access: unspecified,
+      purpose: "region START pending metadata binding",
+      source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4,
+    }
+  - {
+      name: nexus.mregion.end,
+      owner: W3,
+      scope: per_context,
+      access: unspecified,
+      purpose: "region END pending metadata binding",
+      source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4,
+    }
+  - {
+      name: nexus.mregion.first,
+      owner: W3,
+      scope: per_context,
+      access: unspecified,
+      purpose: "region FIRST pending metadata binding",
+      source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4,
+    }
+  - {
+      name: nexus.mregion.continue,
+      owner: W3,
+      scope: per_context,
+      access: unspecified,
+      purpose: "region CONTINUE pending metadata binding",
+      source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4,
+    }
+  - {
+      name: nexus.mregion.final,
+      owner: W3,
+      scope: per_context,
+      access: unspecified,
+      purpose: "region FINAL pending metadata binding",
+      source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4,
+    }
+  - {
+      name: nexus.missue.control,
+      owner: W3,
+      scope: per_context,
+      access: unspecified,
+      purpose: "VME issue metadata (W3-01/02)",
+      source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4,
+    }

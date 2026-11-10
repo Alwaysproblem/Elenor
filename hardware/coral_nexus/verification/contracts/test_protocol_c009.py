@@ -20,7 +20,6 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 H = REPO_ROOT / "hardware/coral_nexus"
@@ -225,12 +224,6 @@ def test_width_covers_window_and_single_context_is_never_zero_width() -> None:
   assert single.bits >= 1, "one Context must still get a non-zero-width field"
 
 
-def test_unsourced_lifetime_term_fails_derivation_instead_of_guessing(data: dict) -> None:
-  del data["lifetimes"]["domains"][0]["lifetime_ticks"]["source"]
-  _, errors = vp.derive_all(data["budgets"], data["lifetimes"])
-  assert any("no sourced file" in e for e in errors)
-
-
 def test_underivable_domain_must_explain_itself(data: dict) -> None:
   dom = next(d for d in data["lifetimes"]["domains"] if d["name"] == "run_generation")
   assert dom["derivable"] is False
@@ -239,29 +232,17 @@ def test_underivable_domain_must_explain_itself(data: dict) -> None:
   assert any("gives no reason" in e for e in errors)
 
 
-def test_unresolved_budget_ref_is_rejected(data: dict) -> None:
-  bad_ref = "channel_budgets.transaction_capacity.nope"
-  data["lifetimes"]["domains"][0]["max_in_flight"]["ref"] = bad_ref
+def test_underivable_domain_must_list_the_evidence_it_needs(data: dict) -> None:
+  dom = next(d for d in data["lifetimes"]["domains"] if d["name"] == "txn_id")
+  del dom["needs"]
   _, errors = vp.derive_all(data["budgets"], data["lifetimes"])
-  assert any("unresolved ref" in e for e in errors)
+  assert any("lists no `needs` evidence" in e for e in errors)
 
 
 def test_budget_without_file_line_source_is_rejected(data: dict) -> None:
   entry = data["budgets"]["ledgers"]["transaction_capacity"]["entries"][0]
   del entry["source"]["line"]
   assert any("missing source file:line" in e for e in _errors(vp.check_budgets, data["budgets"]))
-
-
-def test_derived_widths_are_reproducible(tmp_path: Path) -> None:
-  out = tmp_path / "w"
-  for _ in range(2):
-    subprocess.run(
-      [sys.executable, str(H / "scripts/lib/validate_protocol.py"), "--out", str(out)],
-      check=True,
-      capture_output=True,
-    )
-  first = yaml.safe_load((out / "protocol_report.json").read_text())
-  assert first["valid"] and first["widths"]["txn_id"] == {"window": 116, "bits": 7}
 
 
 def _msg(seq: int, mtype: str, txn: int = 7, **extra: object) -> dict:
@@ -353,3 +334,96 @@ def test_phase_rule_removal_is_rejected(data: dict) -> None:
   ]
   errors = _errors(vp.check_phases_and_channels, data["protocol"])
   assert any("no rule recorded for P1" in e for e in errors)
+
+
+# --- fail-closed width derivation -------------------------------------------
+
+
+def _derivable_domain(name: str = "fixture_dom", **override: dict) -> dict:
+  dom: dict = {
+    "name": name,
+    "max_in_flight": {"ref": "channel_budgets.transaction_capacity.dispatch_capacity"},
+    "rate": {"value": 2, "unit": "msg_per_tick", "bounds": name, "source": {"file": "t.txt", "line": 1}},
+    "lifetime_ticks": {"value": 10, "unit": "tick", "bounds": name, "source": {"file": "t.txt", "line": 2}},
+  }
+  dom.update(override)
+  return dom
+
+
+def test_committed_lifetimes_emit_no_width_without_evidence(data: dict) -> None:
+  """Every committed domain lacks rate/lifetime evidence -> nothing is derived."""
+  widths, errors = vp.derive_all(data["budgets"], data["lifetimes"])
+  assert errors == []
+  assert widths == [], "no width may be emitted for an unevidenced domain"
+  assert all(d["derivable"] is False for d in data["lifetimes"]["domains"])
+
+
+def test_reset_drain_threshold_is_not_accepted_as_a_lifetime(data: dict) -> None:
+  """The old 100-tick reset_domain.py:89 value must not derive a txn width."""
+  dom = _derivable_domain(
+    "txn_id",
+    lifetime_ticks={
+      "value": 100,
+      "unit": "tick",
+      "bounds": "reset_drain_cancel_threshold",
+      "source": {"file": "pipeline_validator/runtime/reset_domain.py", "line": 89},
+    },
+  )
+  data["lifetimes"]["domains"] = [dom]
+  widths, errors = vp.derive_all(data["budgets"], data["lifetimes"])
+  assert widths == []
+  assert any("bounds 'reset_drain_cancel_threshold', not 'txn_id'" in e for e in errors)
+
+
+def test_task_commit_rate_is_not_accepted_as_a_message_rate(data: dict) -> None:
+  dom = _derivable_domain(
+    "message_seq",
+    rate={
+      "value": 1,
+      "unit": "msg_per_tick",
+      "bounds": "task_commit_issue",
+      "source": {"file": "pipeline_validator/tile_group.py", "line": 1230},
+    },
+  )
+  data["lifetimes"]["domains"] = [dom]
+  widths, errors = vp.derive_all(data["budgets"], data["lifetimes"])
+  assert widths == []
+  assert any("rate bounds 'task_commit_issue', not 'message_seq'" in e for e in errors)
+
+
+def test_domain_with_matching_evidence_does_derive(data: dict) -> None:
+  data["lifetimes"]["domains"] = [_derivable_domain()]
+  widths, errors = vp.derive_all(data["budgets"], data["lifetimes"])
+  assert errors == []
+  assert [(w.name, w.window) for w in widths] == [("fixture_dom", 16 + 2 * 10)]
+  assert 2 ** widths[0].bits > widths[0].window
+
+
+def test_derivable_claim_without_rate_or_lifetime_is_rejected(data: dict) -> None:
+  for missing in ("rate", "lifetime_ticks"):
+    dom = _derivable_domain()
+    del dom[missing]
+    data["lifetimes"]["domains"] = [dom]
+    _, errors = vp.derive_all(data["budgets"], data["lifetimes"])
+    assert any("mark derivable: false" in e for e in errors), missing
+
+
+def test_evidence_without_sourced_file_is_rejected(data: dict) -> None:
+  dom = _derivable_domain()
+  del dom["rate"]["source"]
+  data["lifetimes"]["domains"] = [dom]
+  _, errors = vp.derive_all(data["budgets"], data["lifetimes"])
+  assert any("rate has no sourced file" in e for e in errors)
+
+
+def test_unresolved_max_in_flight_ref_is_rejected(data: dict) -> None:
+  dom = _derivable_domain()
+  dom["max_in_flight"] = {"ref": "channel_budgets.transaction_capacity.nope"}
+  data["lifetimes"]["domains"] = [dom]
+  _, errors = vp.derive_all(data["budgets"], data["lifetimes"])
+  assert any("unresolved max_in_flight ref" in e for e in errors)
+
+
+def test_budget_rates_declare_what_they_bound(data: dict) -> None:
+  for rate in data["budgets"]["rates"]:
+    assert rate.get("bounds"), f"rate {rate['name']} must declare what it bounds"
