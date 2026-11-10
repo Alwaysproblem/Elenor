@@ -1,0 +1,317 @@
+# W4 static resource envelope inputs, DRAFT (C013 / W4-01).
+#
+# Every input carries an explicit unit and a source the validator reads back
+# from the repo (validator code wins over docs). All values are CURRENT model
+# baselines (simulator_experiment), not frozen silicon values; SRAM/PPA freeze
+# happens later (W4 design section 6). Anything without a sourced bound stays
+# on the unresolved list with derivable:false + reason + needs -- never a guess.
+schema: cn_w4_memory_constraints/v1
+status: draft
+units:
+  allowed: [B, KiB, entries, jobs, cycles, banks, GB_per_s, MHz]
+  rules:
+    - "B and KiB convert (1 KiB = 1024 B); entries, jobs, cycles and banks are distinct dimensions"
+    - "adding quantities of different dimensions is rejected -- never add entries to cycles"
+    - "composite results (B/bank, B/cycle, B/bank/cycle, entries/job) must match the declared unit of the derivation"
+inputs:
+  - {
+      name: core_mhz,
+      value: 1000.0,
+      unit: MHz,
+      key: core_mhz,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 14, needle: core_mhz },
+    }
+  - {
+      name: system_reserved_spm_per_bank,
+      value: 2048,
+      unit: B/bank,
+      key: system_reserved_spm_per_bank,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 21, needle: system_reserved_spm_per_bank },
+      note: "missing must never default to 0 (PRO-16)",
+    }
+  - {
+      name: spm_bytes_per_bank_mode0,
+      value: 65536,
+      unit: B/bank,
+      key: spm_bytes_per_bank,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 39, needle: spm_bytes_per_bank },
+    }
+  - {
+      name: spm_bytes_per_bank_mode1,
+      value: 57344,
+      unit: B/bank,
+      key: spm_bytes_per_bank,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 40, needle: spm_bytes_per_bank },
+    }
+  - {
+      name: spm_bytes_per_bank_mode2,
+      value: 49152,
+      unit: B/bank,
+      key: spm_bytes_per_bank,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 41, needle: spm_bytes_per_bank },
+    }
+  - {
+      name: spm_bytes_per_bank_mode3,
+      value: 32768,
+      unit: B/bank,
+      key: spm_bytes_per_bank,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 42, needle: spm_bytes_per_bank },
+    }
+  - {
+      name: cache_bytes_per_bank_mode0,
+      value: 0,
+      unit: B/bank,
+      key: cache_bytes_per_bank,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 39, needle: cache_bytes_per_bank },
+      allow_zero: true,
+      note: "zero is a legitimate partition (SPM-only mode 0), still not a default",
+    }
+  - {
+      name: cache_bytes_per_bank_mode1,
+      value: 8192,
+      unit: B/bank,
+      key: cache_bytes_per_bank,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 40, needle: cache_bytes_per_bank },
+    }
+  - {
+      name: cache_bytes_per_bank_mode2,
+      value: 16384,
+      unit: B/bank,
+      key: cache_bytes_per_bank,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 41, needle: cache_bytes_per_bank },
+    }
+  - {
+      name: cache_bytes_per_bank_mode3,
+      value: 32768,
+      unit: B/bank,
+      key: cache_bytes_per_bank,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 42, needle: cache_bytes_per_bank },
+    }
+  - {
+      name: cache_line_bytes,
+      value: 64,
+      unit: B,
+      key: line_bytes,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 50, needle: line_bytes },
+      requires: power_of_two,
+      requires_source: { file: pipeline_validator/memory/cache.py, line: 110, needle: "line_bytes & (line_bytes - 1)" },
+    }
+  - {
+      name: hbm_outstanding_limit,
+      value: 32,
+      unit: entries,
+      key: outstanding_limit,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 55, needle: outstanding_limit },
+      note: "Python external-leg CAM depth (tag CAM, PPA-frozen later)",
+    }
+  - {
+      name: l2_mshr_entries,
+      value: 64,
+      unit: entries,
+      key: mshr_entries,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 67, needle: mshr_entries },
+      note: "Python-owned L2 MSHR capacity",
+    }
+  - {
+      name: tile_l1_capacity_bytes,
+      value: 1048576,
+      unit: B,
+      key: capacity_bytes,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 70, needle: capacity_bytes },
+    }
+  - {
+      name: tile_l1_banks,
+      value: 16,
+      unit: banks,
+      key: banks,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 71, needle: banks },
+    }
+  - {
+      name: tile_l1_bandwidth_gbs,
+      value: 512.0,
+      unit: GB_per_s,
+      key: bandwidth_gbs,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 72, needle: bandwidth_gbs },
+    }
+  - {
+      name: l1_access_latency_cycles,
+      value: 1,
+      unit: cycles,
+      key: access_latency_cycles,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 73, needle: access_latency_cycles },
+    }
+  - {
+      name: l1_cache_lookup_cycles,
+      value: 1,
+      unit: cycles,
+      key: lookup_latency_cycles,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 75, needle: lookup_latency_cycles },
+    }
+  - {
+      name: l1_mshr_entries,
+      value: 16,
+      unit: entries,
+      key: mshr_entries,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 76, needle: mshr_entries },
+      note: "RTL implementation anchor for the L1 MSHR",
+    }
+  - {
+      name: mfe_load_depth,
+      value: 4,
+      unit: jobs,
+      key: load_depth,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 109, needle: load_depth },
+    }
+  - {
+      name: mfe_store_depth,
+      value: 4,
+      unit: jobs,
+      key: store_depth,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 110, needle: store_depth },
+    }
+  - {
+      name: frame_bind_cycles,
+      value: 8,
+      unit: cycles,
+      key: bind_cycles,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 129, needle: bind_cycles },
+      note: "a latency, distinct dimension from frame_slot_count; never summed with it",
+    }
+  - {
+      name: frame_slot_count,
+      value: 16,
+      unit: entries,
+      key: slot_count,
+      source: { file: pipeline_validator/hardware_config.yaml, line: 130, needle: slot_count },
+    }
+derivations:
+  - {
+      name: l1_per_bank_bytes,
+      expr: "tile_l1_capacity_bytes / tile_l1_banks",
+      unit: B,
+      note: "bank budget: physical bytes behind ONE bank port (banks/jobs are plain counts; B, entries and cycles are the checked dimensions)",
+    }
+  - {
+      name: l1_bank_bytes_per_cycle,
+      expr: "tile_l1_bandwidth_gbs / tile_l1_banks / core_mhz",
+      unit: B/cycle,
+      note: "per bank port; validator stage formula (transfer.py:650); equals the upstream 256-bit row width at 1 GHz",
+    }
+  - {
+      name: l1_cache_bytes_per_cycle,
+      expr: "tile_l1_bandwidth_gbs / core_mhz",
+      unit: B/cycle,
+      note: "the L1 cache lookup/fill stage runs at FULL tile bandwidth (transfer.py:669), unlike the per-bank data stage",
+    }
+  - {
+      name: user_spm_per_bank_mode0,
+      expr: "spm_bytes_per_bank_mode0 - system_reserved_spm_per_bank",
+      unit: B,
+      note: "per bank; profiles.py:222-223 user_spm_per_bank; the capacity side of the PRO-16 identity",
+    }
+  - { name: user_spm_per_bank_mode1, expr: "spm_bytes_per_bank_mode1 - system_reserved_spm_per_bank", unit: B }
+  - { name: user_spm_per_bank_mode2, expr: "spm_bytes_per_bank_mode2 - system_reserved_spm_per_bank", unit: B }
+  - { name: user_spm_per_bank_mode3, expr: "spm_bytes_per_bank_mode3 - system_reserved_spm_per_bank", unit: B }
+  - {
+      name: bank_busy_cycles_line_burst,
+      expr: "l1_access_latency_cycles + ceil_div(cache_line_bytes, l1_bank_bytes_per_cycle)",
+      unit: cycles,
+      note: "one bank serializes one line burst: fixed latency + ceil(bytes / bytes-per-cycle) (transfer.py:383-391)",
+    }
+  - {
+      name: l1_refill_budget,
+      expr: "l1_mshr_entries",
+      unit: entries,
+      note: "MSHR budget: concurrent refill entries (capacity bound)",
+    }
+  - {
+      name: l2_refill_budget,
+      expr: "l2_mshr_entries",
+      unit: entries,
+      note: "Python-side L2 refill budget for reference",
+    }
+  - {
+      name: external_outstanding_budget,
+      expr: "hbm_outstanding_limit",
+      unit: entries,
+      note: "response/external-leg outstanding budget owned by Python",
+    }
+  - {
+      name: frame_slot_budget,
+      expr: "frame_slot_count",
+      unit: entries,
+      note: "Frame budget: fixed L1 slot ABI per Context",
+    }
+  - name: gather_window_entries_per_job_no_mshr_stall
+    expr: "floor_div(l1_mshr_entries, mfe_load_depth)"
+    unit: entries
+    note: >-
+      window budget (advisory envelope): merge happens only on an identical
+      (generation, merge_group) (mshr.py:83-86), so the no-merge worst case costs
+      one refill entry per window entry; with at most mfe_load_depth concurrent
+      gather jobs, floor(capacity/jobs) window entries per job keep the MSHR
+      unstalled. Not a frozen window cap.
+  - {
+      name: scatter_window_entries_per_job_no_mshr_stall,
+      expr: "floor_div(l1_mshr_entries, mfe_store_depth)",
+      unit: entries,
+      note: "same envelope for the store direction (scatter reads its source window)",
+    }
+  - {
+      name: l1_cache_lookup_latency_budget,
+      expr: "l1_cache_lookup_cycles",
+      unit: cycles,
+      note: "the L1 cache lookup/fill stage fixed latency (transfer.py:661-673); runs at full tile bandwidth",
+    }
+  - {
+      name: frame_bind_latency_budget,
+      expr: "frame_bind_cycles",
+      unit: cycles,
+      note: "Frame bind latency (FRM-04); counted in Task start latency, never added to frame_slot_budget",
+    }
+conservation_checks:
+  - {
+      name: bank_partition_conservation_mode0,
+      expr: "spm_bytes_per_bank_mode0 + cache_bytes_per_bank_mode0",
+      equals: l1_per_bank_bytes,
+      note: "SPM + cache partitions conserve the physical bank (profiles.py:197-198)",
+    }
+  - { name: bank_partition_conservation_mode1, expr: "spm_bytes_per_bank_mode1 + cache_bytes_per_bank_mode1", equals: l1_per_bank_bytes }
+  - { name: bank_partition_conservation_mode2, expr: "spm_bytes_per_bank_mode2 + cache_bytes_per_bank_mode2", equals: l1_per_bank_bytes }
+  - { name: bank_partition_conservation_mode3, expr: "spm_bytes_per_bank_mode3 + cache_bytes_per_bank_mode3", equals: l1_per_bank_bytes }
+unresolved:
+  - {
+      name: per_ctx_outstanding_credit_cap,
+      derivable: false,
+      reason: "the CreditManager per-ctx upper limit is an explicitly unfrozen mechanical parameter (W4 design 4.2: 'mechanical parameters pending review'); no config constant or upstream anchor bounds it",
+      needs: [per_ctx_outstanding_bound_source],
+      owner: C018,
+    }
+  - {
+      name: mshr_token_width_bits,
+      derivable: false,
+      reason: "a width needs 2**w > max_in_flight + rate*lifetime in refill-entry counts (protocol/lifetime_bounds.yaml rule); no sourced refill arrival rate or accept->FREE lifetime exists -- mshr.py only enforces a monotone token, which is not a reuse bound",
+      needs: [refill_arrival_rate_entries_per_tick, refill_live_ticks],
+      owner: C019,
+    }
+  - {
+      name: response_record_budget,
+      derivable: false,
+      reason: "early token release moves waiter data into bounded response records (W4 design 3.4); waiters per refill entry have no sourced bound -- mshr.py counts merges without capping them",
+      needs: [waiters_per_refill_bound],
+      owner: C018,
+    }
+  - {
+      name: mfe_external_address_bits,
+      derivable: false,
+      reason: "typed binding + full-width offset derives from the frozen L2/HBM capacity; capacity_bytes is an explicitly to-be-frozen model baseline, so no width is emitted",
+      needs: [frozen_hbm_capacity, frozen_l2_capacity],
+      owner: C019,
+    }
+  - {
+      name: lease_ref_width_bits,
+      derivable: false,
+      reason: "lease_ref identifies a scope x page grant; page_count per pool is runtime state with no sourced silicon bound",
+      needs: [page_count_per_pool_bound],
+      owner: C019,
+    }

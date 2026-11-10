@@ -65,6 +65,7 @@ commands:
           - hardware/coral_nexus/verification/contracts/test_protocol_c009.py
           - hardware/coral_nexus/verification/contracts/test_native_owner_c010.py
           - hardware/coral_nexus/verification/contracts/test_numeric_c011.py
+          - hardware/coral_nexus/verification/contracts/test_memory_c013.py
       numeric-bootstrap:
         tests:
           - hardware/coral_nexus/verification/numerics/test_numeric_bootstrap.py

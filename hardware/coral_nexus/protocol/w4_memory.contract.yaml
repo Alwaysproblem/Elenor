@@ -1,0 +1,350 @@
+version: 1
+# W4 memory ownership / page authorization / bounded resource lifetimes, DRAFT (C013 / W4-01).
+#
+# Logical contract only: no silicon bit encoding is frozen here (r5 13.1). Every
+# number carries `source: {file, line, needle}` into the current validator or the
+# pinned upstream, and the validator reads the line back. Quantities with no
+# sourced bound stay unresolved / derivable:false (fail closed, same rule as
+# protocol/lifetime_bounds.yaml). C020 seals this jointly; consumers (C023/C029/C055)
+# must not build a second Python L1 execution ledger from it.
+status: draft
+
+# ---------------------------------------------------------------------------
+# 1. Ownership split. One execution owner per mutable state; Python keeps the
+#    external services and the parent ledgers only (W4 design section 2).
+# ---------------------------------------------------------------------------
+ownership:
+  source: components/W4_Memory_Subsystem.md#2
+  rtl_executes:
+    - {
+        state: l1_bank_bytes,
+        scope: "L1 SRAM bytes, bank busy, SPM+cache partitions, per-bank in-flight refs",
+        python_role: "read-only mirror; cosim baseline is the per-bank model stage",
+        source: { file: pipeline_validator/memory/transfer.py, line: 646, needle: _l1_stage },
+      }
+    - {
+        state: l1_cache_mshr,
+        scope: "L1 cache tag/dirty/validity, MSHR token/merge/generation, line fill buffers",
+        python_role: "none; mshr.py / cache.py stay behavior oracles only",
+        source: { file: pipeline_validator/memory/mshr.py, line: 76, needle: "def allocate" },
+      }
+    - {
+        state: l1_arena_ledger,
+        scope: "L1 per-bank extent ledger incl. hold/bound reservation, view/pin/in-flight counts, arena generation",
+        python_role: "read-only layout mirror; cosim baseline arena.py invalidate/pin/in-flight",
+        source: { file: pipeline_validator/memory/arena.py, line: 789, needle: "def invalidate_view" },
+      }
+    - {
+        state: slot_frame,
+        scope: "Slot->Arena view binding, frame generation, FRM-02 validation off the launch path",
+        python_role: "read-only; cosim baseline l1_slot_frame.py",
+        source: { file: pipeline_validator/memory/l1_slot_frame.py, line: 124, needle: "Allocation generation" },
+      }
+    - {
+        state: tile_program_memory,
+        scope: "program SRAM physical array, install/fetch port arbitration, FET-06 write protection",
+        python_role: "residency identity/refcount belongs to W5 (RES-17..19)",
+        source: components/W4_Memory_Subsystem.md#2,
+      }
+    - {
+        state: cancel_isolation,
+        scope: "cancel FSM, isolation confirmation leg, terminal ACK emission (three terminal states)",
+        python_role: "Group drain/poison authority; isolation confirm today is test-only",
+        source: { file: pipeline_validator/memory/transfer.py, line: 1796, needle: "def confirm_isolation" },
+      }
+  python_executes:
+    - {
+        state: external_legs,
+        scope: "L2/HBM/NoC/global-DMA transactions, L2 SRAM/cache/MSHR (Tile never instantiates L2)",
+        python_role: "sole execution owner (external-leg service)",
+        source: { file: pipeline_validator/memory/transfer.py, line: 115, needle: "class TransferLegKind" },
+      }
+    - {
+        state: l2_arena,
+        scope: "L2 view lifecycle, parent L2 pins, nest.release forfeiture, backing final-free",
+        python_role: "sole execution owner",
+        source: { file: pipeline_validator/memory/arena.py, line: 1275, needle: _try_release_l2_backing },
+      }
+    - {
+        state: page_authority,
+        scope: "page ownership/epoch/revoke authority and AccessLease bookkeeping",
+        python_role: "sole execution authority",
+        source: { file: pipeline_validator/memory/page_pool.py, line: 98, needle: "class AccessLease" },
+      }
+    - {
+        state: r_lease_root_retire,
+        scope: "R lease, parent L2 pins, root retirement and completion publication",
+        python_role: "sole execution owner",
+        source: { file: pipeline_validator/tile_group.py, line: 1523, needle: "def retire_context_arena" },
+      }
+  non_goals:
+    - rtl_changes (this card writes contracts only; C026+ touches RTL)
+    - l2_noc_hbm_physical_redesign
+    - second_python_l1_execution_ledger
+    - changing_l2_physical_reclaim_granularity
+
+# ---------------------------------------------------------------------------
+# 2. Allocation provenance. The returned/acked fields of every memory message
+#    carry real allocation provenance; an ordinary binding name is NOT provenance.
+# ---------------------------------------------------------------------------
+provenance:
+  source: components/W4_Memory_Subsystem.md#4.2
+  fields:
+    - {
+        name: context_key,
+        composition: [tile_id, ctx_slot, ctx_generation],
+        owner: W2,
+        note: "ctx_generation is the ContextKey generation; a buffer/binding name must never stand in for it",
+      }
+    - { name: txn_id, owner: W1, note: "one physical memory transaction" }
+    - { name: slice_id, owner: W4, note: "shard ordinal within the txn" }
+    - { name: slice_count, owner: W4, note: "shard count of the txn" }
+    - {
+        name: arena_alloc_gen,
+        owner: W4,
+        source: { file: pipeline_validator/memory/l1_slot_frame.py, line: 124, needle: "Allocation generation" },
+        note: "allocation_generation of the committed Task Arena; separate domain from ctx_generation (protocol epochs.arena_alloc_gen)",
+      }
+    - {
+        name: binding_generation,
+        owner: W4,
+        note: "generation of the typed binding an external address resolves against; MSHR merge-key domain",
+      }
+    - { name: scope_epoch, owner: W4, note: "page scope epoch held at lease acquire; a stale epoch is host_scope_inactive" }
+  rule: >-
+    an ACK/terminal record carries the same provenance tuple as its request; a
+    response whose arena_alloc_gen or scope_epoch differs from the live allocation
+    is stale (stale_response), never a completion.
+
+# ---------------------------------------------------------------------------
+# 3. Addressing. RV32 keeps local windows only; external access is MFE-only
+#    (ADR-06, Main ruling C-4 in the W4 plan section 7.1).
+# ---------------------------------------------------------------------------
+addressing:
+  source: implementation/W4_Memory_Subsystem_Plan.md#4.1
+  local_windows:
+    - { user: scalar_lsu, windows: [frame_window, local_window, program_window] }
+    - { user: rvv, windows: [frame_window, local_window] }
+    - {
+        rule: "an access outside every bound window is address_out_of_range; the RV32 data leg has NO external HBM path, external writes are MFE-only",
+        source: implementation/W4_Memory_Subsystem_Plan.md#7.1,
+      }
+  mfe_external:
+    form: "typed_binding(binding_class in [L2_VIEW, HBM_BINDING]) + offset -> full-width system address"
+    checks: [high_bit_range, addition_overflow]
+    address_bits: unresolved
+    address_bits_note: "width derives from the frozen L2/HBM capacity; capacity_bytes is a model baseline, so no width is emitted (constraints unresolved list)"
+  indexed:
+    formula: "remote_element = index*i*index_scale + offset + t*task_stride + j*stride"
+    source: { file: pipeline_validator/memory/address_provider.py, line: 55, needle: "index * index_scale" }
+    errors:
+      - {
+          code: indexed_address_out_of_bounds,
+          source: { file: pipeline_validator/memory/address_provider.py, line: 52, needle: "index < 0" },
+          note: "negative indices never wrap Python-style",
+        }
+      - {
+          code: indexed_address_overflow,
+          source: { file: pipeline_validator/memory/address_provider.py, line: 66, needle: indexed_address_overflow },
+        }
+    window_entries_positive:
+      source: { file: pipeline_validator/execution_verifier.py, line: 285, needle: window_entries }
+
+# ---------------------------------------------------------------------------
+# 4. Page authorization. The acquire/release transaction set ALREADY exists in
+#    AccessLease/PagePoolRegistry; this contract consumes it and does not
+#    re-implement it. GAT-15..20.
+# ---------------------------------------------------------------------------
+page_authorization:
+  source: components/W4_Memory_Subsystem.md#4.7
+  existing_transaction_set:
+    - {
+        api: "PagePoolRegistry.lease(scope, binding, offset, size)",
+        source: { file: pipeline_validator/memory/page_pool.py, line: 344, needle: "def lease" },
+      }
+    - {
+        api: PagePoolRegistry.scope_owns_range,
+        source: { file: pipeline_validator/memory/page_pool.py, line: 331, needle: "def scope_owns_range" },
+      }
+    - {
+        api: AccessLease.acquire(transaction_id),
+        source: { file: pipeline_validator/memory/page_pool.py, line: 132, needle: "def acquire" },
+      }
+    - {
+        api: AccessLease.release(transaction_id),
+        source: { file: pipeline_validator/memory/page_pool.py, line: 141, needle: "def release" },
+        note: "current release is per-lease, not per-txn: it discards the id and decrements the scope lease count (page_pool.py:143), so a repeated release consumes another holder's lease",
+      }
+    - {
+        api: AccessLease.is_valid,
+        source: { file: pipeline_validator/memory/page_pool.py, line: 125, needle: "def is_valid" },
+      }
+  protocol:
+    - {
+        id: GAT-19-ATOMIC,
+        text: "acquire_range = scope_owns_range check + lease grant + per-txn registration in ONE atomic step (the single serialization point); issue before grant is host_scope_inactive, and a failed range grants nothing (no partial take)",
+      }
+    - {
+        id: GAT-19-TERMINAL,
+        text: "the lease reference is held until the SAME physical transaction's terminal ACK; tile-local bookkeeping never substitutes the Python release",
+      }
+    - {
+        id: GAT-20-REVOKE,
+        text: "revoke order: close new accesses -> wait old refs and irrevocable writes settle or isolate -> invalidate copies and collect ACKs -> bump epoch -> publish new owner",
+      }
+    - {
+        id: RELEASE-IDEMPOTENT,
+        text: "per-txn release is idempotent: a second release of an already terminal-acked txn returns False and never underflows another lease; the current code does NOT guarantee this yet",
+      }
+  changes_required:
+    - { api: "acquire_range(scope, binding, offset, size, txn_id)", owner: W4-04 }
+    - { api: per-txn idempotent release, owner: W4-04 }
+
+# ---------------------------------------------------------------------------
+# 5. Accounting ledgers. Cancellation, confirmed isolation, stale responses,
+#    credit and in-flight references are FIVE SEPARATE ledgers.
+# ---------------------------------------------------------------------------
+accounting_ledgers:
+  source: components/W4_Memory_Subsystem.md#4.4
+  ledgers:
+    - { name: cancellation, counts: "CANCEL_REQUESTED markers registered (marker, not a terminal)" }
+    - { name: isolation_confirmed, counts: "isolation confirmations accepted (no external write may follow)" }
+    - { name: stale_response, counts: "late/duplicate/generation-mismatched responses dropped without completion" }
+    - { name: credit, counts: "per-ctx credits issued minus returned (issue on accept, return on the real terminal)" }
+    - { name: inflight_references, counts: "view references held by accepted, not-yet-terminal transactions" }
+  rule: >-
+    the ledgers are independent: settling one never writes another (a stale
+    response returns no credit and closes no in-flight reference); cross-ledger
+    netting is a contract violation.
+
+# ---------------------------------------------------------------------------
+# 6. Terminal states.
+# ---------------------------------------------------------------------------
+terminal:
+  source: components/W4_Memory_Subsystem.md#4.4
+  states: [COMPLETED, ISOLATED, FAULTED]
+  cancel_marker: CANCEL_REQUESTED
+  rules:
+    - "exactly one terminal per accepted op/transfer/command; a second is DUPLICATE_TERMINAL"
+    - "an accepted external write is irrevocable by generation or timeout; ISOLATED only promises no external write AFTER the isolation point; earlier obligations are retained until settled"
+    - "references/credit/lease return only at the real terminal (MEM-12); acknowledge contract transfer.py:1690-1711"
+    - "isolation confirmation requires the cancel marker first"
+  rules_sources:
+    - { file: pipeline_validator/memory/transfer.py, line: 1690, needle: "def acknowledge" }
+    - { file: pipeline_validator/memory/transfer.py, line: 1800, needle: CANCEL_REQUESTED }
+
+# ---------------------------------------------------------------------------
+# 7. Lifecycle: hold -> bind -> retire, L1 free vs retirement, L2 three moments,
+#    early input release, profile gate scope.
+# ---------------------------------------------------------------------------
+lifecycle:
+  hold_states: [free, held, bound]
+  conservation:
+    - { id: PRO-16-HOLD, identity: "per bank: allocated == held + bound" }
+    - { id: PRO-16-CAPACITY, identity: "per bank: allocated + free == user_spm_per_bank" }
+    - {
+        id: PRO-16-ORACLE,
+        identity: "cosim oracle raises MemoryInvariantError on both identities",
+        source: { file: pipeline_validator/memory/arena.py, line: 1435, needle: "per-bank SPM capacity is not conserved" },
+      }
+  hold_bind_retire:
+    source: components/W4_Memory_Subsystem.md#3.7
+    phases: [HOLD_REQ, HOLD_ACK, BIND_INSTALL, BIND_ACK, RETIRE_READY, RETIRE, TASK_COMPLETION]
+    rules:
+      - "HOLD exclusively reserves extents + Frame capacity immediately (free -> held); a concurrent ticket cannot reserve the same capacity (no oversell)"
+      - "BIND_INSTALL moves held -> bound atomically and writes the arena generation"
+      - "failure BEFORE final authorization -> COMPENSATE (held -> free, release Frame); AFTER authorization there is no ROLLBACK, only cancel/drain"
+    cosim_baseline:
+      - { file: pipeline_validator/tile.py, line: 1541, needle: "def plan_admission" }
+      - { file: pipeline_validator/tile.py, line: 1572, needle: "def commit_admission" }
+      - { file: pipeline_validator/tile.py, line: 1598, needle: "def abort_admission" }
+  l1_free_vs_retirement:
+    - {
+        rule: "FREE_L1 invalidates exactly ONE view: prior-event preflight, in-flight transfer check, then invalidate_view + frame.release_slot",
+        source: { file: pipeline_validator/tile.py, line: 923, needle: "def _free_l1" },
+      }
+    - {
+        rule: "the freed view does NOT shrink allocated bytes; the L1 Arena + Frame + UCE slot themselves return ONLY at Task safe retirement",
+        source: { file: pipeline_validator/tile_group.py, line: 1077, needle: retire_arena },
+      }
+  l2_release:
+    - {
+        rule: "nest.release is a permanent forfeiture with an all-or-nothing preflight (claims RELEASED/CANCELLED, views released, pins/in-flight zero)",
+        source: { file: pipeline_validator/tile_group.py, line: 784, needle: "def release_l2" },
+      }
+    - {
+        rule: "backing final-free returns the WHOLE stripe-rounded padded span and bumps pool_version; per-buffer granularity is UNCHANGED (no sub-range reclaim in this card)",
+        source: { file: pipeline_validator/memory/arena.py, line: 1291, needle: release_exact },
+      }
+    - {
+        rule: "three DISTINCT moments: (a) L2 backing final-free (may precede OR follow root retirement), (b) Task retirement, (c) root completion published only after (b)",
+        source: { file: pipeline_validator/tile_group.py, line: 1523, needle: "def retire_context_arena" },
+      }
+  early_input_release:
+    - {
+        rule: "per Task: input_released is signaled only after ALL of that task's L2 loads are awaited and no later L2 load exists",
+      }
+    - {
+        rule: "Group aggregates all_tasks of the grid, then unpins the remaining PURE-READ pins; read-write pins are never dropped by the input phase",
+        source: { file: pipeline_validator/tile_group.py, line: 1010, needle: "def _unpin_grid_readers" },
+      }
+    - "safe retirement cleans up the task's REMAINING pins idempotently (an already-unpinned pin is never unpinned twice)"
+  profile_gate:
+    blocked: [new_data_issue]
+    exempt: [completion_ack, maintenance_clean, program_install, cancel_and_drain]
+    rule: >-
+      CLOSE_ISSUE blocks ONLY new data issue (LSU/MFE/RVV/VME data legs, new Task
+      admission, new Route registration); completion/ACK returns, range-maintenance
+      clean traffic, the program install path (RES-17) and cancel/drain always
+      proceed; the gate never blocks a terminal ACK.
+    writer: "Python ProfileController is the single writer; RTL never re-opens a gate itself"
+
+# ---------------------------------------------------------------------------
+# 8. L1 MSHR token lifecycle (merge by provenance, waiter survival).
+# ---------------------------------------------------------------------------
+mshr:
+  token_states: [ALLOCATED, ISSUED_REFILL, WAITERS_PENDING, FREE]
+  merge_key: [binding_id, binding_generation, line_offset]
+  rules:
+    - "a token becomes FREE only when every registered waiter holds reliable data/response AND every token reference (per-op + cancel tracker) is settled; earlier reuse is a contract violation"
+    - "the line fill buffer (line data + per-byte validity) stays in the entry until then; cache eviction never destroys waiter data"
+    - "merge only within one profile generation; an old-generation refill/response is rejected and counted, never written into the new generation (MEM-13)"
+  cosim_baseline:
+    - { file: pipeline_validator/memory/mshr.py, line: 83, needle: merge_group }
+    - { file: pipeline_validator/memory/mshr.py, line: 87, needle: capacity }
+    - { file: pipeline_validator/memory/mshr.py, line: 125, needle: "def complete" }
+  capacity_ref: l1_refill_budget
+
+# ---------------------------------------------------------------------------
+# 9. Error codes (W4 design 4.5; no new codes invented here).
+# ---------------------------------------------------------------------------
+errors:
+  source: components/W4_Memory_Subsystem.md#4.5
+  codes:
+    - { code: address_out_of_range, trigger: "window/binding range violation or addition overflow (ADR-04)" }
+    - { code: frame_slot_fault, trigger: "FRM-02 validation failure" }
+    - { code: l1_view_double_free, trigger: "FREE of an already invalidated view" }
+    - { code: engine_queue_full, trigger: "MFE front-end capacity full" }
+    - { code: l1_cache_maintenance_conflict, trigger: "profile/maintenance conflicts with live in-flight or dirty lines" }
+    - { code: stale_response, trigger: "old-generation or duplicate response; dropped and counted" }
+    - { code: scatter_segment_write_fault, trigger: "one scatter segment write FAULT/CANCELLED" }
+    - { code: host_scope_inactive, trigger: "page lease stale or owner mismatch (GAT-15/19)" }
+
+# ---------------------------------------------------------------------------
+# 10. Upstream baselines (read back from the pinned tree; context, not W4 caps).
+# ---------------------------------------------------------------------------
+upstream_baselines:
+  - {
+      name: lsuDataBits,
+      value: 256,
+      unit: bits,
+      source: { file: hdl/chisel/src/coralnpu/Parameters.scala, line: 165, needle: lsuDataBits },
+      note: "upstream row width; 32 B/cycle matches the derived l1_bank_bytes_per_cycle",
+    }
+  - {
+      name: lsuSlotTxidEntries,
+      value: 8,
+      unit: entries,
+      source: { file: hdl/chisel/src/coralnpu/Parameters.scala, line: 172, needle: lsuSlotTxidEntries },
+      note: "upstream SINGLE-context txid table baseline; NOT a W4 per-Context bound (per-ctx outstanding stays unresolved)",
+    }
