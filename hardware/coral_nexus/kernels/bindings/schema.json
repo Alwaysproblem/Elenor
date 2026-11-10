@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "cn_package/v1 binding manifest",
+  "$comment": "DERIVED from protocol/w5_package.contract.yaml (the authority). It is a structural aid for tools that have a schema library; the strict consumer in scripts/lib/package_contract.py is what the tests run, because this environment has no jsonschema package. Cross-field rules (alias target, unique events, mode table, chain order) are NOT expressible here and live in the consumer.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kernels"],
+  "properties": {
+    "kernels": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kernel_id",
+          "kernel_version",
+          "source_node",
+          "ins",
+          "outs",
+          "initial",
+          "scratch",
+          "clobber",
+          "events",
+          "numeric_profile",
+          "mode_table",
+          "region",
+          "patch_mask",
+          "helpers"
+        ],
+        "properties": {
+          "kernel_id": {
+            "type": "string"
+          },
+          "kernel_version": {
+            "type": "integer"
+          },
+          "source_node": {
+            "type": "string"
+          },
+          "ins": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "handle",
+                "shape",
+                "dtype",
+                "layout",
+                "permission",
+                "alias",
+                "actual_view"
+              ],
+              "properties": {
+                "handle": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "shape": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "dtype": {
+                  "enum": ["bf16", "f32", "i32"]
+                },
+                "layout": {
+                  "enum": ["contiguous"]
+                },
+                "permission": {
+                  "enum": ["r", "w", "rw"]
+                },
+                "alias": {
+                  "type": ["string", "null"]
+                },
+                "actual_view": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "outs": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "handle",
+                "shape",
+                "dtype",
+                "layout",
+                "permission",
+                "alias",
+                "actual_view"
+              ],
+              "properties": {
+                "handle": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "shape": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "dtype": {
+                  "enum": ["bf16", "f32", "i32"]
+                },
+                "layout": {
+                  "enum": ["contiguous"]
+                },
+                "permission": {
+                  "enum": ["r", "w", "rw"]
+                },
+                "alias": {
+                  "type": ["string", "null"]
+                },
+                "actual_view": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "initial": {
+            "type": "object",
+            "required": ["method"],
+            "additionalProperties": false,
+            "properties": {
+              "method": {
+                "enum": ["vtzero", "vtmv", "tile_load"]
+              },
+              "note": {
+                "type": "string"
+              }
+            }
+          },
+          "scratch": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "bytes", "bound_source"],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "bytes": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "bound_source": {
+                  "enum": ["static_analysis"]
+                }
+              }
+            }
+          },
+          "clobber": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "events": {
+            "type": "object",
+            "required": ["completion"],
+            "additionalProperties": false,
+            "properties": {
+              "completion": {
+                "type": "string",
+                "minLength": 1
+              },
+              "prerequisite": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "numeric_profile": {
+            "const": "w3_bf16_fp32_rod_v1"
+          },
+          "mode_table": {
+            "type": "string"
+          },
+          "region": {
+            "type": "object",
+            "required": ["start", "end", "chains"],
+            "additionalProperties": false,
+            "properties": {
+              "start": {
+                "const": true
+              },
+              "end": {
+                "const": true
+              },
+              "chains": {
+                "type": "array"
+              }
+            }
+          },
+          "patch_mask": {
+            "type": "array"
+          },
+          "helpers": {
+            "type": "array"
+          }
+        }
+      }
+    }
+  }
+}

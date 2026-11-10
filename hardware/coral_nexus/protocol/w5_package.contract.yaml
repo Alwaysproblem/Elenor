@@ -1,0 +1,308 @@
+version: 1
+# W5 sealed package / kernel binding / helper contract, DRAFT (C014 / W5-01).
+#
+# Logical contract only: no silicon encoding, no CSR address, no slot count and no capacity is assigned
+# here. A number is either read back from the pinned tree or validator, or it is `unresolved` with an
+# owner and a reason. The validator builds its structures FROM this file and holds the required set in
+# code, so one edit cannot weaken the contract and the check that would notice it together.
+#
+# This card does NOT claim a package runtime exists: encode/decode and the Loader are C037. It
+# specifies what a consumer needs to generate a real call and check its effect.
+status: draft
+
+# ---------------------------------------------------------------------------
+# 1. Version domains. cn_package/v1 is a NEW, independent domain (CMP-15). It neither inherits nor
+#    reuses another domain's number.
+# ---------------------------------------------------------------------------
+version_domains:
+  package:
+    id: cn_package/v1
+    schema_field: package_schema
+    independent_of: [control_plane, hardware_yaml, legacy_package]
+  control_plane:
+    schema_version: 3
+    compiler_abi: v3
+    wrapped_unchanged: true
+    source:
+      {
+        file: pipeline_validator/compiled_program.py,
+        line: 894,
+        needle: 'program.schema_version != 3 or program.compiler_abi != "v3"',
+      }
+  hardware_yaml:
+    schema_version: 2
+    source:
+      {
+        file: pipeline_validator/hardware_config.yaml,
+        line: 4,
+        needle: "schema_version: 2",
+      }
+  legacy_package:
+    package_abi_version: 1
+    status: not_inherited
+    reason: "ElenorPackage/PackageHeader is a mutable older design object with no real seal chain (X-17); it neither provides nor constrains cn_package/v1"
+    source:
+      {
+        file: pipeline_validator/package/package_ir.py,
+        line: 34,
+        needle: "package_abi_version: int = 1",
+      }
+  rule: "a version number is never reused across domains; changing one domain's number does not change another's"
+
+# ---------------------------------------------------------------------------
+# 2. Outer structure. Required top-level fields; an undeclared field is rejected, a missing one is a
+#    build/load rejection that names the field.
+# ---------------------------------------------------------------------------
+package:
+  required_fields:
+    - package_schema
+    - control_plane
+    - image
+    - binding_manifest
+    - resource_manifest
+    - target_fingerprint
+    - numeric_profile_id
+    - patch_mask
+    - package_hash
+  strict:
+    unknown_fields: reject
+    duplicate_keys: reject
+    non_finite_numbers: reject
+    wrong_version: reject
+    wrong_types: reject
+  strict_source:
+    {
+      file: pipeline_validator/compiled_program.py,
+      line: 1085,
+      needle: "object_pairs_hook=_unique_object, parse_constant=_reject_constant",
+    }
+  control_plane:
+    kind: CompiledProgram
+    rule: "wrapped unchanged; its artifact_hash is recomputed by the existing loader, never trusted"
+    digest_source:
+      {
+        file: pipeline_validator/compiled_program.py,
+        line: 1041,
+        needle: "def artifact_digest",
+      }
+  numeric_profile:
+    ref: protocol/w3_numeric_profile_v1.yaml
+    must_equal_id: w3_bf16_fp32_rod_v1
+    status_allowed: [experimental]
+    note: "a package may be sealed against an experimental profile; supported is decided by W7 after a bitwise oracle run, not here"
+  package_hash:
+    covers:
+      [
+        image_sha256,
+        binding_manifest,
+        resource_manifest,
+        target_fingerprint,
+        patch_mask,
+        numeric_profile_id,
+        control_plane_artifact_hash,
+      ]
+    excludes_itself: true
+    algorithm: sha256
+    canonical_form: "json.dumps(sort_keys=True, separators=(',', ':'), allow_nan=False)"
+    canonical_source:
+      {
+        file: pipeline_validator/compiled_program.py,
+        line: 1048,
+        needle: "json.dumps(value, sort_keys=True, separators",
+      }
+    rule: "any execution-relevant byte changing changes package_hash and forfeits the old warm-hit eligibility (CMP-18)"
+
+# ---------------------------------------------------------------------------
+# 3. Image. A real linked ELF's bytes, identified separately from the contract that wraps it.
+# ---------------------------------------------------------------------------
+image:
+  required_fields: [bytes_sha256, text_bytes, entry, link_layout, provenance]
+  text_bytes:
+    rule: "equals the REAL length of the linked text; an estimate is rejected"
+    estimate_rejected:
+      reason: "the abstract-IR estimate is max(insts*4 + descriptors*16, 1024), a model of the old IR and not a machine-code length"
+      source:
+        {
+          file: pipeline_validator/compiler/api.py,
+          line: 71,
+          needle: "len(role.tile_program.insts) * 4",
+        }
+  link_layout:
+    required_fields: [text_base, text_bytes, data_base, data_bytes]
+    fixed_prelink: true
+    overlap: reject
+    relocation_by_loader: forbidden
+    unit: bytes
+    rule: "a package is linked at a fixed address written into the manifest; the Loader never relocates it"
+  provenance:
+    required_fields: [builder, toolchain_lock_sha256, source_sha256]
+    rule: "an image with no controlled source (no recorded builder, toolchain lock or source digest) is rejected: a hash of unknown bytes is not an identity"
+  capacities:
+    itcm_bytes:
+      {
+        value: 8192,
+        source:
+          { file: rules/coralnpu_v2.bzl, line: 224, needle: itcm_size_kbytes },
+        unit: B,
+        note: "upstream DEFAULT, 8 KiB; a candidate target may differ and then needs a new target hash",
+      }
+    dtcm_bytes:
+      {
+        value: 32768,
+        source:
+          { file: rules/coralnpu_v2.bzl, line: 225, needle: dtcm_size_kbytes },
+        unit: B,
+        note: "upstream DEFAULT, 32 KiB",
+      }
+    stack_bytes:
+      {
+        value: 128,
+        source:
+          { file: rules/coralnpu_v2.bzl, line: 228, needle: stack_size_bytes },
+        unit: B,
+        note: "upstream DEFAULT, 128 B",
+      }
+  slot_count:
+    {
+      value: unresolved,
+      owner: C018,
+      reason: "frozen from real measured ELF resources, not guessed here",
+    }
+  slot_capacity:
+    {
+      value: unresolved,
+      owner: C018,
+      reason: "frozen from real measured ELF resources, not guessed here",
+    }
+
+# ---------------------------------------------------------------------------
+# 4. Residency identity: by package identity, zero-ref plus invalidation ACK before reuse.
+# ---------------------------------------------------------------------------
+residency:
+  identity: [program_id, version, package_hash, epoch]
+  slots:
+    min_coexisting: 2
+    non_overlapping: true
+    reuse_requires: [zero_references, invalidation_ack]
+    same_slot_new_package: "must go through invalidation first"
+  mutable_area:
+    isolated_from_text: true
+    per_context_instance: true
+    rule: "mutable parameters live in their own area, one instance per Context; resident read-only text is never rewritten"
+  text_shared_across_contexts: true
+
+# ---------------------------------------------------------------------------
+# 5. KernelBindingManifest. One entry per compute region. Nothing is guessed from an op name, an ops
+#    count, buffer order or an adjacent DMA (CMP-19).
+# ---------------------------------------------------------------------------
+binding_manifest:
+  entry_required_fields:
+    - kernel_id
+    - kernel_version
+    - source_node
+    - ins
+    - outs
+    - initial
+    - scratch
+    - clobber
+    - events
+    - numeric_profile
+    - mode_table
+    - region
+    - patch_mask
+    - helpers
+  view_required_fields:
+    [handle, shape, dtype, layout, permission, alias, actual_view]
+  view:
+    dtypes: [bf16, f32, i32]
+    layouts: [contiguous]
+    permissions: [r, w, rw]
+    alias_rule: "an output may alias only a view that is writable; an out aliasing a read-only in is illegal"
+    actual_view_rule: "every binding names the ACTUAL view it reads or writes; a binding with no actual view is rejected, never inferred"
+  tensor_dtype_rule:
+    tensor_in: bf16
+    tensor_out: bf16
+    accumulator: f32
+    int8_new_on_tensor_path: forbidden
+    external_f32_output: forbidden
+    note: "internal f32 seed/drain/scratch and scalar i32 control/address/index are legal companions, not new precisions"
+  initial:
+    methods: [vtzero, vtmv, tile_load]
+    rule: "a FIRST chain with no seed is rejected; relying on undeclared mt residue is rejected"
+    compute_init_via_rvv_helper: "a bias-style compute init must be declared as an RVV helper, never guessed to be a seed"
+  scratch:
+    required_fields: [name, bytes, bound_source]
+    bound_source_values: [static_analysis]
+    rule: "a measured peak is evidence, not a bound; a bound must come from bounded static analysis of a fixed template"
+  events:
+    required: [completion]
+    optional: [prerequisite]
+    unique_within_context: true
+    rule: "a missing completion event or a duplicate name is rejected"
+  region:
+    declaration_ref: protocol/w3_vme_decl_abi_v1.json
+    kinds_from: declaration.kinds
+    rule: "region and chain declarations are referenced by ABI kind; START/END positions and FIRST/CONTINUE/FINAL are declared per region"
+  mode_table:
+    ref: protocol/w3_vme_mode_tables_v1.json
+    rule: "the table must be one the mode-table checker accepts and must belong to the same kernel; a table the sealed profile does not list is rejected"
+  required_kernel_families:
+    [matmul, gather, scatter, softmax, norm, reduce_sum, pow, add, recurrence]
+  supported_kernels:
+    - { id: K-VME-BF16-ACC, version: 1, family: matmul, mode_table: reference }
+  note: "only the kernels listed in supported_kernels are registered by THIS card; the rest of the families are required by the plan and are added by C038/C052 with their own tables. An unregistered kernel id is rejected."
+
+# ---------------------------------------------------------------------------
+# 6. Helpers. Each helper has observable semantics, a compiler-reordering barrier, parameter access and
+#    resource limits. CSRs are referenced by logical name only (generated by C017, never typed by hand).
+# ---------------------------------------------------------------------------
+helpers:
+  entry_required_fields: [name, csr, observable, barrier, params, resources]
+  csr_names_from: protocol/csr_name_map.yaml
+  barrier_kinds: [volatile_asm_memory_clobber, compiler_fence_seq_cst]
+  rule: "no runtime guesses an operand and no runtime adds an await: a helper that is not declared here cannot be called"
+  registered:
+    - { name: region_start, csr: nexus.mregion.start, kind: REGION_START }
+    - { name: region_end, csr: nexus.mregion.end, kind: REGION_END }
+    - { name: chain_first, csr: nexus.mregion.first, kind: CHAIN_FIRST }
+    - {
+        name: chain_continue,
+        csr: nexus.mregion.continue,
+        kind: CHAIN_CONTINUE,
+      }
+    - { name: chain_final, csr: nexus.mregion.final, kind: CHAIN_FINAL }
+  hand_written_numeric_address: forbidden
+
+# ---------------------------------------------------------------------------
+# 7. patch_mask. A new object (it does not exist in the validator): a declared whitelist of patchable
+#    fields, layered Runtime -> UCE -> MFE (RES-07).
+# ---------------------------------------------------------------------------
+patch_mask:
+  layers: [runtime, uce, mfe]
+  required_fields: [field, layer]
+  undeclared_field_patch: reject
+  out_of_range_patch: invalid_descriptor
+  rule: "a field absent from patch_mask is never modified at run time; the layer that may patch it is stated"
+
+# ---------------------------------------------------------------------------
+# 8. Build order. A failure returns to AUTHORED; nothing is patched in the Loader (CMP-20).
+# ---------------------------------------------------------------------------
+build:
+  states: [AUTHORED, COMPILED, MEASURED, RECHECKED, SEALED, LOADED]
+  failure_returns_to: AUTHORED
+  loader_patches: forbidden
+  immutable_after: SEALED
+  bounds:
+    measured_is_evidence_only: true
+    bound_requires: static_analysis
+
+# ---------------------------------------------------------------------------
+# 9. Trust boundary, recorded explicitly (CMP-14).
+# ---------------------------------------------------------------------------
+trust_boundary:
+  loader_proves_machine_code: false
+  machine_code_trusted_via:
+    [controlled_kernel, trusted_build_chain, numeric_and_protocol_verification]
+  loader_rechecks: [contract_layer_effects, dependencies, actual_bindings]
+  delete_required_step_with_recomputed_hash: reject
+  note: "the Loader re-verifies the contract layer; it does not claim to prove arbitrary machine code"

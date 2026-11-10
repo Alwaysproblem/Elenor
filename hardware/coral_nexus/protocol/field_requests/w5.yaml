@@ -1,0 +1,77 @@
+# W5 field request to W1-01, DRAFT (C014).
+#
+# A REQUEST, not an implementation: W1-01 (C017) merges it into the ABI and W5 defines no bits. No CSR
+# address, opcode, width or bit position appears here. Every helper names a CSR logical name that exists
+# in protocol/csr_name_map.yaml, and every package field names a field of w5_package.contract.yaml, so
+# the validator checks the request against the contract it points at. Joint freeze with C020; a missing
+# request blocks the seal and is never filled in by W1.
+schema: cn_field_request/v1
+package: W5
+status: draft
+package_fields:
+  - { name: package_schema, why: "own version domain, cn_package/v1" }
+  - {
+      name: control_plane,
+      why: "the existing CompiledProgram, wrapped unchanged",
+    }
+  - {
+      name: image,
+      why: "real linked bytes, identified apart from the contract that wraps them",
+    }
+  - {
+      name: binding_manifest,
+      why: "explicit per-region kernel bindings; nothing is guessed from an op name or buffer order",
+    }
+  - {
+      name: resource_manifest,
+      why: "measured text and statically-bounded stack/scratch",
+    }
+  - {
+      name: target_fingerprint,
+      why: "binds VLEN, context count and the BF16-in/FP32-acc/BF16-out dtypes",
+    }
+  - {
+      name: numeric_profile_id,
+      why: "references the C011 profile; experimental until W7 runs the oracle",
+    }
+  - {
+      name: patch_mask,
+      why: "declared whitelist of fields that may be patched, by layer",
+    }
+  - {
+      name: package_hash,
+      why: "covers everything execution-relevant except itself",
+    }
+helpers:
+  - {
+      name: region_start,
+      csr: nexus.mregion.start,
+      why: "arms the pending REGION_START declaration",
+    }
+  - {
+      name: region_end,
+      csr: nexus.mregion.end,
+      why: "closes the accepted-op set",
+    }
+  - {
+      name: chain_first,
+      csr: nexus.mregion.first,
+      why: "opens an accumulation chain",
+    }
+  - {
+      name: chain_continue,
+      csr: nexus.mregion.continue,
+      why: "an accumulate step in an open chain",
+    }
+  - { name: chain_final, csr: nexus.mregion.final, why: "closes a chain" }
+messages:
+  - {
+      message: PROGRAM_REGISTER,
+      new: true,
+      why: "Host to Group residency manager; carries program_id + version + package_hash (not the abstract-IR program_digest). It is not a Tile/Group boundary message, so the C009 catalog does not define it",
+    }
+  - {
+      message: PROGRAM_INSTALL,
+      new: false,
+      why: "carries the fixed pre-linked slot address from the manifest",
+    }

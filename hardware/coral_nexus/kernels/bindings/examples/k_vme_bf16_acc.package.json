@@ -1,0 +1,136 @@
+{
+  "package_schema": "cn_package/v1",
+  "control_plane": {
+    "schema_version": 3,
+    "compiler_abi": "v3",
+    "artifact_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "source_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "image": {
+    "bytes_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "text_bytes": 1536,
+    "entry": 256,
+    "link_layout": {
+      "text_base": 0,
+      "text_bytes": 1536,
+      "data_base": 65536,
+      "data_bytes": 256
+    },
+    "provenance": {
+      "builder": "coral-nexus-builder:c002",
+      "toolchain_lock_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "source_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  },
+  "binding_manifest": {
+    "kernels": [
+      {
+        "kernel_id": "K-VME-BF16-ACC",
+        "kernel_version": 1,
+        "source_node": "matmul_0",
+        "ins": [
+          {
+            "handle": "a",
+            "shape": [16, 2],
+            "dtype": "bf16",
+            "layout": "contiguous",
+            "permission": "r",
+            "alias": null,
+            "actual_view": "l1.a"
+          },
+          {
+            "handle": "b",
+            "shape": [2, 16],
+            "dtype": "bf16",
+            "layout": "contiguous",
+            "permission": "r",
+            "alias": null,
+            "actual_view": "l1.b"
+          }
+        ],
+        "outs": [
+          {
+            "handle": "c",
+            "shape": [16, 16],
+            "dtype": "bf16",
+            "layout": "contiguous",
+            "permission": "w",
+            "alias": null,
+            "actual_view": "l1.c"
+          }
+        ],
+        "initial": {
+          "method": "vtzero"
+        },
+        "scratch": [
+          {
+            "name": "drain",
+            "bytes": 1024,
+            "bound_source": "static_analysis"
+          }
+        ],
+        "clobber": ["t5", "t6"],
+        "events": {
+          "completion": "matmul_0.done"
+        },
+        "numeric_profile": "w3_bf16_fp32_rod_v1",
+        "mode_table": "reference",
+        "region": {
+          "start": true,
+          "end": true,
+          "chains": [
+            {
+              "id": 0,
+              "steps": ["CHAIN_FIRST", "CHAIN_CONTINUE", "CHAIN_FINAL"]
+            }
+          ]
+        },
+        "patch_mask": [],
+        "helpers": [
+          {
+            "name": "region_start",
+            "csr": "nexus.mregion.start",
+            "observable": "arms the pending declaration",
+            "barrier": "volatile_asm_memory_clobber",
+            "params": [],
+            "resources": {
+              "stack_bytes": 0
+            }
+          },
+          {
+            "name": "region_end",
+            "csr": "nexus.mregion.end",
+            "observable": "closes the accepted-op set",
+            "barrier": "volatile_asm_memory_clobber",
+            "params": [],
+            "resources": {
+              "stack_bytes": 0
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "resource_manifest": {
+    "text_bytes": 1536,
+    "static_data_bytes": 256,
+    "stack_bytes": 128,
+    "scratch_bytes": 1024,
+    "bound_source": "static_analysis"
+  },
+  "target_fingerprint": {
+    "tensor_input_bytes": 2,
+    "accumulator_bytes": 4,
+    "tensor_output_bytes": 2,
+    "rvv_vlen": 128,
+    "context_count": 2
+  },
+  "numeric_profile_id": "w3_bf16_fp32_rod_v1",
+  "patch_mask": [
+    {
+      "field": "param_area.shape",
+      "layer": "runtime"
+    }
+  ],
+  "package_hash": "ed1684f8a8e2672158f4d594c471a73ca7c4f9c7b1a283a082ce7d90a1b46b23"
+}
