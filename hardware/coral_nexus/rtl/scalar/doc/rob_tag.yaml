@@ -10,44 +10,106 @@ version: 1
 status: draft
 
 upstream_keys_replaced:
-  - {id: store_complete_by_pc, upstream: "storeComplete.bits === bufferEntry.addr",
-     source: {file: hdl/chisel/src/coralnpu/RetirementBuffer.scala, line: 588},
-     replaced_by: "(context_key, owner_op_seq)"}
-  - {id: nonrvv_fault_by_mepc, upstream: "bufferEntry.addr === faultRetire.bits.mepc",
-     source: {file: hdl/chisel/src/coralnpu/RetirementBuffer.scala, line: 495},
-     replaced_by: "(context_key, owner_op_seq)"}
-  - {id: scalar_writeback_by_regno, upstream: "x.bits.addr === bufferEntry.idx",
-     source: {file: hdl/chisel/src/coralnpu/RetirementBuffer.scala, line: 468},
-     replaced_by: "(context_key, owner_op_seq); flushed_scoreboard still orders same-register writes"}
-  - {id: vector_writeback_by_rob_tag, upstream: "x.bits.rob_tag === pIdx",
-     source: {file: hdl/chisel/src/coralnpu/RetirementBuffer.scala, line: 482},
-     replaced_by: "(context_key, rob_tag, slot_generation)"}
-  - {id: rvv_fault_by_rob_tag, upstream: "faultRetire.bits.rob_tag.getOrElse(0.U) === pIdx",
-     source: {file: hdl/chisel/src/coralnpu/RetirementBuffer.scala, line: 493},
-     replaced_by: "(context_key, rob_tag, slot_generation)"}
+  - {
+      id: store_complete_by_pc,
+      upstream: "storeComplete.bits === bufferEntry.addr",
+      source:
+        { file: hdl/chisel/src/coralnpu/RetirementBuffer.scala, line: 588 },
+      replaced_by: "(context_key, owner_op_seq)",
+    }
+  - {
+      id: nonrvv_fault_by_mepc,
+      upstream: "bufferEntry.addr === faultRetire.bits.mepc",
+      source:
+        { file: hdl/chisel/src/coralnpu/RetirementBuffer.scala, line: 495 },
+      replaced_by: "(context_key, owner_op_seq)",
+    }
+  - {
+      id: scalar_writeback_by_regno,
+      upstream: "x.bits.addr === bufferEntry.idx",
+      source:
+        { file: hdl/chisel/src/coralnpu/RetirementBuffer.scala, line: 468 },
+      replaced_by: "(context_key, owner_op_seq); flushed_scoreboard still orders same-register writes",
+    }
+  - {
+      id: vector_writeback_by_rob_tag,
+      upstream: "x.bits.rob_tag === pIdx",
+      source:
+        { file: hdl/chisel/src/coralnpu/RetirementBuffer.scala, line: 482 },
+      replaced_by: "(context_key, rob_tag, slot_generation)",
+    }
+  - {
+      id: rvv_fault_by_rob_tag,
+      upstream: "faultRetire.bits.rob_tag.getOrElse(0.U) === pIdx",
+      source:
+        { file: hdl/chisel/src/coralnpu/RetirementBuffer.scala, line: 493 },
+      replaced_by: "(context_key, rob_tag, slot_generation)",
+    }
 
 # A completion is matched ONLY on the complete key below. Context + bare slot is
 # not enough: a slot is reused, so an old result for the same slot would be read
 # as the new op (ABA). `slot_generation` (or an equivalent owner_op_seq) closes it.
 owner_tag:
   fields:
-    - {name: ctx_slot, width_rule: "ctx_bits", owner: W2, consumers: [W3, W4, W6, W7], required: true}
-    - {name: ctx_generation, width_rule: "unresolved", owner: W2, consumers: [W3, W4, W6, W7], required: true,
-       note: "equals ContextKey.ctx_generation in protocol/cn_protocol_v1.yaml"}
-    - {name: owner_op_seq, width_rule: "unresolved", owner: W2, consumers: [W3, W4, W6, W7], required: true,
-       note: "parent instruction sequence within one Context; same field as op_seq in the protocol"}
-    - {name: subop_id, width_rule: "unresolved", owner: W2, consumers: [W3], required: true,
-       note: "RVV/VME sub-operation of one op_seq; last_uop marks the final one"}
+    - {
+        name: ctx_slot,
+        width_rule: "ctx_bits",
+        owner: W2,
+        consumers: [W3, W4, W6, W7],
+        required: true,
+      }
+    - {
+        name: ctx_generation,
+        width_rule: "unresolved",
+        owner: W2,
+        consumers: [W3, W4, W6, W7],
+        required: true,
+        note: "equals ContextKey.ctx_generation in protocol/cn_protocol_v1.yaml",
+      }
+    - {
+        name: owner_op_seq,
+        width_rule: "unresolved",
+        owner: W2,
+        consumers: [W3, W4, W6, W7],
+        required: true,
+        note: "parent instruction sequence within one Context; same field as op_seq in the protocol",
+      }
+    - {
+        name: subop_id,
+        width_rule: "unresolved",
+        owner: W2,
+        consumers: [W3],
+        required: true,
+        note: "RVV/VME sub-operation of one op_seq; last_uop marks the final one",
+      }
   match_rule: "all required fields equal; a result whose ctx_generation or slot_generation differs from the live occupant is stale"
   stale_outcome: "reject and count; never write architectural state (INV-15)"
 
 rob_tag:
   fields:
-    - {name: ctx_slot, width_rule: "ctx_bits", owner: W2, consumers: [W3], required: true}
-    - {name: rob_slot, width_rule: "log2Ceil(retirementBufferSize)", owner: W2, consumers: [W3], required: true,
-       note: "upstream RvvInterface rob_tag width; see conflicts"}
-    - {name: slot_generation, width_rule: "unresolved", owner: W2, consumers: [W3], required: true,
-       note: "ABA guard for a reused slot of the SAME Context"}
+    - {
+        name: ctx_slot,
+        width_rule: "ctx_bits",
+        owner: W2,
+        consumers: [W3],
+        required: true,
+      }
+    - {
+        name: rob_slot,
+        width_rule: "log2Ceil(retirementBufferSize)",
+        owner: W2,
+        consumers: [W3],
+        required: true,
+        note: "upstream RvvInterface rob_tag width; see conflicts",
+      }
+    - {
+        name: slot_generation,
+        width_rule: "unresolved",
+        owner: W2,
+        consumers: [W3],
+        required: true,
+        note: "ABA guard for a reused slot of the SAME Context",
+      }
   derivation:
     ctx_bits: "max(1, ceil(log2(context_count)))"
     context_count_note: "context_count == 1 uses an explicit constant specialization; a zero-width field is never generated"
@@ -55,30 +117,71 @@ rob_tag:
 
 parameters:
   # Sourced from the pinned upstream; the validator recomputes derived widths from these.
-  - {name: retirementBufferSize, value: 16, source: {file: hdl/chisel/src/coralnpu/Parameters.scala, line: 141}}
-  - {name: retirementLanes, value: 8, source: {file: hdl/chisel/src/coralnpu/Parameters.scala, line: 142}}
-  - {name: instructionLanes, value: 4, source: {file: hdl/chisel/src/coralnpu/Parameters.scala, line: 77}}
-  - {name: scalarRegCount, value: 32, source: {file: hdl/chisel/src/coralnpu/Parameters.scala, line: 131}}
-  - {name: floatRegCount, value: 32, source: {file: hdl/chisel/src/coralnpu/Parameters.scala, line: 133}}
-  - {name: rvvRegCount, value: 32, source: {file: hdl/chisel/src/coralnpu/Parameters.scala, line: 137}}
-  - {name: rvv_rob_tag_width_fallback, value: 4, anchor: ROB_TAG_WIDTH,
-     source: {file: hdl/verilog/rvv/inc/rvv_backend_define.svh, line: 138},
-     note: "used only when RTBUF_DEPTH is undefined"}
+  - {
+      name: retirementBufferSize,
+      value: 16,
+      source: { file: hdl/chisel/src/coralnpu/Parameters.scala, line: 141 },
+    }
+  - {
+      name: retirementLanes,
+      value: 8,
+      source: { file: hdl/chisel/src/coralnpu/Parameters.scala, line: 142 },
+    }
+  - {
+      name: instructionLanes,
+      value: 4,
+      source: { file: hdl/chisel/src/coralnpu/Parameters.scala, line: 77 },
+    }
+  - {
+      name: scalarRegCount,
+      value: 32,
+      source: { file: hdl/chisel/src/coralnpu/Parameters.scala, line: 131 },
+    }
+  - {
+      name: floatRegCount,
+      value: 32,
+      source: { file: hdl/chisel/src/coralnpu/Parameters.scala, line: 133 },
+    }
+  - {
+      name: rvvRegCount,
+      value: 32,
+      source: { file: hdl/chisel/src/coralnpu/Parameters.scala, line: 137 },
+    }
+  - {
+      name: rvv_rob_tag_width_fallback,
+      value: 4,
+      anchor: ROB_TAG_WIDTH,
+      source: { file: hdl/verilog/rvv/inc/rvv_backend_define.svh, line: 138 },
+      note: "used only when RTBUF_DEPTH is undefined",
+    }
 
 # Conflicts between width sources that MUST agree or be kept apart. Each names
 # both sides with file:line so a checker can fail on a stated mismatch.
 conflicts:
   - id: rob_tag_vs_regidx
-    left: {name: rob_slot, rule: "log2Ceil(retirementBufferSize)"}
-    right: {name: retirementBufferIdxWidth, rule: "log2Ceil(scalarRegCount + (enableFloat ? floatRegCount : 0) + rvvRegCount + 2)",
-            source: {file: hdl/chisel/src/coralnpu/Parameters.scala, line: 143}}
+    left: { name: rob_slot, rule: "log2Ceil(retirementBufferSize)" }
+    right:
+      {
+        name: retirementBufferIdxWidth,
+        rule: "log2Ceil(scalarRegCount + (enableFloat ? floatRegCount : 0) + rvvRegCount + 2)",
+        source: { file: hdl/chisel/src/coralnpu/Parameters.scala, line: 143 },
+      }
     rule: "different quantities: a ROB slot number vs a register index. They must never be used for one another (INV-11)."
     must_differ: true
   - id: chisel_rob_tag_vs_rvv_define
-    left: {name: rob_slot, rule: "log2Ceil(retirementBufferSize)",
-           source: {file: hdl/chisel/src/coralnpu/rvv/RvvInterface.scala, line: 143}}
-    right: {name: ROB_TAG_WIDTH, rule: "RTBUF_DEPTH ? clog2(RTBUF_DEPTH) : 4",
-            source: {file: hdl/verilog/rvv/inc/rvv_backend_define.svh, line: 135}}
+    left:
+      {
+        name: rob_slot,
+        rule: "log2Ceil(retirementBufferSize)",
+        source:
+          { file: hdl/chisel/src/coralnpu/rvv/RvvInterface.scala, line: 143 },
+      }
+    right:
+      {
+        name: ROB_TAG_WIDTH,
+        rule: "RTBUF_DEPTH ? clog2(RTBUF_DEPTH) : 4",
+        source: { file: hdl/verilog/rvv/inc/rvv_backend_define.svh, line: 135 },
+      }
     rule: "must be equal; RTBUF_DEPTH is not defined anywhere in the pinned tree, so the SV side currently relies on the literal 4 (the log2 of the default 16)."
     must_equal: true
-    sourced_values: {left: 4, right: 4}
+    sourced_values: { left: 4, right: 4 }

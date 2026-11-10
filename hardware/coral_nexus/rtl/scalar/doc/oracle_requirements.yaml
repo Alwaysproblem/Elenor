@@ -7,18 +7,19 @@ version: 1
 # stand in for it.
 status: draft
 independence:
-  oracle_must_not_share: ["the RTL under test", "pipeline_validator numeric paths"]
+  oracle_must_not_share:
+    ["the RTL under test", "pipeline_validator numeric paths"]
   oracle_owner: W7-02
   w2_role: "fixes the dependency and the record schema only"
 
 input_contract:
   required:
-    - {name: elf, note: "program image"}
-    - {name: entry_pc}
-    - {name: writable_segment_layout}
-    - {name: per_context_initial_csr, note: "start CSR values per Context"}
-    - {name: per_context_initial_rf, note: "start GPR/FPR values per Context"}
-    - {name: observable_event_list, note: "events the oracle must reproduce"}
+    - { name: elf, note: "program image" }
+    - { name: entry_pc }
+    - { name: writable_segment_layout }
+    - { name: per_context_initial_csr, note: "start CSR values per Context" }
+    - { name: per_context_initial_rf, note: "start GPR/FPR values per Context" }
+    - { name: observable_event_list, note: "events the oracle must reproduce" }
   per_context: true
   note: "one oracle input per Context; Contexts do not share register or CSR state"
 
@@ -28,6 +29,26 @@ output_contract:
     ordering: "program order per Context"
   final_architectural_state: [register_files, csrs, memory_bytes]
   flags: [fflags, vxsat]
+
+# Retire-record fields the comparison below cannot work without. Each must be a
+# `required: true` field of retire_record.yaml (the validator checks this), so
+# marking one optional there cannot silently weaken the oracle.
+retire_fields_compared:
+  basis: "decided in C010 from comparison_rules: key_match needs the three identity fields, flags_at_retire needs flags_delta, program-order register comparison needs the instruction identity and write-back"
+  fields:
+    [
+      ctx_slot,
+      ctx_generation,
+      owner_op_seq,
+      flags_delta,
+      valid,
+      order,
+      insn,
+      trap,
+      pc_rdata,
+      x_wdata,
+      x_wb,
+    ]
 
 comparison_rules:
   - id: key_match

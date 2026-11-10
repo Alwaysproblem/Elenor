@@ -2,10 +2,12 @@
 
 Two kinds of check, neither of which is "grep for OwnerTag":
 
-1. Structured consumer behaviour. `RobPartition`/`RobBank` decode a completion
-   by its FULL key and refuse everything else, so a result for a reused slot
-   cannot be read as the new op. Tests drive legal and mismatched samples
-   through it.
+1. Structured consumer behaviour. `contract_codec.RobConsumer` is built FROM the
+   YAML (field list, width rules, required flags, reuse rule); it decodes a
+   completion by every required field and refuses everything else, so a result
+   for a reused slot cannot be read as the new op. Tests drive legal, missing,
+   mismatched and out-of-range samples through it, and mutate the YAML to prove
+   the consumer follows it.
 2. Source anchors. Every upstream line the YAML cites is read back from the
    pinned tree and must contain what the YAML claims there, so a drifted line
    number or a wrong quotation is a failure rather than a silent citation.
@@ -19,7 +21,6 @@ from __future__ import annotations
 import ast
 import json
 import sys
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,8 @@ import yaml
 LIB = Path(__file__).resolve().parent
 sys.path.insert(0, str(LIB))
 
-from validate_protocol import ProtocolError, derive_index_width, load_all  # noqa: E402
+import contract_codec as cc  # noqa: E402
+from validate_protocol import load_all  # noqa: E402
 
 H = LIB.parents[1]
 REPO = LIB.parents[3]
@@ -42,149 +44,34 @@ _UNSOURCED_WIDTH_FIELDS = {"ctx_generation", "owner_op_seq", "subop_id", "slot_g
 _FIELD_KEYS = ("name", "width_rule", "owner", "consumers", "required")
 
 
-class OwnerError(ProtocolError):
-  """Coded error from the reference ROB (inherits the protocol error shape)."""
-
-
-def log2_ceil(n: int) -> int:
-  """Chisel log2Ceil: 1 -> 0, 2 -> 1, 16 -> 4, 66 -> 7."""
-  if n < 1:
-    raise ValueError(f"log2_ceil needs n >= 1, got {n}")
-  return (n - 1).bit_length()
-
-
-def tag_layout(context_count: int, rob_capacity: int) -> dict[str, Any]:
-  """Layout implied by rob_tag.yaml for one configuration.
+def layout(docs: dict[str, Any], values: dict[str, int], context_count: int) -> dict[str, Any]:
+  """Layout implied by the YAML for one configuration, via the contract codec.
 
   One Context still gets a real ctx field (a constant), never a zero-width one.
+  Fields whose width is `unresolved` are listed as open, not given a number.
   """
-  ctx = derive_index_width("ctx_slot", context_count)
+  config = cc.ConfigParams(context_count, values)
+  env = config.env()
+  fields = docs["rob_tag"]["rob_tag"]["fields"] + docs["rob_tag"]["owner_tag"]["fields"]
+  resolvable, open_ = cc.split_resolvable(fields, env)
+  widths: dict[str, int] = {}
+  for f in resolvable:
+    widths.setdefault(f["name"], cc.eval_width(f["width_rule"], env))
   return {
     "context_count": context_count,
-    "ctx_bits": ctx.bits,
+    "ctx_bits": env["ctx_bits"],
     "ctx_slot_constant": context_count == 1,
-    "rob_slot_bits": log2_ceil(rob_capacity),
+    "rob_slot_bits": widths["rob_slot"],
     "partitions": context_count,
+    "resolved_widths": widths,
+    "open_widths": sorted(set(open_)),
   }
 
 
-@dataclass(frozen=True)
-class Tag:
-  ctx_slot: int
-  ctx_generation: int
-  rob_slot: int
-  slot_generation: int
-  owner_op_seq: int
-
-
-@dataclass
-class _Entry:
-  owner_op_seq: int
-  generation: int
-  completed: bool = False
-
-
-@dataclass
-class RobPartition:
-  """One Context's private ROB: completion needs the complete key."""
-
-  ctx_slot: int
-  ctx_generation: int
-  capacity: int
-  _entries: list[_Entry | None] = field(init=False)
-  _slot_gen: list[int] = field(init=False)
-  _head: int = 0
-  _tail: int = 0
-  _count: int = 0
-
-  def __post_init__(self) -> None:
-    self._entries = [None] * self.capacity
-    self._slot_gen = [0] * self.capacity
-
-  @property
-  def live(self) -> int:
-    return self._count
-
-  def allocate(self, owner_op_seq: int) -> Tag:
-    if self._count == self.capacity:
-      raise OwnerError("ROB_FULL", f"ctx {self.ctx_slot} partition of {self.capacity} is full")
-    slot = self._tail
-    self._entries[slot] = _Entry(owner_op_seq, self._slot_gen[slot])
-    self._tail = (self._tail + 1) % self.capacity
-    self._count += 1
-    return Tag(self.ctx_slot, self.ctx_generation, slot, self._slot_gen[slot], owner_op_seq)
-
-  def complete(self, tag: Tag) -> None:
-    if tag.ctx_slot != self.ctx_slot:
-      raise OwnerError("WRONG_CONTEXT", f"tag ctx {tag.ctx_slot} != partition {self.ctx_slot}")
-    if tag.ctx_generation != self.ctx_generation:
-      raise OwnerError(
-        "STALE_CTX_GENERATION", f"tag gen {tag.ctx_generation} != live {self.ctx_generation}"
-      )
-    if not 0 <= tag.rob_slot < self.capacity:
-      raise OwnerError("SLOT_OUT_OF_RANGE", f"rob_slot {tag.rob_slot}")
-    entry = self._entries[tag.rob_slot]
-    if entry is None:
-      raise OwnerError("SLOT_NOT_LIVE", f"slot {tag.rob_slot} holds no op")
-    if tag.slot_generation != entry.generation:
-      raise OwnerError(
-        "STALE_SLOT_GENERATION",
-        f"slot {tag.rob_slot}: tag gen {tag.slot_generation} != live {entry.generation}",
-      )
-    if tag.owner_op_seq != entry.owner_op_seq:
-      raise OwnerError("OP_SEQ_MISMATCH", f"{tag.owner_op_seq} != {entry.owner_op_seq}")
-    if entry.completed:
-      raise OwnerError("DUPLICATE_COMPLETION", f"slot {tag.rob_slot} already completed")
-    entry.completed = True
-
-  def retire(self) -> int | None:
-    """Retire the head in order; returns its owner_op_seq or None if not ready."""
-    if self._count == 0:
-      return None
-    entry = self._entries[self._head]
-    if entry is None or not entry.completed:
-      return None
-    self._entries[self._head] = None
-    self._slot_gen[self._head] += 1  # the NEXT occupant of this slot is a new generation
-    self._head = (self._head + 1) % self.capacity
-    self._count -= 1
-    return entry.owner_op_seq
-
-
-class RobBank:
-  """Static private partitions, one per Context slot (W2-D02)."""
-
-  def __init__(self, context_count: int, capacity: int) -> None:
-    derive_index_width("ctx_slot", context_count)  # rejects count < 1
-    self.context_count = context_count
-    self.parts = [RobPartition(i, 1, capacity) for i in range(context_count)]
-
-  def allocate(self, ctx_slot: int, owner_op_seq: int) -> Tag:
-    return self._part(ctx_slot).allocate(owner_op_seq)
-
-  def complete(self, tag: Tag) -> None:
-    self._part(tag.ctx_slot).complete(tag)
-
-  def reuse_context(
-    self, ctx_slot: int, *, completion_consumed: bool, obligations_closed: bool | None = None
-  ) -> int:
-    """Hand the slot to a new Task; every precondition is named when it fails."""
-    part = self._part(ctx_slot)
-    closed = (part.live == 0) if obligations_closed is None else obligations_closed
-    missing = []
-    if not closed:
-      missing.append("old obligations still open")
-    if not completion_consumed:
-      missing.append("TASK_COMPLETION not consumed")
-    if missing:
-      raise OwnerError("REUSE_BLOCKED", "; ".join(missing))
-    part.ctx_generation += 1
-    return part.ctx_generation
-
-  def _part(self, ctx_slot: int) -> RobPartition:
-    if not 0 <= ctx_slot < self.context_count:
-      raise OwnerError("CTX_OUT_OF_RANGE", f"ctx_slot {ctx_slot} not in 0..{self.context_count - 1}")
-    return self.parts[ctx_slot]
+def rob_consumer(docs: dict[str, Any], values: dict[str, int], context_count: int, **fixture_widths: int):
+  """Build the YAML-driven ROB. Unresolved widths need an explicit fixture width."""
+  config = cc.ConfigParams(context_count, values, fixture_widths or None)
+  return cc.RobConsumer(docs["rob_tag"], config)
 
 
 # --------------------------------------------------------------------------
@@ -252,9 +139,11 @@ def check_field_schema(docs: dict[str, Any], errors: list[str]) -> None:
 def check_width_rules(docs: dict[str, Any], errors: list[str]) -> None:
   seen: dict[str, str] = {}
   for where, f in _all_fields(docs):
-    name, rule = f.get("name"), str(f.get("width_rule"))
+    name, rule = str(f.get("name")), str(f.get("width_rule"))
     if name in _UNSOURCED_WIDTH_FIELDS and rule.strip().isdigit():
       errors.append(f"{where}.{name}: width {rule} is a literal but no source bounds it (invented width)")
+    if rule.strip() == cc.UNRESOLVED and name not in _UNSOURCED_WIDTH_FIELDS:
+      errors.append(f"{where}.{name}: declared unresolved but its width derives from sourced parameters")
     if name in seen and seen[name] != rule:
       errors.append(f"field {name}: width_rule {seen[name]!r} conflicts with {rule!r} in {where}")
     seen.setdefault(name, rule)
@@ -279,9 +168,9 @@ def check_parameters(docs: dict[str, Any], errors: list[str]) -> dict[str, int]:
 
 def check_conflicts(docs: dict[str, Any], params: dict[str, int], errors: list[str]) -> None:
   float_regs = params["floatRegCount"]
-  rob_bits = log2_ceil(params["retirementBufferSize"])
-  idx_bits_no_float = log2_ceil(params["scalarRegCount"] + params["rvvRegCount"] + 2)
-  idx_bits_float = log2_ceil(params["scalarRegCount"] + float_regs + params["rvvRegCount"] + 2)
+  rob_bits = cc.log2_ceil(params["retirementBufferSize"])
+  idx_bits_no_float = cc.log2_ceil(params["scalarRegCount"] + params["rvvRegCount"] + 2)
+  idx_bits_float = cc.log2_ceil(params["scalarRegCount"] + float_regs + params["rvvRegCount"] + 2)
   for item in docs["rob_tag"]["conflicts"]:
     if item["id"] == "rob_tag_vs_regidx":
       right = item["right"]["source"]
@@ -351,15 +240,63 @@ def check_retire_record(docs: dict[str, Any], params: dict[str, int], errors: li
   if rec["lanes"]["value"] != params["retirementLanes"]:
     errors.append("retire_record.lanes disagrees with retirementLanes")
   check_anchor(errors, "retire_record.lanes", rec["lanes"]["source"], "retirementLanes")
-  for f in rec["fields"]:
-    if f.get("origin") == "upstream":
-      check_anchor(errors, f"retire_record.{f['name']}", f["source"], f"{f['name']}_i")
+  for item in rec["width_parameters"]:
+    anchor = item.get("anchor", item["name"])
+    check_anchor(errors, f"retire_record.width_parameters.{item['name']}", item["source"], anchor)
+    text = _source_line(item["source"]["file"], item["source"]["line"]) or ""
+    if str(item["value"]) not in text and "def " not in text:
+      errors.append(f"retire_record.width_parameters.{item['name']}: value not on its cited line")
+  trace = UPSTREAM / "hdl/chisel/src/coralnpu/RvviTrace.scala"
+  errors.extend(f"retire_record: {e}" for e in cc.check_trace_coverage(rec, trace))
   if rec["mode_requirement"]["retirement_buffer_mode"] != "full":
     errors.append("retire_record must require a full RetirementBuffer")
   check_anchor(errors, "retire_record.mode", rec["mode_requirement"]["source"], "mini")
   check_anchor(errors, "retire_record.mode.also", rec["mode_requirement"]["also"], "dataWidth")
   if "W7" not in rec["read_only_for"]:
     errors.append("retire_record must be read-only for W7")
+
+
+# The completion match floor: removing any of these from `required` removes the
+# protection it gives (ABA, cross-Context, stale Task, sub-operation), so the
+# contract may add required fields but never drop these.
+_REQUIRED_FLOOR = {
+  "rob_tag": {"ctx_slot", "rob_slot", "slot_generation"},
+  "owner_tag": {"ctx_slot", "ctx_generation", "owner_op_seq", "subop_id"},
+}
+
+
+def check_required_floor(docs: dict[str, Any], errors: list[str]) -> None:
+  for group, floor in _REQUIRED_FLOOR.items():
+    fields = {f["name"]: f for f in docs["rob_tag"][group]["fields"]}
+    for name in sorted(floor):
+      if name not in fields:
+        errors.append(f"rob_tag.{group}: required match field {name!r} is missing")
+      elif fields[name].get("required") is not True:
+        errors.append(f"rob_tag.{group}.{name}: must be required: true (it is part of the match floor)")
+
+
+def check_oracle_retire_fields(docs: dict[str, Any], errors: list[str]) -> None:
+  carried = {f["name"]: f for f in docs["retire_record"]["fields"]}
+  for name in docs["oracle_requirements"]["retire_fields_compared"]["fields"]:
+    if name not in carried:
+      errors.append(f"oracle compares {name!r} but retire_record does not carry it")
+    elif carried[name].get("required") is not True:
+      errors.append(f"oracle compares {name!r} but retire_record marks it optional")
+
+
+def check_width_evaluation(docs: dict[str, Any], params: dict[str, int], errors: list[str]) -> None:
+  """Every resolvable width rule must evaluate for both C1 and C2; none may be zero."""
+  values = dict(params)
+  values.update({p["name"]: int(p["value"]) for p in docs["retire_record"]["width_parameters"]})
+  for count in (1, 2):
+    env = cc.ConfigParams(count, values).env()
+    for where, f in _all_fields(docs):
+      if str(f["width_rule"]).strip() == cc.UNRESOLVED:
+        continue
+      try:
+        cc.eval_width(f["width_rule"], env)
+      except cc.ContractError as exc:
+        errors.append(f"{where}.{f['name']} (context_count={count}): {exc}")
 
 
 def check_issue(docs: dict[str, Any], params: dict[str, int], errors: list[str]) -> None:
@@ -395,9 +332,7 @@ def check_oracle(docs: dict[str, Any], errors: list[str]) -> None:
     errors.append("oracle retire stream must reference retire_record.yaml")
 
 
-def check_field_request(
-  request: dict, protocol: dict, docs: dict[str, Any], errors: list[str]
-) -> None:
+def check_field_request(request: dict, protocol: dict, docs: dict[str, Any], errors: list[str]) -> None:
   catalog = {m["name"]: m for m in protocol["messages"]}
   for item in request["requests"]:
     msg = catalog.get(item["message"])
@@ -442,6 +377,9 @@ def validate(docs_dir: Path = DOC, protocol_dir: Path = PROTOCOL) -> dict:
   check_csr_commit(docs, proto["upstream_csr"], errors)
   check_ops_and_control(docs, proto["protocol"], errors)
   check_retire_record(docs, params, errors)
+  check_width_evaluation(docs, params, errors)
+  check_required_floor(docs, errors)
+  check_oracle_retire_fields(docs, errors)
   check_issue(docs, params, errors)
   check_oracle(docs, errors)
   check_field_request(request, proto["protocol"], docs, errors)
@@ -451,7 +389,7 @@ def validate(docs_dir: Path = DOC, protocol_dir: Path = PROTOCOL) -> dict:
     "valid": not errors,
     "errors": errors,
     "open_widths": open_widths,
-    "layouts": {n: tag_layout(n, params.get("retirementBufferSize", 16)) for n in (1, 2)},
+    "layouts": {n: layout(docs, params, n) for n in (1, 2)},
   }
 
 

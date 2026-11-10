@@ -31,7 +31,11 @@ csr_commit:
     early_completion: "an entry that completes early keeps its delta in its slot until retire; nothing is lost"
   csr_read_interlock:
     applies_to: [FFLAGS, VXSAT, VL, VTYPE]
-    blocks_until: ["no in-flight flags delta of the SAME Context is unmerged", "vset/mset of the SAME Context has retired"]
+    blocks_until:
+      [
+        "no in-flight flags delta of the SAME Context is unmerged",
+        "vset/mset of the SAME Context has retired",
+      ]
     forwarding: false
     scope: "own Context only; the cross-Context rvvIdle condition is removed"
   # Writeback kinds are distinguished: an ordinary GPR write-back becomes
@@ -41,37 +45,128 @@ csr_commit:
     csr_commit_time: "not applicable; GPR completion never implies CSR commit"
 
 ops:
-  - {name: WAIT, class: event, operand: event_ref, side_effect: "park this Context's NEXT issue until the event is satisfied",
-     ordering: "program order within the Context", record_owner: W6,
-     note: "accepted in-flight work continues; park does not flush (EVT-04)"}
-  - {name: WAITALL, class: event, operand: event_ref_list, side_effect: "as WAIT over a set", ordering: "program order", record_owner: W6}
-  - {name: SIGNAL_PHASE, class: event, operand: phase_id, side_effect: "report a phase to the Group", ordering: "program order", record_owner: W6}
-  - {name: RET, class: termination, operand: none, side_effect: "stop new issue for this Context; wait for local events to finish",
-     ordering: "program order", record_owner: W2,
-     note: "RET is not task success; EXEC_DRAINED follows once local events are done"}
-  - {name: EXEC_DRAINED, class: notification, operand: none, direction: W2_to_W6,
-     side_effect: "internal notice only; never published as a success terminal", record_owner: W2}
-  - {name: REGION_START, class: region, operand: region_decl, side_effect: "declare a VME region; park if not granted", record_owner: W3,
-     note: "W2 holds only a park projection bit; the wait record body belongs to W3 (one per Context)"}
-  - {name: REGION_END, class: region, operand: region_decl, side_effect: "close the region declaration", record_owner: W3}
-  - {name: PARK_REQUEST, class: park, operand: reason, side_effect: "stop issue only", record_owner: W2,
-     note: "WFI/park does not stop acceptance or retire of already-accepted work (SCH-07)"}
+  - {
+      name: WAIT,
+      class: event,
+      operand: event_ref,
+      side_effect: "park this Context's NEXT issue until the event is satisfied",
+      ordering: "program order within the Context",
+      record_owner: W6,
+      note: "accepted in-flight work continues; park does not flush (EVT-04)",
+    }
+  - {
+      name: WAITALL,
+      class: event,
+      operand: event_ref_list,
+      side_effect: "as WAIT over a set",
+      ordering: "program order",
+      record_owner: W6,
+    }
+  - {
+      name: SIGNAL_PHASE,
+      class: event,
+      operand: phase_id,
+      side_effect: "report a phase to the Group",
+      ordering: "program order",
+      record_owner: W6,
+    }
+  - {
+      name: RET,
+      class: termination,
+      operand: none,
+      side_effect: "stop new issue for this Context; wait for local events to finish",
+      ordering: "program order",
+      record_owner: W2,
+      note: "RET is not task success; EXEC_DRAINED follows once local events are done",
+    }
+  - {
+      name: EXEC_DRAINED,
+      class: notification,
+      operand: none,
+      direction: W2_to_W6,
+      side_effect: "internal notice only; never published as a success terminal",
+      record_owner: W2,
+    }
+  - {
+      name: REGION_START,
+      class: region,
+      operand: region_decl,
+      side_effect: "declare a VME region; park if not granted",
+      record_owner: W3,
+      note: "W2 holds only a park projection bit; the wait record body belongs to W3 (one per Context)",
+    }
+  - {
+      name: REGION_END,
+      class: region,
+      operand: region_decl,
+      side_effect: "close the region declaration",
+      record_owner: W3,
+    }
+  - {
+      name: PARK_REQUEST,
+      class: park,
+      operand: reason,
+      side_effect: "stop issue only",
+      record_owner: W2,
+      note: "WFI/park does not stop acceptance or retire of already-accepted work (SCH-07)",
+    }
 
 fields:
   common:
-    - {name: ctx_slot, width_rule: "ctx_bits", owner: W2, consumers: [W3, W6], required: true}
-    - {name: ctx_generation, width_rule: "unresolved", owner: W2, consumers: [W3, W6], required: true,
-       note: "same field and same rule as rob_tag.yaml; a stale generation is rejected"}
-    - {name: owner_op_seq, width_rule: "unresolved", owner: W2, consumers: [W3, W6, W7], required: true}
+    - {
+        name: ctx_slot,
+        width_rule: "ctx_bits",
+        owner: W2,
+        consumers: [W3, W6],
+        required: true,
+      }
+    - {
+        name: ctx_generation,
+        width_rule: "unresolved",
+        owner: W2,
+        consumers: [W3, W6],
+        required: true,
+        note: "same field and same rule as rob_tag.yaml; a stale generation is rejected",
+      }
+    - {
+        name: owner_op_seq,
+        width_rule: "unresolved",
+        owner: W2,
+        consumers: [W3, W6, W7],
+        required: true,
+      }
 
 # Park, cancel and fail-stop are three mechanisms and must not be merged (W2-D06).
 control_separation:
-  park: {stops: "issue/scheduling of this Context", does_not_stop: "acceptance and retire of accepted work", uses_core_clock_gate: false}
-  cancel: {stops: "issue of this Context", in_flight: "completes or is isolated", other_contexts: "untouched", confirmation_owner: "W6/W4"}
-  fail_stop: {trigger: "any Context FAULT", effect: "Tile stops issue", flush_scope: "the faulting Context only",
-              report: "(task, ctx, op) to W6", local_recovery: "not in this phase"}
+  park:
+    {
+      stops: "issue/scheduling of this Context",
+      does_not_stop: "acceptance and retire of accepted work",
+      uses_core_clock_gate: false,
+    }
+  cancel:
+    {
+      stops: "issue of this Context",
+      in_flight: "completes or is isolated",
+      other_contexts: "untouched",
+      confirmation_owner: "W6/W4",
+    }
+  fail_stop:
+    {
+      trigger: "any Context FAULT",
+      effect: "Tile stops issue",
+      flush_scope: "the faulting Context only",
+      report: "(task, ctx, op) to W6",
+      local_recovery: "not in this phase",
+    }
 
 reuse_rule:
-  context_slot_reuse_requires: ["old obligations closed", "TASK_COMPLETION reliably consumed", "identity isolated (ctx_generation advanced)"]
+  context_slot_reuse_requires:
+    [
+      "old obligations closed",
+      "TASK_COMPLETION reliably consumed",
+      "identity isolated (ctx_generation advanced)",
+    ]
 
-no_cross_c_abi_objects: ["ContextKey object", "Python context handle", "wait record object"]
+no_cross_c_abi_objects:
+  ["ContextKey object", "Python context handle", "wait record object"]
