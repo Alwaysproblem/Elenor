@@ -1,0 +1,422 @@
+{
+ "schema": "cn_vme_decl_abi/v1",
+ "version": 1,
+ "status": "draft",
+ "note": "A REQUEST to W1-01: no CSR address, opcode or bit position is assigned here (those come from the W1 CSR allocator). Logical names only.",
+ "carrier": {
+  "logical_csr": "cn_vdecl",
+  "access": "unspecified",
+  "scope": "per_context",
+  "access_note": "write-only per Context is the design intent; the allowed access level is not frozen here",
+  "csr_name_map_entries": [
+   "nexus.mregion.start",
+   "nexus.mregion.end",
+   "nexus.mregion.first",
+   "nexus.mregion.continue",
+   "nexus.mregion.final"
+  ],
+  "bit_positions": "unresolved",
+  "bit_positions_owner": "W1-01 (C017)",
+  "width_bits": "unresolved",
+  "width_reason": "the plan says 32 bits but no sourced bound or allocator output exists; not invented here"
+ },
+ "declaration": {
+  "kinds": [
+   "REGION_START",
+   "REGION_END",
+   "CHAIN_FIRST",
+   "CHAIN_CONTINUE",
+   "CHAIN_FINAL"
+  ],
+  "one_pending_per_context": true,
+  "consumer": "the first target-class instruction of the SAME Context, in program order, to reach E2"
+ },
+ "events": {
+  "E1": {
+   "name": "request_park",
+   "point": "declared target is at the Context issue head, valid, and has NOT entered the shared RVV queue",
+   "outcomes": [
+    "GRANTED",
+    "PARKED"
+   ],
+   "registers_waiter": true,
+   "requires_accepted": false,
+   "may_read_pending": true,
+   "may_consume_pending": false
+  },
+  "E2": {
+   "name": "consume",
+   "point": "the beat the front end accepts the granted target instruction",
+   "consumes_pending": true,
+   "consume_count": 1,
+   "unique_consume_point": true,
+   "source": {
+    "file": "verilog/rvv/design/RvvFrontEnd.sv",
+    "line": 116,
+    "needle": "inst_accepted[i] = inst_ready_o[i] && inst_valid_i[i]"
+   }
+  }
+ },
+ "ordering": [
+  "state_free",
+  "region_done",
+  "wake"
+ ],
+ "ordering_rule": "state_free recycles state but does NOT hand the instance over; only a reliably stored region_done wakes and grants a waiter",
+ "properties": {
+  "U1": "no early bind: writing the declaration CSR is not a tile side effect and does not trigger E1",
+  "U2": "no early consume: pending is not read by any consumer before E2",
+  "U3": "no late bind: once ARMED only the first target to reach E2 may consume it; after a redirect it is never re-attached to a later instruction",
+  "U4": "stall keeps pending: a parked head or a full front-end queue does not clear it, and a repeated csrw is an ARMED conflict",
+  "U5": "redirect/cancel clears pending, cancels the waiter and makes the head eligible again; a Context generation change clears it the same beat",
+  "U6": "wake is event driven after region_done, not polled each tick"
+ },
+ "faults": [
+  {
+   "code": "ARMED_CONFLICT",
+   "group": "F2",
+   "kind": "declaration",
+   "static": false,
+   "text": "csrw while a declaration is already ARMED"
+  },
+  {
+   "code": "NESTED_START",
+   "group": "F2",
+   "kind": "declaration",
+   "static": false,
+   "text": "REGION_START while ACTIVE, PARKED or ending"
+  },
+  {
+   "code": "UNKNOWN_KIND",
+   "group": "F6",
+   "kind": "declaration",
+   "static": true,
+   "text": "declaration kind is not in the closed set"
+  },
+  {
+   "code": "TOUCH_WITHOUT_BINDING",
+   "group": "F1",
+   "kind": "tile_access",
+   "static": true,
+   "text": "tile touched with no ACTIVE region"
+  },
+  {
+   "code": "TOUCH_AFTER_END",
+   "group": "F3",
+   "kind": "tile_access",
+   "static": true,
+   "text": "tile touched after END was accepted"
+  },
+  {
+   "code": "EXIT_WITHOUT_END",
+   "group": "F4",
+   "kind": "task_exit",
+   "static": false,
+   "text": "Task exits with an open region and no END"
+  },
+  {
+   "code": "EXIT_BEFORE_REGION_DONE",
+   "group": "F4",
+   "kind": "task_exit",
+   "static": false,
+   "text": "Task exits after END but before region_done"
+  },
+  {
+   "code": "STALE_GENERATION",
+   "group": "F5",
+   "kind": "identity",
+   "static": false,
+   "text": "pending survived a Context generation change"
+  },
+  {
+   "code": "CONSUME_WITHOUT_PENDING",
+   "group": "F6",
+   "kind": "declaration",
+   "static": false,
+   "text": "target accepted with nothing ARMED"
+  },
+  {
+   "code": "ACCEPTED_WHILE_PARKED",
+   "group": "F5",
+   "kind": "declaration",
+   "static": false,
+   "text": "a parked target was accepted instead of staying at the head"
+  },
+  {
+   "code": "ACCEPTED_WITHOUT_GRANT",
+   "group": "F5",
+   "kind": "declaration",
+   "static": false,
+   "text": "START accepted before E1 granted a lease"
+  },
+  {
+   "code": "DUPLICATE_FIRST",
+   "group": "F7",
+   "kind": "chain",
+   "static": true,
+   "text": "second FIRST for a chain"
+  },
+  {
+   "code": "CONTINUE_WITHOUT_FIRST",
+   "group": "F7",
+   "kind": "chain",
+   "static": true,
+   "text": "CONTINUE for a chain that has no FIRST"
+  },
+  {
+   "code": "FINAL_WITHOUT_FIRST",
+   "group": "F7",
+   "kind": "chain",
+   "static": true,
+   "text": "FINAL for a chain that has no FIRST"
+  },
+  {
+   "code": "ACCUMULATE_AFTER_FINAL",
+   "group": "F7",
+   "kind": "chain",
+   "static": true,
+   "text": "accumulate or write on a chain after its FINAL"
+  },
+  {
+   "code": "END_WITH_OPEN_CHAIN",
+   "group": "F7",
+   "kind": "chain",
+   "static": true,
+   "text": "END while a chain has no FINAL"
+  },
+  {
+   "code": "SETTLE_WITHOUT_ACCEPT",
+   "group": "F5",
+   "kind": "completion",
+   "static": false,
+   "text": "completion for an op that was never accepted"
+  },
+  {
+   "code": "STATE_FREE_BEFORE_END",
+   "group": "F3",
+   "kind": "ordering",
+   "static": false,
+   "text": "state_free before END"
+  },
+  {
+   "code": "STATE_FREE_WITH_OUTSTANDING",
+   "group": "F3",
+   "kind": "ordering",
+   "static": false,
+   "text": "state_free with unsettled accepted ops"
+  },
+  {
+   "code": "REGION_DONE_BEFORE_END",
+   "group": "F3",
+   "kind": "ordering",
+   "static": false,
+   "text": "region_done before END"
+  },
+  {
+   "code": "REGION_DONE_WITH_OUTSTANDING",
+   "group": "F3",
+   "kind": "ordering",
+   "static": false,
+   "text": "region_done with unsettled accepted ops"
+  },
+  {
+   "code": "REGION_DONE_BEFORE_STATE_FREE",
+   "group": "F3",
+   "kind": "ordering",
+   "static": false,
+   "text": "region_done before state_free"
+  },
+  {
+   "code": "CTX_OUT_OF_RANGE",
+   "group": "F6",
+   "kind": "identity",
+   "static": true,
+   "text": "Context index outside the configuration"
+  },
+  {
+   "code": "FAULT_CODE_UNKNOWN",
+   "group": "F6",
+   "kind": "internal",
+   "static": true,
+   "text": "model raised a fault code the ABI does not define"
+  }
+ ],
+ "fault_groups": {
+  "F1": "touch without binding",
+  "F2": "start while holding a region",
+  "F3": "touch or free out of order after END",
+  "F4": "task exit with an unfinished region",
+  "F5": "redirect/cancel/identity between declaration and target",
+  "F6": "malformed or mismatched declaration",
+  "F7": "chain order"
+ },
+ "cleanup": {
+  "grant_then_redirect": "a grant already taken is SETTLED (instance released and waiters woken); 'not accepted' does not mean 'no side effect'",
+  "waiter_then_redirect": "the waiter is removed and the head becomes eligible again",
+  "armed_then_redirect": "pending is cleared; no later instruction inherits it",
+  "accepted_then_cancel": "accepted ops still settle for real; the region ends FAILED and never publishes a success region_done",
+  "final_does_not_drain": true,
+  "end_does_not_release": true
+ },
+ "mode_table_schema": {
+  "carried_by": "the sealed kernel manifest (W5), one table per kernel template; NOT a global whitelist",
+  "limits": {
+   "mtwiden_values": {
+    "values": [
+     0,
+     1,
+     2,
+     3
+    ],
+    "source": {
+     "file": "verilog/rvv/design/RvvFrontEnd.sv",
+     "line": 265,
+     "needle": "inst_q[i].bits[24:18] == 7'b1000010"
+    },
+    "note": "mtwiden is a 2-bit field (mtype[1:0]); 0 means unconfigured"
+   },
+   "disabled_mtwiden": {
+    "values": [
+     3
+    ],
+    "decided_by": "design W3 section 1 / W5 4.2.1: INT8 is registered as existing but disabled on the tensor path",
+    "source": null
+   },
+   "tk_max_by_mtwiden": {
+    "1": {
+     "value": 1,
+     "source": {
+      "file": "verilog/rvv/design/RvvFrontEnd.sv",
+      "line": 300,
+      "needle": "inst_config_state[i+1].tk = (reg_read_data_i[2*i][7:5] > 3'd1)"
+     }
+    },
+    "2": {
+     "value": 2,
+     "source": {
+      "file": "verilog/rvv/design/RvvFrontEnd.sv",
+      "line": 295,
+      "needle": "inst_config_state[i+1].tk = (reg_read_data_i[2*i][7:5] > 3'd2)"
+     }
+    },
+    "3": {
+     "value": 4,
+     "source": {
+      "file": "verilog/rvv/design/RvvFrontEnd.sv",
+      "line": 290,
+      "needle": "inst_config_state[i+1].tk = (reg_read_data_i[2*i][7:5] > 3'd4)"
+     }
+    }
+   },
+   "tm_max": {
+    "value": 16,
+    "source": {
+     "file": "verilog/rvv/design/RvvFrontEnd.sv",
+     "line": 155,
+     "needle": "TILE_EDGE_DIM = 14'd16"
+    }
+   },
+   "vtype_lmul_by_sew": {
+    "0": {
+     "lmul": 0,
+     "source": {
+      "file": "verilog/rvv/design/RvvFrontEnd.sv",
+      "line": 289,
+      "needle": "lmul_orig = LMUL1"
+     }
+    },
+    "1": {
+     "lmul": 1,
+     "source": {
+      "file": "verilog/rvv/design/RvvFrontEnd.sv",
+      "line": 294,
+      "needle": "lmul_orig = LMUL2"
+     }
+    },
+    "2": {
+     "lmul": 2,
+     "source": {
+      "file": "verilog/rvv/design/RvvFrontEnd.sv",
+      "line": 299,
+      "needle": "lmul_orig = LMUL4"
+     }
+    }
+   },
+   "vtype_lmul_source": {
+    "file": "verilog/rvv/design/RvvFrontEnd.sv",
+    "line": 279,
+    "needle": "and vlmul is derived"
+   },
+   "note": "the front end CLAMPS tk and tm silently, so a table that asks for more is lying about what the hardware does"
+  },
+  "encoding": {
+   "formula": "mtype = (tm & 0x3FFF) << 10 | (tk & 7) << 5 | (mtwiden & 3)",
+   "source": {
+    "file": "tests/cocotb/vme_test/vme_test_utils.h",
+    "line": 145,
+    "needle": "MtypeValue"
+   }
+  },
+  "states": [
+   "NONE",
+   "CLEARED"
+  ],
+  "rules": [
+   "inside an asm block any vset* is illegal",
+   "CLEARED -> mode must carry restore: true",
+   "tile use at CLEARED with no restore is MISSING_RESTORE_PREAMBLE",
+   "a disabled mode hit is DISABLED_MODE"
+  ]
+ },
+ "corrections_to_design_text": [
+  {
+   "id": "VTYPE-01",
+   "text": "The design lists vtype 18 / 265 / 256 for FP32 / BF16 / INT8. The upstream test constants are 0xD2 (210), 0x1C9 (457) and 0xC0 (192): they carry the ta/ma bits that msetmtype forces to 1 when mtwiden != 0. 18 and 265 are the same values with ta/ma cleared; 256 is NOT the INT8 vtype in any form.",
+   "source": {
+    "file": "tests/cocotb/vme_test/vme_matmul_test.cc",
+    "line": 39,
+    "needle": "kVtypeSew32Lmul4 = 0xD2"
+   }
+  },
+  {
+   "id": "ANCHOR-01",
+   "text": "The plan cites RvvFrontEnd.sv 131-135 for the accepted beat; the accepted expression is at line 116 and the registered valid_inst_q at 134.",
+   "source": {
+    "file": "verilog/rvv/design/RvvFrontEnd.sv",
+    "line": 116,
+    "needle": "inst_accepted[i] = inst_ready_o[i] && inst_valid_i[i]"
+   }
+  },
+  {
+   "id": "ANCHOR-02",
+   "text": "The plan cites Decode.scala:1194 as the END decode (csrrwi). That line is the BitPat for csrrw, and no csrrwi pattern is named there; END is a W1/W2 helper whose encoding is not decided here.",
+   "source": {
+    "file": "hdl/chisel/src/coralnpu/scalar/Decode.scala",
+    "line": 1194,
+    "needle": "\"csrrw\""
+   }
+  },
+  {
+   "id": "TK-CLAMP-01",
+   "text": "msetmtype silently clamps tk by SEW (SEW16 -> 2, SEW32 -> 1, SEW8 -> 4) and tm to 16; a table row that asks for more describes hardware that does not exist.",
+   "source": {
+    "file": "verilog/rvv/design/RvvFrontEnd.sv",
+    "line": 295,
+    "needle": "inst_config_state[i+1].tk = (reg_read_data_i[2*i][7:5] > 3'd2)"
+   }
+  },
+  {
+   "id": "ENC-01",
+   "text": "mtype = tm[23:10] | tk[7:5] | mtwiden[1:0]. The 16384 in the compiler's formula is tm = 16 shifted by 10, not a flag bit.",
+   "source": {
+    "file": "tests/cocotb/vme_test/vme_test_utils.h",
+    "line": 146,
+    "needle": "((tm & 0x3FFF) << 10)"
+   }
+  },
+  {
+   "id": "LIMITS-01",
+   "text": "every limit the mode-table checker relies on (the tk clamp per mtwiden, tm_max, mtwiden values, LMUL per SEW) carries its own sourced line; none is a bare constant in the validator."
+  }
+ ]
+}

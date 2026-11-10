@@ -12,50 +12,130 @@ requests:
     direction: T2G
     why: "the external-leg request carries the full provenance tuple so the Python authority checks allocation, page and generation in one place"
     fields_needed:
-      - { name: txn_id, from: protocol/w4_memory.contract.yaml, key: provenance.fields }
-      - { name: context_key, from: protocol/w4_memory.contract.yaml, key: provenance.fields }
-      - { name: slice_id, from: protocol/w4_memory.contract.yaml, key: provenance.fields }
-      - { name: slice_count, from: protocol/w4_memory.contract.yaml, key: provenance.fields }
-      - { name: arena_alloc_gen, from: protocol/w4_memory.contract.yaml, key: provenance.fields }
-      - { name: binding_generation, from: protocol/w4_memory.contract.yaml, key: provenance.fields }
-      - { name: scope_epoch, from: protocol/w4_memory.contract.yaml, key: provenance.fields }
+      - {
+          name: txn_id,
+          from: protocol/w4_memory.contract.yaml,
+          key: provenance.fields,
+        }
+      - {
+          name: context_key,
+          from: protocol/w4_memory.contract.yaml,
+          key: provenance.fields,
+        }
+      - {
+          name: slice_id,
+          from: protocol/w4_memory.contract.yaml,
+          key: provenance.fields,
+        }
+      - {
+          name: slice_count,
+          from: protocol/w4_memory.contract.yaml,
+          key: provenance.fields,
+        }
+      - {
+          name: arena_alloc_gen,
+          from: protocol/w4_memory.contract.yaml,
+          key: provenance.fields,
+        }
+      - {
+          name: binding_generation,
+          from: protocol/w4_memory.contract.yaml,
+          key: provenance.fields,
+        }
+      - {
+          name: scope_epoch,
+          from: protocol/w4_memory.contract.yaml,
+          key: provenance.fields,
+        }
   - message: MEM_RSP
     direction: G2T
     why: "a response is matched by provenance; a generation mismatch is stale_response, never a completion"
     fields_needed:
-      - { name: txn_id, from: protocol/w4_memory.contract.yaml, key: provenance.fields }
-      - { name: slice_id, from: protocol/w4_memory.contract.yaml, key: provenance.fields }
-      - { name: binding_generation, from: protocol/w4_memory.contract.yaml, key: provenance.fields }
+      - {
+          name: txn_id,
+          from: protocol/w4_memory.contract.yaml,
+          key: provenance.fields,
+        }
+      - {
+          name: slice_id,
+          from: protocol/w4_memory.contract.yaml,
+          key: provenance.fields,
+        }
+      - {
+          name: binding_generation,
+          from: protocol/w4_memory.contract.yaml,
+          key: provenance.fields,
+        }
   - message: TERMINAL_ACK
     direction: T2G
     why: "the terminal ACK settles credit, in-flight references and the page-lease reference together with the terminal state"
     fields_needed:
-      - { name: txn_id, from: protocol/w4_memory.contract.yaml, key: provenance.fields }
-      - { name: slice_id, from: protocol/w4_memory.contract.yaml, key: provenance.fields }
-      - { name: slice_count, from: protocol/w4_memory.contract.yaml, key: provenance.fields }
-      - { name: final_state, from: protocol/w4_memory.contract.yaml, key: terminal.states }
+      - {
+          name: txn_id,
+          from: protocol/w4_memory.contract.yaml,
+          key: provenance.fields,
+        }
+      - {
+          name: slice_id,
+          from: protocol/w4_memory.contract.yaml,
+          key: provenance.fields,
+        }
+      - {
+          name: slice_count,
+          from: protocol/w4_memory.contract.yaml,
+          key: provenance.fields,
+        }
+      - {
+          name: final_state,
+          from: protocol/w4_memory.contract.yaml,
+          key: terminal.states,
+        }
   - message: RESOURCE_UPDATE
     direction: T2G
     why: "the parent mirror of the L1 hold/bound ledger (W4 plan R5) for RESOURCE_COMMIT_IND reconciliation"
     fields_needed:
-      - { name: arena_alloc_gen, from: protocol/w4_memory.contract.yaml, key: provenance.fields }
-      - { name: context_key, from: protocol/w4_memory.contract.yaml, key: provenance.fields }
+      - {
+          name: arena_alloc_gen,
+          from: protocol/w4_memory.contract.yaml,
+          key: provenance.fields,
+        }
+      - {
+          name: context_key,
+          from: protocol/w4_memory.contract.yaml,
+          key: provenance.fields,
+        }
   - message: GATE_NOTIFY
     direction: G2T
     why: "the gate notice must carry its level and generation; it blocks new data issue only"
     fields_needed:
-      - { name: profile_l1_gen, from: protocol/cn_protocol_v1.yaml, key: identity_domains.epochs }
+      - {
+          name: profile_l1_gen,
+          from: protocol/cn_protocol_v1.yaml,
+          key: identity_domains.epochs,
+        }
   - message: PHASE_SIGNAL
     direction: T2G
     why: "input_released is per Task and aggregates to all_tasks before pure-read L2 pins drop"
     fields_needed:
-      - { name: task_key, from: protocol/cn_protocol_v1.yaml, key: identity_domains.task_key }
+      - {
+          name: task_key,
+          from: protocol/cn_protocol_v1.yaml,
+          key: identity_domains.task_key,
+        }
   - message: RETIRE
     direction: G2T
     why: "Group-driven retire authorization; the local L1 Arena/Frame/UCE return happens only after it"
     fields_needed:
-      - { name: context_key, from: protocol/w4_memory.contract.yaml, key: provenance.fields }
-      - { name: arena_alloc_gen, from: protocol/w4_memory.contract.yaml, key: provenance.fields }
+      - {
+          name: context_key,
+          from: protocol/w4_memory.contract.yaml,
+          key: provenance.fields,
+        }
+      - {
+          name: arena_alloc_gen,
+          from: protocol/w4_memory.contract.yaml,
+          key: provenance.fields,
+        }
 # Messages W4 needs that the C009 catalog does not define yet; W1-01 adds them.
 # The page-lease acquire/release transaction set itself already exists in
 # pipeline_validator/memory/page_pool.py (AccessLease); these are its wire forms.

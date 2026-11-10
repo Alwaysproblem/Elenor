@@ -1,0 +1,40 @@
+# W3 field request to W1-01, DRAFT (C012).
+#
+# A REQUEST, not an implementation: W1-01 (C017) merges it into the ABI and W3 defines no bits.
+# No CSR address, opcode, width or bit position appears here; those come from the W1 CSR
+# allocator. Every csr request names a kind that exists in protocol/w3_vme_decl_abi_v1.json, so the
+# validator checks the request against the contract it points at. Joint freeze with C020; a
+# missing request blocks the seal and is never filled in by W1.
+schema: cn_field_request/v1
+package: W3
+status: draft
+csr_requests:
+  - name: nexus.mregion.start
+    kind: REGION_START
+    why: "the declaration carrier for E1/E2; consumed once, at the accepted beat of the first target-class instruction"
+  - name: nexus.mregion.end
+    kind: REGION_END
+    why: "closes the accepted-op set; END does not release the lease"
+  - name: nexus.mregion.first
+    kind: CHAIN_FIRST
+    why: "opens an accumulation chain; exactly one FIRST per chain"
+  - name: nexus.mregion.continue
+    kind: CHAIN_CONTINUE
+    why: "an accumulate step inside an open chain"
+  - name: nexus.mregion.final
+    kind: CHAIN_FINAL
+    why: "closes a chain; FINAL does not drain"
+messages:
+  - message: REGION_REQUEST
+    new: true
+    why: "E1: W2 asks W3 for a lease at the issue head; the reply is GRANTED or PARKED"
+  - message: REGION_GRANT
+    new: true
+    why: "grant result carrying region_id and the instance id for observability"
+  - message: REGION_DONE
+    new: true
+    why: "the only success terminal; the first moment a waiter may be woken"
+fields_needed:
+  - { name: region_id, key: events, why: "allocated by W3, unique within a Context generation" }
+  - { name: instance_id, key: events, why: "observability only; software never sees it (MAT-19)" }
+  - { name: region_done_record, key: ordering, why: "reliable, stable, bounded; W6 turns it into a completion event" }

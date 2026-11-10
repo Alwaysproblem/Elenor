@@ -19,14 +19,24 @@ inputs:
       value: 1000.0,
       unit: MHz,
       key: core_mhz,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 14, needle: core_mhz },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 14,
+          needle: core_mhz,
+        },
     }
   - {
       name: system_reserved_spm_per_bank,
       value: 2048,
       unit: B/bank,
       key: system_reserved_spm_per_bank,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 21, needle: system_reserved_spm_per_bank },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 21,
+          needle: system_reserved_spm_per_bank,
+        },
       note: "missing must never default to 0 (PRO-16)",
     }
   - {
@@ -34,35 +44,60 @@ inputs:
       value: 65536,
       unit: B/bank,
       key: spm_bytes_per_bank,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 39, needle: spm_bytes_per_bank },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 39,
+          needle: spm_bytes_per_bank,
+        },
     }
   - {
       name: spm_bytes_per_bank_mode1,
       value: 57344,
       unit: B/bank,
       key: spm_bytes_per_bank,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 40, needle: spm_bytes_per_bank },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 40,
+          needle: spm_bytes_per_bank,
+        },
     }
   - {
       name: spm_bytes_per_bank_mode2,
       value: 49152,
       unit: B/bank,
       key: spm_bytes_per_bank,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 41, needle: spm_bytes_per_bank },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 41,
+          needle: spm_bytes_per_bank,
+        },
     }
   - {
       name: spm_bytes_per_bank_mode3,
       value: 32768,
       unit: B/bank,
       key: spm_bytes_per_bank,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 42, needle: spm_bytes_per_bank },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 42,
+          needle: spm_bytes_per_bank,
+        },
     }
   - {
       name: cache_bytes_per_bank_mode0,
       value: 0,
       unit: B/bank,
       key: cache_bytes_per_bank,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 39, needle: cache_bytes_per_bank },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 39,
+          needle: cache_bytes_per_bank,
+        },
       allow_zero: true,
       note: "zero is a legitimate partition (SPM-only mode 0), still not a default",
     }
@@ -71,37 +106,67 @@ inputs:
       value: 8192,
       unit: B/bank,
       key: cache_bytes_per_bank,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 40, needle: cache_bytes_per_bank },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 40,
+          needle: cache_bytes_per_bank,
+        },
     }
   - {
       name: cache_bytes_per_bank_mode2,
       value: 16384,
       unit: B/bank,
       key: cache_bytes_per_bank,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 41, needle: cache_bytes_per_bank },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 41,
+          needle: cache_bytes_per_bank,
+        },
     }
   - {
       name: cache_bytes_per_bank_mode3,
       value: 32768,
       unit: B/bank,
       key: cache_bytes_per_bank,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 42, needle: cache_bytes_per_bank },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 42,
+          needle: cache_bytes_per_bank,
+        },
     }
   - {
       name: cache_line_bytes,
       value: 64,
       unit: B,
       key: line_bytes,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 50, needle: line_bytes },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 50,
+          needle: line_bytes,
+        },
       requires: power_of_two,
-      requires_source: { file: pipeline_validator/memory/cache.py, line: 110, needle: "line_bytes & (line_bytes - 1)" },
+      requires_source:
+        {
+          file: pipeline_validator/memory/cache.py,
+          line: 110,
+          needle: "line_bytes & (line_bytes - 1)",
+        },
     }
   - {
       name: hbm_outstanding_limit,
       value: 32,
       unit: entries,
       key: outstanding_limit,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 55, needle: outstanding_limit },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 55,
+          needle: outstanding_limit,
+        },
       note: "Python external-leg CAM depth (tag CAM, PPA-frozen later)",
     }
   - {
@@ -109,7 +174,12 @@ inputs:
       value: 64,
       unit: entries,
       key: mshr_entries,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 67, needle: mshr_entries },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 67,
+          needle: mshr_entries,
+        },
       note: "Python-owned L2 MSHR capacity",
     }
   - {
@@ -117,42 +187,72 @@ inputs:
       value: 1048576,
       unit: B,
       key: capacity_bytes,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 70, needle: capacity_bytes },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 70,
+          needle: capacity_bytes,
+        },
     }
   - {
       name: tile_l1_banks,
       value: 16,
       unit: banks,
       key: banks,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 71, needle: banks },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 71,
+          needle: banks,
+        },
     }
   - {
       name: tile_l1_bandwidth_gbs,
       value: 512.0,
       unit: GB_per_s,
       key: bandwidth_gbs,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 72, needle: bandwidth_gbs },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 72,
+          needle: bandwidth_gbs,
+        },
     }
   - {
       name: l1_access_latency_cycles,
       value: 1,
       unit: cycles,
       key: access_latency_cycles,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 73, needle: access_latency_cycles },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 73,
+          needle: access_latency_cycles,
+        },
     }
   - {
       name: l1_cache_lookup_cycles,
       value: 1,
       unit: cycles,
       key: lookup_latency_cycles,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 75, needle: lookup_latency_cycles },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 75,
+          needle: lookup_latency_cycles,
+        },
     }
   - {
       name: l1_mshr_entries,
       value: 16,
       unit: entries,
       key: mshr_entries,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 76, needle: mshr_entries },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 76,
+          needle: mshr_entries,
+        },
       note: "RTL implementation anchor for the L1 MSHR",
     }
   - {
@@ -160,21 +260,36 @@ inputs:
       value: 4,
       unit: jobs,
       key: load_depth,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 109, needle: load_depth },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 109,
+          needle: load_depth,
+        },
     }
   - {
       name: mfe_store_depth,
       value: 4,
       unit: jobs,
       key: store_depth,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 110, needle: store_depth },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 110,
+          needle: store_depth,
+        },
     }
   - {
       name: frame_bind_cycles,
       value: 8,
       unit: cycles,
       key: bind_cycles,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 129, needle: bind_cycles },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 129,
+          needle: bind_cycles,
+        },
       note: "a latency, distinct dimension from frame_slot_count; never summed with it",
     }
   - {
@@ -182,7 +297,12 @@ inputs:
       value: 16,
       unit: entries,
       key: slot_count,
-      source: { file: pipeline_validator/hardware_config.yaml, line: 130, needle: slot_count },
+      source:
+        {
+          file: pipeline_validator/hardware_config.yaml,
+          line: 130,
+          needle: slot_count,
+        },
     }
 derivations:
   - {
@@ -209,9 +329,21 @@ derivations:
       unit: B,
       note: "per bank; profiles.py:222-223 user_spm_per_bank; the capacity side of the PRO-16 identity",
     }
-  - { name: user_spm_per_bank_mode1, expr: "spm_bytes_per_bank_mode1 - system_reserved_spm_per_bank", unit: B }
-  - { name: user_spm_per_bank_mode2, expr: "spm_bytes_per_bank_mode2 - system_reserved_spm_per_bank", unit: B }
-  - { name: user_spm_per_bank_mode3, expr: "spm_bytes_per_bank_mode3 - system_reserved_spm_per_bank", unit: B }
+  - {
+      name: user_spm_per_bank_mode1,
+      expr: "spm_bytes_per_bank_mode1 - system_reserved_spm_per_bank",
+      unit: B,
+    }
+  - {
+      name: user_spm_per_bank_mode2,
+      expr: "spm_bytes_per_bank_mode2 - system_reserved_spm_per_bank",
+      unit: B,
+    }
+  - {
+      name: user_spm_per_bank_mode3,
+      expr: "spm_bytes_per_bank_mode3 - system_reserved_spm_per_bank",
+      unit: B,
+    }
   - {
       name: bank_busy_cycles_line_burst,
       expr: "l1_access_latency_cycles + ceil_div(cache_line_bytes, l1_bank_bytes_per_cycle)",
@@ -276,9 +408,21 @@ conservation_checks:
       equals: l1_per_bank_bytes,
       note: "SPM + cache partitions conserve the physical bank (profiles.py:197-198)",
     }
-  - { name: bank_partition_conservation_mode1, expr: "spm_bytes_per_bank_mode1 + cache_bytes_per_bank_mode1", equals: l1_per_bank_bytes }
-  - { name: bank_partition_conservation_mode2, expr: "spm_bytes_per_bank_mode2 + cache_bytes_per_bank_mode2", equals: l1_per_bank_bytes }
-  - { name: bank_partition_conservation_mode3, expr: "spm_bytes_per_bank_mode3 + cache_bytes_per_bank_mode3", equals: l1_per_bank_bytes }
+  - {
+      name: bank_partition_conservation_mode1,
+      expr: "spm_bytes_per_bank_mode1 + cache_bytes_per_bank_mode1",
+      equals: l1_per_bank_bytes,
+    }
+  - {
+      name: bank_partition_conservation_mode2,
+      expr: "spm_bytes_per_bank_mode2 + cache_bytes_per_bank_mode2",
+      equals: l1_per_bank_bytes,
+    }
+  - {
+      name: bank_partition_conservation_mode3,
+      expr: "spm_bytes_per_bank_mode3 + cache_bytes_per_bank_mode3",
+      equals: l1_per_bank_bytes,
+    }
 unresolved:
   - {
       name: per_ctx_outstanding_credit_cap,

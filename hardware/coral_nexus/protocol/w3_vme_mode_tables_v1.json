@@ -1,0 +1,185 @@
+{
+ "schema": "cn_vme_mode_tables/v1",
+ "status": "draft",
+ "abi": "w3_vme_decl_abi_v1.json",
+ "numeric_profile": "w3_numeric_profile_v1.yaml",
+ "reference": {
+  "template": "K-VME-BF16-ACC reference (compiler family: TM=16, TN in {8,12,16}, TK in {1,2})",
+  "scope": "REFERENCE TEMPLATE ONLY. Other tails and packings are separate sealed templates with their own tables; this is not a global whitelist.",
+  "modes": [
+   {
+    "name": "FP32-MAC",
+    "tm": 16,
+    "tk": 1,
+    "mtwiden": 1,
+    "mtype": 16417,
+    "vtype": 210,
+    "enabled": true,
+    "note": "seed/drain only: the accumulator is always 32-bit"
+   },
+   {
+    "name": "BF16-MAC-TK1",
+    "tm": 16,
+    "tk": 1,
+    "mtwiden": 2,
+    "mtype": 16418,
+    "vtype": 457,
+    "enabled": true,
+    "note": "single-K step"
+   },
+   {
+    "name": "BF16-MAC-TK2",
+    "tm": 16,
+    "tk": 2,
+    "mtwiden": 2,
+    "mtype": 16450,
+    "vtype": 457,
+    "enabled": true,
+    "note": "even-K pair"
+   },
+   {
+    "name": "INT8",
+    "tm": 16,
+    "tk": 1,
+    "mtwiden": 3,
+    "mtype": 16419,
+    "vtype": 192,
+    "enabled": false,
+    "note": "registered as existing; the tensor path forbids it, a hit is DISABLED_MODE"
+   }
+  ],
+  "transitions": [
+   {
+    "from": "NONE",
+    "to": "FP32-MAC",
+    "why": "seed"
+   },
+   {
+    "from": "FP32-MAC",
+    "to": "BF16-MAC-TK1",
+    "why": "operand load, single K"
+   },
+   {
+    "from": "FP32-MAC",
+    "to": "BF16-MAC-TK2",
+    "why": "operand load, K pair"
+   },
+   {
+    "from": "BF16-MAC-TK1",
+    "to": "FP32-MAC",
+    "why": "drain / narrowing alternation"
+   },
+   {
+    "from": "BF16-MAC-TK2",
+    "to": "FP32-MAC",
+    "why": "drain / narrowing alternation"
+   },
+   {
+    "from": "BF16-MAC-TK1",
+    "to": "BF16-MAC-TK2",
+    "why": "K tail grouping change"
+   },
+   {
+    "from": "BF16-MAC-TK2",
+    "to": "BF16-MAC-TK1",
+    "why": "odd-K tail step"
+   },
+   {
+    "from": "FP32-MAC",
+    "to": "FP32-MAC",
+    "why": "TN reprogram 16 <-> 8/12"
+   },
+   {
+    "from": "FP32-MAC",
+    "to": "CLEARED",
+    "why": "inter-block vset* clears mtype/altfmt (LLVM inserts it between asm blocks)"
+   },
+   {
+    "from": "BF16-MAC-TK1",
+    "to": "CLEARED",
+    "why": "inter-block vset*"
+   },
+   {
+    "from": "BF16-MAC-TK2",
+    "to": "CLEARED",
+    "why": "inter-block vset*"
+   },
+   {
+    "from": "CLEARED",
+    "to": "FP32-MAC",
+    "restore": true,
+    "why": "the next block's mset* preamble restores the mode"
+   },
+   {
+    "from": "CLEARED",
+    "to": "BF16-MAC-TK1",
+    "restore": true,
+    "why": "next block preamble"
+   },
+   {
+    "from": "CLEARED",
+    "to": "BF16-MAC-TK2",
+    "restore": true,
+    "why": "next block preamble"
+   }
+  ]
+ },
+ "tail": {
+  "template": "tail template (partial M, N in {8,12}) sealed separately",
+  "scope": "its own table; accepted by the same schema and the same checker",
+  "modes": [
+   {
+    "name": "FP32-MAC",
+    "tm": 16,
+    "tk": 1,
+    "mtwiden": 1,
+    "mtype": 16417,
+    "vtype": 210,
+    "enabled": true,
+    "note": "seed/drain"
+   },
+   {
+    "name": "BF16-MAC-TK1",
+    "tm": 9,
+    "tk": 1,
+    "mtwiden": 2,
+    "mtype": 9250,
+    "vtype": 457,
+    "enabled": true,
+    "note": "tm=9 tail: a different tm than the reference"
+   }
+  ],
+  "transitions": [
+   {
+    "from": "NONE",
+    "to": "FP32-MAC"
+   },
+   {
+    "from": "FP32-MAC",
+    "to": "BF16-MAC-TK1"
+   },
+   {
+    "from": "BF16-MAC-TK1",
+    "to": "FP32-MAC"
+   },
+   {
+    "from": "FP32-MAC",
+    "to": "CLEARED"
+   },
+   {
+    "from": "BF16-MAC-TK1",
+    "to": "CLEARED"
+   },
+   {
+    "from": "CLEARED",
+    "to": "FP32-MAC",
+    "restore": true
+   },
+   {
+    "from": "CLEARED",
+    "to": "BF16-MAC-TK1",
+    "restore": true
+   }
+  ]
+ }
+}
