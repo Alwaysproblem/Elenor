@@ -168,6 +168,73 @@ def check_cvfpu(profile: dict[str, Any], errors: list[str], notes: list[str]) ->
 
 
 # ---------------------------------------------------------------------------
+# the required contract (held HERE, not in the YAML it constrains)
+# ---------------------------------------------------------------------------
+# A required set stored in the profile could be deleted by the same edit that deletes a rule, so
+# it lives in the validator. Each entry is a rule the C011 card names, with the evidence class the
+# rule must keep and the vector KIND that must exercise it. Removing a rule, weakening its evidence
+# class, or removing the last vector of a kind makes the whole contract invalid.
+#
+# Card clause (design/coral_nexus_tile/execution/G1_contracts.md, C011 step 1):
+#   finite-width tree -> MUL-01; jam -> JAM-01; internal ROD -> ROD-01; multiplier widening overflow
+#   to Inf -> OVF-MUL-01; accumulate ROD overflow to max-normal -> OVF-ACC-01; signed zero, NaN,
+#   subnormal -> CAN-01 / SPC-01 / SUB-01; mask -> MSK-01; TK grouping -> TKG-01; the final BF16 RNE
+#   narrowing as its own boundary -> NAR-01; VME OF/NV only -> FLG-01; tail -> TIL-01; frm -> FRM-01.
+REQUIRED_RULES: dict[str, dict[str, Any]] = {
+  "MUL-01": {"evidence": "upstream_source", "kinds": {"cell"}},
+  "JAM-01": {"evidence": "upstream_source", "kinds": {"cell", "ablation"}},
+  "ROD-01": {"evidence": "upstream_source", "kinds": {"cell", "tk_sequence", "ablation"}},
+  "OVF-MUL-01": {"evidence": "upstream_source", "kinds": {"cell"}},
+  "OVF-ACC-01": {"evidence": "upstream_source", "kinds": {"cell"}},
+  "SPC-01": {"evidence": "upstream_source", "kinds": {"cell"}},
+  "MSK-01": {"evidence": "upstream_source", "kinds": {"cell"}},
+  "TIL-01": {"evidence": "real_rtl_run", "kinds": {"record_case"}},
+  "TKG-01": {"evidence": "upstream_source", "kinds": {"cell", "tk_sequence"}},
+  "CAN-01": {"evidence": "upstream_source", "kinds": {"cell"}},
+  "SUB-01": {"evidence": "upstream_source", "kinds": {"cell"}},
+  "FLG-01": {"evidence": "upstream_source", "kinds": {"cell"}},
+  "FRM-01": {"evidence": "upstream_source", "kinds": {"frm"}},
+  "NAR-01": {"evidence": "decided_by_card", "kinds": {"narrow"}},
+}
+# Open items and known differences the contract must keep reporting until their owner closes them.
+REQUIRED_OPEN_ITEMS = {"OPEN-02", "OPEN-03", "OPEN-04"}
+REQUIRED_KNOWN_DIFFERENCES = {"KD-01"}
+# Vector kinds that must be present at all, whatever the rules claim.
+REQUIRED_VECTOR_KINDS = {"cell", "ablation", "tk_sequence", "narrow", "frm", "record_case"}
+
+
+def check_required_contract(profile: dict[str, Any], vectors: dict[str, Any], errors: list[str]) -> None:
+  rules = {r["id"]: r for r in profile["rules"]}
+  by_id = {v["id"]: v for v in vectors["vectors"]}
+  for rid, need in REQUIRED_RULES.items():
+    rule = rules.get(rid)
+    if rule is None:
+      errors.append(f"required rule {rid} is missing from the profile")
+      continue
+    if rule.get("evidence") != need["evidence"]:
+      errors.append(
+        f"required rule {rid}: evidence class {rule.get('evidence')!r}, must stay {need['evidence']!r}"
+      )
+    kinds = {by_id[v]["kind"] for v in rule.get("vectors", []) if v in by_id}
+    for kind in sorted(need["kinds"] - kinds):
+      errors.append(f"required rule {rid}: no {kind!r} vector exercises it")
+  for kind in sorted(REQUIRED_VECTOR_KINDS - {v["kind"] for v in vectors["vectors"]}):
+    errors.append(f"required vector kind {kind!r} is absent from known_vectors.json")
+  present = {i["id"] for i in profile.get("open_items", []) if i.get("status") != "closed"}
+  for item in sorted(REQUIRED_OPEN_ITEMS - present):
+    errors.append(f"open item {item} was removed or closed without its owner closing it")
+  closed = {i["id"]: i for i in profile.get("open_items", []) if i.get("status") == "closed"}
+  if "OPEN-01" not in closed:
+    errors.append("open item OPEN-01 must stay closed by the committed probe record")
+  known = {k["id"] for k in profile.get("known_differences", [])}
+  for kd in sorted(REQUIRED_KNOWN_DIFFERENCES - known):
+    errors.append(f"known difference {kd} was removed")
+  extra = sorted(set(rules) - set(REQUIRED_RULES))
+  if extra:
+    errors.append(f"rules {extra} are not in the validator's required set; add them there deliberately")
+
+
+# ---------------------------------------------------------------------------
 # rules vs vectors
 # ---------------------------------------------------------------------------
 def check_rule_vector_coverage(profile: dict[str, Any], vectors: dict[str, Any], errors: list[str]) -> None:
@@ -209,10 +276,50 @@ def run_cell(vec: dict[str, Any]) -> tuple[int, dict[str, int]]:
   return bits, {"nv": mul.nv | add.nv, "of": mul.of | add.of}
 
 
+_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
+  "cell": ("old_fp32_bits", "pairs_bf16_bits", "tk", "expected_fp32_bits", "expected_flags"),
+  "ablation": (
+    "old_fp32_bits",
+    "pairs_bf16_bits",
+    "tk",
+    "expected_fp32_bits",
+    "ablation",
+    "ablated_fp32_bits",
+  ),
+  "tk_sequence": (
+    "old_fp32_bits",
+    "pairs_bf16_bits",
+    "tk",
+    "expected_fp32_bits",
+    "expected_split_fp32_bits",
+  ),
+  "narrow": ("input_fp32_bits", "frm", "expected_bf16_bits", "expected_flags"),
+  "frm": ("frm", "expected_error"),
+  "record_case": ("record", "case"),
+}
+
+
 def run_vector(vec: dict[str, Any]) -> list[str]:
-  """Run one vector through the reference model; return the list of mismatches (empty = pass)."""
-  kind = vec["kind"]
+  """Run one vector through the reference model; return the list of mismatches (empty = pass).
+
+  A vector whose fields do not fit its kind is reported, never raised: a malformed vector must not
+  turn a validation failure into a traceback.
+  """
+  kind = str(vec.get("kind"))
   out: list[str] = []
+  need = _REQUIRED_FIELDS.get(kind)
+  if need is None:
+    return [f"unknown vector kind {kind!r}"]
+  missing = [f for f in need if f not in vec]
+  if missing:
+    return [f"kind {kind!r} needs fields {missing}"]
+  try:
+    return _run_vector_checked(vec, kind, out)
+  except (nr.NumericError, TypeError, ValueError, IndexError) as exc:
+    return [f"malformed vector: {exc}"]
+
+
+def _run_vector_checked(vec: dict[str, Any], kind: str, out: list[str]) -> list[str]:
   if kind in ("cell", "ablation", "tk_sequence"):
     bits, flags = run_cell(vec)
     if bits != vec["expected_fp32_bits"]:
@@ -242,10 +349,46 @@ def run_vector(vec: dict[str, Any]) -> list[str]:
       if exc.code != vec["expected_error"]:
         out.append(f"error {exc.code} != expected {vec['expected_error']}")
   elif kind == "record_case":
-    pass  # checked against the real-RTL record by check_record
+    out.extend(check_record_case(vec))
   else:
     out.append(f"unknown vector kind {kind!r}")
   return out
+
+
+def check_record_case(vec: dict[str, Any], record_path: Path | None = None) -> list[str]:
+  """A `record_case` vector must point at a real tail case of the committed real-RTL record.
+
+  The case must exist, be a tail tile (tm or tn below the full dimension), and every cell outside
+  the tm x tn window must still hold the preloaded accumulator (undisturbed). Without this a vector
+  could name any case and the tail rule would have no evidence behind it.
+  """
+  path = record_path or RECORD
+  if not path.is_file():
+    return [f"record {path} missing"]
+  record = json.loads(path.read_text())
+  if vec["record"] != "bf16_kat_record.json":
+    return [f"record_case names unknown record {vec['record']!r}"]
+  cases = {c["case"]: c for c in record["cases"]}
+  case = cases.get(vec["case"])
+  if case is None:
+    return [f"record has no case {vec['case']}"]
+  tm, tn = case["tm"], case["tn"]
+  if tm >= nr_dim() and tn >= nr_dim():
+    return [f"case {vec['case']} is a full tile (tm={tm}, tn={tn}); it carries no tail evidence"]
+  if not case["init_mode"]:
+    return [f"case {vec['case']} did not preload the accumulator, so undisturbed cells cannot be shown"]
+  outside = [i for i in range(nr_dim() ** 2) if i // nr_dim() >= tm or i % nr_dim() >= tn]
+  moved = [i for i in outside if case["actual_u32"][i] != case["c_init_u32"][i]]
+  if moved:
+    return [f"case {vec['case']}: {len(moved)} cells outside {tm}x{tn} changed (first {moved[0]})"]
+  inside = [i for i in range(nr_dim() ** 2) if i not in set(outside)]
+  if not inside or all(case["actual_u32"][i] == case["c_init_u32"][i] for i in inside):
+    return [f"case {vec['case']}: no cell inside the window was updated"]
+  return []
+
+
+def nr_dim() -> int:
+  return 16
 
 
 def check_vectors(vectors: dict[str, Any], errors: list[str]) -> int:
@@ -359,7 +502,11 @@ def check_probe_record(vectors: dict[str, Any], errors: list[str], path: Path = 
     errors.append(f"real-RTL probe record {path} missing")
     return 0
   rec = json.loads(path.read_text())
-  groups = probe.build_groups(vectors)
+  try:
+    groups = probe.build_groups(vectors)
+  except (KeyError, TypeError, IndexError, probe.ProbeError) as exc:
+    errors.append(f"probe record: vectors cannot be packed for the probe: {type(exc).__name__}: {exc}")
+    return 0
   errors.extend(f"probe record: {e}" for e in probe.compare(rec, groups))
   errors.extend(f"probe record: {e}" for e in probe.vector_results(rec, groups, vectors))
   if rec.get("replay_identical") is not True:
@@ -383,6 +530,7 @@ def validate(
   anchors = check_anchors(profile, errors)
   check_generator(profile, errors)
   cvfpu_checked = check_cvfpu(profile, errors, notes)
+  check_required_contract(profile, vectors, errors)
   check_rule_vector_coverage(profile, vectors, errors)
   vector_count = check_vectors(vectors, errors)
   ablation_count = check_ablations(vectors, errors)

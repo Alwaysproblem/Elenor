@@ -1,3 +1,9 @@
 # Generated simulator traces/reports are large artifacts, not source documents.
 /*.json
 /examples/artifacts/
+
+# Evidence records are byte-pinned (sha256 in verification/expected_evidence.json or checked by the
+# numeric validator). A formatter must never rewrite them: prettier only changes whitespace, but the
+# digest covers the bytes.
+/hardware/coral_nexus/verification/numerics/upstream_probe/
+/hardware/coral_nexus/verification/numerics/known_vectors.json

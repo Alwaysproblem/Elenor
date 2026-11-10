@@ -22,12 +22,25 @@ generator:
   fp_fmt_config:
     literal: "5'b10001"
     enabled: [FP32, FP16ALT]
-    source: {file: verilog/rvv/design/Zvt/zvt_pe_block.sv, line: 110, anchor: "5'b10001"}
+    source:
+      {
+        file: verilog/rvv/design/Zvt/zvt_pe_block.sv,
+        line: 110,
+        anchor: "5'b10001",
+      }
     note: "also applies to the non-origin PEs only under ZVTBF16FMM_ON (block lines 150-155); the flag is set in flags.bzl"
-    flag_source: {file: chisel/src/coralnpu/flags.bzl, line: 66, anchor: ZVTBF16FMM_ON}
+    flag_source:
+      { file: chisel/src/coralnpu/flags.bzl, line: 66, anchor: ZVTBF16FMM_ON }
   format_table:
     source: "pinned cvfpu src/fpnew_pkg.sv FP_ENCODINGS (vendor archive; see cvfpu_pin)"
-    entries: {FP32: [8, 23], FP64: [11, 52], FP16: [5, 10], FP8: [5, 2], FP16ALT: [8, 7]}
+    entries:
+      {
+        FP32: [8, 23],
+        FP64: [11, 52],
+        FP16: [5, 10],
+        FP8: [5, 2],
+        FP16ALT: [8, 7],
+      }
     bf16_is: FP16ALT
   derived:
     super_exp_bits: 8
@@ -37,31 +50,90 @@ generator:
     guard_bits: 2
     prod_exp_bits: 10
     prod_sig_bits: 26
-    lanes: {FP32: 1, FP16ALT: 2}
+    lanes: { FP32: 1, FP16ALT: 2 }
     derivation_sources:
-      - {file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv, line: 65, anchor: PROD_EXP_BITS}
-      - {file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv, line: 66, anchor: PROD_SIG_BITS}
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv,
+          line: 65,
+          anchor: PROD_EXP_BITS,
+        }
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv,
+          line: 66,
+          anchor: PROD_SIG_BITS,
+        }
   pipeline:
-    mulbulk_pipe_stages: {value: 3, source: {file: verilog/rvv/design/Zvt/zvt_pe_block.sv, line: 34, anchor: "MULBULKPIPENUM  = 3"}}
-    adder_pipe_stages: {value: 3, source: {file: verilog/rvv/design/Zvt/zvt_pe_block.sv, line: 35, anchor: "ADDERPIPENUM    = 3"}}
+    mulbulk_pipe_stages:
+      {
+        value: 3,
+        source:
+          {
+            file: verilog/rvv/design/Zvt/zvt_pe_block.sv,
+            line: 34,
+            anchor: "MULBULKPIPENUM  = 3",
+          },
+      }
+    adder_pipe_stages:
+      {
+        value: 3,
+        source:
+          {
+            file: verilog/rvv/design/Zvt/zvt_pe_block.sv,
+            line: 35,
+            anchor: "ADDERPIPENUM    = 3",
+          },
+      }
     note: "cycle counts are NOT part of this numeric contract"
-  vlen: {value: 128, source: {file: chisel/src/coralnpu/Parameters.scala, line: 100, anchor: rvvVlen}}
-  te: {rule: "VLEN / 8", source: {file: verilog/rvv/inc/rvv_backend_define.svh, line: 208, anchor: "`define TE"}, value: 16}
-  compratio_default: {source: {file: verilog/rvv/inc/rvv_backend_define.svh, line: 215, anchor: "4/`TE"}, note: "ZVT_MAXCOMPUTING (1/4) is never enabled in the pinned flags; excluded here"}
+  vlen:
+    {
+      value: 128,
+      source:
+        {
+          file: chisel/src/coralnpu/Parameters.scala,
+          line: 100,
+          anchor: rvvVlen,
+        },
+    }
+  te:
+    {
+      rule: "VLEN / 8",
+      source:
+        {
+          file: verilog/rvv/inc/rvv_backend_define.svh,
+          line: 208,
+          anchor: "`define TE",
+        },
+      value: 16,
+    }
+  compratio_default:
+    {
+      source:
+        {
+          file: verilog/rvv/inc/rvv_backend_define.svh,
+          line: 215,
+          anchor: "4/`TE",
+        },
+      note: "ZVT_MAXCOMPUTING (1/4) is never enabled in the pinned flags; excluded here",
+    }
 
 cvfpu_pin:
-  source: {file: rules/repos.bzl, line: 100, anchor: "bb65bdedd07711dfd41c621382f940a5cbb93046"}
+  source:
+    {
+      file: rules/repos.bzl,
+      line: 100,
+      anchor: "bb65bdedd07711dfd41c621382f940a5cbb93046",
+    }
   note: "cvfpu is a Bazel external. Its fpnew_pkg.sv is NOT in the pinned coralnpu tree; it exists only in the offline vendor archive produced by C004/C005. The probe records its sha256 when run; the validator never cites a cvfpu line it did not read."
   read_from: "out/coral_nexus/C005/work-coralnpu/vendor-cache/+coralnpu_deps_ext+cvfpu/src/fpnew_pkg.sv"
   read_sha256: 5a40b565a754a206bc7075cb1169039b33659c27e75749e6772e15ae0ac3922e
   encodings:
-    RNE: {value: "3'b000", line: 141}
-    RTZ: {value: "3'b001", line: 142}
-    RDN: {value: "3'b010", line: 143}
-    RUP: {value: "3'b011", line: 144}
-    RMM: {value: "3'b100", line: 145}
-    ROD: {value: "3'b101", line: 146}
-    DYN: {value: "3'b111", line: 148}
+    RNE: { value: "3'b000", line: 141 }
+    RTZ: { value: "3'b001", line: 142 }
+    RDN: { value: "3'b010", line: 143 }
+    RUP: { value: "3'b011", line: 144 }
+    RMM: { value: "3'b100", line: 145 }
+    ROD: { value: "3'b101", line: 146 }
+    DYN: { value: "3'b111", line: 148 }
   correction: "the W3 design cites fpnew_pkg ROD at L146 and FP16ALT at L27/L45/L55: the cvfpu vendor copy confirms ROD L146 and FP16ALT enum L45 (table row L27); L55 is not the FP16ALT encoding."
 
 # ---- the rules -------------------------------------------------------------------------------
@@ -77,8 +149,16 @@ rules:
       rounded once.
     evidence: upstream_source
     sources:
-      - {file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv, line: 136, anchor: "max_exp_tree[0] = ALIGN_PRODUCT_TO_MSB"}
-      - {file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv, line: 66, anchor: PROD_SIG_BITS}
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv,
+          line: 136,
+          anchor: "max_exp_tree[0] = ALIGN_PRODUCT_TO_MSB",
+        }
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv,
+          line: 66,
+          anchor: PROD_SIG_BITS,
+        }
     vectors: [mul_basic_exact, mul_two_lane_sum, jam_large_exponent_gap]
   - id: JAM-01
     title: "Bits lost on alignment are OR-ed into the LSB (jam), not truncated"
@@ -97,8 +177,16 @@ rules:
       dropped the jam, or used RNE internally, cannot pass.
     evidence: upstream_source
     sources:
-      - {file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv, line: 417, anchor: "this_prod.round_bit | this_prod.sticky_bit"}
-      - {file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv, line: 9, anchor: "ALIGN_PRODUCT_TO_MSB = 1'b1"}
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv,
+          line: 417,
+          anchor: "this_prod.round_bit | this_prod.sticky_bit",
+        }
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv,
+          line: 9,
+          anchor: "ALIGN_PRODUCT_TO_MSB = 1'b1",
+        }
     caution: >
       The design (W3 6.2/8.2) describes the finite-width tree as "not mathematically exact" and asks
       for a quantified difference. For two lanes under ROD that difference is zero; the rule is kept
@@ -112,11 +200,35 @@ rules:
       bit is 0 and (round | sticky) is 1.
     evidence: upstream_source
     sources:
-      - {file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv, line: 272, anchor: "fpnew_pkg::ROD"}
-      - {file: verilog/rvv/design/Zvt/zvt_pe_block.sv, line: 90, anchor: "fpnew_pkg::ROD"}
-      - {file: verilog/rvv/design/Zvt/fp_rounding.sv, line: 91, anchor: "fpnew_pkg::ROD: round_up"}
-      - {file: verilog/rvv/design/Zvt/zvt_pe_block.sv, line: 311, anchor: "mulbulkCmd.tag.rndMode"}
-    vectors: [rod_odd_sticky, rod_guard_set_no_round, rod_exact, rod_vs_rne, tkg_grouping_differs, jam_ablation_rne]
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv,
+          line: 272,
+          anchor: "fpnew_pkg::ROD",
+        }
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_block.sv,
+          line: 90,
+          anchor: "fpnew_pkg::ROD",
+        }
+      - {
+          file: verilog/rvv/design/Zvt/fp_rounding.sv,
+          line: 91,
+          anchor: "fpnew_pkg::ROD: round_up",
+        }
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_block.sv,
+          line: 311,
+          anchor: "mulbulkCmd.tag.rndMode",
+        }
+    vectors:
+      [
+        rod_odd_sticky,
+        rod_guard_set_no_round,
+        rod_exact,
+        rod_vs_rne,
+        tkg_grouping_differs,
+        jam_ablation_rne,
+      ]
   - id: OVF-MUL-01
     title: "Multiplier-stage overflow is Inf (widening), not max-normal"
     statement: >
@@ -124,8 +236,16 @@ rules:
       src_fmt == dst_fmt. BF16 -> FP32 differs, so the overflow is Inf with OF and NX set.
     evidence: upstream_source
     sources:
-      - {file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv, line: 562, anchor: "widen-mode ROD overflows to inf"}
-      - {file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv, line: 563, anchor: "src_fmt_q == dst_fmt_q"}
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv,
+          line: 562,
+          anchor: "widen-mode ROD overflows to inf",
+        }
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv,
+          line: 563,
+          anchor: "src_fmt_q == dst_fmt_q",
+        }
     caution: "Reachability: two BF16 operands multiply to < 2**256, which is inside FP32 range; a single product cannot overflow FP32. Overflow at this stage needs the two-lane SUM to exceed FP32 max, hence the vector uses max-normal operands."
     vectors: [mul_overflow_two_lane_sum]
   - id: OVF-ACC-01
@@ -136,8 +256,16 @@ rules:
       overflows FP32 yields +/- max-normal with OF and NX set, NOT Inf.
     evidence: upstream_source
     sources:
-      - {file: verilog/rvv/design/Zvt/zvt_pe_adder_fp_lane.sv, line: 151, anchor: "8'hFE, 23'h7FFFFF"}
-      - {file: verilog/rvv/design/Zvt/fp_rounding.sv, line: 101, anchor: "fpnew_pkg::RTZ, fpnew_pkg::ROD: round_of_to_max_norm = 1'b1"}
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_adder_fp_lane.sv,
+          line: 151,
+          anchor: "8'hFE, 23'h7FFFFF",
+        }
+      - {
+          file: verilog/rvv/design/Zvt/fp_rounding.sv,
+          line: 101,
+          anchor: "fpnew_pkg::RTZ, fpnew_pkg::ROD: round_of_to_max_norm = 1'b1",
+        }
     asymmetry: "OVF-MUL-01 gives Inf, OVF-ACC-01 gives max-normal. Both are deliberate and both are pinned; KD-01 records that raw Spike/MPACT differ."
     vectors: [acc_overflow_to_max_normal, acc_overflow_negative]
   - id: SPC-01
@@ -149,10 +277,31 @@ rules:
       In the accumulate stage Inf - Inf (effective) is NaN with NV.
     evidence: upstream_source
     sources:
-      - {file: verilog/rvv/design/Zvt/fp_mulfront.sv, line: 93, anchor: "a_is_nan || b_is_nan"}
-      - {file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv, line: 227, anchor: "inf_minus_inf"}
-      - {file: verilog/rvv/design/Zvt/fp_addfront.sv, line: 75, anchor: "a_is_inf && b_is_inf"}
-    vectors: [spc_inf_times_zero, spc_snan_sets_nv, spc_qnan_no_nv, spc_inf_minus_inf_lanes, spc_acc_inf_minus_inf, spc_single_inf, msk_live_inf_other_masked]
+      - {
+          file: verilog/rvv/design/Zvt/fp_mulfront.sv,
+          line: 93,
+          anchor: "a_is_nan || b_is_nan",
+        }
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv,
+          line: 227,
+          anchor: "inf_minus_inf",
+        }
+      - {
+          file: verilog/rvv/design/Zvt/fp_addfront.sv,
+          line: 75,
+          anchor: "a_is_inf && b_is_inf",
+        }
+    vectors:
+      [
+        spc_inf_times_zero,
+        spc_snan_sets_nv,
+        spc_qnan_no_nv,
+        spc_inf_minus_inf_lanes,
+        spc_acc_inf_minus_inf,
+        spc_single_inf,
+        msk_live_inf_other_masked,
+      ]
   - id: MSK-01
     title: "Mask comes before classification; a masked lane never takes part"
     statement: >
@@ -162,21 +311,38 @@ rules:
       0 x 0, never 0 x Inf. Partial-element masks are forbidden by assertion.
     evidence: upstream_source
     sources:
-      - {file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv, line: 86, anchor: "operands_masked[0]"}
-      - {file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv, line: 161, anchor: "fmt_product_enable[i][j] = mask"}
-      - {file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv, line: 168, anchor: "Partial mask detected"}
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv,
+          line: 86,
+          anchor: "operands_masked[0]",
+        }
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv,
+          line: 161,
+          anchor: "fmt_product_enable[i][j] = mask",
+        }
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv,
+          line: 168,
+          anchor: "Partial mask detected",
+        }
     note: >
       The 0 x Inf NV hazard exists only if a mask were implemented as multiply-by-zero on ONE
       operand; this RTL does not. A live Inf on one operand with a live zero on the other is still
       NV (SPC-01), because that lane is not masked.
-    vectors: [msk_masked_inf_isolated, msk_masked_nan_isolated, msk_live_inf_other_masked]
+    vectors:
+      [
+        msk_masked_inf_isolated,
+        msk_masked_nan_isolated,
+        msk_live_inf_other_masked,
+      ]
   - id: TIL-01
     title: "Tail Tm/Tn: cells outside the tile are not written"
     statement: >
       A cell with row >= tm or column >= tn receives no valid input and the accumulator is left
       undisturbed (the real-RTL KAT records the preloaded value there).
     evidence: real_rtl_run
-    source_record: {record: bf16_kat_record.json, case: 3, tm: 9, tn: 11}
+    source_record: { record: bf16_kat_record.json, case: 3, tm: 9, tn: 11 }
     vectors: [til_tail_9x11]
   - id: TKG-01
     title: "TK grouping: tk=1 uses lane 0 only; tk=2 sums both K lanes in one tree"
@@ -186,8 +352,16 @@ rules:
       grouped differently can produce different bits.
     evidence: upstream_source
     sources:
-      - {file: verilog/rvv/design/Zvt/zvt_pe_array.sv, line: 95, anchor: "peCmd[0].tk==3'd1"}
-      - {file: verilog/rvv/design/Zvt/zvt_pe_array.sv, line: 96, anchor: "vaMaskLo[i] = {2'b0"}
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_array.sv,
+          line: 95,
+          anchor: "peCmd[0].tk==3'd1",
+        }
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_array.sv,
+          line: 96,
+          anchor: "vaMaskLo[i] = {2'b0",
+        }
     vectors: [tkg_grouping_differs, tkg_tk1_single_lane]
   - id: CAN-01
     title: "Exact cancellation gives +0 in the multiplier tree and sign-by-rule in the adder"
@@ -197,8 +371,16 @@ rules:
       operand sign. RDN is never used here (the tag is ROD), so cancellation is +0.
     evidence: upstream_source
     sources:
-      - {file: verilog/rvv/design/Zvt/fp_addfront.sv, line: 214, anchor: "assign result_sign = sum_is_zero"}
-      - {file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv, line: 478, anchor: "fmt_zero ? 1'b0"}
+      - {
+          file: verilog/rvv/design/Zvt/fp_addfront.sv,
+          line: 214,
+          anchor: "assign result_sign = sum_is_zero",
+        }
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv,
+          line: 478,
+          anchor: "fmt_zero ? 1'b0",
+        }
     vectors: [can_tree_cancel, can_accumulate_cancel, can_signed_zero_same_sign]
   - id: SUB-01
     title: "Subnormal inputs and results are handled on the fixed subnormal grid"
@@ -208,8 +390,16 @@ rules:
       2**-149 grid under ROD and raise UF only when inexact.
     evidence: upstream_source
     sources:
-      - {file: verilog/rvv/design/Zvt/fp_mulfront.sv, line: 129, anchor: "a_exponent + a_is_subnormal"}
-      - {file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv, line: 119, anchor: "subnormal * subnormal"}
+      - {
+          file: verilog/rvv/design/Zvt/fp_mulfront.sv,
+          line: 129,
+          anchor: "a_exponent + a_is_subnormal",
+        }
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_mulbulk_fp_lane.sv,
+          line: 119,
+          anchor: "subnormal * subnormal",
+        }
     vectors: [sub_input_times_normal, sub_times_sub_underflow]
   - id: FLG-01
     title: "Only OF and NV leave the VME; NX/UF/DZ do not"
@@ -219,10 +409,26 @@ rules:
       instructions (vfwmaccbf16, vfncvtbf16) keep their own IEEE flags and are not restricted by it.
     evidence: upstream_source
     sources:
-      - {file: verilog/rvv/design/Zvt/zvt_pe_block.sv, line: 206, anchor: "status.OF"}
-      - {file: verilog/rvv/design/Zvt/zvt_pe_block.sv, line: 207, anchor: "status.NV"}
-      - {file: verilog/rvv/design/Zvt/zvt_pe_block.sv, line: 366, anchor: "fpexp.of"}
-      - {file: verilog/rvv/design/Zvt/zvt_pe_block.sv, line: 367, anchor: "fpexp.nv"}
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_block.sv,
+          line: 206,
+          anchor: "status.OF",
+        }
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_block.sv,
+          line: 207,
+          anchor: "status.NV",
+        }
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_block.sv,
+          line: 366,
+          anchor: "fpexp.of",
+        }
+      - {
+          file: verilog/rvv/design/Zvt/zvt_pe_block.sv,
+          line: 367,
+          anchor: "fpexp.nv",
+        }
     vectors: [flg_nx_not_exposed, flg_of_exposed]
   - id: FRM-01
     title: "frm is cast straight to roundmode; DYN and the unassigned codes are not allowed"
@@ -234,7 +440,11 @@ rules:
       are rejected by the profile.
     evidence: upstream_source
     sources:
-      - {file: verilog/rvv/design/rvv_backend_dispatch.sv, line: 505, anchor: "roundmode_e'(uop_uop2dp[i].vector_csr.frm)"}
+      - {
+          file: verilog/rvv/design/rvv_backend_dispatch.sv,
+          line: 505,
+          anchor: "roundmode_e'(uop_uop2dp[i].vector_csr.frm)",
+        }
     cvfpu_encodings: "RNE 000, RTZ 001, RDN 010, RUP 011, RMM 100, ROD 101, DYN 111 (cvfpu_pin); code 110 has no enumerator"
     vectors: [frm_dyn_rejected, frm_rod_rejected, frm_unassigned_rejected]
   - id: NAR-01
@@ -245,7 +455,14 @@ rules:
       into the VME rounding.
     evidence: decided_by_card
     basis: "design W3 6.1 selects frm=RNE for narrowing; the RTL path (rvv_backend_falu_unit.sv) is NOT read back in this card, so the narrowing rule is the card's decision plus an exact RNE reference, not an RTL fact"
-    vectors: [nar_tie_to_even, nar_tie_odd, nar_overflow_inf, nar_snan, nar_min_sub_exact]
+    vectors:
+      [
+        nar_tie_to_even,
+        nar_tie_odd,
+        nar_overflow_inf,
+        nar_snan,
+        nar_min_sub_exact,
+      ]
 
 # ---- evidence the card could NOT close --------------------------------------------------------
 open_items:
