@@ -1,0 +1,44 @@
+version: 1
+# Per-Context issue boundary, DRAFT (C010 / W2-01; fields finalized by W2-03).
+#
+# Defines what the scheduler may accept per cycle and how rejection, partial
+# accept and cancel are expressed, so W3/W4/W6/W7 can code against it.
+status: draft
+
+bundle:
+  lanes_param: instructionLanes
+  lanes: 4
+  source: {file: hdl/chisel/src/coralnpu/Parameters.scala, line: 77}
+  rules:
+    - {id: same_context, text: "every lane of one bundle comes from the SAME Context"}
+    - {id: prefix_only, text: "accepted lanes are a program-order prefix: if lane i is not accepted, lanes i+1.. are not accepted"}
+    - {id: partial_accept, text: "an accepted prefix may be shorter than 4; the unaccepted lanes keep a stable payload until accepted or cancelled"}
+    - {id: owner_op_seq_advance, text: "owner_op_seq advances only for ACCEPTED lanes"}
+
+selection:
+  policy: round_robin_over_eligible
+  rr_advance: "the pointer moves only when a Context is actually selected; a cycle with no selection does not advance it"
+  rr_resume: "after a Context is selected the next scan starts at that slot + 1"
+  source: {file: pipeline_validator/tile.py, line: 635,
+           note: "_select_context: _rr_next_ctx = (idx + 1) % context_count on selection only"}
+  parked_context: "not selected; its accepted work still executes and retires"
+
+signals:
+  ready_valid:
+    - {name: per_ctx_ready, direction: W6_to_W2, owner: W6, note: "READY/park summary per Context"}
+    - {name: issue_valid, direction: W2_out, owner: W2}
+    - {name: lane_accept, direction: W2_out, owner: W2, width_rule: "instructionLanes"}
+  cancel:
+    - {name: cancel_ctx, direction: W6_to_W2, owner: W6, scope: "one Context only"}
+    - {name: fetch_epoch_flush, direction: W2_internal, owner: W2, scope: "one Context only",
+       note: "branch redirect bumps THIS Context's fetch_epoch; it is not a Task-level cancel"}
+  stall_reasons:
+    existing_validator: [WAIT_EVENT, WAIT_OPERAND, STREAM_CREDIT, WAIT_L1_BANK, WAIT_L2_BANK, WAIT_NOC_CREDIT,
+                         WAIT_DMA_QUEUE, WAIT_HBM_OUTSTANDING, UCE_PROGRAM_DESC, UNKNOWN, WAIT_MSHR]
+    existing_source: {file: pipeline_validator/pmu.py, line: 15}
+    added_by_cs1: [WAIT_REGION, WAIT_CSR, WAIT_FETCH]
+
+epochs:
+  fetch_epoch: {scope: per_context, role: "judges whether a fetch response is current", not_for: "task isolation"}
+  ctx_generation: {scope: per_context_slot, role: "isolates every late result of an old Task"}
+  separation: "the two are different domains and are never substituted for each other (CTX-05/06)"

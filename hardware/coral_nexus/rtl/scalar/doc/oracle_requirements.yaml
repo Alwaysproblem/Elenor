@@ -1,0 +1,43 @@
+version: 1
+# Independent ISA oracle requirements, DRAFT (C010 / W2-01).
+#
+# Input and output contract for the W7-02 oracle. W2 states what it NEEDS from
+# an oracle; it does not write one. A Python sequencing comparison is not an
+# instruction oracle (parent contract C4), so nothing here lets the validator
+# stand in for it.
+status: draft
+independence:
+  oracle_must_not_share: ["the RTL under test", "pipeline_validator numeric paths"]
+  oracle_owner: W7-02
+  w2_role: "fixes the dependency and the record schema only"
+
+input_contract:
+  required:
+    - {name: elf, note: "program image"}
+    - {name: entry_pc}
+    - {name: writable_segment_layout}
+    - {name: per_context_initial_csr, note: "start CSR values per Context"}
+    - {name: per_context_initial_rf, note: "start GPR/FPR values per Context"}
+    - {name: observable_event_list, note: "events the oracle must reproduce"}
+  per_context: true
+  note: "one oracle input per Context; Contexts do not share register or CSR state"
+
+output_contract:
+  retire_stream:
+    schema_ref: retire_record.yaml
+    ordering: "program order per Context"
+  final_architectural_state: [register_files, csrs, memory_bytes]
+  flags: [fflags, vxsat]
+
+comparison_rules:
+  - id: key_match
+    text: "records are compared by (ctx_slot, ctx_generation, owner_op_seq), never by PC alone"
+  - id: no_pc_only_pairing
+    text: "two Contexts executing the same PC must not be paired with each other's oracle stream"
+  - id: flags_at_retire
+    text: "flags are compared at the retiring record, not at first arrival"
+  - id: mode
+    text: "requires a full RetirementBuffer; a mini build cannot be compared"
+
+known_gaps_recorded_not_hidden:
+  - "special-value differences between an ISA reference and the DUT are left to the independent oracle card (C047); the DUT is not changed to match"

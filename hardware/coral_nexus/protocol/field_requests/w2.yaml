@@ -1,0 +1,42 @@
+# W2 field request to W1-01, DRAFT (C010).
+#
+# A REQUEST, not an implementation: W1-01 merges it into the ABI and W2 defines
+# no bits. Every field names a W2 doc and key it came from, so the validator can
+# check the request against the files it points at. Joint freeze with C020; a
+# missing request blocks the seal (it is never filled in by W1).
+schema: cn_field_request/v1
+package: W2
+status: draft
+requests:
+  - message: TASK_COMMIT
+    direction: G2T
+    why: "the HOLD request installs the Context binding the native owner tag will refer to"
+    fields_needed:
+      - {name: ctx_slot, from: rtl/scalar/doc/rob_tag.yaml, key: owner_tag.fields}
+      - {name: ctx_generation, from: rtl/scalar/doc/rob_tag.yaml, key: owner_tag.fields}
+  - message: TASK_COMMIT_FINAL
+    direction: G2T
+    why: "FINAL is a distinct legal stage after HOLD (protocol dedup rule DUP-01)"
+    fields_needed:
+      - {name: ctx_generation, from: rtl/scalar/doc/rob_tag.yaml, key: owner_tag.fields}
+  - message: ACK
+    direction: T2G
+    why: "outcome of HOLD/FINAL; must reference the request's (txn_id, message_type)"
+    fields_needed:
+      - {name: owner_op_seq, from: rtl/scalar/doc/rob_tag.yaml, key: owner_tag.fields}
+  - message: RETIRE_READY
+    direction: T2G
+    why: "reported after EXEC_DRAINED once no old in-flight work remains"
+    fields_needed:
+      - {name: ctx_generation, from: rtl/scalar/doc/rob_tag.yaml, key: owner_tag.fields}
+  - message: QUERY_CAPS
+    direction: G2T
+    why: "context count and program-slot capacity negotiation"
+    fields_needed: []
+  - message: CAPS_RESP
+    direction: T2G
+    why: "answers QUERY_CAPS; the Context count is a physical value from the generated C1/C2 config"
+    fields_needed: []
+internal_events_not_on_wire:
+  - {name: EXEC_DRAINED, from: rtl/scalar/doc/ctx_ctrl.yaml, key: ops, note: "W2 -> W6 internal notice; not a boundary message"}
+  - {name: fetch_epoch, from: rtl/scalar/doc/perctx_issue.yaml, key: epochs, note: "W2-internal; field_visibility hidden in the protocol"}

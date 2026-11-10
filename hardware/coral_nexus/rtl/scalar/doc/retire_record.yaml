@@ -1,0 +1,52 @@
+version: 1
+# Per-lane retire record, DRAFT (C010 / W2-01).
+#
+# One record per retiring instruction per lane. Consumed READ-ONLY by W7-01
+# (trace schema) and W7-02 (native ISA oracle). Aligned with the upstream
+# RetirementBuffer debug/RVVI trace, plus per-Context identity fields the
+# upstream trace does not have.
+status: draft
+lanes:
+  count_param: retirementLanes
+  value: 8
+  source: {file: hdl/chisel/src/coralnpu/Parameters.scala, line: 142}
+fields:
+  # identity added for CS1 (not in upstream)
+  - {name: ctx_slot, width_rule: "ctx_bits", origin: nexus_added, owner: W2, consumers: [W7], required: true}
+  - {name: ctx_generation, width_rule: "unresolved", origin: nexus_added, owner: W2, consumers: [W7], required: true}
+  - {name: owner_op_seq, width_rule: "unresolved", origin: nexus_added, owner: W2, consumers: [W7], required: true}
+  - {name: rob_tag, width_rule: "log2Ceil(retirementBufferSize)", origin: nexus_added, owner: W2, consumers: [W7], required: true}
+  - {name: uop_pc, width_rule: "programCounterBits", origin: nexus_added, owner: W2, consumers: [W7], required: false,
+     note: "sub-operation program position for RVV expansion"}
+  # carried from the upstream RVVI trace (names verified against RvviTrace.scala)
+  - {name: valid, width_rule: "1", origin: upstream, owner: W2, consumers: [W7], required: true,
+     source: {file: hdl/chisel/src/coralnpu/RvviTrace.scala, line: 188}}
+  - {name: order, width_rule: "64", origin: upstream, owner: W2, consumers: [W7], required: true,
+     source: {file: hdl/chisel/src/coralnpu/RvviTrace.scala, line: 189}}
+  - {name: insn, width_rule: "instructionBits", origin: upstream, owner: W2, consumers: [W7], required: true,
+     source: {file: hdl/chisel/src/coralnpu/RvviTrace.scala, line: 190}}
+  - {name: trap, width_rule: "1", origin: upstream, owner: W2, consumers: [W7], required: true,
+     source: {file: hdl/chisel/src/coralnpu/RvviTrace.scala, line: 191}}
+  - {name: pc_rdata, width_rule: "programCounterBits", origin: upstream, owner: W2, consumers: [W7], required: true,
+     source: {file: hdl/chisel/src/coralnpu/RvviTrace.scala, line: 193}}
+  - {name: x_wdata, width_rule: "scalarRegCount * xlen", origin: upstream, owner: W2, consumers: [W7], required: true,
+     source: {file: hdl/chisel/src/coralnpu/RvviTrace.scala, line: 194}}
+  - {name: x_wb, width_rule: "scalarRegCount", origin: upstream, owner: W2, consumers: [W7], required: true,
+     source: {file: hdl/chisel/src/coralnpu/RvviTrace.scala, line: 195}}
+  - {name: f_wdata, width_rule: "floatRegCount * xlen", origin: upstream, owner: W2, consumers: [W7], required: false,
+     source: {file: hdl/chisel/src/coralnpu/RvviTrace.scala, line: 196}}
+  - {name: f_wb, width_rule: "floatRegCount", origin: upstream, owner: W2, consumers: [W7], required: false,
+     source: {file: hdl/chisel/src/coralnpu/RvviTrace.scala, line: 197}}
+  - {name: v_wdata, width_rule: "rvvRegCount * rvvVlen", origin: upstream, owner: W2, consumers: [W7], required: false,
+     source: {file: hdl/chisel/src/coralnpu/RvviTrace.scala, line: 198}}
+  - {name: v_wb, width_rule: "rvvRegCount", origin: upstream, owner: W2, consumers: [W7], required: false,
+     source: {file: hdl/chisel/src/coralnpu/RvviTrace.scala, line: 199}}
+  - {name: flags_delta, width_rule: "5 (fflags) + 1 (vxsat)", origin: nexus_added, owner: W2, consumers: [W7], required: true,
+     note: "carried per record; merged only at retire (see ctx_ctrl.yaml csr_commit.flags_delta)"}
+mode_requirement:
+  retirement_buffer_mode: full
+  reason: "only full mode exposes per-instruction retire data; mini mode has inst = 0 and data = 0"
+  source: {file: hdl/chisel/src/coralnpu/RetirementBuffer.scala, line: 74}
+  also: {file: hdl/chisel/src/coralnpu/RetirementBuffer.scala, line: 371,
+         note: "dataWidth is 0 when mini, so no result data is kept"}
+read_only_for: [W7]
