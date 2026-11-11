@@ -331,6 +331,29 @@ def test_every_sp_write_the_frame_model_does_not_cover_is_refused() -> None:
   # _start alone may initialise sp (auipc + addi), nothing else may
   start = "00000000 <_start>:\n   8: 00010117 \tauipc\tsp, 0x10\n   c: 07810113 \taddi\tsp, sp, 0x78\n"
   assert mk._parse_disassembly(start)[1] == {"_start": 0}
+  # the init pair is consumed, not a credit: a real push after it counts in full, and with no .su record
+  # for _start that frame cannot be waved through as zero
+  push = start + "  10: ff010113 \taddi\tsp, sp, -0x10\n"
+  frames = mk._parse_disassembly(push)[1]
+  assert frames == {"_start": 0x10}
+  _expect("FRAME_MISMATCH", mk._stack_bound, "", {"_start": []}, frames)
+  # the pair is single-use and must be whole: repeat, orphan half, wrong order, or split across functions
+  auipc = "   8: 00010117 \tauipc\tsp, 0x10\n"
+  addi = "   c: 07810113 \taddi\tsp, sp, 0x78\n"
+  head = "00000000 <_start>:\n"
+  for bad in (
+    start + auipc + addi,
+    start + auipc,
+    head + auipc,
+    head + addi,
+    head + auipc + "  10: ff010113 \taddi\tsp, sp, -0x10\n",
+    head + "  10: ff010113 \taddi\tsp, sp, -0x10\n" + auipc + addi,
+    head + auipc + "00000020 <g>:\n" + addi,
+    head + auipc + "  10: f0010113 \taddi\tsp, sp, -0x100\n" + addi,
+    head + "   8: 00050113 \tmv\tsp, a0\n" + addi,
+    "00000000 <f>:\n" + auipc + addi,
+  ):
+    _expect("UNMODELED_STACK", mk._parse_disassembly, bad)
   for insn in ("mv\tsp, a0", "li\tsp, 0", "sub\tsp, sp, a0", "lw\tsp, 0(a0)"):
     _expect("UNMODELED_STACK", mk._parse_disassembly, f"00000000 <_start>:\n   0: 00000000 \t{insn}\n")
 

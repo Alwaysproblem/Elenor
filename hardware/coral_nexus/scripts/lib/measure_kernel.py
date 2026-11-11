@@ -79,17 +79,22 @@ def _parse_disassembly(dis: str) -> tuple[dict[str, list[str]], dict[str, int], 
 
   A positive sp adjust is the epilogue of the SAME function only while a negative adjust of at least the
   same size is outstanding; anything else (sp restored past its own frame, sp used as scratch) leaves the
-  frame model open and is refused instead of guessed. `_start` initializes sp, so its initial positive
-  setup is legal.
+  frame model open and is refused instead of guessed. The ONE exception is `_start`'s sp load, a single
+  `auipc sp` immediately followed by `addi sp, sp, +imm`: that pair is consumed as an initialization state
+  (it sets sp, it is not a release) and leaves depth 0. A second auipc, an auipc not followed by that addi,
+  or an init `addi` with no auipc is refused, so the pair cannot be repeated or used to hide a frame.
   """
   calls: dict[str, list[str]] = {}
   frames: dict[str, int] = {}
   csrws: list[int] = []
   depth = 0
   current = "?"
+  init = "none"  # none -> pending (auipc seen) -> done (addi consumed); only `_start` may leave "none"
   for line in dis.splitlines():
     head = _RE_FRAME.match(line)
     if head:
+      if init == "pending":
+        raise MeasureError("UNMODELED_STACK", f"{current}: auipc sp not completed before {head.group(1)}")
       current = head.group(1)
       frames.setdefault(current, 0)
       depth = 0
@@ -105,19 +110,28 @@ def _parse_disassembly(dis: str) -> tuple[dict[str, list[str]], dict[str, int], 
       raise MeasureError("UNRESOLVED_INDIRECT", f"{current}: an indirect call the bound cannot close")
     grow = _RE_ADDISP.search(line)
     shrink = None if grow else _RE_ADDISP_POS.search(line)
-    if not grow and not shrink:
-      written = _RE_SP_WRITE.match(line)
-      # the ONLY legal non-frame sp write: _start's `la sp, __stack_end` (auipc sp + addi sp, sp, +imm)
-      if written and not (current == "_start" and written.group(1) == "auipc"):
-        raise MeasureError(
-          "UNMODELED_STACK", f"{current}: an sp update the frame model does not cover: {line.strip()}"
-        )
+    written = None if grow or shrink else _RE_SP_WRITE.match(line)
+    if init == "pending":
+      # the very next sp update must be the init addi; anything else leaves sp half-loaded
+      if not shrink:
+        if grow or written:
+          raise MeasureError("UNMODELED_STACK", f"{current}: auipc sp not completed by addi sp, sp, +imm")
+      else:
+        init = "done"
+        continue
+    elif written:
+      if current == "_start" and written.group(1) == "auipc" and init == "none" and depth == 0:
+        init = "pending"
+        continue
+      raise MeasureError(
+        "UNMODELED_STACK", f"{current}: an sp update the frame model does not cover: {line.strip()}"
+      )
     if grow:
       depth += int(grow.group(1), 16)
       frames[current] = max(frames[current], depth)
     elif shrink:
       release = int(shrink.group(1), 16)
-      if release > depth and not (current == "_start" and depth == 0):
+      if release > depth:
         raise MeasureError(
           "UNMODELED_STACK", f"{current}: restores {release} with only {depth} outstanding"
         )
@@ -125,6 +139,8 @@ def _parse_disassembly(dis: str) -> tuple[dict[str, list[str]], dict[str, int], 
     csr = _RE_CSRW.search(line)
     if csr:
       csrws.append(int(csr.group(2), 0))
+  if init == "pending":
+    raise MeasureError("UNMODELED_STACK", "_start: auipc sp at end of image with no completing addi")
   return calls, frames, csrws
 
 
