@@ -18,6 +18,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 EVIDENCE_SCHEMA = "cn_evidence/v1"
 GATE_SCHEMA = "cn_gate/v1"
@@ -318,6 +319,33 @@ class G0Gate:
     return self._report(not any_failed)
 
 
+def _fragment_validators() -> list[tuple[str, Any]]:
+  """The C010-C016 producer validators G1 re-runs. The set is held here, not in any YAML."""
+  import derive_w4_bounds as w4
+  import validate_native_owner as vno
+  import validate_numeric as vnum
+  import validate_package_contract as vpc
+  import validate_vme_decl as vvd
+  import validate_w6_contract as vw6
+  import validate_w7_contract as vw7
+
+  return [
+    ("C010 native owner", vno.validate),
+    ("C011 numeric", vnum.validate),
+    ("C012 vme decl", vvd.validate),
+    ("C013 memory", lambda: w4.validate_all(constraints_path=_w4_path())),
+    ("C014 package", vpc.validate),
+    ("C015 event/reset", vw6.validate),
+    ("C016 trace", vw7.validate),
+  ]
+
+
+def _w4_path() -> Path:
+  import freeze_check as fc
+
+  return fc.W4_CONSTRAINTS
+
+
 class G1Gate:
   """CN-G1 joint-contract gate (C020).
 
@@ -350,8 +378,10 @@ class G1Gate:
 
     sys.path.insert(0, str(self.repo_root / "hardware/coral_nexus/protocol"))
     sys.path.insert(0, str(self.repo_root / "hardware/coral_nexus/scripts/lib"))
+    sys.path.insert(0, str(self.repo_root / "hardware/coral_nexus/scripts"))
     import csr_lint  # noqa: F401  (imported for the side effect of path sanity)
     import csr_lint as cl
+    import derive_w4_bounds as w4
     import derive_widths as dw
     import freeze_check as fc
     import gen_targets as gtr
@@ -370,8 +400,21 @@ class G1Gate:
       self._record("gate.spec", True, "spec matches the evaluator")
 
     catalog = vpr.validate(self.repo_root / "hardware/coral_nexus/protocol")
+    # Every producer contract (C010-C016) is re-validated HERE, not trusted from its own commit: the seal
+    # only hashes these files, so without this call nothing would read their anchors back at gate time.
+    contract_errors = [f"protocol: {e}" for e in catalog["errors"]]
+    for label, check in _fragment_validators():
+      try:
+        report = check()
+        contract_errors += [f"{label}: {e}" for e in report.get("errors", [])]
+        if report.get("valid") is not True:
+          contract_errors.append(f"{label}: validator did not report valid")
+      except Exception as exc:  # a crashed validator is a failed validator, never a skipped one
+        contract_errors.append(f"{label}: validator raised {type(exc).__name__}: {exc}")
     if not self._record(
-      "protocol.contracts", catalog["valid"], "; ".join(catalog["errors"])[:400] or "catalog valid"
+      "protocol.contracts",
+      not contract_errors,
+      "; ".join(contract_errors)[:400] or f"catalog + {len(_fragment_validators())} contracts valid",
     ):
       exit_code = exit_code or REQUIRED_G1_CHECKS["protocol.contracts"]
 
@@ -391,6 +434,11 @@ class G1Gate:
     budgets_open = fc.open_budgets()
     try:
       result = dw.derive(data["budgets"], data["lifetimes"])
+      # the W4 envelope is validated by its own owner (units, partition conservation, unresolved guard);
+      # a budget cannot read as closed while that validator rejects the file that closes it
+      w4_report = w4.validate_all(constraints_path=fc.W4_CONSTRAINTS)
+      if not w4_report["valid"] and not budgets_open:
+        raise dw.WidthError("w4 envelope rejected: " + "; ".join(w4_report["errors"])[:300])
       if budgets_open:
         self._record(
           "budgets.closed", False, f"open required budget, no sourced value: {', '.join(budgets_open)}"

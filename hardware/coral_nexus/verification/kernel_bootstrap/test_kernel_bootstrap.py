@@ -421,3 +421,47 @@ def test_no_toolchain_is_a_refusal_not_a_fake_measurement(tmp_path: Path, monkey
   monkeypatch.setattr(mk, "TOOLCHAIN", tmp_path / "nowhere")
   _expect("NO_TOOLCHAIN", mk.measure, tmp_path / "out")
   assert shutil.which("true") is not None  # the suite ran to here; skips above only hide real builds
+
+
+_READELF = """  [Nr] Name              Type            Addr     Off    Size   ES Flg Lk Inf Al
+  [ 1] .text             PROGBITS        00000000 001000 0000a0 00  AX  0   0 16
+  [ 2] .data             PROGBITS        00010000 0010a0 000000 00  WA  0   0 16
+  [ 3] .bss              NOBITS          00010000 000000 000000 00  WA  0   0 16
+  [ 4] .stack            NOBITS          00010000 002000 000080 00  WA  0   0 16
+"""
+
+
+def test_nobits_sections_are_read_for_their_vma() -> None:
+  vmas = mk._section_vmas(_READELF)
+  assert vmas[".stack"] == 0x10000 and vmas[".bss"] == 0x10000
+  mk._check_data_side_vmas(vmas, 0x10000)
+
+
+def test_a_stack_or_bss_placed_in_itcm_or_missing_is_refused() -> None:
+  low = _READELF.replace(
+    ".stack            NOBITS          00010000", ".stack            NOBITS          00000200"
+  )
+  _expect("VMA_MISMATCH", mk._check_data_side_vmas, mk._section_vmas(low), 0x10000)
+  low_bss = _READELF.replace(
+    ".bss              NOBITS          00010000", ".bss              NOBITS          00000300"
+  )
+  _expect("VMA_MISMATCH", mk._check_data_side_vmas, mk._section_vmas(low_bss), 0x10000)
+  without = "\n".join(line for line in _READELF.splitlines() if ".stack" not in line)
+  _expect("VMA_MISMATCH", mk._check_data_side_vmas, mk._section_vmas(without), 0x10000)
+
+
+def test_measure_never_rewrites_the_committed_record_unless_asked(
+  record: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+  committed = tmp_path / "committed.json"
+  committed.write_text("sentinel")
+  monkeypatch.setattr(mk, "COMMITTED_RECORD", committed)
+  mk.measure(REPO_ROOT / "out/coral_nexus/C018/test_measure")
+  assert committed.read_text() == "sentinel"
+  mk.measure(REPO_ROOT / "out/coral_nexus/C018/test_measure", update_record=True)
+  assert committed.read_text() == mk._json(record)
+
+
+def test_the_committed_record_is_exactly_what_a_fresh_build_measures(record: dict[str, Any]) -> None:
+  # a hand-edited text/stack figure or stale ELF hash fails here, since no gate rebuilds the ELF
+  assert mk.COMMITTED_RECORD.read_text() == mk._json(record)

@@ -641,7 +641,7 @@ def _scenarios() -> dict[str, list[Case]]:
   def _commit(change: dict[str, int], seq: int) -> bytes:
     return wire.pack("TASK_COMMIT", {**commit, **change}, seq)
 
-  final = {**TASK_KEY, "txn_id": 9, "ctx_generation": 5}
+  final = {**TASK_KEY, "txn_id": 9, "ctx_slot": 2, "ctx_generation": 5}
   handshake: list[Case] = [
     (_port("TASK_COMMIT"), wire.pack("TASK_COMMIT", commit, 0)),
     (_port("ACK"), _ack("TASK_COMMIT", "HOLD_READY", 0)),
@@ -650,6 +650,8 @@ def _scenarios() -> dict[str, list[Case]]:
     (_port("ACK"), _ack("TASK_COMMIT_FINAL", "ACCEPTED", 2)),
     (_port("TASK_COMMIT_FINAL"), wire.pack("TASK_COMMIT_FINAL", final, 2)),
   ]  # fmt: skip
+  old_gen = {"ctx_generation": 4}
+  retire = {**TASK_KEY, **old_gen, "drain_evidence_seq": 1}
   limit = wire.DEDUP_ENTRIES
   flood: list[Case] = [
     (_port("QUERY_CAPS"), wire.pack("QUERY_CAPS", {"txn_id": n}, n)) for n in range(limit + 2)
@@ -659,6 +661,10 @@ def _scenarios() -> dict[str, list[Case]]:
     (_port("TASK_COMMIT"), _commit({"txn_id": 10, "ctx_generation": 4}, 1)),
     (_port("TASK_COMMIT"), _commit({"txn_id": 11, "ctx_generation": 6}, 2)),
     (_port("TASK_COMMIT"), _commit({"txn_id": 12, "ctx_slot": 3, "ctx_generation": 1}, 3)),
+    # every later message of a Context carries (ctx_slot, ctx_generation) and is stale below the live one
+    (_port("TASK_COMMIT_FINAL"), wire.pack("TASK_COMMIT_FINAL", {**final, **old_gen, "txn_id": 13}, 4)),
+    (_port("CANCEL_TASK"), wire.pack("CANCEL_TASK", {**TASK_KEY, **old_gen, "ctx_slot": 2}, 5)),
+    (_port("RETIRE_READY"), wire.pack("RETIRE_READY", {**retire, "ctx_slot": 2}, 0)),
   ]  # fmt: skip
   return {"handshake": handshake, "flood": flood, "stale": stale}
 
@@ -671,7 +677,7 @@ def test_scenario_outcomes_are_the_documented_ones() -> None:
   flood = [line.split()[0] for line in _python_lines(scenarios["flood"])]
   assert flood[: wire.DEDUP_ENTRIES] == ["OK"] * wire.DEDUP_ENTRIES and flood[-2:] == ["CAPACITY"] * 2
   assert [line.split()[0] for line in _python_lines(scenarios["stale"])] == [
-    "OK", "STALE_GENERATION", "OK", "OK"
+    "OK", "STALE_GENERATION", "OK", "OK", "STALE_GENERATION", "STALE_GENERATION", "STALE_GENERATION"
   ]  # fmt: skip
 
 

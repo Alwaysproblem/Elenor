@@ -47,6 +47,15 @@ def gate() -> gates.G1Gate:
 SOURCED_BOUND = {"file": "hardware/coral_nexus/configs/w4_memory_constraints.yaml", "line": 3}
 
 
+# A real readable line carrying the integer 32: the HBM tag depth, NOT a credit bound. The fixture only
+# shows a closure whose value and needle both read back is accepted by the W4 owner's validator.
+FIXTURE_SOURCE = {
+  "file": "pipeline_validator/hardware_config.yaml",
+  "line": 55,
+  "needle": "outstanding_limit",
+}
+
+
 def _closed_w4(tmp_path: Path) -> Path:
   """A copy of the w4 constraints with the two required budgets genuinely CLOSED: moved off the
   unresolved list AND onto inputs with a value plus a source whose needle reads back (deleting the
@@ -57,13 +66,10 @@ def _closed_w4(tmp_path: Path) -> Path:
   doc["inputs"] += [
     {
       "name": name,
-      "value": 8,
-      "unit": "count" if "credit_cap" in name else "entries",
+      "value": 32,
+      "unit": "entries",
       "key": name,
-      "source": {
-        **SOURCED_BOUND,
-        "needle": "Every input carries an explicit unit and a source the validator reads back",
-      },
+      "source": {**FIXTURE_SOURCE},
       "provenance": {"note": "fixture; the real closure cites the sourced constant"},
     }
     for name in sorted(fc.REQUIRED_CLOSED_BUDGETS)
@@ -157,27 +163,65 @@ def test_a_sourced_looking_entry_without_a_readback_needle_is_still_open(tmp_pat
     fc.W4_CONSTRAINTS = original
 
 
-def test_a_width_may_stay_underivable_but_a_capacity_may_not(gate: gates.G1Gate, tmp_path: Path) -> None:
-  monkey_w4 = _closed_w4(tmp_path)
-  original = fc.W4_CONSTRAINTS
-  fc.W4_CONSTRAINTS = monkey_w4
-  try:
-    report = gate.run()
-    by = {c["check"]: c for c in report["checks"]}
-    assert by["budgets.closed"]["ok"] is True
-    assert "widths declared underivable" in by["budgets.closed"]["detail"]
-    # the seal is still the blocker until one exists
-    assert report["exit_code"] == gates.REQUIRED_G1_CHECKS["seal.joint"] == 17
-  finally:
-    fc.W4_CONSTRAINTS = original
+def test_a_width_may_stay_underivable_but_a_capacity_may_not(
+  gate: gates.G1Gate, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+  _simulate_real_closure(monkeypatch, _closed_w4(tmp_path))
+  report = gate.run()
+  by = {c["check"]: c for c in report["checks"]}
+  assert by["budgets.closed"]["ok"] is True
+  assert "widths declared underivable" in by["budgets.closed"]["detail"]
+  # the seal is still the blocker until one exists
+  assert report["exit_code"] == gates.REQUIRED_G1_CHECKS["seal.joint"] == 17
+
+
+def test_a_closure_the_w4_validator_rejects_does_not_pass_the_gate(
+  gate: gates.G1Gate, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+  # the file says closed, but the owner's validator still demands them on the unresolved list: not closed
+  monkeypatch.setattr(fc, "W4_CONSTRAINTS", _closed_w4(tmp_path))
+  report = gate.run()
+  by = {c["check"]: c for c in report["checks"]}
+  assert by["protocol.contracts"]["ok"] is False
+  assert "C013 memory" in by["protocol.contracts"]["detail"]
+  assert report["exit_code"] == gates.REQUIRED_G1_CHECKS["protocol.contracts"] == 11
+
+
+def test_a_crashing_or_failing_fragment_validator_fails_the_gate(
+  gate: gates.G1Gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+  import validate_numeric as vnum
+
+  def boom() -> dict:
+    raise RuntimeError("probe")
+
+  monkeypatch.setattr(vnum, "validate", boom)
+  report = gate.run()
+  by = {c["check"]: c for c in report["checks"]}
+  assert by["protocol.contracts"]["ok"] is False and "C011 numeric" in by["protocol.contracts"]["detail"]
+  monkeypatch.setattr(vnum, "validate", lambda: {"valid": False, "errors": ["mutated"]})
+  assert gate.run()["exit_code"] == 11
+  monkeypatch.setattr(vnum, "validate", lambda: {"errors": []})
+  assert gate.run()["exit_code"] == 11, "a report that does not say valid is not valid"
 
 
 # ---------------------------------------------------------------------------------------------------
 # the seal, once the budgets are closed
 # ---------------------------------------------------------------------------------------------------
+def _simulate_real_closure(monkeypatch: pytest.MonkeyPatch, constraints: Path) -> None:
+  """The real closure edits the constraints file AND drops the two names from the w4 validator's own
+  REQUIRED_UNRESOLVED guard (scripts/derive_w4_bounds.py). The G1 gate now runs that validator, so a fixture
+  that moves only the file is rejected (exit 11) -- the next test pins exactly that."""
+  import derive_w4_bounds as w4
+
+  monkeypatch.setattr(fc, "W4_CONSTRAINTS", constraints)
+  closed = {k: v for k, v in w4.REQUIRED_UNRESOLVED.items() if k not in fc.REQUIRED_CLOSED_BUDGETS}
+  monkeypatch.setattr(w4, "REQUIRED_UNRESOLVED", closed)
+
+
 @pytest.fixture
 def closed_budgets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-  monkeypatch.setattr(fc, "W4_CONSTRAINTS", _closed_w4(tmp_path))
+  _simulate_real_closure(monkeypatch, _closed_w4(tmp_path))
   return tmp_path
 
 

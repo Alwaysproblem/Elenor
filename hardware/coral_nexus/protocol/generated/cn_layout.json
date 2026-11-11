@@ -525,7 +525,7 @@
       "dir_index": 0,
       "owner": "W2",
       "host_only": false,
-      "payload_words": 7,
+      "payload_words": 8,
       "fields": [
         {
           "name": "launch_generation",
@@ -582,9 +582,18 @@
           "optional": false
         },
         {
-          "name": "ctx_generation",
+          "name": "ctx_slot",
           "kind": "uint",
           "offset": 6,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_generation",
+          "kind": "uint",
+          "offset": 7,
           "words": 1,
           "limit": 0,
           "enum": null,
@@ -600,8 +609,8 @@
         }
       ],
       "txn": 5,
-      "ctx_slot": -1,
-      "ctx_gen": 6,
+      "ctx_slot": 6,
+      "ctx_gen": 7,
       "stage": -1,
       "ack_for": -1,
       "establishes": false
@@ -687,7 +696,7 @@
       "dir_index": 1,
       "owner": "W2",
       "host_only": false,
-      "payload_words": 7,
+      "payload_words": 8,
       "fields": [
         {
           "name": "launch_generation",
@@ -735,7 +744,7 @@
           "optional": false
         },
         {
-          "name": "ctx_generation",
+          "name": "ctx_slot",
           "kind": "uint",
           "offset": 5,
           "words": 1,
@@ -744,9 +753,18 @@
           "optional": false
         },
         {
-          "name": "drain_evidence_seq",
+          "name": "ctx_generation",
           "kind": "uint",
           "offset": 6,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "drain_evidence_seq",
+          "kind": "uint",
+          "offset": 7,
           "words": 1,
           "limit": 0,
           "enum": null,
@@ -762,8 +780,8 @@
         }
       ],
       "txn": -1,
-      "ctx_slot": -1,
-      "ctx_gen": 5,
+      "ctx_slot": 5,
+      "ctx_gen": 6,
       "stage": -1,
       "ack_for": -1,
       "establishes": false
@@ -2578,7 +2596,7 @@
       "dir_index": 0,
       "owner": "W6",
       "host_only": false,
-      "payload_words": 6,
+      "payload_words": 7,
       "fields": [
         {
           "name": "launch_generation",
@@ -2626,9 +2644,18 @@
           "optional": false
         },
         {
-          "name": "ctx_generation",
+          "name": "ctx_slot",
           "kind": "uint",
           "offset": 5,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_generation",
+          "kind": "uint",
+          "offset": 6,
           "words": 1,
           "limit": 0,
           "enum": null,
@@ -2644,8 +2671,8 @@
         }
       ],
       "txn": -1,
-      "ctx_slot": -1,
-      "ctx_gen": 5,
+      "ctx_slot": 5,
+      "ctx_gen": 6,
       "stage": -1,
       "ack_for": -1,
       "establishes": false
@@ -3426,7 +3453,7 @@
   },
   "inputs": {
     "cn_protocol_v1.yaml": "ab8d448063a126d798631dae6abe9ef72fe9d4a4ab22e80a41f196265f7d207c",
-    "wire_schema_v1.yaml": "4873c59c3bd8f48ea01b478675f2dd143ed9e17be5418a16bea0447d175171c3",
+    "wire_schema_v1.yaml": "7403e7cda09d00236be4ac641bad4326e114ac8ffa4a5bb15c41b8b59ddf843e",
     "csr_name_map.yaml": "8819944028986b1211adb073bb6c065bc5d1580a91f602abfe48151980c61b7b",
     "upstream_csr_occupied.json": "81491cb41ed1813c871d1b6676d9eb361af2cb8a7bf6a696c8c7ba606eb92c8e",
     "channel_budgets.yaml": "604e830f60653f3f44628ee968929ad1c2e1e4fb249666ba2e1e3dc6a97481eb",

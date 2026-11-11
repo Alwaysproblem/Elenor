@@ -34,6 +34,7 @@ TOOLCHAIN = REPO / "out/coral_nexus/cache/toolchain/extracted/toolchain_coralnpu
 OUT_ROOT = REPO / "out/coral_nexus/C018"
 STACK_BYTES = 128  # upstream DEFAULT stack_size_bytes; a candidate target may differ -> new target hash
 ALIGN = 16  # W5 contract: fixed pre-link images; both candidate bases stay 16-byte aligned
+COMMITTED_RECORD = H / "verification/kernel_bootstrap/kernel_measurement.json"
 ITCM_ORIGIN = 0x00000000
 DTCM_ORIGIN = 0x00010000  # pinned upstream default (rules/linker.bzl dtcm_origin_default), never guessed
 
@@ -202,13 +203,24 @@ def _stack_bound(su_text: str, calls: dict[str, list[str]], frames: dict[str, in
   return depth("_start")
 
 
-_RE_SECTION = re.compile(r"^\s*\[\s*\d+\]\s+(\.[\w.]+)\s+PROGBITS\s+([0-9a-f]+)")
+# NOBITS (.bss, .stack) carries a VMA like PROGBITS; matching only PROGBITS left every .stack check dead
+_RE_SECTION = re.compile(r"^\s*\[\s*\d+\]\s+(\.[\w.]+)\s+(?:PROGBITS|NOBITS)\s+([0-9a-f]+)")
 
 
 def _section_vmas(readelf_sw: str) -> dict[str, int]:
   """Actual section VMAs from readelf -SW: the ELF is the authority, not the .ld intent."""
   matches = (_RE_SECTION.match(line) for line in readelf_sw.splitlines())
   return {m.group(1): int(m.group(2), 16) for m in matches if m}
+
+
+def _check_data_side_vmas(vmas: dict[str, int], expected_data: int) -> None:
+  """.stack must exist and every data-side section must sit in DTCM, never in the ITCM text region."""
+  if ".stack" not in vmas:
+    raise MeasureError("VMA_MISMATCH", ".stack section missing: the stack proof has no placed stack")
+  for name in (".data", ".bss", ".stack"):
+    at = vmas.get(name)
+    if at is not None and at < expected_data:
+      raise MeasureError("VMA_MISMATCH", f"{name} at {at:#x} is below the data base {expected_data:#x}")
 
 
 def _verify_upstream_regions() -> None:
@@ -244,10 +256,6 @@ def build_layout(layout: dict[str, Any], out: Path) -> dict[str, int]:
   )
   sizes = _section_sizes((build_dir / "bootstrap.size").read_text())
   sections = _run([str(TOOLCHAIN / "riscv64-unknown-elf-readelf"), "-SW", str(build_dir / "bootstrap.elf")])
-  for line in sections.splitlines():
-    parts = line.split()
-    if len(parts) >= 5 and parts[1].lstrip(".").rstrip("]").isdigit() is False and "PROGBITS" in line:
-      pass
   vmas = _section_vmas(sections)
   expected_text = ITCM_ORIGIN + int(layout["text_base"])
   expected_data = DTCM_ORIGIN + int(layout["data_base"])
@@ -255,9 +263,7 @@ def build_layout(layout: dict[str, Any], out: Path) -> dict[str, int]:
     raise MeasureError("VMA_MISMATCH", f".text at {vmas.get('.text', -1):#x}, expected {expected_text:#x}")
   if vmas.get(".data", -1) not in (expected_data, -1):
     raise MeasureError("VMA_MISMATCH", f".data at {vmas.get('.data')!r}, expected near {expected_data:#x}")
-  stack_at = vmas.get(".stack")
-  if stack_at is not None and stack_at < expected_data:
-    raise MeasureError("VMA_MISMATCH", f".stack at {stack_at:#x} is below the data base {expected_data:#x}")
+  _check_data_side_vmas(vmas, expected_data)
   return sizes
 
 
@@ -276,7 +282,7 @@ def _section_sizes(size_text: str) -> dict[str, int]:
   return {"text": text, "data": data}
 
 
-def measure(out: Path = OUT_ROOT) -> dict[str, Any]:
+def measure(out: Path = OUT_ROOT, *, update_record: bool = False) -> dict[str, Any]:
   """Build both candidate layouts, bound their resources, and write the C018 measurement record."""
   if not TOOLCHAIN.is_dir():
     raise MeasureError("NO_TOOLCHAIN", f"{TOOLCHAIN} missing (cn env seed pulls the locked archive)")
@@ -348,10 +354,11 @@ def measure(out: Path = OUT_ROOT) -> dict[str, Any]:
     raise MeasureError("CAPACITY", "; ".join(f"{c['name']}: {c['detail']}" for c in errors))
   record_text = _json(record)
   (out / "kernel_measurement.json").write_text(record_text)
-  # the committed evidence record C019 consumes; regeneration must be byte-identical
-  committed = H / "verification/kernel_bootstrap/kernel_measurement.json"
-  committed.parent.mkdir(parents=True, exist_ok=True)
-  committed.write_text(record_text)
+  # The committed evidence record C019 consumes is rewritten ONLY on an explicit --update-record: tests and
+  # parallel workers call measure() freely and must never race on, or silently regenerate, a committed file.
+  if update_record:
+    COMMITTED_RECORD.parent.mkdir(parents=True, exist_ok=True)
+    COMMITTED_RECORD.write_text(record_text)
   return record
 
 
@@ -482,9 +489,12 @@ def main() -> None:
 
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("--out", default=str(OUT_ROOT))
+  parser.add_argument(
+    "--update-record", action="store_true", help="rewrite the committed kernel_measurement.json"
+  )
   args = parser.parse_args()
   try:
-    record = measure(Path(args.out))
+    record = measure(Path(args.out), update_record=args.update_record)
   except MeasureError as exc:
     print(f"measure_kernel: {exc}", file=sys.stderr)
     raise SystemExit(1) from exc

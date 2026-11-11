@@ -313,16 +313,18 @@ typedef struct {
   uint64_t task_id;
   uint64_t context_handle;
   uint64_t txn_id;
+  uint64_t ctx_slot;
   uint64_t ctx_generation;
 } cn_task_commit_final_t;
-_Static_assert(sizeof(cn_task_commit_final_t) == 56, "TASK_COMMIT_FINAL size");
+_Static_assert(sizeof(cn_task_commit_final_t) == 64, "TASK_COMMIT_FINAL size");
 _Static_assert(offsetof(cn_task_commit_final_t, launch_generation) == 0, "TASK_COMMIT_FINAL.launch_generation offset");
 _Static_assert(offsetof(cn_task_commit_final_t, root_launch_generation) == 8, "TASK_COMMIT_FINAL.root_launch_generation offset");
 _Static_assert(offsetof(cn_task_commit_final_t, dispatch_ordinal) == 16, "TASK_COMMIT_FINAL.dispatch_ordinal offset");
 _Static_assert(offsetof(cn_task_commit_final_t, task_id) == 24, "TASK_COMMIT_FINAL.task_id offset");
 _Static_assert(offsetof(cn_task_commit_final_t, context_handle) == 32, "TASK_COMMIT_FINAL.context_handle offset");
 _Static_assert(offsetof(cn_task_commit_final_t, txn_id) == 40, "TASK_COMMIT_FINAL.txn_id offset");
-_Static_assert(offsetof(cn_task_commit_final_t, ctx_generation) == 48, "TASK_COMMIT_FINAL.ctx_generation offset");
+_Static_assert(offsetof(cn_task_commit_final_t, ctx_slot) == 48, "TASK_COMMIT_FINAL.ctx_slot offset");
+_Static_assert(offsetof(cn_task_commit_final_t, ctx_generation) == 56, "TASK_COMMIT_FINAL.ctx_generation offset");
 typedef struct {
   uint64_t txn_id;
   uint64_t ack_for_message_type;
@@ -342,17 +344,19 @@ typedef struct {
   uint64_t dispatch_ordinal;
   uint64_t task_id;
   uint64_t context_handle;
+  uint64_t ctx_slot;
   uint64_t ctx_generation;
   uint64_t drain_evidence_seq;
 } cn_retire_ready_t;
-_Static_assert(sizeof(cn_retire_ready_t) == 56, "RETIRE_READY size");
+_Static_assert(sizeof(cn_retire_ready_t) == 64, "RETIRE_READY size");
 _Static_assert(offsetof(cn_retire_ready_t, launch_generation) == 0, "RETIRE_READY.launch_generation offset");
 _Static_assert(offsetof(cn_retire_ready_t, root_launch_generation) == 8, "RETIRE_READY.root_launch_generation offset");
 _Static_assert(offsetof(cn_retire_ready_t, dispatch_ordinal) == 16, "RETIRE_READY.dispatch_ordinal offset");
 _Static_assert(offsetof(cn_retire_ready_t, task_id) == 24, "RETIRE_READY.task_id offset");
 _Static_assert(offsetof(cn_retire_ready_t, context_handle) == 32, "RETIRE_READY.context_handle offset");
-_Static_assert(offsetof(cn_retire_ready_t, ctx_generation) == 40, "RETIRE_READY.ctx_generation offset");
-_Static_assert(offsetof(cn_retire_ready_t, drain_evidence_seq) == 48, "RETIRE_READY.drain_evidence_seq offset");
+_Static_assert(offsetof(cn_retire_ready_t, ctx_slot) == 40, "RETIRE_READY.ctx_slot offset");
+_Static_assert(offsetof(cn_retire_ready_t, ctx_generation) == 48, "RETIRE_READY.ctx_generation offset");
+_Static_assert(offsetof(cn_retire_ready_t, drain_evidence_seq) == 56, "RETIRE_READY.drain_evidence_seq offset");
 typedef struct {
   uint64_t launch_generation;
   uint64_t root_launch_generation;
@@ -714,15 +718,17 @@ typedef struct {
   uint64_t dispatch_ordinal;
   uint64_t task_id;
   uint64_t context_handle;
+  uint64_t ctx_slot;
   uint64_t ctx_generation;
 } cn_cancel_task_t;
-_Static_assert(sizeof(cn_cancel_task_t) == 48, "CANCEL_TASK size");
+_Static_assert(sizeof(cn_cancel_task_t) == 56, "CANCEL_TASK size");
 _Static_assert(offsetof(cn_cancel_task_t, launch_generation) == 0, "CANCEL_TASK.launch_generation offset");
 _Static_assert(offsetof(cn_cancel_task_t, root_launch_generation) == 8, "CANCEL_TASK.root_launch_generation offset");
 _Static_assert(offsetof(cn_cancel_task_t, dispatch_ordinal) == 16, "CANCEL_TASK.dispatch_ordinal offset");
 _Static_assert(offsetof(cn_cancel_task_t, task_id) == 24, "CANCEL_TASK.task_id offset");
 _Static_assert(offsetof(cn_cancel_task_t, context_handle) == 32, "CANCEL_TASK.context_handle offset");
-_Static_assert(offsetof(cn_cancel_task_t, ctx_generation) == 40, "CANCEL_TASK.ctx_generation offset");
+_Static_assert(offsetof(cn_cancel_task_t, ctx_slot) == 40, "CANCEL_TASK.ctx_slot offset");
+_Static_assert(offsetof(cn_cancel_task_t, ctx_generation) == 48, "CANCEL_TASK.ctx_generation offset");
 typedef struct {
   uint64_t phase;
   uint64_t run_generation;
@@ -901,7 +907,8 @@ static const cn_field_t cn_fields_task_commit_final[] = {
   {"task_id", CN_KIND_UINT, 3, 1, 0ull},
   {"context_handle", CN_KIND_UINT, 4, 1, 0ull},
   {"txn_id", CN_KIND_UINT, 5, 1, 0ull},
-  {"ctx_generation", CN_KIND_UINT, 6, 1, 0ull},
+  {"ctx_slot", CN_KIND_UINT, 6, 1, 0ull},
+  {"ctx_generation", CN_KIND_UINT, 7, 1, 0ull},
 };
 static const cn_cond_t cn_conds_task_commit_final[] = {
   {0, 1, 0, 0},
@@ -922,8 +929,9 @@ static const cn_field_t cn_fields_retire_ready[] = {
   {"dispatch_ordinal", CN_KIND_UINT, 2, 1, 0ull},
   {"task_id", CN_KIND_UINT, 3, 1, 0ull},
   {"context_handle", CN_KIND_UINT, 4, 1, 0ull},
-  {"ctx_generation", CN_KIND_UINT, 5, 1, 0ull},
-  {"drain_evidence_seq", CN_KIND_UINT, 6, 1, 0ull},
+  {"ctx_slot", CN_KIND_UINT, 5, 1, 0ull},
+  {"ctx_generation", CN_KIND_UINT, 6, 1, 0ull},
+  {"drain_evidence_seq", CN_KIND_UINT, 7, 1, 0ull},
 };
 static const cn_cond_t cn_conds_retire_ready[] = {
   {0, 1, 0, 0},
@@ -1206,7 +1214,8 @@ static const cn_field_t cn_fields_cancel_task[] = {
   {"dispatch_ordinal", CN_KIND_UINT, 2, 1, 0ull},
   {"task_id", CN_KIND_UINT, 3, 1, 0ull},
   {"context_handle", CN_KIND_UINT, 4, 1, 0ull},
-  {"ctx_generation", CN_KIND_UINT, 5, 1, 0ull},
+  {"ctx_slot", CN_KIND_UINT, 5, 1, 0ull},
+  {"ctx_generation", CN_KIND_UINT, 6, 1, 0ull},
 };
 static const cn_cond_t cn_conds_cancel_task[] = {
   {0, 1, 0, 0},
@@ -1321,9 +1330,9 @@ static const cn_msg_t cn_msgs[CN_MSG_COUNT] = {
   {"RUN_BEGIN", 0, 0, 0, 1, 1, 0, -1, -1, -1, -1, -1, 0, cn_fields_run_begin, cn_conds_run_begin},
   {"TASK_PLAN", 0, 0, 0, 8, 8, 1, 5, -1, -1, -1, -1, 0, cn_fields_task_plan, cn_conds_task_plan},
   {"TASK_COMMIT", 0, 0, 0, 9, 9, 1, 5, 6, 7, -1, -1, 1, cn_fields_task_commit, cn_conds_task_commit},
-  {"TASK_COMMIT_FINAL", 0, 0, 0, 7, 7, 1, 5, -1, 6, -1, -1, 0, cn_fields_task_commit_final, cn_conds_task_commit_final},
+  {"TASK_COMMIT_FINAL", 0, 0, 0, 8, 8, 1, 5, 6, 7, -1, -1, 0, cn_fields_task_commit_final, cn_conds_task_commit_final},
   {"ACK", 0, 1, 0, 5, 5, 1, 0, -1, -1, 1, 1, 0, cn_fields_ack, cn_conds_ack},
-  {"RETIRE_READY", 0, 1, 0, 7, 7, 1, -1, -1, 5, -1, -1, 0, cn_fields_retire_ready, cn_conds_retire_ready},
+  {"RETIRE_READY", 0, 1, 0, 8, 8, 1, -1, 5, 6, -1, -1, 0, cn_fields_retire_ready, cn_conds_retire_ready},
   {"RETIRE", 0, 0, 0, 9, 9, 1, -1, 6, 7, -1, -1, 0, cn_fields_retire, cn_conds_retire},
   {"TASK_COMPLETION", 0, 1, 0, 7, 7, 1, -1, -1, -1, -1, -1, 0, cn_fields_task_completion, cn_conds_task_completion},
   {"GATE_NOTIFY", 0, 0, 0, 3, 3, 0, -1, -1, -1, -1, -1, 0, cn_fields_gate_notify, cn_conds_gate_notify},
@@ -1351,7 +1360,7 @@ static const cn_msg_t cn_msgs[CN_MSG_COUNT] = {
   {"STREAM_ERROR", 3, 0, 0, 4, 4, 0, -1, -1, -1, -1, -1, 0, cn_fields_stream_error, cn_conds_stream_error},
   {"GEN_WRAP_QUIESCE", 0, 1, 0, 3, 3, 0, -1, 1, 2, -1, -1, 0, cn_fields_gen_wrap_quiesce, cn_conds_gen_wrap_quiesce},
   {"QUIESCE_RESP", 0, 0, 0, 5, 5, 0, -1, 1, 2, -1, -1, 0, cn_fields_quiesce_resp, cn_conds_quiesce_resp},
-  {"CANCEL_TASK", 0, 0, 0, 6, 6, 1, -1, -1, 5, -1, -1, 0, cn_fields_cancel_task, cn_conds_cancel_task},
+  {"CANCEL_TASK", 0, 0, 0, 7, 7, 1, -1, 5, 6, -1, -1, 0, cn_fields_cancel_task, cn_conds_cancel_task},
   {"RESET_PHASE_REQ", 0, 0, 0, 2, 2, 0, -1, -1, -1, -1, -1, 0, cn_fields_reset_phase_req, cn_conds_reset_phase_req},
   {"RESET_PHASE_ACK", 0, 1, 0, 4, 4, 0, -1, -1, -1, -1, -1, 0, cn_fields_reset_phase_ack, cn_conds_reset_phase_ack},
   {"FAULT_REPORT", 0, 1, 0, 8, 8, 0, -1, 1, 2, -1, -1, 0, cn_fields_fault_report, cn_conds_fault_report},

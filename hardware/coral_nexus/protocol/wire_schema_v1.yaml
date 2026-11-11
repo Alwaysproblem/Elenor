@@ -368,6 +368,7 @@ messages:
     include: [task_key]
     fields:
       - { name: txn_id, kind: uint, ident: txn }
+      - { name: ctx_slot, kind: uint, ident: context_key }
       - { name: ctx_generation, kind: uint, ident: context_key }
   ACK:
     fields:
@@ -379,6 +380,7 @@ messages:
   RETIRE_READY:
     include: [task_key]
     fields:
+      - { name: ctx_slot, kind: uint, ident: context_key }
       - { name: ctx_generation, kind: uint, ident: context_key }
       - {
           name: drain_evidence_seq,
@@ -591,7 +593,9 @@ messages:
   # ---- messages requested by field requests and not in the C009 catalog -----------------------------
   CANCEL_TASK:
     include: [task_key]
-    fields: [{ name: ctx_generation, kind: uint, ident: context_key }]
+    fields:
+      - { name: ctx_slot, kind: uint, ident: context_key }
+      - { name: ctx_generation, kind: uint, ident: context_key }
   RESET_PHASE_REQ:
     fields:
       - { name: phase, kind: enum, enum: reset_phase }
