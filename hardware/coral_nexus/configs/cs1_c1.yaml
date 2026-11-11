@@ -1,0 +1,48 @@
+schema: cn_target/v1
+kind: cs1_target
+name: cs1_c1
+generated_by: hardware/coral_nexus/scripts/lib/gen_targets.py
+constraints:
+  context_count: 1
+  tile_count: 1
+  vme_instances: 1
+  user_spm_per_bank: 63488
+  system_reserved_spm_per_bank: 2048
+  retirement_buffer_mode: full
+  retirement_buffer_entries: 16
+  program_slots: 2
+  itcm_bytes: 8192
+  dtcm_bytes: 32768
+index_widths:
+  ctx_slot_bits: 1
+envelope:
+  measured:
+    text_bytes: 160
+    static_data_bytes: 0
+    stack_bytes: 16
+    scratch_bytes: 0
+  record: hardware/coral_nexus/verification/kernel_bootstrap/kernel_measurement.json
+  elf_sha256_layout_A: 98501375e559b2e4ed05f199166eecde1fade673c9349107834f6b5667cd83a8
+  toolchain_lock_sha256: de06690c2da5cd783d76b2998208bd4db4dcdc22dec146c7b0a5ee1af40d3db7
+support:
+  numeric: experimental (C011 profile; W7 oracle pending)
+  kernels:
+  - bootstrap (measure-only, C018)
+  executable: false
+  note: no full Tile top exists yet; cn build only reaches prepare-only (C040 provides the top)
+provenance:
+  decision: 'design/coral_nexus_tile/plan.md :: cs1_c1'
+  vme_instances: 'design/coral_nexus_tile/plan.md :: VME N=1'
+  retirement_buffer_mode:
+  - hardware/coral_nexus/configs/p0_coral.yaml
+  - 'full_retirement_buffer: true'
+  retirement_buffer_entries:
+  - hardware/coral_nexus/upstream/coralnpu/hdl/chisel/src/coralnpu/Parameters.scala
+  - val retirementBufferSize          = 16
+  user_spm_per_bank: l1_spm_bytes_per_bank_mode0 - l1_system_reserved_spm_per_bank (params.d)
+  system_reserved_spm_per_bank: params.d validator_model l1_system_reserved_spm_per_bank
+  itcm_bytes: rules/coralnpu_v2.bzl:224 (read via w5_package.contract.yaml image.capacities)
+  dtcm_bytes: rules/coralnpu_v2.bzl:225 (read via w5_package.contract.yaml image.capacities)
+  w4_constraints: configs/w4_memory_constraints.yaml
+fingerprints:
+  constraints_sha256: 9023c92a027600bf7295b2501579cd62453dc399833d81643e18fb58d0ab2e6b

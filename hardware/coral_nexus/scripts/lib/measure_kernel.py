@@ -248,7 +248,12 @@ def measure(out: Path = OUT_ROOT) -> dict[str, Any]:
   errors = [c for c in record["checks"] if not c["ok"]]
   if errors:
     raise MeasureError("CAPACITY", "; ".join(f"{c['name']}: {c['detail']}" for c in errors))
-  (out / "kernel_measurement.json").write_text(_json(record))
+  record_text = _json(record)
+  (out / "kernel_measurement.json").write_text(record_text)
+  # the committed evidence record C019 consumes; regeneration must be byte-identical
+  committed = H / "verification/kernel_bootstrap/kernel_measurement.json"
+  committed.parent.mkdir(parents=True, exist_ok=True)
+  committed.write_text(record_text)
   return record
 
 

@@ -42,19 +42,13 @@ def main() -> None:
 
   words = argv[2:]
   if not words:
-    print(
-      "usage: cn <command> [args]; known: " + ", ".join(sorted(commands)),
-      file=sys.stderr,
-    )
+    print("usage: cn <command> [args]; known: " + ", ".join(sorted(commands)), file=sys.stderr)
     raise SystemExit(EXIT_USAGE)
 
   command, rest = words[0], words[1:]
   spec = commands.get(command)
   if spec is None:
-    print(
-      f"error: unknown command {command!r}; known: {', '.join(sorted(commands))}",
-      file=sys.stderr,
-    )
+    print(f"error: unknown command {command!r}; known: {', '.join(sorted(commands))}", file=sys.stderr)
     raise SystemExit(EXIT_UNKNOWN)
 
   handler_rel = spec["handler"]
@@ -82,21 +76,17 @@ def main() -> None:
       print(f"error: unit requires --suite; known: {', '.join(sorted(suites))}", file=sys.stderr)
       raise SystemExit(EXIT_USAGE)
     if suite not in suites:
-      print(
-        f"error: unknown suite {suite!r}; known: {', '.join(sorted(suites))}",
-        file=sys.stderr,
-      )
+      print(f"error: unknown suite {suite!r}; known: {', '.join(sorted(suites))}", file=sys.stderr)
       raise SystemExit(EXIT_UNKNOWN)
     argv = ["--suite", suite, *cleaned]
   elif spec.get("subcommands"):
     subcommands = spec["subcommands"]
-    if not rest or rest[0] not in subcommands:
-      print(
-        f"error: {command} requires one of {subcommands}; got {rest[:1]!r}",
-        file=sys.stderr,
-      )
+    # a leading --flag spelling of a registered subcommand is accepted and normalized to the bare word
+    first: str | None = rest[0].lstrip("-") if rest else None
+    if first is None or first not in subcommands:
+      print(f"error: {command} requires one of {subcommands}; got {rest[:1]!r}", file=sys.stderr)
       raise SystemExit(EXIT_USAGE)
-    argv = rest
+    argv = [first, *rest[1:]]
   else:
     argv = rest
 

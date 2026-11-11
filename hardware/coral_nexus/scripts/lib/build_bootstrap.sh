@@ -9,7 +9,7 @@ MARCH="rv32imf_zve32f_zicsr_zifencei_zbb_zfbfmin_zvfbfmin_zvfbfwma"
 obj="$out/${name}.o"
 "$bin/clang" --target=riscv32-unknown-elf -march="$MARCH" -mabi=ilp32 -mcmodel=medany \
   -ffreestanding -fno-builtin -fno-stack-protector -fno-jump-tables \
-  -ffunction-sections -fdata-sections -Oz -g -fstack-usage \
+  -ffunction-sections -fdata-sections -Oz -fstack-usage \
   -Wall -Wextra -Werror -I"$inc" -c "$src/bootstrap_control.c" -o "$obj"
 "$bin/clang" --target=riscv32-unknown-elf -march="$MARCH" -mabi=ilp32 -mcmodel=medany \
   -ffreestanding -fno-builtin -Wa,--no-warn -c "$src/bootstrap_start.S" -o "$out/${name}_start.o"

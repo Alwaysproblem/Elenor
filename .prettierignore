@@ -7,3 +7,9 @@
 # digest covers the bytes.
 /hardware/coral_nexus/verification/numerics/upstream_probe/
 /hardware/coral_nexus/verification/numerics/known_vectors.json
+
+/hardware/coral_nexus/verification/kernel_bootstrap/kernel_measurement.json
+# Generated CS1 targets (C019); freeze/staleness is byte-compared by scripts/lib/gen_targets.py --check
+/hardware/coral_nexus/configs/cs1_c1.yaml
+/hardware/coral_nexus/configs/cs1_c2.yaml
+/hardware/coral_nexus/configs/params.d/coral_cs1.json

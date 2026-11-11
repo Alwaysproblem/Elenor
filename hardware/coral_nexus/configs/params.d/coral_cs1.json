@@ -1,0 +1,34 @@
+{
+  "schema": "cn_params/v1",
+  "source": {
+    "repo": "coral_nexus",
+    "kind": "cs1_target",
+    "note": "generated with the CS1 targets (C019)"
+  },
+  "params": [
+    {
+      "name": "cs1_c1.context_count",
+      "value": 1,
+      "unit": "count",
+      "provenance": {
+        "file": "hardware/coral_nexus/configs/cs1_c1.yaml"
+      }
+    },
+    {
+      "name": "cs1_c2.context_count",
+      "value": 2,
+      "unit": "count",
+      "provenance": {
+        "file": "hardware/coral_nexus/configs/cs1_c2.yaml"
+      }
+    },
+    {
+      "name": "cs1.program_slots",
+      "value": 2,
+      "unit": "count",
+      "provenance": {
+        "file": "hardware/coral_nexus/configs/cs1_c2.yaml"
+      }
+    }
+  ]
+}

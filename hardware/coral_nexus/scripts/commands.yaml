@@ -43,6 +43,12 @@ commands:
     summary: run directed BF16 numeric vectors on the unmodified core and compare to the reference
     executor: host
     handler: scripts/handlers/numeric_probe.sh
+  build:
+    summary: generate and validate one cs1 target (prepare-only)
+    executor: host
+    handler: scripts/handlers/build_config_stage.sh
+    subcommands: [prepare-only]
+    requires_config: true
   unit:
     summary: run a registered unit suite
     executor: host
@@ -71,6 +77,7 @@ commands:
           - hardware/coral_nexus/verification/contracts/test_w6_c015.py
           - hardware/coral_nexus/verification/contracts/test_w7_c016.py
           - hardware/coral_nexus/verification/contracts/test_protocol_c017.py
+          - hardware/coral_nexus/verification/contracts/test_targets_c019.py
       kernel-bootstrap:
         tests:
           - hardware/coral_nexus/verification/kernel_bootstrap/test_kernel_bootstrap.py

@@ -1,0 +1,75 @@
+{
+  "schema": "cn_kernel_measurement/v1",
+  "kernel": "bootstrap",
+  "purpose": "measure-only; not a loadable CS1 package",
+  "resource_manifest": {
+    "text_bytes": 160,
+    "static_data_bytes": 0,
+    "stack_bytes": 16,
+    "scratch_bytes": 0,
+    "bound_source": "static_analysis"
+  },
+  "candidate_layouts": [
+    {
+      "name": "A",
+      "text_base": 0,
+      "text_bytes": 160,
+      "data_base": 0,
+      "data_bytes": 0,
+      "stack_bytes": 128,
+      "align": 16
+    },
+    {
+      "name": "B",
+      "text_base": 4096,
+      "text_bytes": 160,
+      "data_base": 4096,
+      "data_bytes": 0,
+      "stack_bytes": 128,
+      "align": 16
+    }
+  ],
+  "capacities": {
+    "itcm_bytes": 8192,
+    "dtcm_bytes": 32768,
+    "source": "w5_package.contract.yaml image.capacities"
+  },
+  "entry": 0,
+  "csr_immediates": {
+    "distinct": 5,
+    "max": 1998
+  },
+  "provenance": {
+    "toolchain": "toolchain_coralnpu_v2",
+    "toolchain_lock_sha256": "de06690c2da5cd783d76b2998208bd4db4dcdc22dec146c7b0a5ee1af40d3db7",
+    "source_sha256": {
+      "bootstrap_control.c": "de1c3214f7f6f50b35df064aa665c44edb94af651dcfe3571fbb851d9459ddfc",
+      "bootstrap_helpers.h": "b0ba7ee20a7cb337bdd59560a07edc83c74eb1a7ecc28be4f56a4c969647be6c",
+      "bootstrap_layout.ld.tpl": "04fa924bc08a1bbee878660e752cbc2e694e3add40f520f1cb52858d1300c0aa",
+      "bootstrap_start.S": "9d32b85b5bd32161e4d2473005d2c93ef5a87d8b2f4bf84e23b4dd4499f676d0"
+    },
+    "elf_sha256_layout_A": "98501375e559b2e4ed05f199166eecde1fade673c9349107834f6b5667cd83a8"
+  },
+  "checks": [
+    {
+      "name": "coexist_A_B",
+      "ok": true,
+      "detail": "disjoint"
+    },
+    {
+      "name": "itcm_capacity",
+      "ok": true,
+      "detail": "text ends at 4256 of 8192"
+    },
+    {
+      "name": "dtcm_capacity",
+      "ok": true,
+      "detail": "data+stack ends at 4224 of 32768"
+    },
+    {
+      "name": "stack_reservation_covers_bound",
+      "ok": true,
+      "detail": "call-graph bound 16 vs reserved 128"
+    }
+  ]
+}
