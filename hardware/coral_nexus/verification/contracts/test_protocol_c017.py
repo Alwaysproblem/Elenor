@@ -710,6 +710,75 @@ def test_python_pack_unpack_roundtrips_every_message(layout: dict[str, Any]) -> 
       )
 
 
+def _field(kind: str, message: str) -> tuple[str, int]:
+  spec = wire.MESSAGES[wire.MSG_INDEX[message]]
+  name, _kind, _off, _count, limit, *_ = next(f for f in spec["fields"] if f[1] == kind)
+  return name, limit
+
+
+def _filled(message: str, **given: object) -> dict[str, object]:
+  """Zero for every plain field, so the one field under test is the only thing that can be refused."""
+  spec = wire.MESSAGES[wire.MSG_INDEX[message]]
+  values: dict[str, object] = {f[0]: 0 for f in spec["fields"] if f[1] != "digest"}
+  values.update(given)
+  return values
+
+
+def _refused(message: str, values: dict[str, object]) -> str | None:
+  try:
+    blob = wire.pack(message, values)
+  except wire.WireError as exc:
+    return exc.code
+  # whatever pack() lets out must not be refused for a RANGE reason by the receiver. Cross-field CONDITION
+  # rules are a separate check that pack() does not own, so a frame failing only that is not a range escape.
+  try:
+    wire.unpack(blob)
+  except wire.WireError as exc:
+    assert exc.code == "CONDITION", f"pack() emitted a frame the receiver refuses: {exc.code}"
+  return None
+
+
+def test_pack_refuses_an_out_of_range_enum_at_the_exact_boundary() -> None:
+  name, limit = _field("enum", "ACK")
+  assert limit > 1
+  assert _refused("ACK", _filled("ACK", **{name: limit - 1})) is None
+  assert _refused("ACK", _filled("ACK", **{name: limit})) == "ENUM_RANGE"
+  assert _refused("ACK", _filled("ACK", **{name: limit + 1})) == "ENUM_RANGE"
+  assert _refused("ACK", _filled("ACK", **{name: (1 << 64) - 1})) == "ENUM_RANGE"
+
+
+def test_pack_refuses_a_bool_other_than_zero_or_one() -> None:
+  name, limit = _field("bool", "CAPS_RESP")
+  assert limit == 1
+  assert _refused("CAPS_RESP", _filled("CAPS_RESP", **{name: 0})) is None
+  assert _refused("CAPS_RESP", _filled("CAPS_RESP", **{name: 1})) is None
+  assert _refused("CAPS_RESP", _filled("CAPS_RESP", **{name: 2})) == "BOOL_RANGE"
+  assert _refused("CAPS_RESP", _filled("CAPS_RESP", **{name: (1 << 64) - 1})) == "BOOL_RANGE"
+
+
+def test_pack_refuses_a_bitset_with_a_bit_outside_the_declared_members() -> None:
+  name, mask = _field("bitset", "QUIESCE_RESP")
+  assert mask & (mask + 1) == 0 and mask > 0, "the mask is a contiguous low-bit set"
+  assert _refused("QUIESCE_RESP", _filled("QUIESCE_RESP", **{name: mask})) is None
+  assert _refused("QUIESCE_RESP", _filled("QUIESCE_RESP", **{name: 0})) is None
+  assert _refused("QUIESCE_RESP", _filled("QUIESCE_RESP", **{name: mask + 1})) == "BITSET_RANGE"
+  assert _refused("QUIESCE_RESP", _filled("QUIESCE_RESP", **{name: 1 << 63})) == "BITSET_RANGE"
+
+
+def test_pack_and_the_decoder_agree_on_every_enum_field_at_its_boundary() -> None:
+  for spec in wire.MESSAGES:
+    if any(f[1] == "digest" for f in spec["fields"]):
+      continue
+    for name, kind, _off, _count, limit, _enum, _optional in spec["fields"]:
+      if kind != "enum":
+        continue
+      assert _refused(spec["name"], _filled(spec["name"], **{name: limit - 1})) is None
+      assert _refused(spec["name"], _filled(spec["name"], **{name: limit})) == "ENUM_RANGE", (
+        spec["name"],
+        name,
+      )
+
+
 def test_pack_rejects_unknown_missing_and_oversized_values() -> None:
   good = {"txn_id": 1}
   assert wire.pack("QUERY_CAPS", good)
