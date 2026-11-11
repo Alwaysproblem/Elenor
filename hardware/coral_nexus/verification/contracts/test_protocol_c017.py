@@ -463,9 +463,24 @@ def test_freeze_record_hash_mismatch_and_bad_state_are_rejected(tmp_path: Path) 
   assert any("missing" in e for e in freeze_check.verify(bad))
 
 
-def test_freeze_check_has_no_seal_entry_point() -> None:
-  assert not hasattr(freeze_check, "seal")
-  assert not (PROTO / "PROTOCOL_FREEZE.json").exists(), "C017 must not write the formal seal"
+def test_the_required_seal_set_is_held_by_the_checker() -> None:
+  # C017 shipped collect/verify only; C020 added the seal. The required input/generated sets live in
+  # the checker (never in a YAML it validates); while a required capacity budget is open there is no
+  # committed seal at all and both sealing and verifying say so by name.
+  assert hasattr(freeze_check, "seal")
+  if freeze_check.open_budgets():
+    assert freeze_check.verify_seal() == [
+      f"{freeze_check._rel(freeze_check.SEAL_PATH)}: the joint seal is missing"
+    ]
+    with pytest.raises(gp.GenError):
+      freeze_check.seal()
+    assert not freeze_check.SEAL_PATH.exists()
+  else:
+    assert freeze_check.verify_seal() == []
+    record = json.loads(freeze_check.SEAL_PATH.read_text())
+    assert set(record["inputs"]) == set(freeze_check.REQUIRED_INPUTS)
+    assert set(record["generated"]) == set(freeze_check.REQUIRED_GENERATED)
+    assert "PROTOCOL_FREEZE" not in json.dumps(record["inputs"]) + json.dumps(record["generated"])
 
 
 # ---------------------------------------------------------------------------------------------------

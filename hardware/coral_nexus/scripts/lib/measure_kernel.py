@@ -34,7 +34,11 @@ TOOLCHAIN = REPO / "out/coral_nexus/cache/toolchain/extracted/toolchain_coralnpu
 OUT_ROOT = REPO / "out/coral_nexus/C018"
 STACK_BYTES = 128  # upstream DEFAULT stack_size_bytes; a candidate target may differ -> new target hash
 ALIGN = 16  # W5 contract: fixed pre-link images; both candidate bases stay 16-byte aligned
+ITCM_ORIGIN = 0x00000000
+DTCM_ORIGIN = 0x00010000  # pinned upstream default (rules/linker.bzl dtcm_origin_default), never guessed
 
+# Slot offsets INSIDE the pinned regions: A at the start of ITCM/DTCM, B one 4 KiB slot up. The slot
+# size is a candidate planning bound, not a hardware constant; C019 re-checks capacity from the record.
 _LAYOUTS: tuple[dict[str, Any], ...] = (
   {"name": "A", "text_base": 0x0000, "data_base": 0x0000},
   {"name": "B", "text_base": 0x1000, "data_base": 0x1000},
@@ -137,6 +141,23 @@ def _stack_bound(su_text: str, calls: dict[str, list[str]], frames: dict[str, in
   return depth("_start")
 
 
+_RE_SECTION = re.compile(r"^\s*\[\s*\d+\]\s+(\.[\w.]+)\s+PROGBITS\s+([0-9a-f]+)")
+
+
+def _section_vmas(readelf_sw: str) -> dict[str, int]:
+  """Actual section VMAs from readelf -SW: the ELF is the authority, not the .ld intent."""
+  matches = (_RE_SECTION.match(line) for line in readelf_sw.splitlines())
+  return {m.group(1): int(m.group(2), 16) for m in matches if m}
+
+
+def _verify_upstream_regions() -> None:
+  """The region bases are the pinned upstream generator's, read back -- never a local guess."""
+  linker = H / "upstream/coralnpu/rules/linker.bzl"
+  text = linker.read_text()
+  if 'dtcm_origin_default = "0x00010000"' not in text:
+    raise MeasureError("REGION_DRIFT", "upstream DTCM origin default changed; re-derive the layout")
+
+
 def build_layout(layout: dict[str, Any], out: Path) -> dict[str, int]:
   """Fill the layout template and build the real ELF with the pinned toolchain."""
   tpl = (BOOTSTRAP / "bootstrap_layout.ld.tpl").read_text()
@@ -145,6 +166,7 @@ def build_layout(layout: dict[str, Any], out: Path) -> dict[str, int]:
     .replace("@@DATA_BASE@@", f"0x{layout['data_base']:08x}")
     .replace("@@STACK_BYTES@@", str(STACK_BYTES))
   )
+  _verify_upstream_regions()
   build_dir = out / layout["name"]
   build_dir.mkdir(parents=True, exist_ok=True)
   (build_dir / "bootstrap.ld").write_text(script)
@@ -160,6 +182,21 @@ def build_layout(layout: dict[str, Any], out: Path) -> dict[str, int]:
     ]
   )
   sizes = _section_sizes((build_dir / "bootstrap.size").read_text())
+  sections = _run([str(TOOLCHAIN / "riscv64-unknown-elf-readelf"), "-SW", str(build_dir / "bootstrap.elf")])
+  for line in sections.splitlines():
+    parts = line.split()
+    if len(parts) >= 5 and parts[1].lstrip(".").rstrip("]").isdigit() is False and "PROGBITS" in line:
+      pass
+  vmas = _section_vmas(sections)
+  expected_text = ITCM_ORIGIN + int(layout["text_base"])
+  expected_data = DTCM_ORIGIN + int(layout["data_base"])
+  if vmas.get(".text", -1) != expected_text:
+    raise MeasureError("VMA_MISMATCH", f".text at {vmas.get('.text', -1):#x}, expected {expected_text:#x}")
+  if vmas.get(".data", -1) not in (expected_data, -1):
+    raise MeasureError("VMA_MISMATCH", f".data at {vmas.get('.data')!r}, expected near {expected_data:#x}")
+  stack_at = vmas.get(".stack")
+  if stack_at is not None and stack_at < expected_data:
+    raise MeasureError("VMA_MISMATCH", f".stack at {stack_at:#x} is below the data base {expected_data:#x}")
   return sizes
 
 
@@ -206,9 +243,9 @@ def measure(out: Path = OUT_ROOT) -> dict[str, Any]:
     record_layouts.append(
       {
         "name": layout["name"],
-        "text_base": layout["text_base"],
+        "text_base": ITCM_ORIGIN + layout["text_base"],
         "text_bytes": text,
-        "data_base": layout["data_base"],
+        "data_base": DTCM_ORIGIN + layout["data_base"],
         "data_bytes": data,
         "stack_bytes": STACK_BYTES,
         "align": ALIGN,
@@ -295,15 +332,41 @@ def _checks(layouts: list[dict[str, Any]], stack: int) -> list[dict[str, Any]]:
   itcm, dtcm = 8192, 32768
   out = []
   for a in layouts:
+    text_range = (a["text_base"], a["text_base"] + a["text_bytes"])
+    data_range = (a["data_base"], a["data_base"] + a["data_bytes"] + a["stack_bytes"])
+    clash = text_range[0] < data_range[1] and data_range[0] < text_range[1]
+    out.append(
+      {
+        "name": f"regions_disjoint_{a['name']}",
+        "ok": not clash,
+        "detail": f"text {text_range} vs data+stack {data_range}",
+      }
+    )
+    inside = (
+      ITCM_ORIGIN <= a["text_base"]
+      and text_range[1] <= ITCM_ORIGIN + itcm
+      and DTCM_ORIGIN <= a["data_base"]
+      and data_range[1] <= DTCM_ORIGIN + dtcm
+    )
+    out.append(
+      {
+        "name": f"regions_fit_{a['name']}",
+        "ok": inside,
+        "detail": f"slot inside ITCM[{ITCM_ORIGIN:#x},+{itcm}) DTCM[{DTCM_ORIGIN:#x},+{dtcm})",
+      }
+    )
+  for a in layouts:
     for b in layouts:
       if a["name"] < b["name"]:
         overlap = (
           a["text_base"] < b["text_base"] + b["text_bytes"]
           and b["text_base"] < a["text_base"] + a["text_bytes"]
         )
+        # data ranges include their stack reservation: a stack may not collide with the
+        # other image's data any more than data may collide with data
         overlap = overlap or (
-          a["data_base"] < b["data_base"] + b["data_bytes"]
-          and b["data_base"] < a["data_base"] + a["data_bytes"]
+          a["data_base"] < b["data_base"] + b["data_bytes"] + max(a["stack_bytes"], b["stack_bytes"])
+          and b["data_base"] < a["data_base"] + a["data_bytes"] + max(a["stack_bytes"], b["stack_bytes"])
         )
         out.append(
           {
@@ -313,12 +376,22 @@ def _checks(layouts: list[dict[str, Any]], stack: int) -> list[dict[str, Any]]:
           }
         )
   text_end = max(x["text_base"] + x["text_bytes"] for x in layouts)
+  itcm_end = ITCM_ORIGIN + itcm
   out.append(
-    {"name": "itcm_capacity", "ok": text_end <= itcm, "detail": f"text ends at {text_end} of {itcm}"}
+    {
+      "name": "itcm_capacity",
+      "ok": text_end <= itcm_end,
+      "detail": f"text ends at {text_end} of {itcm_end}",
+    }
   )
   data_end = max(x["data_base"] + x["data_bytes"] + STACK_BYTES for x in layouts)
+  dtcm_end = DTCM_ORIGIN + dtcm
   out.append(
-    {"name": "dtcm_capacity", "ok": data_end <= dtcm, "detail": f"data+stack ends at {data_end} of {dtcm}"}
+    {
+      "name": "dtcm_capacity",
+      "ok": data_end <= dtcm_end,
+      "detail": f"data+stack ends at {data_end} of {dtcm_end}",
+    }
   )
   reserved = min(x["stack_bytes"] for x in layouts)
   out.append(

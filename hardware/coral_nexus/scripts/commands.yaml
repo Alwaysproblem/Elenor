@@ -78,6 +78,7 @@ commands:
           - hardware/coral_nexus/verification/contracts/test_w7_c016.py
           - hardware/coral_nexus/verification/contracts/test_protocol_c017.py
           - hardware/coral_nexus/verification/contracts/test_targets_c019.py
+          - hardware/coral_nexus/verification/contracts/test_g1_c020.py
       kernel-bootstrap:
         tests:
           - hardware/coral_nexus/verification/kernel_bootstrap/test_kernel_bootstrap.py

@@ -51,6 +51,11 @@ case "$STAGE" in
     exec python3 "$H/verification/gates.py" \
       --evidence-index "$EVIDENCE_INDEX" --pin "$PIN" --out "$OUT"
     ;;
+  G1)
+    # CN-G1 joint-contract gate (C020): re-validates the actual contracts, budgets, generated
+    # artifacts, measured resources and the joint seal. No evidence-index pin: the artifacts are it.
+    exec python3 "$H/verification/gates.py" --stage G1 --out "$OUT"
+    ;;
   *)
     echo "error: gate stage '$STAGE' not implemented yet" >&2; exit 4
     ;;

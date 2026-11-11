@@ -3,9 +3,11 @@
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
+/* Region bases follow the upstream generator (rules/linker.bzl): ITCM at 0x0, DTCM at 0x10000.
+ * @@TEXT_BASE@@ / @@DATA_BASE@@ select the SLOT inside each region; the two regions never overlap. */
 MEMORY {
-  ITCM (rx)  : ORIGIN = @@TEXT_BASE@@, LENGTH = 4K
-  DTCM (rwx) : ORIGIN = @@DATA_BASE@@, LENGTH = 4K
+  ITCM (rx)  : ORIGIN = 0x00000000 + @@TEXT_BASE@@, LENGTH = 8K
+  DTCM (rwx) : ORIGIN = 0x00010000 + @@DATA_BASE@@, LENGTH = 32K
 }
 
 STACK_BYTES = @@STACK_BYTES@@;

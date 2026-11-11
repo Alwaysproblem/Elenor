@@ -248,8 +248,14 @@ def test_the_committed_record_stays_schema_clean() -> None:
   assert doc["schema"] == "cn_kernel_measurement/v1"
   checks = {c["name"]: c["ok"] for c in doc["checks"]}
   assert checks == {
+    "regions_disjoint_A": True,
+    "regions_fit_A": True,
+    "regions_disjoint_B": True,
+    "regions_fit_B": True,
     "coexist_A_B": True,
     "itcm_capacity": True,
     "dtcm_capacity": True,
     "stack_reservation_covers_bound": True,
   }
+  for layout in doc["candidate_layouts"]:
+    assert layout["data_base"] >= 0x10000, "data must live in DTCM, never overlap ITCM"

@@ -14,7 +14,7 @@
       "name": "A",
       "text_base": 0,
       "text_bytes": 160,
-      "data_base": 0,
+      "data_base": 65536,
       "data_bytes": 0,
       "stack_bytes": 128,
       "align": 16
@@ -23,7 +23,7 @@
       "name": "B",
       "text_base": 4096,
       "text_bytes": 160,
-      "data_base": 4096,
+      "data_base": 69632,
       "data_bytes": 0,
       "stack_bytes": 128,
       "align": 16
@@ -45,12 +45,32 @@
     "source_sha256": {
       "bootstrap_control.c": "de1c3214f7f6f50b35df064aa665c44edb94af651dcfe3571fbb851d9459ddfc",
       "bootstrap_helpers.h": "b0ba7ee20a7cb337bdd59560a07edc83c74eb1a7ecc28be4f56a4c969647be6c",
-      "bootstrap_layout.ld.tpl": "04fa924bc08a1bbee878660e752cbc2e694e3add40f520f1cb52858d1300c0aa",
+      "bootstrap_layout.ld.tpl": "c9f4320b70ce63760c8995c1d561f9cd151a32e06dc7fcf50954e1f1389f7215",
       "bootstrap_start.S": "9d32b85b5bd32161e4d2473005d2c93ef5a87d8b2f4bf84e23b4dd4499f676d0"
     },
-    "elf_sha256_layout_A": "98501375e559b2e4ed05f199166eecde1fade673c9349107834f6b5667cd83a8"
+    "elf_sha256_layout_A": "42b83d9d0efcf40aab2eb328795082210a96ee74c3ecbd3344da87d9af1e786d"
   },
   "checks": [
+    {
+      "name": "regions_disjoint_A",
+      "ok": true,
+      "detail": "text (0, 160) vs data+stack (65536, 65664)"
+    },
+    {
+      "name": "regions_fit_A",
+      "ok": true,
+      "detail": "slot inside ITCM[0x0,+8192) DTCM[0x10000,+32768)"
+    },
+    {
+      "name": "regions_disjoint_B",
+      "ok": true,
+      "detail": "text (4096, 4256) vs data+stack (69632, 69760)"
+    },
+    {
+      "name": "regions_fit_B",
+      "ok": true,
+      "detail": "slot inside ITCM[0x0,+8192) DTCM[0x10000,+32768)"
+    },
     {
       "name": "coexist_A_B",
       "ok": true,
@@ -64,7 +84,7 @@
     {
       "name": "dtcm_capacity",
       "ok": true,
-      "detail": "data+stack ends at 4224 of 32768"
+      "detail": "data+stack ends at 69760 of 98304"
     },
     {
       "name": "stack_reservation_covers_bound",

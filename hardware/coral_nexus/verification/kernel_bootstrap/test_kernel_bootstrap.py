@@ -135,13 +135,21 @@ def test_two_candidate_layouts_coexist_inside_capacity(record: dict[str, Any]) -
   assert a is not b
   # the C014 package consumer's own coexistence proof agrees with the record
   pc.layouts_coexist(_layout_pkg(a), _layout_pkg(b))
+  itcm, dtcm = mk.ITCM_ORIGIN, mk.DTCM_ORIGIN
   for layout in (a, b):
     assert layout["text_base"] % layout["align"] == 0
     assert layout["data_base"] % layout["align"] == 0
-    assert layout["text_base"] + layout["text_bytes"] <= record["capacities"]["itcm_bytes"]
+    assert itcm <= layout["text_base"]
+    assert layout["text_base"] + layout["text_bytes"] <= itcm + record["capacities"]["itcm_bytes"]
+    assert dtcm <= layout["data_base"]
     assert (
       layout["data_base"] + layout["data_bytes"] + layout["stack_bytes"]
-      <= record["capacities"]["dtcm_bytes"]
+      <= dtcm + record["capacities"]["dtcm_bytes"]
+    )
+    # within one image, text and data+stack live in different regions and never overlap
+    assert (
+      layout["text_base"] + layout["text_bytes"] <= layout["data_base"]
+      or layout["data_base"] + layout["data_bytes"] + layout["stack_bytes"] <= layout["text_base"]
     )
   assert all(check["ok"] for check in record["checks"])
 
@@ -177,56 +185,93 @@ def _expect(code: str, fn: Any, *args: Any) -> None:
 
 def test_capacity_and_overlap_failures_are_refused() -> None:
   layouts = [
-    {"name": "A", "text_base": 0, "text_bytes": 6000, "data_base": 0, "data_bytes": 0, "stack_bytes": 128},
+    {
+      "name": "A",
+      "text_base": 0,
+      "text_bytes": 6000,
+      "data_base": 0x10000,
+      "data_bytes": 0,
+      "stack_bytes": 128,
+    },
     {
       "name": "B",
       "text_base": 4096,
       "text_bytes": 6000,
-      "data_base": 0,
+      "data_base": 0x11000,
       "data_bytes": 0,
       "stack_bytes": 128,
     },
   ]
   errors = [c for c in mk._checks(layouts, 16) if not c["ok"]]
-  assert {c["name"] for c in errors} == {"coexist_A_B", "itcm_capacity"}
-  dtcm_over = [
+  assert {c["name"] for c in errors} == {"coexist_A_B", "itcm_capacity", "regions_fit_B"}
+  # a data base below the DTCM origin is refused even when the sizes are tiny
+  below_dtcm = [
     {
       "name": "A",
       "text_base": 0,
       "text_bytes": 8,
-      "data_base": 32600,
-      "data_bytes": 100,
-      "stack_bytes": 128,
+      "data_base": 0x8000,
+      "data_bytes": 64,
+      "stack_bytes": 16,
     },
     {
       "name": "B",
       "text_base": 4096,
       "text_bytes": 8,
-      "data_base": 40,
-      "data_bytes": 100,
-      "stack_bytes": 128,
+      "data_base": 0x10000,
+      "data_bytes": 0,
+      "stack_bytes": 16,
     },
   ]
-  assert {c["name"] for c in mk._checks(dtcm_over, 16) if not c["ok"]} == {"dtcm_capacity"}
+  assert {c["name"] for c in mk._checks(below_dtcm, 16) if not c["ok"]} == {"regions_fit_A"}
   tiny_stack = [
-    {"name": "A", "text_base": 0, "text_bytes": 8, "data_base": 0, "data_bytes": 0, "stack_bytes": 8},
-    {"name": "B", "text_base": 4096, "text_bytes": 8, "data_base": 4096, "data_bytes": 0, "stack_bytes": 8},
+    {"name": "A", "text_base": 0, "text_bytes": 8, "data_base": 0x10000, "data_bytes": 0, "stack_bytes": 8},
+    {
+      "name": "B",
+      "text_base": 4096,
+      "text_bytes": 8,
+      "data_base": 0x11000,
+      "data_bytes": 0,
+      "stack_bytes": 8,
+    },
   ]
   assert {c["name"] for c in mk._checks(tiny_stack, 16) if not c["ok"]} == {
     "stack_reservation_covers_bound"
   }
-  overlapping = [
-    {"name": "A", "text_base": 0, "text_bytes": 100, "data_base": 0, "data_bytes": 100, "stack_bytes": 16},
-    {"name": "B", "text_base": 50, "text_bytes": 100, "data_base": 0, "data_bytes": 100, "stack_bytes": 16},
+  # a stack colliding with the other image's data is an overlap, not just a tight fit
+  stack_clash = [
+    {
+      "name": "A",
+      "text_base": 0,
+      "text_bytes": 8,
+      "data_base": 0x10000,
+      "data_bytes": 0,
+      "stack_bytes": 0x1080,
+    },
+    {
+      "name": "B",
+      "text_base": 4096,
+      "text_bytes": 8,
+      "data_base": 0x10400,
+      "data_bytes": 8,
+      "stack_bytes": 16,
+    },
   ]
-  assert any(not c["ok"] for c in mk._checks(overlapping, 16))
+  assert {c["name"] for c in mk._checks(stack_clash, 16) if not c["ok"]} == {"coexist_A_B"}
   ok = [
-    {"name": "A", "text_base": 0, "text_bytes": 160, "data_base": 0, "data_bytes": 0, "stack_bytes": 128},
+    {
+      "name": "A",
+      "text_base": 0,
+      "text_bytes": 160,
+      "data_base": 0x10000,
+      "data_bytes": 0,
+      "stack_bytes": 128,
+    },
     {
       "name": "B",
       "text_base": 4096,
       "text_bytes": 160,
-      "data_base": 4096,
+      "data_base": 0x11000,
       "data_bytes": 0,
       "stack_bytes": 128,
     },

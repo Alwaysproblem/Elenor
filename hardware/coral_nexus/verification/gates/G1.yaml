@@ -1,0 +1,22 @@
+schema: cn_gate_config/v1
+stage: G1
+# The evaluator holds the same required set in code (verification/gates.py REQUIRED_G1_CHECKS) and
+# refuses a drifted spec: this file is the readable manifest, not the authority.
+required_checks:
+  - protocol.contracts # C009 catalog + budgets + CSR names validate (validate_protocol)
+  - wire.codec_generation # all four wire artifacts equal a fresh render (freeze_check)
+  - csr.bindings # generated CSR addresses match a fresh allocation (csr_lint)
+  - budgets.closed # every lifetime domain derived or explicitly underivable (derive_widths)
+  - resources.measured # the committed C018 record is schema-clean and all-OK
+  - targets.generated # cs1 targets/params/targets.bzl equal a fresh render (gen_targets --check)
+  - seal.joint # PROTOCOL_FREEZE.json present, complete and hash-true (freeze_check)
+exit_codes:
+  0: all required contracts, resources and the joint seal verified
+  11: protocol contracts failed to validate
+  12: generated codec artifacts stale or hand-edited
+  13: CSR bindings inconsistent with the allocation
+  14: a lifetime budget is neither derived nor declared underivable
+  15: the measured resource record is missing or not all-OK
+  16: generated cs1 targets are stale or hand-edited
+  17: the joint seal is missing, half-sealed, stale or tampered
+  18: the G1 gate spec drifted from the evaluator

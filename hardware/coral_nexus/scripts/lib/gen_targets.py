@@ -44,6 +44,7 @@ REPO = H.parents[1]
 sys.path.insert(0, str(H / "scripts/lib"))
 sys.path.insert(0, str(H / "protocol"))
 
+import measure_kernel as mkr  # noqa: E402  (region bases are the measurer's pinned constants)
 import validate_constraints as vc  # noqa: E402
 import validate_protocol as vp  # noqa: E402
 
@@ -170,7 +171,11 @@ def build(measurement_path: Path = MEASUREMENT, contract_path: Path | None = Non
   user_spm = int(bank["value"]) - int(reserved["value"])
 
   envelope_ok = all(
-    x["text_base"] + x["text_bytes"] <= itcm and x["data_base"] + x["data_bytes"] + x["stack_bytes"] <= dtcm
+    mkr.ITCM_ORIGIN <= x["text_base"] and x["text_base"] + x["text_bytes"] <= mkr.ITCM_ORIGIN + itcm
+    for x in layouts
+  ) and all(
+    mkr.DTCM_ORIGIN <= x["data_base"]
+    and x["data_base"] + x["data_bytes"] + x["stack_bytes"] <= mkr.DTCM_ORIGIN + dtcm
     for x in layouts
   )
   if not envelope_ok:
@@ -182,8 +187,8 @@ def build(measurement_path: Path = MEASUREMENT, contract_path: Path | None = Non
         and b["text_base"] < a["text_base"] + a["text_bytes"]
       )
       clash = clash or (
-        a["data_base"] < b["data_base"] + b["data_bytes"]
-        and b["data_base"] < a["data_base"] + a["data_bytes"]
+        a["data_base"] < b["data_base"] + b["data_bytes"] + max(a["stack_bytes"], b["stack_bytes"])
+        and b["data_base"] < a["data_base"] + a["data_bytes"] + max(a["stack_bytes"], b["stack_bytes"])
       )
       if clash:
         raise TargetError("ENVELOPE", "candidate layouts overlap; they cannot be program slots")

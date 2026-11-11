@@ -24,6 +24,20 @@ GATE_SCHEMA = "cn_gate/v1"
 MANIFEST_SCHEMA = "cn_evidence_manifest/v1"
 PIN_SCHEMA = "cn_evidence_pin/v1"
 G0_STAGE = "G0"
+G1_STAGE = "G1"
+G1_SPEC_PATH = Path(__file__).with_name("gates") / "G1.yaml"
+# The required G1 check set lives HERE (the yaml mirrors it for readers); a drifted spec is itself a
+# failure class. (check name -> failure exit code)
+REQUIRED_G1_CHECKS = {
+  "protocol.contracts": 11,
+  "wire.codec_generation": 12,
+  "csr.bindings": 13,
+  "budgets.closed": 14,
+  "resources.measured": 15,
+  "targets.generated": 16,
+  "seal.joint": 17,
+}
+G1_SPEC_DRIFT_CODE = 18
 DEFAULT_PIN_PATH = Path(__file__).with_name("expected_evidence.json")
 
 # (evidence_name, report_filename, verdict_field, required_artifacts)
@@ -43,10 +57,8 @@ EVIDENCE_SPECS = [
     "replay_identical",
     ["bf16_kat_record.json", "bf16_kat_run_a.json", "bf16_kat_run_b.json"],
   ),
-  ("offline_rebuild", "offline_rebuild.json", "pass",
-   ["offline_rebuild.json", "build.log"]),
-  ("devcontainer_probe", "devcontainer_report.json", "pass",
-   ["devcontainer_report.json", "probes.log"]),
+  ("offline_rebuild", "offline_rebuild.json", "pass", ["offline_rebuild.json", "build.log"]),
+  ("devcontainer_probe", "devcontainer_report.json", "pass", ["devcontainer_report.json", "probes.log"]),
 ]
 
 REQUIRED_G0_EVIDENCE = [spec[0] for spec in EVIDENCE_SPECS]
@@ -75,11 +87,7 @@ def build_pin(evidence_index: Path) -> dict:
       "report_sha256": sha256_file(report_path),
       "verdict_field": verdict_field,
       "expected_verdict": report.get(verdict_field),
-      "artifacts": {
-        a: sha256_file(entry_path / a)
-        for a in artifacts
-        if (entry_path / a).is_file()
-      },
+      "artifacts": {a: sha256_file(entry_path / a) for a in artifacts if (entry_path / a).is_file()},
     }
   return {
     "schema": PIN_SCHEMA,
@@ -120,19 +128,14 @@ def sha256_file(path: Path) -> str:
 def git_head(root: Path) -> str:
   try:
     proc = subprocess.run(
-      ["git", "-C", str(root), "rev-parse", "HEAD"],
-      capture_output=True,
-      text=True,
-      check=True,
+      ["git", "-C", str(root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     )
     return proc.stdout.strip()
   except (subprocess.CalledProcessError, OSError):
     return "unknown"
 
 
-def build_evidence_manifest(
-  evidence_index: Path,
-) -> dict:
+def build_evidence_manifest(evidence_index: Path) -> dict:
   """Scan the evidence index and record real hashes + required artifacts.
 
   Called by gate.sh BEFORE running the gate. Each required evidence
@@ -174,9 +177,7 @@ def build_evidence_manifest(
       entry["report_verdict"] = None
       entry["verdict_pass"] = False
 
-    missing_artifacts = [
-      a for a in artifacts if not (entry_path / a).is_file()
-    ]
+    missing_artifacts = [a for a in artifacts if not (entry_path / a).is_file()]
     entry["missing_artifacts"] = missing_artifacts
     entry["status"] = "present" if not missing_artifacts else "incomplete"
 
@@ -268,18 +269,14 @@ class G0Gate:
         report = json.loads(report_path.read_text())
         value = report.get(expected["verdict_field"])
         detail = str(value)
-        verdict_ok = (
-          value == expected.get("expected_verdict") and _verdict_passes(value)
-        )
+        verdict_ok = value == expected.get("expected_verdict") and _verdict_passes(value)
       except (json.JSONDecodeError, OSError) as exc:
         detail = f"parse error: {exc}"
       any_failed |= not self._record(f"{name}.verdict", verdict_ok, detail)
 
       bad_artifacts = []
       expected_artifacts = expected.get("artifacts", {})
-      spec_artifacts = next(
-        artifacts for n, _, _, artifacts in EVIDENCE_SPECS if n == name
-      )
+      spec_artifacts = next(artifacts for n, _, _, artifacts in EVIDENCE_SPECS if n == name)
       for artifact in spec_artifacts:
         artifact_path = evidence_index / name / artifact
         pinned_hash = expected_artifacts.get(artifact)
@@ -302,9 +299,7 @@ class G0Gate:
     try:
       baseline = json.loads(baseline_report.read_text())
       offline = json.loads(offline_report.read_text())
-      by_name = {
-        w["name"] + ".elf": w["elf_sha256"] for w in baseline.get("workloads", [])
-      }
+      by_name = {w["name"] + ".elf": w["elf_sha256"] for w in baseline.get("workloads", [])}
       rebuilt = offline.get("elfs", {})
       mismatched = [
         f"{elf}: {digest[:12]} != {by_name[elf][:12]}"
@@ -318,25 +313,144 @@ class G0Gate:
         "; ".join(mismatched) if mismatched else f"{len(compared)} elf(s) identical",
       )
     except (json.JSONDecodeError, OSError, KeyError) as exc:
-      any_failed |= not self._record(
-        "offline_rebuild.matches_baseline", False, f"unreadable: {exc}"
-      )
+      any_failed |= not self._record("offline_rebuild.matches_baseline", False, f"unreadable: {exc}")
 
     return self._report(not any_failed)
+
+
+class G1Gate:
+  """CN-G1 joint-contract gate (C020).
+
+  Runs the REAL checkers (catalog validation, fresh re-render of every generated artifact, the CSR
+  allocation lint, the budget derivation, the measured-resource record and the joint seal); it never
+  accepts a producer's "DONE" status in place of artifact consistency. Each failure class maps to its
+  own non-zero exit code; a spec/evaluator drift is a failure of its own.
+  """
+
+  def __init__(self, repo_root: Path) -> None:
+    self.repo_root = repo_root
+    self.results: list[dict] = []
+
+  def _record(self, name: str, ok: bool, detail: str) -> bool:
+    self.results.append({"check": name, "ok": ok, "detail": detail})
+    return ok
+
+  def _report(self, exit_code: int) -> dict:
+    return {
+      "schema": GATE_SCHEMA,
+      "stage": G1_STAGE,
+      "checks": self.results,
+      "pass": exit_code == 0,
+      "exit_code": exit_code,
+      "evaluated_at": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+
+  def run(self) -> dict:
+    import yaml
+
+    sys.path.insert(0, str(self.repo_root / "hardware/coral_nexus/protocol"))
+    sys.path.insert(0, str(self.repo_root / "hardware/coral_nexus/scripts/lib"))
+    import csr_lint  # noqa: F401  (imported for the side effect of path sanity)
+    import csr_lint as cl
+    import derive_widths as dw
+    import freeze_check as fc
+    import gen_targets as gtr
+    import validate_protocol as vpr
+
+    exit_code = 0
+
+    spec = yaml.safe_load(G1_SPEC_PATH.read_text())
+    listed = list(spec.get("required_checks") or [])
+    if listed != list(REQUIRED_G1_CHECKS):
+      self._record(
+        "gate.spec", False, f"G1.yaml lists {listed}, evaluator holds {list(REQUIRED_G1_CHECKS)}"
+      )
+      exit_code = G1_SPEC_DRIFT_CODE
+    else:
+      self._record("gate.spec", True, "spec matches the evaluator")
+
+    catalog = vpr.validate(self.repo_root / "hardware/coral_nexus/protocol")
+    if not self._record(
+      "protocol.contracts", catalog["valid"], "; ".join(catalog["errors"])[:400] or "catalog valid"
+    ):
+      exit_code = exit_code or REQUIRED_G1_CHECKS["protocol.contracts"]
+
+    drift = fc.verify_generated()
+    if not self._record(
+      "wire.codec_generation", not drift, "; ".join(drift)[:400] or "all artifacts fresh"
+    ):
+      exit_code = exit_code or REQUIRED_G1_CHECKS["wire.codec_generation"]
+
+    csr_errors = cl.lint()
+    if not self._record("csr.bindings", not csr_errors, "; ".join(csr_errors)[:400] or "bindings match"):
+      exit_code = exit_code or REQUIRED_G1_CHECKS["csr.bindings"]
+
+    data = vpr.load_all(self.repo_root / "hardware/coral_nexus/protocol")
+    # widths may stay declared-underivable (fail closed, no invented width); capacity budgets may not:
+    # a budget on the w4 unresolved list is open and the gate fails on it by name
+    budgets_open = fc.open_budgets()
+    try:
+      result = dw.derive(data["budgets"], data["lifetimes"])
+      if budgets_open:
+        self._record(
+          "budgets.closed", False, f"open required budget, no sourced value: {', '.join(budgets_open)}"
+        )
+        exit_code = exit_code or REQUIRED_G1_CHECKS["budgets.closed"]
+      else:
+        detail = f"{len(result.derived)} derived, {len(result.unresolved)} widths declared underivable"
+        self._record("budgets.closed", True, detail)
+    except dw.WidthError as exc:
+      self._record("budgets.closed", False, str(exc)[:400])
+      exit_code = exit_code or REQUIRED_G1_CHECKS["budgets.closed"]
+
+    measurement = (
+      self.repo_root / "hardware/coral_nexus/verification/kernel_bootstrap/kernel_measurement.json"
+    )
+    if not measurement.is_file():
+      self._record("resources.measured", False, f"{measurement} missing")
+      exit_code = exit_code or REQUIRED_G1_CHECKS["resources.measured"]
+    else:
+      record = json.loads(measurement.read_text())
+      ok = record.get("schema") == "cn_kernel_measurement/v1" and all(c["ok"] for c in record["checks"])
+      ok = ok and record["resource_manifest"]["bound_source"] == "static_analysis"
+      self._record(
+        "resources.measured", ok, "record schema-clean, all checks OK" if ok else "record not all-OK"
+      )
+      if not ok:
+        exit_code = exit_code or REQUIRED_G1_CHECKS["resources.measured"]
+
+    target_errors = gtr.check()
+    if not self._record(
+      "targets.generated", not target_errors, "; ".join(target_errors)[:400] or "targets fresh"
+    ):
+      exit_code = exit_code or REQUIRED_G1_CHECKS["targets.generated"]
+
+    seal_errors = fc.verify_seal()
+    if not self._record("seal.joint", not seal_errors, "; ".join(seal_errors)[:400] or "seal verifies"):
+      exit_code = exit_code or REQUIRED_G1_CHECKS["seal.joint"]
+
+    return self._report(exit_code)
 
 
 def main() -> None:
   import argparse
 
-  parser = argparse.ArgumentParser(description="CN-G0 evidence gate")
-  parser.add_argument("--evidence-index", required=True)
+  parser = argparse.ArgumentParser(description="CN stage gates")
+  parser.add_argument("--stage", default=G0_STAGE)
+  parser.add_argument("--evidence-index", required=False)
   parser.add_argument("--out", required=False)
   parser.add_argument("--pin", required=False, default=str(DEFAULT_PIN_PATH))
   parser.add_argument("--build-manifest", action="store_true")
   parser.add_argument("--write-pin", action="store_true")
   args = parser.parse_args()
 
-  evidence_index = Path(args.evidence_index).resolve()
+  if args.stage == G1_STAGE and not args.out:
+    print("error: --out is required", file=sys.stderr)
+    raise SystemExit(2)
+  if args.stage != G1_STAGE and not args.evidence_index:
+    print("error: --evidence-index is required for this stage", file=sys.stderr)
+    raise SystemExit(2)
+  evidence_index = Path(args.evidence_index).resolve() if args.evidence_index else Path("/nonexistent")
   if args.write_pin:
     pin = build_pin(evidence_index)
     pin_path = Path(args.pin).resolve()
@@ -348,16 +462,21 @@ def main() -> None:
     print(f"manifest built: {len(m['entries'])} entries")
     return
   if not args.out:
-    print("error: --out is required unless --build-manifest/--write-pin",
-          file=sys.stderr)
+    print("error: --out is required unless --build-manifest/--write-pin", file=sys.stderr)
     raise SystemExit(2)
+  if args.stage == G1_STAGE:
+    report = G1Gate(Path.cwd()).run()
+    out = Path(args.out).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "g1_gate_report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(report, indent=2, sort_keys=True))
+    raise SystemExit(0 if report["pass"] else report["exit_code"])
+
   gate = G0Gate(Path.cwd(), Path(args.pin))
   report = gate.run(evidence_index)
   out = Path(args.out).resolve()
   out.mkdir(parents=True, exist_ok=True)
-  (out / "g0_gate_report.json").write_text(
-    json.dumps(report, indent=2, sort_keys=True) + "\n"
-  )
+  (out / "g0_gate_report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
   print(json.dumps(report, indent=2, sort_keys=True))
   if not report["pass"]:
     raise SystemExit(1)

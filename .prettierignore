@@ -13,3 +13,4 @@
 /hardware/coral_nexus/configs/cs1_c1.yaml
 /hardware/coral_nexus/configs/cs1_c2.yaml
 /hardware/coral_nexus/configs/params.d/coral_cs1.json
+/hardware/coral_nexus/protocol/PROTOCOL_FREEZE.json

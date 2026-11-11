@@ -22,7 +22,7 @@ envelope:
     stack_bytes: 16
     scratch_bytes: 0
   record: hardware/coral_nexus/verification/kernel_bootstrap/kernel_measurement.json
-  elf_sha256_layout_A: 98501375e559b2e4ed05f199166eecde1fade673c9349107834f6b5667cd83a8
+  elf_sha256_layout_A: 42b83d9d0efcf40aab2eb328795082210a96ee74c3ecbd3344da87d9af1e786d
   toolchain_lock_sha256: de06690c2da5cd783d76b2998208bd4db4dcdc22dec146c7b0a5ee1af40d3db7
 support:
   numeric: experimental (C011 profile; W7 oracle pending)
