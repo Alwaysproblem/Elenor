@@ -173,6 +173,26 @@ Never refresh the pin merely to make a red gate green: an unchanged
 verdict with changed bytes means the producer changed, and that is a
 review event.
 
+## CN-G1 gate and the capacity decisions (C020)
+
+`cn gate --stage G1 --out <dir>` re-runs every producer validator (C009-C016), re-renders every generated
+artifact, checks the measured resource record and verifies the joint seal. Exit codes: 11 contracts,
+12 codec artifacts, 13 CSR bindings, 14 open capacity budget, 15 measured resources, 16 targets, 17 seal,
+18 gate spec drift.
+
+Two capacities have no derivable bound and are therefore **decisions**, recorded in
+`configs/w4_capacity_decisions.yaml` (read by `freeze_check.open_budgets`, sealed by hash):
+
+- `per_ctx_outstanding_credit_cap`: per-Context CreditManager ceiling, in entries.
+- `response_record_budget`: waiter response records per MSHR refill entry, in entries.
+
+A budget is closed only when `value` is a positive integer in `entries` and `decided_by`, `rationale` and
+`evidence` are non-empty (for the response budget the rationale must say the hardware stalls when full).
+`null`, 0, a bool, a float or a blank field keeps it open. Recording a decision does not edit
+`w4_memory_constraints.yaml`: both stay `derivable: false` there. After filling the file: run
+`python hardware/coral_nexus/protocol/freeze_check.py seal`, then `cn gate --stage G1`. Changing a recorded
+value later changes the file hash, so the seal stops verifying until `seal --bump`.
+
 ## Devcontainer
 
 `.devcontainer/coral_nexus/devcontainer.json` builds the same locked image

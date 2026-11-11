@@ -33,12 +33,15 @@ import gen_protocol as gp  # noqa: E402
 STATES = ("collected-not-frozen", "frozen")
 SEAL_PATH = H / "protocol/PROTOCOL_FREEZE.json"
 W4_CONSTRAINTS = H / "configs/w4_memory_constraints.yaml"
+W4_DECISIONS = H / "configs/w4_capacity_decisions.yaml"
+DECISIONS_SCHEMA = "cn_w4_capacity_decisions/v1"
+DECISION_TEXT_FIELDS = ("decided_by", "rationale", "evidence")
 
 # Capacity budgets (NOT widths) the seal requires CLOSED with a sourced value. A width may legally stay
 # declared-underivable (C009 fail-closed rule; it rides a 64-bit transport container); a capacity budget
 # left on the unresolved list is an OPEN budget, and the W1 freeze rule forbids sealing over it
 # ("a missing source fails the freeze; an empty TBD placeholder is forbidden"). Closing one means
-# editing w4_memory_constraints.yaml with a sourced value -- never a number invented here.
+# recording the decision in configs/w4_capacity_decisions.yaml -- never a number invented here.
 REQUIRED_CLOSED_BUDGETS = ("per_ctx_outstanding_credit_cap", "response_record_budget")
 
 # The required joint-freeze input set (C009-C019 producer fragments) lives HERE, in the checker, so
@@ -64,6 +67,7 @@ REQUIRED_INPUTS = (
   # C013 memory contract + envelope
   "hardware/coral_nexus/protocol/w4_memory.contract.yaml",
   "hardware/coral_nexus/configs/w4_memory_constraints.yaml",
+  "hardware/coral_nexus/configs/w4_capacity_decisions.yaml",
   # C014 package contract
   "hardware/coral_nexus/protocol/w5_package.contract.yaml",
   # C015/C016 event, terminal-reset and trace contracts
@@ -94,34 +98,39 @@ REQUIRED_GENERATED = (
 
 
 def open_budgets() -> list[str]:
-  """Required capacity budgets without a sourced value.
+  """Required capacity budgets whose DECISION is not recorded in ``configs/w4_capacity_decisions.yaml``.
 
-  Fail closed in BOTH directions: an entry still on the w4 ``unresolved`` list is open, and one deleted
-  entirely is equally unresolved -- deletion must not turn into a green seal. Closing one means MOVING it
-  to ``inputs`` with a sourced file/line/needle that reads back AND the value; the w4 validator
-  (scripts/derive_w4_bounds.py) then owns the remaining bookkeeping, so a sourced number here is never a
-  local invention.
+  A capacity with no derivable bound is a design decision, so it is closed by an external, reviewed,
+  hash-sealed config and never by a number invented in code. Fail closed in every direction: a missing
+  file, a missing or extra decision, ``null``, zero, a bool or non-integer value, or an empty
+  decided_by / rationale / evidence all leave the budget open. The w4 constraints file keeps listing the
+  two as underivable; the decision does not claim they were derived.
   """
   import yaml
 
-  doc = yaml.safe_load(W4_CONSTRAINTS.read_text())
-  unresolved = {entry.get("name") for entry in doc.get("unresolved") or []}
-  read_back: dict[str, bool] = {}
-  for entry in doc.get("inputs") or []:
-    name = entry.get("name")
-    if name in REQUIRED_CLOSED_BUDGETS:
-      source = entry.get("source") or {}
-      try:
-        line = (REPO / str(source["file"])).read_text().splitlines()[int(source["line"]) - 1]
-      except (KeyError, OSError, IndexError, TypeError):
-        read_back[name] = False
-        continue
-      read_back[name] = str(source["needle"]) in line and isinstance(entry.get("value"), int)
+  try:
+    doc = yaml.safe_load(W4_DECISIONS.read_text())
+  except (OSError, yaml.YAMLError):
+    return list(REQUIRED_CLOSED_BUDGETS)
+  decisions = doc.get("decisions") if isinstance(doc, dict) else None
+  if not isinstance(decisions, dict) or doc.get("schema") != DECISIONS_SCHEMA:
+    return list(REQUIRED_CLOSED_BUDGETS)
   state: list[str] = []
   for name in REQUIRED_CLOSED_BUDGETS:
-    if name in unresolved or name not in read_back or not read_back[name]:
+    entry = decisions.get(name)
+    if not isinstance(entry, dict) or not _decision_closed(entry):
       state.append(name)
-  return state
+  extra = sorted(set(decisions) - set(REQUIRED_CLOSED_BUDGETS))
+  return state + [f"{n} (not a required budget)" for n in extra]
+
+
+def _decision_closed(entry: dict[str, Any]) -> bool:
+  value = entry.get("value")
+  if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+    return False
+  if entry.get("unit") != "entries":
+    return False
+  return all(isinstance(entry.get(k), str) and entry[k].strip() for k in DECISION_TEXT_FIELDS)
 
 
 def _sha(path: Path) -> str:
@@ -215,8 +224,8 @@ def seal(out: Path | None = None, *, bump: bool = False) -> dict[str, Any]:
   if budgets:
     raise gp.GenError(
       [
-        f"open budget {name}: no sourced value; sealing over it is forbidden (close it in "
-        "configs/w4_memory_constraints.yaml with a sourced bound first)"
+        f"open budget {name}: no recorded decision; sealing over it is forbidden (fill it in "
+        "configs/w4_capacity_decisions.yaml: value, decided_by, rationale, evidence)"
         for name in budgets
       ]
     )
@@ -276,7 +285,7 @@ def verify_seal(path: Path | None = None) -> list[str]:
   budgets = open_budgets()
   if budgets:
     errors.append(
-      "open required budget, seal invalid until closed with a sourced value: " + ", ".join(budgets)
+      "open required budget, seal invalid until its decision is recorded: " + ", ".join(budgets)
     )
   return errors
 

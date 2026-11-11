@@ -5,12 +5,12 @@ State of the tree these tests pin:
 * the seal ENTRY POINTS exist and are refuse-first: an open required capacity budget refuses to seal, a
   missing required input refuses to seal, identical content re-seals idempotently, changed content needs
   --bump (which archives the previous seal), and the seal file's own digest appears nowhere inside it;
-* TODAY the two required capacity budgets (per_ctx_outstanding_credit_cap, response_record_budget) have
-  no sourced value, so no seal is committed and the G1 gate fails closed with exit 14 naming them (and
-  17 for the missing seal). This is the honest state: `derivable:false` closes a WIDTH (fail-closed, no
-  invented width); it does not close a CAPACITY, and the W1 freeze rule forbids sealing over it;
-* once those budgets carry sourced values (simulated here with a patched constraints file -- the real
-  closure is an edit of configs/w4_memory_constraints.yaml with evidence), the gate passes end to end
+* TODAY the two required capacity budgets (per_ctx_outstanding_credit_cap, response_record_budget) have no
+  recorded decision (configs/w4_capacity_decisions.yaml holds null), so no seal is committed and the G1 gate
+  fails closed with exit 14 naming them (and 17 for the missing seal). A capacity with no derivable bound is
+  a design decision: it is closed by filling value + decided_by + rationale + evidence in that external
+  file, never by a number in code, and recording one does not make the capacity "derivable";
+* once both decisions are recorded (simulated here with a patched decisions file) the gate passes end to end
   and a seal written to a temp path verifies;
 * every G1 failure class maps to its own non-zero exit: half-seal 17, tampered/stale generated artifact
   12 (codec) and 17 (seal hash), open budget 14, spec/evaluator drift 18, missing seal 17.
@@ -41,49 +41,35 @@ def gate() -> gates.G1Gate:
   return gates.G1Gate(REPO_ROOT)
 
 
-# A sourced bound to close the two budgets in the fixture. The needle is read back by
-# freeze_check.open_budgets; the real closure additionally updates scripts/derive_w4_bounds.py's
-# REQUIRED_UNRESOLVED bookkeeping, which its own suite checks -- the fixture only simulates the move.
-SOURCED_BOUND = {"file": "hardware/coral_nexus/configs/w4_memory_constraints.yaml", "line": 3}
+BUDGETS = sorted(fc.REQUIRED_CLOSED_BUDGETS)
 
 
-# A real readable line carrying the integer 32: the HBM tag depth, NOT a credit bound. The fixture only
-# shows a closure whose value and needle both read back is accepted by the W4 owner's validator.
-FIXTURE_SOURCE = {
-  "file": "pipeline_validator/hardware_config.yaml",
-  "line": 55,
-  "needle": "outstanding_limit",
-}
-
-
-def _closed_w4(tmp_path: Path) -> Path:
-  """A copy of the w4 constraints with the two required budgets genuinely CLOSED: moved off the
-  unresolved list AND onto inputs with a value plus a source whose needle reads back (deleting the
-  entries is NOT closure; a deleted required entry stays open by design)."""
-  doc = yaml.safe_load((H / "configs/w4_memory_constraints.yaml").read_text())
-  doc["unresolved"] = [e for e in doc["unresolved"] if e["name"] not in fc.REQUIRED_CLOSED_BUDGETS]
-  doc["inputs"] = list(doc.get("inputs") or [])
-  doc["inputs"] += [
-    {
-      "name": name,
-      "value": 32,
+def _decisions(tmp_path: Path, **overrides: dict[str, object]) -> Path:
+  """A decisions file with both budgets fully recorded; `overrides` replace single entries."""
+  doc = yaml.safe_load((H / "configs/w4_capacity_decisions.yaml").read_text())
+  for name in BUDGETS:
+    doc["decisions"][name] = {
       "unit": "entries",
-      "key": name,
-      "source": {**FIXTURE_SOURCE},
-      "provenance": {"note": "fixture; the real closure cites the sourced constant"},
+      "value": 8,
+      "decided_by": "review-2026-11-11",
+      "rationale": "fixture decision; stalls when full, never drops",
+      "evidence": "fixture://cosim-sweep-1",
     }
-    for name in sorted(fc.REQUIRED_CLOSED_BUDGETS)
-  ]
-  path = tmp_path / "w4_memory_constraints.yaml"
+  doc["decisions"].update(overrides)
+  path = tmp_path / "w4_capacity_decisions.yaml"
   path.write_text(yaml.safe_dump(doc))
   return path
 
 
+def _use(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
+  monkeypatch.setattr(fc, "W4_DECISIONS", path)
+
+
 # ---------------------------------------------------------------------------------------------------
-# the honest current state: open budgets, no seal, gate red with named reasons
+# the honest current state: no decision recorded, no seal, gate red with named reasons
 # ---------------------------------------------------------------------------------------------------
 def test_the_two_capacity_budgets_are_still_open() -> None:
-  assert fc.open_budgets() == ["per_ctx_outstanding_credit_cap", "response_record_budget"]
+  assert fc.open_budgets() == BUDGETS
 
 
 def test_the_gate_fails_closed_today_naming_the_open_budgets(gate: gates.G1Gate) -> None:
@@ -97,94 +83,97 @@ def test_the_gate_fails_closed_today_naming_the_open_budgets(gate: gates.G1Gate)
   assert not (H / "protocol/PROTOCOL_FREEZE.json").exists()
 
 
-def test_deleting_a_required_budget_is_open_not_closed(
+def test_a_fully_recorded_decision_closes_the_budget(
   tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-  doc = yaml.safe_load((H / "configs/w4_memory_constraints.yaml").read_text())
-  doc["unresolved"] = [e for e in doc["unresolved"] if e["name"] not in fc.REQUIRED_CLOSED_BUDGETS]
-  path = tmp_path / "deleted.yaml"
+  _use(monkeypatch, _decisions(tmp_path))
+  assert fc.open_budgets() == []
+
+
+@pytest.mark.parametrize(
+  "broken",
+  [
+    {"value": None},
+    {"value": 0},
+    {"value": -3},
+    {"value": True},
+    {"value": 8.0},
+    {"value": "8"},
+    {"unit": "cycles"},
+    {"decided_by": None},
+    {"decided_by": "  "},
+    {"rationale": ""},
+    {"evidence": None},
+  ],
+)
+def test_every_incomplete_decision_stays_open(
+  broken: dict[str, object], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+  good = yaml.safe_load(_decisions(tmp_path).read_text())["decisions"]["response_record_budget"]
+  _use(monkeypatch, _decisions(tmp_path, response_record_budget={**good, **broken}))
+  assert fc.open_budgets() == ["response_record_budget"]
+
+
+def test_a_missing_file_a_missing_entry_or_a_foreign_entry_is_open(
+  tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+  _use(monkeypatch, tmp_path / "absent.yaml")
+  assert fc.open_budgets() == BUDGETS
+  doc = yaml.safe_load(_decisions(tmp_path).read_text())
+  del doc["decisions"]["per_ctx_outstanding_credit_cap"]
+  path = tmp_path / "missing.yaml"
   path.write_text(yaml.safe_dump(doc))
-  original = fc.W4_CONSTRAINTS
-  fc.W4_CONSTRAINTS = path
-  try:
-    assert fc.open_budgets() == sorted(fc.REQUIRED_CLOSED_BUDGETS)
-  finally:
-    fc.W4_CONSTRAINTS = original
-
-
-def test_a_budget_with_an_unreadback_source_is_open(tmp_path: Path) -> None:
-  doc = yaml.safe_load((H / "configs/w4_memory_constraints.yaml").read_text())
-  doc["unresolved"] = [e for e in doc["unresolved"] if e["name"] not in fc.REQUIRED_CLOSED_BUDGETS]
-  doc["inputs"] = list(doc.get("inputs") or [])
-  doc["inputs"] += [
-    {
-      "name": name,
-      "value": 8,
-      "unit": "count",
-      "source": {"file": "hardware/coral_nexus/nope.yaml", "line": 1, "needle": "x"},
-    }
-    for name in sorted(fc.REQUIRED_CLOSED_BUDGETS)
-  ]
-  path = tmp_path / "unreadable.yaml"
+  _use(monkeypatch, path)
+  assert fc.open_budgets() == ["per_ctx_outstanding_credit_cap"]
+  doc = yaml.safe_load(_decisions(tmp_path).read_text())
+  doc["decisions"]["invented_budget"] = doc["decisions"]["response_record_budget"]
+  path = tmp_path / "foreign.yaml"
   path.write_text(yaml.safe_dump(doc))
-  original = fc.W4_CONSTRAINTS
-  fc.W4_CONSTRAINTS = path
-  try:
-    assert fc.open_budgets() == sorted(fc.REQUIRED_CLOSED_BUDGETS)
-  finally:
-    fc.W4_CONSTRAINTS = original
-
-
-def test_a_sourced_looking_entry_without_a_readback_needle_is_still_open(tmp_path: Path) -> None:
-  doc = yaml.safe_load((H / "configs/w4_memory_constraints.yaml").read_text())
-  doc["unresolved"] = [e for e in doc["unresolved"] if e["name"] not in fc.REQUIRED_CLOSED_BUDGETS]
-  doc["inputs"] = list(doc.get("inputs") or [])
-  doc["inputs"] += [
-    {
-      "name": name,
-      "value": 8,
-      "unit": "count",
-      # an existing line, but the needle is not on it; and a non-integer value with a right needle
-      "source": {
-        "file": "hardware/coral_nexus/configs/w4_memory_constraints.yaml",
-        "line": 3,
-        "needle": "this text is not on that line",
-      },
-    }
-    for name in sorted(fc.REQUIRED_CLOSED_BUDGETS)
-  ]
-  path = tmp_path / "cosmetic.yaml"
+  _use(monkeypatch, path)
+  assert fc.open_budgets() == ["invented_budget (not a required budget)"]
+  doc["schema"] = "something/else"
   path.write_text(yaml.safe_dump(doc))
-  original = fc.W4_CONSTRAINTS
-  fc.W4_CONSTRAINTS = path
-  try:
-    assert fc.open_budgets() == sorted(fc.REQUIRED_CLOSED_BUDGETS)
-  finally:
-    fc.W4_CONSTRAINTS = original
+  assert fc.open_budgets() == BUDGETS
+
+
+def test_the_committed_decision_file_records_no_value_yet() -> None:
+  doc = yaml.safe_load((H / "configs/w4_capacity_decisions.yaml").read_text())
+  assert sorted(doc["decisions"]) == BUDGETS
+  assert all(entry["value"] is None for entry in doc["decisions"].values())
+
+
+def test_a_decision_does_not_make_the_capacity_derivable() -> None:
+  # the constraints file keeps both underivable with a reason and a needs list; recording a decision never
+  # edits that claim, so a reader cannot mistake a chosen number for a derived one
+  doc = yaml.safe_load((H / "configs/w4_memory_constraints.yaml").read_text())
+  listed = {e["name"]: e for e in doc["unresolved"]}
+  for name in BUDGETS:
+    assert listed[name]["derivable"] is False and listed[name]["reason"] and listed[name]["needs"]
+
+
+def test_the_decision_file_is_sealed_so_changing_a_decision_needs_a_bump(
+  closed_budgets: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+  rel = "hardware/coral_nexus/configs/w4_capacity_decisions.yaml"
+  assert rel in fc.REQUIRED_INPUTS
+  # the seal records the decision file's hash, so editing a decision after sealing breaks verification
+  monkeypatch.setattr(fc, "SEAL_PATH", closed_budgets / "PROTOCOL_FREEZE.json")
+  fc.seal()
+  record = json.loads((closed_budgets / "PROTOCOL_FREEZE.json").read_text())
+  assert rel in record["inputs"], "the decision file is part of the sealed input set"
 
 
 def test_a_width_may_stay_underivable_but_a_capacity_may_not(
   gate: gates.G1Gate, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-  _simulate_real_closure(monkeypatch, _closed_w4(tmp_path))
+  _use(monkeypatch, _decisions(tmp_path))
   report = gate.run()
   by = {c["check"]: c for c in report["checks"]}
   assert by["budgets.closed"]["ok"] is True
   assert "widths declared underivable" in by["budgets.closed"]["detail"]
+  assert by["protocol.contracts"]["ok"] is True
   # the seal is still the blocker until one exists
   assert report["exit_code"] == gates.REQUIRED_G1_CHECKS["seal.joint"] == 17
-
-
-def test_a_closure_the_w4_validator_rejects_does_not_pass_the_gate(
-  gate: gates.G1Gate, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-  # the file says closed, but the owner's validator still demands them on the unresolved list: not closed
-  monkeypatch.setattr(fc, "W4_CONSTRAINTS", _closed_w4(tmp_path))
-  report = gate.run()
-  by = {c["check"]: c for c in report["checks"]}
-  assert by["protocol.contracts"]["ok"] is False
-  assert "C013 memory" in by["protocol.contracts"]["detail"]
-  assert report["exit_code"] == gates.REQUIRED_G1_CHECKS["protocol.contracts"] == 11
 
 
 def test_a_crashing_or_failing_fragment_validator_fails_the_gate(
@@ -208,20 +197,9 @@ def test_a_crashing_or_failing_fragment_validator_fails_the_gate(
 # ---------------------------------------------------------------------------------------------------
 # the seal, once the budgets are closed
 # ---------------------------------------------------------------------------------------------------
-def _simulate_real_closure(monkeypatch: pytest.MonkeyPatch, constraints: Path) -> None:
-  """The real closure edits the constraints file AND drops the two names from the w4 validator's own
-  REQUIRED_UNRESOLVED guard (scripts/derive_w4_bounds.py). The G1 gate now runs that validator, so a fixture
-  that moves only the file is rejected (exit 11) -- the next test pins exactly that."""
-  import derive_w4_bounds as w4
-
-  monkeypatch.setattr(fc, "W4_CONSTRAINTS", constraints)
-  closed = {k: v for k, v in w4.REQUIRED_UNRESOLVED.items() if k not in fc.REQUIRED_CLOSED_BUDGETS}
-  monkeypatch.setattr(w4, "REQUIRED_UNRESOLVED", closed)
-
-
 @pytest.fixture
 def closed_budgets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-  _simulate_real_closure(monkeypatch, _closed_w4(tmp_path))
+  _use(monkeypatch, _decisions(tmp_path))
   return tmp_path
 
 
@@ -300,8 +278,9 @@ def test_reopening_a_budget_after_sealing_invalidates_the_seal(
   monkeypatch.setattr(fc, "SEAL_PATH", closed_budgets / "PROTOCOL_FREEZE.json")
   fc.seal()
   assert fc.verify_seal() == []
-  # the budget is re-opened after the seal (the real file still lists it): the seal stops verifying
-  monkeypatch.setattr(fc, "W4_CONSTRAINTS", H / "configs/w4_memory_constraints.yaml")
+  # the decision is withdrawn after the seal (value back to null): the seal stops verifying, twice over
+  # (the file hash moved and the budget is open again)
+  _use(monkeypatch, _decisions(closed_budgets, per_ctx_outstanding_credit_cap={"value": None}))
   errors = fc.verify_seal()
   assert any("open required budget" in e and "per_ctx_outstanding_credit_cap" in e for e in errors)
 

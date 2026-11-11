@@ -1,0 +1,30 @@
+# W4 capacity DECISIONS (C020). Read by protocol/freeze_check.py::open_budgets and sealed by hash.
+#
+# These two capacities have no derivable bound (see `unresolved` in w4_memory_constraints.yaml, which stays
+# derivable:false): the pinned model neither caps merges per refill entry nor names a per-Context credit
+# ceiling, and the W4 design marks both as parameters frozen after co-simulation review. So the value is a
+# DECISION, not a derived fact. A decision is closed only when ALL of the following are filled in; the gate
+# refuses `null`, 0, a non-integer, and an empty decided_by / rationale / evidence.
+#
+#   value       positive integer, in `unit`
+#   decided_by  who owns the decision (a person or a review record id)
+#   rationale   why this number is safe; for response_record_budget it must say what happens when the
+#               budget is full (the hardware must stall, never drop or overwrite a waiter)
+#   evidence    where the number was checked (co-sim run id, sweep report path, review minutes)
+#
+# Changing a filled value after sealing changes this file's hash, so the seal stops verifying and a
+# `freeze_check seal --bump` is required: a decision can be revised, never silently.
+schema: cn_w4_capacity_decisions/v1
+decisions:
+  per_ctx_outstanding_credit_cap:
+    unit: entries
+    value: null
+    decided_by: null
+    rationale: null
+    evidence: null
+  response_record_budget:
+    unit: entries
+    value: null
+    decided_by: null
+    rationale: null
+    evidence: null

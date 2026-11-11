@@ -381,7 +381,6 @@ class G1Gate:
     sys.path.insert(0, str(self.repo_root / "hardware/coral_nexus/scripts"))
     import csr_lint  # noqa: F401  (imported for the side effect of path sanity)
     import csr_lint as cl
-    import derive_w4_bounds as w4
     import derive_widths as dw
     import freeze_check as fc
     import gen_targets as gtr
@@ -429,19 +428,15 @@ class G1Gate:
       exit_code = exit_code or REQUIRED_G1_CHECKS["csr.bindings"]
 
     data = vpr.load_all(self.repo_root / "hardware/coral_nexus/protocol")
-    # widths may stay declared-underivable (fail closed, no invented width); capacity budgets may not:
-    # a budget on the w4 unresolved list is open and the gate fails on it by name
+    # widths may stay declared-underivable (fail closed, no invented width); capacity budgets may not: each
+    # needs a recorded decision in configs/w4_capacity_decisions.yaml (the W4 envelope itself is validated
+    # by its owner under protocol.contracts)
     budgets_open = fc.open_budgets()
     try:
       result = dw.derive(data["budgets"], data["lifetimes"])
-      # the W4 envelope is validated by its own owner (units, partition conservation, unresolved guard);
-      # a budget cannot read as closed while that validator rejects the file that closes it
-      w4_report = w4.validate_all(constraints_path=fc.W4_CONSTRAINTS)
-      if not w4_report["valid"] and not budgets_open:
-        raise dw.WidthError("w4 envelope rejected: " + "; ".join(w4_report["errors"])[:300])
       if budgets_open:
         self._record(
-          "budgets.closed", False, f"open required budget, no sourced value: {', '.join(budgets_open)}"
+          "budgets.closed", False, f"open required budget, no recorded decision: {', '.join(budgets_open)}"
         )
         exit_code = exit_code or REQUIRED_G1_CHECKS["budgets.closed"]
       else:
