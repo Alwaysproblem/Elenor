@@ -585,8 +585,23 @@ def check_terminal(t: dict[str, Any], errors: list[str]) -> None:
     errors.append(
       "wrap_quiesce: reuse is forbidden while a same-pattern old copy may arrive; the Tile never times out"
     )
-  if wq["wire_direction"].get("status") != "unresolved":
-    errors.append("wrap_quiesce.wire_direction: the conflicting direction must stay unresolved until C017")
+  wd = wq["wire_direction"]
+  if wd.get("status") != "decided":
+    errors.append(
+      "wrap_quiesce.wire_direction: the Tile-asks/Group-answers direction must be recorded as decided"
+    )
+  _eq(
+    errors,
+    "wrap_quiesce.wire_direction.request",
+    wd.get("request"),
+    {"message": "GEN_WRAP_QUIESCE", "dir": "T2G"},
+  )
+  _eq(
+    errors,
+    "wrap_quiesce.wire_direction.response",
+    wd.get("response"),
+    {"message": "QUIESCE_RESP", "dir": "G2T"},
+  )
   cg = t["clock_gating"]
   _eq(errors, "clock_gating.layers", _tup(cg["layers"]), REQ_GATING_LAYERS)
   _eq(
@@ -740,7 +755,17 @@ def check_field_request(
 ) -> None:
   if req.get("schema") != "cn_field_request/v1" or req.get("package") != "W6":
     errors.append("field_request: schema/package must be cn_field_request/v1 + W6")
-  catalog = {m["name"] for m in yaml.safe_load(CATALOG.read_text())["messages"]}
+  catalog_doc = yaml.safe_load(CATALOG.read_text())["messages"]
+  catalog = {m["name"] for m in catalog_doc}
+  wd = t["wrap_quiesce"]["wire_direction"]
+  for side in ("request", "response"):
+    entry = wd.get(side) or {}
+    cat_dir = next((m["dir"] for m in catalog_doc if m["name"] == entry.get("message")), None)
+    if cat_dir != entry.get("dir"):
+      errors.append(
+        f"wrap_quiesce.wire_direction.{side}: the catalog has {entry.get('message')} as {cat_dir}, "
+        f"the contract decided {entry.get('dir')}"
+      )
   docs = {"protocol/w6_event_facility.contract.yaml": f, "protocol/w6_terminal_reset.contract.yaml": t}
   groups = (
     ("messages", req.get("messages") or []),
@@ -832,7 +857,6 @@ def validate_docs(f: Any, t: Any, req: Any) -> dict[str, Any]:
       "event/generation/sequence widths (C017)",
       "per-Context frontier slots (C018)",
       "tile slot budget, max_drain_cycles, debug FIFO depth (C019)",
-      "GEN_WRAP_QUIESCE wire direction (C017)",
       "RTL concurrency and backpressure proof (C033/C034)",
     ],
   }

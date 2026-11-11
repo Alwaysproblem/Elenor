@@ -1,4 +1,6 @@
-exclude: ^(?:[^/]+\.json|examples/artifacts/)
+# Generated protocol outputs are byte-compared against a fresh render by hardware/coral_nexus/protocol/
+# freeze_check.py; a formatter must never rewrite them.
+exclude: ^(?:[^/]+\.json|examples/artifacts/|hardware/coral_nexus/protocol/generated/|pipeline_validator/cosim/wire\.py$)
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks

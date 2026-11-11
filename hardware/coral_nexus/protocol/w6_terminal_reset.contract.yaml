@@ -352,9 +352,11 @@ wrap_quiesce:
   tile_timeout: forbidden
   response_verifiable_by: [drain_bitmap, evidence_sequence]
   wire_direction:
-    status: unresolved
-    owner: C017
-    reason: "protocol/cn_protocol_v1.yaml lists GEN_WRAP_QUIESCE as G2T with the Tile only answering, while W6 plan 5.1 has the Tile ask and the Group answer. The authority rule above holds in both; the wire direction is decided by C017/C020 and is not assumed here."
+    status: decided
+    decided_by: "user decision during C017, 2026-11-11"
+    request: { message: GEN_WRAP_QUIESCE, dir: T2G }
+    response: { message: QUIESCE_RESP, dir: G2T }
+    reason: "W6 plan 5.1 has the Tile ask and the Group answer; the C009 catalog had listed the opposite. The catalog now follows the decision. Authority is unchanged: only the Group's answer authorizes reuse."
   channel_and_idempotency_key_owner: W1
 
 # ---------------------------------------------------------------------------

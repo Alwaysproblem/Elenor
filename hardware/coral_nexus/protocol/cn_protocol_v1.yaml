@@ -106,6 +106,14 @@ version_ticket:
 # ---------------------------------------------------------------------------
 dedup:
   semantic_key: [txn_id, message_type]
+  # One extra key field per message type. An ACK is a different legal message per request it answers
+  # (the ACK for HOLD and the ACK for FINAL of one txn both apply, W1 design 4.2); the W4 shards of one
+  # txn are told apart by slice_id (DUP-03 for fragments of the same type).
+  stage_fields:
+    ACK: ack_for_message_type
+    MEM_REQ: slice_id
+    MEM_RSP: slice_id
+    TERMINAL_ACK: slice_id
   rules:
     - id: DUP-01
       text: "HOLD and FINAL of one txn are different legal messages; txn_id alone is never a dedup hit."
@@ -490,19 +498,19 @@ messages:
   - {
       name: GEN_WRAP_QUIESCE,
       channel: CTRL,
-      dir: G2T,
+      dir: T2G,
       owner: W6,
       status: draft,
-      source: implementation/W1_Boundary_Cosimulation_Plan.md#7.4,
+      source: implementation/W6_Events_Fault_Reset_Plan.md#5.1,
       key: [context_key],
-      note: "Tile only answers (QUIESCE_RESP); it neither times out nor clears itself",
+      note: "the Tile asks; the Group answers (QUIESCE_RESP) and alone authorizes reuse; the Tile neither times out nor clears itself (user decision at C017)",
     }
   - {
       name: QUIESCE_RESP,
       channel: CTRL,
-      dir: T2G,
+      dir: G2T,
       owner: W6,
       status: draft,
-      source: implementation/W1_Boundary_Cosimulation_Plan.md#7.4,
+      source: implementation/W6_Events_Fault_Reset_Plan.md#5.1,
       key: [context_key],
     }

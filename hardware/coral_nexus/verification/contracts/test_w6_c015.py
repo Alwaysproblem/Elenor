@@ -935,15 +935,20 @@ def test_an_identical_old_copy_forbids_reuse_unless_an_outer_epoch_isolates_it(t
   w.authorize_reuse(GOOD_WRAP, old_copy_may_arrive=True, outer_epoch=True)
 
 
-def test_wrap_rules_are_held_and_the_conflicting_wire_direction_stays_open(docs: Any) -> None:
+def test_wrap_rules_and_the_decided_wire_direction_are_held(docs: Any) -> None:
   caught(
     docs, tm=lambda t: t["wrap_quiesce"].__setitem__("reuse_authorized_by", "tile"), needle="wrap_quiesce"
   )
   caught(docs, tm=lambda t: t["wrap_quiesce"]["covers"].remove("late_acks"), needle="wrap_quiesce")
   caught(
     docs,
-    tm=lambda t: t["wrap_quiesce"]["wire_direction"].__setitem__("status", "T2G"),
+    tm=lambda t: t["wrap_quiesce"]["wire_direction"].__setitem__("status", "unresolved"),
     needle="wire_direction",
+  )
+  caught(
+    docs,
+    tm=lambda t: t["wrap_quiesce"]["wire_direction"]["request"].__setitem__("dir", "G2T"),
+    needle="wire_direction.request",
   )
 
 
@@ -1212,6 +1217,8 @@ def test_field_request_invents_no_value_and_is_complete(docs: Any) -> None:
   caught(docs, rm=lambda r: r.__setitem__("package", "W5"), needle="W6")
 
 
-def test_the_wire_direction_conflict_is_recorded_not_resolved(term_c: Any) -> None:
+def test_the_decided_wire_direction_matches_the_catalog(term_c: Any) -> None:
   w = term_c["wrap_quiesce"]["wire_direction"]
-  assert w["status"] == "unresolved" and w["owner"] == "C017" and "G2T" in w["reason"]
+  catalog = {m["name"]: m["dir"] for m in yaml.safe_load(vw.CATALOG.read_text())["messages"]}
+  assert w["status"] == "decided"
+  assert (catalog["GEN_WRAP_QUIESCE"], catalog["QUIESCE_RESP"]) == ("T2G", "G2T")

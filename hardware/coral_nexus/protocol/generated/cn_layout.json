@@ -1,0 +1,3440 @@
+{
+  "schema": "cn_layout/v1",
+  "status": "draft",
+  "protocol_only": true,
+  "container": {
+    "word_bytes": 8,
+    "byte_order": "little_endian",
+    "derived_width": false
+  },
+  "header_words": 4,
+  "header": [
+    "msg_type",
+    "payload_words",
+    "message_seq",
+    "header_reserved"
+  ],
+  "channels": [
+    "CTRL",
+    "EVENT",
+    "PROGRAM",
+    "MEMORY",
+    "DEBUG"
+  ],
+  "dirs": [
+    "G2T",
+    "T2G",
+    "H2G"
+  ],
+  "enums": {
+    "ack_outcome": [
+      "HOLD_READY",
+      "ACCEPTED",
+      "WAIT",
+      "FAULT",
+      "STALE",
+      "COMPENSATED"
+    ],
+    "wait_reason": [
+      "WAIT_CAPACITY",
+      "WAIT_FRAGMENTATION",
+      "WAIT_SLOT",
+      "WAIT_CONTROL_RESOURCE",
+      "WAIT_CONTEXT_LIMIT"
+    ],
+    "phase_direction": [
+      "input_released",
+      "output_ready"
+    ],
+    "event_status": [
+      "PENDING",
+      "DONE",
+      "ERROR",
+      "TIMEOUT",
+      "RESET"
+    ],
+    "event_scope": [
+      "task_private",
+      "tile_shared",
+      "group_l2",
+      "external"
+    ],
+    "task_terminal": [
+      "DONE",
+      "ERROR",
+      "TIMEOUT",
+      "RESET"
+    ],
+    "gate_level": [
+      "l1",
+      "l2"
+    ],
+    "gate_state": [
+      "closed",
+      "open"
+    ],
+    "terminal_state": [
+      "COMPLETED",
+      "ISOLATED",
+      "FAULTED"
+    ],
+    "fault_code": [
+      "INVALID_DESCRIPTOR",
+      "UNSUPPORTED_ABI",
+      "ADDRESS_FAULT",
+      "DMA_TIMEOUT",
+      "EVENT_DEPENDENCY_TIMEOUT",
+      "STREAM_PROTOCOL_ERROR",
+      "ENGINE_INTERNAL_FAULT",
+      "RESET_DURING_EXECUTION",
+      "L2_CAPACITY_FAULT",
+      "INVALID_LAYOUT_FAULT",
+      "SLOT_PERMISSION_FAULT"
+    ],
+    "reset_phase": [
+      "FREEZE_ISSUE",
+      "CANCEL_UNISSUED",
+      "DRAIN",
+      "MARK_EVENTS",
+      "INVALIDATE_RESIDENCY",
+      "REBUILD_CREDIT",
+      "RESUME_DONE"
+    ],
+    "lease_result": [
+      "GRANT",
+      "HOST_SCOPE_INACTIVE"
+    ],
+    "msg_type": [
+      "QUERY_CAPS",
+      "CAPS_RESP",
+      "RUN_BEGIN",
+      "TASK_PLAN",
+      "TASK_COMMIT",
+      "TASK_COMMIT_FINAL",
+      "ACK",
+      "RETIRE_READY",
+      "RETIRE",
+      "TASK_COMPLETION",
+      "GATE_NOTIFY",
+      "RESOURCE_UPDATE",
+      "POST_EVENT",
+      "PHASE_SIGNAL",
+      "EVENT_NOTIFY",
+      "EVENT_RETIRE",
+      "PROGRAM_INSTALL",
+      "PROGRAM_READ_REQ",
+      "PROGRAM_READ_RESP",
+      "PROGRAM_INSTALL_ACK",
+      "PROGRAM_READY",
+      "PROGRAM_INVALIDATE",
+      "INVALIDATE_ACK",
+      "MEM_REQ",
+      "MEM_RSP",
+      "TERMINAL_ACK",
+      "STREAM_ACQUIRE",
+      "STREAM_POP",
+      "STREAM_PUSH",
+      "STREAM_RELEASE",
+      "STREAM_PUSH_EOS",
+      "STREAM_EOS",
+      "STREAM_ERROR",
+      "GEN_WRAP_QUIESCE",
+      "QUIESCE_RESP",
+      "CANCEL_TASK",
+      "RESET_PHASE_REQ",
+      "RESET_PHASE_ACK",
+      "FAULT_REPORT",
+      "FAULT_ACK",
+      "POISON",
+      "LEASE_ACQUIRE",
+      "LEASE_GRANT",
+      "PAGE_REVOKE",
+      "REGION_REQUEST",
+      "REGION_GRANT",
+      "REGION_DONE",
+      "PROGRAM_REGISTER"
+    ]
+  },
+  "bitsets": {
+    "quiesce_classes": [
+      "in_flight_completions",
+      "late_acks",
+      "event_queues",
+      "protocol_replay_cache"
+    ],
+    "drain_evidence": [
+      "engine_accepted_zero",
+      "engine_queue_empty",
+      "l1_mshr_empty",
+      "transfer_quiescent",
+      "no_pending_debug_export",
+      "no_unaccepted_phase_or_post_event"
+    ]
+  },
+  "errors": [
+    "OK",
+    "TRUNCATED",
+    "TRAILING",
+    "UNKNOWN_MSG",
+    "WRONG_PORT",
+    "LENGTH_MISMATCH",
+    "RESERVED",
+    "ENUM_RANGE",
+    "BOOL_RANGE",
+    "BITSET_RANGE",
+    "CONDITION",
+    "TRANSPORT_REPLAY",
+    "INCOMPLETE",
+    "STALE_GENERATION",
+    "ACK_MISMATCH",
+    "DUPLICATE_STAGE",
+    "CAPACITY"
+  ],
+  "consumer_model": {
+    "context_slots": 64,
+    "dedup_entries": 256
+  },
+  "messages": [
+    {
+      "name": "QUERY_CAPS",
+      "id": 0,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W2",
+      "host_only": false,
+      "payload_words": 1,
+      "fields": [
+        {
+          "name": "txn_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": 0,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "CAPS_RESP",
+      "id": 1,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W2",
+      "host_only": false,
+      "payload_words": 4,
+      "fields": [
+        {
+          "name": "txn_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "context_count",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "program_slots",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "stream_supported",
+          "kind": "bool",
+          "offset": 3,
+          "words": 1,
+          "limit": 1,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": 0,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "RUN_BEGIN",
+      "id": 2,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W6",
+      "host_only": false,
+      "payload_words": 1,
+      "fields": [
+        {
+          "name": "run_generation",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "TASK_PLAN",
+      "id": 3,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W1",
+      "host_only": false,
+      "payload_words": 8,
+      "fields": [
+        {
+          "name": "launch_generation",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "root_launch_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "dispatch_ordinal",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "task_id",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "context_handle",
+          "kind": "uint",
+          "offset": 4,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "txn_id",
+          "kind": "uint",
+          "offset": 5,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "pool_epoch",
+          "kind": "uint",
+          "offset": 6,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "pool_version",
+          "kind": "uint",
+          "offset": 7,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [
+        {
+          "kind": "equal",
+          "a": 1,
+          "b": 0,
+          "value": 0
+        }
+      ],
+      "txn": 5,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "TASK_COMMIT",
+      "id": 4,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W2",
+      "host_only": false,
+      "payload_words": 9,
+      "fields": [
+        {
+          "name": "launch_generation",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "root_launch_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "dispatch_ordinal",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "task_id",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "context_handle",
+          "kind": "uint",
+          "offset": 4,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "txn_id",
+          "kind": "uint",
+          "offset": 5,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_slot",
+          "kind": "uint",
+          "offset": 6,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_generation",
+          "kind": "uint",
+          "offset": 7,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "pool_version",
+          "kind": "uint",
+          "offset": 8,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [
+        {
+          "kind": "equal",
+          "a": 1,
+          "b": 0,
+          "value": 0
+        }
+      ],
+      "txn": 5,
+      "ctx_slot": 6,
+      "ctx_gen": 7,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": true
+    },
+    {
+      "name": "TASK_COMMIT_FINAL",
+      "id": 5,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W2",
+      "host_only": false,
+      "payload_words": 7,
+      "fields": [
+        {
+          "name": "launch_generation",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "root_launch_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "dispatch_ordinal",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "task_id",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "context_handle",
+          "kind": "uint",
+          "offset": 4,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "txn_id",
+          "kind": "uint",
+          "offset": 5,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_generation",
+          "kind": "uint",
+          "offset": 6,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [
+        {
+          "kind": "equal",
+          "a": 1,
+          "b": 0,
+          "value": 0
+        }
+      ],
+      "txn": 5,
+      "ctx_slot": -1,
+      "ctx_gen": 6,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "ACK",
+      "id": 6,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W2",
+      "host_only": false,
+      "payload_words": 5,
+      "fields": [
+        {
+          "name": "txn_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ack_for_message_type",
+          "kind": "enum",
+          "offset": 1,
+          "words": 1,
+          "limit": 48,
+          "enum": "msg_type",
+          "optional": false
+        },
+        {
+          "name": "op_seq",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "outcome",
+          "kind": "enum",
+          "offset": 3,
+          "words": 1,
+          "limit": 6,
+          "enum": "ack_outcome",
+          "optional": false
+        },
+        {
+          "name": "wait_reason",
+          "kind": "enum",
+          "offset": 4,
+          "words": 1,
+          "limit": 6,
+          "enum": "wait_reason",
+          "optional": true
+        }
+      ],
+      "conditions": [
+        {
+          "kind": "nonzero_iff",
+          "a": 4,
+          "b": 3,
+          "value": 2
+        }
+      ],
+      "txn": 0,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": 1,
+      "ack_for": 1,
+      "establishes": false
+    },
+    {
+      "name": "RETIRE_READY",
+      "id": 7,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W2",
+      "host_only": false,
+      "payload_words": 7,
+      "fields": [
+        {
+          "name": "launch_generation",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "root_launch_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "dispatch_ordinal",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "task_id",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "context_handle",
+          "kind": "uint",
+          "offset": 4,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_generation",
+          "kind": "uint",
+          "offset": 5,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "drain_evidence_seq",
+          "kind": "uint",
+          "offset": 6,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [
+        {
+          "kind": "equal",
+          "a": 1,
+          "b": 0,
+          "value": 0
+        }
+      ],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": 5,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "RETIRE",
+      "id": 8,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W4",
+      "host_only": false,
+      "payload_words": 9,
+      "fields": [
+        {
+          "name": "launch_generation",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "root_launch_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "dispatch_ordinal",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "task_id",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "context_handle",
+          "kind": "uint",
+          "offset": 4,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "tile_id",
+          "kind": "uint",
+          "offset": 5,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_slot",
+          "kind": "uint",
+          "offset": 6,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_generation",
+          "kind": "uint",
+          "offset": 7,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "arena_alloc_gen",
+          "kind": "uint",
+          "offset": 8,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [
+        {
+          "kind": "equal",
+          "a": 1,
+          "b": 0,
+          "value": 0
+        }
+      ],
+      "txn": -1,
+      "ctx_slot": 6,
+      "ctx_gen": 7,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "TASK_COMPLETION",
+      "id": 9,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W6",
+      "host_only": false,
+      "payload_words": 7,
+      "fields": [
+        {
+          "name": "launch_generation",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "root_launch_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "dispatch_ordinal",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "task_id",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "context_handle",
+          "kind": "uint",
+          "offset": 4,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "status",
+          "kind": "enum",
+          "offset": 5,
+          "words": 1,
+          "limit": 4,
+          "enum": "task_terminal",
+          "optional": false
+        },
+        {
+          "name": "first_fault_ref",
+          "kind": "uint",
+          "offset": 6,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [
+        {
+          "kind": "equal",
+          "a": 1,
+          "b": 0,
+          "value": 0
+        }
+      ],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "GATE_NOTIFY",
+      "id": 10,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W4",
+      "host_only": false,
+      "payload_words": 3,
+      "fields": [
+        {
+          "name": "level",
+          "kind": "enum",
+          "offset": 0,
+          "words": 1,
+          "limit": 2,
+          "enum": "gate_level",
+          "optional": false
+        },
+        {
+          "name": "state",
+          "kind": "enum",
+          "offset": 1,
+          "words": 1,
+          "limit": 2,
+          "enum": "gate_state",
+          "optional": false
+        },
+        {
+          "name": "profile_generation",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "RESOURCE_UPDATE",
+      "id": 11,
+      "channel": "EVENT",
+      "channel_index": 1,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W4",
+      "host_only": false,
+      "payload_words": 5,
+      "fields": [
+        {
+          "name": "tile_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_slot",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_generation",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "version",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "arena_alloc_gen",
+          "kind": "uint",
+          "offset": 4,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": 1,
+      "ctx_gen": 2,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "POST_EVENT",
+      "id": 12,
+      "channel": "EVENT",
+      "channel_index": 1,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W6",
+      "host_only": false,
+      "payload_words": 8,
+      "fields": [
+        {
+          "name": "tile_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_slot",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_generation",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "local_event_id",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "event_generation",
+          "kind": "uint",
+          "offset": 4,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "sequence",
+          "kind": "uint",
+          "offset": 5,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "scope",
+          "kind": "enum",
+          "offset": 6,
+          "words": 1,
+          "limit": 4,
+          "enum": "event_scope",
+          "optional": false
+        },
+        {
+          "name": "status",
+          "kind": "enum",
+          "offset": 7,
+          "words": 1,
+          "limit": 5,
+          "enum": "event_status",
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": 1,
+      "ctx_gen": 2,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "PHASE_SIGNAL",
+      "id": 13,
+      "channel": "EVENT",
+      "channel_index": 1,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W6",
+      "host_only": false,
+      "payload_words": 6,
+      "fields": [
+        {
+          "name": "launch_generation",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "root_launch_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "dispatch_ordinal",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "task_id",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "context_handle",
+          "kind": "uint",
+          "offset": 4,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "direction",
+          "kind": "enum",
+          "offset": 5,
+          "words": 1,
+          "limit": 2,
+          "enum": "phase_direction",
+          "optional": false
+        }
+      ],
+      "conditions": [
+        {
+          "kind": "equal",
+          "a": 1,
+          "b": 0,
+          "value": 0
+        }
+      ],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "EVENT_NOTIFY",
+      "id": 14,
+      "channel": "EVENT",
+      "channel_index": 1,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W6",
+      "host_only": false,
+      "payload_words": 9,
+      "fields": [
+        {
+          "name": "tile_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_slot",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_generation",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "local_event_id",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "event_generation",
+          "kind": "uint",
+          "offset": 4,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "sequence",
+          "kind": "uint",
+          "offset": 5,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "scope",
+          "kind": "enum",
+          "offset": 6,
+          "words": 1,
+          "limit": 4,
+          "enum": "event_scope",
+          "optional": false
+        },
+        {
+          "name": "status",
+          "kind": "enum",
+          "offset": 7,
+          "words": 1,
+          "limit": 5,
+          "enum": "event_status",
+          "optional": false
+        },
+        {
+          "name": "error_code",
+          "kind": "uint",
+          "offset": 8,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": 1,
+      "ctx_gen": 2,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "EVENT_RETIRE",
+      "id": 15,
+      "channel": "EVENT",
+      "channel_index": 1,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W6",
+      "host_only": false,
+      "payload_words": 5,
+      "fields": [
+        {
+          "name": "launch_generation",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "root_launch_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "dispatch_ordinal",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "task_id",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "context_handle",
+          "kind": "uint",
+          "offset": 4,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [
+        {
+          "kind": "equal",
+          "a": 1,
+          "b": 0,
+          "value": 0
+        }
+      ],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "PROGRAM_INSTALL",
+      "id": 16,
+      "channel": "PROGRAM",
+      "channel_index": 2,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W5",
+      "host_only": false,
+      "payload_words": 8,
+      "fields": [
+        {
+          "name": "program_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "version",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "package_hash",
+          "kind": "digest",
+          "offset": 2,
+          "words": 4,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "program_epoch",
+          "kind": "uint",
+          "offset": 6,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "slot",
+          "kind": "uint",
+          "offset": 7,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "PROGRAM_READ_REQ",
+      "id": 17,
+      "channel": "PROGRAM",
+      "channel_index": 2,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W5",
+      "host_only": false,
+      "payload_words": 7,
+      "fields": [
+        {
+          "name": "program_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "version",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "package_hash",
+          "kind": "digest",
+          "offset": 2,
+          "words": 4,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "program_epoch",
+          "kind": "uint",
+          "offset": 6,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "PROGRAM_READ_RESP",
+      "id": 18,
+      "channel": "PROGRAM",
+      "channel_index": 2,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W5",
+      "host_only": false,
+      "payload_words": 8,
+      "fields": [
+        {
+          "name": "program_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "version",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "package_hash",
+          "kind": "digest",
+          "offset": 2,
+          "words": 4,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "program_epoch",
+          "kind": "uint",
+          "offset": 6,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "hbm_chunk_len",
+          "kind": "uint",
+          "offset": 7,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "PROGRAM_INSTALL_ACK",
+      "id": 19,
+      "channel": "PROGRAM",
+      "channel_index": 2,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W5",
+      "host_only": false,
+      "payload_words": 12,
+      "fields": [
+        {
+          "name": "program_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "version",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "package_hash",
+          "kind": "digest",
+          "offset": 2,
+          "words": 4,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "program_epoch",
+          "kind": "uint",
+          "offset": 6,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "installed_len",
+          "kind": "uint",
+          "offset": 7,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "measured_hash",
+          "kind": "digest",
+          "offset": 8,
+          "words": 4,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "PROGRAM_READY",
+      "id": 20,
+      "channel": "PROGRAM",
+      "channel_index": 2,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W5",
+      "host_only": false,
+      "payload_words": 8,
+      "fields": [
+        {
+          "name": "program_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "version",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "package_hash",
+          "kind": "digest",
+          "offset": 2,
+          "words": 4,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "program_epoch",
+          "kind": "uint",
+          "offset": 6,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "local_handle",
+          "kind": "uint",
+          "offset": 7,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "PROGRAM_INVALIDATE",
+      "id": 21,
+      "channel": "PROGRAM",
+      "channel_index": 2,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W5",
+      "host_only": false,
+      "payload_words": 7,
+      "fields": [
+        {
+          "name": "program_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "version",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "package_hash",
+          "kind": "digest",
+          "offset": 2,
+          "words": 4,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "program_epoch",
+          "kind": "uint",
+          "offset": 6,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "INVALIDATE_ACK",
+      "id": 22,
+      "channel": "PROGRAM",
+      "channel_index": 2,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W5",
+      "host_only": false,
+      "payload_words": 7,
+      "fields": [
+        {
+          "name": "program_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "version",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "package_hash",
+          "kind": "digest",
+          "offset": 2,
+          "words": 4,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "program_epoch",
+          "kind": "uint",
+          "offset": 6,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "MEM_REQ",
+      "id": 23,
+      "channel": "MEMORY",
+      "channel_index": 3,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W4",
+      "host_only": false,
+      "payload_words": 13,
+      "fields": [
+        {
+          "name": "tile_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_slot",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_generation",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "txn_id",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "slice_id",
+          "kind": "uint",
+          "offset": 4,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "slice_count",
+          "kind": "uint",
+          "offset": 5,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "arena_alloc_gen",
+          "kind": "uint",
+          "offset": 6,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "binding_id",
+          "kind": "uint",
+          "offset": 7,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "binding_generation",
+          "kind": "uint",
+          "offset": 8,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "binding_offset",
+          "kind": "uint",
+          "offset": 9,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "scope_epoch",
+          "kind": "uint",
+          "offset": 10,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "mem_op",
+          "kind": "uint",
+          "offset": 11,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "length",
+          "kind": "uint",
+          "offset": 12,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": 3,
+      "ctx_slot": 1,
+      "ctx_gen": 2,
+      "stage": 4,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "MEM_RSP",
+      "id": 24,
+      "channel": "MEMORY",
+      "channel_index": 3,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W4",
+      "host_only": false,
+      "payload_words": 5,
+      "fields": [
+        {
+          "name": "txn_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "slice_id",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "binding_generation",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "visibility",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "status",
+          "kind": "uint",
+          "offset": 4,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": 0,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": 1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "TERMINAL_ACK",
+      "id": 25,
+      "channel": "MEMORY",
+      "channel_index": 3,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W4",
+      "host_only": false,
+      "payload_words": 4,
+      "fields": [
+        {
+          "name": "txn_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "slice_id",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "slice_count",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "final_state",
+          "kind": "enum",
+          "offset": 3,
+          "words": 1,
+          "limit": 3,
+          "enum": "terminal_state",
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": 0,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": 1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "STREAM_ACQUIRE",
+      "id": 26,
+      "channel": "MEMORY",
+      "channel_index": 3,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W4",
+      "host_only": false,
+      "payload_words": 3,
+      "fields": [
+        {
+          "name": "token_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "queue_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "seq",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "STREAM_POP",
+      "id": 27,
+      "channel": "MEMORY",
+      "channel_index": 3,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W4",
+      "host_only": false,
+      "payload_words": 3,
+      "fields": [
+        {
+          "name": "token_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "queue_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "seq",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "STREAM_PUSH",
+      "id": 28,
+      "channel": "MEMORY",
+      "channel_index": 3,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W4",
+      "host_only": false,
+      "payload_words": 3,
+      "fields": [
+        {
+          "name": "token_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "queue_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "seq",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "STREAM_RELEASE",
+      "id": 29,
+      "channel": "MEMORY",
+      "channel_index": 3,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W4",
+      "host_only": false,
+      "payload_words": 3,
+      "fields": [
+        {
+          "name": "token_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "queue_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "seq",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "STREAM_PUSH_EOS",
+      "id": 30,
+      "channel": "MEMORY",
+      "channel_index": 3,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W4",
+      "host_only": false,
+      "payload_words": 3,
+      "fields": [
+        {
+          "name": "token_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "queue_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "seq",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "STREAM_EOS",
+      "id": 31,
+      "channel": "MEMORY",
+      "channel_index": 3,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W4",
+      "host_only": false,
+      "payload_words": 3,
+      "fields": [
+        {
+          "name": "token_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "queue_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "seq",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "STREAM_ERROR",
+      "id": 32,
+      "channel": "MEMORY",
+      "channel_index": 3,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W4",
+      "host_only": false,
+      "payload_words": 4,
+      "fields": [
+        {
+          "name": "token_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "queue_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "seq",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "first_fault_index",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "GEN_WRAP_QUIESCE",
+      "id": 33,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W6",
+      "host_only": false,
+      "payload_words": 3,
+      "fields": [
+        {
+          "name": "tile_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_slot",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_generation",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": 1,
+      "ctx_gen": 2,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "QUIESCE_RESP",
+      "id": 34,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W6",
+      "host_only": false,
+      "payload_words": 5,
+      "fields": [
+        {
+          "name": "tile_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_slot",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_generation",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "drain_bitmap",
+          "kind": "bitset",
+          "offset": 3,
+          "words": 1,
+          "limit": 15,
+          "enum": "quiesce_classes",
+          "optional": false
+        },
+        {
+          "name": "evidence_seq",
+          "kind": "uint",
+          "offset": 4,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": 1,
+      "ctx_gen": 2,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "CANCEL_TASK",
+      "id": 35,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W6",
+      "host_only": false,
+      "payload_words": 6,
+      "fields": [
+        {
+          "name": "launch_generation",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "root_launch_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "dispatch_ordinal",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "task_id",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "context_handle",
+          "kind": "uint",
+          "offset": 4,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_generation",
+          "kind": "uint",
+          "offset": 5,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [
+        {
+          "kind": "equal",
+          "a": 1,
+          "b": 0,
+          "value": 0
+        }
+      ],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": 5,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "RESET_PHASE_REQ",
+      "id": 36,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W6",
+      "host_only": false,
+      "payload_words": 2,
+      "fields": [
+        {
+          "name": "phase",
+          "kind": "enum",
+          "offset": 0,
+          "words": 1,
+          "limit": 7,
+          "enum": "reset_phase",
+          "optional": false
+        },
+        {
+          "name": "run_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "RESET_PHASE_ACK",
+      "id": 37,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W6",
+      "host_only": false,
+      "payload_words": 4,
+      "fields": [
+        {
+          "name": "phase",
+          "kind": "enum",
+          "offset": 0,
+          "words": 1,
+          "limit": 7,
+          "enum": "reset_phase",
+          "optional": false
+        },
+        {
+          "name": "run_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "pending_to_reset",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "evidence_mask",
+          "kind": "bitset",
+          "offset": 3,
+          "words": 1,
+          "limit": 63,
+          "enum": "drain_evidence",
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "FAULT_REPORT",
+      "id": 38,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W6",
+      "host_only": false,
+      "payload_words": 8,
+      "fields": [
+        {
+          "name": "tile_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_slot",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_generation",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "code",
+          "kind": "enum",
+          "offset": 3,
+          "words": 1,
+          "limit": 11,
+          "enum": "fault_code",
+          "optional": false
+        },
+        {
+          "name": "severity",
+          "kind": "uint",
+          "offset": 4,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "source_id",
+          "kind": "uint",
+          "offset": 5,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "engine_id",
+          "kind": "uint",
+          "offset": 6,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "op_seq",
+          "kind": "uint",
+          "offset": 7,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": 1,
+      "ctx_gen": 2,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "FAULT_ACK",
+      "id": 39,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W6",
+      "host_only": false,
+      "payload_words": 1,
+      "fields": [
+        {
+          "name": "tile_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "POISON",
+      "id": 40,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W6",
+      "host_only": false,
+      "payload_words": 1,
+      "fields": [
+        {
+          "name": "run_generation",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "LEASE_ACQUIRE",
+      "id": 41,
+      "channel": "MEMORY",
+      "channel_index": 3,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W4",
+      "host_only": false,
+      "payload_words": 4,
+      "fields": [
+        {
+          "name": "txn_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "scope_epoch",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "binding_generation",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "page_count",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": 0,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "LEASE_GRANT",
+      "id": 42,
+      "channel": "MEMORY",
+      "channel_index": 3,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W4",
+      "host_only": false,
+      "payload_words": 4,
+      "fields": [
+        {
+          "name": "txn_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "lease_ref",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "scope_epoch",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "result",
+          "kind": "enum",
+          "offset": 3,
+          "words": 1,
+          "limit": 2,
+          "enum": "lease_result",
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": 0,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "PAGE_REVOKE",
+      "id": 43,
+      "channel": "MEMORY",
+      "channel_index": 3,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W4",
+      "host_only": false,
+      "payload_words": 2,
+      "fields": [
+        {
+          "name": "scope_epoch",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "binding_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "REGION_REQUEST",
+      "id": 44,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W3",
+      "host_only": false,
+      "payload_words": 4,
+      "fields": [
+        {
+          "name": "tile_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_slot",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_generation",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "op_seq",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": 1,
+      "ctx_gen": 2,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "REGION_GRANT",
+      "id": 45,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W3",
+      "host_only": false,
+      "payload_words": 5,
+      "fields": [
+        {
+          "name": "tile_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_slot",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_generation",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "region_id",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "instance_id",
+          "kind": "uint",
+          "offset": 4,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": 1,
+      "ctx_gen": 2,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "REGION_DONE",
+      "id": 46,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "T2G",
+      "dir_index": 1,
+      "owner": "W3",
+      "host_only": false,
+      "payload_words": 5,
+      "fields": [
+        {
+          "name": "tile_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_slot",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_generation",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "region_id",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "status",
+          "kind": "enum",
+          "offset": 4,
+          "words": 1,
+          "limit": 5,
+          "enum": "event_status",
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": 1,
+      "ctx_gen": 2,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    },
+    {
+      "name": "PROGRAM_REGISTER",
+      "id": 47,
+      "channel": "PROGRAM",
+      "channel_index": 2,
+      "dir": "H2G",
+      "dir_index": 2,
+      "owner": "W5",
+      "host_only": true,
+      "payload_words": 6,
+      "fields": [
+        {
+          "name": "program_id",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "version",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "package_hash",
+          "kind": "digest",
+          "offset": 2,
+          "words": 4,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [],
+      "txn": -1,
+      "ctx_slot": -1,
+      "ctx_gen": -1,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
+    }
+  ],
+  "csr": [
+    {
+      "name": "nexus.mctx.dispatch_snapshot",
+      "address": 1992,
+      "owner": "W2",
+      "scope": "per_context",
+      "access": "unspecified"
+    },
+    {
+      "name": "nexus.msnap.config",
+      "address": 1993,
+      "owner": "W2",
+      "scope": "per_context",
+      "access": "unspecified"
+    },
+    {
+      "name": "nexus.mregion.start",
+      "address": 1994,
+      "owner": "W3",
+      "scope": "per_context",
+      "access": "unspecified"
+    },
+    {
+      "name": "nexus.mregion.end",
+      "address": 1995,
+      "owner": "W3",
+      "scope": "per_context",
+      "access": "unspecified"
+    },
+    {
+      "name": "nexus.mregion.first",
+      "address": 1996,
+      "owner": "W3",
+      "scope": "per_context",
+      "access": "unspecified"
+    },
+    {
+      "name": "nexus.mregion.continue",
+      "address": 1997,
+      "owner": "W3",
+      "scope": "per_context",
+      "access": "unspecified"
+    },
+    {
+      "name": "nexus.mregion.final",
+      "address": 1998,
+      "owner": "W3",
+      "scope": "per_context",
+      "access": "unspecified"
+    },
+    {
+      "name": "nexus.missue.control",
+      "address": 1999,
+      "owner": "W3",
+      "scope": "per_context",
+      "access": "unspecified"
+    }
+  ],
+  "widths": {
+    "derived": {},
+    "unresolved": [
+      {
+        "name": "txn_id",
+        "reason": "No sourced arrival rate for txn_id and no sourced accept->terminal-ACK lifetime. dispatch_capacity (16) bounds concurrent grid routes, not txn arrivals; reset_domain.py:89 (max_drain_cycles) is a reset-drain cancel threshold, not a txn lifetime.",
+        "needs": [
+          "txn_arrival_rate_msg_per_tick",
+          "txn_live_ticks"
+        ]
+      },
+      {
+        "name": "ctx_generation",
+        "reason": "No sourced rate of slot reuse and no sourced occupant live-time. active_context_capacity (8) bounds simultaneous Contexts, not reuse frequency.",
+        "needs": [
+          "ctx_reuse_rate_per_tick",
+          "ctx_occupant_live_ticks"
+        ]
+      },
+      {
+        "name": "message_seq",
+        "reason": "No sourced per-(tile,channel,direction) message rate and no sourced in-flight message lifetime. task_commits_per_tile_per_tick bounds task commits, which are one message type among many on CTRL.",
+        "needs": [
+          "channel_message_rate_msg_per_tick",
+          "message_live_ticks"
+        ]
+      },
+      {
+        "name": "event_sequence",
+        "reason": "event_table.py:173 states the compiler-emitted use count is the only event lifetime source; no emitted-use bound or event arrival rate is recorded. device_issue_width bounds host command issue, not event arrivals.",
+        "needs": [
+          "event_arrival_rate_msg_per_tick",
+          "compiler_event_use_bound"
+        ]
+      },
+      {
+        "name": "run_generation",
+        "reason": "advances once per launch (begin_launch); no in-flight bound or rate constant exists in current code.",
+        "needs": [
+          "launch_rate_bound"
+        ]
+      }
+    ]
+  },
+  "open_items": {
+    "transport_only_fields": [
+      {
+        "message": "PROGRAM_READ_RESP",
+        "field": "hbm_chunk_len",
+        "note": "bytes ride a follow-on blob; no document defines a length field"
+      },
+      {
+        "message": "MEM_REQ",
+        "field": "mem_op",
+        "note": "W4 does not enumerate read/write; carried opaque and judged by the memory service"
+      },
+      {
+        "message": "MEM_REQ",
+        "field": "length",
+        "note": "W4 gives address checks but no length unit for the wire"
+      },
+      {
+        "message": "MEM_RSP",
+        "field": "visibility",
+        "note": "design says the response declares a write visibility scope but enumerates none"
+      },
+      {
+        "message": "MEM_RSP",
+        "field": "status",
+        "note": "design says the response carries a status but enumerates none"
+      },
+      {
+        "message": "LEASE_ACQUIRE",
+        "field": "page_count",
+        "note": "W4 states an atomic page range but no count unit for the wire"
+      }
+    ],
+    "unconfirmed_aliases": [
+      "profile_l1_gen"
+    ],
+    "unresolved_widths": [
+      "txn_id",
+      "ctx_generation",
+      "message_seq",
+      "event_sequence",
+      "run_generation"
+    ]
+  },
+  "inputs": {
+    "cn_protocol_v1.yaml": "ab8d448063a126d798631dae6abe9ef72fe9d4a4ab22e80a41f196265f7d207c",
+    "wire_schema_v1.yaml": "4873c59c3bd8f48ea01b478675f2dd143ed9e17be5418a16bea0447d175171c3",
+    "csr_name_map.yaml": "8819944028986b1211adb073bb6c065bc5d1580a91f602abfe48151980c61b7b",
+    "upstream_csr_occupied.json": "81491cb41ed1813c871d1b6676d9eb361af2cb8a7bf6a696c8c7ba606eb92c8e",
+    "channel_budgets.yaml": "604e830f60653f3f44628ee968929ad1c2e1e4fb249666ba2e1e3dc6a97481eb",
+    "lifetime_bounds.yaml": "cdf911ca22d99ac09ecffcbae6de56dda31ec07dc1a351bf8cc414be25c1030f",
+    "field_requests/w2.yaml": "32814fe480d57a4a7303537df94ea361638cf6745ff21540a0ba975d668034b0",
+    "field_requests/w3.yaml": "5120c67efe4659335ae798e1090343533afe13b976fbb64bc45acc5117da6787",
+    "field_requests/w4.yaml": "0f29e225dd829a9e172e1220153a3c4211468853b28d2b6d500296b8b1f34d81",
+    "field_requests/w5.yaml": "f5e72e0fe7e443283016505fb8cf37ef8090d9549c43688efe507b17b845d393",
+    "field_requests/w6.yaml": "f2fdce444820112039e69d25a36e53ec96f0f1f88c0e9573a30cdf6e6497b563"
+  }
+}

@@ -116,6 +116,11 @@ def check_dedup_rules(protocol: dict, errors: list[str]) -> None:
   stages = {m["name"]: m.get("stage") for m in protocol["messages"]}
   if not (stages.get("TASK_COMMIT") == "HOLD" and stages.get("TASK_COMMIT_FINAL") == "FINAL"):
     errors.append("dedup: TASK_COMMIT/TASK_COMMIT_FINAL must be the distinct HOLD/FINAL stages")
+  stage_fields = protocol["dedup"].get("stage_fields")
+  if not isinstance(stage_fields, dict) or stage_fields.get("ACK") != "ack_for_message_type":
+    errors.append("dedup: an ACK must be keyed by the request type it answers (stage_fields.ACK)")
+  elif not all(isinstance(v, str) for v in stage_fields.values()):
+    errors.append("dedup: stage_fields must name exactly one field per message")
   if protocol["dedup"].get("transport_replay_outcome") != "INCOMPLETE":
     errors.append("dedup: transport replay must resolve to INCOMPLETE")
   run_begin = next((m for m in protocol["messages"] if m["name"] == "RUN_BEGIN"), None)
@@ -135,9 +140,7 @@ def check_csr(csr: dict, upstream: dict, errors: list[str]) -> None:
     if "address" in item:
       holder = occupied_addrs.get(item["address"])
       detail = f" (collides with upstream {holder})" if holder else ""
-      errors.append(
-        f"csr {name}: an address is assigned here{detail}; addresses come from csr_allocator"
-      )
+      errors.append(f"csr {name}: an address is assigned here{detail}; addresses come from csr_allocator")
     if name.lower().split(".")[-1] in occupied_names:
       errors.append(f"csr {name}: logical name collides with an upstream-occupied CSR")
     for key in ("owner", "scope", "source"):
@@ -274,7 +277,9 @@ class DedupTracker:
   def __init__(self, protocol: dict) -> None:
     self._types = {m["name"]: m for m in protocol["messages"]}
     self._semantic_key = tuple(protocol["dedup"]["semantic_key"])
+    self._stage_fields: dict[str, str] = protocol["dedup"].get("stage_fields", {})
     self._seen: set[tuple] = set()
+    self._requests: set[tuple] = set()
     self._next_seq: dict[tuple, int] = {}
     self.effects = 0
 
@@ -292,22 +297,24 @@ class DedupTracker:
       raise ProtocolError("UNKNOWN_MESSAGE", mtype)
     if mtype == "ACK":
       ref = (msg["txn_id"], msg.get("ack_for_message_type"))
-      if ref not in self._seen:
+      if ref not in self._requests:
         raise ProtocolError("ACK_MISMATCH", f"ACK references unseen request {ref}")
     key = tuple(msg[k] if k != "message_type" else mtype for k in self._semantic_key)
+    stage_field = self._stage_fields.get(mtype)
+    if stage_field is not None:
+      key += (msg[stage_field],)
     if key in self._seen:
       raise ProtocolError("DUPLICATE_STAGE", f"{key} already applied")
     self._seen.add(key)
+    if "txn_id" in msg:
+      self._requests.add((msg["txn_id"], mtype))
     self.effects += 1
 
 
 def check_stale_generation(live_generation: int, message_generation: int) -> None:
   """ABA guard: a message from an older slot occupant is rejected with a code."""
   if message_generation < live_generation:
-    raise ProtocolError(
-      "STALE_GENERATION",
-      f"ctx_generation {message_generation} < live {live_generation}",
-    )
+    raise ProtocolError("STALE_GENERATION", f"ctx_generation {message_generation} < live {live_generation}")
 
 
 def make_identity(protocol: dict, domain: str, values: dict) -> tuple:
@@ -330,8 +337,7 @@ def make_identity(protocol: dict, domain: str, values: dict) -> tuple:
     other = field.get("equals")
     if other is not None and values[field["name"]] != values[other]:
       raise ProtocolError(
-        "IDENTITY_EQUALITY",
-        f"{domain}: {field['name']}={values[field['name']]} != {other}={values[other]}",
+        "IDENTITY_EQUALITY", f"{domain}: {field['name']}={values[field['name']]} != {other}={values[other]}"
       )
   return tuple((name, values[name]) for name in declared)
 

@@ -48,7 +48,7 @@ messages:
       new: false,
       from: protocol/w6_terminal_reset.contract.yaml,
       key: wrap_quiesce.reuse_authorized_by,
-      why: "the Group authorizes bit-pattern reuse; wire direction is unresolved in the contract and decided at C017",
+      why: "the Group authorizes bit-pattern reuse; the Tile asks (T2G) and the Group answers; decided at C017",
     }
   - {
       message: QUIESCE_RESP,

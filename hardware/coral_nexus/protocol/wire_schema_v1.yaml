@@ -1,0 +1,780 @@
+version: 1
+# Cosim wire schema, DRAFT (C017 / W1-01). The ONE input of gen_protocol.py for layouts, message lengths and
+# error enums. It is a TRANSPORT schema for the co-simulation boundary: it freezes no silicon opcode, no
+# silicon field width and no register bit (r5 13.1). Every field travels in fixed 64-bit little-endian words
+# purely so the C, SystemVerilog and Python consumers agree on bytes; that container is NOT a derived or
+# frozen width and nothing is computed from it. Every silicon width stays `unresolved` until derive_widths
+# can derive it from a sourced rate and lifetime.
+#
+# Provenance rules enforced by gen_protocol.py (a violation fails generation and writes nothing):
+#   * ident:  the field is a member of the named identity domain of cn_protocol_v1.yaml.
+#   * enum / bitset: members are checked against the validator or contract they mirror (`source`).
+#   * src:    "<file>::<needle>" - the file must exist and contain the needle (read back, never trusted).
+#   * transport_only: a transport need no sourced document defines; kept visible in the generated report so
+#     the owning package can resolve it. It is never a silicon encoding.
+schema: cn_wire_schema/v1
+status: draft
+protocol_only: true
+
+container:
+  word_bytes: 8
+  byte_order: little_endian
+  is_a_derived_width: false
+  is_a_silicon_width: false
+  rule: "a value that does not fit 64 bits is rejected on pack; a reserved word must be zero on unpack"
+
+header:
+  words:
+    - { name: msg_type, kind: enum, enum: msg_type }
+    - { name: payload_words, kind: count }
+    - { name: message_seq, kind: transport_seq }
+    - { name: header_reserved, kind: reserved }
+  header_words: 4
+  payload_words_must_equal_layout: true
+  unknown_msg_type: reject
+  truncated: reject
+  trailing_bytes: reject
+  reserved_nonzero: reject
+
+# ---------------------------------------------------------------------------------------------------
+# Enums and bitsets. `source` names where the member list comes from; the generator reads it back.
+#   yaml_list : the list at `path` of a contract file          yaml_names: the `name` of each dict entry
+#   py_enum   : class member names (or string values) parsed from a validator file
+#   doc_tokens: every member must occur in the named document text
+# ---------------------------------------------------------------------------------------------------
+enums:
+  ack_outcome:
+    source: { kind: doc_tokens, file: components/W1_Boundary_Cosimulation.md }
+    members: [HOLD_READY, ACCEPTED, WAIT, FAULT, STALE, COMPENSATED]
+  wait_reason:
+    source:
+      {
+        kind: py_enum,
+        file: pipeline_validator/memory/allocator.py,
+        class: AdmissionWaitReason,
+        mode: values,
+      }
+    members:
+      [
+        WAIT_CAPACITY,
+        WAIT_FRAGMENTATION,
+        WAIT_SLOT,
+        WAIT_CONTROL_RESOURCE,
+        WAIT_CONTEXT_LIMIT,
+      ]
+  phase_direction:
+    source:
+      {
+        kind: yaml_list,
+        file: protocol/w6_event_facility.contract.yaml,
+        path: phase_signal.directions,
+      }
+    members: [input_released, output_ready]
+  event_status:
+    source:
+      {
+        kind: py_enum,
+        file: pipeline_validator/runtime/event_table.py,
+        class: EventStatus,
+        mode: names,
+      }
+    members: [PENDING, DONE, ERROR, TIMEOUT, RESET]
+  event_scope:
+    source:
+      {
+        kind: yaml_list,
+        file: protocol/w6_event_facility.contract.yaml,
+        path: identity.scopes,
+      }
+    members: [task_private, tile_shared, group_l2, external]
+  task_terminal:
+    source:
+      {
+        kind: yaml_list,
+        file: protocol/w6_terminal_reset.contract.yaml,
+        path: task_terminal.states,
+      }
+    members: [DONE, ERROR, TIMEOUT, RESET]
+  gate_level:
+    source: { kind: doc_tokens, file: components/W1_Boundary_Cosimulation.md }
+    members: [l1, l2]
+  gate_state:
+    source: { kind: doc_tokens, file: components/W1_Boundary_Cosimulation.md }
+    members: [closed, open]
+  terminal_state:
+    source:
+      {
+        kind: yaml_list,
+        file: protocol/w4_memory.contract.yaml,
+        path: terminal.states,
+      }
+    members: [COMPLETED, ISOLATED, FAULTED]
+  fault_code:
+    source:
+      {
+        kind: py_enum,
+        file: pipeline_validator/runtime/fault_ring.py,
+        class: FaultCode,
+        mode: names,
+      }
+    members:
+      - INVALID_DESCRIPTOR
+      - UNSUPPORTED_ABI
+      - ADDRESS_FAULT
+      - DMA_TIMEOUT
+      - EVENT_DEPENDENCY_TIMEOUT
+      - STREAM_PROTOCOL_ERROR
+      - ENGINE_INTERNAL_FAULT
+      - RESET_DURING_EXECUTION
+      - L2_CAPACITY_FAULT
+      - INVALID_LAYOUT_FAULT
+      - SLOT_PERMISSION_FAULT
+  reset_phase:
+    source:
+      {
+        kind: yaml_names,
+        file: protocol/w6_terminal_reset.contract.yaml,
+        path: reset_endpoint.phases,
+      }
+    members:
+      - FREEZE_ISSUE
+      - CANCEL_UNISSUED
+      - DRAIN
+      - MARK_EVENTS
+      - INVALIDATE_RESIDENCY
+      - REBUILD_CREDIT
+      - RESUME_DONE
+  lease_result:
+    source:
+      {
+        kind: doc_tokens,
+        file: protocol/w4_memory.contract.yaml,
+        ignore_case: true,
+      }
+    members: [GRANT, HOST_SCOPE_INACTIVE]
+
+# Cross-field rules every consumer applies after the per-field range checks. `equal` rules for identity
+# fields declared `equals` in cn_protocol_v1.yaml are added by the generator, not listed here.
+# A message with a (ctx_slot, ctx_generation) pair is stale when its generation is below the live occupant
+# of that slot; the live occupant is set by the messages listed here (the Group installs a Context binding
+# only on the HOLD request).
+stale_generation:
+  establishes_on: [TASK_COMMIT]
+
+conditions:
+  - {
+      message: ACK,
+      kind: nonzero_iff,
+      field: wait_reason,
+      other: outcome,
+      other_is: WAIT,
+      why: "a wait reason is meaningful only for a WAIT outcome (W1 design 4.2); NONE otherwise",
+    }
+
+# Error codes of the consumer model, in code order. Names of the dedup/replay/stale/ACK classes are the
+# ProtocolError codes of validate_protocol.py; the rest are structural rejections at the entry.
+errors:
+  - { name: OK }
+  - { name: TRUNCATED }
+  - { name: TRAILING }
+  - { name: UNKNOWN_MSG }
+  - { name: WRONG_PORT }
+  - { name: LENGTH_MISMATCH }
+  - { name: RESERVED }
+  - { name: ENUM_RANGE }
+  - { name: BOOL_RANGE }
+  - { name: BITSET_RANGE }
+  - { name: CONDITION }
+  - { name: TRANSPORT_REPLAY }
+  - { name: INCOMPLETE }
+  - { name: STALE_GENERATION }
+  - { name: ACK_MISMATCH }
+  - { name: DUPLICATE_STAGE }
+  - { name: CAPACITY }
+
+# The consumer model keeps this many Context slots and dedup entries. They are model bounds of the test
+# receivers, NOT derived widths: a real receiver sizes its tables from the C018/C019 evidence.
+consumer_model:
+  context_slots: 64
+  dedup_entries: 256
+
+bitsets:
+  quiesce_classes:
+    source:
+      {
+        kind: yaml_list,
+        file: protocol/w6_terminal_reset.contract.yaml,
+        path: wrap_quiesce.covers,
+      }
+    members:
+      [in_flight_completions, late_acks, event_queues, protocol_replay_cache]
+  drain_evidence:
+    source:
+      {
+        kind: yaml_list,
+        file: protocol/w6_terminal_reset.contract.yaml,
+        path: reset_endpoint.drain.evidence_required,
+      }
+    members:
+      - engine_accepted_zero
+      - engine_queue_empty
+      - l1_mshr_empty
+      - transfer_quiescent
+      - no_pending_debug_export
+      - no_unaccepted_phase_or_post_event
+
+# ---------------------------------------------------------------------------------------------------
+# Catalog keys that name a group of wire fields rather than one field. Both lists are checked against
+# the W6 event key the contract defines.
+# ---------------------------------------------------------------------------------------------------
+key_aliases:
+  owner:
+    fields: [tile_id, ctx_slot, ctx_generation]
+    source:
+      {
+        file: protocol/w6_event_facility.contract.yaml,
+        path: identity.event_key_fields,
+      }
+  generation:
+    fields: [event_generation]
+    source:
+      {
+        file: protocol/w6_event_facility.contract.yaml,
+        path: identity.event_key_fields,
+      }
+
+# Names a field request uses for something the wire carries under another name. `open: true` marks an
+# alias the owning package has not confirmed; it is repeated in the generated report.
+request_aliases:
+  region_done_record:
+    message: REGION_DONE
+    note: "w3.yaml: the record that carries region completion is the REGION_DONE message itself"
+  owner_op_seq:
+    wire: op_seq
+    note: "rob_tag.yaml: owner_op_seq is the same field as op_seq in the protocol"
+  profile_l1_gen:
+    wire: profile_generation
+    open: true
+    note: "GATE_NOTIFY.level selects whether profile_generation is the l1 or l2 generation; W4 has not confirmed this"
+
+# ---------------------------------------------------------------------------------------------------
+# Field groups, included by name so one definition serves every message that carries the group.
+# ---------------------------------------------------------------------------------------------------
+groups:
+  task_key:
+    - { name: launch_generation, kind: uint, ident: task_key }
+    - { name: root_launch_generation, kind: uint, ident: task_key }
+    - { name: dispatch_ordinal, kind: uint, ident: task_key }
+    - { name: task_id, kind: uint, ident: task_key }
+    - { name: context_handle, kind: uint, ident: task_key }
+  context_key:
+    - { name: tile_id, kind: uint, ident: context_key }
+    - { name: ctx_slot, kind: uint, ident: context_key }
+    - { name: ctx_generation, kind: uint, ident: context_key }
+  event_key:
+    - { name: tile_id, kind: uint, ident: context_key }
+    - { name: ctx_slot, kind: uint, ident: context_key }
+    - { name: ctx_generation, kind: uint, ident: context_key }
+    - {
+        name: local_event_id,
+        kind: uint,
+        src: "protocol/w6_event_facility.contract.yaml::local_event_id",
+      }
+    - {
+        name: event_generation,
+        kind: uint,
+        src: "protocol/w6_event_facility.contract.yaml::event_generation",
+      }
+    - {
+        name: sequence,
+        kind: uint,
+        src: "protocol/w6_event_facility.contract.yaml::sequence",
+      }
+  program_identity:
+    - {
+        name: program_id,
+        kind: uint,
+        src: "protocol/w5_package.contract.yaml::program_id",
+      }
+    - {
+        name: version,
+        kind: uint,
+        src: "protocol/w5_package.contract.yaml::version",
+      }
+    - {
+        name: package_hash,
+        kind: digest,
+        words: 4,
+        src: "protocol/w5_package.contract.yaml::algorithm: sha256",
+      }
+    - { name: program_epoch, kind: uint, ident: epochs }
+  stream_key:
+    - {
+        name: token_id,
+        kind: uint,
+        src: "pipeline_validator/stream_queue.py::token_id",
+      }
+    - {
+        name: queue_generation,
+        kind: uint,
+        src: "implementation/W1_Boundary_Cosimulation_Plan.md::queue_generation",
+      }
+    - {
+        name: seq,
+        kind: uint,
+        src: "implementation/W1_Boundary_Cosimulation_Plan.md::seq",
+      }
+
+# ---------------------------------------------------------------------------------------------------
+# Messages. Field order is the wire order. `include` groups come first, in the order listed.
+# ---------------------------------------------------------------------------------------------------
+messages:
+  QUERY_CAPS:
+    fields: [{ name: txn_id, kind: uint, ident: txn }]
+  CAPS_RESP:
+    fields:
+      - { name: txn_id, kind: uint, ident: txn }
+      - {
+          name: context_count,
+          kind: uint,
+          src: "rtl/scalar/doc/perctx_issue.yaml::context_count",
+        }
+      - {
+          name: program_slots,
+          kind: uint,
+          src: "protocol/field_requests/w2.yaml::program-slot capacity",
+        }
+      - {
+          name: stream_supported,
+          kind: bool,
+          src: "implementation/W1_Boundary_Cosimulation_Plan.md::stream_supported",
+        }
+  RUN_BEGIN:
+    fields: [{ name: run_generation, kind: uint, ident: epochs }]
+  TASK_PLAN:
+    include: [task_key]
+    fields:
+      - { name: txn_id, kind: uint, ident: txn }
+      - { name: pool_epoch, kind: uint, ident: version_ticket }
+      - { name: pool_version, kind: uint, ident: version_ticket }
+  TASK_COMMIT:
+    include: [task_key]
+    fields:
+      - { name: txn_id, kind: uint, ident: txn }
+      - { name: ctx_slot, kind: uint, ident: context_key }
+      - { name: ctx_generation, kind: uint, ident: context_key }
+      - { name: pool_version, kind: uint, ident: version_ticket }
+  TASK_COMMIT_FINAL:
+    include: [task_key]
+    fields:
+      - { name: txn_id, kind: uint, ident: txn }
+      - { name: ctx_generation, kind: uint, ident: context_key }
+  ACK:
+    fields:
+      - { name: txn_id, kind: uint, ident: txn }
+      - { name: ack_for_message_type, kind: enum, enum: msg_type }
+      - { name: op_seq, kind: uint, ident: op }
+      - { name: outcome, kind: enum, enum: ack_outcome }
+      - { name: wait_reason, kind: enum, enum: wait_reason, optional: true }
+  RETIRE_READY:
+    include: [task_key]
+    fields:
+      - { name: ctx_generation, kind: uint, ident: context_key }
+      - {
+          name: drain_evidence_seq,
+          kind: uint,
+          src: "protocol/field_requests/w6.yaml::drain evidence reference",
+        }
+  RETIRE:
+    include: [task_key, context_key]
+    fields: [{ name: arena_alloc_gen, kind: uint, ident: epochs }]
+  TASK_COMPLETION:
+    include: [task_key]
+    fields:
+      - { name: status, kind: enum, enum: task_terminal }
+      - {
+          name: first_fault_ref,
+          kind: uint,
+          src: "protocol/field_requests/w6.yaml::first-fault reference",
+        }
+  GATE_NOTIFY:
+    fields:
+      - { name: level, kind: enum, enum: gate_level }
+      - { name: state, kind: enum, enum: gate_state }
+      - { name: profile_generation, kind: uint, ident: version_ticket }
+  RESOURCE_UPDATE:
+    include: [context_key]
+    fields:
+      - {
+          name: version,
+          kind: uint,
+          src: "components/W1_Boundary_Cosimulation.md::状态与版本",
+        }
+      - { name: arena_alloc_gen, kind: uint, ident: epochs }
+  POST_EVENT:
+    include: [event_key]
+    fields:
+      - { name: scope, kind: enum, enum: event_scope }
+      - { name: status, kind: enum, enum: event_status }
+  PHASE_SIGNAL:
+    include: [task_key]
+    fields: [{ name: direction, kind: enum, enum: phase_direction }]
+  EVENT_NOTIFY:
+    include: [event_key]
+    fields:
+      - { name: scope, kind: enum, enum: event_scope }
+      - { name: status, kind: enum, enum: event_status }
+      - {
+          name: error_code,
+          kind: uint,
+          src: "protocol/w6_event_facility.contract.yaml::error_code",
+        }
+  EVENT_RETIRE:
+    include: [task_key]
+  PROGRAM_INSTALL:
+    include: [program_identity]
+    fields:
+      - {
+          name: slot,
+          kind: uint,
+          src: "protocol/field_requests/w5.yaml::pre-linked slot address",
+        }
+  PROGRAM_READ_REQ:
+    include: [program_identity]
+  PROGRAM_READ_RESP:
+    include: [program_identity]
+    fields:
+      - {
+          name: hbm_chunk_len,
+          kind: uint,
+          transport_only: "bytes ride a follow-on blob; no document defines a length field",
+        }
+  PROGRAM_INSTALL_ACK:
+    include: [program_identity]
+    fields:
+      - {
+          name: installed_len,
+          kind: uint,
+          src: "components/W1_Boundary_Cosimulation.md::实测 hash/长度",
+        }
+      - {
+          name: measured_hash,
+          kind: digest,
+          words: 4,
+          src: "components/W1_Boundary_Cosimulation.md::实测 hash/长度",
+        }
+  PROGRAM_READY:
+    include: [program_identity]
+    fields:
+      - {
+          name: local_handle,
+          kind: uint,
+          src: "components/W1_Boundary_Cosimulation.md::local handle",
+        }
+  PROGRAM_INVALIDATE:
+    include: [program_identity]
+  INVALIDATE_ACK:
+    include: [program_identity]
+  MEM_REQ:
+    include: [context_key]
+    fields:
+      - { name: txn_id, kind: uint, ident: txn }
+      - {
+          name: slice_id,
+          kind: uint,
+          src: "protocol/w4_memory.contract.yaml::slice_id",
+        }
+      - {
+          name: slice_count,
+          kind: uint,
+          src: "protocol/w4_memory.contract.yaml::slice_count",
+        }
+      - { name: arena_alloc_gen, kind: uint, ident: epochs }
+      - {
+          name: binding_id,
+          kind: uint,
+          src: "protocol/w4_memory.contract.yaml::binding_id",
+        }
+      - {
+          name: binding_generation,
+          kind: uint,
+          src: "protocol/field_requests/w4.yaml::binding_generation",
+        }
+      - {
+          name: binding_offset,
+          kind: uint,
+          src: "protocol/w4_memory.contract.yaml::typed_binding(binding_class in [L2_VIEW, HBM_BINDING]) + offset",
+        }
+      - {
+          name: scope_epoch,
+          kind: uint,
+          src: "protocol/w4_memory.contract.yaml::scope_epoch",
+        }
+      - {
+          name: mem_op,
+          kind: uint,
+          transport_only: "W4 does not enumerate read/write; carried opaque and judged by the memory service",
+        }
+      - {
+          name: length,
+          kind: uint,
+          transport_only: "W4 gives address checks but no length unit for the wire",
+        }
+  MEM_RSP:
+    fields:
+      - { name: txn_id, kind: uint, ident: txn }
+      - {
+          name: slice_id,
+          kind: uint,
+          src: "protocol/w4_memory.contract.yaml::slice_id",
+        }
+      - {
+          name: binding_generation,
+          kind: uint,
+          src: "protocol/field_requests/w4.yaml::binding_generation",
+        }
+      - {
+          name: visibility,
+          kind: uint,
+          transport_only: "design says the response declares a write visibility scope but enumerates none",
+        }
+      - {
+          name: status,
+          kind: uint,
+          transport_only: "design says the response carries a status but enumerates none",
+        }
+  TERMINAL_ACK:
+    fields:
+      - { name: txn_id, kind: uint, ident: txn }
+      - {
+          name: slice_id,
+          kind: uint,
+          src: "protocol/w4_memory.contract.yaml::slice_id",
+        }
+      - {
+          name: slice_count,
+          kind: uint,
+          src: "protocol/w4_memory.contract.yaml::slice_count",
+        }
+      - { name: final_state, kind: enum, enum: terminal_state }
+  STREAM_ACQUIRE:
+    include: [stream_key]
+  STREAM_POP:
+    include: [stream_key]
+  STREAM_PUSH:
+    include: [stream_key]
+  STREAM_RELEASE:
+    include: [stream_key]
+  STREAM_PUSH_EOS:
+    include: [stream_key]
+  STREAM_EOS:
+    include: [stream_key]
+  STREAM_ERROR:
+    include: [stream_key]
+    fields:
+      - {
+          name: first_fault_index,
+          kind: uint,
+          src: "pipeline_validator/stream_queue.py::first_fault_index",
+        }
+  GEN_WRAP_QUIESCE:
+    include: [context_key]
+  QUIESCE_RESP:
+    include: [context_key]
+    fields:
+      - { name: drain_bitmap, kind: bitset, bitset: quiesce_classes }
+      - {
+          name: evidence_seq,
+          kind: uint,
+          src: "protocol/w6_terminal_reset.contract.yaml::evidence_sequence",
+        }
+  # ---- messages requested by field requests and not in the C009 catalog -----------------------------
+  CANCEL_TASK:
+    include: [task_key]
+    fields: [{ name: ctx_generation, kind: uint, ident: context_key }]
+  RESET_PHASE_REQ:
+    fields:
+      - { name: phase, kind: enum, enum: reset_phase }
+      - { name: run_generation, kind: uint, ident: epochs }
+  RESET_PHASE_ACK:
+    fields:
+      - { name: phase, kind: enum, enum: reset_phase }
+      - { name: run_generation, kind: uint, ident: epochs }
+      - {
+          name: pending_to_reset,
+          kind: uint,
+          src: "protocol/w6_terminal_reset.contract.yaml::pending_to_reset_count",
+        }
+      - { name: evidence_mask, kind: bitset, bitset: drain_evidence }
+  FAULT_REPORT:
+    include: [context_key]
+    fields:
+      - { name: code, kind: enum, enum: fault_code }
+      - {
+          name: severity,
+          kind: uint,
+          src: "protocol/w6_terminal_reset.contract.yaml::severity",
+        }
+      - {
+          name: source_id,
+          kind: uint,
+          src: "protocol/w6_terminal_reset.contract.yaml::source_id",
+        }
+      - {
+          name: engine_id,
+          kind: uint,
+          src: "protocol/w6_terminal_reset.contract.yaml::engine_id",
+        }
+      - { name: op_seq, kind: uint, ident: op }
+  FAULT_ACK:
+    fields: [{ name: tile_id, kind: uint, ident: context_key }]
+  POISON:
+    fields: [{ name: run_generation, kind: uint, ident: epochs }]
+  LEASE_ACQUIRE:
+    fields:
+      - { name: txn_id, kind: uint, ident: txn }
+      - {
+          name: scope_epoch,
+          kind: uint,
+          src: "protocol/w4_memory.contract.yaml::scope_epoch",
+        }
+      - {
+          name: binding_generation,
+          kind: uint,
+          src: "protocol/field_requests/w4.yaml::binding_generation",
+        }
+      - {
+          name: page_count,
+          kind: uint,
+          transport_only: "W4 states an atomic page range but no count unit for the wire",
+        }
+  LEASE_GRANT:
+    fields:
+      - { name: txn_id, kind: uint, ident: txn }
+      - {
+          name: lease_ref,
+          kind: uint,
+          src: "protocol/field_requests/w4.yaml::lease_ref",
+        }
+      - {
+          name: scope_epoch,
+          kind: uint,
+          src: "protocol/w4_memory.contract.yaml::scope_epoch",
+        }
+      - { name: result, kind: enum, enum: lease_result }
+  PAGE_REVOKE:
+    fields:
+      - {
+          name: scope_epoch,
+          kind: uint,
+          src: "protocol/w4_memory.contract.yaml::scope_epoch",
+        }
+      - {
+          name: binding_generation,
+          kind: uint,
+          src: "protocol/field_requests/w4.yaml::binding_generation",
+        }
+  REGION_REQUEST:
+    include: [context_key]
+    fields: [{ name: op_seq, kind: uint, ident: op }]
+  REGION_GRANT:
+    include: [context_key]
+    fields:
+      - {
+          name: region_id,
+          kind: uint,
+          src: "protocol/field_requests/w3.yaml::region_id",
+        }
+      - {
+          name: instance_id,
+          kind: uint,
+          src: "protocol/field_requests/w3.yaml::instance_id",
+        }
+  REGION_DONE:
+    include: [context_key]
+    fields:
+      - {
+          name: region_id,
+          kind: uint,
+          src: "protocol/field_requests/w3.yaml::region_id",
+        }
+      - { name: status, kind: enum, enum: event_status }
+  PROGRAM_REGISTER:
+    host_only: true
+    fields:
+      - {
+          name: program_id,
+          kind: uint,
+          src: "protocol/w5_package.contract.yaml::program_id",
+        }
+      - {
+          name: version,
+          kind: uint,
+          src: "protocol/w5_package.contract.yaml::version",
+        }
+      - {
+          name: package_hash,
+          kind: digest,
+          words: 4,
+          src: "protocol/w5_package.contract.yaml::algorithm: sha256",
+        }
+
+# New messages: the field requests that ask for them name the owner and direction. Anything not in the C009
+# catalog must be listed here with a request that names it, or the generator refuses it.
+new_messages:
+  - { name: CANCEL_TASK, channel: CTRL, dir: G2T, owner: W6, request: w6.yaml }
+  - {
+      name: RESET_PHASE_REQ,
+      channel: CTRL,
+      dir: G2T,
+      owner: W6,
+      request: w6.yaml,
+    }
+  - {
+      name: RESET_PHASE_ACK,
+      channel: CTRL,
+      dir: T2G,
+      owner: W6,
+      request: w6.yaml,
+    }
+  - { name: FAULT_REPORT, channel: CTRL, dir: T2G, owner: W6, request: w6.yaml }
+  - { name: FAULT_ACK, channel: CTRL, dir: G2T, owner: W6, request: w6.yaml }
+  - { name: POISON, channel: CTRL, dir: G2T, owner: W6, request: w6.yaml }
+  - {
+      name: LEASE_ACQUIRE,
+      channel: MEMORY,
+      dir: T2G,
+      owner: W4,
+      request: w4.yaml,
+    }
+  - {
+      name: LEASE_GRANT,
+      channel: MEMORY,
+      dir: G2T,
+      owner: W4,
+      request: w4.yaml,
+    }
+  - {
+      name: PAGE_REVOKE,
+      channel: MEMORY,
+      dir: G2T,
+      owner: W4,
+      request: w4.yaml,
+    }
+  - {
+      name: REGION_REQUEST,
+      channel: CTRL,
+      dir: T2G,
+      owner: W3,
+      request: w3.yaml,
+    }
+  - { name: REGION_GRANT, channel: CTRL, dir: G2T, owner: W3, request: w3.yaml }
+  - { name: REGION_DONE, channel: CTRL, dir: T2G, owner: W3, request: w3.yaml }
+  - {
+      name: PROGRAM_REGISTER,
+      channel: PROGRAM,
+      dir: H2G,
+      owner: W5,
+      request: w5.yaml,
+      host_only: true,
+    }

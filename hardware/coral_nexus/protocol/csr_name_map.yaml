@@ -12,6 +12,12 @@
 schema: cn_csr_name_map/v1
 status: draft
 upstream_table: upstream_csr_occupied.json
+# Window csr_allocator may hand out addresses from, first-fit ascending in declared order. The bounds are the
+# plan's own example gap after the MCONTEXT block; gen_protocol.py reads the needle back from the plan.
+allocation_window:
+  low: 0x7c8
+  high: 0x7db
+  source: "implementation/W1_Boundary_Cosimulation_Plan.md::0x7c8..0x7db"
 declared:
   - {
       name: nexus.mctx.dispatch_snapshot,
