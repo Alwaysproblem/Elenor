@@ -41,10 +41,33 @@ def gate() -> gates.G1Gate:
   return gates.G1Gate(REPO_ROOT)
 
 
+# A sourced bound to close the two budgets in the fixture. The needle is read back by
+# freeze_check.open_budgets; the real closure additionally updates scripts/derive_w4_bounds.py's
+# REQUIRED_UNRESOLVED bookkeeping, which its own suite checks -- the fixture only simulates the move.
+SOURCED_BOUND = {"file": "hardware/coral_nexus/configs/w4_memory_constraints.yaml", "line": 3}
+
+
 def _closed_w4(tmp_path: Path) -> Path:
-  """A copy of the w4 constraints with the two required budgets CLOSED (moved off the unresolved list)."""
+  """A copy of the w4 constraints with the two required budgets genuinely CLOSED: moved off the
+  unresolved list AND onto inputs with a value plus a source whose needle reads back (deleting the
+  entries is NOT closure; a deleted required entry stays open by design)."""
   doc = yaml.safe_load((H / "configs/w4_memory_constraints.yaml").read_text())
   doc["unresolved"] = [e for e in doc["unresolved"] if e["name"] not in fc.REQUIRED_CLOSED_BUDGETS]
+  doc["inputs"] = list(doc.get("inputs") or [])
+  doc["inputs"] += [
+    {
+      "name": name,
+      "value": 8,
+      "unit": "count" if "credit_cap" in name else "entries",
+      "key": name,
+      "source": {
+        **SOURCED_BOUND,
+        "needle": "Every input carries an explicit unit and a source the validator reads back",
+      },
+      "provenance": {"note": "fixture; the real closure cites the sourced constant"},
+    }
+    for name in sorted(fc.REQUIRED_CLOSED_BUDGETS)
+  ]
   path = tmp_path / "w4_memory_constraints.yaml"
   path.write_text(yaml.safe_dump(doc))
   return path
@@ -66,6 +89,72 @@ def test_the_gate_fails_closed_today_naming_the_open_budgets(gate: gates.G1Gate)
   assert "response_record_budget" in by["budgets.closed"]["detail"]
   assert by["seal.joint"]["ok"] is False
   assert not (H / "protocol/PROTOCOL_FREEZE.json").exists()
+
+
+def test_deleting_a_required_budget_is_open_not_closed(
+  tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+  doc = yaml.safe_load((H / "configs/w4_memory_constraints.yaml").read_text())
+  doc["unresolved"] = [e for e in doc["unresolved"] if e["name"] not in fc.REQUIRED_CLOSED_BUDGETS]
+  path = tmp_path / "deleted.yaml"
+  path.write_text(yaml.safe_dump(doc))
+  original = fc.W4_CONSTRAINTS
+  fc.W4_CONSTRAINTS = path
+  try:
+    assert fc.open_budgets() == sorted(fc.REQUIRED_CLOSED_BUDGETS)
+  finally:
+    fc.W4_CONSTRAINTS = original
+
+
+def test_a_budget_with_an_unreadback_source_is_open(tmp_path: Path) -> None:
+  doc = yaml.safe_load((H / "configs/w4_memory_constraints.yaml").read_text())
+  doc["unresolved"] = [e for e in doc["unresolved"] if e["name"] not in fc.REQUIRED_CLOSED_BUDGETS]
+  doc["inputs"] = list(doc.get("inputs") or [])
+  doc["inputs"] += [
+    {
+      "name": name,
+      "value": 8,
+      "unit": "count",
+      "source": {"file": "hardware/coral_nexus/nope.yaml", "line": 1, "needle": "x"},
+    }
+    for name in sorted(fc.REQUIRED_CLOSED_BUDGETS)
+  ]
+  path = tmp_path / "unreadable.yaml"
+  path.write_text(yaml.safe_dump(doc))
+  original = fc.W4_CONSTRAINTS
+  fc.W4_CONSTRAINTS = path
+  try:
+    assert fc.open_budgets() == sorted(fc.REQUIRED_CLOSED_BUDGETS)
+  finally:
+    fc.W4_CONSTRAINTS = original
+
+
+def test_a_sourced_looking_entry_without_a_readback_needle_is_still_open(tmp_path: Path) -> None:
+  doc = yaml.safe_load((H / "configs/w4_memory_constraints.yaml").read_text())
+  doc["unresolved"] = [e for e in doc["unresolved"] if e["name"] not in fc.REQUIRED_CLOSED_BUDGETS]
+  doc["inputs"] = list(doc.get("inputs") or [])
+  doc["inputs"] += [
+    {
+      "name": name,
+      "value": 8,
+      "unit": "count",
+      # an existing line, but the needle is not on it; and a non-integer value with a right needle
+      "source": {
+        "file": "hardware/coral_nexus/configs/w4_memory_constraints.yaml",
+        "line": 3,
+        "needle": "this text is not on that line",
+      },
+    }
+    for name in sorted(fc.REQUIRED_CLOSED_BUDGETS)
+  ]
+  path = tmp_path / "cosmetic.yaml"
+  path.write_text(yaml.safe_dump(doc))
+  original = fc.W4_CONSTRAINTS
+  fc.W4_CONSTRAINTS = path
+  try:
+    assert fc.open_budgets() == sorted(fc.REQUIRED_CLOSED_BUDGETS)
+  finally:
+    fc.W4_CONSTRAINTS = original
 
 
 def test_a_width_may_stay_underivable_but_a_capacity_may_not(gate: gates.G1Gate, tmp_path: Path) -> None:

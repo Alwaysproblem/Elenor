@@ -94,12 +94,34 @@ REQUIRED_GENERATED = (
 
 
 def open_budgets() -> list[str]:
-  """Required capacity budgets still on the w4 unresolved list (no sourced value)."""
+  """Required capacity budgets without a sourced value.
+
+  Fail closed in BOTH directions: an entry still on the w4 ``unresolved`` list is open, and one deleted
+  entirely is equally unresolved -- deletion must not turn into a green seal. Closing one means MOVING it
+  to ``inputs`` with a sourced file/line/needle that reads back AND the value; the w4 validator
+  (scripts/derive_w4_bounds.py) then owns the remaining bookkeeping, so a sourced number here is never a
+  local invention.
+  """
   import yaml
 
   doc = yaml.safe_load(W4_CONSTRAINTS.read_text())
   unresolved = {entry.get("name") for entry in doc.get("unresolved") or []}
-  return [name for name in REQUIRED_CLOSED_BUDGETS if name in unresolved]
+  read_back: dict[str, bool] = {}
+  for entry in doc.get("inputs") or []:
+    name = entry.get("name")
+    if name in REQUIRED_CLOSED_BUDGETS:
+      source = entry.get("source") or {}
+      try:
+        line = (REPO / str(source["file"])).read_text().splitlines()[int(source["line"]) - 1]
+      except (KeyError, OSError, IndexError, TypeError):
+        read_back[name] = False
+        continue
+      read_back[name] = str(source["needle"]) in line and isinstance(entry.get("value"), int)
+  state: list[str] = []
+  for name in REQUIRED_CLOSED_BUDGETS:
+    if name in unresolved or name not in read_back or not read_back[name]:
+      state.append(name)
+  return state
 
 
 def _sha(path: Path) -> str:
