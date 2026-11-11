@@ -280,15 +280,59 @@ def test_capacity_and_overlap_failures_are_refused() -> None:
 
 
 def test_recursion_dynamic_stack_and_open_indirects_are_refused() -> None:
+  su = "x.c:1:a\t8\tstatic\nx.c:2:b\t8\tstatic\n"
   calls = {"_start": ["a"], "a": ["b"], "b": ["a"]}
-  _expect("RECURSION", mk._stack_bound, "f\t0\tstatic\n", calls, {"_start": 0, "a": 8, "b": 8})
-  _expect("UNBOUNDED_FRAME", mk._stack_bound, "f\t16\tdynamic\n", {}, {"f": 16})
+  _expect("RECURSION", mk._stack_bound, su, calls, {"_start": 0, "a": 8, "b": 8})
+  _expect("UNBOUNDED_FRAME", mk._stack_bound, "x.c:1:f\t16\tdynamic\n", {}, {"f": 16})
   _expect("UNRESOLVED_INDIRECT", mk._parse_disassembly, "   4: 000000e7 \tjr\tt0\n\n00000000 <_start>:\n")
   _, frames, _ = mk._parse_disassembly(
     "00000000 <f>:\n   0: ff010113 \taddi\tsp, sp, -0x10\n   4: 01010113 \taddi\tsp, sp, 0x10\n"
   )
   assert frames["f"] == 0x10
   _expect("UNMODELED_STACK", mk._parse_disassembly, "00000000 <f>:\n   0: 01010113 \taddi\tsp, sp, 0x20\n")
+
+
+def test_the_compilers_frame_is_the_authority_and_the_parse_must_agree() -> None:
+  su = "x.c:1:f\t128\tstatic\n"
+  graph = {"_start": ["f"]}
+  # the compiler says 128, the parse saw 0: the bound is 128, never the under-parsed 0
+  assert mk._stack_bound(su, graph, {"_start": 0, "f": 0}) == 128
+  # the parse saw MORE than the compiler reported: the .su is wrong, refuse
+  _expect("FRAME_MISMATCH", mk._stack_bound, "x.c:1:f\t16\tstatic\n", graph, {"_start": 0, "f": 32})
+  # a frame the .su never recorded cannot be counted as zero
+  _expect("FRAME_MISMATCH", mk._stack_bound, "", graph, {"_start": 0, "f": 8})
+  # a call target the image never defined is unknown, not a free leaf
+  _expect("UNKNOWN_FUNCTION", mk._stack_bound, "", {"_start": ["ghost"]}, {"_start": 0})
+  # a malformed or duplicated .su record is refused rather than skipped
+  _expect("BAD_STACK_USAGE", mk._stack_bound, "x.c:1:f\tmany\tstatic\n", graph, {"_start": 0, "f": 0})
+  _expect("BAD_STACK_USAGE", mk._stack_bound, su + su, graph, {"_start": 0, "f": 0})
+  # the deepest chain wins: _start -> a (8) -> b (16) beats _start -> c (4)
+  deep = "x.c:1:a\t8\tstatic\nx.c:2:b\t16\tstatic\nx.c:3:c\t4\tstatic\n"
+  frames = {"_start": 0, "a": 8, "b": 16, "c": 4}
+  assert mk._stack_bound(deep, {"_start": ["a", "c"], "a": ["b"]}, frames) == 24
+
+
+def test_every_sp_write_the_frame_model_does_not_cover_is_refused() -> None:
+  for insn in (
+    "sub\tsp, sp, a0",
+    "mv\tsp, a0",
+    "li\tsp, 0",
+    "lw\tsp, 0(a0)",
+    "addi\tsp, a0, 4",
+    "auipc\tsp, 0x10",
+  ):
+    _expect("UNMODELED_STACK", mk._parse_disassembly, f"00000000 <f>:\n   0: 00000000 \t{insn}\n")
+  # stores THROUGH sp and loads INTO other registers are not sp writes
+  _, frames, _ = mk._parse_disassembly(
+    "00000000 <f>:\n   0: 00000000 \tsw\ts0, 8(sp)\n   4: 00000000 \tlw\tra, 0xc(sp)\n"
+    "   8: 00000000 \tsw\tsp, 0(a0)\n   c: 00000000 \tc.swsp\tsp, 4(a0)\n"
+  )
+  assert frames == {"f": 0}
+  # _start alone may initialise sp (auipc + addi), nothing else may
+  start = "00000000 <_start>:\n   8: 00010117 \tauipc\tsp, 0x10\n   c: 07810113 \taddi\tsp, sp, 0x78\n"
+  assert mk._parse_disassembly(start)[1] == {"_start": 0}
+  for insn in ("mv\tsp, a0", "li\tsp, 0", "sub\tsp, sp, a0", "lw\tsp, 0(a0)"):
+    _expect("UNMODELED_STACK", mk._parse_disassembly, f"00000000 <_start>:\n   0: 00000000 \t{insn}\n")
 
 
 def test_a_size_report_without_text_is_refused() -> None:

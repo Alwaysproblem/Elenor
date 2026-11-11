@@ -50,6 +50,11 @@ _RE_INDIRECT = re.compile(r"^\s*[0-9a-f]+:.*\b(jalr|jr)\s")
 _RE_FRAME = re.compile(r"^\s*[0-9a-f]+ <([^>+]+)>:")
 _RE_ADDISP = re.compile(r"\baddi\s+sp,\s*sp,\s*-0x([0-9a-f]+)")
 _RE_ADDISP_POS = re.compile(r"\baddi\s+sp,\s*sp,\s*0x([0-9a-f]+)")
+# Every way an instruction can WRITE sp. The frame model understands only `addi sp, sp, +/-imm`; anything
+# else that targets sp (sub/add/mv/li/lw/auipc/csrr ... sp) would silently move the stack, so it is refused.
+_RE_SP_WRITE = re.compile(
+  r"^\s*[0-9a-f]+:\s+[0-9a-f]+\s+(?!sw\b|sh\b|sb\b|c\.sw|c\.swsp)(\w[\w.]*)\s+sp\s*,"
+)
 _RE_CSRW = re.compile(r"\bcsrw\s+(csr\s+)?(0x[0-9a-f]+|\d+)\b")
 
 
@@ -100,6 +105,13 @@ def _parse_disassembly(dis: str) -> tuple[dict[str, list[str]], dict[str, int], 
       raise MeasureError("UNRESOLVED_INDIRECT", f"{current}: an indirect call the bound cannot close")
     grow = _RE_ADDISP.search(line)
     shrink = None if grow else _RE_ADDISP_POS.search(line)
+    if not grow and not shrink:
+      written = _RE_SP_WRITE.match(line)
+      # the ONLY legal non-frame sp write: _start's `la sp, __stack_end` (auipc sp + addi sp, sp, +imm)
+      if written and not (current == "_start" and written.group(1) == "auipc"):
+        raise MeasureError(
+          "UNMODELED_STACK", f"{current}: an sp update the frame model does not cover: {line.strip()}"
+        )
     if grow:
       depth += int(grow.group(1), 16)
       frames[current] = max(frames[current], depth)
@@ -116,16 +128,49 @@ def _parse_disassembly(dis: str) -> tuple[dict[str, list[str]], dict[str, int], 
   return calls, frames, csrws
 
 
-def _stack_bound(su_text: str, calls: dict[str, list[str]], frames: dict[str, int]) -> int:
-  """Sum frames along the longest acyclic call path from _start; refuse anything unbounded."""
+def _parse_su(su_text: str) -> dict[str, int]:
+  """Compiler frame sizes from -fstack-usage (`file:line:func<TAB>bytes<TAB>static`); else refused."""
+  sizes: dict[str, int] = {}
   for su_line in su_text.splitlines():
+    if not su_line.strip():
+      continue
     parts = su_line.split("\t")
-    if len(parts) >= 3 and parts[2] not in ("static", "dynamic", "bounded"):
-      raise MeasureError("UNBOUNDED_FRAME", su_line)
-    if len(parts) >= 3 and parts[2] != "static":
+    if len(parts) != 3 or not parts[1].isdigit():
+      raise MeasureError("BAD_STACK_USAGE", f"unparseable .su line {su_line!r}")
+    if parts[2] != "static":
       raise MeasureError("UNBOUNDED_FRAME", f"{parts[0]}: {parts[2]} stack usage has no bound")
+    func = parts[0].rsplit(":", 1)[-1]
+    if func in sizes:
+      raise MeasureError("BAD_STACK_USAGE", f"{func} appears twice in the .su file")
+    sizes[func] = int(parts[1])
+  return sizes
+
+
+def _stack_bound(su_text: str, calls: dict[str, list[str]], frames: dict[str, int]) -> int:
+  """Sum the COMPILER's frame sizes along the longest acyclic call path from _start.
+
+  The .su value is the authority; the parsed disassembly frame must not exceed it (a larger parsed frame
+  means the compiler under-reported), and a function reachable from _start with no .su frame and a non-zero
+  parsed frame, or a call target the disassembly never defined, is refused instead of counted as zero.
+  Assembly entry stubs (no .su record) are legal only when their parsed frame is 0.
+  """
+  sizes = _parse_su(su_text)
   memo: dict[str, int] = {}
   visiting: set[str] = set()
+
+  def frame_of(fn: str) -> int:
+    if fn not in frames:
+      raise MeasureError("UNKNOWN_FUNCTION", f"{fn} is called but never defined in the image")
+    parsed = frames[fn]
+    if fn in sizes:
+      if parsed > sizes[fn]:
+        raise MeasureError(
+          "FRAME_MISMATCH", f"{fn}: disassembly frame {parsed} exceeds the compiler's {sizes[fn]}"
+        )
+      return sizes[fn]
+    if parsed != 0:
+      raise MeasureError("FRAME_MISMATCH", f"{fn}: {parsed}-byte frame has no .su record to check it")
+    return 0
 
   def depth(fn: str) -> int:
     if fn in memo:
@@ -133,7 +178,7 @@ def _stack_bound(su_text: str, calls: dict[str, list[str]], frames: dict[str, in
     if fn in visiting:
       raise MeasureError("RECURSION", fn)
     visiting.add(fn)
-    total = frames.get(fn, 0) + max((depth(t) for t in calls.get(fn, ())), default=0)
+    total = frame_of(fn) + max((depth(t) for t in calls.get(fn, ())), default=0)
     visiting.discard(fn)
     memo[fn] = total
     return total
