@@ -465,17 +465,27 @@ def test_freeze_record_hash_mismatch_and_bad_state_are_rejected(tmp_path: Path) 
 
 def test_the_required_seal_set_is_held_by_the_checker() -> None:
   # C017 shipped collect/verify only; C020 added the seal. The required input/generated sets live in
-  # the checker (never in a YAML it validates); while a required capacity budget is open there is no
-  # committed seal at all and both sealing and verifying say so by name.
+  # the checker (never in a YAML it validates). Three states are possible:
+  #   1. a required capacity budget is open  -> no seal can exist; sealing is refused
+  #   2. budgets closed, no seal committed   -> seal is missing but sealing is no longer refused
+  #   3. budgets closed and seal committed   -> seal verifies and its input/generated sets match
   assert hasattr(freeze_check, "seal")
   if freeze_check.open_budgets():
+    # state 1: open budgets block sealing
     assert freeze_check.verify_seal() == [
       f"{freeze_check._rel(freeze_check.SEAL_PATH)}: the joint seal is missing"
     ]
     with pytest.raises(gp.GenError):
       freeze_check.seal()
     assert not freeze_check.SEAL_PATH.exists()
+  elif not freeze_check.SEAL_PATH.exists():
+    # state 2: budgets closed but no seal committed yet
+    assert freeze_check.verify_seal() == [
+      f"{freeze_check._rel(freeze_check.SEAL_PATH)}: the joint seal is missing"
+    ]
+    assert not freeze_check.SEAL_PATH.exists()
   else:
+    # state 3: budgets closed and seal committed
     assert freeze_check.verify_seal() == []
     record = json.loads(freeze_check.SEAL_PATH.read_text())
     assert set(record["inputs"]) == set(freeze_check.REQUIRED_INPUTS)

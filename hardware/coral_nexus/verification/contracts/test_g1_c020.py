@@ -5,13 +5,12 @@ State of the tree these tests pin:
 * the seal ENTRY POINTS exist and are refuse-first: an open required capacity budget refuses to seal, a
   missing required input refuses to seal, identical content re-seals idempotently, changed content needs
   --bump (which archives the previous seal), and the seal file's own digest appears nowhere inside it;
-* TODAY the two required capacity budgets (per_ctx_outstanding_credit_cap, response_record_budget) have no
-  recorded decision (configs/w4_capacity_decisions.yaml holds null), so no seal is committed and the G1 gate
-  fails closed with exit 14 naming them (and 17 for the missing seal). A capacity with no derivable bound is
-  a design decision: it is closed by filling value + decided_by + rationale + evidence in that external
-  file, never by a number in code, and recording one does not make the capacity "derivable";
-* once both decisions are recorded (simulated here with a patched decisions file) the gate passes end to end
-  and a seal written to a temp path verifies;
+* the two required capacity budgets (per_ctx_outstanding_credit_cap, response_record_budget) are closed by
+  recorded decisions in configs/w4_capacity_decisions.yaml (a capacity with no derivable bound is a design
+  decision, never a number in code; recording one does not make it "derivable"), PROTOCOL_FREEZE.json is
+  committed, and the G1 gate is green end to end;
+* every way a decision can be incomplete (null, 0, bool, float, wrong unit, blank text, missing or foreign
+  entry, wrong schema) is exercised against a patched decisions file and stays open or refuses to seal;
 * every G1 failure class maps to its own non-zero exit: half-seal 17, tampered/stale generated artifact
   12 (codec) and 17 (seal hash), open budget 14, spec/evaluator drift 18, missing seal 17.
 """
@@ -66,21 +65,19 @@ def _use(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------------------------------
-# the honest current state: no decision recorded, no seal, gate red with named reasons
+# the committed state: decisions recorded, budgets closed, seal committed, gate green
 # ---------------------------------------------------------------------------------------------------
-def test_the_two_capacity_budgets_are_still_open() -> None:
-  assert fc.open_budgets() == BUDGETS
+def test_the_two_capacity_budgets_are_now_closed() -> None:
+  assert fc.open_budgets() == []
 
 
-def test_the_gate_fails_closed_today_naming_the_open_budgets(gate: gates.G1Gate) -> None:
+def test_the_committed_tree_is_sealed_and_the_gate_is_green(gate: gates.G1Gate) -> None:
   report = gate.run()
-  assert report["pass"] is False
-  assert report["exit_code"] == gates.REQUIRED_G1_CHECKS["budgets.closed"] == 14
-  by = {c["check"]: c for c in report["checks"]}
-  assert "per_ctx_outstanding_credit_cap" in by["budgets.closed"]["detail"]
-  assert "response_record_budget" in by["budgets.closed"]["detail"]
-  assert by["seal.joint"]["ok"] is False
-  assert not (H / "protocol/PROTOCOL_FREEZE.json").exists()
+  assert report["pass"] is True and report["exit_code"] == 0, report["checks"]
+  assert all(c["ok"] for c in report["checks"])
+  seal = json.loads((H / "protocol/PROTOCOL_FREEZE.json").read_text())
+  assert seal["state"] == "frozen" and seal["protocol_seq"] == 1
+  assert fc.verify_seal() == []
 
 
 def test_a_fully_recorded_decision_closes_the_budget(
@@ -136,10 +133,14 @@ def test_a_missing_file_a_missing_entry_or_a_foreign_entry_is_open(
   assert fc.open_budgets() == BUDGETS
 
 
-def test_the_committed_decision_file_records_no_value_yet() -> None:
+def test_the_committed_decision_file_records_decisions() -> None:
   doc = yaml.safe_load((H / "configs/w4_capacity_decisions.yaml").read_text())
   assert sorted(doc["decisions"]) == BUDGETS
-  assert all(entry["value"] is None for entry in doc["decisions"].values())
+  for entry in doc["decisions"].values():
+    assert isinstance(entry["value"], int) and entry["value"] >= 1
+    assert entry["unit"] == "entries"
+    for k in fc.DECISION_TEXT_FIELDS:
+      assert isinstance(entry[k], str) and entry[k].strip()
 
 
 def test_a_decision_does_not_make_the_capacity_derivable() -> None:
@@ -172,8 +173,18 @@ def test_a_width_may_stay_underivable_but_a_capacity_may_not(
   assert by["budgets.closed"]["ok"] is True
   assert "widths declared underivable" in by["budgets.closed"]["detail"]
   assert by["protocol.contracts"]["ok"] is True
-  # the seal is still the blocker until one exists
-  assert report["exit_code"] == gates.REQUIRED_G1_CHECKS["seal.joint"] == 17
+  # with the committed seal in place nothing else blocks the gate
+  assert report["exit_code"] == 0
+
+
+def test_withdrawing_one_decision_reopens_the_budget_and_fails_the_gate_with_14(
+  gate: gates.G1Gate, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+  _use(monkeypatch, _decisions(tmp_path, response_record_budget={"value": None}))
+  report = gate.run()
+  by = {c["check"]: c for c in report["checks"]}
+  assert by["budgets.closed"]["ok"] is False and "response_record_budget" in by["budgets.closed"]["detail"]
+  assert report["exit_code"] == gates.REQUIRED_G1_CHECKS["budgets.closed"] == 14
 
 
 def test_a_crashing_or_failing_fragment_validator_fails_the_gate(
@@ -203,7 +214,13 @@ def closed_budgets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
   return tmp_path
 
 
-def test_sealing_with_open_budgets_is_refused(tmp_path: Path) -> None:
+def test_sealing_with_open_budgets_is_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+  doc = yaml.safe_load((H / "configs/w4_capacity_decisions.yaml").read_text())
+  for entry in doc["decisions"].values():
+    entry.update(value=None, decided_by=None, rationale=None, evidence=None)
+  path = tmp_path / "open.yaml"
+  path.write_text(yaml.safe_dump(doc))
+  _use(monkeypatch, path)
   with pytest.raises(gp.GenError) as exc:
     fc.seal(tmp_path / "no.json")
   assert "open budget" in "\n".join(exc.value.errors)
@@ -343,7 +360,7 @@ def test_the_committed_spec_matches_the_evaluator() -> None:
   assert set(spec["exit_codes"]) >= {0, 11, 12, 13, 14, 15, 16, 17, 18}
 
 
-def test_the_gate_command_runs_and_reports_the_honest_state() -> None:
+def test_the_gate_command_exits_zero_on_the_committed_tree() -> None:
   import subprocess
 
   proc = subprocess.run(
@@ -352,5 +369,5 @@ def test_the_gate_command_runs_and_reports_the_honest_state() -> None:
     text=True,
     cwd=REPO_ROOT,
   )
-  assert proc.returncode == 14
-  assert "per_ctx_outstanding_credit_cap" in proc.stdout
+  assert proc.returncode == 0, proc.stdout
+  assert "seal.joint" in proc.stdout and "budgets.closed" in proc.stdout

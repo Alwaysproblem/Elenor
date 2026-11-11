@@ -18,13 +18,50 @@ schema: cn_w4_capacity_decisions/v1
 decisions:
   per_ctx_outstanding_credit_cap:
     unit: entries
-    value: null
-    decided_by: null
-    rationale: null
-    evidence: null
+    value: 16
+    decided_by: W4-capacity-review-r0
+    rationale: >-
+      Matches Gemmini default max_in_flight_mem_reqs=16 (ucb-bar/gemmini Configs.scala
+      defaultConfig); BOA prototypes Gemmini's systolic-array + scratchpad architecture.
+      Coral NPU upstream lsuSlotTxidEntries=8 is single-context; 16 provides 2x headroom for
+      multi-context UCE (1-8 contexts per Tile). CreditManager issues 1 credit per in-flight
+      memory op (load/store/gather/scatter/DMA leg) and returns 1 on terminal state;
+      underflow/double-free/leak checked (MEM-08). Reset clears credit to initial watermark
+      and flushes MSHR/match table (RST-07).
+    evidence: >-
+      ucb-bar/gemmini Configs.scala defaultConfig max_in_flight_mem_reqs=16;
+      hardware/coral_nexus/upstream/coralnpu hdl/chisel/src/coralnpu/Parameters.scala:172
+      lsuSlotTxidEntries=8;
+      design/coral_nexus_tile/components/W4_Memory_Subsystem.md:162 CreditManager per-ctx
+      credit upper limit (W4 design marks it mechanical-parameter-pending-review; this
+      decision closes it).
   response_record_budget:
     unit: entries
-    value: null
-    decided_by: null
-    rationale: null
-    evidence: null
+    value: 16
+    decided_by: W4-capacity-review-r0
+    rationale: >-
+      Conservative interim decision matching validator L1 mshr_entries=16
+      (pipeline_validator/hardware_config.yaml:76). NVIDIA Fermi MSHR merges at least 8
+      requests per entry (HEART 2015, Lashgar et al.) — 8 is a measured floor, not a ceiling;
+      no sourced upper bound exists for waiters-per-refill or simultaneous early-releases, so
+      16 is a design decision pending full_memory co-sim peak measurement. Waiters per MSHR
+      entry are uncapped (mshr.py wait() appends without limit), so N can exceed the pool
+      size. When the budget is full the hardware MUST stall — it never drops or overwrites a
+      waiter. Protocol: reserve-before-release with retained-entry fallback — before freeing
+      an MSHR entry with N waiters, (a) if N > pool capacity, do not release: retain the
+      entry and deliver to waiters directly when the refill arrives (the pool is not used);
+      (b) if N <= pool capacity but fewer than N slots are free, do not release: retain the
+      entry until enough slots drain; (c) if N <= pool capacity and N slots are free, reserve
+      them atomically, transfer waiters to records, then release the entry. The pool is an
+      early-release optimization only; retained entries always complete (refill arrives,
+      waiters consume, entry frees) regardless of pool state. Progress argument: no circular
+      wait because the conservative retain path makes independent progress — but this is
+      UNVERIFIED pending a >16-waiter co-sim test that exercises case (a) and confirms no
+      deadlock when multiple high-waiter entries are retained simultaneously.
+    evidence: >-
+      pipeline_validator/hardware_config.yaml:76 l1_mshr_entries=16;
+      HEART2015 (Lashgar, Salehi, Baniasadi) Fermi MSHR merge >=8 measured floor;
+      design/coral_nexus_tile/components/W4_Memory_Subsystem.md:100 early-release
+      response-record protocol; pipeline_validator/memory/mshr.py:98-105 waiters uncapped.
+      PENDING: full_memory co-sim peak merge-count measurement and >16-waiter progress test
+      to validate or revise.
