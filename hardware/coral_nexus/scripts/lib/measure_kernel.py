@@ -1,0 +1,356 @@
+"""Measure bounded resources of the bootstrap kernel image (C018 / W5-02).
+
+What is measured, from what:
+
+* text_bytes / static_data_bytes -- the real section sizes of the actually linked ELF (``llvm-size -A``),
+  never the abstract-IR estimate the W5 contract rejects;
+* stack_bytes -- a PROVABLE bound from the per-function frame sizes of the real build (``-fstack-usage``)
+  closed over the real call graph of the real disassembly, with every construct that would leave the call
+  graph open refused (indirect calls, recursion, VLAs/alloca, stack-adjusting sequences the parser does not
+  model). A measured peak is evidence, not a bound: nothing dynamic is summed here;
+* scratch_bytes -- 0 for this image; the bootstrap has no scratch section. A later kernel with scratch
+  declares it with ``bound_source: static_analysis`` per the W5 contract, and outgrowing this candidate
+  means a NEW target hash, never widening this one.
+
+The report is written for the C014 package consumer: ``bound_source`` is always ``static_analysis``, and the
+two candidate link layouts are proven coexistent by ``package_contract.layouts_coexist`` in the tests. The
+record carries the toolchain lock sha256 and the source digests; capacity or overlap failures refuse the
+record instead of trimming it (a failure goes back to the build step, never to a Loader patch).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+H = Path(__file__).resolve().parents[2]
+REPO = H.parents[1]
+BOOTSTRAP = H / "kernels/bootstrap"
+TOOLCHAIN = REPO / "out/coral_nexus/cache/toolchain/extracted/toolchain_coralnpu_v2/bin"
+OUT_ROOT = REPO / "out/coral_nexus/C018"
+STACK_BYTES = 128  # upstream DEFAULT stack_size_bytes; a candidate target may differ -> new target hash
+ALIGN = 16  # W5 contract: fixed pre-link images; both candidate bases stay 16-byte aligned
+
+_LAYOUTS: tuple[dict[str, Any], ...] = (
+  {"name": "A", "text_base": 0x0000, "data_base": 0x0000},
+  {"name": "B", "text_base": 0x1000, "data_base": 0x1000},
+)
+
+_RE_CALL = re.compile(r"^\s*[0-9a-f]+:.*\b(jal|j)\s+0x([0-9a-f]+)\s+<([^>+]+)")
+_RE_TAIL = re.compile(r"^\s*[0-9a-f]+:.*\bjr\s+\S+\(\w+\)\s+<([^>+]+)>")
+_RE_INDIRECT = re.compile(r"^\s*[0-9a-f]+:.*\b(jalr|jr)\s")
+_RE_FRAME = re.compile(r"^\s*[0-9a-f]+ <([^>+]+)>:")
+_RE_ADDISP = re.compile(r"\baddi\s+sp,\s*sp,\s*-0x([0-9a-f]+)")
+_RE_ADDISP_POS = re.compile(r"\baddi\s+sp,\s*sp,\s*0x([0-9a-f]+)")
+_RE_CSRW = re.compile(r"\bcsrw\s+(csr\s+)?(0x[0-9a-f]+|\d+)\b")
+
+
+class MeasureError(Exception):
+  """Carries a coded reason so tests can tell the classes apart."""
+
+  def __init__(self, code: str, detail: str) -> None:
+    super().__init__(f"{code}: {detail}")
+    self.code = code
+    self.detail = detail
+
+
+def _run(cmd: list[str], **kw: Any) -> str:
+  proc = subprocess.run(cmd, capture_output=True, text=True, **kw)
+  if proc.returncode != 0:
+    raise MeasureError("TOOL_FAILED", f"{' '.join(cmd[:3])}: {proc.stderr[-300:]}")
+  return proc.stdout
+
+
+def _parse_disassembly(dis: str) -> tuple[dict[str, list[str]], dict[str, int], list[int]]:
+  """Call graph (jal/j targets), per-function max frame, and every csrw immediate.
+
+  A positive sp adjust is the epilogue of the SAME function only while a negative adjust of at least the
+  same size is outstanding; anything else (sp restored past its own frame, sp used as scratch) leaves the
+  frame model open and is refused instead of guessed. `_start` initializes sp, so its initial positive
+  setup is legal.
+  """
+  calls: dict[str, list[str]] = {}
+  frames: dict[str, int] = {}
+  csrws: list[int] = []
+  depth = 0
+  current = "?"
+  for line in dis.splitlines():
+    head = _RE_FRAME.match(line)
+    if head:
+      current = head.group(1)
+      frames.setdefault(current, 0)
+      depth = 0
+      continue
+    call = _RE_CALL.match(line)
+    tail = _RE_TAIL.search(line)
+    if call:
+      calls.setdefault(current, []).append(call.group(3))
+    elif tail:
+      # a relaxed tail call names its target; a jr with no annotation is an open indirect call
+      calls.setdefault(current, []).append(tail.group(1))
+    elif _RE_INDIRECT.search(line):
+      raise MeasureError("UNRESOLVED_INDIRECT", f"{current}: an indirect call the bound cannot close")
+    grow = _RE_ADDISP.search(line)
+    shrink = None if grow else _RE_ADDISP_POS.search(line)
+    if grow:
+      depth += int(grow.group(1), 16)
+      frames[current] = max(frames[current], depth)
+    elif shrink:
+      release = int(shrink.group(1), 16)
+      if release > depth and not (current == "_start" and depth == 0):
+        raise MeasureError(
+          "UNMODELED_STACK", f"{current}: restores {release} with only {depth} outstanding"
+        )
+      depth -= release
+    csr = _RE_CSRW.search(line)
+    if csr:
+      csrws.append(int(csr.group(2), 0))
+  return calls, frames, csrws
+
+
+def _stack_bound(su_text: str, calls: dict[str, list[str]], frames: dict[str, int]) -> int:
+  """Sum frames along the longest acyclic call path from _start; refuse anything unbounded."""
+  for su_line in su_text.splitlines():
+    parts = su_line.split("\t")
+    if len(parts) >= 3 and parts[2] not in ("static", "dynamic", "bounded"):
+      raise MeasureError("UNBOUNDED_FRAME", su_line)
+    if len(parts) >= 3 and parts[2] != "static":
+      raise MeasureError("UNBOUNDED_FRAME", f"{parts[0]}: {parts[2]} stack usage has no bound")
+  memo: dict[str, int] = {}
+  visiting: set[str] = set()
+
+  def depth(fn: str) -> int:
+    if fn in memo:
+      return memo[fn]
+    if fn in visiting:
+      raise MeasureError("RECURSION", fn)
+    visiting.add(fn)
+    total = frames.get(fn, 0) + max((depth(t) for t in calls.get(fn, ())), default=0)
+    visiting.discard(fn)
+    memo[fn] = total
+    return total
+
+  return depth("_start")
+
+
+def build_layout(layout: dict[str, Any], out: Path) -> dict[str, int]:
+  """Fill the layout template and build the real ELF with the pinned toolchain."""
+  tpl = (BOOTSTRAP / "bootstrap_layout.ld.tpl").read_text()
+  script = (
+    tpl.replace("@@TEXT_BASE@@", f"0x{layout['text_base']:08x}")
+    .replace("@@DATA_BASE@@", f"0x{layout['data_base']:08x}")
+    .replace("@@STACK_BYTES@@", str(STACK_BYTES))
+  )
+  build_dir = out / layout["name"]
+  build_dir.mkdir(parents=True, exist_ok=True)
+  (build_dir / "bootstrap.ld").write_text(script)
+  _run(
+    [
+      "bash",
+      str(H / "scripts/lib/build_bootstrap.sh"),
+      str(TOOLCHAIN),
+      str(BOOTSTRAP),
+      str(H / "protocol/generated"),
+      str(build_dir),
+      "bootstrap",
+    ]
+  )
+  sizes = _section_sizes((build_dir / "bootstrap.size").read_text())
+  return sizes
+
+
+def _section_sizes(size_text: str) -> dict[str, int]:
+  text = data = 0
+  for line in size_text.splitlines():
+    parts = line.split()
+    if len(parts) == 3 and parts[0].startswith("."):
+      name, size = parts[0], int(parts[1])
+      if name.startswith((".text", ".rodata", ".init")):
+        text += size
+      if name.startswith((".data", ".sdata", ".bss", ".sbss")):
+        data += size
+  if text <= 0:
+    raise MeasureError("NO_TEXT", "the linked image has no text")
+  return {"text": text, "data": data}
+
+
+def measure(out: Path = OUT_ROOT) -> dict[str, Any]:
+  """Build both candidate layouts, bound their resources, and write the C018 measurement record."""
+  if not TOOLCHAIN.is_dir():
+    raise MeasureError("NO_TOOLCHAIN", f"{TOOLCHAIN} missing (cn env seed pulls the locked archive)")
+  out.mkdir(parents=True, exist_ok=True)
+  sizes_a = build_layout(_LAYOUTS[0], out)
+  build_a = out / "A"
+  dis = (build_a / "bootstrap.dis").read_text()
+  su = (build_a / "bootstrap.su").read_text() if (build_a / "bootstrap.su").exists() else ""
+  if not su:
+    su = _stack_usage_fallback(build_a)
+  calls, frames, csrws = _parse_disassembly(dis)
+  stack = _stack_bound(su, calls, frames)
+  _check_helper_csrs(csrws, _loads((H / "protocol/generated/cn_layout.json").read_text()))
+  elf = (build_a / "bootstrap.elf").read_bytes()
+  entry = _entry_address(dis)
+  record_layouts = []
+  for layout in _LAYOUTS:
+    if layout["name"] != "A":
+      _ = build_layout(layout, out)
+      size_path = out / str(layout["name"]) / "bootstrap.size"
+      sec = _section_sizes(size_path.read_text())
+      text, data = sec["text"], sec["data"]
+    else:
+      text, data = sizes_a["text"], sizes_a["data"]
+    record_layouts.append(
+      {
+        "name": layout["name"],
+        "text_base": layout["text_base"],
+        "text_bytes": text,
+        "data_base": layout["data_base"],
+        "data_bytes": data,
+        "stack_bytes": STACK_BYTES,
+        "align": ALIGN,
+      }
+    )
+  record: dict[str, Any] = {
+    "schema": "cn_kernel_measurement/v1",
+    "kernel": "bootstrap",
+    "purpose": "measure-only; not a loadable CS1 package",
+    "resource_manifest": {
+      "text_bytes": sizes_a["text"],
+      "static_data_bytes": sizes_a["data"],
+      "stack_bytes": stack,
+      "scratch_bytes": 0,
+      "bound_source": "static_analysis",
+    },
+    "candidate_layouts": record_layouts,
+    "capacities": {
+      "itcm_bytes": 8192,
+      "dtcm_bytes": 32768,
+      "source": "w5_package.contract.yaml image.capacities",
+    },
+    "entry": entry,
+    "csr_immediates": {"distinct": len(set(csrws)), "max": max(csrws)},
+    "provenance": {
+      "toolchain": "toolchain_coralnpu_v2",
+      "toolchain_lock_sha256": _lock_sha(),
+      "source_sha256": {
+        p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in sorted(BOOTSTRAP.iterdir())
+        if p.is_file()
+      },
+      "elf_sha256_layout_A": hashlib.sha256(elf).hexdigest(),
+    },
+    "checks": _checks(record_layouts, stack),
+  }
+  errors = [c for c in record["checks"] if not c["ok"]]
+  if errors:
+    raise MeasureError("CAPACITY", "; ".join(f"{c['name']}: {c['detail']}" for c in errors))
+  (out / "kernel_measurement.json").write_text(_json(record))
+  return record
+
+
+def _check_helper_csrs(csrws: list[int], generated: dict[str, Any]) -> None:
+  """Every helper csrw immediate must be a C017-generated mregion address, nothing else."""
+  expected = set(csrws)
+  want = {r["address"] for r in generated["csr"] if r["name"].startswith("nexus.mregion.")}
+  if expected != want:
+    raise MeasureError(
+      "HELPER_CSR_MISMATCH",
+      f"csrw immediates {sorted(hex(x) for x in expected)} != C017 mregion allocation "
+      f"{sorted(hex(x) for x in want)}",
+    )
+
+
+def _stack_usage_fallback(build: Path) -> str:
+  """Recover .su output: the builder passes -fstack-usage, so the file sits next to the object."""
+  su = build / "bootstrap.su"
+  if su.exists():
+    return su.read_text()
+  raise MeasureError("NO_STACK_USAGE", str(su))
+
+
+def _entry_address(dis: str) -> int:
+  for line in dis.splitlines():
+    head = _RE_FRAME.match(line)
+    if head and head.group(1) == "_start":
+      return int(line.split("<")[0].strip().rstrip(":"), 16)
+  raise MeasureError("NO_ENTRY", "_start not found in the disassembly")
+
+
+def _lock_sha() -> str:
+  lock = H / "env/tools.lock"
+  data = __import__("json").loads(lock.read_text())
+  return str(data["rv32_toolchain"]["sha256"])
+
+
+def _checks(layouts: list[dict[str, Any]], stack: int) -> list[dict[str, Any]]:
+  itcm, dtcm = 8192, 32768
+  out = []
+  for a in layouts:
+    for b in layouts:
+      if a["name"] < b["name"]:
+        overlap = (
+          a["text_base"] < b["text_base"] + b["text_bytes"]
+          and b["text_base"] < a["text_base"] + a["text_bytes"]
+        )
+        overlap = overlap or (
+          a["data_base"] < b["data_base"] + b["data_bytes"]
+          and b["data_base"] < a["data_base"] + a["data_bytes"]
+        )
+        out.append(
+          {
+            "name": f"coexist_{a['name']}_{b['name']}",
+            "ok": not overlap,
+            "detail": f"text/data ranges of {a['name']} and {b['name']} overlap" if overlap else "disjoint",
+          }
+        )
+  text_end = max(x["text_base"] + x["text_bytes"] for x in layouts)
+  out.append(
+    {"name": "itcm_capacity", "ok": text_end <= itcm, "detail": f"text ends at {text_end} of {itcm}"}
+  )
+  data_end = max(x["data_base"] + x["data_bytes"] + STACK_BYTES for x in layouts)
+  out.append(
+    {"name": "dtcm_capacity", "ok": data_end <= dtcm, "detail": f"data+stack ends at {data_end} of {dtcm}"}
+  )
+  reserved = min(x["stack_bytes"] for x in layouts)
+  out.append(
+    {
+      "name": "stack_reservation_covers_bound",
+      "ok": stack <= reserved,
+      "detail": f"call-graph bound {stack} vs reserved {reserved}",
+    }
+  )
+  return out
+
+
+def _loads(text: str) -> Any:
+  import json
+
+  return json.loads(text)
+
+
+def _json(record: dict[str, Any]) -> str:
+  import json
+
+  return json.dumps(record, indent=2, sort_keys=False) + "\n"
+
+
+def main() -> None:
+  import argparse
+
+  parser = argparse.ArgumentParser(description=__doc__)
+  parser.add_argument("--out", default=str(OUT_ROOT))
+  args = parser.parse_args()
+  try:
+    record = measure(Path(args.out))
+  except MeasureError as exc:
+    print(f"measure_kernel: {exc}", file=sys.stderr)
+    raise SystemExit(1) from exc
+  print(_json(record))
+
+
+if __name__ == "__main__":
+  main()
