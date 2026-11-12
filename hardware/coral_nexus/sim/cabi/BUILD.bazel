@@ -1,0 +1,12 @@
+# C025 / W1-03: eight-entry CN C ABI + unit-only stub.
+#
+# bazel entry for the sealed build path (C040 links the real Tile top here). The C025 unit
+# evidence is produced by hardware/coral_nexus/sim/cabi/build_cn_abi_stub.sh inside
+# coral-nexus-builder:c002 (Verilator 5.052 + g++), cached under out/coral_nexus/cache/cn_abi_stub/.
+load("@coralnpu_host_cpus//:defs.bzl", "MAKE_JOBS")
+load("@rules_verilator//:defs.bzl", "verilator_cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["cn_abi.h", "cn_abi.cc"])
+exports_files(["//sim/unit:cn_protocol_stub.sv"])

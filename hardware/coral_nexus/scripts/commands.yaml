@@ -89,3 +89,10 @@ commands:
         tests:
           - hardware/coral_nexus/verification/contracts/test_w7_c016.py
           - hardware/coral_nexus/verification/oracle/test_oracle_c021.py
+      w1:
+        tests:
+          - pipeline_validator/tests/test_w1_port.py
+          - pipeline_validator/tests/test_w1_services.py
+          - pipeline_validator/tests/test_w1_memory_service.py
+          - pipeline_validator/tests/test_cn_abi_phase.py
+          - pipeline_validator/tests/test_cn_abi_crash.py
