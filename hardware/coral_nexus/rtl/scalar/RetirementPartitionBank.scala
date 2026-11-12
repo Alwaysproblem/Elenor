@@ -28,9 +28,7 @@ import chisel3.util._
   *   - Head stall in Context A never blocks retirement in Context B (`RET-03` / `T-09`).
   *   - Trap flush (`trapRetired`) clears ONLY the faulting Context partition (`RET-06`).
   */
-class RetirementPartitionBank(p: Parameters, mini: Boolean = false) extends Module {
-  val robSlotWidth = math.max(1, log2Ceil(p.retirementBufferSize))
-  val io           = IO(new Bundle {
+class RetirementPartitionBankIO(p: Parameters) extends Bundle {
     val activeCtx     = Input(UInt(p.ctxBits.W))
     val perCtxGen     = Input(Vec(p.contextCount, UInt(p.ctxGenerationBits.W)))
     val perCtxReset   = Input(Vec(p.contextCount, Bool()))
@@ -63,7 +61,7 @@ class RetirementPartitionBank(p: Parameters, mini: Boolean = false) extends Modu
     val perCtxRetiredDelta =
       Output(Vec(p.contextCount, Vec(p.retirementLanes, new RetiredFlagsDeltaIO(p))))
     // Selected-Context projections for DispatchV2 compatibility.
-    val enqPtr      = Output(UInt(robSlotWidth.W))
+    val enqPtr      = Output(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W))
     val enqSlotGen  = Output(Vec(p.instructionLanes, UInt(p.slotGenerationBits.W)))
     val nSpace      = Output(UInt(log2Ceil(p.retirementBufferSize + 1).W))
     val nRetired    = Output(UInt(log2Ceil(p.retirementLanes + 1).W))
@@ -84,7 +82,11 @@ class RetirementPartitionBank(p: Parameters, mini: Boolean = false) extends Modu
     val perCtxDebug = Option.when(p.shouldExposeDebugPorts)(
       Output(Vec(p.contextCount, new RetirementBufferDebugIO(p)))
     )
-  })
+}
+
+class RetirementPartitionBank(p: Parameters, mini: Boolean = false) extends Module {
+  val robSlotWidth = math.max(1, log2Ceil(p.retirementBufferSize))
+  val io           = IO(new RetirementPartitionBankIO(p))
 
   val effActiveCtx = if (p.contextCount == 1) 0.U(1.W) else io.activeCtx
 

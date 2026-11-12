@@ -1,5 +1,5 @@
 diff --git a/hdl/chisel/src/coralnpu/BUILD b/hdl/chisel/src/coralnpu/BUILD
-index cfd5114..6c52d80 100644
+index cfd5114..27afa55 100644
 --- a/hdl/chisel/src/coralnpu/BUILD
 +++ b/hdl/chisel/src/coralnpu/BUILD
 @@ -477,6 +477,7 @@ chisel_library(
@@ -10,7 +10,7 @@ index cfd5114..6c52d80 100644
          "scalar/Bru.scala",
          "scalar/Csr.scala",
          "scalar/CtxCsr.scala",
-@@ -1000,3 +1001,15 @@ chisel_test(
+@@ -1000,3 +1001,29 @@ chisel_test(
          "//hdl/chisel/src/common:testing",
      ],
  )
@@ -24,6 +24,20 @@ index cfd5114..6c52d80 100644
 +    deps = [
 +        ":coralnpu_base",
 +        ":coralnpu_scalar",
++    ],
++)
++
++chisel_test(
++    name = "w2_04_ordered_flags_spec",
++    size = "large",
++    srcs = [
++        "verification/w2/W2_04_ordered_flags_spec.scala",
++    ],
++    deps = [
++        ":coralnpu_base",
++        ":coralnpu_float",
++        ":coralnpu_scalar",
++        ":retirement_buffer",
 +    ],
 +)
 diff --git a/hdl/chisel/src/coralnpu/RetirementBuffer.scala b/hdl/chisel/src/coralnpu/RetirementBuffer.scala
@@ -113,7 +127,7 @@ index 5c9bc53..5d2b058 100644
      trapRetired,
      VecInit(Seq.fill(bufferSize)(MakeInvalid(new InstructionUpdate))),
 diff --git a/hdl/chisel/src/coralnpu/scalar/Csr.scala b/hdl/chisel/src/coralnpu/scalar/Csr.scala
-index f4764bb..5e7bafb 100644
+index f4764bb..5c6a359 100644
 --- a/hdl/chisel/src/coralnpu/scalar/Csr.scala
 +++ b/hdl/chisel/src/coralnpu/scalar/Csr.scala
 @@ -259,7 +259,13 @@ class Csr(p: Parameters) extends Module {
@@ -130,7 +144,7 @@ index f4764bb..5e7bafb 100644
      val obsFflags            = Output(UInt(5.W))
      val obsFrm               = Output(UInt(3.W))
      val obsMscratch          = Output(UInt(p.xlen.W))
-@@ -640,7 +646,25 @@ class Csr(p: Parameters) extends Module {
+@@ -640,15 +646,29 @@ class Csr(p: Parameters) extends Module {
      io.mstatus_ms.get := ms_post_write
    }
 
@@ -141,22 +155,33 @@ index f4764bb..5e7bafb 100644
 +    Mux(io.retiredFflagsValid, fflags | io.retiredFflagsBits, fflags),
 +  ))
 +  when(io.retiredFrmCommit.valid) { frm := io.retiredFrmCommit.bits }
-+  // W2-04: park software fflags/fcsr writes; drive the export port (wdata known here).
-+  val csrIsFflags = req.valid && (fflagsEn || fcsrEn)
-+  val csrIsFrm    = req.valid && (frmEn || fcsrEn)
-+  io.csrParkOut.valid := req.valid && (csrIsFflags || csrIsFrm)
++  // W2-04 ordered flags: software fflags/fcsr/frm writes NEVER touch the architectural
++  // state at the execute beat. They park at the owning ROB slot (via csrParkOut) and
++  // commit only when that slot retires. A write REPLACES the accumulator (wdata already
++  // folds the op semantics: CSRRW/CSRRS/CSRRC merged against the pre-op rdata).
++  val csrIsFflags = req.valid && is_csr_write && (fflagsEn || fcsrEn)
++  val csrIsFrm    = req.valid && is_csr_write && (frmEn || fcsrEn)
++  io.csrParkOut.valid := csrIsFflags || csrIsFrm
 +  io.csrParkOut.bits.valid := true.B
 +  io.csrParkOut.bits.owner := io.reqOwner
-+  io.csrParkOut.bits.replaceFflags := false.B
++  io.csrParkOut.bits.replaceFflags := csrIsFflags
 +  io.csrParkOut.bits.fflags := Mux(csrIsFflags, wdata(4, 0), 0.U)
 +  io.csrParkOut.bits.replaceVxsat := false.B
 +  io.csrParkOut.bits.vxsat := false.B
 +  io.csrParkOut.bits.commitsFrm := csrIsFrm
 +  io.csrParkOut.bits.frmValue := Mux(fcsrEn, localWdata(Cat(frm, fflags))(7, 5), localWdata(frm)(2, 0))
-+  when(csrIsFflags) { fflags_base := fflags }  // suppress direct architectural write
    when(req.valid) {
-     when(fflagsEn) { fflags_base := wdata(4, 0) }
-     when(frmEn) { frm := localWdata(frm)(2, 0) }
+-    when(fflagsEn) { fflags_base := wdata(4, 0) }
+-    when(frmEn) { frm := localWdata(frm)(2, 0) }
+-    when(fcsrEn) {
+-      val fcsr_w = localWdata(Cat(frm, fflags))
+-      fflags_base := fcsr_w(4, 0)
+-      frm         := fcsr_w(7, 5)
+-    }
++    // fflags/frm/fcsr: architectural effect happens at retirement via the parked delta.
+     when(is_csr_write && mstatusEn) {
+       mstatus_mie  := wdata(3)
+       mstatus_mpie := wdata(7)
 diff --git a/hdl/chisel/src/coralnpu/scalar/SCore.scala b/hdl/chisel/src/coralnpu/scalar/SCore.scala
 index 6c8d497..20ba07f 100644
 --- a/hdl/chisel/src/coralnpu/scalar/SCore.scala

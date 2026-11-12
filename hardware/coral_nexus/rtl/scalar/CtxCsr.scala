@@ -34,8 +34,7 @@ import coralnpu.float.CsrFloatIO
   * synchronously resets bank `b`; any request, trap update, delta, or software CSR write
   * carrying a stale `ctx_generation` is rejected and counted in `staleRejected`.
   */
-class CtxCsr(p: Parameters) extends Module {
-  val io = IO(new Bundle {
+class CtxCsrIO(p: Parameters) extends Bundle {
     val activeCtx  = Input(UInt(p.ctxBits.W))
     val advanceGen = Input(Vec(p.contextCount, Bool()))
     val perCtxGen  = Output(Vec(p.contextCount, UInt(p.ctxGenerationBits.W)))
@@ -95,8 +94,10 @@ class CtxCsr(p: Parameters) extends Module {
     val perCtxFrm      = Output(Vec(p.contextCount, UInt(3.W)))
     val perCtxMscratch = Output(Vec(p.contextCount, UInt(p.xlen.W)))
     val perCtxMepc     = Output(Vec(p.contextCount, UInt(p.programCounterBits.W)))
-    val perCtxMcause   = Output(Vec(p.contextCount, UInt(p.xlen.W)))
-  })
+    val perCtxMcause   = Output(Vec(p.contextCount, UInt(p.xlen.W)))}
+
+class CtxCsr(p: Parameters) extends Module {
+  val io = IO(new CtxCsrIO(p))
 
   val effActiveCtx = if (p.contextCount == 1) 0.U(1.W) else io.activeCtx
 
