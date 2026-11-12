@@ -1,0 +1,507 @@
+{
+  "card": "C021",
+  "fp32_bitwise_vectors": [
+    {
+      "actual_bits": "0x3f800000",
+      "actual_fflags": "0x01",
+      "bits_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "expected_bits": "0x3f800000",
+      "expected_fflags": "0x01",
+      "fflags_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "flags_delta_6b": "0x01",
+      "id": "fp32_rne_tie_even_down",
+      "match": true,
+      "op": "fadd_s",
+      "rm": 0
+    },
+    {
+      "actual_bits": "0x3f800002",
+      "actual_fflags": "0x01",
+      "bits_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "expected_bits": "0x3f800002",
+      "expected_fflags": "0x01",
+      "fflags_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "flags_delta_6b": "0x01",
+      "id": "fp32_rne_tie_even_up",
+      "match": true,
+      "op": "fadd_s",
+      "rm": 0
+    },
+    {
+      "actual_bits": "0x7f7fffff",
+      "actual_fflags": "0x05",
+      "bits_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "expected_bits": "0x7f7fffff",
+      "expected_fflags": "0x05",
+      "fflags_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "flags_delta_6b": "0x05",
+      "id": "fp32_rtz_overflow_max_norm",
+      "match": true,
+      "op": "fmul_s",
+      "rm": 1
+    },
+    {
+      "actual_bits": "0x7f800000",
+      "actual_fflags": "0x05",
+      "bits_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "expected_bits": "0x7f800000",
+      "expected_fflags": "0x05",
+      "fflags_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "flags_delta_6b": "0x05",
+      "id": "fp32_rup_overflow_pos_inf",
+      "match": true,
+      "op": "fmul_s",
+      "rm": 3
+    },
+    {
+      "actual_bits": "0x80000000",
+      "actual_fflags": "0x00",
+      "bits_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "expected_bits": "0x80000000",
+      "expected_fflags": "0x00",
+      "fflags_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "flags_delta_6b": "0x00",
+      "id": "fp32_rdn_cancel_neg_zero",
+      "match": true,
+      "op": "fadd_s",
+      "rm": 2
+    },
+    {
+      "actual_bits": "0x00400000",
+      "actual_fflags": "0x03",
+      "bits_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "expected_bits": "0x00400000",
+      "expected_fflags": "0x03",
+      "fflags_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "flags_delta_6b": "0x03",
+      "id": "fp32_subnormal_underflow_nx_uf",
+      "match": true,
+      "op": "fmul_s",
+      "rm": 1
+    },
+    {
+      "actual_bits": "0xff800000",
+      "actual_fflags": "0x08",
+      "bits_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "expected_bits": "0xff800000",
+      "expected_fflags": "0x08",
+      "fflags_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "flags_delta_6b": "0x08",
+      "id": "fp32_div_zero_dz",
+      "match": true,
+      "op": "fdiv_s",
+      "rm": 0
+    },
+    {
+      "actual_bits": "0x7fc00000",
+      "actual_fflags": "0x10",
+      "bits_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "expected_bits": "0x7fc00000",
+      "expected_fflags": "0x10",
+      "fflags_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "flags_delta_6b": "0x10",
+      "id": "fp32_snan_quiet_nv",
+      "match": true,
+      "op": "fadd_s",
+      "rm": 0
+    },
+    {
+      "actual_bits": "0x34800000",
+      "actual_fflags": "0x01",
+      "bits_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "expected_bits": "0x34800000",
+      "expected_fflags": "0x01",
+      "fflags_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "flags_delta_6b": "0x01",
+      "id": "fp32_fmadd_single_rounding",
+      "match": true,
+      "op": "fmadd_s",
+      "rm": 0
+    },
+    {
+      "actual_bits": "0x80000000",
+      "actual_fflags": "0x10",
+      "bits_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "expected_bits": "0x80000000",
+      "expected_fflags": "0x10",
+      "fflags_diff": {
+        "diff_bits": [],
+        "lsb_diff_bit": null,
+        "xor_mask": "0x0"
+      },
+      "flags_delta_6b": "0x10",
+      "id": "fp32_fcvt_w_s_neg_inf",
+      "match": true,
+      "op": "fcvt_w_s",
+      "rm": 0
+    }
+  ],
+  "g3_c047_pending_matrix": [
+    {
+      "class_id": "vme.bf16_mul_rod_jam",
+      "known_deviation": "NONE",
+      "owner": "C047",
+      "rule_refs": "MUL-01,JAM-01,OVF-MUL-01",
+      "status": "BLOCKED(\u5f52 C047)",
+      "vector_count_in_c021": 0
+    },
+    {
+      "class_id": "vme.fp32_acc_rod_max_norm",
+      "known_deviation": "KD-01",
+      "owner": "C047",
+      "rule_refs": "ACC-01,OVF-ACC-01",
+      "status": "BLOCKED(\u5f52 C047)",
+      "vector_count_in_c021": 0
+    },
+    {
+      "class_id": "vme.lane_mask_before_special",
+      "known_deviation": "KD-02",
+      "owner": "C047",
+      "rule_refs": "MSK-01,SPC-01",
+      "status": "BLOCKED(\u5f52 C047)",
+      "vector_count_in_c021": 0
+    },
+    {
+      "class_id": "vme.tk_grouping_and_cancellation",
+      "known_deviation": "NONE",
+      "owner": "C047",
+      "rule_refs": "TKG-01,CAN-01,SUB-01,FLG-01",
+      "status": "BLOCKED(\u5f52 C047)",
+      "vector_count_in_c021": 0
+    },
+    {
+      "class_id": "rvv.bf16_narrow_rne_and_widen_fma",
+      "known_deviation": "NONE",
+      "owner": "C047",
+      "rule_refs": "NAR-01,FRM-01",
+      "status": "BLOCKED(\u5f52 C047)",
+      "vector_count_in_c021": 0
+    },
+    {
+      "class_id": "vme.matrix_tile_state_ops",
+      "known_deviation": "NONE",
+      "owner": "C047",
+      "rule_refs": "vtle,vtse,vtzero,vtmv,msetmtype,msettk",
+      "status": "BLOCKED(\u5f52 C047)",
+      "vector_count_in_c021": 0
+    }
+  ],
+  "nexus_private_csr_probe": {
+    "extended_words_hex": [
+      "0x00000000",
+      "0x13572468",
+      "0x13572479",
+      "0x00000000"
+    ],
+    "raw_upstream_mcause": 2
+  },
+  "oracle_coverage": "SUFFICIENT_SCALAR_G2",
+  "scalar_elf_selftest": {
+    "nonzero_flags_delta_records": [
+      {
+        "flags_delta": 1,
+        "insn": "0x00b50653",
+        "pc": "0x00000128"
+      },
+      {
+        "flags_delta": 5,
+        "insn": "0x10b51653",
+        "pc": "0x00000154"
+      },
+      {
+        "flags_delta": 8,
+        "insn": "0x18b57653",
+        "pc": "0x00000178"
+      },
+      {
+        "flags_delta": 16,
+        "insn": "0x18b5f6d3",
+        "pc": "0x0000017c"
+      },
+      {
+        "flags_delta": 16,
+        "insn": "0xc00505d3",
+        "pc": "0x000001a4"
+      }
+    ],
+    "retire_records_verified": 126,
+    "trap_records": [
+      {
+        "insn": "0xffffffff",
+        "mcause": 2,
+        "pc": "0x000001b8"
+      }
+    ],
+    "verified_words": {
+      "rv32f.fadd_rne_bits": {
+        "actual_u32": "0x3f800000",
+        "bit_diff": {
+          "diff_bits": [],
+          "lsb_diff_bit": null,
+          "xor_mask": "0x0"
+        },
+        "expected_u32": "0x3f800000",
+        "index": 8,
+        "insn_family": "fadd.s",
+        "match": true
+      },
+      "rv32f.fadd_rne_fflags": {
+        "actual_u32": "0x00000001",
+        "bit_diff": {
+          "diff_bits": [],
+          "lsb_diff_bit": null,
+          "xor_mask": "0x0"
+        },
+        "expected_u32": "0x00000001",
+        "index": 9,
+        "insn_family": "fadd.s/csrr_fflags",
+        "match": true
+      },
+      "rv32f.fcvt_w_s_sat": {
+        "actual_u32": "0x7fffffef",
+        "bit_diff": {
+          "diff_bits": [],
+          "lsb_diff_bit": null,
+          "xor_mask": "0x0"
+        },
+        "expected_u32": "0x7fffffef",
+        "index": 13,
+        "insn_family": "fcvt.w.s",
+        "match": true
+      },
+      "rv32f.fdiv_dz_nv": {
+        "actual_u32": "0x00400018",
+        "bit_diff": {
+          "diff_bits": [],
+          "lsb_diff_bit": null,
+          "xor_mask": "0x0"
+        },
+        "expected_u32": "0x00400018",
+        "index": 12,
+        "insn_family": "fdiv.s",
+        "match": true
+      },
+      "rv32f.fmul_rtz_overflow_bits": {
+        "actual_u32": "0x7f7fffff",
+        "bit_diff": {
+          "diff_bits": [],
+          "lsb_diff_bit": null,
+          "xor_mask": "0x0"
+        },
+        "expected_u32": "0x7f7fffff",
+        "index": 10,
+        "insn_family": "fmul.s",
+        "match": true
+      },
+      "rv32f.fmul_rtz_overflow_fflags": {
+        "actual_u32": "0x00000005",
+        "bit_diff": {
+          "diff_bits": [],
+          "lsb_diff_bit": null,
+          "xor_mask": "0x0"
+        },
+        "expected_u32": "0x00000005",
+        "index": 11,
+        "insn_family": "fmul.s/csrr_fflags",
+        "match": true
+      },
+      "rv32i.alu_wrap": {
+        "actual_u32": "0x80000000",
+        "bit_diff": {
+          "diff_bits": [],
+          "lsb_diff_bit": null,
+          "xor_mask": "0x0"
+        },
+        "expected_u32": "0x80000000",
+        "index": 0,
+        "insn_family": "addi/lui",
+        "match": true
+      },
+      "rv32i.branch_jal_jalr": {
+        "actual_u32": "0x0000002f",
+        "bit_diff": {
+          "diff_bits": [],
+          "lsb_diff_bit": null,
+          "xor_mask": "0x0"
+        },
+        "expected_u32": "0x0000002f",
+        "index": 5,
+        "insn_family": "blt/bge/jal/jalr",
+        "match": true
+      },
+      "rv32i.compare_shift": {
+        "actual_u32": "0xf8000001",
+        "bit_diff": {
+          "diff_bits": [],
+          "lsb_diff_bit": null,
+          "xor_mask": "0x0"
+        },
+        "expected_u32": "0xf8000001",
+        "index": 1,
+        "insn_family": "slt/sltu/srai",
+        "match": true
+      },
+      "rv32i.load_store_ext": {
+        "actual_u32": "0x00008280",
+        "bit_diff": {
+          "diff_bits": [],
+          "lsb_diff_bit": null,
+          "xor_mask": "0x0"
+        },
+        "expected_u32": "0x00008280",
+        "index": 6,
+        "insn_family": "sw/lb/lbu/lh/lhu",
+        "match": true
+      },
+      "rv32m.div_overflow_zero": {
+        "actual_u32": "0x7fffffff",
+        "bit_diff": {
+          "diff_bits": [],
+          "lsb_diff_bit": null,
+          "xor_mask": "0x0"
+        },
+        "expected_u32": "0x7fffffff",
+        "index": 2,
+        "insn_family": "div",
+        "match": true
+      },
+      "rv32m.mulhsu_remu": {
+        "actual_u32": "0x00000004",
+        "bit_diff": {
+          "diff_bits": [],
+          "lsb_diff_bit": null,
+          "xor_mask": "0x0"
+        },
+        "expected_u32": "0x00000004",
+        "index": 3,
+        "insn_family": "mulhsu/remu",
+        "match": true
+      },
+      "trap.illegal_insn_mcause": {
+        "actual_u32": "0x00000002",
+        "bit_diff": {
+          "diff_bits": [],
+          "lsb_diff_bit": null,
+          "xor_mask": "0x0"
+        },
+        "expected_u32": "0x00000002",
+        "index": 14,
+        "insn_family": "trap/mret",
+        "match": true
+      },
+      "trap.mepc_recovery": {
+        "actual_u32": "0x0000005a",
+        "bit_diff": {
+          "diff_bits": [],
+          "lsb_diff_bit": null,
+          "xor_mask": "0x0"
+        },
+        "expected_u32": "0x0000005a",
+        "index": 15,
+        "insn_family": "trap/mret",
+        "match": true
+      },
+      "zbb.bitmanip": {
+        "actual_u32": "0x04030e15",
+        "bit_diff": {
+          "diff_bits": [],
+          "lsb_diff_bit": null,
+          "xor_mask": "0x0"
+        },
+        "expected_u32": "0x04030e15",
+        "index": 4,
+        "insn_family": "clz/ctz/cpop/rev8",
+        "match": true
+      },
+      "zicsr.mtvec_mvendorid": {
+        "actual_u32": "0x00000426",
+        "bit_diff": {
+          "diff_bits": [],
+          "lsb_diff_bit": null,
+          "xor_mask": "0x0"
+        },
+        "expected_u32": "0x00000426",
+        "index": 7,
+        "insn_family": "csrw/csrr",
+        "match": true
+      }
+    }
+  },
+  "schema": "cn_oracle_coverage_matrix/v1"
+}

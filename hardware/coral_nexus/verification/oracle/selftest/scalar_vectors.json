@@ -1,0 +1,215 @@
+{
+  "schema": "cn_oracle_selftest_vectors/v1",
+  "card": "C021",
+  "scalar_elf": {
+    "source": "hardware/coral_nexus/verification/oracle/selftest/scalar_core_selftest.S",
+    "linker": "hardware/coral_nexus/verification/oracle/selftest/scalar_selftest.ld",
+    "output_base": "0x00010100",
+    "output_words_u32": [
+      {
+        "index": 0,
+        "class_id": "rv32i.alu_wrap",
+        "insn_family": "addi/lui",
+        "expected_u32": "0x80000000",
+        "derivation": "0x7fffffff + 1 wraps to 0x80000000 in two's-complement 32-bit"
+      },
+      {
+        "index": 1,
+        "class_id": "rv32i.compare_shift",
+        "insn_family": "slt/sltu/srai",
+        "expected_u32": "0xf8000001",
+        "derivation": "(0x80000000 >>> 4)=0xf8000000 | slt(-2^31, 2^31-1)=1 + sltu=0"
+      },
+      {
+        "index": 2,
+        "class_id": "rv32m.div_overflow_zero",
+        "insn_family": "div",
+        "expected_u32": "0x7fffffff",
+        "derivation": "(INT32_MIN / -1 = 0x80000000) ^ (-7 / 0 = 0xffffffff) = 0x7fffffff"
+      },
+      {
+        "index": 3,
+        "class_id": "rv32m.mulhsu_remu",
+        "insn_family": "mulhsu/remu",
+        "expected_u32": "0x00000004",
+        "derivation": "(29 %u 6 = 5) + mulhsu(-2, 3) (0xffffffff) = 4"
+      },
+      {
+        "index": 4,
+        "class_id": "zbb.bitmanip",
+        "insn_family": "clz/ctz/cpop/rev8",
+        "expected_u32": "0x04030e15",
+        "derivation": "rev8(0x01020304)=0x04030201 ^ ((12<<8)|16|4 = 0x0c14) = 0x04030e15"
+      },
+      {
+        "index": 5,
+        "class_id": "rv32i.branch_jal_jalr",
+        "insn_family": "blt/bge/jal/jalr",
+        "expected_u32": "0x0000002f",
+        "derivation": "taken blt skips +99, non-taken bge calls subroutine +37 -> 10 + 37 = 47 (0x2f)"
+      },
+      {
+        "index": 6,
+        "class_id": "rv32i.load_store_ext",
+        "insn_family": "sw/lb/lbu/lh/lhu",
+        "expected_u32": "0x00008280",
+        "derivation": "((0xffffff81 ^ 0x81) ^ 0xfffffe81) + 0x80ff = 0x181 + 0x80ff = 0x00008280"
+      },
+      {
+        "index": 7,
+        "class_id": "zicsr.mtvec_mvendorid",
+        "insn_family": "csrw/csrr",
+        "expected_u32": "0x00000426",
+        "derivation": "mtvec WARL clears MODE[1:0] (diff=0) + CoralNPU mvendorid 0x426"
+      },
+      {
+        "index": 8,
+        "class_id": "rv32f.fadd_rne_bits",
+        "insn_family": "fadd.s",
+        "expected_u32": "0x3f800000",
+        "derivation": "1.0f + 2^-24 ties to even -> 1.0f (0x3f800000)"
+      },
+      {
+        "index": 9,
+        "class_id": "rv32f.fadd_rne_fflags",
+        "insn_family": "fadd.s/csrr_fflags",
+        "expected_u32": "0x00000001",
+        "derivation": "inexact tie raises NX=0x01"
+      },
+      {
+        "index": 10,
+        "class_id": "rv32f.fmul_rtz_overflow_bits",
+        "insn_family": "fmul.s",
+        "expected_u32": "0x7f7fffff",
+        "derivation": "FLT_MAX * 2.0 under RTZ saturates to FLT_MAX 0x7f7fffff"
+      },
+      {
+        "index": 11,
+        "class_id": "rv32f.fmul_rtz_overflow_fflags",
+        "insn_family": "fmul.s/csrr_fflags",
+        "expected_u32": "0x00000005",
+        "derivation": "overflow raises OF(0x04)|NX(0x01) = 0x05"
+      },
+      {
+        "index": 12,
+        "class_id": "rv32f.fdiv_dz_nv",
+        "insn_family": "fdiv.s",
+        "expected_u32": "0x00400018",
+        "derivation": "(+Inf 0x7f800000 ^ qNaN 0x7fc00000) | (DZ 0x08 | NV 0x10) = 0x00400018"
+      },
+      {
+        "index": 13,
+        "class_id": "rv32f.fcvt_w_s_sat",
+        "insn_family": "fcvt.w.s",
+        "expected_u32": "0x7fffffef",
+        "derivation": "fcvt.w.s(+Inf) saturates to 0x7fffffff with NV=0x10 -> xor = 0x7fffffef"
+      },
+      {
+        "index": 14,
+        "class_id": "trap.illegal_insn_mcause",
+        "insn_family": "trap/mret",
+        "expected_u32": "0x00000002",
+        "derivation": ".4byte 0xffffffff traps to mtvec with mcause = 2 (illegal instruction)"
+      },
+      {
+        "index": 15,
+        "class_id": "trap.mepc_recovery",
+        "insn_family": "trap/mret",
+        "expected_u32": "0x0000005a",
+        "derivation": "trap handler advances mepc by 4 and mrets cleanly -> marker 0x5a"
+      }
+    ]
+  },
+  "fp32_bitwise_vectors": [
+    {
+      "id": "fp32_rne_tie_even_down",
+      "op": "fadd_s",
+      "a": "0x3f800000",
+      "b": "0x33800000",
+      "rm": 0,
+      "expected_bits": "0x3f800000",
+      "expected_fflags": 1
+    },
+    {
+      "id": "fp32_rne_tie_even_up",
+      "op": "fadd_s",
+      "a": "0x3f800001",
+      "b": "0x33800000",
+      "rm": 0,
+      "expected_bits": "0x3f800002",
+      "expected_fflags": 1
+    },
+    {
+      "id": "fp32_rtz_overflow_max_norm",
+      "op": "fmul_s",
+      "a": "0x7f7fffff",
+      "b": "0x40000000",
+      "rm": 1,
+      "expected_bits": "0x7f7fffff",
+      "expected_fflags": 5
+    },
+    {
+      "id": "fp32_rup_overflow_pos_inf",
+      "op": "fmul_s",
+      "a": "0x7f7fffff",
+      "b": "0x40000000",
+      "rm": 3,
+      "expected_bits": "0x7f800000",
+      "expected_fflags": 5
+    },
+    {
+      "id": "fp32_rdn_cancel_neg_zero",
+      "op": "fadd_s",
+      "a": "0x3f800000",
+      "b": "0xbf800000",
+      "rm": 2,
+      "expected_bits": "0x80000000",
+      "expected_fflags": 0
+    },
+    {
+      "id": "fp32_subnormal_underflow_nx_uf",
+      "op": "fmul_s",
+      "a": "0x00800000",
+      "b": "0x3f000001",
+      "rm": 1,
+      "expected_bits": "0x00400000",
+      "expected_fflags": 3
+    },
+    {
+      "id": "fp32_div_zero_dz",
+      "op": "fdiv_s",
+      "a": "0xbf800000",
+      "b": "0x00000000",
+      "rm": 0,
+      "expected_bits": "0xff800000",
+      "expected_fflags": 8
+    },
+    {
+      "id": "fp32_snan_quiet_nv",
+      "op": "fadd_s",
+      "a": "0x7f800001",
+      "b": "0x3f800000",
+      "rm": 0,
+      "expected_bits": "0x7fc00000",
+      "expected_fflags": 16
+    },
+    {
+      "id": "fp32_fmadd_single_rounding",
+      "op": "fmadd_s",
+      "a": "0x3f800001",
+      "b": "0x3f800001",
+      "c": "0xbf800000",
+      "rm": 0,
+      "expected_bits": "0x34800000",
+      "expected_fflags": 1
+    },
+    {
+      "id": "fp32_fcvt_w_s_neg_inf",
+      "op": "fcvt_w_s",
+      "a": "0xff800000",
+      "rm": 0,
+      "expected_bits": "0x80000000",
+      "expected_fflags": 16
+    }
+  ]
+}

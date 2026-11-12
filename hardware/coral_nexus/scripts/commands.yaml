@@ -85,3 +85,7 @@ commands:
       numeric-bootstrap:
         tests:
           - hardware/coral_nexus/verification/numerics/test_numeric_bootstrap.py
+      w7:
+        tests:
+          - hardware/coral_nexus/verification/contracts/test_w7_c016.py
+          - hardware/coral_nexus/verification/oracle/test_oracle_c021.py

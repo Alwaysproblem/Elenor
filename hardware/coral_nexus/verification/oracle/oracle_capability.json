@@ -1,0 +1,408 @@
+{
+  "card": "C021",
+  "classes": [
+    {
+      "category": "scalar_int",
+      "class_id": "rv32i.alu_and_shifts",
+      "evidence_bits": [
+        "0x80000000",
+        "0xf8000001"
+      ],
+      "g2_blocking": false,
+      "gate_phase": "G2",
+      "mandatory_in_g2": true,
+      "oracle_kind": "ISA_REF",
+      "status": "READY"
+    },
+    {
+      "category": "scalar_int",
+      "class_id": "rv32m.mul_div_rem",
+      "evidence_bits": [
+        "0x7fffffff",
+        "0x00000004"
+      ],
+      "g2_blocking": false,
+      "gate_phase": "G2",
+      "mandatory_in_g2": true,
+      "oracle_kind": "ISA_REF",
+      "status": "READY"
+    },
+    {
+      "category": "scalar_int",
+      "class_id": "zbb.scalar_bitmanip",
+      "evidence_bits": [
+        "0x04030e15"
+      ],
+      "g2_blocking": false,
+      "gate_phase": "G2",
+      "mandatory_in_g2": true,
+      "oracle_kind": "ISA_REF",
+      "status": "READY"
+    },
+    {
+      "category": "scalar_control",
+      "class_id": "rv32i.branch_jump",
+      "evidence_bits": [
+        "0x0000002f"
+      ],
+      "g2_blocking": false,
+      "gate_phase": "G2",
+      "mandatory_in_g2": true,
+      "oracle_kind": "ISA_REF",
+      "status": "READY"
+    },
+    {
+      "category": "scalar_memory",
+      "class_id": "rv32i.l1_load_store_ext",
+      "evidence_bits": [
+        "0x00008280"
+      ],
+      "g2_blocking": false,
+      "gate_phase": "G2",
+      "mandatory_in_g2": true,
+      "oracle_kind": "ISA_REF",
+      "status": "READY"
+    },
+    {
+      "category": "scalar_trap",
+      "class_id": "rv32i.illegal_insn_trap_mret",
+      "evidence_bits": [
+        "0x00000002",
+        "0x0000005a"
+      ],
+      "g2_blocking": false,
+      "gate_phase": "G2",
+      "mandatory_in_g2": true,
+      "oracle_kind": "ISA_REF",
+      "status": "READY"
+    },
+    {
+      "category": "scalar_fp32",
+      "class_id": "rv32f.scalar_fp32_ieee_and_flags_delta",
+      "evidence_bits": [
+        "0x3f800000",
+        "0x00000001",
+        "0x7f7fffff",
+        "0x00000005",
+        "0x00400018",
+        "0x7fffffef",
+        "0x7f800000",
+        "0x00400000",
+        "0x34800000"
+      ],
+      "g2_blocking": false,
+      "gate_phase": "G2",
+      "mandatory_in_g2": true,
+      "oracle_kind": "BOTH",
+      "status": "READY"
+    },
+    {
+      "category": "scalar_csr",
+      "class_id": "zicsr.arch_warl_and_retire_flags",
+      "evidence_bits": [
+        "0x00000426",
+        "0x00000100",
+        "0x00000426"
+      ],
+      "g2_blocking": false,
+      "gate_phase": "G2",
+      "mandatory_in_g2": true,
+      "oracle_kind": "BOTH",
+      "status": "READY"
+    },
+    {
+      "adapter": "nexus_extend.py",
+      "category": "nexus_private",
+      "class_id": "nexus.private_csrs_and_helpers",
+      "evidence_bits": [
+        "0x00000000",
+        "0x13572468",
+        "0x13572479",
+        "0x00000000"
+      ],
+      "g2_blocking": false,
+      "gate_phase": "G2",
+      "mandatory_in_g2": true,
+      "oracle_kind": "BIT_ORACLE",
+      "status": "READY_VIA_NEXUS_EXTEND",
+      "upstream_spike_oracle_kind": "NONE",
+      "upstream_trap_mcause": 2
+    },
+    {
+      "category": "bf16_vme",
+      "class_id": "vme.bf16_mul_rod_jam",
+      "evidence_bits": [],
+      "g2_blocking": false,
+      "gate_phase": "G3",
+      "known_deviation": "NONE",
+      "mandatory_in_g2": false,
+      "oracle_kind": "NONE",
+      "owner": "C047",
+      "reason": "BF16 batched multiply tree (26-bit aligned grid + jam + widening Inf) belongs to C047",
+      "status": "BLOCKED(\u5f52 C047)"
+    },
+    {
+      "category": "bf16_vme",
+      "class_id": "vme.fp32_acc_rod_max_norm",
+      "evidence_bits": [],
+      "g2_blocking": false,
+      "gate_phase": "G3",
+      "known_deviation": "KD-01",
+      "mandatory_in_g2": false,
+      "oracle_kind": "NONE",
+      "owner": "C047",
+      "reason": "Accumulate-stage ROD overflow saturates to max-normal (0x7f7fffff); raw Spike yields Inf (KD-01)",
+      "status": "BLOCKED(\u5f52 C047)"
+    },
+    {
+      "category": "bf16_vme",
+      "class_id": "vme.lane_mask_before_special",
+      "evidence_bits": [],
+      "g2_blocking": false,
+      "gate_phase": "G3",
+      "known_deviation": "KD-02",
+      "mandatory_in_g2": false,
+      "oracle_kind": "NONE",
+      "owner": "C047",
+      "reason": "Raw Spike vtfmm lacks lane-mask input; inactive lanes must mask before NaN/Inf classification",
+      "status": "BLOCKED(\u5f52 C047)"
+    },
+    {
+      "category": "bf16_vme",
+      "class_id": "vme.tk_grouping_and_cancellation",
+      "evidence_bits": [],
+      "g2_blocking": false,
+      "gate_phase": "G3",
+      "known_deviation": "NONE",
+      "mandatory_in_g2": false,
+      "oracle_kind": "NONE",
+      "owner": "C047",
+      "reason": "TK1/TK2 grouping, tree +0 cancellation, subnormal grid, and OF/NV-only exposure belong to C047",
+      "status": "BLOCKED(\u5f52 C047)"
+    },
+    {
+      "category": "bf16_rvv",
+      "class_id": "rvv.bf16_narrow_rne_and_widen_fma",
+      "evidence_bits": [],
+      "g2_blocking": false,
+      "gate_phase": "G3",
+      "known_deviation": "NONE",
+      "mandatory_in_g2": false,
+      "oracle_kind": "NONE",
+      "owner": "C047",
+      "reason": "vfncvtbf16.f.f.w RNE narrowing and vfwmaccbf16 vector bitwise oracle belong to C047",
+      "status": "BLOCKED(\u5f52 C047)"
+    },
+    {
+      "category": "bf16_vme",
+      "class_id": "vme.matrix_tile_state_ops",
+      "evidence_bits": [],
+      "g2_blocking": false,
+      "gate_phase": "G3",
+      "known_deviation": "NONE",
+      "mandatory_in_g2": false,
+      "oracle_kind": "NONE",
+      "owner": "C047",
+      "reason": "Matrix tile layout / state instructions belong to G3 C047",
+      "status": "BLOCKED(\u5f52 C047)"
+    }
+  ],
+  "pinned_sources": {
+    "known_deviations_sha256": "362d616de4b2fcfc6ac1c5addaeef21201ad78e6089cb6bc0027e8ef2c0db01f",
+    "riscv_isa_sim_commit": "93a10ae685ac85bd3d8a62054f8f180a4f76fc82",
+    "sealed_contracts": {
+      "hardware/coral_nexus/protocol/cn_protocol_v1.yaml": "ab8d448063a126d798631dae6abe9ef72fe9d4a4ab22e80a41f196265f7d207c",
+      "hardware/coral_nexus/protocol/csr_name_map.yaml": "8819944028986b1211adb073bb6c065bc5d1580a91f602abfe48151980c61b7b",
+      "hardware/coral_nexus/protocol/generated/cn_layout.json": "d43249c76ad972d0c73cfdfaa2095a3f12b44061a3f3796d628c7678d07f7fbf",
+      "hardware/coral_nexus/protocol/w3_numeric_profile_v1.yaml": "36c5aa5ee8556f48485a9a4f299eb1033e58f53167f85707837285600b2c23a0",
+      "hardware/coral_nexus/protocol/w3_vme_decl_abi_v1.json": "dacafbb4081c70c1408083894ccf6149b9a4fe51559b8903d33f33a6e09e70ff",
+      "hardware/coral_nexus/protocol/w5_package.contract.yaml": "5ab74808ef0a87ba9926d16a312bc310859b12db809ad9e691654c8a19ceee1e"
+    },
+    "spike_seed_sha256": "064f4c1f22005899fa5106b822bfdc7034ffc9babc2f5821771589047f028a66"
+  },
+  "schema": "cn_oracle_capability/v1",
+  "scope": "scalar_isa_and_csr_core",
+  "summary": {
+    "c047_blocked_classes": [
+      "vme.bf16_mul_rod_jam",
+      "vme.fp32_acc_rod_max_norm",
+      "vme.lane_mask_before_special",
+      "vme.tk_grouping_and_cancellation",
+      "rvv.bf16_narrow_rne_and_widen_fma",
+      "vme.matrix_tile_state_ops"
+    ],
+    "g2_blocking_classes": [],
+    "g2_ready": true,
+    "ready_scalar_classes": 9
+  },
+  "t_row_oracle_status": [
+    {
+      "c021_oracle_state": "SCALAR_ORACLE_READY",
+      "g2_blocking": false,
+      "gate": "G2",
+      "matrix_oracle_kind": "bit_oracle",
+      "t_id": "T-01"
+    },
+    {
+      "c021_oracle_state": "SCALAR_ORACLE_READY",
+      "g2_blocking": false,
+      "gate": "G2",
+      "matrix_oracle_kind": "observed_invariants",
+      "t_id": "T-02"
+    },
+    {
+      "c021_oracle_state": "SCALAR_ORACLE_READY",
+      "g2_blocking": false,
+      "gate": "G2",
+      "matrix_oracle_kind": "observed_invariants",
+      "t_id": "T-03"
+    },
+    {
+      "c021_oracle_state": "SCALAR_ORACLE_READY",
+      "g2_blocking": false,
+      "gate": "G2",
+      "matrix_oracle_kind": "observed_invariants",
+      "t_id": "T-04"
+    },
+    {
+      "c021_oracle_state": "SCALAR_ORACLE_READY",
+      "g2_blocking": false,
+      "gate": "G2",
+      "matrix_oracle_kind": "observed_invariants",
+      "t_id": "T-05"
+    },
+    {
+      "c021_oracle_state": "SCALAR_ORACLE_READY",
+      "g2_blocking": false,
+      "gate": "G2",
+      "matrix_oracle_kind": "observed_invariants",
+      "t_id": "T-06"
+    },
+    {
+      "c021_oracle_state": "SCALAR_ORACLE_READY",
+      "g2_blocking": false,
+      "gate": "G2",
+      "matrix_oracle_kind": "observed_invariants",
+      "t_id": "T-07"
+    },
+    {
+      "c021_oracle_state": "SCALAR_ORACLE_READY",
+      "g2_blocking": false,
+      "gate": "G2",
+      "matrix_oracle_kind": "observed_invariants",
+      "t_id": "T-08"
+    },
+    {
+      "c021_oracle_state": "SCALAR_ORACLE_READY",
+      "g2_blocking": false,
+      "gate": "G2",
+      "matrix_oracle_kind": "observed_invariants",
+      "t_id": "T-09"
+    },
+    {
+      "c021_oracle_state": "SCALAR_ORACLE_READY",
+      "g2_blocking": false,
+      "gate": "G2",
+      "matrix_oracle_kind": "observed_invariants",
+      "t_id": "T-10"
+    },
+    {
+      "c021_oracle_state": "SCALAR_ORACLE_READY",
+      "g2_blocking": false,
+      "gate": "G2",
+      "matrix_oracle_kind": "observed_invariants",
+      "t_id": "T-11"
+    },
+    {
+      "c021_oracle_state": "SCALAR_ORACLE_READY",
+      "g2_blocking": false,
+      "gate": "G2",
+      "matrix_oracle_kind": "observed_invariants",
+      "t_id": "T-12"
+    },
+    {
+      "c021_oracle_state": "SCALAR_ORACLE_READY",
+      "g2_blocking": false,
+      "gate": "G2",
+      "matrix_oracle_kind": "observed_invariants",
+      "t_id": "T-13"
+    },
+    {
+      "c021_oracle_state": "SCALAR_ADDR_READY_INDEXED_C055",
+      "g2_blocking": false,
+      "gate": "G2",
+      "matrix_oracle_kind": "bit_oracle",
+      "t_id": "T-16"
+    },
+    {
+      "c021_oracle_state": "SCALAR_ORACLE_READY",
+      "g2_blocking": false,
+      "gate": "G2",
+      "matrix_oracle_kind": "observed_invariants",
+      "t_id": "T-17"
+    },
+    {
+      "c021_oracle_state": "SCALAR_ORACLE_READY",
+      "g2_blocking": false,
+      "gate": "G2",
+      "matrix_oracle_kind": "observed_invariants",
+      "t_id": "T-23"
+    },
+    {
+      "c021_oracle_state": "BLOCKED(\u5f52 C047)",
+      "g2_blocking": false,
+      "gate": "G3",
+      "matrix_oracle_kind": "bit_oracle",
+      "t_id": "T-28"
+    },
+    {
+      "c021_oracle_state": "BLOCKED(\u5f52 C047)",
+      "g2_blocking": false,
+      "gate": "G3",
+      "matrix_oracle_kind": "bit_oracle",
+      "t_id": "T-29"
+    },
+    {
+      "c021_oracle_state": "SCALAR_ORACLE_READY",
+      "g2_blocking": false,
+      "gate": "G2",
+      "matrix_oracle_kind": "observed_invariants",
+      "t_id": "T-30"
+    },
+    {
+      "c021_oracle_state": "SCALAR_ORACLE_READY",
+      "g2_blocking": false,
+      "gate": "G2",
+      "matrix_oracle_kind": "observed_invariants",
+      "t_id": "T-33"
+    },
+    {
+      "c021_oracle_state": "BLOCKED(\u5f52 C047)",
+      "g2_blocking": false,
+      "gate": "G3",
+      "matrix_oracle_kind": "bit_oracle",
+      "t_id": "T-39"
+    },
+    {
+      "c021_oracle_state": "DEFERRED_TO_W4_04_ORACLE",
+      "g2_blocking": false,
+      "gate": "G4",
+      "matrix_oracle_kind": "bit_oracle",
+      "t_id": "T-50"
+    },
+    {
+      "c021_oracle_state": "BLOCKED(\u5f52 C047)",
+      "g2_blocking": false,
+      "gate": "G4",
+      "matrix_oracle_kind": "bit_oracle",
+      "t_id": "T-61"
+    },
+    {
+      "c021_oracle_state": "DEFERRED_TO_W4_04_ORACLE",
+      "g2_blocking": false,
+      "gate": "G4",
+      "matrix_oracle_kind": "scenario_oracle",
+      "t_id": "T-65"
+    }
+  ]
+}
