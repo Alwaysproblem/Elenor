@@ -1,0 +1,331 @@
+{
+  "card": "C022",
+  "note": "Pure-Python Tile baseline across timing_only and full_memory runners; proves zero behavioral drift across the C022 TilePort seam (not numeric/RTL proof).",
+  "scenarios": {
+    "l2-admission-wait": {
+      "checks": [
+        {
+          "actual": true,
+          "check": "task_completed",
+          "expected": true,
+          "pass": true
+        },
+        {
+          "actual": true,
+          "check": "credit_invariant",
+          "expected": true,
+          "pass": true
+        },
+        {
+          "actual": {
+            "l1": {
+              "0": {
+                "arena_reserved_bytes": 0,
+                "inflight_count": 0,
+                "live_arenas": 0,
+                "live_views": 0,
+                "pending_release": 0,
+                "pin_count": 0
+              },
+              "1": {
+                "arena_reserved_bytes": 0,
+                "inflight_count": 0,
+                "live_arenas": 0,
+                "live_views": 0,
+                "pending_release": 0,
+                "pin_count": 0
+              },
+              "2": {
+                "arena_reserved_bytes": 0,
+                "inflight_count": 0,
+                "live_arenas": 0,
+                "live_views": 0,
+                "pending_release": 0,
+                "pin_count": 0
+              },
+              "3": {
+                "arena_reserved_bytes": 0,
+                "inflight_count": 0,
+                "live_arenas": 0,
+                "live_views": 0,
+                "pending_release": 0,
+                "pin_count": 0
+              }
+            },
+            "l2": {
+              "active_shared_references": 0,
+              "arena_reserved_bytes": 0,
+              "inflight_count": 0,
+              "live_arenas": 0,
+              "live_backings": 0,
+              "live_views": 0,
+              "pending_release": 0,
+              "pending_shared_claims": 0,
+              "physical_live_backing_bytes": 0,
+              "pin_count": 0
+            }
+          },
+          "check": "arena_zero_leak",
+          "expected": true,
+          "pass": true
+        }
+      ],
+      "completed": true,
+      "context_count": null,
+      "credit_invariant_ok": true,
+      "cycles": 21686,
+      "device_context_count": null,
+      "fidelity": null,
+      "pmu": {},
+      "tiles": [],
+      "trace": {
+        "event_count": 3395,
+        "partial_order_sha256": "3fca9f83a6a0b0470d131515f20915ddd4e16b36a56188f36bfc8f58e8f830e5"
+      }
+    },
+    "profile-reconfiguration": {
+      "checks": [
+        {
+          "actual": true,
+          "check": "task_completed",
+          "expected": true,
+          "pass": true
+        },
+        {
+          "actual": true,
+          "check": "credit_invariant",
+          "expected": true,
+          "pass": true
+        },
+        {
+          "actual": {
+            "l1": {
+              "0": {
+                "arena_reserved_bytes": 0,
+                "inflight_count": 0,
+                "live_arenas": 0,
+                "live_views": 0,
+                "pending_release": 0,
+                "pin_count": 0
+              },
+              "1": {
+                "arena_reserved_bytes": 0,
+                "inflight_count": 0,
+                "live_arenas": 0,
+                "live_views": 0,
+                "pending_release": 0,
+                "pin_count": 0
+              },
+              "2": {
+                "arena_reserved_bytes": 0,
+                "inflight_count": 0,
+                "live_arenas": 0,
+                "live_views": 0,
+                "pending_release": 0,
+                "pin_count": 0
+              },
+              "3": {
+                "arena_reserved_bytes": 0,
+                "inflight_count": 0,
+                "live_arenas": 0,
+                "live_views": 0,
+                "pending_release": 0,
+                "pin_count": 0
+              }
+            },
+            "l2": {
+              "active_shared_references": 0,
+              "arena_reserved_bytes": 0,
+              "inflight_count": 0,
+              "live_arenas": 0,
+              "live_backings": 0,
+              "live_views": 0,
+              "pending_release": 0,
+              "pending_shared_claims": 0,
+              "physical_live_backing_bytes": 0,
+              "pin_count": 0
+            }
+          },
+          "check": "arena_zero_leak",
+          "expected": true,
+          "pass": true
+        }
+      ],
+      "completed": true,
+      "context_count": null,
+      "credit_invariant_ok": true,
+      "cycles": 403,
+      "device_context_count": null,
+      "fidelity": null,
+      "pmu": {},
+      "tiles": [],
+      "trace": {
+        "event_count": 148,
+        "partial_order_sha256": "4bbd34033917635c0c71a985af30b15753ca66eba1c8ea49cd8b51c5151dd557"
+      }
+    },
+    "transformer-prefill-attention": {
+      "checks": [
+        {
+          "actual": true,
+          "check": "task_completed",
+          "expected": true,
+          "pass": true
+        },
+        {
+          "actual": true,
+          "check": "credit_invariant",
+          "expected": true,
+          "pass": true
+        },
+        {
+          "actual": {
+            "l1": {
+              "0": {
+                "arena_reserved_bytes": 0,
+                "inflight_count": 0,
+                "live_arenas": 0,
+                "live_views": 0,
+                "pending_release": 0,
+                "pin_count": 0
+              },
+              "1": {
+                "arena_reserved_bytes": 0,
+                "inflight_count": 0,
+                "live_arenas": 0,
+                "live_views": 0,
+                "pending_release": 0,
+                "pin_count": 0
+              },
+              "2": {
+                "arena_reserved_bytes": 0,
+                "inflight_count": 0,
+                "live_arenas": 0,
+                "live_views": 0,
+                "pending_release": 0,
+                "pin_count": 0
+              },
+              "3": {
+                "arena_reserved_bytes": 0,
+                "inflight_count": 0,
+                "live_arenas": 0,
+                "live_views": 0,
+                "pending_release": 0,
+                "pin_count": 0
+              }
+            },
+            "l2": {
+              "active_shared_references": 0,
+              "arena_reserved_bytes": 0,
+              "inflight_count": 0,
+              "live_arenas": 0,
+              "live_backings": 0,
+              "live_views": 0,
+              "pending_release": 0,
+              "pending_shared_claims": 0,
+              "physical_live_backing_bytes": 0,
+              "pin_count": 0
+            }
+          },
+          "check": "arena_zero_leak",
+          "expected": true,
+          "pass": true
+        }
+      ],
+      "completed": true,
+      "context_count": null,
+      "credit_invariant_ok": true,
+      "cycles": 314565,
+      "device_context_count": null,
+      "fidelity": null,
+      "pmu": {},
+      "tiles": [],
+      "trace": {
+        "event_count": 7979,
+        "partial_order_sha256": "9803d7151351870fe3767668d307b757a48e56489f03ae05ca7ccefd54dd3867"
+      }
+    },
+    "transformer-prefill-attention-baseline": {
+      "checks": [
+        {
+          "actual": true,
+          "check": "task_completed",
+          "expected": true,
+          "pass": true
+        },
+        {
+          "actual": true,
+          "check": "credit_invariant",
+          "expected": true,
+          "pass": true
+        },
+        {
+          "actual": {
+            "l1": {
+              "0": {
+                "arena_reserved_bytes": 0,
+                "inflight_count": 0,
+                "live_arenas": 0,
+                "live_views": 0,
+                "pending_release": 0,
+                "pin_count": 0
+              },
+              "1": {
+                "arena_reserved_bytes": 0,
+                "inflight_count": 0,
+                "live_arenas": 0,
+                "live_views": 0,
+                "pending_release": 0,
+                "pin_count": 0
+              },
+              "2": {
+                "arena_reserved_bytes": 0,
+                "inflight_count": 0,
+                "live_arenas": 0,
+                "live_views": 0,
+                "pending_release": 0,
+                "pin_count": 0
+              },
+              "3": {
+                "arena_reserved_bytes": 0,
+                "inflight_count": 0,
+                "live_arenas": 0,
+                "live_views": 0,
+                "pending_release": 0,
+                "pin_count": 0
+              }
+            },
+            "l2": {
+              "active_shared_references": 0,
+              "arena_reserved_bytes": 0,
+              "inflight_count": 0,
+              "live_arenas": 0,
+              "live_backings": 0,
+              "live_views": 0,
+              "pending_release": 0,
+              "pending_shared_claims": 0,
+              "physical_live_backing_bytes": 0,
+              "pin_count": 0
+            }
+          },
+          "check": "arena_zero_leak",
+          "expected": true,
+          "pass": true
+        }
+      ],
+      "completed": true,
+      "context_count": null,
+      "credit_invariant_ok": true,
+      "cycles": 386656,
+      "device_context_count": null,
+      "fidelity": null,
+      "pmu": {},
+      "tiles": [],
+      "trace": {
+        "event_count": 8142,
+        "partial_order_sha256": "5993096f3c7aaf70322be8a9e15e9d6a66381a11fddc9c02568f30f7369e6ca9"
+      }
+    }
+  },
+  "schema": "cn_python_tileport_baseline/v1"
+}

@@ -494,6 +494,9 @@ class SimConfig:
   fidelity: str = "full_memory"  # "timing_only" | "runtime" | "full_memory"
   context_count: int = 1
   device_context_count: int = 1
+  # C022 TilePort seam: "python" keeps the ComputeTile path byte-identical; "rtl" arrives with
+  # C025 (stub driver) / C040 (real oneTile top) and is refused here until then.
+  backend_kind: str = "python"
   device: DeviceConfig = field(default_factory=DeviceConfig)
   group: GroupSchedulerConfig = field(default_factory=GroupSchedulerConfig)
 
@@ -506,6 +509,8 @@ class SimConfig:
       raise ValueError("context_count must be between 1 and 8")
     if self.device_context_count < 1 or self.device_context_count > MAX_CONTEXT_COUNT:
       raise ValueError("device_context_count must be between 1 and 8")
+    if self.backend_kind != "python":
+      raise ValueError('backend_kind must be "python" until the RTL Tile backend lands (C025/C040)')
 
   def with_overrides(self, **kw) -> SimConfig:
     for scope in ("device", "group"):

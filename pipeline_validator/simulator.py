@@ -62,6 +62,7 @@ class Simulator:
       memory_trace=sim.memory_trace,
       scheduler_config=sim.group,
       byte_store=byte_store,
+      backend_kind=sim.backend_kind,
     )
     self.cycle = 0
     self._trace: list = []

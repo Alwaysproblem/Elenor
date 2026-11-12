@@ -204,7 +204,14 @@ class TileGroup:
     memory_trace: bool = False,
     scheduler_config: GroupSchedulerConfig | None = None,
     byte_store=None,
+    backend_kind: str = "python",
   ):
+    if backend_kind != "python":
+      # C022 introduces the seam only; the RTL Tile endpoint arrives with C025 (stub driver) and
+      # C040 (real oneTile top). Refusing here prevents an empty/partial backend from ever
+      # executing as if it were a Tile.
+      raise NotImplementedError('backend_kind="rtl" lands with C025/C040; only "python" exists')
+    self.backend_kind = backend_kind
     self.cfg = cfg
     self.tracer = tracer
     self.scheduler_config = scheduler_config or GroupSchedulerConfig()
@@ -1667,6 +1674,26 @@ class TileGroup:
         )
 
   def _step_tiles(self, cycle: int, *, freeze_new_work: bool) -> None:
+    """P4 dispatcher: advance every Tile exactly once this Tick.
+
+    Split per C022: `_step_python_tiles` keeps the pure-Python path byte-identical;
+    `_service_rtl_inbound` consumes tile->Group messages for RTL Tiles (none exist until
+    C025/C040, so it is provably empty today and asserts that invariant).
+    """
+    self._step_python_tiles(cycle, freeze_new_work=freeze_new_work)
+    self._service_rtl_inbound(cycle)
+
+  def _service_rtl_inbound(self, cycle: int) -> None:
+    """Consume MEMORY/CTRL/EVENT/PROGRAM/STREAM messages from RTL Tiles (C025/C040).
+
+    With only Python Tiles constructed, there is by construction nothing to service; the
+    assertion keeps a silently-skipped RTL port from masquerading as serviced.
+    """
+    _ = cycle
+    if getattr(self, "rtl_ports", None):
+      raise MemoryInvariantError("RTL Tile inbound servicing arrives with C025/C040")
+
+  def _step_python_tiles(self, cycle: int, *, freeze_new_work: bool) -> None:
     for tile in self.tiles:
       tile.step(cycle, freeze_new_work=freeze_new_work)
       for terminal in tile.drain_context_terminals():
