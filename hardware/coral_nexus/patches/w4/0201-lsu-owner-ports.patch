@@ -1,0 +1,137 @@
+diff --git a/hdl/chisel/src/coralnpu/scalar/Lsu.scala b/hdl/chisel/src/coralnpu/scalar/Lsu.scala
+index de87294..148e86b 100644
+--- a/hdl/chisel/src/coralnpu/scalar/Lsu.scala
++++ b/hdl/chisel/src/coralnpu/scalar/Lsu.scala
+@@ -23,12 +23,15 @@ class Lsu(p: Parameters) extends Module {
+   val io = IO(new Bundle {
+     // Decode cycle.
+     val req         = Vec(p.instructionLanes, Flipped(Decoupled(new LsuCmd(p))))
++    val reqOwner    = Input(Vec(p.instructionLanes, new OwnerTag(p)))
+     val busPort     = Flipped(new RegfileBusPortIO(p))
+     val busPort_flt = Option.when(p.enableFloat)(Flipped(new RegfileBusPortIO(p)))
+
+     // Execute cycle(s).
+-    val rd     = Valid(Flipped(new RegfileWriteDataIO(p)))
+-    val rd_flt = Valid(Flipped(new FloatRegfileWriteDataIO(p)))
++    val rd         = Valid(Flipped(new RegfileWriteDataIO(p)))
++    val rdOwner    = Output(new OwnerTag(p))
++    val rd_flt     = Valid(Flipped(new FloatRegfileWriteDataIO(p)))
++    val rdFltOwner = Output(new OwnerTag(p))
+
+     // Cached interface.
+     val ibus  = new IBusIO(p)
+@@ -52,7 +55,7 @@ class Lsu(p: Parameters) extends Module {
+
+     val queueCapacity = Output(UInt(3.W))
+     val active        = Output(Bool())
+-    val storeComplete = Output(Valid(UInt(p.programCounterBits.W)))
++    val storeComplete = Output(Valid(new OwnerTag(p)))
+     val pipelineFlush = Input(Bool())
+   })
+ }
+@@ -173,6 +176,7 @@ class LsuUOp(p: Parameters) extends Bundle {
+   val rd    = UInt(log2Ceil(p.scalarRegCount).W)
+   val op    = LsuOp()
+   val pc    = UInt(p.programCounterBits.W)
++  val owner = new OwnerTag(p)
+   val addr  = UInt(p.lsuAddrBits.W)
+   val data  = UInt(p.xlen.W) // Doubles as rs2
+   // This aligns with "width" in the spec. It controls index width in
+@@ -214,6 +218,7 @@ object LsuUOp {
+     p: Parameters,
+     i: Int,
+     cmd: LsuCmd,
++    owner: OwnerTag,
+     sbus: RegfileBusPortIO,
+     fbus: Option[RegfileBusPortIO],
+     rvvState: Option[Valid[RvvConfigState]]
+@@ -223,6 +228,7 @@ object LsuUOp {
+     result.rd    := cmd.addr
+     result.op    := cmd.op
+     result.pc    := cmd.pc
++    result.owner := owner
+     if (fbus.isDefined) {
+       result.addr := sbus.addr(i)
+       result.data := Mux(cmd.op.isOneOf(LsuOp.FLOAT, LsuOp.FLOAT_H), fbus.get.data(i), sbus.data(i))
+@@ -751,6 +757,7 @@ class LsuSuperSlot(p: Parameters) extends Module {
+     }
+
+     val pc      = UInt(p.programCounterBits.W)
++    val owner   = new OwnerTag(p)
+     val write   = Bool()
+     val faulted = Bool()
+     // TODO: move into vector
+@@ -1570,6 +1577,7 @@ class LsuSuperSlot(p: Parameters) extends Module {
+         new State(),
+         _               -> this,
+         _.pc            -> uop.pc,
++        _.owner         -> uop.owner,
+         _.write         -> uop.store,
+         _.faulted       -> false.B,
+         _.strictMode    -> (isOrderedIndexed || uop.strict.getOrElse(false.B)),
+@@ -1753,6 +1761,7 @@ class LsuSuperSlot(p: Parameters) extends Module {
+       val ret = MakeWireBundle[State](
+         new State,
+         _.pc                  -> 0.U,
++        _.owner               -> OwnerTag.zero(p),
+         _.write               -> false.B,
+         _.faulted             -> false.B,
+         _.strictMode          -> false.B,
+@@ -1806,6 +1815,7 @@ class LsuSuperSlot(p: Parameters) extends Module {
+     val vmeData         = Option.when(p.enableVme)(Flipped(Decoupled(new Vme2Lsu(p))))
+     val vmeWriteback    = Option.when(p.enableVme)(Decoupled(new Lsu2Vme(p)))
+     val pc              = UInt(p.programCounterBits.W)
++    val owner           = Output(new OwnerTag(p))
+     val active          = Bool()
+     val storeComplete   = Bool()
+     val fault           = Output(Valid(new LsuFaultInfo(p)))
+@@ -1973,7 +1983,8 @@ class LsuSuperSlot(p: Parameters) extends Module {
+   } && stateFromAction.cells.forall { x =>
+     x.state === LsuCellState.DONE
+   }
+-  io.pc := state.pc
++  io.pc    := state.pc
++  io.owner := state.owner
+
+   io.vectorData.map { x =>
+     x.ready := state.cells.map(_.state === LsuCellState.W_DATA).reduce(_ || _) &&
+@@ -2023,7 +2034,7 @@ class LsuSuperSlot(p: Parameters) extends Module {
+     MakeValid(isVector && isNewFault, vstart(log2Ceil(p.rvvVlen) - 1, 0))
+   }
+
+-  io.fault := LsuFaultInfo(p)(rawFault, vstartVal)
++  io.fault := LsuFaultInfo(p)(rawFault, vstartVal, Some(state.owner))
+ }
+
+ class LsuV3(p: Parameters) extends Lsu(p) {
+@@ -2043,7 +2054,7 @@ class LsuV3(p: Parameters) extends Lsu(p) {
+
+   // Prepare and align instructions for the queue.
+   val ops = (0 until p.instructionLanes).map { i =>
+-    val uop        = LsuUOp(p, i, io.req(i).bits, io.busPort, io.busPort_flt, io.rvvState)
++    val uop        = LsuUOp(p, i, io.req(i).bits, io.reqOwner(i), io.busPort, io.busPort_flt, io.rvvState)
+     val isTileNoop = if (p.enableVme) {
+       LsuOp.isTile(io.req(i).bits.op) && (uop.vstart.get >= uop.vl.get)
+     } else {
+@@ -2189,8 +2200,10 @@ class LsuV3(p: Parameters) extends Lsu(p) {
+     )
+   )
+
+-  io.rd     := slot.io.intWriteback
+-  io.rd_flt := slot.io.floatWriteback.getOrElse(MakeInvalid(new FloatRegfileWriteDataIO(p)))
++  io.rd         := slot.io.intWriteback
++  io.rdOwner    := slot.io.owner
++  io.rd_flt     := slot.io.floatWriteback.getOrElse(MakeInvalid(new FloatRegfileWriteDataIO(p)))
++  io.rdFltOwner := slot.io.owner
+   if (p.enableRvv) {
+     io.lsu2rvv.get(0) <> slot.io.vectorWriteback.get
+     io.lsu2rvv.get(1).valid := false.B
+@@ -2202,7 +2215,7 @@ class LsuV3(p: Parameters) extends Lsu(p) {
+
+   // status reporting
+   io.active := rs.io.nEnqueued > 0.U || !slotsIdle || flushCmd.valid || isFaulted || isFlushing
+-  io.storeComplete := MakeValid(slot.io.storeComplete, slot.io.pc)
++  io.storeComplete := MakeValid(slot.io.storeComplete, slot.io.owner)
+
+   io.flush.valid  := flushCmd.valid
+   io.flush.pcNext := flushCmd.bits.pcNext

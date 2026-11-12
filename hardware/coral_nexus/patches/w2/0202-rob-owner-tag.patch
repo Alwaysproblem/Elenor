@@ -1,0 +1,367 @@
+diff --git a/hdl/chisel/src/coralnpu/RetirementBuffer.scala b/hdl/chisel/src/coralnpu/RetirementBuffer.scala
+index f4a6c0d..5c9bc53 100644
+--- a/hdl/chisel/src/coralnpu/RetirementBuffer.scala
++++ b/hdl/chisel/src/coralnpu/RetirementBuffer.scala
+@@ -20,37 +20,42 @@ import common._
+ import coralnpu.rvv.RvvCompressedInstruction
+
+ class RetirementBufferIO(p: Parameters) extends Bundle {
++  val ctxGeneration   = Input(UInt(p.ctxGenerationBits.W))
++  val dispatchOpSeq   = Input(Vec(p.instructionLanes, UInt(p.ownerOpSeqBits.W)))
+   val inst            = Input(Vec(p.instructionLanes, Decoupled(new FetchInstruction(p))))
+   val targets         = Input(Vec(p.instructionLanes, UInt(p.programCounterBits.W)))
+   val jalrTargets     = Input(Vec(p.instructionLanes, UInt(p.programCounterBits.W)))
+   val jump            = Input(Vec(p.instructionLanes, Bool()))
+   val branch          = Input(Vec(p.instructionLanes, Bool()))
+-  val storeComplete   = Input(Valid(UInt(p.programCounterBits.W)))
++  val storeComplete   = Input(Valid(new OwnerTag(p)))
+   val writeAddrScalar = Input(Vec(p.instructionLanes, new RegfileWriteAddrIO(p)))
+-  val writeDataScalar = Input(Vec(p.instructionLanes + 2, Valid(new RegfileWriteDataIO(p))))
++  val writeDataScalar = Input(Vec(p.instructionLanes + 2, Valid(new OwnedRegfileWriteDataIO(p))))
+   val writeAddrFloat  = Option.when(p.enableFloat)(Input(new RegfileWriteAddrIO(p)))
+-  val writeDataFloat  = Option.when(p.enableFloat)(Input(Vec(2, Valid(new RegfileWriteDataIO(p)))))
++  val writeDataFloat  = Option.when(p.enableFloat)(Input(Vec(2, Valid(new OwnedRegfileWriteDataIO(p)))))
+   val writeAddrVector =
+     Option.when(p.enableRvv)(Input(Vec(p.instructionLanes, new RegfileWriteAddrIO(p))))
+   val writeDataVector =
+     Option.when(p.enableRvv)(
+-      Input(Vec(p.rvvRetireLanes, Valid(new VectorWriteDataIO(p))))
++      Input(Vec(p.rvvRetireLanes, Valid(new OwnedVectorWriteDataIO(p))))
+     )
+-  val enqPtr        = Output(UInt(log2Ceil(p.retirementBufferSize).W))
+-  val fault         = Input(Valid(new FaultManagerOutput(p)))
+-  val nSpace        = Output(UInt(log2Ceil(p.retirementBufferSize + 1).W))
+-  val nRetired      = Output(UInt(log2Ceil(p.retirementLanes + 1).W))
+-  val empty         = Output(Bool())
+-  val trapPending   = Output(Bool())
+-  val trapRetired   = Output(Bool())
+-  val isVector      = Option.when(p.enableRvv)(Input(Vec(p.instructionLanes, Bool())))
+-  val isTile        = Option.when(p.enableVme)(Input(Vec(p.instructionLanes, Bool())))
+-  val clearVstart   = Option.when(p.enableRvv)(Output(Bool()))
++  val enqPtr                  = Output(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W))
++  val enqSlotGen              = Output(Vec(p.instructionLanes, UInt(p.slotGenerationBits.W)))
++  val fault                   = Input(Valid(new FaultManagerOutput(p)))
++  val nSpace                  = Output(UInt(log2Ceil(p.retirementBufferSize + 1).W))
++  val nRetired                = Output(UInt(log2Ceil(p.retirementLanes + 1).W))
++  val deqReadyOut             = Output(UInt(log2Ceil(p.retirementLanes + 1).W))
++  val empty                   = Output(Bool())
++  val trapPending             = Output(Bool())
++  val trapRetired             = Output(Bool())
++  val staleCompletionRejected = Output(UInt(16.W))
++  val isVector                = Option.when(p.enableRvv)(Input(Vec(p.instructionLanes, Bool())))
++  val isTile                  = Option.when(p.enableVme)(Input(Vec(p.instructionLanes, Bool())))
++  val clearVstart             = Option.when(p.enableRvv)(Output(Bool()))
+   val writeDataTile = Option.when(p.enableVme)(
+-    Input(Valid(new TileWriteDataIO(p)))
++    Input(Valid(new OwnedTileWriteDataIO(p)))
+   )
+   val vmeMtypeWb = Option.when(p.enableVme)(
+-    Input(Vec(p.instructionLanes, Valid(new MtypeWriteDataIO(p))))
++    Input(Vec(p.instructionLanes, Valid(new OwnedMtypeWriteDataIO(p))))
+   )
+   val debug = Option.when(p.shouldExposeDebugPorts)(Output(new RetirementBufferDebugIO(p)))
+ }
+@@ -64,20 +69,25 @@ class RetirementBufferIO(p: Parameters) extends Bundle {
+   *   - Retired: The final state. Instructions are dequeued from the buffer in-order when they and
+   *     all preceding instructions are completed.
+   */
+-class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
++class RetirementBuffer(p: Parameters, mini: Boolean = false, ctxSlotId: Int = 0) extends Module {
+   val io            = IO(new RetirementBufferIO(p))
+   val idxWidth      = p.retirementBufferIdxWidth
+   val noWriteRegIdx = ~0.U(idxWidth.W)
+   val storeRegIdx   = (noWriteRegIdx - 1.U)
++  val ctxSlotU      = (if (p.contextCount == 1) 0 else ctxSlotId).U(p.ctxBits.W)
+   class Instruction extends Bundle {
+-    val addr = UInt(p.programCounterBits.W)                       // Program counter address
+-    val inst = if (mini) UInt(0.W) else UInt(p.instructionBits.W) // Instruction bits
+-    val idx  = UInt(idxWidth.W)                                   // Register Index
+-    val trap          = Bool() // Instruction causing a trap to occur.
+-    val isControlFlow = Bool() // True if instruction is a jump or branch.
+-    val isBranch      = Bool()
+-    val isVector      = Bool()
+-    val resetsVstart  = Bool()
++    val addr  = UInt(p.programCounterBits.W)                       // Program counter address
++    val inst  = if (mini) UInt(0.W) else UInt(p.instructionBits.W) // Instruction bits
++    val idx   = UInt(idxWidth.W)                                   // Register Index
++    val owner = new OwnerTag(p)                                    // Full return identity (W2-02)
++    val needsScalarWrite     = Bool()
++    val needsFloatWrite      = Bool()
++    val isScalarOrFloatStore = Bool()
++    val trap                 = Bool() // Instruction causing a trap to occur.
++    val isControlFlow        = Bool() // True if instruction is a jump or branch.
++    val isBranch             = Bool()
++    val isVector             = Bool()
++    val resetsVstart         = Bool()
+     // Target storage removed in favor of linkOk check for area optimization
+     val linkOk       = Bool()
+     val isEcall      = Bool()
+@@ -138,6 +148,7 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
+   // Create Instruction wires out of io.inst + io.writeAddrScalar, and align.
+   def dispatch(
+     finst: FetchInstruction,
++    owner: OwnerTag,
+     scalarAddr: RegfileWriteAddrIO,
+     floatAddr: Option[RegfileWriteAddrIO],
+     vectorAddr: Option[RegfileWriteAddrIO],
+@@ -197,6 +208,10 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
+         store                     -> storeRegIdx
+       )
+     )
++    instr.owner                := owner
++    instr.needsScalarWrite     := (sValid && sAddr =/= 0.U) && !floatValid && !vectorValid
++    instr.needsFloatWrite      := floatValid
++    instr.isScalarOrFloatStore := scalarStore || floatStore
+     instr.trap          := isFault
+     instr.isControlFlow := isJump || isBranch
+     instr.isBranch      := isBranch
+@@ -213,6 +228,7 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
+
+   def fault(
+     finst: FetchInstruction,
++    owner: OwnerTag,
+     scalarAddr: RegfileWriteAddrIO,
+     floatAddr: Option[RegfileWriteAddrIO],
+     vectorAddr: Option[RegfileWriteAddrIO],
+@@ -225,6 +241,7 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
+     // to correctly handle side effects (like JAL return addresses) and debug reporting.
+     val instr = dispatch(
+       finst,
++      owner,
+       scalarAddr,
+       floatAddr,
+       vectorAddr,
+@@ -266,7 +283,8 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
+   }
+
+   val insts = (0 until p.instructionLanes).map(i => {
+-    val isDecodeFault = decodeFaultValid && (faultPc === io.inst(i).bits.addr)
++    val laneOwner     = OwnerTag.make(p)(ctxSlotU, io.ctxGeneration, io.dispatchOpSeq(i))
++    val isDecodeFault = decodeFaultValid && OwnerTag.matches(io.fault.bits.owner, laneOwner)
+     val isNoFireFault = (i == 0).B && noFire0Fault
+
+     val linkOk = if (i == 0) {
+@@ -296,6 +314,7 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
+       isNoFireFault,
+       fault(
+         io.inst(i).bits,
++        io.fault.bits.owner,
+         io.writeAddrScalar(i),
+         fAddr,
+         vAddr,
+@@ -306,6 +325,7 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
+       ),
+       dispatch(
+         io.inst(i).bits,
++        laneOwner,
+         io.writeAddrScalar(i),
+         fAddr,
+         vAddr,
+@@ -371,9 +391,16 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
+   val dataWidth    = if (mini) 0 else (if (p.enableRvv) p.lsuDataBits else 32)
+   val resultBuffer = RegInit(VecInit(Seq.fill(bufferSize)(MakeInvalid(new InstructionUpdate))))
+
+-  val accEnqPtr = RegInit(0.U(log2Ceil(bufferSize).W))
+-  val accDeqPtr = RegInit(0.U(log2Ceil(bufferSize).W))
++  val robSlotWidth = math.max(1, log2Ceil(bufferSize))
++  val accEnqPtr    = RegInit(0.U(robSlotWidth.W))
++  val accDeqPtr    = RegInit(0.U(robSlotWidth.W))
++  val slotGen      = RegInit(VecInit.fill(bufferSize)(0.U(p.slotGenerationBits.W)))
+   io.enqPtr := accEnqPtr
++  for (i <- 0 until p.instructionLanes) {
++    val prevFires = PopCount((0 until i).map(j => io.inst(j).fire))
++    val eIdx      = if (bufferSize > 1) (accEnqPtr +& prevFires)(robSlotWidth - 1, 0) else 0.U(1.W)
++    io.enqSlotGen(i) := slotGen(eIdx)
++  }
+   val vectorWriteAccumulator = Option.when(!mini && p.enableRvv)(
+     RegInit(VecInit.fill(bufferSize)(VecInit.fill(8)(0.U.asTypeOf(Valid(new VectorWrite)))))
+   )
+@@ -419,8 +446,9 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
+   )
+   if (p.enableVme) {
+     for (x <- 0 until bufferSize) {
++      val slotRobTag = RobTag.make(p)(ctxSlotU, x.U, slotGen(x))
+       val wbHits = (0 until p.instructionLanes).map { k =>
+-        io.vmeMtypeWb.get(k).valid && (io.vmeMtypeWb.get(k).bits.rob_tag === x.U)
++        io.vmeMtypeWb.get(k).valid && RobTag.matches(io.vmeMtypeWb.get(k).bits.rob_tag, slotRobTag)
+       }
+       val hasWbHit = VecInit(wbHits).asUInt.orR
+       mtypeWbDone.get(x) := hasWbHit || mtypeAccValid.get(x)
+@@ -430,7 +458,7 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
+
+         val tilePort     = io.writeDataTile.get
+         val tileTagMatch =
+-          tilePort.valid && !tilePort.bits.is_store && (tilePort.bits.rob_tag === x.U)
++          tilePort.valid && !tilePort.bits.is_store && RobTag.matches(tilePort.bits.rob_tag, slotRobTag)
+         val nextTileEntry = Wire(Vec(p.vmeMaxTileWrites, Valid(new TileWrite(p))))
+         for (k <- 0 until p.vmeMaxTileWrites) {
+           val hit      = tileTagMatch && tilePort.bits.mask(k)
+@@ -453,24 +481,29 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
+   val resultUpdate = Wire(Vec(bufferSize, Valid(new InstructionUpdate)))
+
+   for (i <- 0 until bufferSize) {
+-    val bufferEntry = instBuffer.io.dataOut(i)
+-    val tagWidth    = log2Ceil(bufferSize)
+-    val pIdx        = if (bufferSize > 1) (accDeqPtr +& i.U)(tagWidth - 1, 0) else 0.U
+-    val mtypeReady  = if (p.enableVme) mtypeWbDone.get(pIdx) else true.B
++    val bufferEntry      = instBuffer.io.dataOut(i)
++    val tagWidth         = robSlotWidth
++    val pIdx             = if (bufferSize > 1) (accDeqPtr +& i.U)(tagWidth - 1, 0) else 0.U(1.W)
++    val entryRobTag      = RobTag.make(p)(ctxSlotU, pIdx, slotGen(pIdx))
++    val validBufferEntry = (i.U < instBuffer.io.nEnqueued)
++    val mtypeReady       = if (p.enableVme) mtypeWbDone.get(pIdx) else true.B
+     // Check if this entry is an operation that doesn't require a register write, but is not a store.
+     val nonWritingInstr =
+       (bufferEntry.idx === noWriteRegIdx) && !bufferEntry.isTile &&
+         (!bufferEntry.isMtypeWrite || mtypeReady)
+     val storeInstr = bufferEntry.idx === storeRegIdx
+
+-    // Check which incoming (scalar,float) write port matches this entry's needed address.
++    // Match scalar and float writebacks strictly by OwnerTag (no bare register-number matching).
+     val scalarWriteIdxMap =
+-      io.writeDataScalar.map(x => x.valid && (x.bits.addr === bufferEntry.idx))
++      io.writeDataScalar.map(x =>
++        x.valid && validBufferEntry && bufferEntry.needsScalarWrite &&
++          OwnerTag.matches(x.bits.owner, bufferEntry.owner)
++      )
+     val floatWriteIdxMap = io.writeDataFloat
+       .map(y =>
+         y.map(x =>
+-          x.valid && ((x.bits.addr +& p.floatRegfileBaseAddr.U) ===
+-            bufferEntry.idx)
++          x.valid && validBufferEntry && bufferEntry.needsFloatWrite &&
++            OwnerTag.matches(x.bits.owner, bufferEntry.owner)
+         )
+       )
+       .getOrElse(Seq(false.B))
+@@ -478,23 +511,19 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
+     val vectorWriteIdxMap = io.writeDataVector
+       .map(y =>
+         y.map(x =>
+-          x.valid && (
+-            (bufferEntry.isVector && !storeInstr && (x.bits.rob_tag === pIdx)) ||
+-              (!bufferEntry.isVector && ((x.bits.addr +& p.rvvRegfileBaseAddr.U) === bufferEntry.idx))
+-          )
++          x.valid && validBufferEntry && bufferEntry.isVector && !storeInstr &&
++            RobTag.matches(x.bits.rob_tag, entryRobTag)
+         )
+       )
+       .getOrElse(Seq(false.B))
+-    // Check if this entry is the faulting instruction. Matched against the
+-    // registered fault so the scan has no same-cycle dependence on dispatch.
++    // Match faults strictly by composite RobTag (RVV) or OwnerTag (non-RVV); never by mepc.
+     val isRvvFault =
+       if (p.enableRvv) faultRetire.valid && faultRetire.bits.is_rvv.getOrElse(false.B) else false.B
+     val rvvTagMatch =
+-      if (p.enableRvv) (faultRetire.bits.rob_tag.getOrElse(0.U) === pIdx) else false.B
++      if (p.enableRvv) RobTag.matches(faultRetire.bits.rob_tag.get, entryRobTag) else false.B
++    val nonRvvOwnerMatch = OwnerTag.matches(faultRetire.bits.owner, bufferEntry.owner)
+     val faultingInstr =
+-      faultRetire.valid && Mux(isRvvFault, rvvTagMatch, bufferEntry.addr === faultRetire.bits.mepc)
+-    // The entry is active if it's validly enqueued.
+-    val validBufferEntry = (i.U < instBuffer.io.nEnqueued)
++      validBufferEntry && faultRetire.valid && Mux(isRvvFault, rvvTagMatch, nonRvvOwnerMatch)
+
+     // Find the index of the first write port that provides the needed data.
+     val scalarWriteIdx = PriorityEncoder(scalarWriteIdxMap)
+@@ -559,8 +588,9 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
+     val tileDe2RtMatch = if (p.enableVme) {
+       io.writeDataVector
+         .map(y =>
+-          y.map(x => x.valid && x.bits.last_uop_valid && (x.bits.rob_tag === pIdx))
+-            .reduce(_ | _)
++          y.map(x =>
++            x.valid && x.bits.last_uop_valid && RobTag.matches(x.bits.rob_tag, entryRobTag)
++          ).reduce(_ | _)
+         )
+         .getOrElse(false.B)
+     } else {
+@@ -570,7 +600,7 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
+     val tileReady = if (p.enableVme) {
+       val tilePort     = io.writeDataTile.get
+       val tileTagMatch =
+-        tilePort.valid && !tilePort.bits.is_store && (tilePort.bits.rob_tag === pIdx)
++        tilePort.valid && !tilePort.bits.is_store && RobTag.matches(tilePort.bits.rob_tag, entryRobTag)
+       val tileAcc = if (!mini && p.enableVerification) {
+         tileAccValid.get(pIdx)
+       } else {
+@@ -581,11 +611,11 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
+       true.B
+     }
+
+-    // If the entry is active and its data dependency is met (or it has no dependency)...
+-    // Special care here for vector, as multiple instructions are allowed to be dispatched for the same destination register.
+-    // This differs from how the scalar/float scoreboards restrict dispatch.
++    // Match store completion strictly by OwnerTag (never by PC).
++    val storeOwnerMatch =
++      storeComplete.valid && validBufferEntry && OwnerTag.matches(storeComplete.bits, bufferEntry.owner)
+     val storeReady =
+-      (storeComplete.valid && storeComplete.bits === bufferEntry.addr) ||
++      (bufferEntry.isScalarOrFloatStore && storeOwnerMatch) ||
+         (bufferEntry.isVector && tileDe2RtMatch)
+     val dataReady = (scalarWriteIdxMap.reduce(_ | _) || floatWriteIdxMap.reduce(
+       _ | _
+@@ -708,6 +738,7 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
+   }
+
+   instBuffer.io.deqReady := deqReady
++  io.deqReadyOut         := deqReady
+
+   val trapRetired = {
+     val laneReady = VecInit(
+@@ -729,9 +760,53 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
+     regAfterFlush := false.B
+   }
+
++  accEnqPtr := Mux(trapRetired, 0.U, accEnqPtr + instBuffer.io.enqValid)
++  accDeqPtr := Mux(trapRetired, 0.U, accDeqPtr + deqReady)
++  for (x <- 0 until bufferSize) {
++    val isRetiringSlot = (0 until p.retirementLanes)
++      .map { k =>
++        val dIdx = if (bufferSize > 1) (accDeqPtr +& k.U)(robSlotWidth - 1, 0) else 0.U(1.W)
++        (k.U < deqReady) && (x.U === dIdx)
++      }
++      .reduce(_ || _)
++    when(trapRetired || isRetiringSlot) {
++      slotGen(x) := slotGen(x) + 1.U
++    }
++  }
++
++  // Count stale-generation / reused-slot ABA completions targeting this Context slot (INV-15).
++  val staleStore = storeComplete.valid && (storeComplete.bits.ctx_slot === ctxSlotU) &&
++    (storeComplete.bits.ctx_generation =/= io.ctxGeneration)
++  val staleScalarVec = VecInit(io.writeDataScalar.map { x =>
++    x.valid && (x.bits.owner.ctx_slot === ctxSlotU) &&
++      (x.bits.owner.ctx_generation =/= io.ctxGeneration)
++  })
++  val staleFloatCount = io.writeDataFloat
++    .map { y =>
++      PopCount(VecInit(y.map { x =>
++        x.valid && (x.bits.owner.ctx_slot === ctxSlotU) &&
++          (x.bits.owner.ctx_generation =/= io.ctxGeneration)
++      }))
++    }
++    .getOrElse(0.U)
++  val staleVecCount = io.writeDataVector
++    .map { y =>
++      PopCount(VecInit(y.map { x =>
++        val sIdx = x.bits.rob_tag.rob_slot
++        x.valid && (x.bits.rob_tag.ctx_slot === ctxSlotU) &&
++          (x.bits.rob_tag.slot_generation =/= slotGen(sIdx))
++      }))
++    }
++    .getOrElse(0.U)
++  val staleFault = faultRetire.valid && !faultRetire.bits.is_rvv.getOrElse(false.B) &&
++    (faultRetire.bits.owner.ctx_slot === ctxSlotU) &&
++    (faultRetire.bits.owner.ctx_generation =/= io.ctxGeneration)
++  val staleReg = RegInit(0.U(16.W))
++  staleReg := staleReg + staleStore.asUInt +& PopCount(staleScalarVec) +&
++    staleFloatCount +& staleVecCount +& staleFault.asUInt
++  io.staleCompletionRejected := staleReg
++
+   if (p.enableRvv) {
+-    accEnqPtr := Mux(trapRetired, 0.U, accEnqPtr + instBuffer.io.enqValid)
+-    accDeqPtr := Mux(trapRetired, 0.U, accDeqPtr + deqReady)
+
+     val clearVstart = VecInit(
+       (0 until p.retirementLanes).map { i =>

@@ -1,0 +1,201 @@
+diff --git a/hdl/chisel/src/coralnpu/BUILD b/hdl/chisel/src/coralnpu/BUILD
+index ebbef3f..5e5ac47 100644
+--- a/hdl/chisel/src/coralnpu/BUILD
++++ b/hdl/chisel/src/coralnpu/BUILD
+@@ -100,6 +100,7 @@ chisel_library(
+     name = "retirement_buffer",
+     srcs = [
+         "RetirementBuffer.scala",
++        "scalar/RetirementPartitionBank.scala",
+     ],
+     deps = [
+         ":coralnpu_base",
+@@ -460,6 +461,7 @@ chisel_library(
+         "Interfaces.scala",
+         "Library.scala",
+         "Parameters.scala",
++        "scalar/UopTag.scala",
+     ],
+     deps = [
+         ":clock_gate",
+@@ -474,8 +476,10 @@ chisel_library(
+     name = "coralnpu_scalar",
+     srcs = [
+         "scalar/Alu.scala",
++        "scalar/BankedRf.scala",
+         "scalar/Bru.scala",
+         "scalar/Csr.scala",
++        "scalar/CtxCsr.scala",
+         "scalar/Debug.scala",
+         "scalar/Decode.scala",
+         "scalar/Dvu.scala",
+@@ -947,3 +951,52 @@ genrule(
+     cmd = "$(location :decode_table_dump) --config=core_mini_axi --output=$@",
+     tools = [":decode_table_dump"],
+ )
++
++chisel_test(
++    name = "w2_02_rob_owner_spec",
++    size = "large",
++    srcs = [
++        "verification/w2/W2_02_rob_owner_spec.scala",
++    ],
++    deps = [
++        ":coralnpu_base",
++        ":coralnpu_rvv",
++        ":retirement_buffer",
++        "//hdl/chisel/src/common:testing",
++    ],
++)
++
++chisel_test(
++    name = "w2_02_rf_bank_spec",
++    size = "large",
++    srcs = [
++        "verification/w2/W2_02_rf_bank_spec.scala",
++    ],
++    deps = [
++        ":coralnpu",
++        ":coralnpu_base",
++        ":coralnpu_float",
++        ":coralnpu_scalar",
++        "//hdl/chisel/src/common:fp",
++        "@coralnpu_hw//lib:common_cells_resources",
++        "@coralnpu_hw//lib:cvfpu_resources",
++        "@coralnpu_hw//lib:fpu_div_sqrt_mvp_resources",
++        "@coralnpu_hw//lib:rvvi_resources",
++        "//hdl/chisel/src/common:testing",
++    ],
++)
++
++chisel_test(
++    name = "w2_02_csr_flag_delta_spec",
++    size = "large",
++    srcs = [
++        "verification/w2/W2_02_csr_flag_delta_spec.scala",
++    ],
++    deps = [
++        ":coralnpu_base",
++        ":coralnpu_float",
++        ":coralnpu_rvv",
++        ":coralnpu_scalar",
++        "//hdl/chisel/src/common:testing",
++    ],
++)
+diff --git a/hdl/chisel/src/coralnpu/Core.scala b/hdl/chisel/src/coralnpu/Core.scala
+index 3fb7329..68e9f8b 100644
+--- a/hdl/chisel/src/coralnpu/Core.scala
++++ b/hdl/chisel/src/coralnpu/Core.scala
+@@ -47,6 +47,7 @@ class Core(p: Parameters, moduleName: String) extends Module with RequireAsyncRe
+     // Bus between core and and external memories or peripherals.
+     val ebus = new EBusIO(p)
+
++    val ctx   = new CoreContextIO(p)
+     val debug = Option.when(p.shouldExposeDebugPorts)(new DebugIO(p))
+   })
+
+@@ -69,6 +70,7 @@ class Core(p: Parameters, moduleName: String) extends Module with RequireAsyncRe
+   score.io.software_irq := io.software_irq
+
+   score.io.dm <> io.dm
++  io.ctx <> score.io.ctx
+
+   require(
+     io.debug.isDefined == score.io.debug.isDefined,
+@@ -121,6 +123,10 @@ object EmitCore extends App {
+       p.itcmSizeKBytes = arg.split("=")(1).toInt
+     } else if (arg.startsWith("--dtcmSizeKBytes")) {
+       p.dtcmSizeKBytes = arg.split("=")(1).toInt
++    } else if (arg.startsWith("--contextCount")) {
++      p.contextCount = arg.split("=")(1).toInt
++    } else if (arg.startsWith("--tileId")) {
++      p.tileId = arg.split("=")(1).toInt
+     } else if (arg.startsWith("--useAxi")) {
+       useAxi = true
+     } else if (arg.startsWith("--useTlul")) {
+diff --git a/hdl/chisel/src/coralnpu/CoreAxi.scala b/hdl/chisel/src/coralnpu/CoreAxi.scala
+index bfc8da0..fe13540 100644
+--- a/hdl/chisel/src/coralnpu/CoreAxi.scala
++++ b/hdl/chisel/src/coralnpu/CoreAxi.scala
+@@ -128,6 +128,8 @@ class CoreAxi(p: Parameters, coreModuleName: String) extends RawModule {
+     )
+     io.debug.zip(core.io.debug).foreach { case (ioDebug, coreDebug) => ioDebug <> coreDebug }
+
++    core.io.ctx.ctxSelect := 0.U
++    core.io.ctx.advanceGen.foreach(_ := false.B)
+     core.io.dm.debug_req  := dm.io.haltreq(0)
+     core.io.dm.resume_req := dm.io.resumereq(0)
+     dm.io.resumeack(0)    := !core.io.dm.debug_mode && RegNext(core.io.dm.debug_mode, false.B)
+diff --git a/hdl/chisel/src/coralnpu/Interfaces.scala b/hdl/chisel/src/coralnpu/Interfaces.scala
+index 09b26fb..6f79864 100644
+--- a/hdl/chisel/src/coralnpu/Interfaces.scala
++++ b/hdl/chisel/src/coralnpu/Interfaces.scala
+@@ -115,19 +115,22 @@ class LsuFaultInfo(p: Parameters) extends Bundle {
+   val write  = Bool()
+   val addr   = UInt(p.programCounterBits.W)
+   val epc    = UInt(p.programCounterBits.W)
++  val owner  = new OwnerTag(p)
+   val vstart = Option.when(p.enableRvv)(Valid(UInt(log2Ceil(p.rvvVlen).W)))
+ }
+
+ object LsuFaultInfo {
+   def apply(p: Parameters)(
+     fault: Valid[FaultInfo],
+-    vstart: Option[Valid[UInt]] = None
++    vstart: Option[Valid[UInt]] = None,
++    owner: Option[OwnerTag] = None
+   ): Valid[LsuFaultInfo] = {
+     val res = Wire(Valid(new LsuFaultInfo(p)))
+     res.valid      := fault.valid
+     res.bits.write := fault.bits.write
+     res.bits.addr  := fault.bits.addr
+     res.bits.epc   := fault.bits.epc
++    res.bits.owner := owner.getOrElse(OwnerTag.zero(p))
+     res.bits.vstart.foreach(v => v := vstart.getOrElse(MakeInvalid(0.U)))
+     res
+   }
+@@ -384,7 +387,8 @@ class FaultManagerOutput(p: Parameters) extends Bundle {
+   val mtval   = UInt(p.xlen.W)
+   val mcause  = UInt(p.xlen.W)
+   val decode  = Bool()
++  val owner   = new OwnerTag(p)
+   val is_rvv  = Option.when(p.enableRvv)(Bool())
+-  val rob_tag = Option.when(p.enableRvv)(UInt(log2Ceil(p.retirementBufferSize).W))
++  val rob_tag = Option.when(p.enableRvv)(new RobTag(p))
+   val vstart  = Option.when(p.enableRvv)(Valid(UInt(log2Ceil(p.rvvVlen).W)))
+ }
+diff --git a/hdl/chisel/src/coralnpu/Parameters.scala b/hdl/chisel/src/coralnpu/Parameters.scala
+index 3c52a6b..62a46cf 100644
+--- a/hdl/chisel/src/coralnpu/Parameters.scala
++++ b/hdl/chisel/src/coralnpu/Parameters.scala
+@@ -140,6 +140,17 @@ class Parameters(var m: Seq[MemoryRegion] = Seq(), val hartId: Int = 0, var xlen
+   val vmeRegCountWidth              = log2Ceil(vmeRegCount)
+   val retirementBufferSize          = 16
+   val retirementLanes               = 8
++
++  // Multi-Context / UCE parameters (W2-02 / C026).
++  // `contextCount == 1` explicitly specializes `ctxBits` to 1 bit (never 0-width).
++  var tileId             = 0
++  var contextCount       = 1
++  def ctxBits: Int       = math.max(1, log2Ceil(contextCount))
++  // Parameterized simulation widths for C010 `unresolved` domains (never frozen silicon widths).
++  var ctxGenerationBits  = 16
++  var ownerOpSeqBits     = 32
++  var slotGenerationBits = 8
++  var subopIdBits        = 8
+   def retirementBufferIdxWidth: Int = {
+     val activeFloatRegCount = (if (enableFloat) { floatRegCount }
+                                else { 0 })
+@@ -213,6 +224,12 @@ class Parameters(var m: Seq[MemoryRegion] = Seq(), val hartId: Int = 0, var xlen
+     newP.lsuDataBits = this.lsuDataBits
+     newP.itcmSizeKBytes = this.itcmSizeKBytes
+     newP.dtcmSizeKBytes = this.dtcmSizeKBytes
++    newP.tileId = this.tileId
++    newP.contextCount = this.contextCount
++    newP.ctxGenerationBits = this.ctxGenerationBits
++    newP.ownerOpSeqBits = this.ownerOpSeqBits
++    newP.slotGenerationBits = this.slotGenerationBits
++    newP.subopIdBits = this.subopIdBits
+     newP.axi2IdBits = this.axi2IdBits + extraBits
+     newP
+   }

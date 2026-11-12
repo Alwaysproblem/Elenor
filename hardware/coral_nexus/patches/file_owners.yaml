@@ -1,14 +1,54 @@
 # Which package may patch which upstream paths. Any file touched by a patch
 # in the series must match exactly one owner; two different owners claiming
-# the same file is rejected by verify_sources.sh. Globs are disjoint by
-# package ownership (execution_guide.md §3.1): W2 owns the scalar core
-# entities (top-level Chisel), W3 owns RVV/Zvt, W4 owns LSU/memory, W6 owns
-# event/reset logic. New patch families must extend their owner's list, not
-# add overlapping globs.
-# Glob syntax: fnmatch with '**' for any-depth suffix, anchored at the left.
+# the same file is rejected by verify_sources.sh.
+# Note: Python fnmatch '*' matches '/', so top-level files are listed explicitly
+# to stay strictly disjoint from `scalar/Lsu.scala` (W4) and `rvv/` (W3).
 schema: cn_patch_owners/v1
 owners:
-  W2: [hdl/chisel/src/coralnpu/*.scala]
-  W3: [hdl/verilog/rvv/**]
-  W4: [hdl/chisel/src/coralnpu/scalar/**]
-  W6: [utils/**, tests/verilator_sim/**]
+  W2:
+    - hdl/chisel/src/coralnpu/BUILD
+    - hdl/chisel/src/coralnpu/AxiSlave.scala
+    - hdl/chisel/src/coralnpu/BankedDtcm.scala
+    - hdl/chisel/src/coralnpu/BankedItcm.scala
+    - hdl/chisel/src/coralnpu/ClockGate.scala
+    - hdl/chisel/src/coralnpu/Core.scala
+    - hdl/chisel/src/coralnpu/CoreAxi.scala
+    - hdl/chisel/src/coralnpu/CoreAxiCSR.scala
+    - hdl/chisel/src/coralnpu/CoreTlul.scala
+    - hdl/chisel/src/coralnpu/CoreTlulCSR.scala
+    - hdl/chisel/src/coralnpu/DBus2Axi.scala
+    - hdl/chisel/src/coralnpu/Fabric.scala
+    - hdl/chisel/src/coralnpu/IBus2Axi.scala
+    - hdl/chisel/src/coralnpu/Interfaces.scala
+    - hdl/chisel/src/coralnpu/Library.scala
+    - hdl/chisel/src/coralnpu/MemorySize.scala
+    - hdl/chisel/src/coralnpu/Parameters.scala
+    - hdl/chisel/src/coralnpu/RetirementBuffer.scala
+    - hdl/chisel/src/coralnpu/RstSync.scala
+    - hdl/chisel/src/coralnpu/RvviTrace.scala
+    - hdl/chisel/src/coralnpu/SRAM.scala
+    - hdl/chisel/src/coralnpu/SramBlock.scala
+    - hdl/chisel/src/coralnpu/SramNx128.scala
+    - hdl/chisel/src/coralnpu/TCM.scala
+    - hdl/chisel/src/coralnpu/float/*.scala
+    - hdl/chisel/src/coralnpu/scalar/Alu.scala
+    - hdl/chisel/src/coralnpu/scalar/Bru.scala
+    - hdl/chisel/src/coralnpu/scalar/Csr.scala
+    - hdl/chisel/src/coralnpu/scalar/Debug.scala
+    - hdl/chisel/src/coralnpu/scalar/Decode.scala
+    - hdl/chisel/src/coralnpu/scalar/Dvu.scala
+    - hdl/chisel/src/coralnpu/scalar/FRegfile.scala
+    - hdl/chisel/src/coralnpu/scalar/FaultManager.scala
+    - hdl/chisel/src/coralnpu/scalar/Fpu.scala
+    - hdl/chisel/src/coralnpu/scalar/Mlu.scala
+    - hdl/chisel/src/coralnpu/scalar/Regfile.scala
+    - hdl/chisel/src/coralnpu/scalar/SCore.scala
+    - hdl/chisel/src/coralnpu/scalar/UncachedFetch.scala
+  W3:
+    - hdl/verilog/rvv/**
+    - hdl/chisel/src/coralnpu/rvv/*.scala
+  W4:
+    - hdl/chisel/src/coralnpu/scalar/Lsu.scala
+  W6:
+    - utils/**
+    - tests/verilator_sim/**

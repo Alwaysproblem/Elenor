@@ -1,0 +1,26 @@
+diff --git a/hdl/chisel/src/coralnpu/scalar/Mlu.scala b/hdl/chisel/src/coralnpu/scalar/Mlu.scala
+index d67ee53..ded4268 100644
+--- a/hdl/chisel/src/coralnpu/scalar/Mlu.scala
++++ b/hdl/chisel/src/coralnpu/scalar/Mlu.scala
+@@ -126,7 +126,7 @@ class Mlu(p: Parameters) extends Module {
+   io.rd.valid     := stage3Input.valid
+   io.rd.bits.addr := stage3Input.bits.rd
+   io.rd.bits.data := mul
+-  io.rdOwner      := stage3Input.bits.owner
++  io.rdOwner      := OwnerTag.zero(p) // MUTANT: tie owner to constant 0
+
+   // Assertions.
+   for (i <- 0 until p.instructionLanes) {
+diff --git a/hdl/chisel/src/coralnpu/scalar/SCore.scala b/hdl/chisel/src/coralnpu/scalar/SCore.scala
+index ece825a..1198fbc 100644
+--- a/hdl/chisel/src/coralnpu/scalar/SCore.scala
++++ b/hdl/chisel/src/coralnpu/scalar/SCore.scala
+@@ -603,7 +603,7 @@ class SCore(p: Parameters) extends Module {
+   regfile.io.writeData(lsuOffset).valid      := lsu.io.rd.valid
+   regfile.io.writeData(lsuOffset).bits.addr  := lsu.io.rd.bits.addr
+   regfile.io.writeData(lsuOffset).bits.data  := lsu.io.rd.bits.data
+-  regfile.io.writeData(lsuOffset).bits.owner := lsu.io.rdOwner
++  regfile.io.writeData(lsuOffset).bits.owner := OwnerTag.zero(p) // MUTANT: tie owner to constant 0
+   regfile.io.writeMask(lsuOffset).valid      := lsu.io.fault.valid
+
+   val writeMask = bru.map(_.io.taken.valid).scan(false.B)(_ || _)

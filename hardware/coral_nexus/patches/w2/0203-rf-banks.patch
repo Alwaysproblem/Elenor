@@ -1,0 +1,807 @@
+diff --git a/hdl/chisel/src/coralnpu/float/FloatCore.scala b/hdl/chisel/src/coralnpu/float/FloatCore.scala
+index 374dc33..4ed41b1 100644
+--- a/hdl/chisel/src/coralnpu/float/FloatCore.scala
++++ b/hdl/chisel/src/coralnpu/float/FloatCore.scala
+@@ -307,10 +307,16 @@ class FloatCoreWrapper(p: Parameters)
+ class FloatCore(p: Parameters) extends Module {
+   val io = IO(new FloatCoreIO(p))
+
+-  val instQueue = Module(new Queue(new FloatInstruction(p), 1))
++  val instQueue      = Module(new Queue(new FloatInstruction(p), 1))
++  val instOwnerQueue = Module(new Queue(new coralnpu.OwnerTag(p), 1))
+   instQueue.io.enq <> MakeDecoupled(io.inst.valid, instQueue.io.count === 0.U, io.inst.bits)
++  instOwnerQueue.io.enq.valid := instQueue.io.enq.fire
++  instOwnerQueue.io.enq.bits  := io.instOwner
+   val inst = instQueue.io.deq
+-  io.inst.ready := (instQueue.io.count === 0.U)
++  instOwnerQueue.io.deq.ready := inst.fire
++  val curOwner = instOwnerQueue.io.deq.bits
++  io.activeOwner := Mux(instOwnerQueue.io.deq.valid, curOwner, io.instOwner)
++  io.inst.ready  := (instQueue.io.count === 0.U)
+
+   val rstn             = (!reset.asBool).asAsyncReset
+   val floatCoreWrapper = Module(new FloatCoreWrapper(p))
+@@ -477,9 +483,12 @@ class FloatCore(p: Parameters) extends Module {
+   io.write_ports(1).valid := io.lsu_rd.valid
+   io.write_ports(1).addr  := io.lsu_rd.bits.addr
+   io.write_ports(1).data  := Fp32.fromWord(io.lsu_rd.bits.data)
++  io.writeOwner(0)        := curOwner
++  io.writeOwner(1)        := io.lsuRdOwner
+
+   io.csr.in.fflags.valid := (floatCoreWrapper.io.out_valid_o && inst.fire && !fmv)
+   io.csr.in.fflags.bits  := floatCoreWrapper.io.status_o.asUInt
++  io.fflagsOwner         := curOwner
+
+   val scalar_rd_pre_pipe = Wire(Decoupled(new RegfileWriteDataIO(p)))
+   scalar_rd_pre_pipe.valid := (((floatCoreWrapper.io.in_valid_i && floatCoreWrapper.io.in_ready_o) || fpuActive) && floatCoreWrapper.io.out_valid_o && floatCoreWrapper.io.out_ready_i && inst.bits.scalar_rd) || (fmv_to_gpr)
+@@ -504,8 +513,13 @@ class FloatCore(p: Parameters) extends Module {
+   )
+   scalar_rd_pre_pipe.bits.data := write_data
+
+-  val scalar_rd_pipe = Queue(scalar_rd_pre_pipe, 2, false)
++  val scalar_rd_pipe      = Queue(scalar_rd_pre_pipe, 2, false)
++  val scalar_rd_owner_q   = Module(new Queue(new coralnpu.OwnerTag(p), 2, false))
++  scalar_rd_owner_q.io.enq.valid := scalar_rd_pre_pipe.fire
++  scalar_rd_owner_q.io.enq.bits  := curOwner
++  scalar_rd_owner_q.io.deq.ready := io.scalar_rd.fire
+   io.scalar_rd <> scalar_rd_pipe
++  io.scalarRdOwner := scalar_rd_owner_q.io.deq.bits
+
+   floatCoreWrapper.io.out_ready_i := (inst.valid && inst.bits.scalar_rd && scalar_rd_pre_pipe.ready) || (inst.valid && !inst.bits.scalar_rd)
+   inst.ready := (((floatCoreWrapper.io.in_ready_o && floatCoreWrapper.io.in_valid_i) || fpuActive) && floatCoreWrapper.io.out_ready_i && floatCoreWrapper.io.out_valid_o) || fmv
+diff --git a/hdl/chisel/src/coralnpu/float/FloatCoreInterface.scala b/hdl/chisel/src/coralnpu/float/FloatCoreInterface.scala
+index 0dd29a0..e55d2e8 100644
+--- a/hdl/chisel/src/coralnpu/float/FloatCoreInterface.scala
++++ b/hdl/chisel/src/coralnpu/float/FloatCoreInterface.scala
+@@ -21,6 +21,7 @@ import coralnpu.{
+   FloatRegfileWriteDataIO,
+   FRegfileRead,
+   FRegfileWrite,
++  OwnerTag,
+   Parameters,
+   RegfileReadDataIO,
+   RegfileWriteDataIO
+@@ -238,13 +239,19 @@ object FloatInstruction {
+ class FloatCoreIO(p: Parameters) extends Bundle {
+   // Decode
+   val inst        = Flipped(Decoupled(new FloatInstruction(p)))
++  val instOwner   = Input(new OwnerTag(p))
+   val read_ports  = Flipped(Vec(3, new FRegfileRead(p)))
+   val write_ports = Flipped(Vec(2, new FRegfileWrite(p)))
++  val writeOwner  = Output(Vec(2, new OwnerTag(p)))
+
+   // Execute
+-  val rs1       = Flipped(new RegfileReadDataIO(p))
+-  val rs2       = Flipped(new RegfileReadDataIO(p))
+-  val scalar_rd = Decoupled(new RegfileWriteDataIO(p))
+-  val csr       = new CsrFloatIO(p)
+-  val lsu_rd    = Flipped(Valid(new FloatRegfileWriteDataIO(p)))
++  val rs1           = Flipped(new RegfileReadDataIO(p))
++  val rs2           = Flipped(new RegfileReadDataIO(p))
++  val scalar_rd     = Decoupled(new RegfileWriteDataIO(p))
++  val scalarRdOwner = Output(new OwnerTag(p))
++  val csr           = new CsrFloatIO(p)
++  val fflagsOwner   = Output(new OwnerTag(p))
++  val activeOwner   = Output(new OwnerTag(p))
++  val lsu_rd        = Flipped(Valid(new FloatRegfileWriteDataIO(p)))
++  val lsuRdOwner    = Input(new OwnerTag(p))
+ }
+diff --git a/hdl/chisel/src/coralnpu/scalar/Alu.scala b/hdl/chisel/src/coralnpu/scalar/Alu.scala
+index 2ae2d9b..1ac8ba3 100644
+--- a/hdl/chisel/src/coralnpu/scalar/Alu.scala
++++ b/hdl/chisel/src/coralnpu/scalar/Alu.scala
+@@ -77,17 +77,20 @@ class AluCmd(p: Parameters) extends Bundle {
+ class Alu(p: Parameters) extends Module {
+   val io = IO(new Bundle {
+     // Decode cycle.
+-    val req = Flipped(Valid(new AluCmd(p)))
++    val req      = Flipped(Valid(new AluCmd(p)))
++    val reqOwner = Input(new OwnerTag(p))
+
+     // Execute cycle.
+-    val rs1 = Flipped(new RegfileReadDataIO(p))
+-    val rs2 = Flipped(new RegfileReadDataIO(p))
+-    val rd  = Valid(Flipped(new RegfileWriteDataIO(p)))
++    val rs1     = Flipped(new RegfileReadDataIO(p))
++    val rs2     = Flipped(new RegfileReadDataIO(p))
++    val rd      = Valid(Flipped(new RegfileWriteDataIO(p)))
++    val rdOwner = Output(new OwnerTag(p))
+   })
+
+-  val valid = RegInit(false.B)
+-  val addr  = RegInit(0.U(log2Ceil(p.scalarRegCount).W))
+-  val op    = RegInit(AluOp.ADD)
++  val valid    = RegInit(false.B)
++  val addr     = RegInit(0.U(log2Ceil(p.scalarRegCount).W))
++  val op       = RegInit(AluOp.ADD)
++  val ownerReg = RegInit(0.U.asTypeOf(new OwnerTag(p)))
+
+   // Pulse the cycle after the decoded request.
+   valid := io.req.valid
+@@ -95,8 +98,9 @@ class Alu(p: Parameters) extends Module {
+   // Avoid output toggles by not updating state between uses.
+   // The Regfile has the same behavior, leaving read ports unchanged.
+   when(io.req.valid) {
+-    addr := io.req.bits.addr
+-    op   := io.req.bits.op
++    addr     := io.req.bits.addr
++    op       := io.req.bits.op
++    ownerReg := io.reqOwner
+   }
+
+   val rs1    = io.rs1.data
+@@ -106,6 +110,7 @@ class Alu(p: Parameters) extends Module {
+
+   io.rd.valid     := valid
+   io.rd.bits.addr := addr
++  io.rdOwner      := ownerReg
+
+   val r2IsGreater  = rs1.asSInt < rs2.asSInt
+   val r2IsGreaterU = rs1 < rs2
+diff --git a/hdl/chisel/src/coralnpu/scalar/Bru.scala b/hdl/chisel/src/coralnpu/scalar/Bru.scala
+index 0ea3624..eb1bb06 100644
+--- a/hdl/chisel/src/coralnpu/scalar/Bru.scala
++++ b/hdl/chisel/src/coralnpu/scalar/Bru.scala
+@@ -60,6 +60,7 @@ class BranchState(p: Parameters) extends Bundle {
+   val linkData       = UInt(p.programCounterBits.W)
+   val pcEx           = UInt(p.programCounterBits.W)
+   val inst           = UInt(p.instructionBits.W)
++  val owner          = new OwnerTag(p)
+ }
+
+ object BranchState {
+@@ -74,6 +75,7 @@ object BranchState {
+     result.linkData       := 0.U
+     result.pcEx           := 0.U
+     result.inst           := 0.U
++    result.owner          := OwnerTag.zero(p)
+     result
+   }
+ }
+@@ -88,13 +90,16 @@ object BranchState {
+ class Bru(p: Parameters, first: Boolean) extends Module {
+   val io = IO(new Bundle {
+     // Decode cycle.
+-    val req = Flipped(Valid(new BruCmd(p)))
++    val req      = Flipped(Valid(new BruCmd(p)))
++    val reqOwner = Input(new OwnerTag(p))
+
+     // Execute cycle.
+     val csr            = Option.when(first)(new CsrBruIO(p))
++    val trapOwner      = Option.when(first)(Output(new OwnerTag(p)))
+     val rs1            = Input(new RegfileReadDataIO(p))
+     val rs2            = Input(new RegfileReadDataIO(p))
+     val rd             = Valid(Flipped(new RegfileWriteDataIO(p)))
++    val rdOwner        = Output(new OwnerTag(p))
+     val taken          = new BranchTakenIO(p)
+     val actually_taken = Output(Bool())
+     val real_target    = Output(UInt(p.programCounterBits.W))
+@@ -126,6 +131,11 @@ class Bru(p: Parameters, first: Boolean) extends Module {
+   nextState.pcEx           := pcDe
+   nextState.inst           := io.req.bits.inst
+   nextState.originalTarget := io.req.bits.target
++  nextState.owner          := Mux(
++    fault_manager_valid,
++    io.fault_manager.map(_.bits.owner).getOrElse(OwnerTag.zero(p)),
++    io.reqOwner
++  )
+
+   val mtvec = if (first) { Cat(io.csr.get.out.mtvec(p.programCounterBits - 1, 2), 0.U(2.W)) }
+   else { 0.U(p.programCounterBits.W) }
+@@ -244,8 +254,10 @@ class Bru(p: Parameters, first: Boolean) extends Module {
+   io.rd.valid     := stateReg.valid && stateReg.bits.linkValid
+   io.rd.bits.addr := stateReg.bits.linkAddr
+   io.rd.bits.data := stateReg.bits.linkData
++  io.rdOwner      := stateReg.bits.owner
+
+   if (first) {
++    io.trapOwner.get := Mux(io.fault_manager.get.valid, io.fault_manager.get.bits.owner, stateReg.bits.owner)
+     io.interlock.get := stateReg.valid &&
+       op.isOneOf(BruOp.EBREAK, BruOp.ECALL, BruOp.MPAUSE, BruOp.MRET, BruOp.FAULT)
+     // Usage Fault.
+diff --git a/hdl/chisel/src/coralnpu/scalar/Dvu.scala b/hdl/chisel/src/coralnpu/scalar/Dvu.scala
+index e826104..0d9a3e4 100644
+--- a/hdl/chisel/src/coralnpu/scalar/Dvu.scala
++++ b/hdl/chisel/src/coralnpu/scalar/Dvu.scala
+@@ -43,12 +43,14 @@ class DvuCmd(p: Parameters) extends Bundle {
+ class Dvu(p: Parameters) extends Module {
+   val io = IO(new Bundle {
+     // Decode cycle.
+-    val req = Flipped(Decoupled(new DvuCmd(p)))
++    val req      = Flipped(Decoupled(new DvuCmd(p)))
++    val reqOwner = Input(new OwnerTag(p))
+
+     // Execute cycle.
+-    val rs1 = Flipped(new RegfileReadDataIO(p))
+-    val rs2 = Flipped(new RegfileReadDataIO(p))
+-    val rd  = Decoupled(new RegfileWriteDataIO(p))
++    val rs1     = Flipped(new RegfileReadDataIO(p))
++    val rs2     = Flipped(new RegfileReadDataIO(p))
++    val rd      = Decoupled(new RegfileWriteDataIO(p))
++    val rdOwner = Output(new OwnerTag(p))
+   })
+
+   // This implemention differs to common::idiv by supporting early termination,
+@@ -76,11 +78,13 @@ class Dvu(p: Parameters) extends Module {
+   val compute = RegInit(false.B)
+
+   val addr1   = RegInit(0.U(log2Ceil(p.scalarRegCount).W))
++  val owner1  = RegInit(0.U.asTypeOf(new OwnerTag(p)))
+   val signed1 = RegInit(false.B)
+   val divide1 = RegInit(false.B)
+   val isWord1 = RegInit(false.B)
+
+   val addr2    = RegInit(0.U(log2Ceil(p.scalarRegCount).W))
++  val owner2   = RegInit(0.U.asTypeOf(new OwnerTag(p)))
+   val signed2d = RegInit(false.B)
+   val signed2r = RegInit(false.B)
+   val divide2  = RegInit(false.B)
+@@ -145,6 +149,7 @@ class Dvu(p: Parameters) extends Module {
+   compute := active
+
+   addr1   := Mux(io.req.fire, io.req.bits.addr, addr1)
++  owner1  := Mux(io.req.fire, io.reqOwner, owner1)
+   signed1 := Mux(
+     io.req.fire,
+     io.req.bits.op.isOneOf(DvuOp.DIV, DvuOp.REM, DvuOp.DIVW, DvuOp.REMW),
+@@ -163,6 +168,7 @@ class Dvu(p: Parameters) extends Module {
+
+   when(active && !compute) {
+     addr2    := addr1
++    owner2   := owner1
+     signed2d := signed1 && (op1(p.xlen - 1) =/= op2(p.xlen - 1)) && !divByZero
+     signed2r := signed1 && op1(p.xlen - 1)
+     divide2  := divide1
+@@ -200,6 +206,7 @@ class Dvu(p: Parameters) extends Module {
+   io.rd.valid     := count(log2Ceil(p.xlen))
+   io.rd.bits.addr := addr2
+   io.rd.bits.data := final_res
++  io.rdOwner      := owner2
+ }
+
+ object EmitDvu extends App {
+diff --git a/hdl/chisel/src/coralnpu/scalar/FaultManager.scala b/hdl/chisel/src/coralnpu/scalar/FaultManager.scala
+index 52bc8ec..552d8ed 100644
+--- a/hdl/chisel/src/coralnpu/scalar/FaultManager.scala
++++ b/hdl/chisel/src/coralnpu/scalar/FaultManager.scala
+@@ -68,7 +68,9 @@ class FaultManager(p: Parameters) extends Module {
+           }
+         )
+       )
+-      val fetchFault = Input(Valid(UInt(p.programCounterBits.W)))
++      val owner           = Input(Vec(p.instructionLanes, new OwnerTag(p)))
++      val fetchFault      = Input(Valid(UInt(p.programCounterBits.W)))
++      val fetchFaultOwner = Input(new OwnerTag(p))
+     }
+     val out = Output(Valid(new FaultManagerOutput(p)))
+   })
+@@ -161,9 +163,19 @@ class FaultManager(p: Parameters) extends Module {
+       first_fault_is_rvv_dispatch -> true.B
+     )
+   )
++  io.out.bits.owner := MuxCase(
++    OwnerTag.zero(p),
++    Seq(
++      load_fault         -> io.in.memory_fault.bits.owner,
++      store_fault        -> io.in.memory_fault.bits.owner,
++      rvv_fault          -> io.in.rvv_fault.map(_.bits.owner).getOrElse(OwnerTag.zero(p)),
++      fault              -> io.in.owner(first_fault),
++      instr_access_fault -> io.in.fetchFaultOwner
++    )
++  )
+   if (p.enableRvv) {
+     io.out.bits.is_rvv.get  := rvv_fault
+-    io.out.bits.rob_tag.get := io.in.rvv_fault.get.bits.rob_tag.getOrElse(0.U)
++    io.out.bits.rob_tag.get := io.in.rvv_fault.get.bits.rob_tag.get
+     io.out.bits.vstart.get  := io.in.memory_fault.bits.vstart.getOrElse(MakeInvalid(0.U))
+   }
+ }
+diff --git a/hdl/chisel/src/coralnpu/scalar/Mlu.scala b/hdl/chisel/src/coralnpu/scalar/Mlu.scala
+index 56269ad..d67ee53 100644
+--- a/hdl/chisel/src/coralnpu/scalar/Mlu.scala
++++ b/hdl/chisel/src/coralnpu/scalar/Mlu.scala
+@@ -39,26 +39,30 @@ class MluCmd(p: Parameters) extends Bundle {
+ }
+
+ class MluStage1(p: Parameters) extends Bundle {
+-  val rd  = UInt(log2Ceil(p.scalarRegCount).W)
+-  val op  = MluOp()
+-  val sel = UInt(p.instructionLanes.W)
++  val rd    = UInt(log2Ceil(p.scalarRegCount).W)
++  val op    = MluOp()
++  val sel   = UInt(p.instructionLanes.W)
++  val owner = new OwnerTag(p)
+ }
+
+ class MluStage2(p: Parameters) extends Bundle {
+-  val rd   = UInt(log2Ceil(p.scalarRegCount).W)
+-  val op   = MluOp()
+-  val prod = SInt((2 * p.xlen + 2).W)
++  val rd    = UInt(log2Ceil(p.scalarRegCount).W)
++  val op    = MluOp()
++  val prod  = SInt((2 * p.xlen + 2).W)
++  val owner = new OwnerTag(p)
+ }
+
+ class Mlu(p: Parameters) extends Module {
+   val io = IO(new Bundle {
+     // Decode cycle.
+-    val req = Vec(p.instructionLanes, Flipped(Decoupled(new MluCmd(p))))
++    val req      = Vec(p.instructionLanes, Flipped(Decoupled(new MluCmd(p))))
++    val reqOwner = Input(Vec(p.instructionLanes, new OwnerTag(p)))
+
+     // Execute cycle.
+-    val rs1 = Vec(p.instructionLanes, Flipped(new RegfileReadDataIO(p)))
+-    val rs2 = Vec(p.instructionLanes, Flipped(new RegfileReadDataIO(p)))
+-    val rd  = Decoupled(Flipped(new RegfileWriteDataIO(p)))
++    val rs1     = Vec(p.instructionLanes, Flipped(new RegfileReadDataIO(p)))
++    val rs2     = Vec(p.instructionLanes, Flipped(new RegfileReadDataIO(p)))
++    val rd      = Decoupled(Flipped(new RegfileWriteDataIO(p)))
++    val rdOwner = Output(new OwnerTag(p))
+   })
+
+   // Stage 1 select and decode instruction
+@@ -67,9 +71,10 @@ class Mlu(p: Parameters) extends Module {
+
+   val stage1 = Wire(Decoupled(new MluStage1(p)))
+   stage1.valid     := arb.io.out.valid
+-  stage1.bits.rd   := arb.io.out.bits.addr
+-  stage1.bits.op   := arb.io.out.bits.op
+-  stage1.bits.sel  := UIntToOH(arb.io.chosen)
++  stage1.bits.rd    := arb.io.out.bits.addr
++  stage1.bits.op    := arb.io.out.bits.op
++  stage1.bits.sel   := UIntToOH(arb.io.chosen)
++  stage1.bits.owner := io.reqOwner(arb.io.chosen)
+   arb.io.out.ready := stage1.ready
+   val stage2Input = Queue(stage1, 1, true)
+
+@@ -96,6 +101,7 @@ class Mlu(p: Parameters) extends Module {
+   stage2.bits.rd    := addr2in
+   stage2.bits.op    := op2in
+   stage2.bits.prod  := prod
++  stage2.bits.owner := stage2Input.bits.owner
+   stage2Input.ready := stage2.ready
+
+   val stage3Input = Queue(stage2, 1, true)
+@@ -120,6 +126,7 @@ class Mlu(p: Parameters) extends Module {
+   io.rd.valid     := stage3Input.valid
+   io.rd.bits.addr := stage3Input.bits.rd
+   io.rd.bits.data := mul
++  io.rdOwner      := stage3Input.bits.owner
+
+   // Assertions.
+   for (i <- 0 until p.instructionLanes) {
+diff --git a/hdl/chisel/src/coralnpu/scalar/SCore.scala b/hdl/chisel/src/coralnpu/scalar/SCore.scala
+index d223219..fca2856 100644
+--- a/hdl/chisel/src/coralnpu/scalar/SCore.scala
++++ b/hdl/chisel/src/coralnpu/scalar/SCore.scala
+@@ -44,31 +44,75 @@ class SCore(p: Parameters) extends Module {
+
+     val rvvcore = Option.when(p.enableRvv)(Flipped(new RvvCoreIO(p)))
+
++    val ctx   = new CoreContextIO(p)
+     val debug = Option.when(p.shouldExposeDebugPorts)(new DebugIO(p))
+   })
+
++  val activeCtx = if (p.contextCount == 1) 0.U(1.W) else io.ctx.ctxSelect
++  val perCtxGenWire = Wire(Vec(p.contextCount, UInt(p.ctxGenerationBits.W)))
++  val activeCtxGen  = perCtxGenWire(activeCtx)
++
++  // Monotonic per-Context parent instruction sequence (`owner_op_seq`).
++  val perCtxOpSeq = RegInit(VecInit.fill(p.contextCount)(0.U(p.ownerOpSeqBits.W)))
++  val laneOpSeq   = Wire(Vec(p.instructionLanes, UInt(p.ownerOpSeqBits.W)))
++  val laneOwners  = Wire(Vec(p.instructionLanes, new OwnerTag(p)))
++
+   // The functional units that make up the core.
+-  val regfile = Regfile(p)
++  val regfile = Module(new BankedRf(p))
+   val fetch   = Module(new UncachedFetch(p))
+
+   val csr      = Csr(p)
+   val dispatch = Module(new DispatchV2(p))
+
++  for (i <- 0 until p.instructionLanes) {
++    val prevFires = PopCount((0 until i).map(j => dispatch.io.inst(j).fire))
++    laneOpSeq(i)  := perCtxOpSeq(activeCtx) + prevFires
++    laneOwners(i) := OwnerTag.make(p)(activeCtx, activeCtxGen, laneOpSeq(i))
++  }
++  val totalFires = PopCount((0 until p.instructionLanes).map(j => dispatch.io.inst(j).fire))
++  for (c <- 0 until p.contextCount) {
++    when(io.ctx.advanceGen(c)) {
++      perCtxOpSeq(c) := 0.U
++    }.elsewhen(activeCtx === c.U) {
++      perCtxOpSeq(c) := perCtxOpSeq(c) + totalFires
++    }
++  }
++
+   val lsu               = Lsu(p)
+   val fault_manager     = Module(new FaultManager(p))
+-  val retirement_buffer = Module(new RetirementBuffer(p, mini = !p.useRetirementBuffer))
++  val retirement_buffer = Module(new RetirementPartitionBank(p, mini = !p.useRetirementBuffer))
+   val rob_io            = retirement_buffer.io
+
+-  rob_io.inst            := dispatch.io.inst
++  regfile.io.activeCtx   := activeCtx
++  regfile.io.perCtxGen   := perCtxGenWire
++  regfile.io.perCtxReset := io.ctx.advanceGen
++  regfile.io.perCtxFlush := rob_io.perCtxTrapRetired
++
++  rob_io.activeCtx       := activeCtx
++  rob_io.perCtxGen       := perCtxGenWire
++  rob_io.perCtxReset     := io.ctx.advanceGen
++  rob_io.dispatchOpSeq   := laneOpSeq
++  rob_io.inst            := dispatch.io.inst
+   rob_io.jump            := dispatch.io.jump
+   rob_io.branch          := dispatch.io.branch
+   rob_io.writeAddrScalar := dispatch.io.rdMark
+   (0 until p.instructionLanes + 2).foreach(i => {
+-    rob_io.writeDataScalar(i) := regfile.io.writeData(i)
++    rob_io.writeDataScalar(i).valid := regfile.io.writeData(i).valid
++    rob_io.writeDataScalar(i).bits  := regfile.io.writeData(i).bits
+   })
+   dispatch.io.retirement_buffer_nSpace       := rob_io.nSpace
+   dispatch.io.retirement_buffer_empty        := rob_io.empty
+   dispatch.io.retirement_buffer_trap_pending := rob_io.trapPending
++
++  // Track composite RobTag / OwnerTag per RVV rob_slot until W3-02 partitions RvvCore ROB.
++  val rvvSlotWidth = math.max(1, log2Ceil(p.retirementBufferSize))
++  val rvvSlotOwner = Option.when(p.enableRvv)(
++    RegInit(VecInit.fill(p.retirementBufferSize)(0.U.asTypeOf(new OwnerTag(p))))
++  )
++  val rvvSlotRobTag = Option.when(p.enableRvv)(
++    RegInit(VecInit.fill(p.retirementBufferSize)(0.U.asTypeOf(new RobTag(p))))
++  )
++
+   val rvvFlushReg = Option.when(p.enableRvv)(RegNext(rob_io.trapRetired, false.B))
+   if (p.enableRvv) {
+     rob_io.isVector.get                        := dispatch.io.isVector.get
+@@ -83,10 +127,11 @@ class SCore(p: Parameters) extends Module {
+     )
+     rvvRdPipedBits := io.rvvcore.get.rd_rob2rt_o
+     (0 until p.rvvRetireLanes).foreach(i => {
++      val rawSlot = rvvRdPipedBits(i).rob_tag
+       rob_io.writeDataVector.get(i).valid        := rvvRdPipedValid(i)
+       rob_io.writeDataVector.get(i).bits.w_valid := rvvRdPipedBits(i).w_valid
+       rob_io.writeDataVector.get(i).bits.addr    := rvvRdPipedBits(i).w_index
+-      rob_io.writeDataVector.get(i).bits.rob_tag := rvvRdPipedBits(i).rob_tag
++      rob_io.writeDataVector.get(i).bits.rob_tag := rvvSlotRobTag.get(rawSlot)
+       if (p.enableVerification) {
+         rob_io.writeDataVector.get(i).bits.data.get   := rvvRdPipedBits(i).w_data.get
+         rob_io.writeDataVector.get(i).bits.uop_pc.get := rvvRdPipedBits(i).uop_pc.get
+@@ -94,9 +139,25 @@ class SCore(p: Parameters) extends Module {
+       rob_io.writeDataVector.get(i).bits.last_uop_valid := rvvRdPipedBits(i).last_uop_valid
+     })
+     if (p.enableVme) {
+-      rob_io.isTile.get         := dispatch.io.isTile.get
+-      rob_io.writeDataTile.get  := io.rvvcore.get.vmeRt.get
+-      rob_io.vmeMtypeWb.get     := io.rvvcore.get.vmeMtypeWb.get
++      rob_io.isTile.get := dispatch.io.isTile.get
++      val vmeRtIn       = io.rvvcore.get.vmeRt.get
++      rob_io.writeDataTile.get.valid         := vmeRtIn.valid
++      rob_io.writeDataTile.get.bits.rob_tag  := rvvSlotRobTag.get(vmeRtIn.bits.rob_tag)
++      rob_io.writeDataTile.get.bits.is_store := vmeRtIn.bits.is_store
++      rob_io.writeDataTile.get.bits.mask     := vmeRtIn.bits.mask
++      rob_io.writeDataTile.get.bits.idx      := vmeRtIn.bits.idx
++      if (p.enableVerification) {
++        rob_io.writeDataTile.get.bits.data.get := vmeRtIn.bits.data.get
++        rob_io.writeDataTile.get.bits.pc.get   := vmeRtIn.bits.pc.get
++      }
++      for (k <- 0 until p.instructionLanes) {
++        val mwb = io.rvvcore.get.vmeMtypeWb.get(k)
++        rob_io.vmeMtypeWb.get(k).valid        := mwb.valid
++        rob_io.vmeMtypeWb.get(k).bits.rob_tag := rvvSlotRobTag.get(mwb.bits.rob_tag)
++        if (p.enableVerification) {
++          rob_io.vmeMtypeWb.get(k).bits.data.get := mwb.bits.data.get
++        }
++      }
+       dispatch.io.mstatusMs.get := csr.io.mstatus_ms.get
+       val vmeEventValid = !(rob_io.trapRetired || rvvFlushReg.get || io.rvvcore.get.trap.valid)
+       csr.io.vme_discard.get  := RegNext(dispatch.io.vmeDiscard.get, false.B) && vmeEventValid
+@@ -163,6 +224,7 @@ class SCore(p: Parameters) extends Module {
+       fault_manager.io.in.fault(i).rvv.get := dispatch.io.rvvFault.get(i)
+     }
+     fault_manager.io.in.pc(i).pc       := fetch.io.inst.lanes(i).bits.addr
++    fault_manager.io.in.owner(i)       := laneOwners(i)
+     fault_manager.io.in.jalr(i).target := regfile.io.target(i).data
+     fault_manager.io.in.undef(i).inst  := fetch.io.inst.lanes(i).bits.inst
+     fault_manager.io.in.jal(i).target  := dispatch.io.bruTarget(i)
+@@ -175,8 +237,10 @@ class SCore(p: Parameters) extends Module {
+     fault_manager.io.in.rvv_fault.get.bits.mtval  :=
+       io.rvvcore.get.trap.bits.originalEncoding()
+     fault_manager.io.in.rvv_fault.get.bits.decode      := false.B
++    val trapSlot = io.rvvcore.get.trap.bits.rob_tag
++    fault_manager.io.in.rvv_fault.get.bits.owner       := rvvSlotOwner.get(trapSlot)
+     fault_manager.io.in.rvv_fault.get.bits.is_rvv.get  := true.B
+-    fault_manager.io.in.rvv_fault.get.bits.rob_tag.get := io.rvvcore.get.trap.bits.rob_tag
++    fault_manager.io.in.rvv_fault.get.bits.rob_tag.get := rvvSlotRobTag.get(trapSlot)
+     fault_manager.io.in.rvv_fault.get.bits.vstart.get  := MakeInvalid(0.U)
+   }
+   bru(0).io.fault_manager.get := fault_manager.io.out
+@@ -184,15 +248,17 @@ class SCore(p: Parameters) extends Module {
+   // ---------------------------------------------------------------------------
+   // ALU
+   for (i <- 0 until p.instructionLanes) {
+-    alu(i).io.req := dispatch.io.alu(i)
+-    alu(i).io.rs1 := regfile.io.readData(2 * i + 0)
+-    alu(i).io.rs2 := regfile.io.readData(2 * i + 1)
++    alu(i).io.req      := dispatch.io.alu(i)
++    alu(i).io.reqOwner := laneOwners(i)
++    alu(i).io.rs1      := regfile.io.readData(2 * i + 0)
++    alu(i).io.rs2      := regfile.io.readData(2 * i + 1)
+   }
+
+   // ---------------------------------------------------------------------------
+   // Branch Unit
+   for (i <- 0 until p.instructionLanes) {
+     bru(i).io.req             := dispatch.io.bru(i)
++    bru(i).io.reqOwner        := laneOwners(i)
+     bru(i).io.rs1             := regfile.io.readData(2 * i + 0)
+     bru(i).io.rs2             := regfile.io.readData(2 * i + 1)
+     bru(i).io.target          := regfile.io.target(i)
+@@ -256,6 +322,7 @@ class SCore(p: Parameters) extends Module {
+   // Load/Store Unit
+   lsu.io.busPort := regfile.io.busPort
+   lsu.io.req <> dispatch.io.lsu
++  lsu.io.reqOwner      := laneOwners
+   lsu.io.pipelineFlush := rob_io.trapRetired
+   if (p.enableRvv) {
+     lsu.io.rvvState.get := io.rvvcore.get.configState
+@@ -271,13 +338,15 @@ class SCore(p: Parameters) extends Module {
+   // Multiplier Unit
+   for (i <- 0 until p.instructionLanes) {
+     mlu.io.req(i) <> dispatch.io.mlu(i)
+-    mlu.io.rs1(i) := regfile.io.readData(2 * i)
+-    mlu.io.rs2(i) := regfile.io.readData((2 * i) + 1)
++    mlu.io.reqOwner(i) := laneOwners(i)
++    mlu.io.rs1(i)      := regfile.io.readData(2 * i)
++    mlu.io.rs2(i)      := regfile.io.readData((2 * i) + 1)
+   }
+
+   // ---------------------------------------------------------------------------
+   // Divide Unit
+   dvu.io.req <> dispatch.io.dvu(0)
++  dvu.io.reqOwner := laneOwners(0)
+   dvu.io.rs1      := regfile.io.readData(0)
+   dvu.io.rs2      := regfile.io.readData(1)
+   dvu.io.rd.ready := !mlu.io.rd.valid
+@@ -298,10 +367,13 @@ class SCore(p: Parameters) extends Module {
+     regfile.io.writeAddr(i)        := dispatch.io.rdMark(i)
+     regfile.io.busAddr(i)          := dispatch.io.busRead(i)
+
+-    val csr0Valid = if (i == 0) csr.io.rd.valid else false.B
+-    val csr0Addr  = if (i == 0) csr.io.rd.bits.addr else 0.U
+-    val csr0Data  = if (i == 0) csr.io.rd.bits.data else 0.U
++    val csrReqOwner = RegNext(laneOwners(0), OwnerTag.zero(p))
++    val csr0Valid   = if (i == 0) csr.io.rd.valid else false.B
++    val csr0Addr    = if (i == 0) csr.io.rd.bits.addr else 0.U
++    val csr0Data    = if (i == 0) csr.io.rd.bits.data else 0.U
++    val csr0Owner   = if (i == 0) csrReqOwner else OwnerTag.zero(p)
+
++    val rvvSyncOwner   = RegNext(laneOwners(i), OwnerTag.zero(p))
+     val rvvCoreRdValid = io.rvvcore.map(_.rd(i).valid).getOrElse(false.B)
+     val rvvCoreRdAddr  = MuxOR(rvvCoreRdValid, io.rvvcore.map(_.rd(i).bits.addr).getOrElse(0.U))
+     val rvvCoreRdData  = MuxOR(rvvCoreRdValid, io.rvvcore.map(_.rd(i).bits.data).getOrElse(0.U))
+@@ -322,6 +394,16 @@ class SCore(p: Parameters) extends Module {
+         MuxOR(bru(i).io.rd.valid, bru(i).io.rd.bits.data) |
+         rvvCoreRdData
+
++    regfile.io.writeData(i).bits.owner := MuxCase(
++      OwnerTag.zero(p),
++      Seq(
++        csr0Valid          -> csr0Owner,
++        alu(i).io.rd.valid -> alu(i).io.rdOwner,
++        bru(i).io.rd.valid -> bru(i).io.rdOwner,
++        rvvCoreRdValid     -> rvvSyncOwner
++      )
++    )
++
+     if (p.enableRvv) {
+       assert(
+         (csr0Valid +&
+@@ -340,11 +422,21 @@ class SCore(p: Parameters) extends Module {
+   val floatCore       = Option.when(p.enableFloat)(FloatCore(p))
+   val floatReadPorts  = if (p.enableRvv) 4 else 3
+   val floatWritePorts = 2
+-  val fRegfile        =
+-    Option.when(p.enableFloat)(Module(new FRegfile(p, floatReadPorts, floatWritePorts)))
++  val fRegfile =
++    Option.when(p.enableFloat)(Module(new BankedFRegfile(p, floatReadPorts, floatWritePorts)))
++  val lastRvvAsyncOwner = RegInit(0.U.asTypeOf(new OwnerTag(p)))
+   if (p.enableFloat) {
+-    lsu.io.busPort_flt.get         := fRegfile.get.io.busPort
+-    fRegfile.get.io.busPortAddr    := dispatch.io.fbusPortAddr.get
++    fRegfile.get.io.activeCtx    := activeCtx
++    fRegfile.get.io.floatReadCtx := Mux(
++      io.dm.float_rs.get.valid,
++      activeCtx,
++      floatCore.get.io.activeOwner.ctx_slot
++    )
++    fRegfile.get.io.perCtxGen   := perCtxGenWire
++    fRegfile.get.io.perCtxReset := io.ctx.advanceGen
++    fRegfile.get.io.perCtxFlush := rob_io.perCtxTrapRetired
++    lsu.io.busPort_flt.get      := fRegfile.get.io.busPort
++    fRegfile.get.io.busPortAddr := dispatch.io.fbusPortAddr.get
+     fRegfile.get.io.scoreboard_set :=
+       MuxOR(dispatch.io.rdMark_flt.get.valid, UIntToOH(dispatch.io.rdMark_flt.get.addr))
+     // Mux input to read port 0
+@@ -401,15 +493,13 @@ class SCore(p: Parameters) extends Module {
+         floatCore.get.io.write_ports(0).valid -> floatCore.get.io.write_ports(0).data
+       )
+     )
++    fRegfile.get.io.write_ports(0).owner := Mux(
++      io.dm.float_rd.get.valid,
++      OwnerTag.make(p)(activeCtx, activeCtxGen, 0.U),
++      floatCore.get.io.writeOwner(0)
++    )
+     fRegfile.get.io.dm_write_valid := io.dm.float_rd.get.valid
+
+-    // Route RVV async FP writeback (vfmv.f.s) through fRegfile write port 1.
+-    // The LSU FP-load (floatCore.write_ports(1)) takes priority; async_frd
+-    // uses the port only when LSU isn't writing. The scoreboard is pre-marked
+-    // via rdMark_flt (see Decode.scala), so clearing on this write doesn't
+-    // trip FRegfile's scoreboard_error assertion.
+-    // Port 1: Arbitrate between LSU FP-load and RVV async writeback.
+-    // LSU takes priority; RVV is stalled if LSU is writing.
+     val lsuWriting = floatCore.get.io.write_ports(1).valid
+     if (p.enableRvv) {
+       val asyncFrd = io.rvvcore.get.async_frd
+@@ -425,11 +515,21 @@ class SCore(p: Parameters) extends Module {
+         floatCore.get.io.write_ports(1).data,
+         Fp32.fromWord(asyncFrd.bits.data(31, 0))
+       )
++      fRegfile.get.io.write_ports(1).owner := Mux(
++        lsuWriting,
++        floatCore.get.io.writeOwner(1),
++        lastRvvAsyncOwner
++      )
+     } else {
+-      fRegfile.get.io.write_ports(1) := floatCore.get.io.write_ports(1)
++      fRegfile.get.io.write_ports(1).valid := floatCore.get.io.write_ports(1).valid
++      fRegfile.get.io.write_ports(1).addr  := floatCore.get.io.write_ports(1).addr
++      fRegfile.get.io.write_ports(1).data  := floatCore.get.io.write_ports(1).data
++      fRegfile.get.io.write_ports(1).owner := floatCore.get.io.writeOwner(1)
+     }
+
+     floatCore.get.io.inst <> dispatch.io.float.get
++    floatCore.get.io.instOwner  := laneOwners(0)
++    floatCore.get.io.lsuRdOwner := lsu.io.rdFltOwner
+     dispatch.io.fscoreboard.get := fRegfile.get.io.scoreboard
+     dispatch.io.csrFrm.get      := csr.io.float.get.out.frm
+     floatCore.get.io.csr <> csr.io.float.get
+@@ -442,56 +542,82 @@ class SCore(p: Parameters) extends Module {
+
+     rob_io.writeAddrFloat.get := dispatch.io.rdMark_flt.get
+     (0 until 2).foreach(i => {
+-      rob_io.writeDataFloat.get(i).valid     := fRegfile.get.io.write_ports(i).valid
+-      rob_io.writeDataFloat.get(i).bits.addr := fRegfile.get.io.write_ports(i).addr
+-      rob_io.writeDataFloat.get(i).bits.data := fRegfile.get.io.write_ports(i).data.asWord
++      rob_io.writeDataFloat.get(i).valid      := fRegfile.get.io.write_ports(i).valid
++      rob_io.writeDataFloat.get(i).bits.addr  := fRegfile.get.io.write_ports(i).addr
++      rob_io.writeDataFloat.get(i).bits.data  := fRegfile.get.io.write_ports(i).data.asWord
++      rob_io.writeDataFloat.get(i).bits.owner := fRegfile.get.io.write_ports(i).owner
+     })
+     csr.io.float_dirty.get := fRegfile.get.io.write_ports.map(_.valid).reduce(_ || _)
+   }
+
+-  val mluDvuOffset = p.instructionLanes
+-  val mluDvuInputs = Seq(mlu.io.rd, dvu.io.rd) ++
+-    io.rvvcore.map(x => Seq(x.async_rd)).getOrElse(Seq()) ++
+-    floatCore.map(x => Seq(x.io.scalar_rd)).getOrElse(Seq()) ++
+-    Seq(io.dm.scalar_rd)
++  def wrapOwnedDecoupled(
++    src: DecoupledIO[RegfileWriteDataIO],
++    own: OwnerTag
++  ): DecoupledIO[OwnedRegfileWriteDataIO] = {
++    val w = Wire(Decoupled(new OwnedRegfileWriteDataIO(p)))
++    w.valid      := src.valid
++    w.bits.addr  := src.bits.addr
++    w.bits.data  := src.bits.data
++    w.bits.owner := own
++    src.ready    := w.ready
++    w
++  }
+
+-  val arb = Module(new Arbiter(new RegfileWriteDataIO(p), mluDvuInputs.length))
++  val dmWriteOwner = OwnerTag.make(p)(activeCtx, activeCtxGen, 0.U)
++  val mluDvuOffset = p.instructionLanes
++  val mluDvuInputs = Seq(
++    wrapOwnedDecoupled(mlu.io.rd, mlu.io.rdOwner),
++    wrapOwnedDecoupled(dvu.io.rd, dvu.io.rdOwner)
++  ) ++
++    io.rvvcore.map(x => Seq(wrapOwnedDecoupled(x.async_rd, lastRvvAsyncOwner))).getOrElse(Seq()) ++
++    floatCore.map(x => Seq(wrapOwnedDecoupled(x.io.scalar_rd, x.io.scalarRdOwner))).getOrElse(Seq()) ++
++    Seq(wrapOwnedDecoupled(io.dm.scalar_rd, dmWriteOwner))
++
++  val arb = Module(new Arbiter(new OwnedRegfileWriteDataIO(p), mluDvuInputs.length))
+   arb.io.in <> mluDvuInputs
+-  arb.io.out.ready                             := true.B
+-  regfile.io.writeData(mluDvuOffset).valid     := arb.io.out.valid
+-  regfile.io.writeData(mluDvuOffset).bits.addr := arb.io.out.bits.addr
+-  regfile.io.writeData(mluDvuOffset).bits.data := arb.io.out.bits.data
++  arb.io.out.ready                              := true.B
++  regfile.io.writeData(mluDvuOffset).valid      := arb.io.out.valid
++  regfile.io.writeData(mluDvuOffset).bits.addr  := arb.io.out.bits.addr
++  regfile.io.writeData(mluDvuOffset).bits.data  := arb.io.out.bits.data
++  regfile.io.writeData(mluDvuOffset).bits.owner := arb.io.out.bits.owner
+   // MLU/DVU port is never masked
+   regfile.io.writeMask(p.instructionLanes).valid := false.B
+
+   val lsuOffset = p.instructionLanes + 1
+-  regfile.io.writeData(lsuOffset).valid     := lsu.io.rd.valid
+-  regfile.io.writeData(lsuOffset).bits.addr := lsu.io.rd.bits.addr
+-  regfile.io.writeData(lsuOffset).bits.data := lsu.io.rd.bits.data
+-  regfile.io.writeMask(lsuOffset).valid     := lsu.io.fault.valid
++  regfile.io.writeData(lsuOffset).valid      := lsu.io.rd.valid
++  regfile.io.writeData(lsuOffset).bits.addr  := lsu.io.rd.bits.addr
++  regfile.io.writeData(lsuOffset).bits.data  := lsu.io.rd.bits.data
++  regfile.io.writeData(lsuOffset).bits.owner := lsu.io.rdOwner
++  regfile.io.writeMask(lsuOffset).valid      := lsu.io.fault.valid
+
+   val writeMask = bru.map(_.io.taken.valid).scan(false.B)(_ || _)
+   for (i <- 0 until p.instructionLanes) {
+     regfile.io.writeMask(i).valid := writeMask(i)
+   }
+   regfile.io.debugWriteValid := io.dm.scalar_rd.valid
+-  regfile.io.pipelineFlush   := rob_io.trapRetired
+-  fRegfile.foreach(_.io.pipelineFlush := rob_io.trapRetired)
+
+   // ---------------------------------------------------------------------------
+   // Rvv Extension
+   if (p.enableRvv) {
+-    // Connect dispatch with dedicated ROB tag metadata
+-    val tagWidth = log2Ceil(p.retirementBufferSize)
++    // Connect dispatch with dedicated ROB tag metadata and record composite RobTag / OwnerTag
++    val tagWidth = math.max(1, log2Ceil(p.retirementBufferSize))
+     for (i <- 0 until p.instructionLanes) {
+       val prevFires = PopCount((0 until i).map(j => dispatch.io.inst(j).fire))
+       val tag       =
+-        if (p.retirementBufferSize > 1) (rob_io.enqPtr + prevFires)(tagWidth - 1, 0) else 0.U
++        if (p.retirementBufferSize > 1) (rob_io.enqPtr + prevFires)(tagWidth - 1, 0) else 0.U(1.W)
+
+       io.rvvcore.get.inst(i).valid        := dispatch.io.rvv.get(i).valid
+       io.rvvcore.get.inst(i).bits         := dispatch.io.rvv.get(i).bits
+       io.rvvcore.get.inst(i).bits.rob_tag := tag
+       dispatch.io.rvv.get(i).ready        := io.rvvcore.get.inst(i).ready
++
++      when(dispatch.io.rvv.get(i).fire) {
++        rvvSlotOwner.get(tag)  := laneOwners(i)
++        rvvSlotRobTag.get(tag) := RobTag.make(p)(activeCtx, tag, rob_io.enqSlotGen(i))
++        when(dispatch.io.rvv.get(i).bits.writesRd() || dispatch.io.rvv.get(i).bits.writesFrd()) {
++          lastRvvAsyncOwner := laneOwners(i)
++        }
++      }
+     }
+     dispatch.io.rvvState.get         := io.rvvcore.get.configState
+     dispatch.io.rvvIdle.get          := io.rvvcore.get.rvv_idle
+@@ -558,7 +684,19 @@ class SCore(p: Parameters) extends Module {
+     rvvIdle &&                              // Could have vill
+     !lsu.io.active &&                       // Could fault
+     !hasFetchedInstructions
+-  fault_manager.io.in.fetchFault := MakeValid(fetchFaultValid, fetch.io.fault.bits)
++  fault_manager.io.in.fetchFault      := MakeValid(fetchFaultValid, fetch.io.fault.bits)
++  fault_manager.io.in.fetchFaultOwner := laneOwners(0)
++
++  perCtxGenWire             := VecInit.fill(p.contextCount)(0.U(p.ctxGenerationBits.W))
++  io.ctx.perCtxGeneration   := perCtxGenWire
++  io.ctx.perCtxNextOpSeq    := perCtxOpSeq
++  io.ctx.perCtxRobSpace     := rob_io.perCtxSpace
++  io.ctx.perCtxRobEmpty     := rob_io.perCtxEmpty
++  io.ctx.perCtxNRetired     := rob_io.perCtxNRetired
++  io.ctx.perCtxTrapRetired  := rob_io.perCtxTrapRetired
++  io.ctx.staleRfRejected    := regfile.io.staleWriteRejected + fRegfile.map(_.io.staleWriteRejected).getOrElse(0.U)
++  io.ctx.staleRobRejected   := rob_io.staleRejected
++  io.ctx.staleCsrRejected   := 0.U
+
+   // ---------------------------------------------------------------------------
+   // Fetch Bus
+@@ -627,7 +765,9 @@ class SCore(p: Parameters) extends Module {
+     }
+
+     for (i <- 0 until p.instructionLanes + 2) {
+-      debug.regfile.writeData(i) := regfile.io.writeData(i)
++      debug.regfile.writeData(i).valid     := regfile.io.writeData(i).valid
++      debug.regfile.writeData(i).bits.addr := regfile.io.writeData(i).bits.addr
++      debug.regfile.writeData(i).bits.data := regfile.io.writeData(i).bits.data
+     }
+
+     if (p.enableFloat) {

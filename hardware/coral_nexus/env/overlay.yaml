@@ -31,3 +31,31 @@ entries:
     src: hardware/coral_nexus/env/overlay/coralnpu/tests/cocotb/vme_test/p0_numeric/p0_numeric_probe_bench.py
     dst: tests/cocotb/vme_test/p0_numeric/p0_numeric_probe_bench.py
     mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/rtl/scalar/UopTag.scala
+    dst: hdl/chisel/src/coralnpu/scalar/UopTag.scala
+    mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/rtl/scalar/BankedRf.scala
+    dst: hdl/chisel/src/coralnpu/scalar/BankedRf.scala
+    mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/rtl/scalar/CtxCsr.scala
+    dst: hdl/chisel/src/coralnpu/scalar/CtxCsr.scala
+    mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/rtl/scalar/RetirementPartitionBank.scala
+    dst: hdl/chisel/src/coralnpu/scalar/RetirementPartitionBank.scala
+    mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/verification/unit/w2/W2_02_rob_owner_spec.scala
+    dst: hdl/chisel/src/coralnpu/verification/w2/W2_02_rob_owner_spec.scala
+    mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/verification/unit/w2/W2_02_rf_bank_spec.scala
+    dst: hdl/chisel/src/coralnpu/verification/w2/W2_02_rf_bank_spec.scala
+    mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/verification/unit/w2/W2_02_csr_flag_delta_spec.scala
+    dst: hdl/chisel/src/coralnpu/verification/w2/W2_02_csr_flag_delta_spec.scala
+    mode: add

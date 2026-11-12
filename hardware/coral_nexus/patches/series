@@ -2,3 +2,8 @@
 #   <source-name>:<patch-path-under-hardware/coral_nexus/patches/>
 # Patches apply with `git apply` (strict context, no fuzz) inside the
 # materialized work tree of the named source. Entries apply in file order.
+coralnpu:w2/0201-core-ctx-ports.patch
+coralnpu:w4/0201-lsu-owner-ports.patch
+coralnpu:w2/0202-rob-owner-tag.patch
+coralnpu:w2/0203-rf-banks.patch
+coralnpu:w2/0204-csr-ctx-bank.patch

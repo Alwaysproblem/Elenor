@@ -436,24 +436,34 @@ def _apply_patches(lock: dict, root: Path, work: Path) -> list[str]:
     target = work / source
     if not target.is_dir():
       _fail(f"series entry {source}:{patch_rel}: source {source} not materialized")
+    # Isolate `git apply` from any enclosing superproject `.git` (e.g. when
+    # `work` lives under `out/coral_nexus/...` inside the main repo), otherwise
+    # `git apply` resolves `a/...` against the outer repo root and silently
+    # prints `Skipped patch ...` with exit code 0.
+    git_env = {
+      **os.environ,
+      "GIT_CEILING_DIRECTORIES": str(target.resolve().parent),
+    }
     check = subprocess.run(
       ["git", "apply", "--check", "--verbose", str(patch_file.absolute())],
       cwd=target,
+      env=git_env,
       capture_output=True,
       text=True,
     )
-    if check.returncode != 0:
+    if check.returncode != 0 or "Skipped patch" in check.stderr:
       _fail(
         f"patch {patch_rel} does not apply cleanly to {source}: "
         f"{check.stderr.strip()}"
       )
     apply = subprocess.run(
-      ["git", "apply", "--whitespace=nowarn", str(patch_file.absolute())],
+      ["git", "apply", "--whitespace=nowarn", "--verbose", str(patch_file.absolute())],
       cwd=target,
+      env=git_env,
       capture_output=True,
       text=True,
     )
-    if apply.returncode != 0:
+    if apply.returncode != 0 or "Skipped patch" in apply.stderr:
       _fail(f"patch {patch_rel} failed during apply: {apply.stderr.strip()}")
     applied.append(f"{source}:{patch_rel}")
   return applied

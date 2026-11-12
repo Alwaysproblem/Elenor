@@ -1,0 +1,16 @@
+diff --git a/hdl/chisel/src/coralnpu/RetirementBuffer.scala b/hdl/chisel/src/coralnpu/RetirementBuffer.scala
+index 5c9bc53..820e8ef 100644
+--- a/hdl/chisel/src/coralnpu/RetirementBuffer.scala
++++ b/hdl/chisel/src/coralnpu/RetirementBuffer.scala
+@@ -611,9 +611,9 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false, ctxSlotId: Int = 0)
+       true.B
+     }
+
+-    // Match store completion strictly by OwnerTag (never by PC).
++    // MUTANT: ignore OwnerTag op_seq/ctx_generation on storeComplete!
+     val storeOwnerMatch =
+-      storeComplete.valid && validBufferEntry && OwnerTag.matches(storeComplete.bits, bufferEntry.owner)
++      storeComplete.valid && validBufferEntry
+     val storeReady =
+       (bufferEntry.isScalarOrFloatStore && storeOwnerMatch) ||
+         (bufferEntry.isVector && tileDe2RtMatch)

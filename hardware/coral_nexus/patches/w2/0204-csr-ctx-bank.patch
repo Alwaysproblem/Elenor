@@ -1,0 +1,153 @@
+diff --git a/hdl/chisel/src/coralnpu/scalar/Csr.scala b/hdl/chisel/src/coralnpu/scalar/Csr.scala
+index c33c4fb..f4764bb 100644
+--- a/hdl/chisel/src/coralnpu/scalar/Csr.scala
++++ b/hdl/chisel/src/coralnpu/scalar/Csr.scala
+@@ -255,9 +255,14 @@ class Csr(p: Parameters) extends Module {
+       val next_pc             = Input(UInt(p.programCounterBits.W))
+       val debug_pc            = Valid(UInt(p.fetchAddrBits.W))
+     }
+-    val timer_irq    = Input(Bool())
+-    val software_irq = Input(Bool())
+-    val trace        = Output(new CsrTraceIO(p))
++    val timer_irq            = Input(Bool())
++    val software_irq         = Input(Bool())
++    val trace                = Output(new CsrTraceIO(p))
++    val retiredFflagsReplace = Input(Bool())
++    val retiredFflagsBits    = Input(UInt(5.W))
++    val obsFflags            = Output(UInt(5.W))
++    val obsFrm               = Output(UInt(3.W))
++    val obsMscratch          = Output(UInt(p.xlen.W))
+   })
+
+   def LegalizeTdata1(wdata: UInt): Tdata1 = {
+@@ -635,7 +640,7 @@ class Csr(p: Parameters) extends Module {
+     io.mstatus_ms.get := ms_post_write
+   }
+
+-  val fflags_base = WireDefault(fflags)
++  val fflags_base = WireDefault(Mux(io.retiredFflagsReplace, io.retiredFflagsBits, fflags))
+   when(req.valid) {
+     when(fflagsEn) { fflags_base := wdata(4, 0) }
+     when(frmEn) { frm := localWdata(frm)(2, 0) }
+@@ -907,9 +912,12 @@ class Csr(p: Parameters) extends Module {
+
+   val is_read_only = req.bits.index(11, 10) === 3.U
+
+-  io.trace.valid := is_csr_write && !is_read_only
+-  io.trace.addr  := req.bits.index
+-  io.trace.data  := trace_data
++  io.trace.valid  := is_csr_write && !is_read_only
++  io.trace.addr   := req.bits.index
++  io.trace.data   := trace_data
++  io.obsFflags    := fflags
++  io.obsFrm       := frm
++  io.obsMscratch  := mscratch
+
+   // Assertions.
+   assert(!(req.valid && !io.rs1.valid))
+diff --git a/hdl/chisel/src/coralnpu/scalar/SCore.scala b/hdl/chisel/src/coralnpu/scalar/SCore.scala
+index fca2856..ece825a 100644
+--- a/hdl/chisel/src/coralnpu/scalar/SCore.scala
++++ b/hdl/chisel/src/coralnpu/scalar/SCore.scala
+@@ -61,7 +61,7 @@ class SCore(p: Parameters) extends Module {
+   val regfile = Module(new BankedRf(p))
+   val fetch   = Module(new UncachedFetch(p))
+
+-  val csr      = Csr(p)
++  val csr      = Module(new CtxCsr(p))
+   val dispatch = Module(new DispatchV2(p))
+
+   for (i <- 0 until p.instructionLanes) {
+@@ -267,10 +267,21 @@ class SCore(p: Parameters) extends Module {
+     rob_io.jalrTargets(i) := Cat(regfile.io.target(i).data(p.programCounterBits - 1, 1), 0.U(1.W))
+   }
+
++  csr.io.activeCtx     := activeCtx
++  csr.io.advanceGen    := io.ctx.advanceGen
+   bru(0).io.csr.get <> csr.io.bru
+-
+-  // Instruction counters
+-  csr.io.counters.nRetired := rob_io.nRetired
++  csr.io.bruOwner      := bru(0).io.trapOwner.get
++
++  // Instruction counters & retired flags delta (ordered merge connected in C027)
++  csr.io.perCtxNRetired := rob_io.perCtxNRetired
++  for (k <- 0 until p.retirementLanes) {
++    csr.io.retiredDelta(k).valid         := false.B
++    csr.io.retiredDelta(k).owner         := OwnerTag.zero(p)
++    csr.io.retiredDelta(k).fflags        := 0.U
++    csr.io.retiredDelta(k).vxsat         := false.B
++    csr.io.retiredDelta(k).replaceFflags := false.B
++    csr.io.retiredDelta(k).replaceVxsat  := false.B
++  }
+
+   // ---------------------------------------------------------------------------
+   // Control Status Unit
+@@ -284,8 +295,13 @@ class SCore(p: Parameters) extends Module {
+   csrReqArbiter.io.in(1).valid := io.dm.csr.valid
+   csrReqArbiter.io.in(1).bits  := io.dm.csr.bits
+   csrReqArbiter.io.out.ready   := true.B
+-  csr.io.req.bits              := csrReqArbiter.io.out.bits
+-  csr.io.req.valid             := csrReqArbiter.io.out.valid
++  csr.io.req.bits  := csrReqArbiter.io.out.bits
++  csr.io.req.valid := csrReqArbiter.io.out.valid
++  csr.io.reqOwner  := Mux(
++    csrReqArbiter.io.chosen === 0.U,
++    laneOwners(0),
++    OwnerTag.make(p)(activeCtx, activeCtxGen, 0.U)
++  )
+
+   val dmRs1 = Wire(new RegfileReadDataIO(p))
+   dmRs1.valid  := true.B
+@@ -367,11 +383,10 @@ class SCore(p: Parameters) extends Module {
+     regfile.io.writeAddr(i)        := dispatch.io.rdMark(i)
+     regfile.io.busAddr(i)          := dispatch.io.busRead(i)
+
+-    val csrReqOwner = RegNext(laneOwners(0), OwnerTag.zero(p))
+-    val csr0Valid   = if (i == 0) csr.io.rd.valid else false.B
+-    val csr0Addr    = if (i == 0) csr.io.rd.bits.addr else 0.U
+-    val csr0Data    = if (i == 0) csr.io.rd.bits.data else 0.U
+-    val csr0Owner   = if (i == 0) csrReqOwner else OwnerTag.zero(p)
++    val csr0Valid = if (i == 0) csr.io.rd.valid else false.B
++    val csr0Addr  = if (i == 0) csr.io.rd.bits.addr else 0.U
++    val csr0Data  = if (i == 0) csr.io.rd.bits.data else 0.U
++    val csr0Owner = if (i == 0) csr.io.rd.bits.owner else OwnerTag.zero(p)
+
+     val rvvSyncOwner   = RegNext(laneOwners(i), OwnerTag.zero(p))
+     val rvvCoreRdValid = io.rvvcore.map(_.rd(i).valid).getOrElse(false.B)
+@@ -533,6 +548,7 @@ class SCore(p: Parameters) extends Module {
+     dispatch.io.fscoreboard.get := fRegfile.get.io.scoreboard
+     dispatch.io.csrFrm.get      := csr.io.float.get.out.frm
+     floatCore.get.io.csr <> csr.io.float.get
++    csr.io.floatOwner.get := floatCore.get.io.fflagsOwner
+     floatCore.get.io.rs1 := regfile.io.readData(0)
+     floatCore.get.io.rs2 := regfile.io.readData(1)
+
+@@ -660,6 +676,7 @@ class SCore(p: Parameters) extends Module {
+     csr.io.rvv.get.vxrm    := io.rvvcore.get.csr.vxrm
+     csr.io.rvv.get.vxsat   := io.rvvcore.get.csr.vxsat
+     csr.io.rvv.get.fflags  := io.rvvcore.get.csr.fflags
++    csr.io.rvvOwner.get    := lastRvvAsyncOwner
+     // Register the flush into the RVV core to break the cross-core combinational
+     // path from branch resolution / retirement buffer trap scan through RVV ROB
+     // and queue capacity into dispatch and LSU.
+@@ -687,8 +704,8 @@ class SCore(p: Parameters) extends Module {
+   fault_manager.io.in.fetchFault      := MakeValid(fetchFaultValid, fetch.io.fault.bits)
+   fault_manager.io.in.fetchFaultOwner := laneOwners(0)
+
+-  perCtxGenWire             := VecInit.fill(p.contextCount)(0.U(p.ctxGenerationBits.W))
+-  io.ctx.perCtxGeneration   := perCtxGenWire
++  perCtxGenWire             := csr.io.perCtxGen
++  io.ctx.perCtxGeneration   := csr.io.perCtxGen
+   io.ctx.perCtxNextOpSeq    := perCtxOpSeq
+   io.ctx.perCtxRobSpace     := rob_io.perCtxSpace
+   io.ctx.perCtxRobEmpty     := rob_io.perCtxEmpty
+@@ -696,7 +713,7 @@ class SCore(p: Parameters) extends Module {
+   io.ctx.perCtxTrapRetired  := rob_io.perCtxTrapRetired
+   io.ctx.staleRfRejected    := regfile.io.staleWriteRejected + fRegfile.map(_.io.staleWriteRejected).getOrElse(0.U)
+   io.ctx.staleRobRejected   := rob_io.staleRejected
+-  io.ctx.staleCsrRejected   := 0.U
++  io.ctx.staleCsrRejected   := csr.io.staleRejected
+
+   // ---------------------------------------------------------------------------
+   // Fetch Bus

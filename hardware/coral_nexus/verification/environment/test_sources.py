@@ -337,3 +337,23 @@ def test_refuses_non_empty_work_root(fixture: Fixture) -> None:
   proc = fixture.materialize(out, lock)
   assert proc.returncode != 0
   assert "not empty" in proc.stderr
+
+
+def test_materialize_applies_patches_when_out_is_inside_superproject(fixture: Fixture) -> None:
+  """Regression: when `--out` lives inside the superproject tree (e.g. `out/...`),
+  `git apply` must NOT walk up to `super/.git` and silently skip hunks."""
+  lock = fixture.write_lock()
+  patch_body = (
+    "--- a/code/main.c\n"
+    "+++ b/code/main.c\n"
+    "@@ -1 +1 @@\n"
+    "-int main(void) { return 7; }\n"
+    "+int main(void) { return 42; }\n"
+  )
+  (fixture.patches / "ret42.patch").write_text(patch_body)
+  (fixture.patches / "series").write_text("src:ret42.patch\n")
+  nested_out = fixture.super / "out/work"
+  nested_out.parent.mkdir(parents=True, exist_ok=True)
+  proc = fixture.materialize(nested_out, lock)
+  assert proc.returncode == 0, proc.stderr
+  assert "return 42;" in (nested_out / "src/code/main.c").read_text()
