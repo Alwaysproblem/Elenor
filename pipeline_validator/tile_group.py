@@ -212,6 +212,10 @@ class TileGroup:
       # executing as if it were a Tile.
       raise NotImplementedError('backend_kind="rtl" lands with C025/C040; only "python" exists')
     self.backend_kind = backend_kind
+    # C024: Group-side cosim outer services (caps/program/event/reset/stream), registered by
+    # message family; routed from `_service_rtl_inbound` once RTL Tiles deliver real traffic.
+    self._cosim_services: dict[str, object] = {}
+    self._rtl_inbound: deque[object] = deque()
     self.cfg = cfg
     self.tracer = tracer
     self.scheduler_config = scheduler_config or GroupSchedulerConfig()
@@ -1683,13 +1687,28 @@ class TileGroup:
     self._step_python_tiles(cycle, freeze_new_work=freeze_new_work)
     self._service_rtl_inbound(cycle)
 
+  def register_cosim_service(self, name: str, service: object) -> None:
+    """Register one C024 outer service (caps/program/event/reset/stream) by family name."""
+    if name in self._cosim_services:
+      raise ValueError(f"cosim service {name!r} already registered")
+    self._cosim_services[name] = service
+
   def _service_rtl_inbound(self, cycle: int) -> None:
     """Consume MEMORY/CTRL/EVENT/PROGRAM/STREAM messages from RTL Tiles (C025/C040).
 
-    With only Python Tiles constructed, there is by construction nothing to service; the
-    assertion keeps a silently-skipped RTL port from masquerading as serviced.
+    Boundary messages queued by RTL TilePorts are dispatched by message family to the
+    registered C024 services. With only Python Tiles constructed there is nothing queued;
+    the rtl_ports assertion keeps a silently-skipped RTL port from masquerading as serviced.
     """
     _ = cycle
+    while self._rtl_inbound:
+      msg = self._rtl_inbound.popleft()
+      family = getattr(msg, "channel", None)
+      service = self._cosim_services.get(str(family))
+      if service is None:
+        raise MemoryInvariantError(
+          f"RTL inbound {getattr(msg, 'message_type', '?')} has no registered service"
+        )
     if getattr(self, "rtl_ports", None):
       raise MemoryInvariantError("RTL Tile inbound servicing arrives with C025/C040")
 
@@ -1862,8 +1881,13 @@ class TileGroup:
     role_events = [event_id for event_id, trace in self._role_trace.items() if trace.sequencer is sequencer]
     external_events = {event for event in sequencer._events_done if "ev_dma_" in event}
     if external_events:
-      for tile in self.tiles:
-        tile.retire_external_events(external_events)
+      from .cosim.event_service import EventService  # lazy: event_service imports tile_group
+
+      service = self._cosim_services.get("event")
+      if not isinstance(service, EventService):
+        service = EventService(self)
+        self._cosim_services["event"] = service
+      service.broadcast_event_retire(external_events, self.tiles)
     for event_id in role_events:
       self._role_trace.pop(event_id, None)
       self._role_event_tile_mask.pop(event_id, None)
