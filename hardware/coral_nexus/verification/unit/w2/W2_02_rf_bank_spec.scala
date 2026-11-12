@@ -311,17 +311,17 @@ class W2_02_RfBankSpec extends AnyFreeSpec with ChiselSim {
       // IMEM that serves whichever Context `ctxSelect` has selected for issue, as a
       // stand-in for per-context instruction memory:
       //   Context 0: lui x1,0x10; addi x5,x0,42; mul x6,x5,x5; sw x6,0(x1)
-      //   Context 1: lui x1,0x10; addi x5,x0,99; sw x5,4(x1); nop
+      //   Context 1: lui x1,0x10; addi x5,x0,99; mul x6,x5,x5; sw x6,4(x1)
       val fetchLineCtx0 = BigInt("0060a0230252833302a00293000100b7", 16)
-      val fetchLineCtx1 = BigInt("000000130050a22306300293000100b7", 16)
+      val fetchLineCtx1 = BigInt("0060a2230252833306300293000100b7", 16)
       val nopLine       = BigInt("00000013000000130000001300000013", 16)
 
       var prevFire   = false
       var prevAddr   = BigInt(0)
       var prevRdata = nopLine
       var switched  = false
-      var retired0  = 0L
-      var retired1  = 0L
+      val retired0  = Array(0L)
+      val retired1  = Array(0L)
       val dbusStores = scala.collection.mutable.ArrayBuffer[BigInt]()
 
       for (cyc <- 0 until 100) {
@@ -345,10 +345,18 @@ class W2_02_RfBankSpec extends AnyFreeSpec with ChiselSim {
         val reqAddr  = core.io.ibus.addr.peek().litValue
 
         if (core.io.dbus.valid.peek().litToBoolean && core.io.dbus.write.peek().litToBoolean) {
-          dbusStores += (core.io.dbus.wdata.peek().litValue & BigInt("ffffffff", 16))
+          // Reconstruct the stored 32-bit word from wmask/wdata: a word store at
+          // offset 4 lands in wdata[63:32] with wmask=0xF0 (Lsu byte lanes).
+          val wmask = core.io.dbus.wmask.peek().litValue
+          val wdata = core.io.dbus.wdata.peek().litValue
+          val lane0 = (0 until 16).find(i => ((wmask >> i) & BigInt(1)) == BigInt(1)).getOrElse(0)
+          val word  = (0 until 4).foldLeft(BigInt(0)) { (acc, k) =>
+            acc | (((wdata >> (8 * (lane0 + k))) & BigInt(0xff)) << (8 * k))
+          }
+          dbusStores += word
         }
-        retired0 += core.io.ctx.perCtxNRetired(0).peek().litValue.toLong
-        retired1 += core.io.ctx.perCtxNRetired(1).peek().litValue.toLong
+        retired0(0) += core.io.ctx.perCtxNRetired(0).peek().litValue.toLong
+        retired1(0) += core.io.ctx.perCtxNRetired(1).peek().litValue.toLong
 
         core.clock.step()
         val servedLine =
@@ -358,15 +366,18 @@ class W2_02_RfBankSpec extends AnyFreeSpec with ChiselSim {
         prevAddr = reqAddr
       }
 
-      assert(retired0 >= 4, s"expected Context 0 to retire >= 4 instructions, got $retired0")
-      assert(retired1 >= 4, s"expected Context 1 to retire >= 4 instructions, got $retired1")
+      assert(retired0(0) >= 4,
+        s"expected Context 0 to retire >= 4 instructions, got ${retired0(0)}")
+      assert(retired1(0) >= 4,
+        s"expected Context 1 to retire >= 4 instructions, got ${retired1(0)}")
       assert(dbusStores.contains(BigInt(1764)),
-        s"expected Context 0 store 1764 in $dbusStores, retired0=$retired0 retired1=$retired1")
+        s"expected Context 0 store 1764 in $dbusStores, retired0=${retired0(0)}")
+      assert(dbusStores.contains(BigInt(9801)),
+        s"expected Context 1 store 9801 in $dbusStores, retired1=${retired1(0)}")
 
-      // Context 0 x5 == 42, x6 == 1764; Context 1 x5 == 99, x6 == 1764 — both
-      // through the real ALU and 3-stage MLU with per-bank OwnerTag routing
-      // (each bank holds its own x5=42/99). Context 1's own LSU store leg via
-      // the shared fetch PC lands in C028's per-context fetch routing.
+      // Context 0 x5 == 42, x6 == 1764; Context 1 x5 == 99, x6 == 9801 — both
+      // Contexts execute their own ALU + 3-stage MLU + LSU store through the real
+      // Core with per-bank OwnerTag routing (full dual-context proof).
       core.io.ctx.ctxSelect.poke(0.U)
       core.io.dm.scalar_rs.idx.poke(5.U)
       core.io.dm.scalar_rs.data.expect(42.U)
@@ -377,7 +388,7 @@ class W2_02_RfBankSpec extends AnyFreeSpec with ChiselSim {
       core.io.dm.scalar_rs.idx.poke(5.U)
       core.io.dm.scalar_rs.data.expect(99.U)
       core.io.dm.scalar_rs.idx.poke(6.U)
-      core.io.dm.scalar_rs.data.expect(1764.U)
+      core.io.dm.scalar_rs.data.expect(9801.U)
     }
   }
 }
