@@ -56,7 +56,9 @@ bash "$H/scripts/lib/docker_run.sh" "$IMAGE" "$CACHE_DIR" -- bash -exc '
     /workspace/coral_nexus/protocol/cn_protocol_v1.yaml \
     /out/work/cn_slot_table.h
   # 2) Verilate the stub top (C++ outputs only)
-  "$VERILATOR_ROOT/bin/verilator" --cc -Wno-fatal --top-module cn_protocol_stub \
+  "$VERILATOR_ROOT/bin/verilator" --cc -Wno-fatal \
+    -I/workspace/coral_nexus/protocol/generated \
+    --top-module cn_protocol_stub \
     -Mdir obj /workspace/coral_nexus/sim/unit/cn_protocol_stub.sv >verilate.log 2>&1
   # 3) shared library: model + ABI + verilated runtime
   g++ -std=c++20 -O2 -fPIC -shared \
@@ -72,7 +74,9 @@ bash "$H/scripts/lib/docker_run.sh" "$IMAGE" "$CACHE_DIR" -- bash -exc '
     -o /out/libcn_cosim_stub.so
   # 4) selftest driver (dlopen the .so, so it exercises the exact loadable artifact)
   gcc -std=c11 -O2 \
-    -I/workspace/coral_nexus/sim/cabi -I/out/work \
+    -I/workspace/coral_nexus/sim/cabi \
+    -I/workspace/coral_nexus/protocol/generated \
+    -I/out/work \
     /workspace/coral_nexus/sim/cabi/abi_selftest_driver.c \
     -ldl -o /out/abi_selftest_driver
 '

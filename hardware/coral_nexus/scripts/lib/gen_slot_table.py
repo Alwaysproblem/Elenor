@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Generate `cn_slot_table.h` for the CN C ABI from the sealed protocol layout (C025 / W1-03).
+"""Generate `cn_slot_table.h` for the CN C ABI from `cn_layout.json` (C025 / W1-03).
 
-The slot table is DERIVED from `protocol/generated/cn_layout.json` (never hand-written):
-one slot per (channel, direction) link, capacity = (header_words + max payload words among the
-messages on that link) * container word bytes. Also emits the ABI identity hashes:
-sha256(cn_protocol_v1.yaml) ++ sha256(generated/cn_layout.json) as 128 hex characters.
-
-Usage: gen_slot_table.py <layout.json> <cn_protocol_v1.yaml> <out_header>
+Derived strictly from `protocol/generated/cn_layout.json` (never hand-written):
+- Emits one slot per `(channel, direction)` pair across the Tile<->Group boundary (`G2T`, `T2G`;
+  `H2G` is Host<->Group and not a Tile pin).
+- Slot byte capacity = `(header_words + max_payload_words) * word_bytes`, using each message's
+  `payload_words` field in `cn_layout.json` (e.g. `TASK_PLAN` = (4+8)*8 = 96 B,
+  `TASK_COMMIT` = (4+9)*8 = 104 B, `MEM_REQ` = (4+13)*8 = 136 B). Links with no messages yet
+  (such as `DEBUG/G2T` or `DEBUG/T2G`) still receive a header-sized diagnostic slot.
+- Emits the 128-hex ABI identity `sha256(cn_protocol_v1.yaml) ++ sha256(cn_layout.json)`.
 """
 
 from __future__ import annotations
@@ -15,43 +17,50 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 
-def main() -> int:
-  if len(sys.argv) != 4:
-    print(__doc__, file=sys.stderr)
-    return 2
-  layout_path, protocol_path, out_path = (Path(a) for a in sys.argv[1:4])
+def generate_header_text(layout_path: Path, protocol_path: Path) -> tuple[str, list[dict[str, Any]]]:
   layout = json.loads(layout_path.read_text())
   word_bytes = int(layout["container"]["word_bytes"])
   header_words = int(layout["header_words"])
   channels = [str(c) for c in layout["channels"]]
   dirs = [str(d) for d in layout["dirs"]]
 
-  slots = []
-  for ch_index, _ch in enumerate(channels):
-    for dir_index, _d in enumerate(dirs):
+  entries: list[dict[str, Any]] = []
+  offset = 0
+  slot_id = 0
+  max_frame_words = header_words
+
+  for ch_index, ch_name in enumerate(channels):
+    for dir_name in ("G2T", "T2G"):
+      dir_index = dirs.index(dir_name)
       msgs = [
         m
         for m in layout["messages"]
         if int(m["channel_index"]) == ch_index
         and int(m["dir_index"]) == dir_index
-        and not m.get("host_only")
+        and not m.get("host_only", False)
       ]
-      if not msgs:
-        continue
-      max_words = max(int(m.get("words", 0)) for m in msgs)
-      ch_name, dir_name = channels[ch_index], dirs[dir_index]
-      slots.append((ch_index, dir_index, ch_name, dir_name, header_words + max_words))
-
-  offset = 0
-  entries = []
-  for slot_id, entry in enumerate(slots):
-    words = entry[-1]
-    ch, d = entry[0], entry[1]
-    length = words * word_bytes
-    entries.append((slot_id, offset, length, ch, d))
-    offset += length
+      max_payload_words = max((int(m["payload_words"]) for m in msgs), default=0)
+      total_words = header_words + max_payload_words
+      if total_words > max_frame_words:
+        max_frame_words = total_words
+      byte_len = total_words * word_bytes
+      entries.append(
+        {
+          "slot_id": slot_id,
+          "channel_index": ch_index,
+          "dir_index": dir_index,
+          "offset": offset,
+          "len": byte_len,
+          "max_words": total_words,
+          "channel": ch_name,
+          "dir": dir_name,
+        }
+      )
+      offset += byte_len
+      slot_id += 1
 
   proto_hash = hashlib.sha256(protocol_path.read_bytes()).hexdigest()
   layout_hash = hashlib.sha256(layout_path.read_bytes()).hexdigest()
@@ -63,15 +72,29 @@ def main() -> int:
     "",
     "#include <stdint.h>",
     "",
+    f"#define CN_CHANNEL_COUNT {len(channels)}u",
     f"#define CN_SLOT_COUNT {len(entries)}u",
+    f"#define CN_MAX_FRAME_WORDS {max_frame_words}u",
+    f"#define CN_MAX_FRAME_BYTES {max_frame_words * word_bytes}u",
     f"#define CN_SLAB_TOTAL_BYTES {offset}u",
     "",
-    "static const struct { uint32_t slot_id; uint32_t offset; uint32_t len; "
-    "const char *channel; const char *dir; }",
-    "cn_slot_table[CN_SLOT_COUNT] = {",
+    "struct CnSlotSpec {",
+    "  uint32_t slot_id;",
+    "  uint32_t channel_index;",
+    "  uint32_t dir_index; /* 0 = G2T, 1 = T2G */",
+    "  uint32_t offset;",
+    "  uint32_t len;",
+    "  const char *channel;",
+    "  const char *dir;",
+    "};",
+    "",
+    "static const struct CnSlotSpec cn_slot_table[CN_SLOT_COUNT] = {",
   ]
-  for slot_id, off, length, ch, d in entries:
-    lines.append(f'  {{{slot_id}u, {off}u, {length}u, "{ch}", "{d}"}},')
+  for e in entries:
+    lines.append(
+      f'  {{{e["slot_id"]}u, {e["channel_index"]}u, {e["dir_index"]}u, '
+      f'{e["offset"]}u, {e["len"]}u, "{e["channel"]}", "{e["dir"]}"}},'
+    )
   lines += [
     "};",
     "",
@@ -80,8 +103,18 @@ def main() -> int:
     "#endif /* CN_SLOT_TABLE_H_ */",
     "",
   ]
-  out_path.write_text("\n".join(lines))
-  print(f"generated {out_path}: {len(entries)} slots, {offset} slab bytes")
+  return "\n".join(lines), entries
+
+
+def main() -> int:
+  if len(sys.argv) != 4:
+    print(__doc__, file=sys.stderr)
+    return 2
+  layout_path, protocol_path, out_path = (Path(a) for a in sys.argv[1:4])
+  text, entries = generate_header_text(layout_path, protocol_path)
+  out_path.write_text(text)
+  total = sum(int(e["len"]) for e in entries)
+  print(f"generated {out_path}: {len(entries)} slots, {total} slab bytes")
   return 0
 
 

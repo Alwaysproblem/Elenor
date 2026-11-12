@@ -37,17 +37,29 @@ extern "C" {
   3 /* collect buffer too small / slot length exceeds capacity */
 #define CN_ERR_ABI 4 /* hash/layout verification failed */
 #define CN_ERR_FATAL_DUT \
-  5 /* catchable DUT fatal (uncatchable crash simply kills the process) */
+  5 /* catchable DUT fatal (uncatchable crash terminates the process) */
 
 /* Protocol error kinds reported through CnStatus.proto_err. */
 #define CN_EP_NONE 0
 #define CN_EP_PAYLOAD_READY_MISMATCH \
-  1 /* post-edge ready paired with pre-edge payload */
+  1 /* payload mutated while valid&&!ready or post-edge mismatch */
+
+/* CnBeginCfg.reserved[0] unit-stub test flags (ignored by production tops). */
+#define CN_STUB_FLAG_CORRUPT_T2G \
+  0x01u /* flip bit 0 of DUT T2G payload word 0 */
+#define CN_STUB_FLAG_EMIT_MEM_REQ \
+  0x02u /* emit a full 136-byte MEM_REQ on MEMORY T2G at tick 0 */
+#define CN_STUB_FLAG_GLITCH_PAYLOAD \
+  0x04u /* corrupt post-edge G2T snapshot inside stub */
 
 struct CnSim; /* opaque handle: C side is the sole owner */
 
 /* One tile x channel x direction port slot; the slot table is generated from
- * protocol/generated/cn_layout.json (never hand-written). */
+ * protocol/generated/cn_layout.json (never hand-written).
+ * For G2T slots: `bytes[0..len)` carries a complete wire.pack frame (`len == 0`
+ * clears idle). For T2G slots: optional 1-byte flow-control override (`len ==
+ * 1`: `bytes[0] == 0` lowers `t2g_ready` for that channel on the upcoming tick;
+ * `bytes[0] != 0` raises `t2g_ready`). */
 struct CnSlot {
   uint32_t slot_id;
   const uint8_t* bytes; /* caller memory; consumed/copied inside bp_drive */
@@ -61,14 +73,22 @@ struct CnIoVec {
   uint32_t slot_count;
 };
 
-/* bp_collect output buffer (caller-allocated; C copies accepted beats in). */
+/* bp_collect output buffer (caller-allocated; C copies accepted records in).
+ * Binary layout written into `buf`:
+ *   uint32_t record_count;
+ *   uint32_t total_bytes_written;
+ *   followed by `record_count` records, each:
+ *     uint32_t slot_id;   (even slot = G2T beat accepted at P1; odd slot = T2G
+ * frame accepted at P1) uint32_t byte_len;  (for G2T ack record: accepted wire
+ * length, followed by 0 payload bytes; for T2G frame record: full wire byte
+ * length, followed by `byte_len` raw wire bytes read from the DUT T2G pins) */
 struct CnCollect {
   uint8_t* buf;
   uint32_t buf_len;
 };
 
-/* One slot's shared-slab geometry (bp_layout fills a caller array, exactly
- * once). */
+/* One slot's shared-slab geometry (read-only query; never mutates functional
+ * state). */
 struct CnSlotLayout {
   uint32_t slot_id;
   uint32_t offset;
@@ -86,10 +106,12 @@ struct CnBeginCfg {
   int32_t inject_abort_at_tick; /* -1 = never; else process-level crash at that
                                    tick */
   uint8_t trace;                /* 0 = no VCD */
-  uint8_t reserved[7];          /* zero-filled */
+  uint8_t
+      reserved[7]; /* reserved[0]: unit-stub test flags (0 in normal runs) */
 };
 
-/* Read-only status POD; readable at any time. */
+/* Read-only status POD; readable at any time without mutating functional state.
+ */
 struct CnStatus {
   uint32_t abi_version;
   uint32_t fatal_code;
@@ -116,13 +138,13 @@ uint32_t bp_abi_info(uint8_t out_hash[129]);
  * / missing dependencies. */
 struct CnSim* bp_begin(const struct CnBeginCfg* cfg);
 
-/* (2) Layout export: exactly once after bp_begin; fills the caller's slab
- * array. */
+/* (2) Read-only layout query: fills `slabs[0..CN_SLOT_COUNT)` without mutating
+ * functional state. */
 int bp_layout(struct CnSim* sim, struct CnSlotLayout* slabs, uint32_t count);
 
-/* (3) P0, alone: once per tick, BEFORE bp_tick; freezes drive inputs onto the
- * input pins without evaluating or changing model state. bp_tick without a
- * prior bp_drive -> CN_ERR_STATE. */
+/* (3) P0, alone: once per tick, BEFORE bp_tick; freezes drive inputs without
+ * evaluating or changing model state. bp_tick without a prior bp_drive ->
+ * CN_ERR_STATE. */
 int bp_drive(struct CnSim* sim, const struct CnIoVec* vec);
 
 /* (4) P1..P3: eval + sole pre-edge handshake decision + exactly one rising edge
@@ -130,8 +152,9 @@ int bp_drive(struct CnSim* sim, const struct CnIoVec* vec);
  * candidates only). No drive, no P4. */
 int bp_tick(struct CnSim* sim);
 
-/* (5) Exactly once between P3 and P4: copies the accepted beats into the caller
- * buffer; insufficient length -> CN_ERR_RANGE without truncation. */
+/* (5) Between P3 and P4 (at most once per tick): copies committed P1-accepted
+ * records into `out`; insufficient `buf_len` -> CN_ERR_RANGE without truncation
+ * or loss. */
 int bp_collect(struct CnSim* sim, const struct CnCollect* out);
 
 /* (6) Non-blocking read-only status export. */
