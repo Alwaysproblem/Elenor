@@ -11,6 +11,8 @@ Every pass here is a BEHAVIORAL result, not wiring:
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from pipeline_validator.config import HardwareConfig
@@ -34,14 +36,16 @@ def _make_service() -> tuple[TileGroup, MemoryService]:
   group = TileGroup(HardwareConfig(), fidelity="full_memory", context_count=1, byte_store=None)
   store = ByteStore()
   group.hbm.bind_external(GlobalBinding("A_IN", 0x100000, 4096, "rw"), cycle=0)
-  store.register_hbm_binding(group.hbm.get_handle("A_IN"), "rw")
+  handle_a = group.hbm.get_handle("A_IN")
+  assert handle_a is not None
+  store.register_hbm_binding(handle_a, "rw")
   svc = MemoryService(group.hbm, store)
   svc.register_binding("A_IN", 0x100000, 4096, "rw")
   return group, svc
 
 
-def _req(**kw) -> dict:
-  base = dict(
+def _req(**kw) -> MemRequest:
+  base = MemRequest(
     tile_id=0,
     ctx_slot=0,
     ctx_generation=1,
@@ -56,14 +60,14 @@ def _req(**kw) -> dict:
     mem_op=MEM_OP_READ,
     length=16,
   )
-  base.update(kw)
-  return MemRequest(**base)
+  return replace(base, **kw) if kw else base
 
 
 def test_read_returns_exactly_the_seeded_bytes() -> None:
   group, svc = _make_service()
   payload = bytes(range(16))
   _ = group.hbm  # service reads via ByteStore
+  assert svc.byte_store is not None
   svc.byte_store.seed_hbm(0x100000, payload)
   rsp = svc.submit_mem_req(_req(txn_id=7))
   assert rsp.status == 0 and rsp.visibility == VIS_NONE
@@ -80,7 +84,8 @@ def test_write_commits_real_bytes_and_reads_back_identical() -> None:
   rsp = svc.submit_mem_req(_req(txn_id=9, mem_op=MEM_OP_WRITE, length=16, payload=payload))
   assert rsp.status == 0 and rsp.visibility == VIS_HBM
   assert svc.stats.bytes_written == 16
-  assert svc.byte_store.read_hbm(0x100000, 16) == payload
+  assert svc.byte_store is not None
+  svc.byte_store.read_hbm(0x100000, 16) == payload
   # a second read request observes exactly the committed bytes
   rsp2 = svc.submit_mem_req(_req(txn_id=10, binding_offset=0, length=16))
   assert rsp2.data == payload
@@ -91,6 +96,7 @@ def test_write_commits_real_bytes_and_reads_back_identical() -> None:
 
 def test_forged_released_binding_is_rejected_and_ledger_unchanged() -> None:
   group, svc = _make_service()
+  assert svc.byte_store is not None
   svc.byte_store.seed_hbm(0x100000, bytes(16))
   svc.release_binding("A_IN", 1)
   before = svc.ledger_snapshot()
@@ -101,6 +107,7 @@ def test_forged_released_binding_is_rejected_and_ledger_unchanged() -> None:
   # stale generation on a live binding is rejected the same way (bytes seeded so the
   # generation guard is the ONLY possible rejection source)
   _group2, svc2 = _make_service()
+  assert svc2.byte_store is not None
   svc2.byte_store.seed_hbm(0x100000, bytes(16))
   svc2_before = svc2.ledger_snapshot()
   with pytest.raises(MemoryServiceError) as stale:
@@ -111,6 +118,7 @@ def test_forged_released_binding_is_rejected_and_ledger_unchanged() -> None:
 
 def test_duplicate_slice_and_permission_faults_rejected() -> None:
   _group, svc = _make_service()
+  assert svc.byte_store is not None
   svc.byte_store.seed_hbm(0x100000, bytes(32))
   svc.submit_mem_req(_req(txn_id=30, slice_id=0, length=16))
   before = svc.ledger_snapshot()
@@ -126,6 +134,7 @@ def test_duplicate_slice_and_permission_faults_rejected() -> None:
 
 def test_forged_terminal_ack_leaves_ledger_unchanged() -> None:
   _group, svc = _make_service()
+  assert svc.byte_store is not None
   svc.byte_store.seed_hbm(0x100000, bytes(16))
   svc.submit_mem_req(_req(txn_id=40))
   before = svc.ledger_snapshot()
@@ -156,6 +165,7 @@ def test_fabricated_credit_return_breaks_conservation_loudly() -> None:
 
 def test_slice_accounting_requires_full_txn_closure() -> None:
   _group, svc = _make_service()
+  assert svc.byte_store is not None
   svc.byte_store.seed_hbm(0x100000, bytes(32))
   svc.submit_mem_req(_req(txn_id=50, slice_id=0, slice_count=2, length=16))
   svc.submit_mem_req(_req(txn_id=50, slice_id=1, slice_count=2, binding_offset=16, length=16))
@@ -174,7 +184,9 @@ def test_write_view_rejects_when_permission_lacks_write() -> None:
   group = TileGroup(HardwareConfig(), fidelity="full_memory", context_count=1)
   store = ByteStore()
   group.hbm.bind_external(GlobalBinding("RO", 0x200000, 64, "r"), cycle=0)
-  store.register_hbm_binding(group.hbm.get_handle("RO"), "r")
+  handle_ro = group.hbm.get_handle("RO")
+  assert handle_ro is not None
+  store.register_hbm_binding(handle_ro, "r")
   svc = MemoryService(group.hbm, store)
   svc.register_binding("RO", 0x200000, 64, "r")
   before = svc.ledger_snapshot()

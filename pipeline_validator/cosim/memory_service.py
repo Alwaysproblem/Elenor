@@ -30,7 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ..memory.allocator import MemoryInvariantError
+from ..memory.allocator import ExternalOwner, MemoryInvariantError
 from ..memory.byte_store import ByteStore
 from ..memory.hbm_region import HBMRegion
 from ..memory.transfer import ResolvedMemoryView
@@ -101,10 +101,11 @@ class MemRequest:
       raise ValueError("slice_id must index into slice_count")
     if self.length <= 0:
       raise ValueError("length must be positive")
-    if self.mem_op == MEM_OP_WRITE and not isinstance(self.payload, bytes):
-      raise TypeError("write MEM_REQ requires payload bytes")
-    if self.mem_op == MEM_OP_WRITE and len(self.payload) != self.length:
-      raise ValueError("write payload length disagrees with length field")
+    if self.mem_op == MEM_OP_WRITE:
+      if not isinstance(self.payload, bytes):
+        raise TypeError("write MEM_REQ requires payload bytes")
+      if len(self.payload) != self.length:
+        raise ValueError("write payload length disagrees with length field")
 
 
 @dataclass(frozen=True)
@@ -174,7 +175,7 @@ class MemoryService:
       raise MemoryServiceError("BINDING_PERMISSION_MISMATCH", name)
     handle = self.hbm.get_handle(name)
     assert handle is not None
-    if handle.owner.binding_name != name:
+    if not isinstance(handle.owner, ExternalOwner) or handle.owner.binding_name != name:
       raise MemoryServiceError("BINDING_OWNER_MISMATCH", name)
     self._bindings[name] = _ServiceBinding(name, base, size, permissions, generation)
 
@@ -218,7 +219,7 @@ class MemoryService:
       raise MemoryServiceError("MEM_REQ_REJECTED", f"duplicate slice txn={req.txn_id} slice={req.slice_id}")
 
     handle = self.hbm.get_handle(req.binding_name)
-    assert handle is not None
+    assert handle is not None and isinstance(handle.owner, ExternalOwner)
     pool = self.credits.pool("MEMORY", "T2G")
     pool.reserve_on_send()
     pool.accept_into_receiver()
@@ -240,7 +241,7 @@ class MemoryService:
           address=segments[0].address,
           segments=segments,
         )
-        self.byte_store.write_view(view, req.payload)
+        self.byte_store.write_view(view, req.payload)  # type: ignore[arg-type]
         data = None
     except MemoryInvariantError as exc:
       seen.discard(req.slice_id)
