@@ -58,7 +58,10 @@ class RetirementPartitionBank(p: Parameters, mini: Boolean = false) extends Modu
     val writeDataTile = Option.when(p.enableVme)(Input(Valid(new OwnedTileWriteDataIO(p))))
     val vmeMtypeWb =
       Option.when(p.enableVme)(Input(Vec(p.instructionLanes, Valid(new OwnedMtypeWriteDataIO(p)))))
-
+    val flagsDelta = Input(Valid(new ParkedFlagsDeltaIO(p)))
+    val csrPark    = Input(Valid(new ParkedCsrDeltaIO(p)))
+    val perCtxRetiredDelta =
+      Output(Vec(p.contextCount, Vec(p.retirementLanes, new RetiredFlagsDeltaIO(p))))
     // Selected-Context projections for DispatchV2 compatibility.
     val enqPtr      = Output(UInt(robSlotWidth.W))
     val enqSlotGen  = Output(Vec(p.instructionLanes, UInt(p.slotGenerationBits.W)))
@@ -157,6 +160,15 @@ class RetirementPartitionBank(p: Parameters, mini: Boolean = false) extends Modu
         (io.writeDataTile.get.bits.rob_tag.ctx_slot === c.U)
       part.io.writeDataTile.get.bits := io.writeDataTile.get.bits
     }
+
+    // W2-04 ordered deltas: route by identity to the owning partition.
+    part.io.flagsDelta.valid := io.flagsDelta.valid &&
+      (io.flagsDelta.bits.rob_tag.ctx_slot === c.U)
+    part.io.flagsDelta.bits := io.flagsDelta.bits
+    part.io.csrPark.valid := io.csrPark.valid && (io.csrPark.bits.owner.ctx_slot === c.U)
+    part.io.csrPark.bits := io.csrPark.bits
+
+    io.perCtxRetiredDelta(c) := part.io.retiredDelta
 
     val isRvvFault = io.fault.bits.is_rvv.getOrElse(false.B)
     val faultSlot  = Mux(

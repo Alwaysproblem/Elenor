@@ -1,0 +1,86 @@
+version: 1
+# Private W2-04 implementation metadata (C027). NOT part of any frozen contract:
+# C020 sealed PROTOCOL_FREEZE.json once; this file must never be added to it.
+status: draft
+
+csr_commit_classification:
+  # W2-D03/D04 classification actually implemented by patches 0401/0402.
+  dispatch_beat:
+    - { csr: MSCRATCH, note: "management-class; side effect on dispatch" }
+    - {
+        csr: MSTATUS,
+        note: "management bits only (mie/pmie); architectural bits untouched",
+      }
+  retire_commit:
+    - {
+        csr: FRM,
+        note: "snapshot at dispatch; committed when its own ROB entry retires",
+      }
+    - {
+        csr: FCSR,
+        note: "frm bits retire-commit; fflags bits are an ordered delta",
+      }
+    - { csr: VL, note: "via vset*; retire-point commit" }
+    - { csr: VTYPE, note: "via vset*; retire-point commit" }
+    - { csr: MTYPE, note: "via mset*; retire-point commit" }
+  flags_delta:
+    - {
+        csr: FFLAGS,
+        note: "5-bit per-entry delta merged only at its own retirement (CFG-04)",
+      }
+    - {
+        csr: VXSAT,
+        note: "1-bit per-entry delta merged only at its own retirement",
+      }
+  closed_open_item:
+    # C010 ctx_ctrl.yaml left MCAUSE/MEPC/MTVAL commit timing open (owner W2-04).
+    - {
+        csr: MCAUSE,
+        note: "trap-state writes are single-writer from the trap path (bru.in), which is already ordered after retirement of the faulting op; classified as trap-path single-beat, not dispatch vs retire",
+      }
+    - { csr: MEPC, note: "same trap-path single-beat classification as MCAUSE" }
+    - {
+        csr: MTVAL,
+        note: "same trap-path single-beat classification as MCAUSE",
+      }
+
+ordered_flags:
+  per_entry_fields:
+    [
+      fflags_delta(5),
+      vxsat_delta(1),
+      replace_fflags(1),
+      replace_vxsat(1),
+      commits_frm(1),
+      frm_value(3),
+    ]
+  merge_point: "the entry's own retirement beat, in its Context's program order"
+  early_completion: "delta parked in the ROB slot until retirement; never first-to-arrive merged"
+  csr_read_interlock:
+    scope: own_context_only
+    blocks_until: [no_unmerged_flags_delta, vset_mset_retired]
+    forwarding: false
+
+park_cancel_failstop:
+  park:
+    {
+      stops: new_issue,
+      does_not_stop: retire_of_accepted_work,
+      clock_gating: never,
+    }
+  cancel:
+    {
+      scope: one_context,
+      stale_generation: idempotent_reject_and_count,
+      peers: untouched_bit_exact,
+    }
+  fail_stop:
+    {
+      trigger: any_context_FAULT,
+      effect: tile_issue_freeze,
+      flush_scope: faulting_context_only,
+    }
+
+coreaxi_gate_ctl:
+  removed: "(!csr.io.cg && !core.io.wfi) direct clock-gate coupling (CoreAxi.scala:109)"
+  added: "io.gate_ctl input; clock gates only when gate_ctl && core.io.quiescent"

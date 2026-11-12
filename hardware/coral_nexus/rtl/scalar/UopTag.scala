@@ -145,6 +145,40 @@ object RobTag {
   }
 }
 
+/** Retired flags-delta published at an entry's own retirement beat (W2-02/W2-04, CFG-04). */
+class RetiredFlagsDeltaIO(p: Parameters) extends Bundle {
+  val valid         = Bool()
+  val owner         = new OwnerTag(p)
+  val fflags        = UInt(5.W)
+  val vxsat         = Bool()
+  val replaceFflags = Bool()
+  val replaceVxsat  = Bool()
+  val commitsFrm    = Bool()
+  val frmValue      = UInt(3.W)
+}
+
+/** HW fflags/vxsat delta (FloatCore/RVV); parks at its ROB slot until retirement. */
+class ParkedFlagsDeltaIO(p: Parameters) extends Bundle {
+  val valid         = Bool()
+  val rob_tag       = new RobTag(p)
+  val fflags        = UInt(5.W)
+  val vxsat         = Bool()
+  val replaceFflags = Bool()
+  val replaceVxsat  = Bool()
+}
+
+/** Software fflags/fcsr/frm CSR write observed one beat after dispatch; parks at its slot. */
+class ParkedCsrDeltaIO(p: Parameters) extends Bundle {
+  val valid         = Bool()
+  val owner         = new OwnerTag(p)
+  val fflags        = UInt(5.W)
+  val vxsat         = Bool()
+  val replaceFflags = Bool()
+  val replaceVxsat  = Bool()
+  val commitsFrm    = Bool()
+  val frmValue      = UInt(3.W)
+}
+
 /** Owned scalar/float/vector/VME writeback bundles carrying `OwnerTag` / `RobTag` (`W2-02`). */
 class OwnedRegfileWriteDataIO(p: Parameters) extends Bundle {
   val addr  = UInt(p.scalarRegCountWidth.W)

@@ -1,0 +1,213 @@
+diff --git a/hdl/chisel/src/coralnpu/BUILD b/hdl/chisel/src/coralnpu/BUILD
+index cfd5114..6c52d80 100644
+--- a/hdl/chisel/src/coralnpu/BUILD
++++ b/hdl/chisel/src/coralnpu/BUILD
+@@ -477,6 +477,7 @@ chisel_library(
+     srcs = [
+         "scalar/Alu.scala",
+         "scalar/BankedRf.scala",
++        "scalar/Context.scala",
+         "scalar/Bru.scala",
+         "scalar/Csr.scala",
+         "scalar/CtxCsr.scala",
+@@ -1000,3 +1001,15 @@ chisel_test(
+         "//hdl/chisel/src/common:testing",
+     ],
+ )
++
++chisel_test(
++    name = "w2_04_ctx_quiescent_spec",
++    size = "large",
++    srcs = [
++        "verification/w2/W2_04_ctx_quiescent_spec.scala",
++    ],
++    deps = [
++        ":coralnpu_base",
++        ":coralnpu_scalar",
++    ],
++)
+diff --git a/hdl/chisel/src/coralnpu/RetirementBuffer.scala b/hdl/chisel/src/coralnpu/RetirementBuffer.scala
+index 5c9bc53..5d2b058 100644
+--- a/hdl/chisel/src/coralnpu/RetirementBuffer.scala
++++ b/hdl/chisel/src/coralnpu/RetirementBuffer.scala
+@@ -48,6 +48,9 @@ class RetirementBufferIO(p: Parameters) extends Bundle {
+   val trapPending             = Output(Bool())
+   val trapRetired             = Output(Bool())
+   val staleCompletionRejected = Output(UInt(16.W))
++  val flagsDelta   = Input(Valid(new ParkedFlagsDeltaIO(p)))
++  val csrPark      = Input(Valid(new ParkedCsrDeltaIO(p)))
++  val retiredDelta = Output(Vec(p.retirementLanes, new RetiredFlagsDeltaIO(p)))
+   val isVector                = Option.when(p.enableRvv)(Input(Vec(p.instructionLanes, Bool())))
+   val isTile                  = Option.when(p.enableVme)(Input(Vec(p.instructionLanes, Bool())))
+   val clearVstart             = Option.when(p.enableRvv)(Output(Bool()))
+@@ -774,6 +777,47 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false, ctxSlotId: Int = 0)
+     }
+   }
+
++  // W2-04 ordered deltas: a parallel parked-delta register array keyed by ROB slot.
++  // (instBuffer.io.dataOut is a read-only view; deltas live here and are consumed at
++  // the slot's own retirement beat, then cleared — CFG-04, no first-to-arrive merge.)
++  class ParkedEntry extends Bundle {
++    val valid = Bool()
++    val fflags = UInt(5.W)
++    val vxsat = Bool()
++    val repF  = Bool()
++    val repV  = Bool()
++    val frm   = Bool()
++    val frmVal = UInt(3.W)
++  }
++  val parked = RegInit(VecInit.fill(bufferSize)(0.U.asTypeOf(new ParkedEntry)))
++  val parkHwOH = VecInit((0 until bufferSize).map { x =>
++    val slotRobTag = RobTag.make(p)(ctxSlotU, x.U, slotGen(x))
++    io.flagsDelta.valid && RobTag.matches(io.flagsDelta.bits.rob_tag, slotRobTag)
++  })
++  val csrParkOH = VecInit((0 until bufferSize).map { x =>
++    io.csrPark.valid && OwnerTag.matches(io.csrPark.bits.owner, instBuffer.io.dataOut(x).owner)
++  })
++  for (x <- 0 until bufferSize) {
++    when(parkHwOH(x)) {
++      parked(x).valid := true.B
++      when(io.flagsDelta.bits.replaceFflags) {
++        parked(x).fflags := io.flagsDelta.bits.fflags; parked(x).repF := true.B
++      } .otherwise { parked(x).fflags := parked(x).fflags | io.flagsDelta.bits.fflags }
++      when(io.flagsDelta.bits.replaceVxsat) {
++        parked(x).vxsat := io.flagsDelta.bits.vxsat; parked(x).repV := true.B
++      } .otherwise { parked(x).vxsat := parked(x).vxsat | io.flagsDelta.bits.vxsat }
++    }
++    when(csrParkOH(x)) {
++      val w = io.csrPark.bits
++      parked(x).valid := true.B
++      when(w.replaceFflags) { parked(x).fflags := w.fflags; parked(x).repF := true.B }
++      .otherwise { parked(x).fflags := parked(x).fflags | w.fflags }
++      when(w.replaceVxsat) { parked(x).vxsat := w.vxsat; parked(x).repV := true.B }
++      .otherwise { parked(x).vxsat := parked(x).vxsat | w.vxsat }
++      when(w.commitsFrm) { parked(x).frm := true.B; parked(x).frmVal := w.frmValue }
++    }
++  }
++
+   // Count stale-generation / reused-slot ABA completions targeting this Context slot (INV-15).
+   val staleStore = storeComplete.valid && (storeComplete.bits.ctx_slot === ctxSlotU) &&
+     (storeComplete.bits.ctx_generation =/= io.ctxGeneration)
+@@ -854,6 +898,23 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false, ctxSlotId: Int = 0)
+     }
+   }
+
++  for (lane <- 0 until p.retirementLanes) {
++    val laneRetiring = (lane.U < deqReady) && !resultUpdate(lane).bits.trap
++    val entry        = instBuffer.io.dataOut(lane)
++    val laneSlot     = if (bufferSize > 1) (accDeqPtr +& lane.U)(robSlotWidth - 1, 0) else 0.U(1.W)
++    val pk           = parked(laneSlot)
++    io.retiredDelta(lane).valid := laneRetiring && pk.valid &&
++      (pk.fflags =/= 0.U || pk.vxsat || pk.repF || pk.repV || pk.frm)
++    io.retiredDelta(lane).owner         := entry.owner
++    io.retiredDelta(lane).fflags        := pk.fflags
++    io.retiredDelta(lane).vxsat         := pk.vxsat
++    io.retiredDelta(lane).replaceFflags := pk.repF
++    io.retiredDelta(lane).replaceVxsat  := pk.repV
++    io.retiredDelta(lane).commitsFrm    := pk.frm
++    io.retiredDelta(lane).frmValue      := pk.frmVal
++    when(laneRetiring) { parked(laneSlot) := 0.U.asTypeOf(new ParkedEntry) }
++  }
++
+   resultBuffer := Mux(
+     trapRetired,
+     VecInit(Seq.fill(bufferSize)(MakeInvalid(new InstructionUpdate))),
+diff --git a/hdl/chisel/src/coralnpu/scalar/Csr.scala b/hdl/chisel/src/coralnpu/scalar/Csr.scala
+index f4764bb..5e7bafb 100644
+--- a/hdl/chisel/src/coralnpu/scalar/Csr.scala
++++ b/hdl/chisel/src/coralnpu/scalar/Csr.scala
+@@ -259,7 +259,13 @@ class Csr(p: Parameters) extends Module {
+     val software_irq         = Input(Bool())
+     val trace                = Output(new CsrTraceIO(p))
+     val retiredFflagsReplace = Input(Bool())
++    val retiredFflagsValid   = Input(Bool())
+     val retiredFflagsBits    = Input(UInt(5.W))
++    val retiredFrmCommit     = Input(Valid(UInt(3.W)))
++    // W2-04: software writes to fflags/fcsr(frm part)/frm are OBSERVED here and
++    // exported for ROB parking; the architectural commit happens at retirement.
++    val csrParkOut = Output(Valid(new ParkedCsrDeltaIO(p)))
++    val reqOwner   = Input(new OwnerTag(p))  // owner of the CSR op observed at req beat
+     val obsFflags            = Output(UInt(5.W))
+     val obsFrm               = Output(UInt(3.W))
+     val obsMscratch          = Output(UInt(p.xlen.W))
+@@ -640,7 +646,25 @@ class Csr(p: Parameters) extends Module {
+     io.mstatus_ms.get := ms_post_write
+   }
+
+-  val fflags_base = WireDefault(Mux(io.retiredFflagsReplace, io.retiredFflagsBits, fflags))
++  val fflags_base = WireDefault(Mux(
++    io.retiredFflagsReplace,
++    io.retiredFflagsBits,
++    Mux(io.retiredFflagsValid, fflags | io.retiredFflagsBits, fflags),
++  ))
++  when(io.retiredFrmCommit.valid) { frm := io.retiredFrmCommit.bits }
++  // W2-04: park software fflags/fcsr writes; drive the export port (wdata known here).
++  val csrIsFflags = req.valid && (fflagsEn || fcsrEn)
++  val csrIsFrm    = req.valid && (frmEn || fcsrEn)
++  io.csrParkOut.valid := req.valid && (csrIsFflags || csrIsFrm)
++  io.csrParkOut.bits.valid := true.B
++  io.csrParkOut.bits.owner := io.reqOwner
++  io.csrParkOut.bits.replaceFflags := false.B
++  io.csrParkOut.bits.fflags := Mux(csrIsFflags, wdata(4, 0), 0.U)
++  io.csrParkOut.bits.replaceVxsat := false.B
++  io.csrParkOut.bits.vxsat := false.B
++  io.csrParkOut.bits.commitsFrm := csrIsFrm
++  io.csrParkOut.bits.frmValue := Mux(fcsrEn, localWdata(Cat(frm, fflags))(7, 5), localWdata(frm)(2, 0))
++  when(csrIsFflags) { fflags_base := fflags }  // suppress direct architectural write
+   when(req.valid) {
+     when(fflagsEn) { fflags_base := wdata(4, 0) }
+     when(frmEn) { frm := localWdata(frm)(2, 0) }
+diff --git a/hdl/chisel/src/coralnpu/scalar/SCore.scala b/hdl/chisel/src/coralnpu/scalar/SCore.scala
+index 6c8d497..20ba07f 100644
+--- a/hdl/chisel/src/coralnpu/scalar/SCore.scala
++++ b/hdl/chisel/src/coralnpu/scalar/SCore.scala
+@@ -89,6 +89,9 @@ class SCore(p: Parameters) extends Module {
+   regfile.io.perCtxFlush := rob_io.perCtxTrapRetired
+
+   rob_io.activeCtx       := activeCtx
++  // W2-04: delta-park defaults; the FloatCore wiring overrides inside enableFloat.
++  rob_io.flagsDelta.valid := false.B
++  rob_io.flagsDelta.bits := DontCare
+   rob_io.perCtxGen       := perCtxGenWire
+   rob_io.perCtxReset     := io.ctx.advanceGen
+   rob_io.dispatchOpSeq   := laneOpSeq
+@@ -297,11 +300,21 @@ class SCore(p: Parameters) extends Module {
+   csrReqArbiter.io.out.ready   := true.B
+   csr.io.req.bits  := csrReqArbiter.io.out.bits
+   csr.io.req.valid := csrReqArbiter.io.out.valid
+-  csr.io.reqOwner  := Mux(
++  csr.io.reqOwner := Mux(
+     csrReqArbiter.io.chosen === 0.U,
+     laneOwners(0),
+     OwnerTag.make(p)(activeCtx, activeCtxGen, 0.U)
+   )
++  // W2-04: software flags/frm CSR writes park at their ROB slot (observed one beat
++  // after dispatch, when Csr computes wdata); merge at retirement, never before.
++  rob_io.csrPark := csr.io.csrParkOut
++  // Flatten per-Context retiring deltas onto one bus. Program order within a Context
++  // is preserved by its own lane order; across Contexts the order is irrelevant
++  // because each bank only merges deltas carrying its own ctx identity.
++  val flatDeltas = (0 until p.contextCount * p.retirementLanes).map { i =>
++    rob_io.perCtxRetiredDelta(i / p.retirementLanes)(i % p.retirementLanes)
++  }
++  csr.io.retiredDelta := VecInit(flatDeltas)
+
+   val dmRs1 = Wire(new RegfileReadDataIO(p))
+   dmRs1.valid  := true.B
+@@ -549,6 +562,17 @@ class SCore(p: Parameters) extends Module {
+     dispatch.io.csrFrm.get      := csr.io.float.get.out.frm
+     floatCore.get.io.csr <> csr.io.float.get
+     csr.io.floatOwner.get := floatCore.get.io.fflagsOwner
++    // W2-04: FloatCore deltas park at the owning ROB slot; merge only at retirement.
++    val fflagsHit  = VecInit((0 until p.retirementBufferSize).map { x =>
++      OwnerTag.matches(rvvSlotOwner.get(x), floatCore.get.io.fflagsOwner)
++    })
++    val fflagsSlot = OHToUInt(fflagsHit.asUInt)
++    rob_io.flagsDelta.valid := floatCore.get.io.csr.in.fflags.valid && fflagsHit.asUInt.orR
++    rob_io.flagsDelta.bits.rob_tag := rvvSlotRobTag.get(fflagsSlot)
++    rob_io.flagsDelta.bits.fflags := floatCore.get.io.csr.in.fflags.bits
++    rob_io.flagsDelta.bits.vxsat := false.B
++    rob_io.flagsDelta.bits.replaceFflags := false.B
++    rob_io.flagsDelta.bits.replaceVxsat := false.B
+     floatCore.get.io.rs1 := regfile.io.readData(0)
+     floatCore.get.io.rs2 := regfile.io.readData(1)

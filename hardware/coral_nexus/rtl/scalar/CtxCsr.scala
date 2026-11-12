@@ -18,33 +18,27 @@ import chisel3._
 import chisel3.util._
 import coralnpu.float.CsrFloatIO
 
-/** Retired flags-delta update port consumed at instruction retirement (W2-02/W2-04). */
-class RetiredFlagsDeltaIO(p: Parameters) extends Bundle {
-  val valid         = Bool()
-  val owner         = new OwnerTag(p)
-  val fflags        = UInt(5.W)
-  val vxsat         = Bool()
-  val replaceFflags = Bool()
-  val replaceVxsat  = Bool()
-}
-
-/** Per-Context CSR bank (`W2-02` / C026).
+/** Per-Context CSR bank (`W2-02` C026 + `W2-04` C027).
   *
   * Each Context slot `b` owns an independent `Csr` bank whose `mhartid` encodes `(tileId, b)`,
   * isolated trap CSRs (`mtvec`, `mepc`, `mcause`, `mtval`, `mscratch`), counters (`mcycle`,
   * `minstret`), and floating/vector configuration & flags state.
   *
-  * Generation isolation (`CTX-08/09`, `INV-15`):
-  *   - `advanceGen(b)` increments `perCtxGen(b)` and synchronously resets bank `b` (clearing
-  *     its flags accumulator and per-Context writable CSRs) without disturbing any peer Context.
-  *   - Any CSR request, trap update, or flags delta carrying an `OwnerTag` whose
-  *     `ctx_generation =/= perCtxGen(ctx_slot)` is rejected and counted in `staleRejected`.
+  * W2-04 ordered merge (CFG-04): the architectural `fflags` accumulator is ONLY updated by
+  * `retiredDelta` at each entry's own retirement beat, in its Context's program order.
+  * FloatCore's direct `float.in.fflags` path is disabled in full mode (deltas park in the
+  * ROB); software `csrw fflags/fcsr` likewise parks and commits at retirement. `frm`/`fcsr`
+  * frm-bits retire-commit with the LAST retiring `commitsFrm` lane winning (program order).
+  *
+  * Generation isolation (CTX-08/09, INV-15): `advanceGen(b)` increments `perCtxGen(b)` and
+  * synchronously resets bank `b`; any request, trap update, delta, or software CSR write
+  * carrying a stale `ctx_generation` is rejected and counted in `staleRejected`.
   */
 class CtxCsr(p: Parameters) extends Module {
   val io = IO(new Bundle {
-    val activeCtx   = Input(UInt(p.ctxBits.W))
-    val advanceGen  = Input(Vec(p.contextCount, Bool()))
-    val perCtxGen   = Output(Vec(p.contextCount, UInt(p.ctxGenerationBits.W)))
+    val activeCtx  = Input(UInt(p.ctxBits.W))
+    val advanceGen = Input(Vec(p.contextCount, Bool()))
+    val perCtxGen  = Output(Vec(p.contextCount, UInt(p.ctxGenerationBits.W)))
 
     val csr          = new CsrInOutIO(p)
     val req          = Flipped(Valid(new CsrCmd(p)))
@@ -66,7 +60,11 @@ class CtxCsr(p: Parameters) extends Module {
     val mstatus_ms   = Option.when(p.enableVme)(Output(UInt(2.W)))
 
     val perCtxNRetired = Input(Vec(p.contextCount, UInt(log2Ceil(p.retirementLanes + 1).W)))
-    val retiredDelta   = Input(Vec(p.retirementLanes, new RetiredFlagsDeltaIO(p)))
+    // Flat bus: context c's retiring lanes occupy c*retirementLanes + lane (program order
+    // within a Context preserved; cross-Context order irrelevant — banks filter by owner).
+    val retiredDelta = Input(Vec(p.contextCount * p.retirementLanes, new RetiredFlagsDeltaIO(p)))
+    // Winning bank's software-CSR park export (observed one beat after dispatch).
+    val csrParkOut = Output(Valid(new ParkedCsrDeltaIO(p)))
 
     val halted       = Output(Bool())
     val fault        = Output(Bool())
@@ -110,6 +108,10 @@ class CtxCsr(p: Parameters) extends Module {
   }
   io.perCtxGen := genRegs
 
+  def selCtx[T <: Data](items: Seq[T], idx: UInt): T = {
+    if (items.length == 1) items.head else VecInit(items)(idx)
+  }
+
   def copyParamsWithHart(hart: Int): Parameters = {
     val q = new Parameters(p.m, hartId = hart, xlen = p.xlen)
     q.enableVerification        = p.enableVerification
@@ -141,10 +143,6 @@ class CtxCsr(p: Parameters) extends Module {
     }
   }
 
-  def selCtx[T <: Data](items: Seq[T], idx: UInt): T = {
-    if (items.length == 1) items.head else VecInit(items)(idx)
-  }
-
   def isLiveOwner(owner: OwnerTag): Bool = {
     val slot      = owner.ctx_slot
     val slotInRng = if (p.contextCount == 1) (slot === 0.U) else (slot < p.contextCount.U)
@@ -152,6 +150,7 @@ class CtxCsr(p: Parameters) extends Module {
     slotInRng && (owner.ctx_generation === liveGen)
   }
 
+  val nDeltaLanes = p.contextCount * p.retirementLanes
   val reqStale = io.req.valid && !isLiveOwner(io.reqOwner)
   val bruAnyValid = io.bru.in.mode.valid || io.bru.in.mcause.valid ||
     io.bru.in.mepc.valid || io.bru.in.mtval.valid ||
@@ -165,7 +164,7 @@ class CtxCsr(p: Parameters) extends Module {
     .zip(io.rvvOwner)
     .map { case (r, own) => r.fflags.valid && !isLiveOwner(own) }
     .getOrElse(false.B)
-  val deltaStaleVec = VecInit((0 until p.retirementLanes).map { k =>
+  val deltaStaleVec = VecInit((0 until nDeltaLanes).map { k =>
     io.retiredDelta(k).valid && !isLiveOwner(io.retiredDelta(k).owner)
   })
 
@@ -186,6 +185,7 @@ class CtxCsr(p: Parameters) extends Module {
     bank.io.csr.in       := io.csr.in
     bank.io.req.valid    := reqMatch
     bank.io.req.bits     := io.req.bits
+    bank.io.reqOwner     := io.reqOwner
     bank.io.rs1          := io.rs1
     bank.io.counters.nRetired := io.perCtxNRetired(b)
 
@@ -201,30 +201,36 @@ class CtxCsr(p: Parameters) extends Module {
     bank.io.bru.in.fault        := bruMatch && io.bru.in.fault
     bank.io.bru.in.wfi          := bruMatch && io.bru.in.wfi
 
-    val matchingDeltas = (0 until p.retirementLanes).map { k =>
+    // ---- W2-04 ordered merge: only retiring-lane deltas touch the accumulator ----
+    val matchingDeltas = (0 until nDeltaLanes).map { k =>
       val d = io.retiredDelta(k)
       d.valid && notAdv && OwnerTag.sameContext(d.owner, b.U, liveGen)
     }
-    val hasDeltaHit = VecInit(matchingDeltas).asUInt.orR
-    val mergedDeltaFflags = (0 until p.retirementLanes).foldLeft(0.U(5.W)) { (acc, k) =>
+    val mergedDeltaFflags = (0 until nDeltaLanes).foldLeft(0.U(5.W)) { (acc, k) =>
       val d   = io.retiredDelta(k)
       val hit = matchingDeltas(k)
       Mux(hit, Mux(d.replaceFflags, d.fflags, acc | d.fflags), acc)
     }
-    val anyReplaceFflags = (0 until p.retirementLanes)
+    val anyReplaceFflags = (0 until nDeltaLanes)
       .map(k => matchingDeltas(k) && io.retiredDelta(k).replaceFflags)
       .reduce(_ || _)
     bank.io.retiredFflagsReplace := anyReplaceFflags
+    bank.io.retiredFflagsValid   := VecInit(matchingDeltas).asUInt.orR
     bank.io.retiredFflagsBits    := mergedDeltaFflags
+    // frm retire-point commit: the LAST retiring lane with commitsFrm wins (program order).
+    val frmHits = VecInit((0 until nDeltaLanes).map { k =>
+      matchingDeltas(k) && io.retiredDelta(k).commitsFrm
+    })
+    bank.io.retiredFrmCommit.valid := frmHits.asUInt.orR
+    bank.io.retiredFrmCommit.bits  := PriorityMux(frmHits, (0 until nDeltaLanes).map(k => io.retiredDelta(k).frmValue))
 
     if (p.enableFloat) {
+      // CFG-04: the architectural fflags accumulator updates ONLY via retiredDelta.
+      // FloatCore's direct path is disabled in full mode; its deltas park in the ROB.
       val fltMatch = notAdv && OwnerTag.sameContext(io.floatOwner.get, b.U, liveGen)
-      val fflagsInValid = (fltMatch && io.float.get.in.fflags.valid) || (hasDeltaHit && !anyReplaceFflags)
-      val fflagsInBits = Mux(fltMatch && io.float.get.in.fflags.valid, io.float.get.in.fflags.bits, 0.U(5.W)) |
-        Mux(hasDeltaHit && !anyReplaceFflags, mergedDeltaFflags, 0.U(5.W))
-      bank.io.float.get.in.fflags.valid := fflagsInValid
-      bank.io.float.get.in.fflags.bits  := fflagsInBits
-      bank.io.float_dirty.get           := (fltMatch && io.float_dirty.get) || fflagsInValid || anyReplaceFflags
+      bank.io.float.get.in.fflags.valid := false.B
+      bank.io.float.get.in.fflags.bits  := 0.U
+      bank.io.float_dirty.get           := (fltMatch && io.float_dirty.get) || anyReplaceFflags
     }
 
     if (p.enableRvv) {
@@ -270,6 +276,12 @@ class CtxCsr(p: Parameters) extends Module {
     io.perCtxMepc(b)     := bank.io.csr.out.value(1)
     io.perCtxMcause(b)   := bank.io.csr.out.value(3)
   }
+
+  // Software CSR park export: the winning (live) bank's observation wins; stale owners
+  // are rejected upstream so at most one bank observes a live write at a time.
+  val parkHits = VecInit(banks.map(_.io.csrParkOut.valid))
+  io.csrParkOut.valid := parkHits.asUInt.orR
+  io.csrParkOut.bits  := PriorityMux(parkHits, banks.map(_.io.csrParkOut.bits))
 
   io.csr.out                 := selCtx(banks.map(_.io.csr.out), effActiveCtx)
   io.bru.out.mode            := selCtx(banks.map(_.io.bru.out.mode), effActiveCtx)

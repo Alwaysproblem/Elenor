@@ -158,10 +158,13 @@ class W2_02_CsrFlagDeltaSpec extends AnyFreeSpec with ChiselSim {
       dut.io.retiredDelta(0).owner.ctx_slot.poke(0.U)
       dut.io.retiredDelta(0).owner.ctx_generation.poke(0.U)
 
-      dut.io.retiredDelta(1).valid.poke(true.B)
-      dut.io.retiredDelta(1).fflags.poke("b00010".U)
-      dut.io.retiredDelta(1).owner.ctx_slot.poke(1.U)
-      dut.io.retiredDelta(1).owner.ctx_generation.poke(0.U)
+      // Flattened bus (C027): context c lane l sits at c*retirementLanes + l;
+      // retirementLanes == 8 here, so Context 1's lane-0 delta is index 8.
+      val ctx1Lane0 = dut.io.retiredDelta.length / 2
+      dut.io.retiredDelta(ctx1Lane0).valid.poke(true.B)
+      dut.io.retiredDelta(ctx1Lane0).fflags.poke("b00010".U)
+      dut.io.retiredDelta(ctx1Lane0).owner.ctx_slot.poke(1.U)
+      dut.io.retiredDelta(ctx1Lane0).owner.ctx_generation.poke(0.U)
 
       dut.io.bru.in.mepc.valid.poke(true.B)
       dut.io.bru.in.mepc.bits.poke("h20001008".U)

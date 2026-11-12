@@ -32,6 +32,14 @@ entries:
     dst: tests/cocotb/vme_test/p0_numeric/p0_numeric_probe_bench.py
     mode: add
   - source: coralnpu
+    src: hardware/coral_nexus/rtl/scalar/Context.scala
+    dst: hdl/chisel/src/coralnpu/scalar/Context.scala
+    mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/verification/unit/w2/W2_04_ctx_quiescent_spec.scala
+    dst: hdl/chisel/src/coralnpu/verification/w2/W2_04_ctx_quiescent_spec.scala
+    mode: add
+  - source: coralnpu
     src: hardware/coral_nexus/rtl/scalar/UopTag.scala
     dst: hdl/chisel/src/coralnpu/scalar/UopTag.scala
     mode: add
