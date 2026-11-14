@@ -4,20 +4,22 @@
 
 CS1_TARGETS = {
     "cs1_c1": {
-        "constraints_sha256": "9023c92a027600bf7295b2501579cd62453dc399833d81643e18fb58d0ab2e6b",
+        "constraints_sha256": "f09ab86ff7b461338047c1c3f4dc488b9d49642f2dcf8e3c32bb4232b7b0754b",
         "context_count": 1,
         "tile_count": 1,
         "vme_instances": 1,
         "program_slots": 2,
         "retirement_buffer_mode": "full",
+        "fetch_outstanding_per_context": 2,
     },
     "cs1_c2": {
-        "constraints_sha256": "4e23ebe66c372ecbe9a069d8f480bc031b7f75d6ac22958ca8ce16c094b08856",
+        "constraints_sha256": "8a0108cfec4e3b28d5b8e3aa4ab1dbda92ee160f7f6103b09ac6b1296fca3b8f",
         "context_count": 2,
         "tile_count": 1,
         "vme_instances": 1,
         "program_slots": 2,
         "retirement_buffer_mode": "full",
+        "fetch_outstanding_per_context": 2,
     },
 }
 

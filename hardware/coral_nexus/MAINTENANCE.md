@@ -89,8 +89,8 @@ not implemented.
 
 ## Focused C027 acceptance
 
-The `w2` suite contains both C026 and C027. To verify C027 without rerunning
-an already-accepted C026 run, use its independent pytest entry:
+The `w2` suite contains C026, C027 and C028. To verify C027 without rerunning
+the other cards, use its independent pytest entry:
 
 ```bash
 EVIDENCE=out/coral_nexus/C027/attempt-NNN
@@ -113,6 +113,12 @@ Patch files are excluded from whitespace/EOF fixers: removing a trailing
 blank context line can corrupt a unified diff. Regenerate patch artifacts
 from the derived tree rather than formatting them.
 
+Prettier also excludes C012 declaration artifacts and the sealed W3 field
+requests. `clang-format` excludes C018's `bootstrap_control.c` and
+`bootstrap_helpers.h`: `kernel_measurement.json` pins their source bytes.
+Restore formatter-only changes to these files; do not change the protocol
+seal or measurement merely to accept formatting.
+
 ChiselSim test titles become build-directory names: use shell-safe words,
 not semicolons, pipes or ampersands. The simulation launcher adds ChiselSim's
 `support-artifacts` include directory and parses macro headers before SV
@@ -120,6 +126,28 @@ consumers; FPnew definitions must not depend on resource enumeration order.
 Native-resource simulations retain warnings under the upstream
 `fpga/coralnpu_soc.core` `-Wno-fatal` policy; this is functional acceptance,
 not a warning-free lint claim. Chisel-only cases keep fatal warnings.
+
+## Focused C028 acceptance
+
+C028 consumes the reopened C019 target field `fetch_outstanding_per_context`.
+Generate its Scala consumer after an authorized target update; the acceptance
+entry rejects a stale consumer or an invalid joint seal before building.
+
+```bash
+python3 hardware/coral_nexus/scripts/lib/gen_frontend_params.py
+EVIDENCE=out/coral_nexus/C028/attempt-NNN
+mkdir -p "$EVIDENCE"
+conda run --no-capture-output -n elenor-validator python -m pytest \
+  hardware/coral_nexus/verification/unit/w2/test_w2_c028.py \
+  -n0 -v --basetemp="$EVIDENCE/pytest"
+```
+
+The isolated entry executes the stale-fetch and non-prefix mutants before the
+green fetch, dispatch and real-Core specs, retaining JUnit and per-target logs.
+It does not execute C026/C027. Build failures are not mutation kills. The
+frontend's tagged-port tests cover delayed/out-of-order responses; the native
+Core adapter retains the existing fixed-next-cycle IBus timing. Neither result
+claims C030 physical-port arbitration or C040 full-Tile assembly is complete.
 
 ## Offline seeds (C004)
 

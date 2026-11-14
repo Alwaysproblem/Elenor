@@ -236,6 +236,13 @@ cn unit --suite contracts --out "$EVIDENCE/unit"
 
 - **通过/交接**：C1 不产生零宽索引，C2 资源包络可装入，两者同源生成且失配被拒。C020 冻结本版合同；完整 `build`/`cosim` 目标由 C040 提供，不能抢先用不存在的 top。
 
+**2026-11-14 授权重开（C028 前置）**：
+
+- C1/C2 新增 `constraints.fetch_outstanding_per_context`，从锁定上游 `UncachedFetch.scala` 的 `Fetcher.maxConcurrentTx` 唯一正整数字面量读取；本版为 2。目标指纹、`params.d/coral_cs1.json`、`rtl/targets.bzl` 与 prepare-only C 消费者同步消费，缺来源／非字面量／歧义／零容量拒绝生成。
+- 首次 contracts 为 1297 passed、21 failed；失败暴露 C013/C015 的 validator 源码锚点漂移。逐处核对语义后仅修正引用；L1 安全退休改指实际正常退休路径，未改变 validator 行为或放宽 checker。
+- 修正后的 C013/C015/C020 定向验证 **353 passed**，G1 **8/8 PASS**；C1/C2 的真实 C 消费者编译通过。证据：`out/coral_nexus/C019/attempt-003/`；其中 `cs1_c1/`、`cs1_c2/` 保留首次 contracts 的成功编译产物，未重复编译。
+- 联合 seal 经既有 `seal --bump` 升至 `protocol_seq=3`，SHA-256 为 `5cd30e2e080a6c3ea46e152e295560b100b0a13151e30c691a87f3815ef2ef46`。v1 与未通过合同验收的 v2 均已原样归档；v2 不构成 G1 通过证据。新目标只使用本轮新 G1 结果，旧 C027 运行记录仍属于当时的 v1 基线。
+
 <a id="c020"></a>
 
 ## C020 — 一次性联合封印与 CN-G1 门

@@ -118,7 +118,7 @@ ownership:
         source:
           {
             file: pipeline_validator/tile_group.py,
-            line: 1523,
+            line: 1534,
             needle: "def retire_context_arena",
           },
       }
@@ -430,7 +430,7 @@ lifecycle:
         source:
           {
             file: pipeline_validator/tile_group.py,
-            line: 1077,
+            line: 1746,
             needle: retire_arena,
           },
       }
@@ -440,7 +440,7 @@ lifecycle:
         source:
           {
             file: pipeline_validator/tile_group.py,
-            line: 784,
+            line: 795,
             needle: "def release_l2",
           },
       }
@@ -458,7 +458,7 @@ lifecycle:
         source:
           {
             file: pipeline_validator/tile_group.py,
-            line: 1523,
+            line: 1534,
             needle: "def retire_context_arena",
           },
       }
@@ -471,7 +471,7 @@ lifecycle:
         source:
           {
             file: pipeline_validator/tile_group.py,
-            line: 1010,
+            line: 1021,
             needle: "def _unpin_grid_readers",
           },
       }

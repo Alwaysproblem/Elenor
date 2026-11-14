@@ -87,3 +87,31 @@ entries:
     src: hardware/coral_nexus/verification/unit/w2/W2_04_core_control_spec.scala
     dst: hdl/chisel/src/coralnpu/verification/w2/W2_04_core_control_spec.scala
     mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/rtl/scalar/C028TargetParams.scala
+    dst: hdl/chisel/src/coralnpu/scalar/C028TargetParams.scala
+    mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/rtl/scalar/PerCtxFetchMux.scala
+    dst: hdl/chisel/src/coralnpu/scalar/PerCtxFetchMux.scala
+    mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/rtl/scalar/Scheduler.scala
+    dst: hdl/chisel/src/coralnpu/scalar/Scheduler.scala
+    mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/verification/unit/w2/W2_03_fetch_epoch_spec.scala
+    dst: hdl/chisel/src/coralnpu/verification/w2/W2_03_fetch_epoch_spec.scala
+    mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/verification/unit/w2/W2_03_dispatch_prefix_spec.scala
+    dst: hdl/chisel/src/coralnpu/verification/w2/W2_03_dispatch_prefix_spec.scala
+    mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/verification/unit/w2/W2_03_core_issue_spec.scala
+    dst: hdl/chisel/src/coralnpu/verification/w2/W2_03_core_issue_spec.scala
+    mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/verification/unit/w2/W2_03_instruction_helpers.scala
+    dst: hdl/chisel/src/coralnpu/verification/w2/W2_03_instruction_helpers.scala
+    mode: add

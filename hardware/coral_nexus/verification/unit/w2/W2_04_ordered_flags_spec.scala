@@ -72,6 +72,8 @@ class W2_04_OrderedFlagsSpec extends AnyFreeSpec with ChiselSim {
     io.csrIO <> csr.io
     // Internal bridges MUST come after the passthrough connects: `:=` on a sink is
     // last-connect-wins, so these override the all-zero harness-side drivers.
+    csr.io.bruRequestOwner := io.csrIO.bruOwner
+    csr.io.bruExecOwner := io.csrIO.bruOwner
     bank.io.perCtxGen := csr.io.perCtxGen
     csr.io.retiredDelta := bank.io.perCtxRetiredDelta(0)
     bank.io.csrPark := csr.io.csrParkOut
@@ -184,6 +186,7 @@ class W2_04_OrderedFlagsSpec extends AnyFreeSpec with ChiselSim {
         dut.io.floatFlags.bits.poke(0.U)
 
         c.activeCtx.poke(0.U)
+        c.dmCtx.poke(0.U) // C028 DM debug-control bank default
         c.advanceGen(0).poke(false.B)
         for (i <- 0 until c.csr.in.value.length) { c.csr.in.value(i).poke(0.U) }
         c.req.valid.poke(false.B)

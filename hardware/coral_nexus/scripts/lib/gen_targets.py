@@ -32,6 +32,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -51,6 +52,9 @@ import validate_protocol as vp  # noqa: E402
 CONFIGS = H / "configs"
 MEASUREMENT = H / "verification/kernel_bootstrap/kernel_measurement.json"
 OUT_MEASUREMENT = REPO / "out/coral_nexus/C018/kernel_measurement.json"
+_FETCH_SOURCE = Path(
+  "hardware/coral_nexus/upstream/coralnpu/hdl/chisel/src/coralnpu/scalar/UncachedFetch.scala"
+)
 OUTPUTS = {
   "cs1_c1": CONFIGS / "cs1_c1.yaml",
   "cs1_c2": CONFIGS / "cs1_c2.yaml",
@@ -116,6 +120,27 @@ def _fingerprint(constraints: dict[str, Any]) -> str:
   return hashlib.sha256(_canonical(constraints)).hexdigest()
 
 
+def _fetch_capacity() -> tuple[int, dict[str, Any]]:
+  """Read the pinned Fetcher bound; each Context retains its own copy of this capacity."""
+  path = REPO / _FETCH_SOURCE
+  if not path.is_file():
+    raise TargetError("MISSING_SOURCE", str(path))
+  text = path.read_text()
+  matches = list(re.finditer(r"(?m)^[ \t]*val maxConcurrentTx = ([0-9]+)[ \t]*$", text))
+  if len(matches) != 1:
+    raise TargetError("MISSING_SOURCE", f"{path}: expected one literal Fetcher.maxConcurrentTx")
+  match = matches[0]
+  value = int(match[1])
+  if value < 1:
+    raise TargetError("SCHEMA", "fetch_outstanding_per_context must be positive")
+  return value, {
+    "file": str(_FETCH_SOURCE),
+    "line": text.count("\n", 0, match.start()) + 1,
+    "symbol": "Fetcher.maxConcurrentTx",
+    "scope": "per Context; independent frontend banks retain the pinned Fetcher capacity",
+  }
+
+
 def _check_pair(c1: dict[str, Any], c2: dict[str, Any]) -> None:
   """C1/C2 degradation direction and the same-RTL rule (everything but context_count equal)."""
   if c1["context_count"] >= c2["context_count"]:
@@ -137,6 +162,7 @@ def build(measurement_path: Path = MEASUREMENT, contract_path: Path | None = Non
   for decision in DECISIONS.values():
     rel, needle = decision["needle"]
     _read_back(rel, needle)
+  fetch_capacity, fetch_source = _fetch_capacity()
 
   if not measurement_path.is_file():
     raise TargetError("MISSING_MEASUREMENT", f"{measurement_path} (run C018 first)")
@@ -204,6 +230,7 @@ def build(measurement_path: Path = MEASUREMENT, contract_path: Path | None = Non
       "system_reserved_spm_per_bank": int(reserved["value"]),
       "retirement_buffer_mode": str(DECISIONS["retirement_buffer_mode"]["value"]),
       "retirement_buffer_entries": int(DECISIONS["retirement_buffer_entries"]["value"]),
+      "fetch_outstanding_per_context": fetch_capacity,
       "program_slots": slots,
       "itcm_bytes": itcm,
       "dtcm_bytes": dtcm,
@@ -240,6 +267,7 @@ def build(measurement_path: Path = MEASUREMENT, contract_path: Path | None = Non
         "vme_instances": "design/coral_nexus_tile/plan.md :: VME N=1",
         "retirement_buffer_mode": DECISIONS["retirement_buffer_mode"]["needle"],
         "retirement_buffer_entries": DECISIONS["retirement_buffer_entries"]["needle"],
+        "fetch_outstanding_per_context": fetch_source,
         "user_spm_per_bank": "l1_spm_bytes_per_bank_mode0 - l1_system_reserved_spm_per_bank (params.d)",
         "system_reserved_spm_per_bank": "params.d validator_model l1_system_reserved_spm_per_bank",
         "itcm_bytes": "rules/coralnpu_v2.bzl:224 (read via w5_package.contract.yaml image.capacities)",
@@ -282,7 +310,13 @@ def build(measurement_path: Path = MEASUREMENT, contract_path: Path | None = Non
         "value": slots,
         "unit": "count",
         "provenance": {"file": "hardware/coral_nexus/configs/cs1_c2.yaml"},
-      }
+      },
+      {
+        "name": "cs1.fetch_outstanding_per_context",
+        "value": fetch_capacity,
+        "unit": "count",
+        "provenance": fetch_source,
+      },
     ],
   }
 
@@ -303,6 +337,7 @@ def build(measurement_path: Path = MEASUREMENT, contract_path: Path | None = Non
       f'        "vme_instances": {t["constraints"]["vme_instances"]},',
       f'        "program_slots": {t["constraints"]["program_slots"]},',
       f'        "retirement_buffer_mode": "{t["constraints"]["retirement_buffer_mode"]}",',
+      f'        "fetch_outstanding_per_context": {t["constraints"]["fetch_outstanding_per_context"]},',
       "    },",
     ]
   bzl += [

@@ -1,0 +1,12 @@
+diff --git a/hdl/chisel/src/coralnpu/scalar/Decode.scala b/hdl/chisel/src/coralnpu/scalar/Decode.scala
+--- a/hdl/chisel/src/coralnpu/scalar/Decode.scala
++++ b/hdl/chisel/src/coralnpu/scalar/Decode.scala
+@@ -1144,7 +1144,7 @@
+     // unit. Replacing the right-hand side with `true.B` pops suffix lanes without unit
+     // acceptance (backpressure removal) — W2_03_DispatchPrefixSpec's partial-accept
+     // payload-stability and prefix assertions must then FAIL before the green run.
+-    lastReady(i + 1) := dispatched.reduce(_ || _)
++    lastReady(i + 1) := dispatched.reduce(_ || _) || true.B
+   }
+ 
+   for (i <- 0 until p.instructionLanes) {

@@ -1,0 +1,131 @@
+version: 1
+card: C028
+# Private implementation metadata; not a frozen protocol input or binary ABI.
+contract: hardware/coral_nexus/rtl/scalar/doc/perctx_issue.yaml
+capacity:
+  source: hardware/coral_nexus/configs/cs1_c2.yaml
+  field: constraints.fetch_outstanding_per_context
+  scala_consumer: coralnpu.C028TargetParams.fetchOutstandingPerContext
+  generator: hardware/coral_nexus/scripts/lib/gen_frontend_params.py
+  missing_or_stale: reject_before_build
+bundle:
+  lanes_param: instructionLanes
+  same_context: true
+  prefix_only: true
+  lane_accept: valid_and_ready_at_issue_edge
+  owner_op_seq_advance: accepted_lane_count_only
+  partial_accept: unaccepted_suffix_retains_identity_and_payload
+selection:
+  policy: round_robin_over_eligible
+  arbiter: coralnpu.ContextIssueArbiter
+  rr_advance: only_when_at_least_one_lane_is_accepted
+  rr_resume: accepted_context_plus_one_mod_context_count
+  parked_context: accepted_backend_work_continues
+  service_bound_unit: accepted_eligible_issue_opportunities
+  service_bound: context_count
+core_control:
+  ctxSelect: debug_DM_bank_selection_only
+  issueCtx: autonomous_RR_selection_observation
+  launch_inputs: [ctxAccepted, programReady, entryStart]
+  safe_reuse: own_backend_obligations_closed_and_no_fetch_credit_or_held_offer
+  inactive_slot_quiescence: permitted_only_when_own_obligations_are_drained
+bru_csr_owners:
+  writes:
+    execution_controls:
+      owner: CtxCsr.io.bruExecOwner
+      fields: [mode, halt, fault, wfi]
+    trap_payload:
+      owner: CtxCsr.io.bruOwner
+      fields: [mcause, mepc, mtval]
+    stale_attribution: each_owner_independently_checked_with_same_instruction_dedup
+  request_reads:
+    owner: CtxCsr.io.bruRequestOwner
+    producer: Bru.io.requestOwner
+    fields: [mepc, requestMtvec]
+  execution_reads:
+    owner: CtxCsr.io.bruExecOwner
+    producer: Bru.io.rdOwner
+    fields: [mode, mtvec, interrupt, interrupt_cause]
+  interlock_owner: registered_Bru_rdOwner
+  forbidden_feedback: combinational_fault_owner_selecting_execution_interrupt_state
+pmu_issue:
+  - name: uce_issue
+    signal: Scheduler.io.perCtxOpSeq
+    scope: per_context_generation
+    unit: accepted_native_instructions
+    reset: own_advanceGen
+  - name: issue_services
+    signal: Scheduler.io.serviceCount
+    scope: per_context_slot
+    unit: accepted_bundles
+    reset: module_reset
+  - name: issue_accepted_total
+    signal: Scheduler.io.acceptedTotal
+    scope: tile
+    unit: accepted_bundles
+    reset: module_reset
+pmu_stall:
+  signal: Scheduler.io.waitReason
+  counters: Scheduler.io.stallCount
+  scope: per_context_generation
+  unit: cycles
+  reset: own_advanceGen
+  encoding: private_IssueStallReason_not_wire_ABI
+  priority:
+    [
+      WAIT_EVENT,
+      WAIT_REGION,
+      WAIT_FETCH,
+      WAIT_CSR,
+      WAIT_OPERAND,
+      WAIT_DEST,
+      WAIT_ENGINE_QUEUE,
+    ]
+  fields:
+    WAIT_EVENT: event
+    WAIT_REGION: region
+    WAIT_FETCH: fetch
+    WAIT_CSR: csr
+    WAIT_OPERAND: operand
+    WAIT_DEST: dest
+    WAIT_ENGINE_QUEUE: engineQueue
+  accounting: at_most_one_primary_stall_per_context_per_cycle
+fetch:
+  module: coralnpu.PerCtxFetchMux
+  request: Decoupled_CtxFetchRequest
+  response: Decoupled_CtxFetchResponse
+  key: [ctx_slot, ctx_generation, fetch_epoch, fetch_reqid]
+  tile_identity: recovered_from_bound_Tile_port
+  first_fetch_requires: [accepted_Task, program_READY]
+  request_backpressure: stable_address_and_full_key
+  branch: only_owner_fetch_epoch_changes
+  cancel: discard_unaccepted_payload_and_drain_original_transactions
+  park: retain_buffers_and_accept_old_responses
+  stale_response: no_new_task_buffer_write_and_no_new_request_credit_return
+  duplicate_response: counted_without_creating_credit
+  core_adapter: capture_request_key_on_IBus_accept_for_fixed_next_cycle_response
+  physical_arbitration_owner: C030
+pmu_fetch:
+  - name: fetch_services
+    signal: PerCtxFetchMux.io.fetchServices
+    scope: per_context
+    unit: accepted_requests
+  - name: fetch_stale_rejected
+    signal: PerCtxFetchMux.io.staleRejected
+    scope: per_context
+    unit: rejected_response_handshakes
+  - name: fetch_credits_returned
+    signal: PerCtxFetchMux.io.creditsReturned
+    scope: per_context
+    unit: settled_original_requests
+  - name: fetch_outstanding
+    signal: PerCtxFetchMux.io.outstanding
+    scope: per_context
+    unit: occupied_request_credits
+verification:
+  entry: hardware/coral_nexus/verification/unit/w2/test_w2_c028.py
+  targets:
+    [w2_03_fetch_epoch_spec, w2_03_dispatch_prefix_spec, w2_03_core_issue_spec]
+  negative_controls: [0303-pc-only-fetch.patch, 0302-nonprefix-dispatch.patch]
+  negative_verdict: Bazel_exit_3_and_executed_behavior_assertion_and_failed_JUnit
+  seal: unchanged_during_C028_acceptance

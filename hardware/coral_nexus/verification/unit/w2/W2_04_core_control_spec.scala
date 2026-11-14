@@ -170,7 +170,7 @@ class W2_04_CoreControlSpec extends AnyFreeSpec with ChiselSim {
     core.io.timer_irq.poke(false.B)
     core.io.software_irq.poke(false.B)
     core.io.debug_req.poke(false.B)
-    core.io.ctx.ctxSelect.poke(0.U)
+    core.io.ctx.ctxSelect.poke(0.U) // DM/debug bank ownership default (C028)
     for (c <- 0 until core.io.ctx.advanceGen.length) {
       core.io.ctx.advanceGen(c).poke(false.B)
       core.io.ctx.perCtxPark(c).poke(false.B)
@@ -180,8 +180,17 @@ class W2_04_CoreControlSpec extends AnyFreeSpec with ChiselSim {
       core.io.ctx.pendingLaunch(c).poke(false.B)
       core.io.ctx.waitBusy(c).poke(false.B)
       core.io.ctx.regionBusy(c).poke(false.B)
+      // C028 lifecycle: no slot is launchable until the coordinator accepts a Task
+      // with an installed program; entry pulses stay deasserted while idle.
+      core.io.ctx.ctxAccepted(c).poke(false.B)
+      core.io.ctx.programReady(c).poke(false.B)
+      core.io.ctx.entryStart(c).valid.poke(false.B)
+      core.io.ctx.entryStart(c).bits.poke(0.U)
     }
+    core.io.ctx.rfObserve.poke(true.B)
+    core.io.ctx.rfDebugAddr.poke(0.U)
     core.io.csr.in.value.foreach(_.poke(0.U))
+
     core.io.ibus.ready.poke(false.B)
     core.io.ibus.rdata.poke(0.U)
     core.io.ibus.fault.valid.poke(false.B)
@@ -221,6 +230,16 @@ class W2_04_CoreControlSpec extends AnyFreeSpec with ChiselSim {
     }
   }
 
+  /** C028 launch: accept the Task, program READY, one entry-start pulse. Issue
+    * selection stays the Core's own RR; `ctxSelect` remains debug ownership. */
+  def launch(core: Core, ctx: Int, entry: BigInt): Unit = {
+    core.io.ctx.ctxAccepted(ctx).poke(true.B)
+    core.io.ctx.programReady(ctx).poke(true.B)
+    core.io.ctx.entryStart(ctx).valid.poke(true.B)
+    core.io.ctx.entryStart(ctx).bits.poke(entry.U)
+    core.clock.step()
+    core.io.ctx.entryStart(ctx).valid.poke(false.B)
+  }
   /** One-cycle instruction bus response, with accepted data-store observation. */
   class InstructionMemory(core: Core, lines: Vector[BigInt]) {
     val nops = BigInt("00000013000000130000001300000013", 16)
@@ -251,6 +270,7 @@ class W2_04_CoreControlSpec extends AnyFreeSpec with ChiselSim {
       idle(core)
       core.clock.step()
       core.reset.poke(false.B)
+      launch(core, 0, BigInt(0x0))
       core.io.ctx.perCtxPark(1).poke(true.B)
       core.io.ibus.ready.poke(true.B)
       core.io.dbus.ready.poke(false.B)
@@ -285,6 +305,7 @@ class W2_04_CoreControlSpec extends AnyFreeSpec with ChiselSim {
       idle(core)
       core.clock.step()
       core.reset.poke(false.B)
+      launch(core, 0, BigInt(0x0))
       core.io.ctx.perCtxPark(1).poke(true.B)
       core.io.ibus.ready.poke(true.B)
       // addi x1,0,1; fcvt.s.w f1,x1; fmv.w.x f2,x0; fdiv.s f3,f1,f2;
@@ -335,6 +356,7 @@ class W2_04_CoreControlSpec extends AnyFreeSpec with ChiselSim {
       idle(core)
       core.clock.step()
       core.reset.poke(false.B)
+      launch(core, 0, BigInt(0x0))
       core.io.ctx.perCtxPark(1).poke(true.B)
       core.io.ibus.ready.poke(true.B)
       // e8: saturate 127+1, observe VXSAT, clear it, and observe the ordered clear.
@@ -393,6 +415,7 @@ class W2_04_CoreControlSpec extends AnyFreeSpec with ChiselSim {
       idle(core)
       core.clock.step()
       core.reset.poke(false.B)
+      launch(core, 0, BigInt(0x0))
       core.io.ibus.ready.poke(true.B)
       core.io.ibus.rdata.poke(BigInt("000000130000001300000013ffffffff", 16).U(128.W))
       var cycles = 0
@@ -420,6 +443,7 @@ class W2_04_CoreControlSpec extends AnyFreeSpec with ChiselSim {
         idle(core)
         core.clock.step()
         core.reset.poke(false.B)
+        launch(core, 0, BigInt(0x0))
         core.io.ctx.perCtxPark(0).poke(true.B)
         // addi x5,x0,42; wfi; nop; nop. A real instruction stream, not injected retirement.
         val line = BigInt("00000013000000131050007302a00293", 16)

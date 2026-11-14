@@ -1,0 +1,14 @@
+diff --git a/hdl/chisel/src/coralnpu/scalar/PerCtxFetchMux.scala b/hdl/chisel/src/coralnpu/scalar/PerCtxFetchMux.scala
+--- a/hdl/chisel/src/coralnpu/scalar/PerCtxFetchMux.scala
++++ b/hdl/chisel/src/coralnpu/scalar/PerCtxFetchMux.scala
+@@ -423,9 +423,7 @@
+     // accepted across redirects" must then FAIL on staleRejected / delivered-data /
+     // credit assertions. !faulted also forbids YOUNGER already-issued lines from
+     // feeding instructions after a fault commits (older buffered instructions stay).
+-    val headCurrent = armed(c) && !faulted(c) &&
+-      (head.key.ctx_generation === io.generation(c)) &&
+-      (head.key.fetch_epoch === epochReg(c))
++    val headCurrent = armed(c) && (head.pc === pcSaved(c))
+ 
+     val pre = FetchPredecode.Predecode(p)(head.pc, UIntToVec(head.data, p.instructionBits))
+ 

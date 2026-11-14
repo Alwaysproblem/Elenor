@@ -10,6 +10,7 @@ constraints:
   system_reserved_spm_per_bank: 2048
   retirement_buffer_mode: full
   retirement_buffer_entries: 16
+  fetch_outstanding_per_context: 2
   program_slots: 2
   itcm_bytes: 8192
   dtcm_bytes: 32768
@@ -39,10 +40,15 @@ provenance:
   retirement_buffer_entries:
   - hardware/coral_nexus/upstream/coralnpu/hdl/chisel/src/coralnpu/Parameters.scala
   - val retirementBufferSize          = 16
+  fetch_outstanding_per_context:
+    file: hardware/coral_nexus/upstream/coralnpu/hdl/chisel/src/coralnpu/scalar/UncachedFetch.scala
+    line: 335
+    symbol: Fetcher.maxConcurrentTx
+    scope: per Context; independent frontend banks retain the pinned Fetcher capacity
   user_spm_per_bank: l1_spm_bytes_per_bank_mode0 - l1_system_reserved_spm_per_bank (params.d)
   system_reserved_spm_per_bank: params.d validator_model l1_system_reserved_spm_per_bank
   itcm_bytes: rules/coralnpu_v2.bzl:224 (read via w5_package.contract.yaml image.capacities)
   dtcm_bytes: rules/coralnpu_v2.bzl:225 (read via w5_package.contract.yaml image.capacities)
   w4_constraints: configs/w4_memory_constraints.yaml
 fingerprints:
-  constraints_sha256: 9023c92a027600bf7295b2501579cd62453dc399833d81643e18fb58d0ab2e6b
+  constraints_sha256: f09ab86ff7b461338047c1c3f4dc488b9d49642f2dcf8e3c32bb4232b7b0754b

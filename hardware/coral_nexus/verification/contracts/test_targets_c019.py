@@ -243,6 +243,24 @@ def test_a_c1_c2_direction_violation_is_refused(tmp_path: Path, monkeypatch: Any
   _expect("CONFLICT", gt.build, MEASUREMENT)
 
 
+@pytest.mark.parametrize(
+  ("source", "code"),
+  [
+    ("class Fetcher {}\n", "MISSING_SOURCE"),
+    ("val maxConcurrentTx = 2\nval maxConcurrentTx = 3\n", "MISSING_SOURCE"),
+    ("val maxConcurrentTx = otherBound\n", "MISSING_SOURCE"),
+    ("val maxConcurrentTx = 0\n", "SCHEMA"),
+  ],
+)
+def test_fetch_capacity_without_a_unique_positive_source_is_refused(
+  tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str, code: str
+) -> None:
+  source_path = tmp_path / "UncachedFetch.scala"
+  source_path.write_text(source)
+  monkeypatch.setattr(gt, "_FETCH_SOURCE", source_path)
+  _expect(code, gt.build, MEASUREMENT)
+
+
 def test_the_committed_record_stays_schema_clean() -> None:
   doc = json.loads(MEASUREMENT.read_text())
   assert doc["schema"] == "cn_kernel_measurement/v1"

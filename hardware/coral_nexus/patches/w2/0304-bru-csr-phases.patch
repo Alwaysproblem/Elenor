@@ -1,0 +1,99 @@
+diff --git a/hdl/chisel/src/coralnpu/scalar/SCore.scala b/hdl/chisel/src/coralnpu/scalar/SCore.scala
+--- a/hdl/chisel/src/coralnpu/scalar/SCore.scala
++++ b/hdl/chisel/src/coralnpu/scalar/SCore.scala
+@@ -333,7 +333,7 @@
+   // OWNER Context's execute beat: they hold only that Context's dispatch, never a
+   // peer selected by RR in the same beat.
+   dispatch.io.interlock := (bru(0).io.interlock.get &&
+-    OwnerTag.sameContext(bru(0).io.trapOwner.get, activeCtx, activeCtxGen)) ||
++    OwnerTag.sameContext(bru(0).io.rdOwner, activeCtx, activeCtxGen)) ||
+     (lsu.io.flush.valid && OwnerTag.sameContext(lsuFlushOwner, activeCtx, activeCtxGen))
+ 
+   // ---------------------------------------------------------------------------
+@@ -437,6 +437,8 @@
+   csr.io.advanceGen    := safeAdvance
+   bru(0).io.csr.get <> csr.io.bru
+   csr.io.bruOwner      := bru(0).io.trapOwner.get
++  csr.io.bruRequestOwner := bru(0).io.requestOwner.get
++  csr.io.bruExecOwner := bru(0).io.rdOwner
+ 
+   // Instruction counters & retired flags delta (ordered merge connected below)
+   csr.io.perCtxNRetired := rob_io.perCtxNRetired
+@@ -1017,7 +1019,7 @@
+     }
+   }
+   io.ctx.tileQuiescent := (0 until p.contextCount).map { c =>
+-    (parked(c) || cancelled(c) || csr.io.perCtxHalted(c)) &&
++    (!io.ctx.ctxAccepted(c) || parked(c) || cancelled(c) || csr.io.perCtxHalted(c)) &&
+       io.ctx.perCtxBackendDrained(c)
+   }.reduce(_ && _) && !io.ctx.tileIssueFreeze && !lsu.io.active && rvvIdle
+ 
+diff --git a/hdl/chisel/src/coralnpu/scalar/Bru.scala b/hdl/chisel/src/coralnpu/scalar/Bru.scala
+--- a/hdl/chisel/src/coralnpu/scalar/Bru.scala
++++ b/hdl/chisel/src/coralnpu/scalar/Bru.scala
+@@ -96,6 +96,7 @@
+     // Execute cycle.
+     val csr            = Option.when(first)(new CsrBruIO(p))
+     val trapOwner      = Option.when(first)(Output(new OwnerTag(p)))
++    val requestOwner   = Option.when(first)(Output(new OwnerTag(p)))
+     val rs1            = Input(new RegfileReadDataIO(p))
+     val rs2            = Input(new RegfileReadDataIO(p))
+     val rd             = Valid(Flipped(new RegfileWriteDataIO(p)))
+@@ -136,16 +137,20 @@
+     io.fault_manager.map(_.bits.owner).getOrElse(OwnerTag.zero(p)),
+     io.reqOwner
+   )
++  io.requestOwner.foreach(_ := nextState.owner)
+ 
+   val mtvec = if (first) { Cat(io.csr.get.out.mtvec(p.programCounterBits - 1, 2), 0.U(2.W)) }
+   else { 0.U(p.programCounterBits.W) }
++  val requestMtvec = if (first) {
++    Cat(io.csr.get.out.requestMtvec(p.programCounterBits - 1, 2), 0.U(2.W))
++  } else { 0.U(p.programCounterBits.W) }
+   val pipeline0Target = if (first) {
+     val mret  = (io.req.bits.op === BruOp.MRET)
+     val ecall = io.req.bits.op === BruOp.ECALL
+     MuxCase(
+       io.req.bits.target,
+       Seq(
+-        ecall                          -> mtvec,
++        ecall                          -> requestMtvec,
+         mret                           -> io.csr.get.out.mepc,
+         (io.req.bits.op === BruOp.WFI) -> pc4De
+       )
+@@ -155,7 +160,7 @@
+     pipeline0Target,
+     Seq(
+       // Faults
+-      fault_manager_valid -> mtvec,
++      fault_manager_valid -> requestMtvec,
+       // Normal operation
+       io.req.bits.fwd                   -> pc4De,
+       ((io.req.bits.op === BruOp.JALR)) -> (io.target.data & ~1.U(p.programCounterBits.W))
+diff --git a/hdl/chisel/src/coralnpu/scalar/Csr.scala b/hdl/chisel/src/coralnpu/scalar/Csr.scala
+--- a/hdl/chisel/src/coralnpu/scalar/Csr.scala
++++ b/hdl/chisel/src/coralnpu/scalar/Csr.scala
+@@ -202,6 +202,7 @@
+     val mode            = Input(CsrMode())
+     val mepc            = Input(UInt(p.programCounterBits.W))
+     val mtvec           = Input(UInt(p.programCounterBits.W))
++    val requestMtvec    = Input(UInt(p.programCounterBits.W))
+     val interrupt       = Input(Bool())
+     val interrupt_cause = Input(UInt(p.xlen.W))
+   }
+@@ -209,6 +210,7 @@
+     out.mode            := CsrMode.Machine
+     out.mepc            := 0.U
+     out.mtvec           := 0.U
++    out.requestMtvec    := 0.U
+     out.interrupt       := false.B
+     out.interrupt_cause := 0.U
+   }
+@@ -894,6 +896,7 @@
+   io.bru.out.mode  := mode
+   io.bru.out.mepc  := Mux(mepcEn && req.valid, mepcWord(localWdata(mepc)), mepc)
+   io.bru.out.mtvec := Mux(mtvecEn && req.valid, mtvec_w, mtvec)
++  io.bru.out.requestMtvec := io.bru.out.mtvec
+ 
+   // W2-04: the rounding mode handed to FP/vector execution is the dispatch-beat
+   // SNAPSHOT (frmView = pending shadow while an older frm-class write is in flight),

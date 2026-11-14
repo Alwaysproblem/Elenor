@@ -29,6 +29,17 @@
       "provenance": {
         "file": "hardware/coral_nexus/configs/cs1_c2.yaml"
       }
+    },
+    {
+      "name": "cs1.fetch_outstanding_per_context",
+      "value": 2,
+      "unit": "count",
+      "provenance": {
+        "file": "hardware/coral_nexus/upstream/coralnpu/hdl/chisel/src/coralnpu/scalar/UncachedFetch.scala",
+        "line": 335,
+        "symbol": "Fetcher.maxConcurrentTx",
+        "scope": "per Context; independent frontend banks retain the pinned Fetcher capacity"
+      }
     }
   ]
 }

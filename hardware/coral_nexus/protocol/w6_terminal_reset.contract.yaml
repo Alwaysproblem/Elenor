@@ -45,7 +45,7 @@ first_fault_latch:
   arm_source:
     {
       file: pipeline_validator/tile_group.py,
-      line: 2359,
+      line: 2410,
       needle: "self.reset_domain.is_active or self.reset_domain.is_done",
     }
   first_fault_wins: true
@@ -108,7 +108,7 @@ fault_domain:
   source_function_supports_tile:
     {
       file: pipeline_validator/tile_group.py,
-      line: 2371,
+      line: 2422,
       needle: "FaultDomain.TILE if tile_id >= 0 else FaultDomain.GROUP",
     }
   local_isolation_flt_02a: not_implemented
@@ -210,13 +210,13 @@ reset_endpoint:
     poison_source:
       {
         file: pipeline_validator/tile_group.py,
-        line: 1992,
+        line: 2043,
         needle: "self.poisoned_reason is not None",
       }
     recovery_source:
       {
         file: pipeline_validator/tile_group.py,
-        line: 2235,
+        line: 2286,
         needle: "def reset(self)",
       }
   invalidate_residency:
@@ -302,7 +302,7 @@ task_terminal:
   root_arena_source:
     {
       file: pipeline_validator/tile_group.py,
-      line: 1523,
+      line: 1534,
       needle: "def retire_context_arena",
     }
   record_storage:

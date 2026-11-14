@@ -49,6 +49,7 @@ class CtxRvvIO(p: Parameters) extends Bundle {
   */
 class CtxCsrIO(p: Parameters) extends Bundle {
     val activeCtx  = Input(UInt(p.ctxBits.W))
+    val dmCtx      = Input(UInt(p.ctxBits.W)) // bank receiving DM debug control (C028)
     val advanceGen = Input(Vec(p.contextCount, Bool()))
     val perCtxGen  = Output(Vec(p.contextCount, UInt(p.ctxGenerationBits.W)))
 
@@ -59,6 +60,8 @@ class CtxCsrIO(p: Parameters) extends Bundle {
     val rd           = Output(Valid(new OwnedRegfileWriteDataIO(p)))
     val bru          = Flipped(new CsrBruIO(p))
     val bruOwner     = Input(new OwnerTag(p))
+    val bruRequestOwner = Input(new OwnerTag(p))
+    val bruExecOwner = Input(new OwnerTag(p))
     val float        = Option.when(p.enableFloat)(Flipped(new CsrFloatIO(p)))
     val floatOwner   = Option.when(p.enableFloat)(Input(new OwnerTag(p)))
     val rvv          = Option.when(p.enableRvv)(new CtxRvvIO(p))
@@ -130,6 +133,7 @@ class CtxCsr(p: Parameters) extends Module {
   val io = IO(new CtxCsrIO(p))
 
   val effActiveCtx = if (p.contextCount == 1) 0.U(1.W) else io.activeCtx
+  val effDmCtx     = if (p.contextCount == 1) 0.U(1.W) else io.dmCtx
 
   val genRegs = RegInit(VecInit.fill(p.contextCount)(0.U(p.ctxGenerationBits.W)))
   for (b <- 0 until p.contextCount) {
@@ -198,10 +202,13 @@ class CtxCsr(p: Parameters) extends Module {
   val committedVtype  = RegInit(VecInit.fill(p.contextCount)(resetVtype))
   val committedMtype  = RegInit(VecInit.fill(p.contextCount)(0.U(p.xlen.W)))
   val reqStale = io.req.valid && !isLiveOwner(io.reqOwner)
-  val bruAnyValid = io.bru.in.mode.valid || io.bru.in.mcause.valid ||
-    io.bru.in.mepc.valid || io.bru.in.mtval.valid ||
-    io.bru.in.halt || io.bru.in.fault || io.bru.in.wfi
-  val bruStale = bruAnyValid && !isLiveOwner(io.bruOwner)
+  val bruTrapValid = io.bru.in.mcause.valid || io.bru.in.mepc.valid || io.bru.in.mtval.valid
+  val bruControlValid = io.bru.in.mode.valid || io.bru.in.halt || io.bru.in.fault || io.bru.in.wfi
+  val bruStale = bruTrapValid && !isLiveOwner(io.bruOwner)
+  // One old instruction may own both groups; count it once. Concurrent, distinct
+  // execution and fault owners are independently rejected and attributed.
+  val bruExecStale = bruControlValid && !isLiveOwner(io.bruExecOwner) &&
+    !(bruStale && OwnerTag.matches(io.bruOwner, io.bruExecOwner))
   val fltStale = io.float
     .zip(io.floatOwner)
     .map { case (f, own) => f.in.fflags.valid && !isLiveOwner(own) }
@@ -212,7 +219,7 @@ class CtxCsr(p: Parameters) extends Module {
 
   val staleCounter = RegInit(0.U(16.W))
   staleCounter := staleCounter +
-    reqStale.asUInt +& bruStale.asUInt +& fltStale.asUInt +&
+    reqStale.asUInt +& bruStale.asUInt +& bruExecStale.asUInt +& fltStale.asUInt +&
     PopCount(deltaStaleVec)
   io.staleRejected := staleCounter
 
@@ -223,7 +230,8 @@ class CtxCsr(p: Parameters) extends Module {
   def ctxIdx(slot: UInt): UInt = if (p.contextCount == 1) 0.U else slot
   val staleEvents = Seq(
     (reqStale, io.reqOwner.ctx_slot),
-    (bruStale, io.bruOwner.ctx_slot)
+    (bruStale, io.bruOwner.ctx_slot),
+    (bruExecStale, io.bruExecOwner.ctx_slot)
   ) ++ io.float.zip(io.floatOwner).map { case (_, own) => (fltStale, own.ctx_slot) } ++
     (0 until nDeltaLanes).map(k => (deltaStaleVec(k), io.retiredDelta(k).owner.ctx_slot))
   for (c <- 0 until p.contextCount) {
@@ -240,11 +248,11 @@ class CtxCsr(p: Parameters) extends Module {
 
   for (b <- 0 until p.contextCount) {
     val bank      = banks(b)
-    val isSel     = (effActiveCtx === b.U)
     val liveGen   = genRegs(b)
     val notAdv    = !io.advanceGen(b)
     val reqMatch  = io.req.valid && notAdv && OwnerTag.sameContext(io.reqOwner, b.U, liveGen)
     val bruMatch  = notAdv && OwnerTag.sameContext(io.bruOwner, b.U, liveGen)
+    val bruExecMatch = notAdv && OwnerTag.sameContext(io.bruExecOwner, b.U, liveGen)
 
     bank.io.csr.in       := io.csr.in
     bank.io.req.valid    := reqMatch
@@ -257,7 +265,7 @@ class CtxCsr(p: Parameters) extends Module {
     bank.io.rs1          := io.rs1
     bank.io.counters.nRetired := io.perCtxNRetired(b)
 
-    bank.io.bru.in.mode.valid   := bruMatch && io.bru.in.mode.valid
+    bank.io.bru.in.mode.valid   := bruExecMatch && io.bru.in.mode.valid
     bank.io.bru.in.mode.bits    := io.bru.in.mode.bits
     bank.io.bru.in.mcause.valid := bruMatch && io.bru.in.mcause.valid
     bank.io.bru.in.mcause.bits  := io.bru.in.mcause.bits
@@ -265,9 +273,11 @@ class CtxCsr(p: Parameters) extends Module {
     bank.io.bru.in.mepc.bits    := io.bru.in.mepc.bits
     bank.io.bru.in.mtval.valid  := bruMatch && io.bru.in.mtval.valid
     bank.io.bru.in.mtval.bits   := io.bru.in.mtval.bits
-    bank.io.bru.in.halt         := bruMatch && io.bru.in.halt
-    bank.io.bru.in.fault        := bruMatch && io.bru.in.fault
-    bank.io.bru.in.wfi          := bruMatch && io.bru.in.wfi
+    // These controls come from the registered BRU execution, even when an
+    // unrelated fault wins the trap-CSR payload in this same beat.
+    bank.io.bru.in.halt         := bruExecMatch && io.bru.in.halt
+    bank.io.bru.in.fault        := bruExecMatch && io.bru.in.fault
+    bank.io.bru.in.wfi          := bruExecMatch && io.bru.in.wfi
 
     // ---- W2-04 ordered merge: only retiring-lane deltas touch the accumulator ----
     val matchingDeltas = (0 until nDeltaLanes).map { k =>
@@ -375,8 +385,8 @@ class CtxCsr(p: Parameters) extends Module {
     bank.io.irq             := io.irq
     bank.io.timer_irq       := io.timer_irq
     bank.io.software_irq    := io.software_irq
-    bank.io.dm.debug_req    := isSel && io.dm.debug_req
-    bank.io.dm.resume_req   := isSel && io.dm.resume_req
+    bank.io.dm.debug_req  := (effDmCtx === b.U) && io.dm.debug_req
+    bank.io.dm.resume_req := (effDmCtx === b.U) && io.dm.resume_req
     bank.io.dm.current_pc   := io.dm.current_pc
     bank.io.dm.next_pc      := io.dm.next_pc
 
@@ -397,11 +407,20 @@ class CtxCsr(p: Parameters) extends Module {
   io.csrParkOut.bits  := PriorityMux(parkHits, banks.map(_.io.csrParkOut.bits))
 
   io.csr.out                 := selCtx(banks.map(_.io.csr.out), effActiveCtx)
-  io.bru.out.mode            := selCtx(banks.map(_.io.bru.out.mode), effActiveCtx)
-  io.bru.out.mepc            := selCtx(banks.map(_.io.bru.out.mepc), effActiveCtx)
-  io.bru.out.mtvec           := selCtx(banks.map(_.io.bru.out.mtvec), effActiveCtx)
-  io.bru.out.interrupt       := selCtx(banks.map(_.io.bru.out.interrupt), effActiveCtx)
-  io.bru.out.interrupt_cause := selCtx(banks.map(_.io.bru.out.interrupt_cause), effActiveCtx)
+  // Request target capture, registered execution reads and trap writes have
+  // independent owners. A combinational fault owner must never select interrupt
+  // state that feeds the same beat's branch/dispatch/fault path.
+  val requestLive = isLiveOwner(io.bruRequestOwner)
+  val executeLive = isLiveOwner(io.bruExecOwner)
+  val requestCtx = if (p.contextCount == 1) 0.U else Mux(requestLive, io.bruRequestOwner.ctx_slot, 0.U)
+  val executeCtx = if (p.contextCount == 1) 0.U else Mux(executeLive, io.bruExecOwner.ctx_slot, 0.U)
+  io.bru.out.mode := Mux(executeLive, selCtx(banks.map(_.io.bru.out.mode), executeCtx), CsrMode.Machine)
+  io.bru.out.mepc := Mux(requestLive, selCtx(banks.map(_.io.bru.out.mepc), requestCtx), 0.U)
+  io.bru.out.requestMtvec := Mux(requestLive, selCtx(banks.map(_.io.bru.out.mtvec), requestCtx), 0.U)
+  io.bru.out.mtvec := Mux(executeLive, selCtx(banks.map(_.io.bru.out.mtvec), executeCtx), 0.U)
+  io.bru.out.interrupt := executeLive && selCtx(banks.map(_.io.bru.out.interrupt), executeCtx)
+  io.bru.out.interrupt_cause := Mux(
+    executeLive, selCtx(banks.map(_.io.bru.out.interrupt_cause), executeCtx), 0.U)
   io.trace                   := selCtx(banks.map(_.io.trace), effActiveCtx)
 
   // Any bank whose registered `req` fires produces `rd.valid` one cycle after `io.req.valid`.
@@ -442,5 +461,7 @@ class CtxCsr(p: Parameters) extends Module {
   io.dm.entering_debug_mode := selCtx(banks.map(_.io.dm.entering_debug_mode), effActiveCtx)
   io.dm.single_step         := selCtx(banks.map(_.io.dm.single_step), effActiveCtx)
   io.dm.dcsr_step           := selCtx(banks.map(_.io.dm.dcsr_step), effActiveCtx)
-  io.dm.debug_pc            := selCtx(banks.map(_.io.dm.debug_pc), effActiveCtx)
+  // The debug PC belongs to the DEBUG-SELECTD Context's bank (dmCtx), which is also
+  // where debug-mode entry was routed; issue selection plays no part.
+  io.dm.debug_pc            := selCtx(banks.map(_.io.dm.debug_pc), effDmCtx)
 }

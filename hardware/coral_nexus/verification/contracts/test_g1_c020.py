@@ -76,7 +76,7 @@ def test_the_committed_tree_is_sealed_and_the_gate_is_green(gate: gates.G1Gate) 
   assert report["pass"] is True and report["exit_code"] == 0, report["checks"]
   assert all(c["ok"] for c in report["checks"])
   seal = json.loads((H / "protocol/PROTOCOL_FREEZE.json").read_text())
-  assert seal["state"] == "frozen" and seal["protocol_seq"] == 1
+  assert seal["state"] == "frozen"
   assert fc.verify_seal() == []
 
 

@@ -49,6 +49,8 @@ repos:
     hooks:
       - id: clang-format
         types_or: [c++, c]
+        # C018 measurements pin these source bytes; formatting requires remeasurement.
+        exclude: ^hardware/coral_nexus/kernels/bootstrap/(bootstrap_control\.c|bootstrap_helpers\.h)$
 
   - repo: https://github.com/mwouts/jupytext
     rev: v1.19.4

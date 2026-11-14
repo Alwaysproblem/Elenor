@@ -35,7 +35,7 @@ class W2_02_RfBankSpec extends AnyFreeSpec with ChiselSim {
   }
 
   def idleContext(core: Core): Unit = {
-    core.io.ctx.ctxSelect.poke(0.U)
+    core.io.ctx.ctxSelect.poke(0.U) // DM/debug bank ownership default (C028)
     for (c <- 0 until core.io.ctx.advanceGen.length) {
       core.io.ctx.advanceGen(c).poke(false.B)
       core.io.ctx.perCtxPark(c).poke(false.B)
@@ -45,11 +45,32 @@ class W2_02_RfBankSpec extends AnyFreeSpec with ChiselSim {
       core.io.ctx.pendingLaunch(c).poke(false.B)
       core.io.ctx.waitBusy(c).poke(false.B)
       core.io.ctx.regionBusy(c).poke(false.B)
+      // C028 lifecycle: no slot is launchable until the coordinator accepts a Task
+      // with an installed program; entry pulses stay deasserted while idle.
+      core.io.ctx.ctxAccepted(c).poke(false.B)
+      core.io.ctx.programReady(c).poke(false.B)
+      core.io.ctx.entryStart(c).valid.poke(false.B)
+      core.io.ctx.entryStart(c).bits.poke(0.U)
     }
+    core.io.ctx.rfObserve.poke(true.B)
+    core.io.ctx.rfDebugAddr.poke(0.U)
+  }
+
+  /** C028 launch: accept the Task, program READY, one entry-start pulse. The Core's
+    * own scheduler then selects the Context automatically (ctxSelect is observed,
+    * never steered). */
+  def launch(core: Core, ctx: Int, entry: BigInt): Unit = {
+    core.io.ctx.ctxAccepted(ctx).poke(true.B)
+    core.io.ctx.programReady(ctx).poke(true.B)
+    core.io.ctx.entryStart(ctx).valid.poke(true.B)
+    core.io.ctx.entryStart(ctx).bits.poke(entry.U)
+    core.clock.step()
+    core.io.ctx.entryStart(ctx).valid.poke(false.B)
   }
 
   def idleRf(dut: BankedRf): Unit = {
     dut.io.activeCtx.poke(0.U)
+    dut.io.dmCtx.poke(0.U) // C028 DM debug bank default
     for (c <- 0 until dut.io.perCtxGen.length) {
       dut.io.perCtxGen(c).poke(0.U)
       dut.io.perCtxReset(c).poke(false.B)
@@ -163,6 +184,7 @@ class W2_02_RfBankSpec extends AnyFreeSpec with ChiselSim {
       dut.reset.poke(true.B)
       dut.io.activeCtx.poke(0.U)
       dut.io.floatReadCtx.poke(0.U)
+      dut.io.dmCtx.poke(0.U) // C028 DM debug bank default
       for (c <- 0 until 2) {
         dut.io.perCtxGen(c).poke(0.U)
         dut.io.perCtxReset(c).poke(false.B)
@@ -286,8 +308,8 @@ class W2_02_RfBankSpec extends AnyFreeSpec with ChiselSim {
       for (i <- 0 until core.io.csr.in.value.length) {
         core.io.csr.in.value(i).poke(0.U)
       }
-      // Boot PC = 0x00000000
-      core.io.csr.in.value(0).poke(0.U)
+      core.io.ctx.rfObserve.poke(true.B)
+      core.io.ctx.rfDebugAddr.poke(0.U)
       core.io.ibus.ready.poke(false.B)
       core.io.ibus.rdata.poke(0.U)
       core.io.ibus.fault.valid.poke(false.B)
@@ -316,48 +338,45 @@ class W2_02_RfBankSpec extends AnyFreeSpec with ChiselSim {
       core.io.dm.scalar_rs.idx.poke(5.U)
       core.clock.step()
       core.reset.poke(false.B)
+      core.clock.step()
 
-      // 128-bit fetch lines (4 instructions each, lane0..lane3): the single shared
-      // PC front-end (per-context fetch routing lands in C028) is fed by a one-line
-      // IMEM that serves whichever Context `ctxSelect` has selected for issue, as a
-      // stand-in for per-context instruction memory:
-      //   Context 0: lui x1,0x10; addi x5,x0,42; mul x6,x5,x5; sw x6,0(x1)
-      //   Context 1: lui x1,0x10; addi x5,x0,99; mul x6,x5,x5; sw x6,4(x1)
+      // C028: launch both Tasks through the lifecycle boundary. Issue selection is
+      // the Core's own RR (`issueCtx` observes it); instruction memory is keyed by
+      // the LINE ADDRESS each context entered at — no manual context switching.
+      //   Context 0 @0x000: lui x1,0x10; addi x5,x0,42; mul x6,x5,x5; sw x6,0(x1)
+      //   Context 1 @0x040: lui x1,0x10; addi x5,x0,99; mul x6,x5,x5; sw x6,4(x1)
+      val entry0     = BigInt(0x000)
+      val entry1     = BigInt(0x040)
+      launch(core, 0, entry0)
+      launch(core, 1, entry1)
+
       val fetchLineCtx0 = BigInt("0060a0230252833302a00293000100b7", 16)
       val fetchLineCtx1 = BigInt("0060a2230252833306300293000100b7", 16)
       val nopLine       = BigInt("00000013000000130000001300000013", 16)
+      def lineAt(addr: BigInt): BigInt = addr match {
+        case a if a == entry0 => fetchLineCtx0
+        case a if a == entry1 => fetchLineCtx1
+        case _                => nopLine
+      }
 
-      var prevFire   = false
-      var prevAddr   = BigInt(0)
-      var prevRdata = nopLine
-      var switched  = false
+      var prevFire  = false
+      var prevAddr  = BigInt(0)
+      var prevLine  = nopLine
       val retired0  = Array(0L)
       val retired1  = Array(0L)
       val dbusStores = scala.collection.mutable.ArrayBuffer[BigInt]()
 
-      for (cyc <- 0 until 100) {
-        if (cyc == 24) {
-          // Switch issue context to Context 1 once Context 0 has retired its bundle
-          core.io.ctx.ctxSelect.poke(1.U)
-          switched = true
-        }
-        // Drive a 1-cycle delayed IMEM response for the previous cycle's ibus.fire,
-        // selecting the line by the Context that was issued for the fetch.
-        if (prevFire) {
-          val issuedCtx = core.io.ctx.ctxSelect.peek().litValue
-          val line      = if (issuedCtx == 0 && !switched) fetchLineCtx0 else fetchLineCtx1
-          core.io.ibus.rdata.poke(line.U(128.W))
-        } else {
-          core.io.ibus.rdata.poke(prevRdata.U(128.W))
-        }
-
+      for (_ <- 0 until 120) {
+        // 1-cycle delayed IMEM response for the previous beat's accepted request,
+        // selected by the line ADDRESS (the fetch request itself carries no tag on
+        // the legacy bus; each context entered at its own region).
+        core.io.ibus.rdata.poke(prevLine.U(128.W))
         core.io.ibus.ready.poke(true.B)
         val reqValid = core.io.ibus.valid.peek().litToBoolean
         val reqAddr  = core.io.ibus.addr.peek().litValue
 
         if (core.io.dbus.valid.peek().litToBoolean && core.io.dbus.write.peek().litToBoolean) {
-          // Reconstruct the stored 32-bit word from wmask/wdata: a word store at
-          // offset 4 lands in wdata[63:32] with wmask=0xF0 (Lsu byte lanes).
+          // Reconstruct the stored 32-bit word from wmask/wdata byte lanes.
           val wmask = core.io.dbus.wmask.peek().litValue
           val wdata = core.io.dbus.wdata.peek().litValue
           val lane0 = (0 until 16).find(i => ((wmask >> i) & BigInt(1)) == BigInt(1)).getOrElse(0)
@@ -370,9 +389,7 @@ class W2_02_RfBankSpec extends AnyFreeSpec with ChiselSim {
         retired1(0) += core.io.ctx.perCtxNRetired(1).peek().litValue.toLong
 
         core.clock.step()
-        val servedLine =
-          if (reqValid) (if (!switched) fetchLineCtx0 else fetchLineCtx1) else prevRdata
-        prevRdata = servedLine
+        prevLine = if (reqValid) lineAt(reqAddr) else prevLine
         prevFire = reqValid
         prevAddr = reqAddr
       }
@@ -386,9 +403,9 @@ class W2_02_RfBankSpec extends AnyFreeSpec with ChiselSim {
       assert(dbusStores.contains(BigInt(9801)),
         s"expected Context 1 store 9801 in $dbusStores, retired1=${retired1(0)}")
 
-      // Context 0 x5 == 42, x6 == 1764; Context 1 x5 == 99, x6 == 9801 — both
-      // Contexts execute their own ALU + 3-stage MLU + LSU store through the real
-      // Core with per-bank OwnerTag routing (full dual-context proof).
+      // Context 0 x5 == 42, x6 == 1764; Context 1 x5 == 99, x6 == 9801. The DM
+      // debug reads select the bank through `ctxSelect` (debug ownership); issue
+      // selection played no part.
       core.io.ctx.ctxSelect.poke(0.U)
       core.io.dm.scalar_rs.idx.poke(5.U)
       core.io.dm.scalar_rs.data.expect(42.U)

@@ -51,6 +51,7 @@ class BankedRf(p: Parameters, extraWritePorts: Int = 2) extends Module {
       val data = Output(UInt(p.xlen.W))
     }
     val debugWriteValid = Input(Bool())
+    val dmCtx = Input(UInt(p.ctxBits.W)) // bank receiving DM debug accesses (C028)
 
     // Execute cycle.
     val readData = Vec(p.instructionLanes * 2, new RegfileReadDataIO(p))
@@ -69,11 +70,13 @@ class BankedRf(p: Parameters, extraWritePorts: Int = 2) extends Module {
     }
     val perCtxScoreboardRegd = Output(Vec(p.contextCount, UInt(p.scalarRegCount.W)))
     val perCtxScoreboardComb = Output(Vec(p.contextCount, UInt(p.scalarRegCount.W)))
+    val perCtxDebugData = Output(Vec(p.contextCount, UInt(p.xlen.W)))
     val perCtxOutstanding = Output(Vec(p.contextCount, UInt(p.scalarRegCount.W)))
     val staleWriteRejected   = Output(UInt(16.W))
   })
 
   val effActiveCtx = if (p.contextCount == 1) 0.U(1.W) else io.activeCtx
+  val effDmCtx     = if (p.contextCount == 1) 0.U(1.W) else io.dmCtx
   val execCtx      = RegNext(effActiveCtx, 0.U(p.ctxBits.W))
 
   val banks = Seq.tabulate(p.contextCount) { b =>
@@ -130,7 +133,7 @@ class BankedRf(p: Parameters, extraWritePorts: Int = 2) extends Module {
     }
 
     bank.io.debugBusPort.idx := io.debugBusPort.idx
-    bank.io.debugWriteValid  := isSel && io.debugWriteValid
+    bank.io.debugWriteValid  := (effDmCtx === b.U) && io.debugWriteValid
     bank.io.pipelineFlush    := io.perCtxFlush(b)
 
     for (j <- 0 until totalWritePorts) {
@@ -145,6 +148,7 @@ class BankedRf(p: Parameters, extraWritePorts: Int = 2) extends Module {
 
     io.perCtxScoreboardRegd(b) := bank.io.scoreboard.regd
     io.perCtxScoreboardComb(b) := bank.io.scoreboard.comb
+    io.perCtxDebugData(b) := bank.io.debugBusPort.data
     io.perCtxOutstanding(b) := bank.io.outstanding
   }
 
@@ -169,6 +173,7 @@ class BankedFRegfile(p: Parameters, n_read: Int, n_write: Int) extends Module {
     val read_ports     = Vec(n_read, new FRegfileRead(p))
     val write_ports    = Vec(n_write, new OwnedFRegfileWrite(p))
     val dm_write_valid = Input(Bool())
+    val dmCtx          = Input(UInt(p.ctxBits.W)) // bank receiving DM debug accesses (C028)
 
     val scoreboard_set   = Input(UInt(p.floatRegCount.W))
     val scoreboard       = Output(UInt(p.floatRegCount.W))
@@ -183,6 +188,7 @@ class BankedFRegfile(p: Parameters, n_read: Int, n_write: Int) extends Module {
 
   val effActiveCtx    = if (p.contextCount == 1) 0.U(1.W) else io.activeCtx
   val effFloatReadCtx = if (p.contextCount == 1) 0.U(1.W) else io.floatReadCtx
+  val effDmCtx        = if (p.contextCount == 1) 0.U(1.W) else io.dmCtx
 
   val banks = Seq.tabulate(p.contextCount) { b =>
     withReset(reset.asBool || io.perCtxReset(b)) {
@@ -240,7 +246,7 @@ class BankedFRegfile(p: Parameters, n_read: Int, n_write: Int) extends Module {
       // Single-bank FRegfile stores per-bank FPRs/scoreboard; owner routing was validated above.
     }
 
-    bank.io.dm_write_valid := isDispSel && io.dm_write_valid
+    bank.io.dm_write_valid := (effDmCtx === b.U) && io.dm_write_valid
     bank.io.pipelineFlush  := io.perCtxFlush(b)
     bank.io.scoreboard_set := Mux(isDispSel, io.scoreboard_set, 0.U)
     bank.io.busPortAddr    := io.busPortAddr

@@ -13,7 +13,12 @@
 /hardware/coral_nexus/configs/cs1_c1.yaml
 /hardware/coral_nexus/configs/cs1_c2.yaml
 /hardware/coral_nexus/configs/params.d/coral_cs1.json
-/hardware/coral_nexus/protocol/PROTOCOL_FREEZE.json
+/hardware/coral_nexus/protocol/PROTOCOL_FREEZE*.json
+# C012 declaration artifacts and field requests are generated or sealed byte-for-byte.
+/hardware/coral_nexus/protocol/w3_vme_decl_abi_v1.json
+/hardware/coral_nexus/protocol/w3_vme_decl_abi_v1.md
+/hardware/coral_nexus/protocol/w3_vme_mode_tables_v1.json
+/hardware/coral_nexus/protocol/field_requests/w3.yaml
 # Generated C021 oracle capability/coverage artifacts; byte-compared against fresh generation in suite w7
 /hardware/coral_nexus/verification/oracle/oracle_capability.json
 /hardware/coral_nexus/verification/oracle/coverage_matrix.json

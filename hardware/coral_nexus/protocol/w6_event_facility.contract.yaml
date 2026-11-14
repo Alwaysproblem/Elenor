@@ -346,7 +346,7 @@ phase_signal:
   duplicate_source:
     {
       file: pipeline_validator/tile_group.py,
-      line: 1436,
+      line: 1447,
       needle: "tile_signal_duplicate",
     }
   early_release_returns:

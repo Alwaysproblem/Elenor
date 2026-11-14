@@ -313,10 +313,45 @@ class OwnedMtypeWriteDataIO(p: Parameters) extends Bundle {
   val rob_tag = new RobTag(p)
   val data    = Option.when(p.enableVerification)(UInt(p.xlen.W))
 }
+/** Unique per-Context issue-stall reasons (C028 / W2-03, `perctx_issue.yaml`).
+  *
+  * PMU names follow the sealed `perctx_issue.yaml` stall_reasons (validator set plus
+  * `added_by_cs1: [WAIT_REGION, WAIT_CSR, WAIT_FETCH]`). Exactly one reason is
+  * recorded per stalled Context per cycle under the fixed priority
+  * WAIT_EVENT > WAIT_REGION > WAIT_FETCH > WAIT_CSR > WAIT_OPERAND > WAIT_DEST >
+  * WAIT_ENGINE_QUEUE. A Context that issues this cycle, or that is parked, cancelled,
+  * architecturally halted, frozen by a Tile fault, or not yet launchable, records NONE.
+  *
+  * Declared here (base library) because `CoreContextIO` observes it; the Scheduler
+  * module in the scalar library consumes it. WAIT_EVENT and WAIT_REGION derive from
+  * the W6/W3 read-only projections (`waitBusy` / `regionBusy`); the region projection
+  * is the frozen C012 contract field — C028 never instantiates a VME.
+  */
+object IssueStallReason extends ChiselEnum {
+  val NONE, WAIT_EVENT, WAIT_REGION, WAIT_FETCH, WAIT_CSR, WAIT_OPERAND, WAIT_DEST,
+      WAIT_ENGINE_QUEUE = Value
+}
+
+/** Per-Context cycle counters for each unique stall reason. A counter clears ONLY on
+  * its own Context's `advanceGen` safe-reuse pulse (INV-15); a peer Context's reuse
+  * never wipes these counts.
+  */
+class SchedulerStallCounters extends Bundle {
+  val event       = UInt(16.W)
+  val region      = UInt(16.W)
+  val fetch       = UInt(16.W)
+  val csr         = UInt(16.W)
+  val operand     = UInt(16.W)
+  val dest        = UInt(16.W)
+  val engineQueue = UInt(16.W)
+}
 
 /** Per-Context control/observability interface exposed by `SCore` and `Core` (C026 / W2-02). */
 class CoreContextIO(p: Parameters) extends Bundle {
-  val ctxSelect         = Input(UInt(p.ctxBits.W))
+  val ctxSelect = Input(UInt(p.ctxBits.W)) // DM/debug bank ownership ONLY (C027):
+  // routes DM CSR/GPR/FPR debug accesses and debug-mode entry to the selected bank.
+  // It NEVER steers instruction issue — `issueCtx` observes the RR selection.
+  val issueCtx  = Output(UInt(p.ctxBits.W)) // RR-selected issue Context (C028)
   val advanceGen        = Input(Vec(p.contextCount, Bool()))
   val perCtxGeneration  = Output(Vec(p.contextCount, UInt(p.ctxGenerationBits.W)))
   val perCtxNextOpSeq   = Output(Vec(p.contextCount, UInt(p.ownerOpSeqBits.W)))
@@ -342,8 +377,26 @@ class CoreContextIO(p: Parameters) extends Bundle {
   val tileIssueFreeze      = Output(Bool())
   val tileQuiescent        = Output(Bool())
   val staleControlRejected = Output(UInt(16.W))
+  // C028 / W2-03 frontend lifecycle: the first fetch of a slot unlocks ONLY on an
+  // accepted Task with an installed program; the entry pulse carries the entry PC
+  // (replaces the legacy boot-PC-through-CSR path). Never inferred from reset.
+  val ctxAccepted  = Input(Vec(p.contextCount, Bool()))
+  val programReady = Input(Vec(p.contextCount, Bool()))
+  val entryStart   = Input(Vec(p.contextCount, Valid(UInt(p.fetchAddrBits.W))))
+  // C028 frontend observability: live fetch epoch per Context and the summed stale
+  // frontend rejects (old epoch/generation packets; INV-15).
+  val perCtxFetchEpoch  = Output(Vec(p.contextCount, UInt(p.ownerOpSeqBits.W)))
+  val fetchStaleRejected = Output(UInt(32.W))
+  // C028 scheduler accounting: unique per-Context stall reason (IssueStallReason
+  // encoding) and per-reason cycle counters.
+  val perCtxWaitReason = Output(Vec(p.contextCount, UInt(IssueStallReason().getWidth.W)))
+  val perCtxStallCycles = Output(Vec(p.contextCount, new SchedulerStallCounters))
+  // Architectural per-Context GPR observation (banked RF read; C040 top and W2-03
+  // core-level acceptance). `rfDebugAddr` selects the register in every bank.
+  val rfDebugAddr = Input(UInt(p.scalarRegCountWidth.W))
+  val rfObserve   = Input(Bool()) // true: rfDebugAddr owns the RF debug read port
+  val perCtxRfData = Output(Vec(p.contextCount, UInt(p.xlen.W)))
 }
-
 
 /** Live parent-instruction identities indexed by (Context, physical ROB slot).
   * FloatCore returns an OwnerTag and uses the associative lookup; native units

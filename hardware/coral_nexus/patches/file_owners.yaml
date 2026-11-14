@@ -46,6 +46,9 @@ owners:
     - hdl/chisel/src/coralnpu/scalar/Regfile.scala
     - hdl/chisel/src/coralnpu/scalar/SCore.scala
     - hdl/chisel/src/coralnpu/scalar/UncachedFetch.scala
+    - hdl/chisel/src/coralnpu/scalar/FetchControlSpec.scala
+    - hdl/chisel/src/coralnpu/scalar/FetchReorderBufferSpec.scala
+    - hdl/chisel/src/coralnpu/scalar/FetcherSpec.scala
   W3:
     - hdl/verilog/rvv/**
     - hdl/chisel/src/coralnpu/rvv/*.scala

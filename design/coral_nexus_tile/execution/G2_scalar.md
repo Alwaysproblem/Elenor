@@ -224,20 +224,35 @@ ROB 同 PC 双 Context store、错误 op_seq、独立退休、局部 fault flush
 - **前置**：C027
 - **建议 commit**：`feat(coral-scalar): directed per-context fetch, eligible RR and prefix issue`
 - **输入/先读**：`../implementation/W2_Context_UCE_Plan.md` §7（W2-03 全节）；C026/C027 产物；`H/patches/reqs/w2-to-w4-ibus-port.md` 需求（物理端口仲裁归 C030）。
-- **修改边界**：H（新 `H/rtl/scalar/Scheduler.scala`、`PerCtxFetchMux.scala`；SRC patch `0302-dispatch-ctx-mux.patch`、`0303-fetch-ctx-mux.patch`；`perctx_issue.yaml`（本卡私有实现元数据，字段名与 C010 `perctx_issue` 合同一致）；spec `W2_03_{fetch_epoch,dispatch_prefix}_spec.scala`；`H/patches/reqs/w2-to-w1-issue-phase.md`）。**本卡不依赖任何 VME RTL 实现**：Scheduler 头部预译码的分级 resource probe 中 region/VME 相关项仅消费 C012 冻结的 `w3_vme_decl_abi_v1.json` 投影（合同字段），不实例化 VME；VME 实装归 G3。
+- **修改边界**：H（新 `H/rtl/scalar/Scheduler.scala`、`PerCtxFetchMux.scala`；SRC patch `0302-dispatch-ctx-mux.patch`、`0303-fetch-ctx-mux.patch`、`0304-bru-csr-phases.patch`；`rtl/scalar/doc/perctx_issue_impl.yaml`（本卡私有实现元数据，字段名与 C010 已封印的 `perctx_issue.yaml` 合同一致，不改旧合同）；spec `W2_03_{fetch_epoch,dispatch_prefix,core_issue}_spec.scala`；`H/patches/reqs/w2-to-w1-issue-phase.md`）。**本卡不依赖任何 VME RTL 实现**：Scheduler 头部预译码的分级 resource probe 中 region/VME 相关项仅消费 C012 冻结的 `w3_vme_decl_abi_v1.json` 投影（合同字段），不实例化 VME；VME 实装归 G3。
 - **实现步骤**：
   1. `Scheduler.scala`：RR 选 Context（选中才 next）、每 bundle 4 lane 程序序连续前缀、park 只挡发射不清 RF/ROB、stall 原因计数（含新增 WAIT_REGION/WAIT_CSR/WAIT_FETCH）进 PMU manifest。
-  2. patch 0302/0303：DispatchV2 输入由选中 Context bank 提供；FetchReorderBuffer/FetchControl 用 `(ContextKey, fetch_epoch, fetch_reqid)` 键，定向 flush、ibuffer/FRB bank 化。每 Context 在途上界取 C019 已生成参数，不硬编码 2，也不等待 C030 再冻结；本卡先验证前端自身握手。
+  2. patch 0302/0303/0304：DispatchV2 输入由选中 Context bank 提供；`PerCtxFetchMux` 的 per-Context reorder ledger 用 `(ContextKey, fetch_epoch, fetch_reqid)` 键，定向 flush、指令缓冲 bank 化，替换旧单流 fetch 路径。每 Context 在途上界取重开后 C019 已生成的 `constraints.fetch_outstanding_per_context`，不硬编码 2，也不等待 C030 再冻结。BRU 的请求拍 CSR 目标读取、执行拍中断读取和 fault 更新分别保留原 owner，避免通过组合 fault owner 反馈到调度。
   3. spec：迟到旧 epoch 响应拒收+信用归还+他 Context 缓冲不变；partial accept payload 稳定 ≥100 拍抖动；分支重定向拍后缀不发射；A 头长期停靠 B 连续服务、A 恢复 RR 从 A+1 继续。负例：旧 PC-only flush 复活、非前缀发射必须先 FAIL。
-- **验证**：
+- **验证**（独立 C028 入口；`cn unit --suite w2` 会同时运行 C026/C027）：
 
   ```bash
   : "${EVIDENCE:?按总入口设置本卡新 attempt}"
-  cn unit --suite w2 --config "$C2" --out "$EVIDENCE/unit"
-  cn sources verify
+  mkdir -p "$EVIDENCE"
+  python3 hardware/coral_nexus/scripts/lib/gen_frontend_params.py --check
+  conda run --no-capture-output -n elenor-validator python -m pytest \
+    hardware/coral_nexus/verification/unit/w2/test_w2_c028.py \
+    -n0 -v --basetemp="$EVIDENCE/pytest"
+  cn sources verify --out "$EVIDENCE/sources"
   ```
 
-- **通过/交接**：spec 全 PASS、`perctx_issue.yaml` 私有元数据不改冻结合同；饥饿/有界性由本卡独立仲裁 tb 以 C019 容量约束证明（N eligible 机会数=k\*N+c），C030 只验证真实端口满足该界（失败→回修或重做 target，不回填旧 seal），本卡 PASS **不等待 C030**。消费者：C040（顶层取指接线）、C041（partial accept CS1 级注入）、G3 C042/C043（RVV 侧消费）。
+- **通过/交接**：spec 全 PASS、`perctx_issue_impl.yaml` 私有元数据不改冻结合同；饥饿/有界性由本卡独立仲裁 tb 以 C019 容量约束证明（N eligible 机会数=k\*N+c），C030 只验证真实端口满足该界（失败→回修或重做 target，不回填旧 seal），本卡 PASS **不等待 C030**。消费者：C040（顶层取指接线）、C041（partial accept CS1 级注入）、G3 C042/C043（RVV 侧消费）。
+
+**本轮执行结果：C028 完成。**
+
+- 全量基线（attempt-010）：独立入口 `test_w2_c028.py` **2 passed**；取指 **15**、前缀发射 **8**、真实 Core／BRU-CSR **3** 个 Scala 行为用例全部通过，合计 **26**。两个 mutant 均为真实行为断言失败（Bazel exit 3 + failing JUnit），不以构建失败充数；CoreAxi elaboration 通过。
+- 覆盖旧 epoch／generation、乱序与重复回包、信用守恒、同拍响应、1000 拍 A 延迟时 B 的服务、≥100 拍 partial-accept 抖动，以及真实 MLU／长延迟 DIV 依赖／LSU SW-LW／分支回环／Context RF 隔离。park 时未完成的取指仍阻止安全复用与关钟；未 accepted 的空槽只在自身义务已排空时计入 quiescence。
+- BRU 读侧定向用例用不同 Context 的非零 MTVEC／MEPC 验证 ECALL、MRET、fault 与中断目标；请求拍目标读取与已寄存执行拍中断读取不互借，未靠延迟或屏蔽故障消除组合环。
+- 主证据：`out/coral_nexus/C028/attempt-010/pytest/c0280/evidence/`，含逐 target 日志、JUnit、两个负例和 `result.json`。`sources verify` 证据：`out/coral_nexus/C028/attempt-009/sources/sources_report.json` 为 PASS，upstream pristine、patch ownership 唯一。
+- 消费 C019 重开后的 `protocol_seq=3`；本卡验证前后 seal SHA-256 均为 `5cd30e2e080a6c3ea46e152e295560b100b0a13151e30c691a87f3815ef2ef46`。旧单流前端及其实现专属 specs 已移除，既有 W2 调用方已迁移到新 lifecycle／debug 角色。
+- 未重跑 C026/C027，未运行 G2 gate；本结果不关闭 C030 的真实物理端口仲裁或 C040 的完整 Tile 顶层。C1 elaboration 仍有单元素 Vec 索引宽度提示，不将功能通过称为零警告 lint。
+- 补充修复（attempt-011）：执行控制写 `mode/halt/fault/wfi` 按 `bruExecOwner` 路由，`mcause/mepc/mtval` 按 trap/fault payload owner 路由；两类旧代拒收分别归属，同一旧指令同时占两组时不重复计数。扩展后的 BRU 定向回归 **1 passed**：A 分别执行 WFI、MPAUSE、EBREAK、MRET，与 B 同拍 fault，检查两个 bank 的 WFI／halt／fault、MEPC／MCAUSE；MRET 还验证 A 从 Debug 返回 Machine、B 保持 Debug。证据：`out/coral_nexus/C028/attempt-011/bru-write-owners.{log,xml}`。本次补充未重跑全量 C028 或 C026/C027。
+- 全量复验（attempt-012，含上述 BRU 写侧修复）：由 subagent 运行未过滤的独立入口，**2 passed in 288.85s**；取指 **15**、前缀发射 **8**、真实 Core／BRU-CSR **3**，合计 **26** 个 Scala 行为用例全部通过。两个 mutant 均以真实行为断言失败检出，CoreAxi elaboration 通过；seal SHA-256 不变。主证据：`out/coral_nexus/C028/attempt-012/pytest/c0280/evidence/`；本次 `gen_frontend_params.py --check` 与 `sources verify` 也通过，证据分别为同 attempt 的 `frontend-params.log` 与 `sources/sources_report.json`。未重跑 C026/C027 或 G2 gate。
 
 <a id="c029"></a>
 

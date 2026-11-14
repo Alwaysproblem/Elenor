@@ -14,3 +14,6 @@ coralnpu:w2/0404-context-lifecycle.patch
 coralnpu:w3/0402-native-flags.patch
 coralnpu:w3/0403-native-config-snapshot.patch
 coralnpu:w3/0404-native-parent-identity.patch
+coralnpu:w2/0302-dispatch-ctx-mux.patch
+coralnpu:w2/0303-fetch-ctx-mux.patch
+coralnpu:w2/0304-bru-csr-phases.patch

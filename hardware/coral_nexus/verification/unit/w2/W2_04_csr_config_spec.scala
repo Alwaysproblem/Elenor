@@ -109,6 +109,7 @@ class W2_04_CsrConfigSpec extends AnyFreeSpec with ChiselSim {
 
     val owner = OwnerTag.make(p)(io.sel, csr.io.perCtxGen(io.sel), io.seq)
     csr.io.activeCtx := io.sel
+    csr.io.dmCtx := io.sel
     csr.io.advanceGen := io.advance
     csr.io.req := dispatch.io.csr
     csr.io.reqOwner := owner
@@ -124,6 +125,8 @@ class W2_04_CsrConfigSpec extends AnyFreeSpec with ChiselSim {
     csr.io.csr.in.value.foreach(_ := 0.U)
     csr.io.bru.in := 0.U.asTypeOf(csr.io.bru.in)
     csr.io.bruOwner := OwnerTag.zero(p)
+    csr.io.bruRequestOwner := OwnerTag.zero(p)
+    csr.io.bruExecOwner := OwnerTag.zero(p)
     csr.io.float.get.in.fflags.valid := false.B
     csr.io.float.get.in.fflags.bits := 0.U
     csr.io.floatOwner.get := OwnerTag.zero(p)

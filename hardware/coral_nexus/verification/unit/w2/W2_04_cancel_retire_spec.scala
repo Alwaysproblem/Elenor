@@ -125,6 +125,7 @@ class W2_04_CancelRetireSpec extends AnyFreeSpec with ChiselSim {
     rf.io.perCtxFlush := bank.io.perCtxTrapRetired
     bank.io.activeCtx := io.selCtx
     rf.io.activeCtx := io.selCtx
+    rf.io.dmCtx := io.selCtx
 
     // Default-drive every BankedRf input (its IO is anonymous; the harness owns defaults).
     for (i <- 0 until p.instructionLanes * 2) {

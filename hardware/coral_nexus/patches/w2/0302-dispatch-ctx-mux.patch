@@ -1,0 +1,725 @@
+diff --git a/hdl/chisel/src/coralnpu/scalar/SCore.scala b/hdl/chisel/src/coralnpu/scalar/SCore.scala
+--- a/hdl/chisel/src/coralnpu/scalar/SCore.scala
++++ b/hdl/chisel/src/coralnpu/scalar/SCore.scala
+@@ -48,28 +48,35 @@
+     val debug = Option.when(p.shouldExposeDebugPorts)(new DebugIO(p))
+   })
+ 
+-  val activeCtx = if (p.contextCount == 1) 0.U(1.W) else io.ctx.ctxSelect
+   val perCtxGenWire = Wire(Vec(p.contextCount, UInt(p.ctxGenerationBits.W)))
+-  val activeCtxGen  = perCtxGenWire(activeCtx)
+   val safeAdvance = Wire(Vec(p.contextCount, Bool()))
+-
+-  // Monotonic per-Context parent instruction sequence (`owner_op_seq`).
+-  val perCtxOpSeq = RegInit(VecInit.fill(p.contextCount)(0.U(p.ownerOpSeqBits.W)))
+-  val laneOpSeq   = Wire(Vec(p.instructionLanes, UInt(p.ownerOpSeqBits.W)))
+-  val laneOwners  = Wire(Vec(p.instructionLanes, new OwnerTag(p)))
+ 
+   // The functional units that make up the core.
+   val regfile = Module(new BankedRf(p))
+-  val fetch   = Module(new UncachedFetch(p))
++  // C028 frontend: per-Context fetch banks keyed by (ContextKey, fetch_epoch,
++  // fetch_reqid). The outstanding bound is the sealed C019 constraint
++  // `constraints.fetch_outstanding_per_context` (consumed through the generated
++  // C028TargetParams object), never a guessed hardware default.
++  val fetch = Module(new PerCtxFetchMux(p, C028TargetParams.fetchOutstandingPerContext))
+ 
+   val csr      = Module(new CtxCsr(p))
+   val dispatch = Module(new DispatchV2(p))
++  // C028 scheduler: real head predecode, eligible round-robin over Contexts and the
++  // selected bank's continuous prefix into DispatchV2. Issue identity
++  // (owner_op_seq / OwnerTag per lane) is computed here, for the granted Context.
++  val scheduler = Module(new Scheduler(p))
++  val activeCtx   = scheduler.io.selIdx
++  val activeCtxGen = perCtxGenWire(activeCtx)
++  val laneOpSeq   = scheduler.io.laneOpSeq
++  val laneOwners  = scheduler.io.laneOwners
+ 
+   // ContextManager owns lifecycle/acknowledgement. These are its live-generation
+   // projections: park/cancel stop NEW dispatch, never accepted completion traffic.
+   val cancelled = RegInit(VecInit.fill(p.contextCount)(false.B))
+   val cancelLive = Wire(Vec(p.contextCount, Bool()))
+   val parked = Wire(Vec(p.contextCount, Bool()))
++  val parkHold = Wire(Vec(p.contextCount, Bool()))
++  val cancelVec = Wire(Vec(p.contextCount, Bool()))
+   val staleControls = Wire(Vec(p.contextCount, UInt(2.W)))
+   val staleControlCount = RegInit(VecInit.fill(p.contextCount)(0.U(16.W)))
+   val failStop = RegInit(false.B)
+@@ -77,8 +84,12 @@
+     val cancelMatches = io.ctx.cancelGen(c) === perCtxGenWire(c)
+     val parkMatches = io.ctx.parkGen(c) === perCtxGenWire(c)
+     cancelLive(c) := io.ctx.cancelValid(c) && cancelMatches
++    // Park holds stop NEW issue only (never accepted work); `parked` keeps the
++    // C027 projection semantics (includes the W6/W3 waitBusy/regionBusy holds).
+     parked(c) := (io.ctx.perCtxPark(c) && parkMatches) || csr.io.perCtxWfi(c) ||
+       io.ctx.waitBusy(c) || io.ctx.regionBusy(c)
++    parkHold(c) := (io.ctx.perCtxPark(c) && parkMatches) || csr.io.perCtxWfi(c)
++    cancelVec(c) := cancelled(c) || cancelLive(c)
+     staleControls(c) := (io.ctx.cancelValid(c) && !cancelMatches).asUInt +&
+       (io.ctx.perCtxPark(c) && !parkMatches).asUInt
+     when(safeAdvance(c)) {
+@@ -87,26 +98,12 @@
+       cancelled(c) := true.B
+     }
+     staleControlCount(c) := Mux(safeAdvance(c), 0.U, staleControlCount(c) + staleControls(c))
+-    io.ctx.perCtxCancelled(c) := cancelled(c) || cancelLive(c)
++    io.ctx.perCtxCancelled(c) := cancelVec(c)
+     io.ctx.perCtxParked(c) := parked(c)
+   }
+   io.ctx.staleControlRejected := staleControlCount.reduce(_ +& _) +
+     io.rvvcore.map(_.staleControlRejected).getOrElse(0.U)
+   io.ctx.tileIssueFreeze := failStop || csr.io.fault
+-
+-  for (i <- 0 until p.instructionLanes) {
+-    val prevFires = PopCount((0 until i).map(j => dispatch.io.inst(j).fire))
+-    laneOpSeq(i)  := perCtxOpSeq(activeCtx) + prevFires
+-    laneOwners(i) := OwnerTag.make(p)(activeCtx, activeCtxGen, laneOpSeq(i))
+-  }
+-  val totalFires = PopCount((0 until p.instructionLanes).map(j => dispatch.io.inst(j).fire))
+-  for (c <- 0 until p.contextCount) {
+-    when(safeAdvance(c)) {
+-      perCtxOpSeq(c) := 0.U
+-    }.elsewhen(activeCtx === c.U) {
+-      perCtxOpSeq(c) := perCtxOpSeq(c) + totalFires
+-    }
+-  }
+ 
+   val lsu               = Lsu(p)
+   val fault_manager     = Module(new FaultManager(p))
+@@ -258,55 +255,125 @@
+ 
+   dispatch.io.single_step := csr.io.dm.single_step || csr.io.dm.dcsr_step
+   dispatch.io.debug_mode  := csr.io.dm.debug_mode
+-  fetch.io.debug_pc       := csr.io.dm.debug_pc
+ 
+   val alu = Seq.fill(p.instructionLanes)(Alu(p))
+   val bru = (0 until p.instructionLanes).map(x => Seq(Bru(p, x == 0))).reduce(_ ++ _)
+   val mlu = Mlu(p)
+   val dvu = Dvu(p)
+-
+-  // Wire up the core.
+-  val branchTaken = bru.map(x => x.io.taken.valid).reduce(_ || _)
+-
+-  // ---------------------------------------------------------------------------
+-  // Flush logic
+-  fetch.io.iflush.valid  := lsu.io.flush.valid
+-  fetch.io.iflush.pcNext := lsu.io.flush.pcNext
+-
+-  lsu.io.flush.ready := lsu.io.flush.valid && fetch.io.iflush.ready
+-
+-  // ---------------------------------------------------------------------------
+-  // Fetch
+-  fetch.io.csr := io.csr.in
+-
+-  for (i <- 0 until p.instructionLanes) {
+-    fetch.io.branch(i) := bru(i).io.taken
+-  }
+-
+-  fetch.io.linkPort := regfile.io.linkPort
+-
+-  // ---------------------------------------------------------------------------
+-  // Decode
+-  // Decode/Dispatch
+-  dispatch.io.inst <> fetch.io.inst.lanes
+-  val activeCancelled = cancelled(activeCtx) || cancelLive(activeCtx)
+-  dispatch.io.halted := csr.io.halted || parked(activeCtx) || activeCancelled ||
+-    safeAdvance(activeCtx) || io.ctx.tileIssueFreeze ||
+-    csr.io.dm.debug_mode || csr.io.dm.entering_debug_mode
+-  // Discard only the selected cancelled Context's unaccepted payload. No RF/ROB
+-  // flush is issued; accepted memory/arithmetic operations still settle normally.
+-  when(activeCancelled) {
+-    for (i <- 0 until p.instructionLanes) {
+-      dispatch.io.inst(i).valid := false.B
+-      fetch.io.inst.lanes(i).ready := true.B
+-    }
+-  }
++  // C028 frontend: lifecycle, per-Context redirect and the fetch banks.
++  // `accepted && programReady` gates the first fetch of a slot; `start` is the
++  // accepted Task's entry initialization pulse carrying the entry PC.
++  fetch.io.accepted     := io.ctx.ctxAccepted
++  fetch.io.programReady := io.ctx.programReady
++  fetch.io.generation   := perCtxGenWire
++  fetch.io.parked       := parked
++  // `cancel` is a 1-cycle live-cancel pulse (generation-qualified): it drops the
++  // unaccepted frontend payload and stops new requests in the cancel beat; accepted
++  // memory responses drain and return their own credits. The registered `cancelled`
++  // level keeps the Scheduler dropping any later selection until safe reuse.
++  fetch.io.cancel            := cancelLive
++  fetch.io.start        := io.ctx.entryStart
++
++  // Owner-correct redirect (FET-05): a branch / LSU fetch-flush / debug PC resolves
++  // for its ORIGINAL owner Context even when RR selected another Context this beat;
++  // only that Context's fetch epoch advances and its wrong-path buffer is dropped.
++  val bruOwners = bru.map(_.io.rdOwner) // registered resolution owner of each lane
++  val branchTakenOfCtx = VecInit((0 until p.contextCount).map { c =>
++    (0 until p.instructionLanes).map(i =>
++      bru(i).io.taken.valid && OwnerTag.sameContext(bruOwners(i), c.U, perCtxGenWire(c))
++    ).reduce(_ || _)
++  })
++  val branchTaken = branchTakenOfCtx(activeCtx)
++  // FENCEI dispatches from lane 0 and the LSU blocks new requests while its flush
++  // command is pending, so at most one fetch-flush is in flight: its owner is exact.
++  val lsuFlushOwner = RegInit(OwnerTag.zero(p))
++  when(dispatch.io.lsu(0).fire && dispatch.io.lsu(0).bits.op === LsuOp.FENCEI) {
++    lsuFlushOwner := laneOwners(0)
++  }
++  val redirectWire = Wire(Vec(p.contextCount, Valid(UInt(p.fetchAddrBits.W))))
++  for (c <- 0 until p.contextCount) {
++    val bruRedirect = MuxCase(
++      MakeInvalid(UInt(p.fetchAddrBits.W)),
++      (0 until p.instructionLanes).map(i =>
++        (bru(i).io.taken.valid && OwnerTag.sameContext(bruOwners(i), c.U, perCtxGenWire(c)))
++          -> MakeValid(bru(i).io.taken.value))
++    )
++    val lsuRedirect = lsu.io.flush.valid &&
++      OwnerTag.sameContext(lsuFlushOwner, c.U, perCtxGenWire(c))
++    // The debug PC is owned by the DEBUG-SELECTED Context (`ctxSelect`): its resume
++    // redirect must re-aim that Context's frontend, not whichever context RR holds.
++    val dbgRedirect = csr.io.dm.debug_pc.valid && io.ctx.ctxSelect === c.U
++    redirectWire(c) := MuxCase(
++      MakeInvalid(UInt(p.fetchAddrBits.W)),
++      Seq(
++        bruRedirect.valid       -> bruRedirect,
++        lsuRedirect             -> MakeValid(lsu.io.flush.pcNext),
++        dbgRedirect             -> csr.io.dm.debug_pc
++      )
++    )
++  }
++  fetch.io.redirect := redirectWire
++  // The per-Context redirect always accepts in its beat (the mux drops the owner's
++  // wrong-path buffer and advances only its own epoch), so the LSU flush handshake
++  // completes here.
++  lsu.io.flush.ready := lsu.io.flush.valid
++
++  // ---------------------------------------------------------------------------
++  // Decode/Dispatch: the Scheduler selects the Context and DispatchV2 issues the
++  // selected bank's continuous prefix into the real shared units.
++  dispatch.io.inst <> scheduler.io.instOut
++  dispatch.io.halted := !scheduler.io.selValid || csr.io.dm.debug_mode ||
++    csr.io.dm.entering_debug_mode
+   dispatch.io.lsuActive        := lsu.io.active
+   dispatch.io.lsuQueueCapacity := lsu.io.queueCapacity
+   dispatch.io.scoreboard.comb  := regfile.io.scoreboard.comb
+   dispatch.io.scoreboard.regd  := regfile.io.scoreboard.regd
+   dispatch.io.branchTaken      := branchTaken
+-  dispatch.io.interlock        := bru(0).io.interlock.get || lsu.io.flush.valid
++  // The pipeline0 serializing interlock and the LSU fetch flush belong to their
++  // OWNER Context's execute beat: they hold only that Context's dispatch, never a
++  // peer selected by RR in the same beat.
++  dispatch.io.interlock := (bru(0).io.interlock.get &&
++    OwnerTag.sameContext(bru(0).io.trapOwner.get, activeCtx, activeCtxGen)) ||
++    (lsu.io.flush.valid && OwnerTag.sameContext(lsuFlushOwner, activeCtx, activeCtxGen))
++
++  // ---------------------------------------------------------------------------
++  // Scheduler inputs: real head predecode gates over per-Context projections.
++  scheduler.io.fetch <> fetch.io.inst
++  scheduler.io.accepted       := io.ctx.ctxAccepted
++  scheduler.io.programReady   := io.ctx.programReady
++  scheduler.io.advanceGen     := safeAdvance
++  scheduler.io.parked         := parkHold
++  scheduler.io.cancelled      := cancelVec
++  scheduler.io.halted         := csr.io.perCtxHalted
++  scheduler.io.tileIssueFreeze := io.ctx.tileIssueFreeze
++  scheduler.io.waitBusy       := io.ctx.waitBusy
++  scheduler.io.regionBusy     := io.ctx.regionBusy
++  scheduler.io.perCtxGen      := perCtxGenWire
++  scheduler.io.scoreboardRegd := regfile.io.perCtxScoreboardRegd
++  scheduler.io.scoreboardComb := regfile.io.perCtxScoreboardComb
++  // Float-projection scheduler inputs are wired after fRegfile/floatCore exist
++  // (see the RV32F extension section below).
++  scheduler.io.robSpace            := rob_io.perCtxSpace
++  scheduler.io.robEmpty            := rob_io.perCtxEmpty
++  scheduler.io.robTrapPending      := rob_io.perCtxTrapPending
++  scheduler.io.flagsInFlight       := rob_io.perCtxFlagsInFlight
++  scheduler.io.configInFlight      := rob_io.perCtxConfigInFlight
++  scheduler.io.frmPending          := csr.io.perCtxFrmPending
++  scheduler.io.rvvOrderedPending   := VecInit((0 until p.contextCount).map(c =>
++    rob_io.perCtxParkedFlags(c) || rob_io.perCtxConfigInFlight(c)))
++  scheduler.io.lsuActive        := lsu.io.active
++  scheduler.io.lsuQueueCapacity := lsu.io.queueCapacity
++  // Producer-owned capacity probes: no duplicated occupancy counter or guessed
++  // pipeline depth; the MLU exposes its queue entrance before lane arbitration.
++  scheduler.io.lsuReqReady      := lsu.io.req(0).ready
++  scheduler.io.mluReqReady      := mlu.io.canAccept
++  scheduler.io.dvuReqReady      := dvu.io.req.ready
++  if (p.enableRvv) {
++    // The RVV queue capacity is the same structural occupancy probe DispatchV2's own
++    // rvvInterlock trusts; the native handshake ready is deliberately NOT probed.
++    scheduler.io.rvvQueueCapacity.get := io.rvvcore.get.queue_capacity
++  }
++  scheduler.io.perCtxFrm := csr.io.perCtxFrm
+ 
+   // Connect fault signaling to FaultManager.
+   for (i <- 0 until p.instructionLanes) {
+@@ -318,10 +385,10 @@
+     if (p.enableRvv) {
+       fault_manager.io.in.fault(i).rvv.get := dispatch.io.rvvFault.get(i)
+     }
+-    fault_manager.io.in.pc(i).pc       := fetch.io.inst.lanes(i).bits.addr
++    fault_manager.io.in.pc(i).pc       := dispatch.io.inst(i).bits.addr
+     fault_manager.io.in.owner(i)       := laneOwners(i)
+     fault_manager.io.in.jalr(i).target := regfile.io.target(i).data
+-    fault_manager.io.in.undef(i).inst  := fetch.io.inst.lanes(i).bits.inst
++    fault_manager.io.in.undef(i).inst  := dispatch.io.inst(i).bits.inst
+     fault_manager.io.in.jal(i).target  := dispatch.io.bruTarget(i)
+   }
+   fault_manager.io.in.memory_fault := lsu.io.fault
+@@ -365,6 +432,8 @@
+   }
+ 
+   csr.io.activeCtx     := activeCtx
++  // DM debug control lands on the debug-selected Context's bank (`ctxSelect`).
++  csr.io.dmCtx         := io.ctx.ctxSelect
+   csr.io.advanceGen    := safeAdvance
+   bru(0).io.csr.get <> csr.io.bru
+   csr.io.bruOwner      := bru(0).io.trapOwner.get
+@@ -381,7 +450,8 @@
+   // ---------------------------------------------------------------------------
+   // Control Status Unit
+   csr.io.csr <> io.csr
+-  csr.io.csr.in.value(12) := fetch.io.pc
++  // Per-Context fetch PC (next unaccepted PC of the selected Context's frontend).
++  csr.io.csr.in.value(12) := fetch.io.pc(activeCtx)
+ 
+   // Arbitrate requests from Dispatch and DM
+   val csrReqArbiter = Module(new Arbiter(new CsrCmd(p), 2))
+@@ -392,10 +462,12 @@
+   csrReqArbiter.io.out.ready   := true.B
+   csr.io.req.bits  := csrReqArbiter.io.out.bits
+   csr.io.req.valid := csrReqArbiter.io.out.valid
++  // The dispatch-side request carries its lane owner; a DM request is owned by the
++  // DEBUG-SELECTED Context (`ctxSelect`), never the RR-selected issue Context.
+   csr.io.reqOwner := Mux(
+     csrReqArbiter.io.chosen === 0.U,
+     laneOwners(0),
+-    OwnerTag.make(p)(activeCtx, activeCtxGen, 0.U)
++    OwnerTag.make(p)(io.ctx.ctxSelect, perCtxGenWire(io.ctx.ctxSelect), 0.U)
+   )
+   // W2-04: DM (debug-module) CSR writes have no ROB slot, so they bypass the ordered
+   // park and keep direct execute-beat semantics inside Csr.
+@@ -482,7 +554,12 @@
+ 
+   // ---------------------------------------------------------------------------
+   // Register File
+-  regfile.io.debugBusPort <> io.dm.scalar_rs
++  // RF debug read port: the debug module keeps its legacy access; when `rfObserve`
++  // is set the per-Context observation index owns the port (perCtxRfData below).
++  regfile.io.debugBusPort.idx := Mux(io.ctx.rfObserve, io.ctx.rfDebugAddr, io.dm.scalar_rs.idx)
++  io.dm.scalar_rs.data        := regfile.io.perCtxDebugData(io.ctx.ctxSelect)
++  regfile.io.dmCtx            := io.ctx.ctxSelect
++  io.ctx.perCtxRfData         := regfile.io.perCtxDebugData
+   for (i <- 0 until p.instructionLanes) {
+     regfile.io.readAddr(2 * i + 0) := dispatch.io.rs1Read(i)
+     regfile.io.readAddr(2 * i + 1) := dispatch.io.rs2Read(i)
+@@ -561,9 +638,11 @@
+   }
+   if (p.enableFloat) {
+     fRegfile.get.io.activeCtx    := activeCtx
++    // The DM FPR debug read selects the DEBUG-SELECTD Context's bank (`ctxSelect`);
++    // the FloatCore operand term keeps its own owner routing.
+     fRegfile.get.io.floatReadCtx := Mux(
+       io.dm.float_rs.get.valid,
+-      activeCtx,
++      io.ctx.ctxSelect,
+       floatCore.get.io.activeOwner.ctx_slot
+     )
+     fRegfile.get.io.perCtxGen   := perCtxGenWire
+@@ -629,9 +708,10 @@
+     )
+     fRegfile.get.io.write_ports(0).owner := Mux(
+       io.dm.float_rd.get.valid,
+-      OwnerTag.make(p)(activeCtx, activeCtxGen, 0.U),
++      OwnerTag.make(p)(io.ctx.ctxSelect, perCtxGenWire(io.ctx.ctxSelect), 0.U),
+       floatCore.get.io.writeOwner(0)
+     )
++    fRegfile.get.io.dmCtx          := io.ctx.ctxSelect
+     fRegfile.get.io.dm_write_valid := io.dm.float_rd.get.valid
+ 
+     val lsuWriting = floatCore.get.io.write_ports(1).valid
+@@ -669,6 +749,9 @@
+     floatCore.get.io.instOwner  := laneOwners(0)
+     floatCore.get.io.lsuRdOwner := lsu.io.rdFltOwner
+     dispatch.io.fscoreboard.get := fRegfile.get.io.scoreboard
++    // C028 scheduler head-gate projections (float scoreboard + float unit ready).
++    scheduler.io.fscoreboard.get  := fRegfile.get.io.perCtxScoreboard
++    scheduler.io.floatReqReady.get := floatCore.get.io.inst.ready
+     dispatch.io.csrFrm.get      := csr.io.float.get.out.frm
+     floatCore.get.io.csr <> csr.io.float.get
+     csr.io.floatOwner.get := floatCore.get.io.fflagsOwner
+@@ -731,7 +814,8 @@
+     dst
+   }
+ 
+-  val dmWriteOwner = OwnerTag.make(p)(activeCtx, activeCtxGen, 0.U)
++  // DM writes belong to the debug-selected Context (`ctxSelect`), never the RR one.
++  val dmWriteOwner = OwnerTag.make(p)(io.ctx.ctxSelect, perCtxGenWire(io.ctx.ctxSelect), 0.U)
+   val mluDvuOffset = p.instructionLanes
+   val mluDvuInputs = Seq(
+     wrapOwnedDecoupled(mlu.io.rd, mlu.io.rdOwner),
+@@ -852,23 +936,38 @@
+       csr.io.perCtxRvvDirty.get(c) := dirty.reduce(_ || _)
+     }
+   }
+-  val hasFetchedInstructions = fetch.io.inst.lanes.map(_.valid).reduce(_ || _)
+-  val floatIdle              = fRegfile.map(_.io.scoreboard === 0.U).getOrElse(true.B)
++  val floatIdleC = if (p.enableFloat) fRegfile.get.io.perCtxScoreboard
++    else Seq.fill(p.contextCount)(0.U(p.floatRegCount.W))
+   val rvvIdle                = io.rvvcore.map(_.rvv_idle).getOrElse(true.B)
+-  // Scalar and float arithmetics don't actually trap, we're just trying to be precise here.
+-  val fetchFaultValid = fetch.io.fault.valid &&
+-    !branchTaken &&                         // Branches and jumps
+-    (regfile.io.scoreboard.regd === 0.U) && // Pending scalar operation
+-    floatIdle &&                            // Pending float operation
+-    rvvIdle &&                              // Could have vill
+-    !lsu.io.active &&                       // Could fault
+-    !hasFetchedInstructions
+-  fault_manager.io.in.fetchFault      := MakeValid(fetchFaultValid, fetch.io.fault.bits)
+-  fault_manager.io.in.fetchFaultOwner := laneOwners(0)
++  // Scalar and float arithmetics don't actually trap, we're just trying to be precise
++  // here. The fetch-fault qualification is per Context: only the faulting Context's
++  // scoreboard, frontend buffer and redirect state participate.
++  val fetchFaultCands = VecInit((0 until p.contextCount).map { c =>
++    fetch.io.fault(c).valid &&
++      !branchTakenOfCtx(c) &&                   // Branches and jumps
++      (regfile.io.perCtxScoreboardRegd(c) === 0.U) && // Pending scalar operation
++      (floatIdleC(c) === 0.U) &&                // Pending float operation
++      rvvIdle &&                                 // Could have vill
++      !lsu.io.active &&                          // Could fault
++      !scheduler.io.perCtxAnyValid(c)
++  })
++  val fetchFaultAny  = fetchFaultCands.asUInt.orR
++  val fetchFaultIdx  = if (p.contextCount == 1) 0.U else PriorityEncoder(fetchFaultCands)
++  val fetchFaultBits = MuxLookup(
++    fetchFaultIdx, 0.U
++  )(
++    (0 until p.contextCount).map(c => c.U -> fetch.io.fault(c).bits)
++  )
++  fault_manager.io.in.fetchFault := MakeValid(fetchFaultAny, fetchFaultBits)
++  fault_manager.io.in.fetchFaultOwner := OwnerTag.make(p)(
++    fetchFaultIdx,
++    perCtxGenWire(fetchFaultIdx),
++    scheduler.io.perCtxOpSeq(fetchFaultIdx)
++  )
+ 
+   perCtxGenWire             := csr.io.perCtxGen
+   io.ctx.perCtxGeneration   := csr.io.perCtxGen
+-  io.ctx.perCtxNextOpSeq    := perCtxOpSeq
++  io.ctx.perCtxNextOpSeq    := scheduler.io.perCtxOpSeq
+   io.ctx.perCtxRobSpace     := rob_io.perCtxSpace
+   io.ctx.perCtxRobEmpty     := rob_io.perCtxEmpty
+   io.ctx.perCtxNRetired     := rob_io.perCtxNRetired
+@@ -901,7 +1000,15 @@
+   for (c <- 0 until p.contextCount) {
+     val rfDrained = regfile.io.perCtxOutstanding(c) === 0.U &&
+       fRegfile.map(_.io.perCtxOutstanding(c) === 0.U).getOrElse(true.B)
+-    val drained = rob_io.perCtxEmpty(c) && rfDrained &&
++    // C028 frontend drainage (safe reuse / clock gating): every accepted fetch
++    // transaction of THIS Context must have completed its handshake (no in-flight
++    // ledger credit) and no request offer owned by this Context may still sit on
++    // the shared port (the offer carries its ORIGINAL key, not activeCtx).
++    // Unaccepted buffered instructions are deliberately NOT drain conditions —
++    // they are discardable at reuse (cancel/start drop them by epoch).
++    val fetchDrained = fetch.io.outstanding(c) === 0.U &&
++      !(fetch.io.request.valid && fetch.io.request.bits.key.ctx_slot === c.U)
++    val drained = rob_io.perCtxEmpty(c) && rfDrained && fetchDrained &&
+       !io.ctx.pendingLaunch(c) && !io.ctx.waitBusy(c) && !io.ctx.regionBusy(c)
+     io.ctx.perCtxBackendDrained(c) := drained
+     safeAdvance(c) := io.ctx.advanceGen(c) && drained
+@@ -914,20 +1021,55 @@
+       io.ctx.perCtxBackendDrained(c)
+   }.reduce(_ && _) && !io.ctx.tileIssueFreeze && !lsu.io.active && rvvIdle
+ 
+-  // ---------------------------------------------------------------------------
+-  // Fetch Bus
++  // C028 observability: RR selection (debug only — never overrides arbitration),
++  // frontend epochs and summed stale frontend rejects, scheduler stall accounting,
++  // and the per-Context GPR observation path (banked RF debug read).
++  io.ctx.issueCtx          := activeCtx
++  io.ctx.perCtxFetchEpoch  := fetch.io.epoch
++  io.ctx.fetchStaleRejected := fetch.io.staleRejected.foldLeft(0.U(32.W))(_ + _)
++  io.ctx.perCtxWaitReason  := scheduler.io.waitReason
++  io.ctx.perCtxStallCycles := scheduler.io.stallCount
++
++  // ---------------------------------------------------------------------------
++  // Fetch Bus (C028 timing adapter — NOT new C030 arbitration: physical LSU-priority
++  // arbitration is retained unchanged). The legacy Core IBus has fixed next-cycle
++  // data, so the tagged frontend request/response is bridged by REGISTERING THE
++  // ACCEPTED REQUEST KEY — never activeCtx — so each response returns to the exact
++  // Context transaction that owns it. Exactly one frontend transaction may occupy
++  // the legacy phase at a time; the response is offered to the frontend until it is
++  // consumed (Decoupled backpressure holds data and key stable).
++  val ibusLsuActive = lsu.io.ibus.valid
++  val ibusIncoming  = RegNext(fetch.io.request.fire, false.B) // rdata beat is NOW
++  val ibusRespPend  = RegInit(false.B)
++  val ibusKeyPipe   = Reg(new CtxFetchKey(p))
++  val ibusDataPipe  = Reg(UInt(p.fetchDataBits.W))
++  val ibusFaultPipe = Reg(Bool())
++  when(fetch.io.request.fire) {
++    ibusKeyPipe := fetch.io.request.bits.key
++  }
++  val fetchCanGo = !ibusIncoming && !ibusRespPend
+   // Mux valid
+-  io.ibus.valid := Mux(lsu.io.ibus.valid, lsu.io.ibus.valid, fetch.io.ibus.valid)
++  io.ibus.valid := ibusLsuActive || (fetch.io.request.valid && fetchCanGo)
+   // Mux addr
+-  io.ibus.addr := Mux(lsu.io.ibus.valid, lsu.io.ibus.addr, fetch.io.ibus.addr)
++  io.ibus.addr := Mux(ibusLsuActive, lsu.io.ibus.addr, fetch.io.request.bits.addr)
+   // Arbitrate ready
+-  lsu.io.ibus.ready   := Mux(lsu.io.ibus.valid, io.ibus.ready, false.B)
+-  fetch.io.ibus.ready := Mux(lsu.io.ibus.valid, false.B, io.ibus.ready)
+-  // Arbitrate error
+-  fetch.io.ibus.fault := Mux(lsu.io.ibus.valid, MakeInvalid(new FaultInfo(p)), io.ibus.fault)
++  lsu.io.ibus.ready     := Mux(ibusLsuActive, io.ibus.ready, false.B)
++  fetch.io.request.ready := !ibusLsuActive && fetchCanGo && io.ibus.ready
++  // Capture the fixed-phase data/fault of THIS frontend transaction in its rdata
++  // beat, keyed by the registered request key.
++  when(ibusIncoming) {
++    ibusRespPend  := true.B
++    ibusDataPipe  := io.ibus.rdata
++    ibusFaultPipe := io.ibus.fault.valid
++  }.elsewhen(ibusRespPend && fetch.io.response.ready) {
++    ibusRespPend := false.B
++  }
++  fetch.io.response.valid      := ibusRespPend
++  fetch.io.response.bits.key   := ibusKeyPipe
++  fetch.io.response.bits.data  := ibusDataPipe
++  fetch.io.response.bits.fault := ibusFaultPipe
+   // Broadcast rdata
+-  lsu.io.ibus.rdata   := io.ibus.rdata
+-  fetch.io.ibus.rdata := io.ibus.rdata
++  lsu.io.ibus.rdata := io.ibus.rdata
+ 
+   // Tie-off ibus faults in lsu (unused)
+   lsu.io.ibus.fault := MakeInvalid(new FaultInfo(p))
+@@ -952,11 +1094,11 @@
+ 
+     val debugBrch = Cat(bru.map(_.io.taken.valid).scanRight(false.B)(_ || _))
+ 
+-    debugEn := Cat(fetch.io.inst.lanes.map(x => x.valid && x.ready && !branchTaken))
++    debugEn := Cat(scheduler.io.instOut.map(x => x.valid && x.ready && !branchTaken))
+ 
+     for (i <- 0 until p.instructionLanes) {
+-      debugAddr(i) := Mux(debugEn(i), fetch.io.inst.lanes(i).bits.addr, debugAddr(i))
+-      debugInst(i) := Mux(debugEn(i), fetch.io.inst.lanes(i).bits.inst, debugInst(i))
++      debugAddr(i) := Mux(debugEn(i), scheduler.io.instOut(i).bits.addr, debugAddr(i))
++      debugInst(i) := Mux(debugEn(i), scheduler.io.instOut(i).bits.inst, debugInst(i))
+     }
+ 
+     debug.en := debugEn & ~debugBrch
+diff --git a/hdl/chisel/src/coralnpu/scalar/Decode.scala b/hdl/chisel/src/coralnpu/scalar/Decode.scala
+--- a/hdl/chisel/src/coralnpu/scalar/Decode.scala
++++ b/hdl/chisel/src/coralnpu/scalar/Decode.scala
+@@ -301,6 +301,31 @@
+   def rs2Set(): Bool = { rs1Set() || isAluImm() || isAlu1Bit() || lui }
+ }
+ 
++/** W2-04 per-CSR ordered classification (CFG-01..05), shared by DispatchV2 and the
++  * C028 Scheduler head predecode so the eligibility gate and the dispatch gate can
++  * never diverge. Returns (isF, isC, isM):
++  *   F flags/ordered: fflags 0x001, frm 0x002, fcsr 0x003, vxsat 0x009;
++  *   C vector config: vstart 0x008, vcsr 0x00F, vxrm 0x00A, vl 0xC20, vtype 0xC21,
++  *     mtype 0xC23 (VME profile only);
++  *   M trap-affecting: mstatus 0x300, mie 0x304, mtvec 0x305, mepc 0x341,
++  *     mcause 0x342, mtval 0x343, dcsr 0x790, dpc 0x711;
++  * every other CSR is dispatch-free (class D).
++  */
++object CsrOrderedClassify {
++  def apply(p: Parameters)(idx: UInt): (Bool, Bool, Bool) = {
++    val isF = Seq(CsrAddress.FFLAGS, CsrAddress.FRM, CsrAddress.FCSR, CsrAddress.VXSAT)
++      .map(_.asUInt === idx).reduce(_ || _)
++    val isC = Seq(CsrAddress.VSTART, CsrAddress.VXRM, CsrAddress.VL, CsrAddress.VTYPE)
++      .map(_.asUInt === idx).reduce(_ || _) ||
++      (if (p.enableVme) idx === CsrAddress.MTYPE.asUInt else false.B)
++    val isM = Seq(
++      CsrAddress.MSTATUS, CsrAddress.MIE, CsrAddress.MTVEC, CsrAddress.MEPC,
++      CsrAddress.MCAUSE, CsrAddress.MTVAL, CsrAddress.DCSR, CsrAddress.DPC
++    ).map(_.asUInt === idx).reduce(_ || _)
++    (isF, isC, isM)
++  }
++}
++
+ class Dispatch(p: Parameters) extends Module {
+   val io = IO(new Bundle {
+     // Core controls.
+@@ -694,18 +719,7 @@
+   //                        semantics, no ROB wait.
+   // vset/mset are RVV instructions: the native frontend computes their immutable
+   // configuration payload, and the owning scalar ROB entry commits it.
+-  private def csrOrderedClass(idx: UInt): (Bool, Bool, Bool) = {
+-    val isF = Seq(CsrAddress.FFLAGS, CsrAddress.FRM, CsrAddress.FCSR, CsrAddress.VXSAT)
+-      .map(_.asUInt === idx).reduce(_ || _)
+-    val isC = Seq(CsrAddress.VSTART, CsrAddress.VXRM, CsrAddress.VL, CsrAddress.VTYPE)
+-      .map(_.asUInt === idx).reduce(_ || _) ||
+-      (if (p.enableVme) idx === CsrAddress.MTYPE.asUInt else false.B)
+-    val isM = Seq(
+-      CsrAddress.MSTATUS, CsrAddress.MIE, CsrAddress.MTVEC, CsrAddress.MEPC,
+-      CsrAddress.MCAUSE, CsrAddress.MTVAL, CsrAddress.DCSR, CsrAddress.DPC
+-    ).map(_.asUInt === idx).reduce(_ || _)
+-    (isF, isC, isM)
+-  }
++  private def csrOrderedClass(idx: UInt): (Bool, Bool, Bool) = CsrOrderedClassify(p)(idx)
+ 
+   val csrOrderedGate = (0 until p.instructionLanes).map(i => {
+     val d               = decodedInsts(i)
+@@ -1124,6 +1138,12 @@
+         Option.when(i == 0)(Seq(io.csr.valid, fenceValid)).getOrElse(Seq()) ++
+         Option.when(p.enableRvv)(Seq(io.rvv.get(i).fire)).getOrElse(Seq()) ++
+         Option.when(p.enableFloat && i == 0)(Seq(io.float.get.fire)).getOrElse(Seq())
++    // C028 NEGATIVE MUTANT SITE (non-prefix dispatch).
++    // This chain is THE continuous-prefix contract (`perctx_issue.yaml` prefix_only):
++    // a lane pops only when every lower lane of the same bundle dispatched into its
++    // unit. Replacing the right-hand side with `true.B` pops suffix lanes without unit
++    // acceptance (backpressure removal) — W2_03_DispatchPrefixSpec's partial-accept
++    // payload-stability and prefix assertions must then FAIL before the green run.
+     lastReady(i + 1) := dispatched.reduce(_ || _)
+   }
+ 
+diff --git a/hdl/chisel/src/coralnpu/BUILD b/hdl/chisel/src/coralnpu/BUILD
+--- a/hdl/chisel/src/coralnpu/BUILD
++++ b/hdl/chisel/src/coralnpu/BUILD
+@@ -324,47 +324,6 @@
+     ],
+ )
+ 
+-chisel_test(
+-    name = "coralnpu_fetch_reorder_buffer_tests",
+-    size = "large",
+-    srcs = [
+-        "scalar/FetchReorderBufferSpec.scala",
+-    ],
+-    deps = [
+-        ":coralnpu_base",
+-        ":coralnpu_scalar",
+-        "//hdl/chisel/src/common",
+-        "//hdl/chisel/src/common:instruction_buffer",
+-    ],
+-)
+-
+-chisel_test(
+-    name = "coralnpu_fetch_control_tests",
+-    size = "large",
+-    srcs = [
+-        "scalar/FetchControlSpec.scala",
+-    ],
+-    deps = [
+-        ":coralnpu_base",
+-        ":coralnpu_scalar",
+-        "//hdl/chisel/src/common",
+-        "//hdl/chisel/src/common:instruction_buffer",
+-    ],
+-)
+-
+-chisel_test(
+-    name = "coralnpu_fetcher_tests",
+-    size = "large",
+-    srcs = [
+-        "scalar/FetcherSpec.scala",
+-    ],
+-    deps = [
+-        ":coralnpu_base",
+-        ":coralnpu_scalar",
+-        "//hdl/chisel/src/common",
+-        "//hdl/chisel/src/common:instruction_buffer",
+-    ],
+-)
+ 
+ chisel_test(
+     name = "coralnpu_core_axi_csr_tests",
+@@ -462,6 +421,7 @@
+         "Library.scala",
+         "Parameters.scala",
+         "scalar/UopTag.scala",
++        "scalar/C028TargetParams.scala",
+     ],
+     deps = [
+         ":clock_gate",
+@@ -487,9 +447,10 @@
+         "scalar/FaultManager.scala",
+         "scalar/Lsu.scala",
+         "scalar/Mlu.scala",
++        "scalar/PerCtxFetchMux.scala",
+         "scalar/Regfile.scala",
+         "scalar/SCore.scala",
+-        "scalar/UncachedFetch.scala",
++        "scalar/Scheduler.scala",
+     ],
+     deps = [
+         ":CoralNPUScmInfo",
+@@ -1084,3 +1045,58 @@
+         "//hdl/chisel/src/common:testing",
+     ],
+ )
++
++chisel_test(
++    name = "w2_03_fetch_epoch_spec",
++    size = "large",
++    srcs = ["verification/w2/W2_03_fetch_epoch_spec.scala"],
++    deps = [
++        ":coralnpu_base",
++        ":coralnpu_scalar",
++        "//hdl/chisel/src/common",
++        "//hdl/chisel/src/common:instruction_buffer",
++        "//hdl/chisel/src/common:testing",
++    ],
++)
++
++chisel_test(
++    name = "w2_03_dispatch_prefix_spec",
++    size = "large",
++    srcs = [
++        "verification/w2/W2_03_dispatch_prefix_spec.scala",
++        "verification/w2/W2_03_instruction_helpers.scala",
++    ],
++    deps = [
++        ":coralnpu_base",
++        ":coralnpu_float",
++        ":coralnpu_rvv",
++        ":coralnpu_scalar",
++        ":retirement_buffer",
++        "//hdl/chisel/src/common",
++        "//hdl/chisel/src/common:instruction_buffer",
++        "//hdl/chisel/src/common:testing",
++    ],
++)
++
++chisel_test(
++    name = "w2_03_core_issue_spec",
++    size = "enormous",
++    srcs = [
++        "verification/w2/W2_03_core_issue_spec.scala",
++        "verification/w2/W2_03_instruction_helpers.scala",
++    ],
++    deps = [
++        ":coralnpu",
++        ":coralnpu_base",
++        ":coralnpu_float",
++        ":coralnpu_rvv",
++        ":coralnpu_scalar",
++        ":retirement_buffer",
++        "@coralnpu_hw//lib:common_cells_resources",
++        "@coralnpu_hw//lib:cvfpu_resources",
++        "@coralnpu_hw//lib:fpu_div_sqrt_mvp_resources",
++        "@coralnpu_hw//lib:rvvi_resources",
++        "//hdl/chisel/src/common:fp",
++        "//hdl/chisel/src/common:testing",
++    ],
++)
+diff --git a/hdl/chisel/src/coralnpu/scalar/Mlu.scala b/hdl/chisel/src/coralnpu/scalar/Mlu.scala
+--- a/hdl/chisel/src/coralnpu/scalar/Mlu.scala
++++ b/hdl/chisel/src/coralnpu/scalar/Mlu.scala
+@@ -57,6 +57,7 @@
+     // Decode cycle.
+     val req      = Vec(p.instructionLanes, Flipped(Decoupled(new MluCmd(p))))
+     val reqOwner = Input(Vec(p.instructionLanes, new OwnerTag(p)))
++    val canAccept = Output(Bool()) // producer-owned capacity probe, before lane arbitration
+ 
+     // Execute cycle.
+     val rs1     = Vec(p.instructionLanes, Flipped(new RegfileReadDataIO(p)))
+@@ -77,6 +78,7 @@
+   stage1.bits.owner := io.reqOwner(arb.io.chosen)
+   arb.io.out.ready := stage1.ready
+   val stage2Input = Queue(stage1, 1, true)
++  io.canAccept := stage1.ready
+ 
+   // Stage 2 do multiplication
+   val valid2in = stage2Input.valid

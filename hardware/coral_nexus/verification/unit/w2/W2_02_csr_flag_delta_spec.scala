@@ -32,6 +32,7 @@ class W2_02_CsrFlagDeltaSpec extends AnyFreeSpec with ChiselSim {
 
   def idleCsr(dut: CtxCsr): Unit = {
     dut.io.activeCtx.poke(0.U)
+    dut.io.dmCtx.poke(0.U) // C028 DM debug-control bank default
     for (c <- 0 until dut.io.advanceGen.length) {
       dut.io.advanceGen(c).poke(false.B)
       dut.io.perCtxNRetired(c).poke(0.U)
@@ -69,6 +70,12 @@ class W2_02_CsrFlagDeltaSpec extends AnyFreeSpec with ChiselSim {
     dut.io.bruOwner.ctx_generation.poke(0.U)
     dut.io.bruOwner.owner_op_seq.poke(0.U)
     dut.io.bruOwner.subop_id.poke(0.U)
+    for (readOwner <- Seq(dut.io.bruRequestOwner, dut.io.bruExecOwner)) {
+      readOwner.ctx_slot.poke(0.U)
+      readOwner.ctx_generation.poke(0.U)
+      readOwner.owner_op_seq.poke(0.U)
+      readOwner.subop_id.poke(0.U)
+    }
 
     dut.io.float.get.in.fflags.valid.poke(false.B)
     dut.io.float.get.in.fflags.bits.poke(0.U)

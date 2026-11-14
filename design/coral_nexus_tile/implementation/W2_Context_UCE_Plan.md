@@ -242,12 +242,12 @@ P1/PN 口径（parent 裁定，需求 §16.3）：P1 = 改造后同一硬件仅 
 
 1. 落 `hardware/coral_nexus/rtl/scalar/Scheduler.scala`：从 W6/W1 侧收 `per_ctx_ready`（READY/park 语义），输出每周期一个选中 Context + `issue_valid`；RR 指针推进规则 = **选中才 next，未选中不推进**（`_select_context` 语义 tile.py L635-653）；head 必要预译码 + 分级 resource probe 是 Scheduler 输入（W2-03 定接口，消费方 W3/W4/W6）；每 Context 维护 stall 原因计数（`WAIT_EVENT/WAIT_ENGINE_QUEUE/.../WAIT_REGION (新)/WAIT_CSR (新)/WAIT_FETCH (新)`，序进 PMU manifest，OBS-07）。park 语义（WFI/region 停靠）只挡发射，不清 RF/ROB（W2-D06）。
 2. 落 `hardware/coral_nexus/patches/w2/0302-dispatch-ctx-mux.patch`：`Decode.scala`（DispatchV2）的输入 `io.inst/scoreboard/fscoreboard/halted/interlock/retirement_buffer_*/rvvIdle/lsuActive` 全部由 `Scheduler` 选中 Context 的 bank 输出提供（W2-D02 的 mux）；`io.jump/isCsr/canDispatch/logic` 不动；`isVxsatOrVcsr` 的 `rvvIdle` 换成"本 Context 分区 idle"（`Decode.scala` L976-993 的 `rvvIdleOrNotVxsat` 接入 per-Context 信号，CFG-05）。
-3. 落 `hardware/coral_nexus/patches/w2/0303-fetch-ctx-mux.patch`：`UncachedFetch.scala` 的 `FetchReorderBuffer`（L39-322）与 `FetchControl`（L384-538）改造为 `(ContextKey, fetch_epoch, fetch_reqid)` 键（W2-D05）；`instructionBuffer.io.flush`（L577）换成"本 Context 定向 flush"；`SCore.scala` L128-131 的 `iflush`、L166-171 的 `branch` 按选中 Context 派发；`ibuffer`/`FRB` 按 Context bank 化（`maxConcurrentTx=2` per Context）。**`UncachedFetch.scala` 物理端口仲裁（ibus 背压）归 W4-02**：W2 在 `patches/reqs/w2-to-w4-ibus-port.md` 提"每 Context 取指请求/响应带 `OwnerTag+epoch+reqid`、每 Context 2 项在途"需求，`maxConcurrentTx` per-Context 值由 W4-02/W5-01 冻结，本步骤先把 `UncachedFetch` 的键改造落完，不动 ibus 物理。
-4. 落 `hardware/coral_nexus/rtl/scalar/PerCtxFetchMux.scala`（若步骤 3 的 per-Context `UncachedFetch` 化需新的顶层拼接）：把 per-Context `FetchReorderBuffer`/`instructionBuffer` 的输入按 `Scheduler` 的选中信号 mux，写回按 `ContextKey` 派发。
+3. 落 `hardware/coral_nexus/patches/w2/0303-fetch-ctx-mux.patch`：取指请求与 FRB 使用 `(ContextKey, fetch_epoch, fetch_reqid)` 键（W2-D05）；PC、FRB 与指令缓冲按 Context bank 化；iflush／branch 按原发起 owner 定向，不能用响应拍的新 issue Context 推断归属。每 Context 在途上界由重开后的 C019 `constraints.fetch_outstanding_per_context` 提供，生成消费者为 `C028TargetParams.scala`，不写默认 2，也不等待 C030 再冻结。**物理端口仲裁仍归 W4-02/C030**：W2 的请求见 `patches/reqs/w2-to-w4-ibus-port.md`；现有固定下一拍 IBus 适配保存接受拍的完整请求键。
+4. 落 `hardware/coral_nexus/rtl/scalar/PerCtxFetchMux.scala`：提供每 Context 的真实取指缓冲，按 Scheduler 的选择接受连续前缀；返回按完整请求键派发。首取指必须同时具备 accepted Task 与 program READY。
 5. 落 `hardware/coral_nexus/verification/unit/w2/W2_03_fetch_epoch_spec.scala`：
-   - 两个 Context 独立 PC/epoch/缓冲，同拍 A 分支重定向，`fetch_epoch[ctxA]++`；构造迟到响应（旧 epoch）断言被拒 + `ctx_generation`/epoch 计数递增、信用归还（`CtxFetchCredit` 计数）、B 缓冲不变（CTX-09/FET-02/T-07 变体）。
-   - 饥饿：A 长延迟 miss 连续 1000 拍，B `wait_fetch` 间隔有界（FET-03/FET-07），断言 `per_CTX fetch service gap ≤ 阈值`（阈值由 W4-02/W5-01 仲裁冻结，spec 用参数读入，不给默认值）。
-   - 取消：A 分支在 fetch 在途时取消（W6 `CANCEL_TASK`），断言 A 的 in-flight fetch 被定向丢弃（`FRB.flush` 带 `OwnerTag`）+ 信用归还 + 无旧代写回（T-08/T-48 类）。
+   - 两个 Context 独立 PC/epoch/缓冲，同拍 A 分支重定向，只有 `fetch_epoch[ctxA]++`，Task 的 `ctx_generation` 不变；迟到旧 epoch 响应拒收并归还原请求信用，B 缓冲不变（CTX-09/FET-02/T-07 变体）。
+   - 饥饿：A 的响应连续延迟 1000 拍，B 仍获服务（FET-03/FET-07）。本卡按 C019 Context 数证明 N 个 accepted 请求机会内的服务界；真实物理端口周期延迟界由 C030 验证，不将两种口径混用。
+   - 取消：A 的 fetch 在途时接收 W6 `CANCEL_TASK`，定向清除未接受指令；已接受请求按原身份排空，旧包不能写新任务或释放新请求的信用（T-08/T-48 类）。
 6. 落 `hardware/coral_nexus/verification/unit/w2/W2_03_dispatch_prefix_spec.scala`：
    - 每周期一个 Context 发射 bundle，lanes 全来自同 Context 且为程序序连续前缀（对应上游 L106-110 断言 + L160-171 "bundle 内 scan"），断言 `io.inst[i].fire` 若 lane i 不 fire 则 i+1..3 必不 fire（SCH-01/06/T-11）。
    - Partial accept：lane0..1 接受、lane2..3 因 unit busy 不接受，断言 (a) `owner_op_seq` 只对 lane0..1 递增、(b) PC 按 lane0..1 实际长度推进、(c) lane2..3 保持 payload 稳定直到接受或取消（SCH-05/T-11）；负例驱动 `unit_ready` 交替抖动 ≥100 拍，断言无变形（validator `T-11` 的 rtl 对应）。
@@ -258,9 +258,9 @@ P1/PN 口径（parent 裁定，需求 §16.3）：P1 = 改造后同一硬件仅 
 ### 7.3 输入/输出与验收
 
 - 输入：W2-02 输出（banked RF/ROB/CSR 已在，owner tag 可生成）；W1-01 message 契约（issue/phase 逻辑字段）；W4-02/W5-01 物理端口仲裁需求（仅需求文件，非阻塞）。
-- 输出：`Scheduler.scala`、`PerCtxFetchMux.scala`、patch `0302-{dispatch-ctx-mux,fetch-ctx-mux}.patch`、两个 spec、`perctx_issue.yaml`（W2-03 输出的 issue 边界表，W1-01/W7-01 消费）。
-- 验收命令【未来】：`bash hardware/coral_nexus/scripts/cn.sh unit --suite w2 --config hardware/coral_nexus/configs/cs1_c2.yaml --out out/coral_nexus/w2-03-unit/`（spec 通过 → per-case result.json）；`bash hardware/coral_nexus/scripts/cn.sh sources verify`（patch 落地 hash 进 manifest）。无 grep/源码存在当 PASS。
-- 接口 freeze：`perctx_issue.yaml` 的 `issue/accept/partial_accept` 字段与 `ctx_ctrl.yaml`/`rob_tag.yaml` 无重名冲突检查（W2-01 同款 YAML 校验脚本）。
+- 输出：`Scheduler.scala`、`PerCtxFetchMux.scala`、patch `0302-dispatch-ctx-mux.patch`／`0303-fetch-ctx-mux.patch`／`0304-bru-csr-phases.patch`、前端／前缀／真实 Core specs、`perctx_issue_impl.yaml`（W2-03 私有实现边界与 PMU manifest，W1/W7 消费）。0304 分离 BRU 请求拍目标读取、已寄存执行拍读取与 fault 更新 owner；不得以组合 fault owner 选择执行拍中断或 interlock 状态。
+- 独立验收入口：`python -m pytest hardware/coral_nexus/verification/unit/w2/test_w2_c028.py -n0 -v --basetemp="$EVIDENCE/pytest"`；`cn sources verify` 检查 patch 与来源。`cn unit --suite w2` 是包含 C026/C027/C028 的全量入口，不用于单卡验证。
+- 接口一致性：实现元数据使用 C010 `perctx_issue.yaml` 的字段与语义，保持与 `ctx_ctrl.yaml`／`rob_tag.yaml` 的身份域一致；不得修改已封印的 C010 文件，也不得把私有实现元数据补进旧 seal。
 - 负例先行：spec 5/6 的负例必须先失败（旧 PC-only flush、非前缀发射）再通过。
 
 ### 7.4 失败/取消/旧代

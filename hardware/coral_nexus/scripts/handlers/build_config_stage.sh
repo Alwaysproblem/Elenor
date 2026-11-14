@@ -54,6 +54,7 @@ header.write_text(
     f"#define CN_{name.upper()}_CONTEXT_COUNT {c['context_count']}\n"
     f"#define CN_{name.upper()}_CTX_SLOT_BITS {cfg['index_widths']['ctx_slot_bits']}\n"
     f"#define CN_{name.upper()}_PROGRAM_SLOTS {c['program_slots']}\n"
+    f"#define CN_{name.upper()}_FETCH_OUTSTANDING_PER_CONTEXT {c['fetch_outstanding_per_context']}\n"
     f"#define CN_{name.upper()}_ITCM_BYTES {c['itcm_bytes']}\n"
     f"#define CN_{name.upper()}_DTCM_BYTES {c['dtcm_bytes']}\n"
     f"#define CN_{name.upper()}_TEXT_BYTES {cfg['envelope']['measured']['text_bytes']}\n"
@@ -66,10 +67,11 @@ consumer.write_text(
     "\n"
     f"_Static_assert(CN_{name.upper()}_CONTEXT_COUNT >= 1, \"a target with no Context is not a target\");\n"
     f"_Static_assert(CN_{name.upper()}_CTX_SLOT_BITS >= 1, \"C1 must not produce a zero-width index\");\n"
+    f"_Static_assert(CN_{name.upper()}_FETCH_OUTSTANDING_PER_CONTEXT >= 1, \"fetch needs positive credit\");\n"
     f"_Static_assert(CN_{name.upper()}_PROGRAM_SLOTS * CN_{name.upper()}_TEXT_BYTES <= CN_{name.upper()}_ITCM_BYTES,\n"
     "                \"the measured images do not fit ITCM\");\n"
     f"_Static_assert(CN_{name.upper()}_STACK_BYTES <= CN_{name.upper()}_DTCM_BYTES, \"stack exceeds DTCM\");\n"
-    "\nint cn_cs1_target_consumer(void) { return 0; }\n"
+    f"\nint cn_cs1_target_consumer(void) {{ return CN_{name.upper()}_FETCH_OUTSTANDING_PER_CONTEXT; }}\n"
 )
 MARCH = "rv32imf_zve32f_zicsr_zifencei_zbb_zfbfmin_zvfbfmin_zvfbfwma"
 compile_cmd = [
