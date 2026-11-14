@@ -1,0 +1,576 @@
+diff --git a/hdl/verilog/rvv/inc/rvv_backend.svh b/hdl/verilog/rvv/inc/rvv_backend.svh
+--- a/hdl/verilog/rvv/inc/rvv_backend.svh
++++ b/hdl/verilog/rvv/inc/rvv_backend.svh
+@@ -697,6 +697,7 @@
+ `ifdef TB_SUPPORT
+   logic [`PC_WIDTH-1:0]                         uop_pc;
+ `endif
++  logic [`ROB_TAG_WIDTH-1:0]                    rob_tag;
+   logic [`TE/2*`COMPRATIO-1:0][`WORD_WIDTH-1:0] va;
+   logic [`TE/2*`COMPRATIO-1:0][3:0]             vaMask;    
+   fpnew_pkg::roundmode_e                        rndMode;
+@@ -725,6 +726,7 @@
+ `ifdef TB_SUPPORT
+   logic [`PC_WIDTH-1:0]                         uop_pc;
+ `endif
++  logic [`ROB_TAG_WIDTH-1:0]                    rob_tag;
+   fpnew_pkg::roundmode_e                        rndMode;
+   PEOPCODE_e                                    op;   
+   fpnew_pkg::fp_format_e                        fdstFmt; 
+@@ -745,6 +747,7 @@
+ `ifdef TB_SUPPORT
+   logic [`PC_WIDTH-1:0]                               uop_pc;
+ `endif
++  logic [`ROB_TAG_WIDTH-1:0]                    rob_tag;
+   fpnew_pkg::status_t                                 status;
+   logic [$clog2(`NUM_MT)-1:0]                         writeMtIdx;
+   logic [$clog2(`PROCESS_DELAY)-1:0]                  writeMtId;
+diff --git a/hdl/verilog/rvv/design/rvv_backend.sv b/hdl/verilog/rvv/design/rvv_backend.sv
+--- a/hdl/verilog/rvv/design/rvv_backend.sv
++++ b/hdl/verilog/rvv/design/rvv_backend.sv
+@@ -55,15 +55,6 @@
+     async_frd_ready,
+ `endif
+ 
+-    wr_vxsat_valid,
+-    wr_vxsat,
+-    wr_vxsat_ready,
+-
+-`ifdef ZVE32F_ON
+-    rt2fcsr_write_valid,
+-    rt2fcsr_write_data,
+-    fcsr2rt_write_ready,
+-`endif
+ 
+     trap_valid_rvs2rvv,
+     trap_ready_rvv2rvs,    
+@@ -74,6 +65,17 @@
+ 
+     rd_valid_rob2rt_o,
+     rd_rob2rt_o,
++
++// CN W3 (C027): per-retirement-lane native fflags/vxsat deltas
++    cn_flags_valid_o,
++    cn_flags_tag_o,
++    cn_fflags_o,
++    cn_vxsat_o,
++`ifdef ZVT_ON
++    cn_zvt_flags_valid_o,
++    cn_zvt_flags_tag_o,
++    cn_zvt_fflags_o,
++`endif
+ 
+     rvv_idle
+ );
+@@ -129,17 +131,6 @@
+     input   logic [`NUM_RT_UOP-1:0]                     async_frd_ready;
+ `endif
+ 
+-// RT to VCSR.vxsat
+-    output  logic                                 wr_vxsat_valid;
+-    output  logic         [`VCSR_VXSAT_WIDTH-1:0] wr_vxsat;
+-    input   logic                                 wr_vxsat_ready;
+-
+-`ifdef ZVE32F_ON
+-// RT to FCSR
+-    output  logic                                 rt2fcsr_write_valid;
+-    output  RVFEXP_t                              rt2fcsr_write_data;
+-    input   logic                                 fcsr2rt_write_ready;
+-`endif
+ 
+ // exception handler
+   // trap signal handshake
+@@ -157,6 +148,19 @@
+ // Once the test is passed, delete TB_SUPPORT and else-block
+     output  logic     [`NUM_RT_UOP+`NUM_DE_INST-1:0]  rd_valid_rob2rt_o;
+     output  ROB2RT_t  [`NUM_RT_UOP+`NUM_DE_INST-1:0]  rd_rob2rt_o;
++
++// Per-native-uop flag deltas retain their complete parent key. Matrix blocks
++// are independent producers; no aggregate flags value is used for ownership.
++    output  logic    [`NUM_RT_UOP-1:0]            cn_flags_valid_o;
++    output  logic    [`NUM_RT_UOP-1:0][`ROB_TAG_WIDTH-1:0] cn_flags_tag_o;
++    output  logic    [`NUM_RT_UOP-1:0][4:0]       cn_fflags_o;
++    output  logic    [`NUM_RT_UOP-1:0][`VCSR_VXSAT_WIDTH-1:0] cn_vxsat_o;
++`ifdef ZVT_ON
++    output  logic [`NUM_BLK-1:0]                    cn_zvt_flags_valid_o;
++    output  logic [`NUM_BLK-1:0][`ROB_TAG_WIDTH-1:0] cn_zvt_flags_tag_o;
++    output  logic [`NUM_BLK-1:0][4:0]               cn_zvt_fflags_o;
++`endif
++
+     
+ // rvv_backend is not active.(IDLE)
+     output  logic                                 rvv_idle;
+@@ -342,9 +346,10 @@
+     PU2ROB_t                              res_vme2rvv;
+     logic                                 res_vme2rvv_rdy;
+   // ZVT to Retire
+-    logic                                 zvtFpexpVld;
+-    RVFEXP_t                              zvtFpexp;
+-    logic                                 zvtFpexpRdy;
++    logic [`NUM_BLK-1:0]                      zvtFpexpVld;
++    RVFEXP_t [`NUM_BLK-1:0]                   zvtFpexp;
++    logic [`NUM_BLK-1:0]                      zvtFpexpRdy;
++    logic [`NUM_BLK-1:0][`ROB_TAG_WIDTH-1:0]  zvtFpexpTag;
+ `endif
+   // DP to VRF
+     logic [`NUM_DP_VRF-1:0][`REGIDX_WIDTH-1:0]  rd_index_dp2vrf;          
+@@ -1078,6 +1083,7 @@
+       .fpexpVld                     (zvtFpexpVld),
+       .fpexp                        (zvtFpexp),
+       .fpexpRdy                     (zvtFpexpRdy),
++      .fpexpTag                     (zvtFpexpTag),
+       .flush                        (trap_flush_rvv),
+       .zvtBusy                      (zvtBusy)
+     );
+@@ -1266,20 +1272,10 @@
+       // RT to VRF
+         .rt2vrf_write_valid     (wr_valid_rt2vrf),
+         .rt2vrf_write_data      (wr_data_rt2vrf),
+-      // update vxsat
+-        .rt2vxsat_write_valid   (wr_vxsat_valid),
+-        .rt2vxsat_write_data    (wr_vxsat),
+-        .vxsat2rt_write_ready   (wr_vxsat_ready),
+       `ifdef ZVT_ON
+         .zvtFpexpVld            (zvtFpexpVld),
+         .zvtFpexp               (zvtFpexp),
+         .zvtFpexpRdy            (zvtFpexpRdy),
+-      `endif
+-      `ifdef ZVE32F_ON
+-      // update FCSR
+-        .rt2fcsr_write_valid    (rt2fcsr_write_valid),
+-        .rt2fcsr_write_data     (rt2fcsr_write_data),
+-        .fcsr2rt_write_ready    (fcsr2rt_write_ready),
+       `endif
+       // write to update vcsr   
+         .rt2vcsr_write_valid    (vcsr_valid),
+@@ -1287,7 +1283,18 @@
+         .vcsr2rt_write_ready    (vcsr_ready),
+       // Retire information for RVVI.
+         .rvvrob2rt_valid        (rvvrob2rt_valid),
+-        .rvvrob2rt_data         (rvvrob2rt_data)
++        .rvvrob2rt_data         (rvvrob2rt_data),
++      // CN W3 (C027): per-retirement-lane native flag deltas
++        .cn_flags_valid_o       (cn_flags_valid_o),
++        .cn_flags_tag_o         (cn_flags_tag_o),
++        .cn_fflags_o            (cn_fflags_o),
++        .cn_vxsat_o             (cn_vxsat_o)
++      `ifdef ZVT_ON
++        ,.zvtFpexpTag           (zvtFpexpTag)
++        ,.cn_zvt_flags_valid_o  (cn_zvt_flags_valid_o)
++        ,.cn_zvt_flags_tag_o    (cn_zvt_flags_tag_o)
++        ,.cn_zvt_fflags_o       (cn_zvt_fflags_o)
++      `endif
+       `ifdef RVVI_ON
+         ,.vrf_data              (vrf_data)
+       `endif
+diff --git a/hdl/verilog/rvv/design/rvv_backend_retire.sv b/hdl/verilog/rvv/design/rvv_backend_retire.sv
+--- a/hdl/verilog/rvv/design/rvv_backend_retire.sv
++++ b/hdl/verilog/rvv/design/rvv_backend_retire.sv
+@@ -18,21 +18,25 @@
+   rt2vcsr_write_valid,
+   rt2vcsr_write_data,
+   vcsr2rt_write_ready,
+-  rt2vxsat_write_valid,
+-  rt2vxsat_write_data,
+-  vxsat2rt_write_ready,
+ `ifdef ZVT_ON
+   zvtFpexpVld,
+   zvtFpexp,
+   zvtFpexpRdy,
+ `endif
+-`ifdef ZVE32F_ON
+-  rt2fcsr_write_valid,
+-  rt2fcsr_write_data,
+-  fcsr2rt_write_ready,
+-`endif
+   rvvrob2rt_valid,
+-  rvvrob2rt_data
++  rvvrob2rt_data,
++// CN W3 (C027): per-retirement-lane native fflags/vxsat deltas, one entry
++// per RT lane. Exact semantics are documented at the port declarations.
++  cn_flags_valid_o,
++  cn_flags_tag_o,
++  cn_fflags_o,
++  cn_vxsat_o
++`ifdef ZVT_ON
++  ,zvtFpexpTag,
++  cn_zvt_flags_valid_o,
++  cn_zvt_flags_tag_o,
++  cn_zvt_fflags_o
++`endif
+ `ifdef RVVI_ON
+   ,vrf_data
+ `endif
+@@ -62,30 +66,34 @@
+     output  RVVConfigState                      rt2vcsr_write_data;
+     input   logic                               vcsr2rt_write_ready;
+ 
+-// vxsat
+-    output  logic                               rt2vxsat_write_valid;
+-    output  logic   [`VCSR_VXSAT_WIDTH-1:0]     rt2vxsat_write_data;
+-    input   logic                               vxsat2rt_write_ready;
+ 
+ `ifdef ZVT_ON
+ // ZVT Floating-point exception
+-    input   logic                               zvtFpexpVld;
+-    input   RVFEXP_t                            zvtFpexp;
+-    output  logic                               zvtFpexpRdy;
+-`endif
+-
+-`ifdef ZVE32F_ON
+-// Floating-point exception
+-    output  logic                               rt2fcsr_write_valid;
+-    output  RVFEXP_t                            rt2fcsr_write_data;
+-    input   logic                               fcsr2rt_write_ready;
+-`endif
++    input   logic [`NUM_BLK-1:0]               zvtFpexpVld;
++    input   RVFEXP_t [`NUM_BLK-1:0]            zvtFpexp;
++    output  logic [`NUM_BLK-1:0]               zvtFpexpRdy;
++`endif
++
+ 
+ // Retire information for RVVI.
+     output  logic    [`NUM_RT_UOP-1:0]          rvvrob2rt_valid; // always ready to receive.
+     output  ROB2RT_t [`NUM_RT_UOP-1:0]          rvvrob2rt_data;  
+ `ifdef RVVI_ON
+     input   logic    [`NUM_VRF-1:0][`VLEN-1:0]  vrf_data;
++`endif
++
++// Per-uop deltas are exported on their accepted beat, including early result
++// beats. Only active element lanes contribute. Never OR different parent tags;
++// trap/younger lanes do not contribute to architectural state.
++    output  logic    [`NUM_RT_UOP-1:0]                 cn_flags_valid_o;
++    output  logic    [`NUM_RT_UOP-1:0][`ROB_TAG_WIDTH-1:0] cn_flags_tag_o;
++    output  logic    [`NUM_RT_UOP-1:0][4:0]            cn_fflags_o;
++    output  logic    [`NUM_RT_UOP-1:0][`VCSR_VXSAT_WIDTH-1:0] cn_vxsat_o;
++`ifdef ZVT_ON
++    input   logic [`NUM_BLK-1:0][`ROB_TAG_WIDTH-1:0] zvtFpexpTag;
++    output  logic [`NUM_BLK-1:0]                    cn_zvt_flags_valid_o;
++    output  logic [`NUM_BLK-1:0][`ROB_TAG_WIDTH-1:0] cn_zvt_flags_tag_o;
++    output  logic [`NUM_BLK-1:0][4:0]               cn_zvt_fflags_o;
+ `endif
+ 
+ ////////////Wires & Regs  ///////////////
+@@ -111,7 +119,6 @@
+ logic [`NUM_RT_UOP-1:0]                         fpexp_nx;
+ RVFEXP_t  [`NUM_RT_UOP-1:0]                     w_fpexp;
+ logic     [`NUM_RT_UOP-1:0]                     w_fpexp_vld;
+-logic     [`NUM_RT_UOP-1:0]                     fcsr2rt_ready;
+ `endif
+ logic [`NUM_RT_UOP-1:1][`NUM_RT_UOP-1:0]        waw;
+ logic [`NUM_RT_UOP-1:0]                         hit_waw;
+@@ -126,7 +133,6 @@
+ logic [`NUM_RT_UOP-1:0]                         w_frf_valid;
+ logic [`NUM_RT_UOP-1:0]                         w_frf;
+ `endif
+-logic [`NUM_RT_UOP-1:0]                         vxsat2rt_ready;
+ 
+ genvar                                          i,j;
+ 
+@@ -168,6 +174,25 @@
+     assign w_fpexp_vld[j] = |w_fpexp[j];
+     `endif
+ 
++
++    logic accepted_no_trap;
++    if (j == 0) begin
++      assign accepted_no_trap = rob2rt_write_valid[j] && rt2rob_write_ready[j] &&
++        !trap_flag[j];
++    end else begin
++      assign accepted_no_trap = rob2rt_write_valid[j] && rt2rob_write_ready[j] &&
++        !trap_flag[j] && !(|(trap_flag[j-1:0] & rob2rt_write_valid[j-1:0]));
++    end
++    assign cn_flags_tag_o[j] = rob2rt_write_data[j].rob_tag;
++    assign cn_vxsat_o[j] = w_vxsat[j] && w_valid[j] && (rob2rt_write_data[j].w_type == VRF);
++    `ifdef ZVE32F_ON
++    // RVFEXP_t uses architectural FFLAGS order: NV4, DZ3, OF2, UF1, NX0.
++    assign cn_fflags_o[j] = w_fpexp[j];
++    assign cn_flags_valid_o[j] = accepted_no_trap && (w_fpexp_vld[j] || cn_vxsat_o[j]);
++    `else
++    assign cn_fflags_o[j] = '0;
++    assign cn_flags_valid_o[j] = accepted_no_trap && cn_vxsat_o[j];
++    `endif
+     if(j==0) begin : gen_0
+       assign w_valid_chkTrap[0] = !trap_flag[0] && rob2rt_write_valid[0];
+     end else begin : gen_j
+@@ -218,51 +243,27 @@
+   assign rt2vcsr_write_valid  = rob2rt_write_valid[0] && trap_flag[0] && vcsr2rt_write_ready;
+   assign rt2vcsr_write_data   = w_vcsr[0];
+ 
+-  // To vxsat
+-  assign vxsat2rt_ready       = ~(w_vrf_valid&w_vxsat) | {`NUM_RT_UOP{vxsat2rt_write_ready}}; 
+-  assign rt2vxsat_write_valid = |(w_vrf_valid&rt2rob_write_ready&w_vxsat) && !trap_flag[0];
+-  assign rt2vxsat_write_data  = rt2vxsat_write_valid;
+-
+-`ifdef ZVE32F_ON
+-  // To FCSR[4:0]
+-  assign fcsr2rt_ready          = ~w_fpexp_vld | {`NUM_RT_UOP{fcsr2rt_write_ready}};
++
+   `ifdef ZVT_ON
+-  assign zvtFpexpRdy            = ~zvtFpexpVld | fcsr2rt_write_ready;
++  // Every PE block carries its own pipelined parent tag. Four simultaneous
++  // exceptions can belong to different instructions and are separate consumers.
++  assign zvtFpexpRdy = '1;
++  assign cn_zvt_flags_valid_o = zvtFpexpVld & zvtFpexpRdy;
++  assign cn_zvt_flags_tag_o = zvtFpexpTag;
++  for (genvar b = 0; b < `NUM_BLK; b++) begin : matrix_flags
++    assign cn_zvt_fflags_o[b] = zvtFpexp[b];
++  end
+   `endif
+-  assign rt2fcsr_write_valid    = trap_flag[0] ? 'b0 : |(w_fpexp_vld & rob2rt_write_valid & rt2rob_write_ready)
+-                                                      `ifdef ZVT_ON
+-                                                       || zvtFpexpVld & fcsr2rt_write_ready
+-                                                      `endif
+-                                                       ;
+-
+-  assign rt2fcsr_write_data.nv  = |(fpexp_nv & rob2rt_write_valid & rt2rob_write_ready)
+-                                  `ifdef ZVT_ON
+-                                   || zvtFpexp.nv
+-                                  `endif
+-                                  ;
+-  assign rt2fcsr_write_data.dz  = |(fpexp_dz & rob2rt_write_valid & rt2rob_write_ready);
+-  assign rt2fcsr_write_data.of  = |(fpexp_of & rob2rt_write_valid & rt2rob_write_ready)
+-                                  `ifdef ZVT_ON
+-                                   || zvtFpexp.of
+-                                  `endif
+-                                  ;
+-  assign rt2fcsr_write_data.uf  = |(fpexp_uf & rob2rt_write_valid & rt2rob_write_ready);
+-  assign rt2fcsr_write_data.nx  = |(fpexp_nx & rob2rt_write_valid & rt2rob_write_ready);
+-`endif
+   
+   always_comb begin
+     if(trap_flag[0])
+       rt2rob_write_ready[0] = vcsr2rt_write_ready;
+     else if(rob2rt_write_data[0].w_type==VRF) begin
+-      rt2rob_write_ready[0] = vxsat2rt_ready[0]
+-                              `ifdef ZVE32F_ON
+-                              && fcsr2rt_ready[0]
+-                              `endif
+-                              ;
++      rt2rob_write_ready[0] = 1'b1;
+     end
+     else begin
+     `ifdef ZVE32F_ON
+-      rt2rob_write_ready[0] = (rob2rt_write_data[0].w_type==XRF) ? rvs2rt_write_ready[0] : frf2rt_write_ready[0] & fcsr2rt_ready[0];
++      rt2rob_write_ready[0] = (rob2rt_write_data[0].w_type==XRF) ? rvs2rt_write_ready[0] : frf2rt_write_ready[0];
+     `else
+       rt2rob_write_ready[0] = rvs2rt_write_ready[0];
+     `endif
+@@ -272,17 +273,13 @@
+   for(j=1;j<`NUM_RT_UOP;j++) begin
+     always_comb begin
+       if(rob2rt_write_data[j].w_type==VRF) begin
+-        rt2rob_write_ready[j] = rt2rob_write_ready[j-1] & (vxsat2rt_ready[j]
+-                                                          `ifdef ZVE32F_ON
+-                                                          && fcsr2rt_ready[j]
+-                                                          `endif
+-                                                          );
++        rt2rob_write_ready[j] = rt2rob_write_ready[j-1];
+       end
+       else begin
+       `ifdef ZVE32F_ON
+         rt2rob_write_ready[j] = (rob2rt_write_data[j].w_type==XRF) 
+                                 ? rt2rob_write_ready[j-1] & rvs2rt_write_ready[j] 
+-                                : rt2rob_write_ready[j-1] & frf2rt_write_ready[j] & fcsr2rt_ready[j];
++                                : rt2rob_write_ready[j-1] & frf2rt_write_ready[j];
+       `else
+         rt2rob_write_ready[j] = rt2rob_write_ready[j-1] & rvs2rt_write_ready[j];
+       `endif
+diff --git a/hdl/verilog/rvv/design/Zvt/zvt.sv b/hdl/verilog/rvv/design/Zvt/zvt.sv
+--- a/hdl/verilog/rvv/design/Zvt/zvt.sv
++++ b/hdl/verilog/rvv/design/Zvt/zvt.sv
+@@ -22,6 +22,7 @@
+   uop_lsu2vme_rdy,
+   fpexpVld,
+   fpexp,
++  fpexpTag,
+   fpexpRdy,
+   vmeRtVld,
+   vmeRt,
+@@ -54,9 +55,10 @@
+   output VMERT_t                  vmeRt;
+   input  logic                    vmeRtRdy;
+   // floating-point status
+-  output logic                    fpexpVld;
+-  output RVFEXP_t                 fpexp;
+-  input  logic                    fpexpRdy;
++  output logic [`NUM_BLK-1:0]       fpexpVld;
++  output RVFEXP_t [`NUM_BLK-1:0]    fpexp;
++  output logic [`NUM_BLK-1:0][`ROB_TAG_WIDTH-1:0] fpexpTag;
++  input  logic [`NUM_BLK-1:0]       fpexpRdy;
+   // control&status  
+   input  logic                    flush;
+   output logic                    zvtBusy;
+@@ -230,6 +232,7 @@
+     .writeData    (peWriteData),
+     .fpexpVld     (fpexpVld),
+     .fpexp        (fpexp),
++    .fpexpTag     (fpexpTag),
+     .fpexpRdy     (fpexpRdy),
+     .peRtVld      (peRtVld),
+   `ifdef RVVI_ON
+diff --git a/hdl/verilog/rvv/design/Zvt/zvt_pe_array.sv b/hdl/verilog/rvv/design/Zvt/zvt_pe_array.sv
+--- a/hdl/verilog/rvv/design/Zvt/zvt_pe_array.sv
++++ b/hdl/verilog/rvv/design/Zvt/zvt_pe_array.sv
+@@ -23,6 +23,7 @@
+   writeData,
+   fpexpVld,
+   fpexp,
++  fpexpTag,
+   fpexpRdy,
+   peRtVld,
+ `ifdef RVVI_ON
+@@ -54,9 +55,10 @@
+   output logic [`NUM_BLK-1:0][`NUM_BLKPORT-1:0][$clog2(`NUM_SUBTILE)-1:0] writeSubIdx;
+   output logic [`NUM_BLK-1:0][`NUM_BLKPORT-1:0][`SUBTILE_SIZE*8-1:0]      writeData;  
+   // floating-point status
+-  output logic                              fpexpVld;
+-  output RVFEXP_t                           fpexp;
+-  input  logic                              fpexpRdy;
++  output logic [`NUM_BLK-1:0]                fpexpVld;
++  output RVFEXP_t [`NUM_BLK-1:0]             fpexp;
++  output logic [`NUM_BLK-1:0][`ROB_TAG_WIDTH-1:0] fpexpTag;
++  input  logic [`NUM_BLK-1:0]                fpexpRdy;
+   // retiring informaiton
+   output logic [`NUM_BLK-1:0]               peRtVld;
+ `ifdef RVVI_ON
+@@ -234,6 +236,8 @@
+   assign vaInfoLo.uop_pc     = peCmd[0].uop_pc;
+   assign vaInfoHi.uop_pc     = peCmd[0].uop_pc;
+ `endif 
++  assign vaInfoLo.rob_tag    = peCmd[0].rob_tag;
++  assign vaInfoHi.rob_tag    = peCmd[0].rob_tag;
+   assign vaInfoLo.rndMode    = peCmd[0].rndMode;
+   assign vaInfoHi.rndMode    = peCmd[0].rndMode;
+   assign vaInfoLo.readMtIdx  = peCmd[0].dst_index[4:1];
+@@ -339,8 +343,6 @@
+   assign blkCmd[3].vbInfo = vbInfoHiD2;
+ 
+ // pe block
+-  logic    [`NUM_BLK-1:0] fpexpBlkVld;
+-  RVFEXP_t [`NUM_BLK-1:0] fpexpBlk;
+   logic    [`NUM_BLK-1:0] blkBusy;
+ 
+   for(genvar i=0; i<`NUM_BLK; i++) begin: peBlkID
+@@ -367,9 +369,10 @@
+       .writeMtIdx       (writeMtIdx[i]),
+       .writeSubIdx      (writeSubIdx[i]),
+       .writeData        (writeData[i]),  
+-      .fpexpVld         (fpexpBlkVld[i]),
+-      .fpexp            (fpexpBlk[i]),
+-      .fpexpRdy         (fpexpRdy),
++      .fpexpVld         (fpexpVld[i]),
++      .fpexp            (fpexp[i]),
++      .fpexpTag         (fpexpTag[i]),
++      .fpexpRdy         (fpexpRdy[i]),
+       .blkRtVld         (peRtVld[i]),
+     `ifdef RVVI_ON
+       .blkRtInfo        (peRtInfo[i]),
+@@ -379,16 +382,8 @@
+     );
+   end
+ 
+-// floating-point exceptions.
+-  always_comb begin
+-    fpexpVld = |fpexpBlkVld;
+-    fpexp    = 'b0;
+-
+-    for(int i=0; i<`NUM_BLK; i++) begin
+-      fpexp.of = fpexp.of | (fpexpBlkVld[i] && fpexpBlk[i].of);
+-      fpexp.nv = fpexp.nv | (fpexpBlkVld[i] && fpexpBlk[i].nv);
+-    end
+-  end
++// Different systolic blocks may finish different parent instructions together.
++// Keep their deltas separate; the scalar ROB folds only matching identities.
+ 
+ // busy
+   assign busy = |blkBusy;
+diff --git a/hdl/verilog/rvv/design/Zvt/zvt_pe_block.sv b/hdl/verilog/rvv/design/Zvt/zvt_pe_block.sv
+--- a/hdl/verilog/rvv/design/Zvt/zvt_pe_block.sv
++++ b/hdl/verilog/rvv/design/Zvt/zvt_pe_block.sv
+@@ -23,6 +23,7 @@
+   writeData,  
+   fpexpVld,
+   fpexp,
++  fpexpTag,
+   fpexpRdy,
+   blkRtVld,
+ `ifdef RVVI_ON
+@@ -60,6 +61,7 @@
+   // floating-point status
+   output logic                                              fpexpVld;
+   output RVFEXP_t                                           fpexp;
++  output logic [`ROB_TAG_WIDTH-1:0]                         fpexpTag;
+   input  logic                                              fpexpRdy;
+   // retiring informaiton
+   output logic                                              blkRtVld;
+@@ -95,6 +97,7 @@
+   assign mulbulkTagIn.readMtIdx  = blkCmd.vaInfo.readMtIdx;
+   assign mulbulkTagIn.readMtId   = blkCmd.vaInfo.readMtId;
+   assign mulbulkTagIn.lastUopVld = blkCmd.vaInfo.lastUopVld;
++  assign mulbulkTagIn.rob_tag    = blkCmd.vaInfo.rob_tag;
+ 
+   // instance mul+bulk-normalization
+   //
+@@ -294,6 +297,7 @@
+   assign adderTagIn.writeMtIdx = mulbulkCmd.tag.readMtIdx;
+   assign adderTagIn.writeMtId  = mulbulkCmd.tag.readMtId;
+   assign adderTagIn.lastUopVld = mulbulkCmd.tag.lastUopVld;
++  assign adderTagIn.rob_tag    = mulbulkCmd.tag.rob_tag;
+ 
+   // adder
+   for(genvar i=0; i<`TE/2*`COMPRATIO; i++) begin: adderRow
+@@ -373,7 +377,8 @@
+     end
+   end
+ 
+-  assign fpexpVld    = |fpexp;
++  assign fpexpTag    = adderResTag.rob_tag;
++  assign fpexpVld    = adderResVld[0][0] && (|fpexp);
+   assign adderResRdy = !fpexpVld || fpexpRdy; 
+ 
+ // write Mt
+diff --git a/hdl/verilog/rvv/sve/rvv_backend_tb/hdl/rvv_backend_top.sv b/hdl/verilog/rvv/sve/rvv_backend_tb/hdl/rvv_backend_top.sv
+--- a/hdl/verilog/rvv/sve/rvv_backend_tb/hdl/rvv_backend_top.sv
++++ b/hdl/verilog/rvv/sve/rvv_backend_tb/hdl/rvv_backend_top.sv
+@@ -37,6 +37,8 @@
+   rvv_intern_interface rvv_intern_if(clk,rst_n);
+   
+   rvv_backend_tb_mod test(); 
++
++  logic [`NUM_RT_UOP-1:0] native_flags_valid, native_vxsat;
+   
+   rvv_backend DUT (
+     .clk(clk),
+@@ -63,9 +65,10 @@
+     .trap_valid_rvs2rvv       (lsu_if.trap_valid_rvs2rvv    ),
+     .trap_ready_rvv2rvs       (lsu_if.trap_ready_rvv2rvs    ), 
+ 
+-    .wr_vxsat_valid           (), // use internal signal   
+-    .wr_vxsat                 (), // use internal signal   
+-    .wr_vxsat_ready           (rvs_if.wr_vxsat_ready),
++    .cn_flags_valid_o        (native_flags_valid),
++    .cn_flags_tag_o          (),
++    .cn_fflags_o             (),
++    .cn_vxsat_o              (native_vxsat),
+ 
+     .vcsr_valid               (rvs_if.vcsr_valid            ),
+     .vector_csr               (rvs_if.vector_csr            ),
+@@ -117,15 +120,8 @@
+   assign rvs_if.rt_vrf_data_rob2rt[2].rt_strobe  = `RT_VRF_PATH.w_enB2;
+   assign rvs_if.rt_vrf_data_rob2rt[3].rt_strobe  = `RT_VRF_PATH.w_enB3;
+ 
+-  assign rvs_if.wr_vxsat_valid[0] = `RT_VXSAT_PATH.w_valid0_chkTrap & `RT_VXSAT_PATH.w_vxsat0;
+-  assign rvs_if.wr_vxsat_valid[1] = `RT_VXSAT_PATH.w_valid1_chkTrap & `RT_VXSAT_PATH.w_vxsat1;
+-  assign rvs_if.wr_vxsat_valid[2] = `RT_VXSAT_PATH.w_valid2_chkTrap & `RT_VXSAT_PATH.w_vxsat2;
+-  assign rvs_if.wr_vxsat_valid[3] = `RT_VXSAT_PATH.w_valid3_chkTrap & `RT_VXSAT_PATH.w_vxsat3;
+-
+-  assign rvs_if.wr_vxsat[0] = `RT_VXSAT_PATH.w_vxsat0;
+-  assign rvs_if.wr_vxsat[1] = `RT_VXSAT_PATH.w_vxsat1;
+-  assign rvs_if.wr_vxsat[2] = `RT_VXSAT_PATH.w_vxsat2;
+-  assign rvs_if.wr_vxsat[3] = `RT_VXSAT_PATH.w_vxsat3;
++  assign rvs_if.wr_vxsat_valid = native_flags_valid & native_vxsat;
++  assign rvs_if.wr_vxsat = native_vxsat;
+     
+ // lsu interface -----------------------------------------------------
+   // trap pc tracer

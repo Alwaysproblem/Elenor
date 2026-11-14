@@ -52,14 +52,35 @@ class RetirementPartitionBankIO(p: Parameters) extends Bundle {
 
     val isVector      = Option.when(p.enableRvv)(Input(Vec(p.instructionLanes, Bool())))
     val isTile        = Option.when(p.enableVme)(Input(Vec(p.instructionLanes, Bool())))
-    val clearVstart   = Option.when(p.enableRvv)(Output(Bool()))
+    val perCtxClearVstart = Option.when(p.enableRvv)(Output(Vec(p.contextCount, Bool())))
     val writeDataTile = Option.when(p.enableVme)(Input(Valid(new OwnedTileWriteDataIO(p))))
     val vmeMtypeWb =
       Option.when(p.enableVme)(Input(Vec(p.instructionLanes, Valid(new OwnedMtypeWriteDataIO(p)))))
-    val flagsDelta = Input(Valid(new ParkedFlagsDeltaIO(p)))
+    // One port per independent producer; simultaneous native lanes are never ORed
+    // across different instruction identities.
+    val flagsDelta = Input(Vec(p.flagsDeltaPorts, Valid(new ParkedFlagsDeltaIO(p))))
     val csrPark    = Input(Valid(new ParkedCsrDeltaIO(p)))
+    // Per-op config payload (vset/mset) parked at its slot; committed at retirement.
+    val configDelta = Input(Vec(p.configDeltaPorts, Valid(new ParkedConfigIO(p))))
+    val cfgPayloadExpected = Input(Vec(p.instructionLanes, Bool()))
+    // Dispatch-time ordered classes: flags-capable (float/rvv/F-class CSR) and
+    // config-capable (vset/mset/C-class CSR) entries feed the per-Context interlock
+    // counters exported below (W2-04 Context-local CSR read gate).
+    val flagsCapable  = Input(Vec(p.instructionLanes, Bool()))
+    val configCapable = Input(Vec(p.instructionLanes, Bool()))
     val perCtxRetiredDelta =
       Output(Vec(p.contextCount, Vec(p.retirementLanes, new RetiredFlagsDeltaIO(p))))
+    // Per-Context ordered-interlock projections (active-Context selected in SCore).
+    val perCtxFlagsInFlight  = Output(Vec(p.contextCount, Bool()))
+    val perCtxConfigInFlight = Output(Vec(p.contextCount, Bool()))
+    val perCtxParkedFlags    = Output(Vec(p.contextCount, Bool()))
+    val perCtxStaleRejected  = Output(Vec(p.contextCount, UInt(16.W)))
+    // C027 cancel-isolation observability: per-Context physical-slot bitmaps
+    // (liveMask = slot holds an entry; readyMask = live && result complete && cfDone).
+    val perCtxLiveMask  = Output(Vec(p.contextCount, UInt(p.retirementBufferSize.W)))
+    val perCtxReadyMask = Output(Vec(p.contextCount, UInt(p.retirementBufferSize.W)))
+    val perCtxPendingData = Output(Vec(p.contextCount, UInt(p.retirementBufferSize.W)))
+    val perCtxRetiredConfig = Output(Vec(p.contextCount, Valid(new RetiredConfigIO(p))))
     // Selected-Context projections for DispatchV2 compatibility.
     val enqPtr      = Output(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W))
     val enqSlotGen  = Output(Vec(p.instructionLanes, UInt(p.slotGenerationBits.W)))
@@ -139,6 +160,7 @@ class RetirementPartitionBank(p: Parameters, mini: Boolean = false) extends Modu
     }
 
     if (p.enableRvv) {
+      io.perCtxClearVstart.get(c) := part.io.clearVstart.get
       for (i <- 0 until p.instructionLanes) {
         part.io.writeAddrVector.get(i).valid := isSel && io.writeAddrVector.get(i).valid
         part.io.writeAddrVector.get(i).addr  := io.writeAddrVector.get(i).addr
@@ -163,14 +185,34 @@ class RetirementPartitionBank(p: Parameters, mini: Boolean = false) extends Modu
       part.io.writeDataTile.get.bits := io.writeDataTile.get.bits
     }
 
-    // W2-04 ordered deltas: route by identity to the owning partition.
-    part.io.flagsDelta.valid := io.flagsDelta.valid &&
-      (io.flagsDelta.bits.rob_tag.ctx_slot === c.U)
-    part.io.flagsDelta.bits := io.flagsDelta.bits
+    // Route each producer independently to its owning partition.
+    for (j <- 0 until p.flagsDeltaPorts) {
+      part.io.flagsDelta(j).valid := io.flagsDelta(j).valid &&
+        (io.flagsDelta(j).bits.rob_tag.ctx_slot === c.U)
+      part.io.flagsDelta(j).bits := io.flagsDelta(j).bits
+    }
     part.io.csrPark.valid := io.csrPark.valid && (io.csrPark.bits.owner.ctx_slot === c.U)
     part.io.csrPark.bits := io.csrPark.bits
+    for (j <- 0 until p.configDeltaPorts) {
+      part.io.configDelta(j).valid := io.configDelta(j).valid &&
+        (io.configDelta(j).bits.rob_tag.ctx_slot === c.U)
+      part.io.configDelta(j).bits := io.configDelta(j).bits
+    }
+
+    // Dispatch-time entry classes only apply to the selected (dispatching) Context.
+    for (i <- 0 until p.instructionLanes) {
+      part.io.flagsCapable(i)  := isSel && io.flagsCapable(i)
+      part.io.configCapable(i) := isSel && io.configCapable(i)
+      part.io.cfgPayloadExpected(i) := isSel && io.cfgPayloadExpected(i)
+    }
 
     io.perCtxRetiredDelta(c) := part.io.retiredDelta
+    io.perCtxFlagsInFlight(c)  := part.io.flagsInFlight
+    io.perCtxConfigInFlight(c) := part.io.configInFlight
+    io.perCtxParkedFlags(c)    := part.io.parkedFlagsPresent
+    // Exact per-Context lifetime: each partition's counter resets only with its own
+    // perCtxReset (advanceGen), so peer Contexts keep their counts on slot reuse.
+    io.perCtxStaleRejected(c) := part.io.staleCompletionRejected
 
     val isRvvFault = io.fault.bits.is_rvv.getOrElse(false.B)
     val faultSlot  = Mux(
@@ -184,9 +226,13 @@ class RetirementPartitionBank(p: Parameters, mini: Boolean = false) extends Modu
     io.perCtxSpace(c)       := part.io.nSpace
     io.perCtxEmpty(c)       := part.io.empty
     io.perCtxNRetired(c)    := part.io.nRetired
+    io.perCtxPendingData(c) := part.io.pendingDataMask
     io.perCtxDeqReady(c)    := part.io.deqReadyOut
     io.perCtxTrapPending(c) := part.io.trapPending
     io.perCtxTrapRetired(c) := part.io.trapRetired
+    io.perCtxLiveMask(c)  := part.io.liveMask
+    io.perCtxReadyMask(c) := part.io.readyMask
+    io.perCtxRetiredConfig(c) := part.io.retiredConfig
   }
 
   io.enqPtr      := selCtx(partitions.map(_.io.enqPtr), effActiveCtx)
@@ -197,9 +243,6 @@ class RetirementPartitionBank(p: Parameters, mini: Boolean = false) extends Modu
   io.trapPending := selCtx(partitions.map(_.io.trapPending), effActiveCtx)
   io.trapRetired := selCtx(partitions.map(_.io.trapRetired), effActiveCtx)
 
-  if (p.enableRvv) {
-    io.clearVstart.get := partitions.map(_.io.clearVstart.get).reduce(_ || _)
-  }
 
   val outOfRangeStore = io.storeComplete.valid && (io.storeComplete.bits.ctx_slot >= p.contextCount.U)
   val outOfRangeReg   = RegInit(0.U(16.W))

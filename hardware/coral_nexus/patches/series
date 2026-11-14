@@ -8,3 +8,9 @@ coralnpu:w2/0202-rob-owner-tag.patch
 coralnpu:w2/0203-rf-banks.patch
 coralnpu:w2/0204-csr-ctx-bank.patch
 coralnpu:w2/0401-ordered-flags.patch
+coralnpu:w2/0402-csr-interlock.patch
+coralnpu:w2/0403-core-clock-gating.patch
+coralnpu:w2/0404-context-lifecycle.patch
+coralnpu:w3/0402-native-flags.patch
+coralnpu:w3/0403-native-config-snapshot.patch
+coralnpu:w3/0404-native-parent-identity.patch

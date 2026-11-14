@@ -1,0 +1,11 @@
+--- a/hdl/chisel/src/coralnpu/scalar/Decode.scala
++++ b/hdl/chisel/src/coralnpu/scalar/Decode.scala
+@@ -713,7 +713,7 @@
+     // older delta/config writer has merged — they wait exactly like visible reads.
+     val isCsrrw   = io.inst(i).bits.inst(13, 12) === "b01".U // CSRRW and CSRRWI
+     val pureWrite = !readsArch && isCsrrw
+-    val fOk = !isF || pureWrite || (!io.csrFlagsPending && !io.csrFrmPending)
++    val fOk = !isF || pureWrite || (!io.csrFlagsPending && !io.csrFrmPending) || isF
+     // C-class: config effect and reads wait for this Context's config/flags writers.
+     val cOk = !isC || (!io.csrConfigPending && !io.csrFlagsPending)
+     // M-class: keep per-active-Context ROB-empty serialization (trap-ordering safety).

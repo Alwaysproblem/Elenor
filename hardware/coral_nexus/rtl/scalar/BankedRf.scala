@@ -69,6 +69,7 @@ class BankedRf(p: Parameters, extraWritePorts: Int = 2) extends Module {
     }
     val perCtxScoreboardRegd = Output(Vec(p.contextCount, UInt(p.scalarRegCount.W)))
     val perCtxScoreboardComb = Output(Vec(p.contextCount, UInt(p.scalarRegCount.W)))
+    val perCtxOutstanding = Output(Vec(p.contextCount, UInt(p.scalarRegCount.W)))
     val staleWriteRejected   = Output(UInt(16.W))
   })
 
@@ -93,9 +94,22 @@ class BankedRf(p: Parameters, extraWritePorts: Int = 2) extends Module {
     val genMatch  = slotInRng && (io.writeData(j).bits.owner.ctx_generation === liveGen)
     staleHits(j) := io.writeData(j).valid && !io.writeMask(j).valid && !genMatch
   }
-  val staleCounter = RegInit(0.U(16.W))
-  staleCounter          := staleCounter + PopCount(staleHits)
-  io.staleWriteRejected := staleCounter
+  val staleByContext = RegInit(VecInit.fill(p.contextCount)(0.U(16.W)))
+  val invalidSlotRejected = RegInit(0.U(16.W))
+  for (c <- 0 until p.contextCount) {
+    val hits = (0 until totalWritePorts).map { j =>
+      staleHits(j) && io.writeData(j).bits.owner.ctx_slot === c.U
+    }
+    when(io.perCtxReset(c)) {
+      staleByContext(c) := 0.U
+    }.otherwise {
+      staleByContext(c) := staleByContext(c) + PopCount(hits)
+    }
+  }
+  invalidSlotRejected := invalidSlotRejected + PopCount((0 until totalWritePorts).map { j =>
+    staleHits(j) && io.writeData(j).bits.owner.ctx_slot >= p.contextCount.U
+  })
+  io.staleWriteRejected := staleByContext.reduce(_ +& _) + invalidSlotRejected
 
   for (b <- 0 until p.contextCount) {
     val bank  = banks(b)
@@ -131,6 +145,7 @@ class BankedRf(p: Parameters, extraWritePorts: Int = 2) extends Module {
 
     io.perCtxScoreboardRegd(b) := bank.io.scoreboard.regd
     io.perCtxScoreboardComb(b) := bank.io.scoreboard.comb
+    io.perCtxOutstanding(b) := bank.io.outstanding
   }
 
   io.target            := selCtx(banks.map(_.io.target), effActiveCtx)
@@ -158,6 +173,7 @@ class BankedFRegfile(p: Parameters, n_read: Int, n_write: Int) extends Module {
     val scoreboard_set   = Input(UInt(p.floatRegCount.W))
     val scoreboard       = Output(UInt(p.floatRegCount.W))
     val perCtxScoreboard = Output(Vec(p.contextCount, UInt(p.floatRegCount.W)))
+    val perCtxOutstanding = Output(Vec(p.contextCount, UInt(p.floatRegCount.W)))
     val exception        = Output(Bool())
 
     val busPort            = new RegfileBusPortIO(p)
@@ -186,9 +202,22 @@ class BankedFRegfile(p: Parameters, n_read: Int, n_write: Int) extends Module {
     val genMatch  = slotInRng && (io.write_ports(w).owner.ctx_generation === liveGen)
     staleHits(w) := io.write_ports(w).valid && !genMatch
   }
-  val staleCounter = RegInit(0.U(16.W))
-  staleCounter          := staleCounter + PopCount(staleHits)
-  io.staleWriteRejected := staleCounter
+  val staleByContext = RegInit(VecInit.fill(p.contextCount)(0.U(16.W)))
+  val invalidSlotRejected = RegInit(0.U(16.W))
+  for (c <- 0 until p.contextCount) {
+    val hits = (0 until n_write).map { w =>
+      staleHits(w) && io.write_ports(w).owner.ctx_slot === c.U
+    }
+    when(io.perCtxReset(c)) {
+      staleByContext(c) := 0.U
+    }.otherwise {
+      staleByContext(c) := staleByContext(c) + PopCount(hits)
+    }
+  }
+  invalidSlotRejected := invalidSlotRejected + PopCount((0 until n_write).map { w =>
+    staleHits(w) && io.write_ports(w).owner.ctx_slot >= p.contextCount.U
+  })
+  io.staleWriteRejected := staleByContext.reduce(_ +& _) + invalidSlotRejected
 
   for (b <- 0 until p.contextCount) {
     val bank      = banks(b)
@@ -216,6 +245,7 @@ class BankedFRegfile(p: Parameters, n_read: Int, n_write: Int) extends Module {
     bank.io.scoreboard_set := Mux(isDispSel, io.scoreboard_set, 0.U)
     bank.io.busPortAddr    := io.busPortAddr
     io.perCtxScoreboard(b) := bank.io.scoreboard
+    io.perCtxOutstanding(b) := bank.io.outstanding
   }
 
   for (r <- 0 until n_read) {

@@ -1,0 +1,19 @@
+diff --git a/hdl/chisel/src/coralnpu/scalar/Context.scala b/hdl/chisel/src/coralnpu/scalar/Context.scala
+--- a/hdl/chisel/src/coralnpu/scalar/Context.scala
++++ b/hdl/chisel/src/coralnpu/scalar/Context.scala
+@@ -328,9 +328,14 @@
+   // Reuse edge: generation advances EXACTLY ONCE (registered state leaves FREE-entry
+   // pulses one-cycle long even if the triggering input stays high), and the pulse is
+   // what the parent wires to per-Context bank clears (safe reuse only).
++  val anyReuseEdge = VecInit.tabulate(p.contextCount) { k =>
++    (nextState(k) === ContextState.FREE) && (states(k) =/= ContextState.FREE)
++  }.asUInt.orR
+   for (c <- 0 until p.contextCount) {
+     val reuseEdge = (nextState(c) === ContextState.FREE) && (states(c) =/= ContextState.FREE)
+-    io.advanceGen(c) := reuseEdge
++    // MUTANT(0404-global-cancel): ANY Context's reuse clears EVERY Context's banks,
++    // breaching RET-06 peer isolation. Must FAIL w2_04_cancel_retire_spec.
++    io.advanceGen(c) := anyReuseEdge
+     when(reuseEdge) {
+       gens(c) := gens(c) + 1.U
+       cancelled(c) := false.B

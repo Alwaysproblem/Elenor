@@ -7,6 +7,7 @@ schema: cn_patch_owners/v1
 owners:
   W2:
     - hdl/chisel/src/coralnpu/BUILD
+    - rules/chisel_test_runner.sh
     - hdl/chisel/src/coralnpu/AxiSlave.scala
     - hdl/chisel/src/coralnpu/BankedDtcm.scala
     - hdl/chisel/src/coralnpu/BankedItcm.scala
@@ -34,6 +35,7 @@ owners:
     - hdl/chisel/src/coralnpu/scalar/Alu.scala
     - hdl/chisel/src/coralnpu/scalar/Bru.scala
     - hdl/chisel/src/coralnpu/scalar/Csr.scala
+    - hdl/chisel/src/coralnpu/scalar/CsrTest.scala
     - hdl/chisel/src/coralnpu/scalar/Debug.scala
     - hdl/chisel/src/coralnpu/scalar/Decode.scala
     - hdl/chisel/src/coralnpu/scalar/Dvu.scala

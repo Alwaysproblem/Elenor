@@ -34,6 +34,20 @@ class W2_02_RfBankSpec extends AnyFreeSpec with ChiselSim {
     p
   }
 
+  def idleContext(core: Core): Unit = {
+    core.io.ctx.ctxSelect.poke(0.U)
+    for (c <- 0 until core.io.ctx.advanceGen.length) {
+      core.io.ctx.advanceGen(c).poke(false.B)
+      core.io.ctx.perCtxPark(c).poke(false.B)
+      core.io.ctx.parkGen(c).poke(0.U)
+      core.io.ctx.cancelValid(c).poke(false.B)
+      core.io.ctx.cancelGen(c).poke(0.U)
+      core.io.ctx.pendingLaunch(c).poke(false.B)
+      core.io.ctx.waitBusy(c).poke(false.B)
+      core.io.ctx.regionBusy(c).poke(false.B)
+    }
+  }
+
   def idleRf(dut: BankedRf): Unit = {
     dut.io.activeCtx.poke(0.U)
     for (c <- 0 until dut.io.perCtxGen.length) {
@@ -225,8 +239,7 @@ class W2_02_RfBankSpec extends AnyFreeSpec with ChiselSim {
       core1.io.timer_irq.poke(false.B)
       core1.io.software_irq.poke(false.B)
       core1.io.debug_req.poke(false.B)
-      core1.io.ctx.ctxSelect.poke(0.U)
-      core1.io.ctx.advanceGen(0).poke(false.B)
+      idleContext(core1)
       for (i <- 0 until core1.io.csr.in.value.length) {
         core1.io.csr.in.value(i).poke(0.U)
       }
@@ -269,9 +282,7 @@ class W2_02_RfBankSpec extends AnyFreeSpec with ChiselSim {
       core.io.timer_irq.poke(false.B)
       core.io.software_irq.poke(false.B)
       core.io.debug_req.poke(false.B)
-      core.io.ctx.ctxSelect.poke(0.U)
-      core.io.ctx.advanceGen(0).poke(false.B)
-      core.io.ctx.advanceGen(1).poke(false.B)
+      idleContext(core)
       for (i <- 0 until core.io.csr.in.value.length) {
         core.io.csr.in.value(i).poke(0.U)
       }

@@ -1,86 +1,154 @@
 version: 1
-# Private W2-04 implementation metadata (C027). NOT part of any frozen contract:
-# C020 sealed PROTOCOL_FREEZE.json once; this file must never be added to it.
-status: draft
+# Private C027 implementation metadata. Not a wire ABI or a sealed contract input.
+# Do not add this file or implementation patches to PROTOCOL_FREEZE.json.
 
 csr_commit_classification:
-  # W2-D03/D04 classification actually implemented by patches 0401/0402.
-  dispatch_beat:
-    - { csr: MSCRATCH, note: "management-class; side effect on dispatch" }
-    - {
-        csr: MSTATUS,
-        note: "management bits only (mie/pmie); architectural bits untouched",
-      }
+  management_execute:
+    csrs:
+      - MSTATUS
+      - MIE
+      - MTVEC
+      - MSCRATCH
+      - MEPC
+      - MCAUSE
+      - MTVAL
+      - MPC
+      - MSP
+      - MCONTEXT0
+      - MCONTEXT1
+      - MCONTEXT2
+      - MCONTEXT3
+      - MCONTEXT4
+      - MCONTEXT5
+      - MCONTEXT6
+      - MCONTEXT7
+      - DSCRATCH0
+      - DSCRATCH1
+      - TDATA1
+      - TDATA2
+      - DCSR
+      - DPC
+      - MCYCLE
+      - MCYCLEH
+      - MINSTRET
+      - MINSTRETH
+    timing: registered CSR request execution, not a new retirement shadow
+    own_context_empty_csrs:
+      [MSTATUS, MIE, MTVEC, MEPC, MCAUSE, MTVAL, DCSR, DPC]
+    other_management_csrs: preserve dispatch/execute timing without a new ROB-empty gate
+    mstatus: MIE/MPIE and supported FS/VS/MS fields retain upstream legalization and owner-qualified dirty updates
+    counters: per-Context; MINSTRET retains the upstream write-mask delay
+  native_working_state_execute:
+    csrs: [VSTART, VXRM]
+    timing: owner-qualified write into the native Context bank
+    consumer: immutable native command snapshot at instruction acceptance
+    fault_restart: separate owner-qualified channel registered with the native flush; cannot retag a simultaneous peer CSR write
+    retirement_clear: clear applies at the retirement edge and is registered for the frontend only if it wins against live fault, CSR and native control updates; a losing clear must not erase the winning value on the next beat
   retire_commit:
-    - {
-        csr: FRM,
-        note: "snapshot at dispatch; committed when its own ROB entry retires",
-      }
-    - {
-        csr: FCSR,
-        note: "frm bits retire-commit; fflags bits are an ordered delta",
-      }
-    - { csr: VL, note: "via vset*; retire-point commit" }
-    - { csr: VTYPE, note: "via vset*; retire-point commit" }
-    - { csr: MTYPE, note: "via mset*; retire-point commit" }
-  flags_delta:
-    - {
-        csr: FFLAGS,
-        note: "5-bit per-entry delta merged only at its own retirement (CFG-04)",
-      }
-    - {
-        csr: VXSAT,
-        note: "1-bit per-entry delta merged only at its own retirement",
-      }
-  closed_open_item:
-    # C010 ctx_ctrl.yaml left MCAUSE/MEPC/MTVAL commit timing open (owner W2-04).
-    - {
-        csr: MCAUSE,
-        note: "trap-state writes are single-writer from the trap path (bru.in), which is already ordered after retirement of the faulting op; classified as trap-path single-beat, not dispatch vs retire",
-      }
-    - { csr: MEPC, note: "same trap-path single-beat classification as MCAUSE" }
-    - {
-        csr: MTVAL,
-        note: "same trap-path single-beat classification as MCAUSE",
-      }
+    FRM: dispatch preview for younger consumers; architectural value at own retirement
+    FCSR: FRM commits and FFLAGS replacement share the same retiring entry
+    VL: masked vset/mset payload, including valid all-zero values
+    VTYPE: masked vset/mset payload; reset has VILL set
+    MTYPE: masked vset/mset payload
+  ordered_flags:
+    FFLAGS: five-bit OR delta or software replacement at own retirement
+    VXSAT: one-bit OR delta or software replacement at own retirement
+  trap_state:
+    csrs: [MCAUSE, MEPC, MTVAL]
+    producer: OwnerTag-qualified BRU trap update
+    timing: existing BRU update beat; no claim of a newly implemented retirement shadow
+  debug_exception:
+    csrs: [FFLAGS, FRM, FCSR, VXSAT]
+    timing: Debug Module writes execute directly because they have no ROB entry
+    isolation: normal instructions never use this bypass
+
+native_identity:
+  representation: private 64-bit opaque word, not a protocol encoding freeze
+  packed_high_to_low:
+    [ctx_generation, owner_op_seq, slot_generation, rob_slot, ctx_slot]
+  padding: unused high bits zero; elaboration rejects widths exceeding the word
+  lookup: full expected key plus live physical slot and current Context generation
+  flushed_writeback: only outstanding pre-flush data returns can settle the flushed RF scoreboard
+  software_parent_subop: 0
+  producers:
+    - every RVV retire lane carries its accepted parent key
+    - every VME PE block carries its key through multiply and add pipeline tags
+    - scalar native result and configuration payload carry the same full key
+  capacity: one scalar FP delta port plus every native RVV and VME producer lane
+  fflags_bit_order: [NV, DZ, OF, UF, NX]
+
+configuration_payload:
+  fields: [valid, wr_vl, wr_vtype, wr_mtype, vl, vtype, mtype, owner, rob_tag]
+  vset: writes VL and VTYPE; implicitly clears MTYPE when Zvt is enabled
+  msetmtype: writes MTYPE and VTYPE; implicitly clears VL
+  msettn: writes VL only
+  msettm_msettk: writes MTYPE only
+  retirement: fold each enabled field in program order across all retiring lanes
+  early_data: retain GPR completion independently while awaiting its configuration packet
+  snapshots: native working state is Context-banked; accepted commands do not sample later CSR values
 
 ordered_flags:
   per_entry_fields:
     [
-      fflags_delta(5),
-      vxsat_delta(1),
-      replace_fflags(1),
-      replace_vxsat(1),
-      commits_frm(1),
-      frm_value(3),
+      fflags_delta,
+      vxsat_delta,
+      replace_fflags,
+      replace_vxsat,
+      commits_frm,
+      frm_value,
     ]
-  merge_point: "the entry's own retirement beat, in its Context's program order"
-  early_completion: "delta parked in the ROB slot until retirement; never first-to-arrive merged"
-  csr_read_interlock:
+  merge_point: own entry retirement, in Context program order
+  simultaneous_lanes: ordered fold preserves replacement followed by younger OR in the same beat
+  early_completion: park until retirement; same-beat arrival and retirement are included
+  csr_interlock:
     scope: own_context_only
-    blocks_until: [no_unmerged_flags_delta, vset_mset_retired]
+    flags_and_frm_reads: wait for own outstanding flags and FRM writers
+    configuration_reads: wait for own configuration and flags writers
+    pure_replace: CSRRW and CSRRWI with rd=x0 need not read the old value
+    read_modify_write: CSRRS and CSRRC still wait even when rd=x0
+    forbidden_gates: peer RVV idle or peer FloatCore ready
     forwarding: false
+  dynamic_rounding: scalar FP DYN becomes its dispatch-time FRM before entering FloatCore
 
 park_cancel_failstop:
   park:
-    {
-      stops: new_issue,
-      does_not_stop: retire_of_accepted_work,
-      clock_gating: never,
-    }
+    stops: new issue only
+    allows: accepted execution, writeback and retirement
+    clock_gating: never directly
   cancel:
-    {
-      scope: one_context,
-      stale_generation: idempotent_reject_and_count,
-      peers: untouched_bit_exact,
-    }
+    scope: one matching Context generation
+    action: stop issue and discard unaccepted payload; accepted obligations continue settling
+    peers: RF scoreboard and ROB live/ready bitmaps remain unchanged
   fail_stop:
-    {
-      trigger: any_context_FAULT,
-      effect: tile_issue_freeze,
-      flush_scope: faulting_context_only,
-    }
+    trigger: any Context fault
+    effect: freeze all Tile issue until Group reset
+    note: ordinary control-flow redirect flush is not a fault
+  safe_reuse:
+    requires:
+      [
+        task_completion_ack_same_generation,
+        ROB_empty,
+        RF_outstanding_empty,
+        no_pending_launch,
+        no_wait,
+        no_region,
+      ]
+    action: increment generation and clear only the reused Context banks and counters
+    stale_inputs: reject and count old cancel, park, wake, completion, acknowledgement, data and flags/configuration returns
+  fairness:
+    rule: round-robin advances only on an accepted issue opportunity
+    bound: N accepted eligible opportunities for N continuously eligible Contexts
+    scope: local arbiter; not a downstream memory-latency bound
 
 coreaxi_gate_ctl:
-  removed: "(!csr.io.cg && !core.io.wfi) direct clock-gate coupling (CoreAxi.scala:109)"
-  added: "io.gate_ctl input; clock gates only when gate_ctl && core.io.quiescent"
+  condition: gate_ctl and tile_quiescent and not irq and not debug_request
+  quiescence: every Context stopped, with backend and projected external obligations drained, and no fault
+  owner: W2 exposes CoreAxi/CoreTlul ports; C040 assembles the full top; W6/G4 owns the gate-control policy
+
+verification:
+  entry_point: hardware/coral_nexus/verification/unit/w2/test_w2_c027.py
+  isolation: does not invoke the C026 pytest suite
+  negative_acceptance: Bazel exit 3 plus an executed behavioral assertion and failing JUnit case
+  native_cases: [tb_native_config, tb_native_flags, tb_native_matrix_tags]
+  independent_reference: C021 pinned Spike; full retirement PC, instruction, rd/data, trap and flags plus Context/generation/op_seq mapping
+  seal: byte hash must remain unchanged

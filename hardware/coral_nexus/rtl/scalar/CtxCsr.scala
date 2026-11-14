@@ -18,6 +18,19 @@ import chisel3._
 import chisel3.util._
 import coralnpu.float.CsrFloatIO
 
+/** Bank-indexed native state and owner-qualified CSR writes. Configuration
+  * readback itself lives in the scalar retirement bank, not shared engine state.
+  */
+class CtxRvvIO(p: Parameters) extends Bundle {
+  val vstart = Input(Vec(p.contextCount, UInt(log2Ceil(p.rvvVlen).W)))
+  val vxrm = Input(Vec(p.contextCount, UInt(2.W)))
+  val vxsat = Output(Bool())
+  val frm = Output(UInt(3.W))
+  val vstart_write = Output(Valid(UInt(log2Ceil(p.rvvVlen).W)))
+  val vxrm_write = Output(Valid(UInt(2.W)))
+  val writeOwner = Output(new OwnerTag(p))
+}
+
 /** Per-Context CSR bank (`W2-02` C026 + `W2-04` C027).
   *
   * Each Context slot `b` owns an independent `Csr` bank whose `mhartid` encodes `(tileId, b)`,
@@ -48,14 +61,14 @@ class CtxCsrIO(p: Parameters) extends Bundle {
     val bruOwner     = Input(new OwnerTag(p))
     val float        = Option.when(p.enableFloat)(Flipped(new CsrFloatIO(p)))
     val floatOwner   = Option.when(p.enableFloat)(Input(new OwnerTag(p)))
-    val rvv          = Option.when(p.enableRvv)(new CsrRvvIO(p))
-    val rvvOwner     = Option.when(p.enableRvv)(Input(new OwnerTag(p)))
+    val rvv          = Option.when(p.enableRvv)(new CtxRvvIO(p))
     val float_dirty  = Option.when(p.enableFloat)(Input(Bool()))
-    val rvv_dirty    = Option.when(p.enableRvv)(Input(Bool()))
+    val perCtxRvvDirty = Option.when(p.enableRvv)(Input(Vec(p.contextCount, Bool())))
     val vme_discard  = Option.when(p.enableVme)(Input(Bool()))
     val vme_ms_dirty = Option.when(p.enableVme)(Input(Bool()))
     val vme_vs_dirty = Option.when(p.enableVme)(Input(Bool()))
     val vme_fp_dirty = Option.when(p.enableVme && p.enableFloat)(Input(Bool()))
+    val vmeOwner = Option.when(p.enableVme)(Input(new OwnerTag(p)))
     val mstatus_ms   = Option.when(p.enableVme)(Output(UInt(2.W)))
 
     val perCtxNRetired = Input(Vec(p.contextCount, UInt(log2Ceil(p.retirementLanes + 1).W)))
@@ -94,7 +107,24 @@ class CtxCsrIO(p: Parameters) extends Bundle {
     val perCtxFrm      = Output(Vec(p.contextCount, UInt(3.W)))
     val perCtxMscratch = Output(Vec(p.contextCount, UInt(p.xlen.W)))
     val perCtxMepc     = Output(Vec(p.contextCount, UInt(p.programCounterBits.W)))
-    val perCtxMcause   = Output(Vec(p.contextCount, UInt(p.xlen.W)))}
+    val perCtxMcause   = Output(Vec(p.contextCount, UInt(p.xlen.W)))
+    // W2-04 / C027: software-CSR park owner must ride the SAME one-beat pipeline as the
+    // bank's internal `req` register (Csr computes wdata one beat after io.req); DM
+    // (debug-module) CSR writes bypass the park and apply architecturally at the req beat.
+    val reqFromDm         = Input(Bool())
+    // Per-Context trap flush: kills in-flight parked frm/config writers of that Context
+    // (their deltas die with the flush), so the frm pending-shadow must drop immediately.
+    val perCtxTrapRetired = Input(Vec(p.contextCount, Bool()))
+    // Dispatch-beat frm snapshot state: true while an older frm-class write is observed
+    // but un-retired (younger FP ops consume the shadow value, not the architectural frm).
+    val perCtxFrmPending  = Output(Vec(p.contextCount, Bool()))
+    // Retire-point config commit records from the ROB (per-op immutable payloads).
+    val perCtxRetiredConfig = Input(Vec(p.contextCount, Valid(new RetiredConfigIO(p))))
+    // Retire-point vxsat commit for software `csrw vxsat/vcsr` (last retiring lane wins).
+    val perCtxRetiredVxsat = Output(Vec(p.contextCount, Valid(UInt(1.W))))
+    // Per-Context stale-reject counters: cleared ONLY by that Context's own advanceGen
+    // (safe slot reuse), never globally — peer Contexts keep their exact counts (INV-15).
+    val perCtxStaleRejected = Output(Vec(p.contextCount, UInt(16.W)))}
 
 class CtxCsr(p: Parameters) extends Module {
   val io = IO(new CtxCsrIO(p))
@@ -151,7 +181,22 @@ class CtxCsr(p: Parameters) extends Module {
     slotInRng && (owner.ctx_generation === liveGen)
   }
 
+
+  // W2-04: the bank's internal `req` register delays every request by one beat, so the
+  // owner / source tags captured WITH a request must be pipelined by the same amount to
+  // stay aligned with the beat in which the bank observes it (park export, DM bypass).
+  val reqOwnerReg = RegNext(io.reqOwner, OwnerTag.zero(p))
+  val reqFromDmReg = RegNext(io.reqFromDm, false.B)
   val nDeltaLanes = p.contextCount * p.retirementLanes
+
+  // W2-04 retire-point architectural config: per-Context committed vxsat / vl / vtype /
+  // mtype. These — not the shared engine's live state — are the authoritative CSR
+  // readback: a not-yet-retired or flushed config writer must never be observable.
+  val committedVxsat  = RegInit(VecInit.fill(p.contextCount)(false.B))
+  val committedVl     = RegInit(VecInit.fill(p.contextCount)(0.U(log2Ceil(p.rvvVlen + 1).W)))
+  val resetVtype = (BigInt(1) << (p.xlen - 1)).U(p.xlen.W)
+  val committedVtype  = RegInit(VecInit.fill(p.contextCount)(resetVtype))
+  val committedMtype  = RegInit(VecInit.fill(p.contextCount)(0.U(p.xlen.W)))
   val reqStale = io.req.valid && !isLiveOwner(io.reqOwner)
   val bruAnyValid = io.bru.in.mode.valid || io.bru.in.mcause.valid ||
     io.bru.in.mepc.valid || io.bru.in.mtval.valid ||
@@ -161,19 +206,37 @@ class CtxCsr(p: Parameters) extends Module {
     .zip(io.floatOwner)
     .map { case (f, own) => f.in.fflags.valid && !isLiveOwner(own) }
     .getOrElse(false.B)
-  val rvvStale = io.rvv
-    .zip(io.rvvOwner)
-    .map { case (r, own) => r.fflags.valid && !isLiveOwner(own) }
-    .getOrElse(false.B)
   val deltaStaleVec = VecInit((0 until nDeltaLanes).map { k =>
     io.retiredDelta(k).valid && !isLiveOwner(io.retiredDelta(k).owner)
   })
 
   val staleCounter = RegInit(0.U(16.W))
   staleCounter := staleCounter +
-    reqStale.asUInt +& bruStale.asUInt +& fltStale.asUInt +& rvvStale.asUInt +&
+    reqStale.asUInt +& bruStale.asUInt +& fltStale.asUInt +&
     PopCount(deltaStaleVec)
   io.staleRejected := staleCounter
+
+  // Per-Context attribution of the same stale events, keyed by the TARGET Context slot.
+  // Each counter clears ONLY on its own Context's advanceGen (safe slot reuse, §8 step 7),
+  // so reusing Context A never wipes Context B's exact reject count (INV-15).
+  val stalePerCtx = RegInit(VecInit.fill(p.contextCount)(0.U(16.W)))
+  def ctxIdx(slot: UInt): UInt = if (p.contextCount == 1) 0.U else slot
+  val staleEvents = Seq(
+    (reqStale, io.reqOwner.ctx_slot),
+    (bruStale, io.bruOwner.ctx_slot)
+  ) ++ io.float.zip(io.floatOwner).map { case (_, own) => (fltStale, own.ctx_slot) } ++
+    (0 until nDeltaLanes).map(k => (deltaStaleVec(k), io.retiredDelta(k).owner.ctx_slot))
+  for (c <- 0 until p.contextCount) {
+    val inc = PopCount(VecInit(staleEvents.map { case (ev, slot) =>
+      ev && (ctxIdx(slot) === c.U)
+    }))
+    when(io.advanceGen(c)) {
+      stalePerCtx(c) := 0.U
+    }.otherwise {
+      stalePerCtx(c) := stalePerCtx(c) + inc
+    }
+  }
+  io.perCtxStaleRejected := stalePerCtx
 
   for (b <- 0 until p.contextCount) {
     val bank      = banks(b)
@@ -186,7 +249,11 @@ class CtxCsr(p: Parameters) extends Module {
     bank.io.csr.in       := io.csr.in
     bank.io.req.valid    := reqMatch
     bank.io.req.bits     := io.req.bits
-    bank.io.reqOwner     := io.reqOwner
+    // The bank registers `req` for one beat before computing wdata/csrParkOut, so the
+    // park owner must ride the SAME pipeline: pass the owner captured at acceptance,
+    // not the combinational input (which by then belongs to the next request).
+    bank.io.reqOwner     := reqOwnerReg
+    bank.io.reqFromDm    := reqFromDmReg
     bank.io.rs1          := io.rs1
     bank.io.counters.nRetired := io.perCtxNRetired(b)
 
@@ -218,12 +285,58 @@ class CtxCsr(p: Parameters) extends Module {
     bank.io.retiredFflagsReplace := anyReplaceFflags
     bank.io.retiredFflagsValid   := VecInit(matchingDeltas).asUInt.orR
     bank.io.retiredFflagsBits    := mergedDeltaFflags
-    // frm retire-point commit: the LAST retiring lane with commitsFrm wins (program order).
+    // frm retire-point commit: the LAST retiring lane with commitsFrm wins (program
+    // order — within one Context higher lane index = younger). PriorityMux selects the
+    // FIRST hit, so scan from the END of the flat bus (cross-Context hits belong to
+    // other banks and never match here).
     val frmHits = VecInit((0 until nDeltaLanes).map { k =>
       matchingDeltas(k) && io.retiredDelta(k).commitsFrm
     })
     bank.io.retiredFrmCommit.valid := frmHits.asUInt.orR
-    bank.io.retiredFrmCommit.bits  := PriorityMux(frmHits, (0 until nDeltaLanes).map(k => io.retiredDelta(k).frmValue))
+    bank.io.retiredFrmCommit.bits  := PriorityMux(
+      frmHits.reverse,
+      (0 until nDeltaLanes).map(k => io.retiredDelta(nDeltaLanes - 1 - k).frmValue)
+    )
+
+    // Fold every retiring vxsat action in program order: a younger OR must
+    // survive an older replace/clear in the same retirement beat.
+    val mergedVxsat = (0 until nDeltaLanes).foldLeft(committedVxsat(b)) { (acc, k) =>
+      val d = io.retiredDelta(k)
+      Mux(matchingDeltas(k), Mux(d.replaceVxsat, d.vxsat, acc || d.vxsat), acc)
+    }
+    io.perCtxRetiredVxsat(b).valid := VecInit((0 until nDeltaLanes).map { k =>
+      matchingDeltas(k) && (io.retiredDelta(k).replaceVxsat || io.retiredDelta(k).vxsat)
+    }).asUInt.orR
+    io.perCtxRetiredVxsat(b).bits := mergedVxsat.asUInt
+
+    // frm pending shadow flush: a trap flush kills every in-flight frm-class writer of
+    // this Context, so the shadow must drop in the same beat (their parked deltas die).
+    bank.io.flushPending   := io.perCtxTrapRetired(b)
+    // Exact frm retire count (several writers may retire in one beat; the coalesced
+    // last-lane value alone would under-decrement the pending-shadow counter).
+    bank.io.retiredFrmCommitCount := PopCount(frmHits)
+    // Per-Context committed config: vxsat merges in retire order; vl/vtype/mtype latch
+    // at a config-class writer's own retirement; advanceGen (safe slot reuse) clears.
+    committedVxsat(b) := mergedVxsat
+    when(io.perCtxRetiredConfig(b).valid) {
+      val cfg = io.perCtxRetiredConfig(b).bits
+      // Masks include all architectural effects, including vset's MTYPE clear
+      // and msetmtype's VTYPE update/VL clear; narrow setters preserve other fields.
+      if (p.enableRvv) {
+        when(cfg.wrVl) { committedVl(b) := cfg.vl }
+        when(cfg.wrVtype) { committedVtype(b) := cfg.vtype }
+      }
+      if (p.enableVme) {
+        when(cfg.wrMtype) { committedMtype(b) := cfg.mtype }
+      }
+    }
+    when(io.advanceGen(b)) {
+      committedVxsat(b)  := false.B
+      committedVl(b)     := 0.U
+      committedVtype(b)  := resetVtype
+      committedMtype(b)  := 0.U
+    }
+    io.perCtxFrmPending(b) := bank.io.frmPendingOut
 
     if (p.enableFloat) {
       // CFG-04: the architectural fflags accumulator updates ONLY via retiredDelta.
@@ -235,28 +348,27 @@ class CtxCsr(p: Parameters) extends Module {
     }
 
     if (p.enableRvv) {
-      val rvvMatch = notAdv && OwnerTag.sameContext(io.rvvOwner.get, b.U, liveGen)
-      bank.io.rvv.get.vstart       := io.rvv.get.vstart
-      bank.io.rvv.get.vl           := io.rvv.get.vl
-      bank.io.rvv.get.vtype        := io.rvv.get.vtype
-      bank.io.rvv.get.vxrm         := io.rvv.get.vxrm
-      bank.io.rvv.get.vxsat        := io.rvv.get.vxsat
-      bank.io.rvv.get.fflags.valid := rvvMatch && io.rvv.get.fflags.valid
-      bank.io.rvv.get.fflags.bits  := io.rvv.get.fflags.bits
-      if (p.enableVme) {
-        bank.io.rvv.get.mtype := io.rvv.get.mtype
-      } else {
-        bank.io.rvv.get.mtype := 0.U
+      bank.io.rvv.get.vstart := io.rvv.get.vstart(b)
+      bank.io.rvv.get.vxrm := io.rvv.get.vxrm(b)
+      bank.io.rvv.get.vxsat := committedVxsat(b)
+      bank.io.rvv.get.vl := committedVl(b)
+      bank.io.rvv.get.vtype := committedVtype(b)
+      bank.io.rvv.get.mtype := committedMtype(b)
+      bank.io.rvv_dirty.get := notAdv && (io.perCtxRvvDirty.get(b) ||
+        io.perCtxRetiredConfig(b).valid || io.perCtxRetiredVxsat(b).valid)
+      // Debug-module CSR writes bypass instruction retirement but still own one bank.
+      when(notAdv && bank.io.rvv.get.vxsat_write.valid) {
+        committedVxsat(b) := bank.io.rvv.get.vxsat_write.bits
       }
-      bank.io.rvv_dirty.get := rvvMatch && io.rvv_dirty.get
     }
 
     if (p.enableVme) {
-      bank.io.vme_discard.get  := isSel && notAdv && io.vme_discard.get
-      bank.io.vme_ms_dirty.get := isSel && notAdv && io.vme_ms_dirty.get
-      bank.io.vme_vs_dirty.get := isSel && notAdv && io.vme_vs_dirty.get
+      val vmeMatch = notAdv && OwnerTag.sameContext(io.vmeOwner.get, b.U, liveGen)
+      bank.io.vme_discard.get  := vmeMatch && io.vme_discard.get
+      bank.io.vme_ms_dirty.get := vmeMatch && io.vme_ms_dirty.get
+      bank.io.vme_vs_dirty.get := vmeMatch && io.vme_vs_dirty.get
       if (p.enableFloat) {
-        bank.io.vme_fp_dirty.get := isSel && notAdv && io.vme_fp_dirty.get
+        bank.io.vme_fp_dirty.get := vmeMatch && io.vme_fp_dirty.get
       }
     }
 
@@ -293,7 +405,7 @@ class CtxCsr(p: Parameters) extends Module {
   io.trace                   := selCtx(banks.map(_.io.trace), effActiveCtx)
 
   // Any bank whose registered `req` fires produces `rd.valid` one cycle after `io.req.valid`.
-  val reqOwnerReg = RegNext(io.reqOwner, OwnerTag.zero(p))
+  // (reqOwnerReg itself is declared above the bank loop — see the W2-04 pipeline note.)
   val rdHits      = VecInit(banks.map(_.io.rd.valid))
   assert(PopCount(rdHits) <= 1.U)
   io.rd.valid      := rdHits.asUInt.orR
@@ -305,10 +417,19 @@ class CtxCsr(p: Parameters) extends Module {
     io.float.get.out.frm := selCtx(banks.map(_.io.float.get.out.frm), effActiveCtx)
   }
   if (p.enableRvv) {
-    io.rvv.get.vstart_write := selCtx(banks.map(_.io.rvv.get.vstart_write), effActiveCtx)
-    io.rvv.get.vxrm_write   := selCtx(banks.map(_.io.rvv.get.vxrm_write), effActiveCtx)
-    io.rvv.get.vxsat_write  := selCtx(banks.map(_.io.rvv.get.vxsat_write), effActiveCtx)
-    io.rvv.get.frm          := selCtx(banks.map(_.io.rvv.get.frm), effActiveCtx)
+    val vstartHits = VecInit(banks.zipWithIndex.map { case (bank, b) =>
+      bank.io.rvv.get.vstart_write.valid && !io.advanceGen(b)
+    })
+    val vxrmHits = VecInit(banks.zipWithIndex.map { case (bank, b) =>
+      bank.io.rvv.get.vxrm_write.valid && !io.advanceGen(b)
+    })
+    io.rvv.get.vstart_write.valid := vstartHits.asUInt.orR
+    io.rvv.get.vstart_write.bits := Mux1H(vstartHits, banks.map(_.io.rvv.get.vstart_write.bits))
+    io.rvv.get.vxrm_write.valid := vxrmHits.asUInt.orR
+    io.rvv.get.vxrm_write.bits := Mux1H(vxrmHits, banks.map(_.io.rvv.get.vxrm_write.bits))
+    io.rvv.get.writeOwner := reqOwnerReg
+    io.rvv.get.vxsat := selCtx(committedVxsat, effActiveCtx)
+    io.rvv.get.frm := selCtx(banks.map(_.io.rvv.get.frm), effActiveCtx)
   }
   if (p.enableVme) {
     io.mstatus_ms.get := selCtx(banks.map(_.io.mstatus_ms.get), effActiveCtx)

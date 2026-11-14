@@ -71,3 +71,19 @@ entries:
     src: hardware/coral_nexus/verification/unit/w2/W2_04_ordered_flags_spec.scala
     dst: hdl/chisel/src/coralnpu/verification/w2/W2_04_ordered_flags_spec.scala
     mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/verification/unit/w2/W2_04_csr_config_spec.scala
+    dst: hdl/chisel/src/coralnpu/verification/w2/W2_04_csr_config_spec.scala
+    mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/verification/unit/w2/W2_04_sched_park_spec.scala
+    dst: hdl/chisel/src/coralnpu/verification/w2/W2_04_sched_park_spec.scala
+    mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/verification/unit/w2/W2_04_cancel_retire_spec.scala
+    dst: hdl/chisel/src/coralnpu/verification/w2/W2_04_cancel_retire_spec.scala
+    mode: add
+  - source: coralnpu
+    src: hardware/coral_nexus/verification/unit/w2/W2_04_core_control_spec.scala
+    dst: hdl/chisel/src/coralnpu/verification/w2/W2_04_core_control_spec.scala
+    mode: add

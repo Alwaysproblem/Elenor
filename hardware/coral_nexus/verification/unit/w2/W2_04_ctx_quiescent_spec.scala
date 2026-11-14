@@ -39,16 +39,24 @@ class W2_04_CtxQuiescentSpec extends AnyFreeSpec with ChiselSim {
     for (c <- 0 until dut.io.holdReq.length) {
       dut.io.holdReq(c).poke(false.B)
       dut.io.accept(c).poke(false.B)
+      dut.io.initStart(c).poke(false.B)
       dut.io.initDone(c).poke(false.B)
       dut.io.retIssued(c).poke(false.B)
-      dut.io.parkReq(c).poke(parked.B)
+      dut.io.parkValid(c).poke(parked.B)
+      dut.io.parkGen(c).poke(0.U)
+      dut.io.wakeValid(c).poke(false.B)
+      dut.io.wakeGen(c).poke(0.U)
+      dut.io.waitKind(c).poke(ContextWait.NONE)
       dut.io.ext(c).waitBusy.poke(false.B)
       dut.io.ext(c).regionBusy.poke(false.B)
       dut.io.robEmpty(c).poke(robEmpty.B)
       dut.io.pendingLaunch(c).poke(launch.B)
+      dut.io.backendDrained(c).poke(true.B)
       dut.io.faultCtx(c).poke(false.B)
       dut.io.taskCompletion(c).poke(false.B)
+      dut.io.taskCompletionGen(c).poke(0.U)
       dut.io.completionAck(c).poke(false.B)
+      dut.io.completionAckGen(c).poke(0.U)
       dut.io.cancelValid(c).poke(false.B)
       dut.io.cancelGen(c).poke(0.U)
     }
@@ -92,10 +100,15 @@ class W2_04_CtxQuiescentSpec extends AnyFreeSpec with ChiselSim {
       dut.io.accept(0).poke(true.B)
       dut.clock.step()
       dut.io.accept(0).poke(false.B)
+      dut.io.initStart(0).poke(true.B)
+      dut.clock.step()
+      dut.io.initStart(0).poke(false.B)
       dut.io.initDone(0).poke(true.B)
       dut.clock.step()
       dut.io.initDone(0).poke(false.B)
-      dut.io.parkReq(0).poke(true.B)
+      dut.io.parkValid(0).poke(true.B)
+      dut.io.parkGen(0).poke(0.U)
+      dut.io.perCtxParked(0).expect(true.B) // park observable in the request beat itself
       dut.clock.step()
       // PARKED is observable via eligibility=0 while quiescence is judged below.
 
@@ -120,16 +133,24 @@ class W2_04_CtxQuiescentSpec extends AnyFreeSpec with ChiselSim {
       dut.clock.step()
       dut.reset.poke(false.B)
       dut.clock.step()
-      // FREE is terminal-quiet, but park only via parkReq; with holdReq=false the slot
+      // FREE is terminal-quiet, but park only via parkValid; with holdReq=false the slot
       // stays FREE and quiet — so drive one context into READY to break quietness.
       dut.io.holdReq(0).poke(true.B)
       dut.clock.step()
       dut.io.accept(0).poke(true.B)
       dut.clock.step()
+      dut.io.initStart(0).poke(true.B)
+      dut.clock.step()
       dut.io.initDone(0).poke(true.B)
       dut.clock.step()
       dut.io.robEmpty(0).poke(true.B)
       dut.io.tileQuiescent.expect(false.B)
+      // A W6 wait record on the READY head also breaks quiescence (never WAIT-quiet).
+      dut.io.ext(0).waitBusy.poke(true.B)
+      dut.clock.step()
+      dut.io.perCtxWaiting(0).expect(true.B)
+      dut.io.tileQuiescent.expect(false.B)
+      dut.io.eligible(0).expect(false.B)
     }
   }
 }

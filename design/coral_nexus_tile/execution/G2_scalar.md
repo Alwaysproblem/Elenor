@@ -170,6 +170,15 @@
 
 - **通过/交接**：spec+集成冒烟全 PASS（含负例先失败留证）、`sources verify` patch hash 入 manifest、无悬空 port；不跑 G2 gate。消费者：C027/C028（消费 owner 键）、C031（LSU 多在途内部实现）、C040（顶层组装）。
 
+**2026-11-13 静态验收复核（未重跑 C026）**：用户确认现有测试通过；但当前
+`test_w2_c026.py` 及三个 Scala spec 尚不足以证明本卡“全路径返回身份”全部完成：
+Core 冒烟仅执行 ALU/MLU/store，未执行 DVU、FloatCore、load 返回及 FaultManager
+生产链；FPR 用例虽名为 stale-generation rejection，正文未注入旧代写回；
+mutation 判定仅检查非零退出码，未区分行为断言失败与构建/工具失败。因此本卡的
+**已有覆盖有效，但完整功能验收证据仍有缺口**，不能把 pytest 绿灯等同于整卡完成。
+ROB 同 PC 双 Context store、错误 op_seq、独立退休、局部 fault flush、slot ABA，
+以及 GPR/CSR 换代隔离已有行为断言；本轮继续 C027，不据此改写 C026 已通过的结果。
+
 <a id="c027"></a>
 
 ## C027 — 架构配置提交与 ordered flags
@@ -177,22 +186,35 @@
 - **任务**：W2-04
 - **前置**：C026
 - **建议 commit**：`feat(coral-scalar): retire-point config commit and ordered fflags delta merge`
-- **输入/先读**：`../implementation/W2_Context_UCE_Plan.md` §8（W2-04 全节：patch 0401 ordered-flags / 0402 csr-interlock / 0403 park-csr-quiescence / 0404 cancel-iso、`Context.scala` FSM）；C026 产物。
-- **修改边界**：H（SRC patch `H/patches/w2/0401..0404`、新 `H/rtl/scalar/Context.scala`、spec ×2；实现私有细节落 `H/rtl/scalar/doc/ctx_owner_cancel_impl.yaml` 独立元数据——cancel/park/quiescence 接口字段已由 C010 `ctx_ctrl.yaml` 提前定义，**C020 一次封印后不向 PROTOCOL_FREEZE 追加任何 hash**）。共享表把 W2-04 拆在 C027（配置/flags）与 C040（顶层/gate_ctl 集成）：本卡落 0401/0402 与 Context FSM/park/cancel 语义及 0403 的 CoreAxi `gate_ctl` 端口暴露（W2 是 CoreAxi 实体唯一编辑者）；W6-04 的算法侧归 G4。
+- **输入/先读**：`../implementation/W2_Context_UCE_Plan.md` §8（W2-04：0401 ordered-flags / 0402 csr-interlock / 0403 core-clock-gating / 0404 context-lifecycle、`Context.scala` FSM）；C026 产物。
+- **修改边界**：H（`patches/w2/0401..0404`、`rtl/scalar/`、六个 `W2_04_*_spec.scala`）；原生返回接线按 W3 文件所有权落 `patches/w3/0402..0404`，覆盖 RVV/VME flags、配置 snapshot 与完整 parent identity，不改变张量算术算法。私有细节落 `rtl/scalar/doc/ctx_owner_cancel_impl.yaml`；**C020 一次封印后不向 PROTOCOL_FREEZE 追加任何 hash**。本卡完成配置/flags、Context FSM/park/cancel 与 CoreAxi/CoreTlul `gate_ctl` 端口暴露；完整 oneTile 顶层组装仍按原分工归 C040，gate-control 算法归 W6/G4。
 - **实现步骤**：
   1. patch 0401：每 ROB 条目 5 bit fflags delta+1 bit vxsat delta，retire 拍合并（`fflags_arch |= entry.fdelta`），早完成 delta 驻留不丢；`csrw fflags/fcsr/vxsat` 替代动作同样在自身 retire 拍生效。
   2. patch 0402：同 Context "无在途 flags delta / `vset/mset` 未 retire" gate；架构配置（vset*/mset*/frm/vtype/vl/mtype）本 Context retire-point commit，dispatch 拍 snapshot 供 younger；管理类 CSR 单独 dispatch 拍（per-CSR 分类清单入 patch）；删除跨 Context `rvvIdle` 判据。
   3. `Context.scala` FSM（`FREE→HELD→ACCEPTED/INIT→READY→WAIT_*(子状态)→DONE/FAULT`）+ `ctx_generation` 旧代拒收；patch 0403/0404 park 拆分与 cancel 隔离（cancel 只作用本 Context，B 的 scoreboard/ROB 位图逐 bit 不变）。
   4. spec：`older FP→csrw fflags 0→younger FP` 终值恰为 younger delta（逐条 delta 落日志）；槽位复用旧 owner 注入全拒收+计数。
-- **验证**：
+  5. 原生配置返回携带字段 mask，零值仍是有效写入；早到 GPR 写回不能因配置未到而丢失。原生身份使用含 Context generation、op_seq、slot generation 的私有完整键，不凭共享标量 slot 推断 owner；VME 每个 PE block 独立携带异常键，不能跨指令 OR 混合。
+- **验证**（独立 C027 入口不重跑 C026；`cn unit --suite w2` 是包含两卡的全量入口）：
 
   ```bash
   : "${EVIDENCE:?按总入口设置本卡新 attempt}"
-  cn unit --suite w2 --config "$C2" --out "$EVIDENCE/unit"
+  mkdir -p "$EVIDENCE"
+  conda run --no-capture-output -n elenor-validator python -m pytest \
+    hardware/coral_nexus/verification/unit/w2/test_w2_c027.py \
+    -n0 -v --basetemp="$EVIDENCE/pytest"
   cn sources verify
   ```
 
-- **通过/交接**：spec 全 PASS、私有元数据落盘且未改任何已冻结合同；SCH-03 有界性由本卡仲裁 tb 以 C019 容量约束自证（N eligible 机会数=k\*N+c），不等待 C030。消费者：C028（消费 park/ready）、C040（顶层）、G4 C059/C060（gate_ctl 算法）。
+- **通过/交接**：六个 Scala spec、三个原生 SV tb 与 CoreAxi elaboration 全 PASS；四个 mutant 必须为实际行为断言失败，构建失败不算检出；cancel 下的完整退休记录与 C021 pinned Spike 独立单跑逐条对拍。私有元数据落盘且未改任何已冻结合同；SCH-03 由本卡仲裁 tb 按 C019 Context 数证明 N 个 accepted eligible 机会内服务，不等待 C030，也不把它声称为内存延迟界。消费者：C028（park/ready）、C040（顶层）、G4 C059/C060（gate_ctl 算法）。
+
+**本轮执行结果：C027 完成。**
+
+- 全量基线（attempt-045）：独立入口 `test_w2_c027.py` **3 passed**；六个 Scala spec 共 **38 个行为用例**、三个原生 SV tb、CoreAxi elaboration 全通过。四个 mutant 均由真实行为断言检出，不以构建失败充数。
+- 真 Core 验证覆盖 FloatCore ordered flags／动态舍入、RVV 配置提交／VXSAT／浮点 flags；独立 native 控制用例覆盖 fault 与 peer CSR 同拍、旧 generation 拒收和退休拍 VSTART 清零。cancel 场景的完整退休记录与 pinned Spike 独立执行逐条一致。
+- 主证据：`out/coral_nexus/C027/attempt-045/pytest/c0270/evidence/`；含逐 target 日志、JUnit、native tb 日志、`result.json` 和 `cancel-oracle/comparison.json`。
+- `sources verify`：`out/coral_nexus/C027/attempt-044/sources/sources_report.json` 为 PASS；upstream 保持 pristine，patch ownership 唯一。`PROTOCOL_FREEZE.json` 前后 SHA-256 均为 `1673ce7799832fdbe8aaa9139c74302fa2e19590eff0d55e093a8e334212707c`。
+- 未重跑 C026，未运行 G2 gate；C026 的静态覆盖缺口仍按上节记录。原生资源仿真保留上游 warning，不将本结果称为 lint 零警告；策略见 `hardware/coral_nexus/MAINTENANCE.md`。
+- 补充修复（attempt-046）：延迟 clear 只登记赢得本 Context VSTART 仲裁的请求，避免同拍 fault／CSR 更新胜出后仍被下一拍清零。定向 native 回归 **1 passed**，同时检查 `csr.vstart` 与 `configState.bits.vstart`，覆盖两类同拍更新、正常 clear、旧代拒收与复用；证据为 `out/coral_nexus/C027/attempt-046/vstart-priority.{log,xml}`。本次补充未重跑全量 C027 或 C026。
 
 <a id="c028"></a>
 

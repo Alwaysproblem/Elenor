@@ -87,6 +87,40 @@ not implemented.
   (`env/overlay.yaml`) and the patch series (`patches/series`,
   single-owner enforced by `patches/file_owners.yaml`) apply strictly there.
 
+## Focused C027 acceptance
+
+The `w2` suite contains both C026 and C027. To verify C027 without rerunning
+an already-accepted C026 run, use its independent pytest entry:
+
+```bash
+EVIDENCE=out/coral_nexus/C027/attempt-NNN
+mkdir -p "$EVIDENCE"
+conda run --no-capture-output -n elenor-validator python -m pytest \
+  hardware/coral_nexus/verification/unit/w2/test_w2_c027.py \
+  -n0 -v --basetemp="$EVIDENCE/pytest"
+```
+
+Requires the locked Docker builder, the populated `cache/w2_bazel` offline
+caches, and the C021 pinned Spike/toolchain cache. The runner materializes
+strict patches, builds the hermetic Bazel Verilator, executes native SV
+cases and Scala RTL scenarios, then compares cancel-time retirement records
+with independent Spike runs. It preserves logs, JUnit, native results and
+oracle comparison output under the attempt. A mutation is accepted only
+for a real behavioral assertion failure; build errors and skipped cases fail.
+`PROTOCOL_FREEZE.json` must remain byte-identical.
+
+Patch files are excluded from whitespace/EOF fixers: removing a trailing
+blank context line can corrupt a unified diff. Regenerate patch artifacts
+from the derived tree rather than formatting them.
+
+ChiselSim test titles become build-directory names: use shell-safe words,
+not semicolons, pipes or ampersands. The simulation launcher adds ChiselSim's
+`support-artifacts` include directory and parses macro headers before SV
+consumers; FPnew definitions must not depend on resource enumeration order.
+Native-resource simulations retain warnings under the upstream
+`fpga/coralnpu_soc.core` `-Wno-fatal` policy; this is functional acceptance,
+not a warning-free lint claim. Chisel-only cases keep fatal warnings.
+
 ## Offline seeds (C004)
 
 - Inventory: `env/seed_targets.json` — every seed has URL/path + sha256 +

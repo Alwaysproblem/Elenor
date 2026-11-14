@@ -99,3 +99,4 @@ commands:
       w2:
         tests:
           - hardware/coral_nexus/verification/unit/w2/test_w2_c026.py
+          - hardware/coral_nexus/verification/unit/w2/test_w2_c027.py

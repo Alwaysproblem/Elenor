@@ -1,0 +1,205 @@
+diff --git a/hdl/chisel/src/coralnpu/CoreAxi.scala b/hdl/chisel/src/coralnpu/CoreAxi.scala
+--- a/hdl/chisel/src/coralnpu/CoreAxi.scala
++++ b/hdl/chisel/src/coralnpu/CoreAxi.scala
+@@ -43,6 +43,9 @@
+     val debug = Option.when(p.shouldExposeDebugPorts)(new DebugIO(p))
+     val dm    = new DebugModuleIO(p)
+     val te    = Input(Bool())
++    // W2 exposes the gate request; W6 owns the tile-level gating policy.
++    val gate_ctl = Input(Bool())
++    val ctx = new CoreContextIO(p)
+   })
+   dontTouch(io)
+ 
+@@ -106,8 +109,13 @@
+     val timer_irq_reg    = RegNext(io.timer_irq, false.B)
+     val software_irq_reg = RegNext(io.software_irq, false.B)
+ 
+-    cg.io.enable := irq_reg || timer_irq_reg || software_irq_reg || (!csr.io.cg && !core.io.wfi) || dm.io
+-      .haltreq(0)
++    // A parked Context never gates accepted work. Interrupt/debug/reset can wake
++    // the core even while the external gate request remains asserted.
++    cg.io.enable := ContextClockEnable(
++      io.gate_ctl, core.io.ctx.tileQuiescent,
++      irq_reg || timer_irq_reg || software_irq_reg || csr.io.reset || dm.io.ndmreset,
++      dm.io.haltreq(0) || dm.io.resumereq(0)
++    )
+     io.halted               := core.io.halted
+     io.fault                := core.io.fault
+     io.wfi                  := core.io.wfi
+@@ -128,8 +136,7 @@
+     )
+     io.debug.zip(core.io.debug).foreach { case (ioDebug, coreDebug) => ioDebug <> coreDebug }
+ 
+-    core.io.ctx.ctxSelect := 0.U
+-    core.io.ctx.advanceGen.foreach(_ := false.B)
++    io.ctx <> core.io.ctx
+     core.io.dm.debug_req  := dm.io.haltreq(0)
+     core.io.dm.resume_req := dm.io.resumereq(0)
+     dm.io.resumeack(0)    := !core.io.dm.debug_mode && RegNext(core.io.dm.debug_mode, false.B)
+diff --git a/hdl/chisel/src/coralnpu/CoreTlul.scala b/hdl/chisel/src/coralnpu/CoreTlul.scala
+--- a/hdl/chisel/src/coralnpu/CoreTlul.scala
++++ b/hdl/chisel/src/coralnpu/CoreTlul.scala
+@@ -37,6 +37,8 @@
+     val timer_irq    = Input(Bool())
+     val software_irq = Input(Bool())
+     val te           = Input(Bool())
++    val gate_ctl = Input(Bool())
++    val ctx = new CoreContextIO(p)
+ 
+     val dm = new DebugModuleIO(p)
+   })
+@@ -74,6 +76,8 @@
+   coreAxi.io.boot_addr    := io.boot_addr
+   coreAxi.io.timer_irq    := io.timer_irq
+   coreAxi.io.software_irq := io.software_irq
++  coreAxi.io.gate_ctl := io.gate_ctl
++  io.ctx <> coreAxi.io.ctx
+   io.wfi                  := coreAxi.io.wfi
+   io.fault                := coreAxi.io.fault
+   io.halted               := coreAxi.io.halted
+diff --git a/hdl/chisel/src/coralnpu/BUILD b/hdl/chisel/src/coralnpu/BUILD
+--- a/hdl/chisel/src/coralnpu/BUILD
++++ b/hdl/chisel/src/coralnpu/BUILD
+@@ -1027,3 +1027,60 @@
+         ":retirement_buffer",
+     ],
+ )
++
++chisel_test(
++    name = "w2_04_csr_config_spec",
++    size = "large",
++    srcs = ["verification/w2/W2_04_csr_config_spec.scala"],
++    deps = [
++        ":coralnpu_base",
++        ":coralnpu_float",
++        ":coralnpu_rvv",
++        ":coralnpu_scalar",
++        ":retirement_buffer",
++        "//hdl/chisel/src/common:testing",
++    ],
++)
++
++chisel_test(
++    name = "w2_04_sched_park_spec",
++    size = "large",
++    srcs = ["verification/w2/W2_04_sched_park_spec.scala"],
++    deps = [
++        ":coralnpu_base",
++        ":coralnpu_scalar",
++        ":retirement_buffer",
++        "//hdl/chisel/src/common:testing",
++    ],
++)
++
++chisel_test(
++    name = "w2_04_cancel_retire_spec",
++    size = "large",
++    srcs = ["verification/w2/W2_04_cancel_retire_spec.scala"],
++    deps = [
++        ":coralnpu_base",
++        ":coralnpu_scalar",
++        ":retirement_buffer",
++        "//hdl/chisel/src/common:testing",
++    ],
++)
++
++chisel_test(
++    name = "w2_04_core_control_spec",
++    size = "enormous",
++    srcs = ["verification/w2/W2_04_core_control_spec.scala"],
++    deps = [
++        ":coralnpu",
++        ":coralnpu_base",
++        ":coralnpu_float",
++        ":coralnpu_rvv",
++        ":coralnpu_scalar",
++        "@coralnpu_hw//lib:common_cells_resources",
++        "@coralnpu_hw//lib:cvfpu_resources",
++        "@coralnpu_hw//lib:fpu_div_sqrt_mvp_resources",
++        "@coralnpu_hw//lib:rvvi_resources",
++        "//hdl/chisel/src/common:fp",
++        "//hdl/chisel/src/common:testing",
++    ],
++)
+diff --git a/hdl/chisel/src/coralnpu/scalar/Decode.scala b/hdl/chisel/src/coralnpu/scalar/Decode.scala
+--- a/hdl/chisel/src/coralnpu/scalar/Decode.scala
++++ b/hdl/chisel/src/coralnpu/scalar/Decode.scala
+@@ -189,12 +189,12 @@
+   }
+   def isMul(): Bool   = { mul || mulh || mulhsu || mulhu || mulw }
+   def isDvu(): Bool   = { div || divu || rem || remu || divw || divuw || remw || remuw }
+-  def isFency(): Bool = { fencei || ebreak || wfi || mpause }
++  def isFency(): Bool = { fencei || ebreak || mpause }
+ 
+   // Instructions that should dispatch out of slot 0, with no other instructions
+   // dispatched on the same cycle.
+   def forceSlot0Only(): Bool = {
+-    isFency() || isCsr() || isFloat() || rvvReadsFloatRs1() || rvvWritesFrd() || isVtdiscard()
++    wfi || isFency() || isCsr() || isFloat() || rvvReadsFloatRs1() || rvvWritesFrd() || isVtdiscard()
+   }
+ 
+   // Checks if an instruction is a jump or changes context switch. Instructions
+@@ -973,7 +973,6 @@
+         d.sh     -> MakeValid(true.B, LsuOp.SH),
+         d.sw     -> MakeValid(true.B, LsuOp.SW),
+         d.sd     -> MakeValid(true.B, LsuOp.SD),
+-        d.wfi    -> MakeValid(true.B, LsuOp.FENCEI),
+         d.fencei -> MakeValid(true.B, LsuOp.FENCEI)
+       ) ++ Option
+         .when(p.enableFloat) {
+@@ -1111,7 +1110,8 @@
+ 
+     // -------------------------------------------------------------------------
+     // WFI
+-    // wfi instruction is handled by the bru and lsu.
++    // WFI parks its Context through the BRU only; it neither waits for the shared
++    // LSU to drain nor injects a global FENCEI/fetch flush. Accepted work continues.
+ 
+     // -------------------------------------------------------------------------
+     // Fence
+diff --git a/rules/chisel_test_runner.sh b/rules/chisel_test_runner.sh
+--- a/rules/chisel_test_runner.sh
++++ b/rules/chisel_test_runner.sh
+@@ -58,7 +58,32 @@
+   fi
+ done
+ 
+-"${VERILATOR_BIN}" "\${args[@]}"
++# ChiselSim separates headers into support-artifacts, beside primary-sources.
++# Include that directory and load macro-only headers before their SV consumers.
++headers=()
++native_warning_policy=()
++for arg in "\${args[@]}"; do
++  if [[ "\${arg}" == +incdir+* ]]; then
++    IFS='+' read -r -a include_dirs <<< "\${arg#+incdir+}"
++    for dir in "\${include_dirs[@]}"; do
++      support="\${dir%/*}/support-artifacts"
++      if [[ -d "\${support}" ]]; then
++        headers+=("+incdir+\${support}")
++        for header in registers.svh rvv_backend_config.svh; do
++          if [[ -f "\${support}/\${header}" ]]; then
++            headers+=("\${support}/\${header}")
++            # Match the warnings-visible policy of fpga/coralnpu_soc.core.
++            # Chisel-only cases retain the default fatal-warning policy.
++            if [[ "\${header}" == registers.svh ]]; then
++              native_warning_policy=("-Wno-fatal")
++            fi
++          fi
++        done
++      fi
++    done
++  fi
++done
++"${VERILATOR_BIN}" "\${native_warning_policy[@]}" "\${headers[@]}" "\${args[@]}"
+ EOF
+ chmod +x "${WRAPPER_DIR}/verilator"
+ 
+@@ -74,4 +99,4 @@
+   exit 1
+ fi
+ 
+-exec "${SCALATEST_BIN}"
+\ No newline at end of file
++exec "${SCALATEST_BIN}" "$@"
+\ No newline at end of file

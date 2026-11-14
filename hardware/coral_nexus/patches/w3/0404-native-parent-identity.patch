@@ -1,0 +1,897 @@
+diff --git a/hdl/chisel/src/coralnpu/rvv/RvvCore.scala b/hdl/chisel/src/coralnpu/rvv/RvvCore.scala
+--- a/hdl/chisel/src/coralnpu/rvv/RvvCore.scala
++++ b/hdl/chisel/src/coralnpu/rvv/RvvCore.scala
+@@ -16,7 +16,10 @@
+ 
+ import chisel3._
+ import chisel3.util._
+-import coralnpu.{MtypeWriteDataIO, Parameters, RegfileReadDataIO, RegfileWriteDataIO}
++import coralnpu.{
++  MtypeWriteDataIO, NativeRobIdentity, Parameters, ParkedFlagsDeltaIO,
++  RegfileReadDataIO, RegfileWriteDataIO
++}
+ 
+ object RvvCore {
+   def apply(p: Parameters): RvvCoreShim = {
+@@ -37,7 +40,7 @@
+     val rvvRegMsb          = p.rvvRegCountWidth - 1
+     val scalarRegMsb       = p.scalarRegCountWidth - 1
+     val floatRegMsb        = p.floatRegCountWidth - 1
+-    val robTagMsb          = log2Ceil(p.retirementBufferSize) - 1
++    val robTagMsb          = p.nativeRobTagBits - 1
+     val tileIdxMsb         = p.vmeRegCountWidth - 1
+     val pcMsb              = p.programCounterBits - 1
+     val xlen               = p.xlen
+@@ -49,13 +52,22 @@
+       """module RvvCoreWrapper(
+         |    input clk,
+         |    input rstn,
+-        |    input logic [VSTART_LEN:0] vstart,
+-        |    input logic vstart_valid,
+         |    input logic [1:0] vxrm,
+         |    input logic vxsat,
+         |    input logic [2:0] frm,
+         |    input logic flush,
+-        |""".stripMargin.replaceAll("VSTART_LEN", vstartLen.toString)
++        |""".stripMargin
++    moduleInterface += s"""    input [${p.ctxBits - 1}:0] ctxSelect,
++      |    input [${p.contextCount - 1}:0] ctxReset,
++      |    output [${robTagMsb}:0] vcsr_tag,
++      |    output [${robTagMsb}:0] async_rd_tag,
++      |    output [${robTagMsb}:0] async_frd_tag,
++      |""".stripMargin
++    for (c <- 0 until p.contextCount) {
++      moduleInterface += s"""    input vstartUpdate_${c}_valid,
++        |    input [${vstartLen}:0] vstartUpdate_${c}_bits,
++        |""".stripMargin
++    }
+ 
+     // Add instruction interface inputs
+     for (i <- 0 until instructionLanes) {
+@@ -93,6 +105,7 @@
+             |    output [${scalarRegMsb}:0] rd_${i}_bits_addr,
+             |    output [${xlenMinus1}:0] rd_${i}_bits_data,
+             |""".stripMargin
++      moduleInterface += s"    output [${robTagMsb}:0] rdTag_${i},\n"
+     }
+ 
+     moduleInterface += s"""    output async_rd_valid,
+@@ -223,12 +236,36 @@
+         |    output [24:0] trap_bits_bits,
+         |    output [${robTagMsb}:0] trap_bits_rob_tag,""".stripMargin
+ 
+-    // Add vxsat and fflags backend update outputs
+-    moduleInterface += """
+-        |    output wr_vxsat_valid_o,
+-        |    output wr_vxsat_o,
+-        |    output wr_fflags_valid_o,
+-        |    output [4:0] wr_fflags_o,""".stripMargin
++    for (i <- 0 until p.nativeFlagLanes) {
++      moduleInterface += s"""
++        |    output nativeFlags_${i}_valid,
++        |    output [${robTagMsb}:0] nativeFlags_${i}_bits_tag,
++        |    output [4:0] nativeFlags_${i}_bits_fflags,
++        |    output nativeFlags_${i}_bits_vxsat,
++        |""".stripMargin
++    }
++    for (i <- 0 until p.configDeltaPorts) {
++      moduleInterface += s"""
++        |    output nativeConfig_${i}_valid,
++        |    output [${robTagMsb}:0] nativeConfig_${i}_bits_tag,
++        |    output nativeConfig_${i}_bits_wrVl,
++        |    output nativeConfig_${i}_bits_wrVtype,
++        |    output nativeConfig_${i}_bits_wrMtype,
++        |    output [${vlLen}:0] nativeConfig_${i}_bits_vl,
++        |    output [${xlenMinus1}:0] nativeConfig_${i}_bits_vtype,
++        |    output [${xlenMinus1}:0] nativeConfig_${i}_bits_mtype,
++        |""".stripMargin
++    }
++    if (p.enableVme) {
++      for (i <- 0 until p.nativeMatrixFlagLanes) {
++        moduleInterface += s"""
++          |    output matrixFlags_${i}_valid,
++          |    output [${robTagMsb}:0] matrixFlags_${i}_bits_tag,
++          |    output [4:0] matrixFlags_${i}_bits_fflags,
++          |    output matrixFlags_${i}_bits_vxsat,
++          |""".stripMargin
++      }
++    }
+ 
+     if (p.enableVme) {
+       val tileMaskMsb = p.vmeMaxTileWrites - 1
+@@ -251,9 +288,7 @@
+       }
+     }
+ 
+-    // Remove last comma/linebreak
+-    moduleInterface = moduleInterface.dropRight(1)
+-    moduleInterface += "\n);\n"
++    moduleInterface = moduleInterface.trim.stripSuffix(",") + "\n);\n"
+ 
+     var coreInstantiation =
+       "  logic [GENN-1:0] inst_valid;\n".replaceAll("GENN", instructionLanes.toString)
+@@ -387,6 +422,60 @@
+         |  logic [${instructionLanes}-1:0][${scalarRegMsb}:0] reg_write_addr;
+         |  logic [${instructionLanes}-1:0][${xlenMinus1}:0] reg_write_data;
+         |""".stripMargin
++    coreInstantiation += s"""
++      |  logic [${instructionLanes - 1}:0][${robTagMsb}:0] reg_write_tag;
++      |  logic [${p.nativeFlagLanes - 1}:0] cn_flags_valid;
++      |  logic [${p.nativeFlagLanes - 1}:0][${robTagMsb}:0] cn_flags_tag;
++      |  logic [${p.nativeFlagLanes - 1}:0][4:0] cn_fflags;
++      |  logic [${p.nativeFlagLanes - 1}:0] cn_vxsat;
++      |  logic [${instructionLanes - 1}:0] cfg_valid, cfg_wr_vl, cfg_wr_vtype, cfg_wr_mtype;
++      |  logic [${instructionLanes - 1}:0][${robTagMsb}:0] cfg_tag;
++      |  logic [${instructionLanes - 1}:0][${vlLen}:0] cfg_vl;
++      |  logic [${instructionLanes - 1}:0][${xlenMinus1}:0] cfg_vtype, cfg_mtype;
++      |  logic [${p.contextCount - 1}:0] vstart_update_valid;
++      |  logic [${p.contextCount - 1}:0][${vstartLen}:0] vstart_update_data;
++      |""".stripMargin
++    for (c <- 0 until p.contextCount) {
++      coreInstantiation += s"""
++        |  assign vstart_update_valid[$c] = vstartUpdate_${c}_valid;
++        |  assign vstart_update_data[$c] = vstartUpdate_${c}_bits;
++        |""".stripMargin
++    }
++    for (i <- 0 until p.nativeFlagLanes) {
++      coreInstantiation += s"""
++        |  assign nativeFlags_${i}_valid = cn_flags_valid[$i];
++        |  assign nativeFlags_${i}_bits_tag = cn_flags_tag[$i];
++        |  assign nativeFlags_${i}_bits_fflags = cn_fflags[$i];
++        |  assign nativeFlags_${i}_bits_vxsat = cn_vxsat[$i];
++        |""".stripMargin
++    }
++    for (i <- 0 until p.configDeltaPorts) {
++      coreInstantiation += s"""
++        |  assign nativeConfig_${i}_valid = cfg_valid[$i];
++        |  assign nativeConfig_${i}_bits_tag = cfg_tag[$i];
++        |  assign nativeConfig_${i}_bits_wrVl = cfg_wr_vl[$i];
++        |  assign nativeConfig_${i}_bits_wrVtype = cfg_wr_vtype[$i];
++        |  assign nativeConfig_${i}_bits_wrMtype = cfg_wr_mtype[$i];
++        |  assign nativeConfig_${i}_bits_vl = cfg_vl[$i];
++        |  assign nativeConfig_${i}_bits_vtype = cfg_vtype[$i];
++        |  assign nativeConfig_${i}_bits_mtype = cfg_mtype[$i];
++        |""".stripMargin
++    }
++    if (p.enableVme) {
++      coreInstantiation += s"""
++        |  logic [${p.nativeMatrixFlagLanes - 1}:0] matrix_flags_valid;
++        |  logic [${p.nativeMatrixFlagLanes - 1}:0][${robTagMsb}:0] matrix_flags_tag;
++        |  logic [${p.nativeMatrixFlagLanes - 1}:0][4:0] matrix_fflags;
++        |""".stripMargin
++      for (i <- 0 until p.nativeMatrixFlagLanes) {
++        coreInstantiation += s"""
++          |  assign matrixFlags_${i}_valid = matrix_flags_valid[$i];
++          |  assign matrixFlags_${i}_bits_tag = matrix_flags_tag[$i];
++          |  assign matrixFlags_${i}_bits_fflags = matrix_fflags[$i];
++          |  assign matrixFlags_${i}_bits_vxsat = 1'b0;
++          |""".stripMargin
++      }
++    }
+ 
+     // VCSR temp output
+     coreInstantiation += """  RVVConfigState vector_csr;
+@@ -401,6 +490,7 @@
+     coreInstantiation += s"  ROB2RT_t [${numRetireLanes - 1}:0] rd_rob2rt_o;\n"
+     coreInstantiation += s"  logic [${numRetireLanes - 1}:0] rd_valid_rob2rt_o;\n"
+     coreInstantiation += "  RVVInstruction trap_data;\n"
++    coreInstantiation += "  assign vcsr_tag = rd_rob2rt_o[0].rob_tag;\n"
+     coreInstantiation +=
+       s"""  logic [${instructionLanes}-1:0] vme_mtype_valid_o;
+          |  logic [${instructionLanes}-1:0][${xlenMinus1}:0] vme_mtype_data_o;
+@@ -417,12 +507,16 @@
+ 
+     coreInstantiation += """  RvvCore#(
+         |      .N (GENN),
++        |      .CONTEXT_COUNT(CTXCOUNT),
++        |      .CTX_BITS(CTXBITS),
+         |      .RegDataT(logic [XLEN_MINUS_1:0])
+         |  ) core(
+         |      .clk(clk),
+         |      .rstn(rstn),
+-        |      .vstart(vstart),
+-        |      .vstart_valid(vstart_valid),
++        |      .ctx_select(ctxSelect),
++        |      .ctx_reset(ctxReset),
++        |      .vstart_update_valid(vstart_update_valid),
++        |      .vstart_update_data(vstart_update_data),
+         |      .vxrm(vxrm),
+         |      .vxsat(vxsat),
+         |      .frm(frm),
+@@ -436,13 +530,24 @@
+         |      .reg_write_valid(reg_write_valid),
+         |      .reg_write_addr(reg_write_addr),
+         |      .reg_write_data(reg_write_data),
++        |      .reg_write_tag(reg_write_tag),
++        |      .cfg_valid(cfg_valid),
++        |      .cfg_tag(cfg_tag),
++        |      .cfg_wr_vl(cfg_wr_vl),
++        |      .cfg_wr_vtype(cfg_wr_vtype),
++        |      .cfg_wr_mtype(cfg_wr_mtype),
++        |      .cfg_vl(cfg_vl),
++        |      .cfg_vtype(cfg_vtype),
++        |      .cfg_mtype(cfg_mtype),
+         |      .async_rd_valid(async_rd_valid),
+         |      .async_rd_addr(async_rd_bits_addr),
+         |      .async_rd_data(async_rd_bits_data),
++        |      .async_rd_tag(async_rd_tag),
+         |      .async_rd_ready(async_rd_ready),
+         |      .async_frd_valid(async_frd_valid),
+         |      .async_frd_addr(async_frd_bits_addr),
+         |      .async_frd_data(async_frd_bits_data),
++        |      .async_frd_tag(async_frd_tag),
+         |      .async_frd_ready(async_frd_ready),
+         |      .uop_lsu_valid_rvv2lsu(uop_lsu_valid_rvv2lsu),
+         |      .uop_lsu_idx_valid_rvv2lsu(uop_lsu_idx_valid_rvv2lsu),
+@@ -474,13 +579,15 @@
+         |      .rd_rob2rt_o(rd_rob2rt_o),
+         |      .trap_valid_o(trap_valid),
+         |      .trap_data_o(trap_data),
+-        |      .wr_vxsat_valid_o(wr_vxsat_valid_o),
+-        |      .wr_vxsat_o(wr_vxsat_o),
+-        |      .wr_fflags_valid_o(wr_fflags_valid_o),
+-        |      .wr_fflags_o(wr_fflags_o)
++        |      .cn_flags_valid_o(cn_flags_valid),
++        |      .cn_flags_tag_o(cn_flags_tag),
++        |      .cn_fflags_o(cn_fflags),
++        |      .cn_vxsat_o(cn_vxsat)
+         |""".stripMargin
+       .replaceAll("GENN", instructionLanes.toString)
+       .replaceAll("XLEN_MINUS_1", xlenMinus1.toString)
++      .replaceAll("CTXCOUNT", p.contextCount.toString)
++      .replaceAll("CTXBITS", p.ctxBits.toString)
+     if (p.enableVme) {
+       coreInstantiation +=
+         """`ifdef ZVT_ON
+@@ -492,7 +599,10 @@
+           |      .uop_lsu2vme_ready(lsu2vme_ready),
+           |      .vmeRtVld_o(vmeRtVld_o),
+           |      .vmeRt_o(vmeRt_o),
+-          |      .vmeRtRdy_i(1'b1)
++          |      .vmeRtRdy_i(1'b1),
++          |      .cn_zvt_flags_valid_o(matrix_flags_valid),
++          |      .cn_zvt_flags_tag_o(matrix_flags_tag),
++          |      .cn_zvt_fflags_o(matrix_fflags)
+           |`endif
+           |""".stripMargin
+     }
+@@ -609,6 +719,7 @@
+       |  assign rd_GENI_bits_addr = reg_write_addr[GENI];
+       |  assign rd_GENI_bits_data = reg_write_data[GENI];
+       |""".stripMargin.replaceAll("GENI", i.toString)
++      coreInstantiation += s"  assign rdTag_${i} = reg_write_tag[${i}];\n"
+     }
+     if (enableVme) {
+       for (i <- 0 until instructionLanes) {
+@@ -663,9 +774,17 @@
+         |`define DISPATCH3
+         |//`define DISPATCH2
+         |
+-        |// FP ISA
+-        |//`define ZVE32F_ON
+-        |""".stripMargin
++        |// Parameter-derived defines also make direct ChiselSim consumers self-contained.
++        |""".stripMargin
++    config += s"`ifndef VLEN_${p.rvvVlen}\n`define VLEN_${p.rvvVlen}\n`endif\n"
++    config += "`ifndef TB_SUPPORT\n`define TB_SUPPORT\n`endif\n"
++    if (p.enableFloat) {
++      config += "`ifndef ZVE32F_ON\n`define ZVE32F_ON\n`endif\n"
++    }
++    if (p.fpuPipeRegs != 4) {
++      config += s"`ifndef FPU_PIPEREGS\n`define FPU_PIPEREGS ${p.fpuPipeRegs}\n`endif\n"
++      config += s"`ifndef FALU_PIPEREGS\n`define FALU_PIPEREGS ${p.fpuPipeRegs}\n`endif\n"
++    }
+     if (p.enableVectorBf16) {
+       config += "`define ZVFBFWMA_ON\n"
+     } else {
+@@ -701,18 +820,26 @@
+     val clk  = Input(Clock())
+     val rstn = Input(AsyncReset())
+ 
+-    val vstart       = Input(UInt(log2Ceil(p.rvvVlen).W))
+-    val vstart_valid = Input(Bool())
++    val vstartUpdate = Input(Vec(p.contextCount, Valid(UInt(log2Ceil(p.rvvVlen).W))))
+     val vxrm         = Input(UInt(2.W))
+     val vxsat        = Input(UInt(1.W))
+     val frm          = Input(UInt(3.W))
+     val flush        = Input(Bool())
++    val ctxSelect = Input(UInt(p.ctxBits.W))
++    val ctxReset = Input(UInt(p.contextCount.W))
+ 
+     val inst = Vec(p.instructionLanes, Flipped(Decoupled(new RvvCompressedInstruction(p))))
+ 
+     val rs  = Vec(p.instructionLanes * 2, Flipped(new RegfileReadDataIO(p)))
+     val rd  = Vec(p.instructionLanes, Valid(new RegfileWriteDataIO(p)))
+     val frs = Vec(p.instructionLanes, Input(UInt(32.W)))
++    val rdTag = Output(Vec(p.instructionLanes, UInt(p.nativeRobTagBits.W)))
++    val async_rd_tag = Output(UInt(p.nativeRobTagBits.W))
++    val async_frd_tag = Output(UInt(p.nativeRobTagBits.W))
++    val nativeFlags = Output(Vec(p.nativeFlagLanes, Valid(new NativeFlagPacket(p))))
++    val matrixFlags = Option.when(p.enableVme)(
++      Output(Vec(p.nativeMatrixFlagLanes, Valid(new NativeFlagPacket(p)))))
++    val nativeConfig = Output(Vec(p.configDeltaPorts, Valid(new NativeConfigPacket(p))))
+ 
+     val async_rd  = Decoupled(new RegfileWriteDataIO(p))
+     val async_frd = Decoupled(new RegfileWriteDataIO(p))
+@@ -725,14 +852,8 @@
+     val vcsr_xrm    = Output(UInt(2.W))
+     val vcsr_vxsat  = Output(Bool())
+     val vcsr_ready  = Input(Bool())
+-
+-    // VXSAT update from backend
+-    val wr_vxsat_valid_o = Output(Bool())
+-    val wr_vxsat_o       = Output(Bool())
+-
+-    // FFLAGS update from backend
+-    val wr_fflags_valid_o = Output(Bool())
+-    val wr_fflags_o       = Output(UInt(5.W))
++    val vcsr_tag = Output(UInt(p.nativeRobTagBits.W))
++
+ 
+     // TODO(derekjchow): Parameterize
+     val rvv2lsu = Vec(2, Decoupled(new Rvv2Lsu(p)))
+@@ -766,7 +887,7 @@
+     )
+ 
+     val vmeRt_valid    = Option.when(p.enableVme)(Output(Bool()))
+-    val vmeRt_rob_tag  = Option.when(p.enableVme)(Output(UInt(log2Ceil(p.retirementBufferSize).W)))
++    val vmeRt_rob_tag  = Option.when(p.enableVme)(Output(UInt(p.nativeRobTagBits.W)))
+     val vmeRt_is_store = Option.when(p.enableVme)(Output(Bool()))
+     val vmeRt_mask     = Option.when(p.enableVme)(Output(UInt(p.vmeMaxTileWrites.W)))
+     val vmeRt_idx      = Option.when(p.enableVme)(Output(UInt(p.vmeRegCountWidth.W)))
+@@ -974,37 +1095,92 @@
+ class RvvCoreShim(p: Parameters) extends Module {
+   val io = IO(new RvvCoreIO(p))
+ 
+-  val vstart = RegInit(0.U(log2Ceil(p.rvvVlen).W))
+-  val vxrm   = RegInit(0.U(2.W))
+-  val vxsat  = RegInit(false.B)
++  val vstart = RegInit(VecInit.fill(p.contextCount)(0.U(log2Ceil(p.rvvVlen).W)))
++  val vxrm = RegInit(VecInit.fill(p.contextCount)(0.U(2.W)))
++  val activeCtx = if (p.contextCount == 1) 0.U(1.W) else io.ctxSelect
++  def select[T <: Data](values: Vec[T]): T =
++    if (p.contextCount == 1) values(0) else values(activeCtx)
++  def live(slot: UInt, generation: UInt): Bool =
++    (0 until p.contextCount).map(c => slot === c.U &&
++      generation === io.ctxGeneration(c) && !io.ctxReset(c)).reduce(_ || _)
+ 
+   val rstn           = (!reset.asBool).asAsyncReset
+   val rvvCoreWrapper = Module(new RvvCoreWrapper(p))
+   rvvCoreWrapper.io.clk   := clock
+   rvvCoreWrapper.io.rstn  := rstn
+   rvvCoreWrapper.io.flush := io.flush
++  rvvCoreWrapper.io.ctxSelect := activeCtx
++  rvvCoreWrapper.io.ctxReset := io.ctxReset.asUInt
+   rvvCoreWrapper.io.inst <> io.inst
+   rvvCoreWrapper.io.rs <> io.rs
+-  rvvCoreWrapper.io.rd <> io.rd
++  for (i <- 0 until p.instructionLanes) {
++    io.rd(i).valid := rvvCoreWrapper.io.rd(i).valid
++    io.rd(i).bits.addr := rvvCoreWrapper.io.rd(i).bits.addr
++    io.rd(i).bits.data := rvvCoreWrapper.io.rd(i).bits.data
++    io.rd(i).bits.tag := rvvCoreWrapper.io.rdTag(i)
++  }
+   rvvCoreWrapper.io.frs <> io.frs
+-  rvvCoreWrapper.io.async_rd <> io.async_rd
+-  rvvCoreWrapper.io.async_frd <> io.async_frd
++  io.async_rd.valid := rvvCoreWrapper.io.async_rd.valid
++  io.async_rd.bits.addr := rvvCoreWrapper.io.async_rd.bits.addr
++  io.async_rd.bits.data := rvvCoreWrapper.io.async_rd.bits.data
++  io.async_rd.bits.tag := rvvCoreWrapper.io.async_rd_tag
++  rvvCoreWrapper.io.async_rd.ready := io.async_rd.ready
++  io.async_frd.valid := rvvCoreWrapper.io.async_frd.valid
++  io.async_frd.bits.addr := rvvCoreWrapper.io.async_frd.bits.addr
++  io.async_frd.bits.data := rvvCoreWrapper.io.async_frd.bits.data
++  io.async_frd.bits.tag := rvvCoreWrapper.io.async_frd_tag
++  rvvCoreWrapper.io.async_frd.ready := io.async_frd.ready
+   rvvCoreWrapper.io.rd_rob2rt_o <> io.rd_rob2rt_o
+   io.trap := rvvCoreWrapper.io.trap
+ 
+-  val vstart_valid = io.csr.vstart_write.valid || rvvCoreWrapper.io.vcsr_valid
+-  rvvCoreWrapper.io.vstart_valid := vstart_valid
+-  rvvCoreWrapper.io.vstart       := MuxCase(
+-    vstart,
+-    Seq(
+-      io.csr.vstart_write.valid    -> io.csr.vstart_write.bits,
+-      rvvCoreWrapper.io.vcsr_valid -> rvvCoreWrapper.io.vcsr_vstart
+-    )
+-  )
+-  rvvCoreWrapper.io.vxrm       := Mux(io.csr.vxrm_write.valid, io.csr.vxrm_write.bits, vxrm)
+-  rvvCoreWrapper.io.vxsat      := Mux(io.csr.vxsat_write.valid, io.csr.vxsat_write.bits, vxsat)
++  val nativeControl = NativeRobIdentity.unpack(p)(rvvCoreWrapper.io.vcsr_tag)
++  io.nativeControl.valid := rvvCoreWrapper.io.vcsr_valid
++  io.nativeControl.bits := rvvCoreWrapper.io.vcsr_tag
++  val nativeControlLive = io.nativeControlAccept &&
++    live(nativeControl.ctx_slot, nativeControl.ctx_generation)
++  val csrControlLive = live(io.csr.writeOwner.ctx_slot, io.csr.writeOwner.ctx_generation)
++  val faultControlLive = live(io.csr.faultOwner.ctx_slot, io.csr.faultOwner.ctx_generation)
++  val csrSelected = csrControlLive && (io.csr.writeOwner.ctx_slot === activeCtx)
++  rvvCoreWrapper.io.vxrm := Mux(csrSelected && io.csr.vxrm_write.valid,
++    io.csr.vxrm_write.bits, select(vxrm))
++  rvvCoreWrapper.io.vxsat := io.csr.vxsat
+   rvvCoreWrapper.io.frm        := io.csr.frm
+   rvvCoreWrapper.io.vcsr_ready := true.B
++
++  def decodeFlags(dst: ValidIO[ParkedFlagsDeltaIO], src: ValidIO[NativeFlagPacket]): Unit = {
++    val identity = NativeRobIdentity.unpack(p)(src.bits.tag)
++    dst.valid := src.valid
++    dst.bits.valid := src.valid
++    dst.bits.owner := identity.owner
++    dst.bits.rob_tag := identity.robTag
++    dst.bits.fflags := src.bits.fflags
++    dst.bits.vxsat := src.bits.vxsat
++    dst.bits.replaceFflags := false.B
++    dst.bits.replaceVxsat := false.B
++  }
++  for (i <- 0 until p.nativeFlagLanes) {
++    decodeFlags(io.nativeFlags(i), rvvCoreWrapper.io.nativeFlags(i))
++  }
++  if (p.enableVme) {
++    for (i <- 0 until p.nativeMatrixFlagLanes) {
++      decodeFlags(io.matrixFlags.get(i), rvvCoreWrapper.io.matrixFlags.get(i))
++    }
++  }
++  for (i <- 0 until p.configDeltaPorts) {
++    val src = rvvCoreWrapper.io.nativeConfig(i)
++    val identity = NativeRobIdentity.unpack(p)(src.bits.tag)
++    val dst = io.configDelta(i)
++    dst.valid := src.valid
++    dst.bits.valid := src.valid
++    dst.bits.owner := identity.owner
++    dst.bits.rob_tag := identity.robTag
++    dst.bits.wrVl := src.bits.wrVl
++    dst.bits.wrVtype := src.bits.wrVtype
++    dst.bits.wrMtype := src.bits.wrMtype
++    dst.bits.vl := src.bits.vl
++    dst.bits.vtype := src.bits.vtype
++    dst.bits.mtype := src.bits.mtype
++  }
+ 
+   io.rvv2lsu <> rvvCoreWrapper.io.rvv2lsu
+   io.lsu2rvv <> rvvCoreWrapper.io.lsu2rvv
+@@ -1032,13 +1208,10 @@
+     }
+   }
+ 
+-  // Conservatively mark config state as invalid the cycle when CSR instruction
+-  // updates vstart, vxrm or vxsat.
++  // A peer's CSR write must not invalidate the selected Context's snapshot.
+   io.configState.valid := rvvCoreWrapper.io.configStateValid &&
+-    !rvvCoreWrapper.io.vcsr_valid &&
+-    !io.csr.vstart_write.valid &&
+-    !io.csr.vxrm_write.valid &&
+-    !io.csr.vxsat_write.valid
++    !select(rvvCoreWrapper.io.vstartUpdate).valid &&
++    !(csrSelected && io.csr.vxrm_write.valid)
+   io.configState.bits.vl        := rvvCoreWrapper.io.configVl
+   io.configState.bits.vstart    := rvvCoreWrapper.io.configVstart
+   io.configState.bits.ma        := rvvCoreWrapper.io.configMa
+@@ -1059,38 +1232,54 @@
+   io.rvv_idle       := rvvCoreWrapper.io.rvv_idle
+   io.queue_capacity := rvvCoreWrapper.io.queue_capacity
+ 
+-  val vstart_wdata = MuxCase(
+-    vstart,
+-    Seq(
+-      io.csr.vstart_write.valid    -> io.csr.vstart_write.bits,
+-      rvvCoreWrapper.io.vcsr_valid -> rvvCoreWrapper.io.vcsr_vstart,
+-      io.clear_vstart              -> 0.U
+-    )
+-  )
+-  vstart := vstart_wdata
+-
+-  val vxrm_wdata = MuxCase(
+-    vxrm,
+-    Seq(
+-      io.csr.vxrm_write.valid      -> io.csr.vxrm_write.bits,
+-      rvvCoreWrapper.io.vcsr_valid -> rvvCoreWrapper.io.vcsr_xrm
+-    )
+-  )
+-  vxrm := vxrm_wdata
+-
+-  val vxsat_wdata = MuxCase(
+-    vxsat,
+-    Seq(
+-      io.csr.vxsat_write.valid           -> io.csr.vxsat_write.bits,
+-      rvvCoreWrapper.io.wr_vxsat_valid_o -> (vxsat | rvvCoreWrapper.io.wr_vxsat_o),
+-      rvvCoreWrapper.io.vcsr_valid       -> rvvCoreWrapper.io.vcsr_vxsat
+-    )
+-  )
+-  vxsat := vxsat_wdata
+-
+-  io.csr.vstart       := vstart
+-  io.csr.vxrm         := vxrm
+-  io.csr.vxsat        := vxsat
+-  io.csr.fflags.valid := rvvCoreWrapper.io.wr_fflags_valid_o
+-  io.csr.fflags.bits  := rvvCoreWrapper.io.wr_fflags_o
++  val stale = RegInit(VecInit.fill(p.contextCount)(0.U(16.W)))
++  val csrWrite = io.csr.vstart_write.valid || io.csr.vxrm_write.valid
++  // Publish a winning retirement clear one beat later to avoid feedback into
++  // the completing command. A clear that loses to a control update must not
++  // erase that update from the frontend on the following beat.
++  for (c <- 0 until p.contextCount) {
++    val csrMatch = csrControlLive && (io.csr.writeOwner.ctx_slot === c.U)
++    val faultMatch = faultControlLive && io.csr.faultVstart.valid &&
++      (io.csr.faultOwner.ctx_slot === c.U)
++    val nativeMatch = nativeControlLive && (nativeControl.ctx_slot === c.U) &&
++      rvvCoreWrapper.io.vcsr_valid
++    val controlUpdate = faultMatch || (csrMatch && io.csr.vstart_write.valid) || nativeMatch
++    val clearWins = io.clear_vstart(c) && !controlUpdate && !io.ctxReset(c)
++    val nativeClear = RegNext(clearWins, false.B)
++    val update = rvvCoreWrapper.io.vstartUpdate(c)
++    update.valid := controlUpdate || (nativeClear && !io.ctxReset(c))
++    update.bits := Mux(faultMatch, io.csr.faultVstart.bits,
++      Mux(csrMatch && io.csr.vstart_write.valid, io.csr.vstart_write.bits,
++        Mux(nativeMatch, rvvCoreWrapper.io.vcsr_vstart, Mux(nativeClear, 0.U, vstart(c)))))
++    when(io.ctxReset(c)) {
++      vstart(c) := 0.U
++      vxrm(c) := 0.U
++      stale(c) := 0.U
++    }.otherwise {
++      when(controlUpdate) {
++        vstart(c) := update.bits
++      }.elsewhen(clearWins) {
++        vstart(c) := 0.U
++      }
++      when(csrMatch && io.csr.vxrm_write.valid) {
++        vxrm(c) := io.csr.vxrm_write.bits
++      }.elsewhen(nativeMatch) {
++        vxrm(c) := rvvCoreWrapper.io.vcsr_xrm
++      }
++      val badCsr = csrWrite && (io.csr.writeOwner.ctx_slot === c.U) && !csrControlLive
++      val badNative = rvvCoreWrapper.io.vcsr_valid &&
++        (nativeControl.ctx_slot === c.U) && !nativeControlLive
++      val badFault = io.csr.faultVstart.valid &&
++        (io.csr.faultOwner.ctx_slot === c.U) && !faultControlLive
++      stale(c) := stale(c) + badCsr.asUInt +& badNative.asUInt +& badFault.asUInt
++    }
++  }
++  val invalidSlot = RegInit(0.U(16.W))
++  invalidSlot := invalidSlot +
++    (csrWrite && io.csr.writeOwner.ctx_slot >= p.contextCount.U).asUInt +&
++    (rvvCoreWrapper.io.vcsr_valid && nativeControl.ctx_slot >= p.contextCount.U).asUInt +&
++    (io.csr.faultVstart.valid && io.csr.faultOwner.ctx_slot >= p.contextCount.U).asUInt
++  io.staleControlRejected := stale.reduce(_ +& _) + invalidSlot
++  io.csr.vstart := vstart
++  io.csr.vxrm := vxrm
+ }
+diff --git a/hdl/chisel/src/coralnpu/rvv/RvvInterface.scala b/hdl/chisel/src/coralnpu/rvv/RvvInterface.scala
+--- a/hdl/chisel/src/coralnpu/rvv/RvvInterface.scala
++++ b/hdl/chisel/src/coralnpu/rvv/RvvInterface.scala
+@@ -18,9 +18,11 @@
+ import chisel3.util._
+ import coralnpu.{
+   MtypeWriteDataIO,
++  ParkedConfigIO,
++  ParkedFlagsDeltaIO,
++  OwnerTag,
+   Parameters,
+   RegfileReadDataIO,
+-  RegfileWriteDataIO,
+   TileWriteDataIO
+ }
+ 
+@@ -85,13 +87,45 @@
+   val data = UInt(p.rvvVlen.W)
+ }
+ 
++class NativeScalarResult(p: Parameters) extends Bundle {
++  val tag = UInt(p.nativeRobTagBits.W)
++  val addr = UInt(p.scalarRegCountWidth.W)
++  val data = UInt(p.xlen.W)
++}
++
++class NativeFlagPacket(p: Parameters) extends Bundle {
++  val tag = UInt(p.nativeRobTagBits.W)
++  val fflags = UInt(5.W)
++  val vxsat = Bool()
++}
++
++class NativeConfigPacket(p: Parameters) extends Bundle {
++  val tag = UInt(p.nativeRobTagBits.W)
++  val wrVl = Bool()
++  val wrVtype = Bool()
++  val wrMtype = Bool()
++  val vl = UInt(log2Ceil(p.rvvVlen + 1).W)
++  val vtype = UInt(p.xlen.W)
++  val mtype = UInt(p.xlen.W)
++}
++
+ class RvvCoreIO(p: Parameters) extends Bundle {
+   // Decode Cycle.
+   val inst = Vec(p.instructionLanes, Flipped(Decoupled(new RvvCompressedInstruction(p))))
++  val ctxSelect = Input(UInt(p.ctxBits.W))
++  val ctxReset = Input(Vec(p.contextCount, Bool()))
++  val ctxGeneration = Input(Vec(p.contextCount, UInt(p.ctxGenerationBits.W)))
++  val staleControlRejected = Output(UInt(16.W))
++  val nativeControl = Output(Valid(UInt(p.nativeRobTagBits.W)))
++  val nativeControlAccept = Input(Bool())
++  val nativeFlags = Output(Vec(p.nativeFlagLanes, Valid(new ParkedFlagsDeltaIO(p))))
++  val matrixFlags = Option.when(p.enableVme)(
++    Output(Vec(p.nativeMatrixFlagLanes, Valid(new ParkedFlagsDeltaIO(p)))))
++  val configDelta = Output(Vec(p.configDeltaPorts, Valid(new ParkedConfigIO(p))))
+ 
+   // Execute cycle.
+   val rs  = Vec(p.instructionLanes * 2, Flipped(new RegfileReadDataIO(p)))
+-  val rd  = Vec(p.instructionLanes, Valid(new RegfileWriteDataIO(p)))
++  val rd  = Vec(p.instructionLanes, Valid(new NativeScalarResult(p)))
+   val frs = Vec(p.instructionLanes, Input(UInt(32.W)))
+ 
+   val rvv2lsu = Vec(2, Decoupled(new Rvv2Lsu(p)))
+@@ -104,8 +138,8 @@
+   val configState = Output(Valid(new RvvConfigState(p)))
+ 
+   // Async scalar regfile writes.
+-  val async_rd  = Decoupled(new RegfileWriteDataIO(p))
+-  val async_frd = Decoupled(new RegfileWriteDataIO(p))
++  val async_rd  = Decoupled(new NativeScalarResult(p))
++  val async_frd = Decoupled(new NativeScalarResult(p))
+ 
+   // Async trap.
+   val trap = Output(Valid(new RvvCompressedInstruction(p)))
+@@ -116,7 +150,7 @@
+   val rvv_idle       = Output(Bool())
+   val queue_capacity = Output(UInt(4.W))
+   val flush          = Input(Bool())
+-  val clear_vstart   = Input(Bool())
++  val clear_vstart   = Input(Vec(p.contextCount, Bool()))
+ 
+   // ROB to RT stage writes.
+   val rd_rob2rt_o = Vec(p.rvvRetireLanes, new Rob2Rt(p))
+@@ -140,16 +174,18 @@
+   val vxsaturate     = UInt(p.rvvVlenb.W)
+   val uop_pc         = Option.when(p.enableVerification)(UInt(p.programCounterBits.W))
+   val last_uop_valid = Bool()
+-  val rob_tag        = UInt(log2Ceil(p.retirementBufferSize).W)
++  val rob_tag        = UInt(p.nativeRobTagBits.W)
+ }
+ 
+ class RvvCsrIO(p: Parameters) extends Bundle {
+-  val vstart       = Output(UInt(log2Ceil(p.rvvVlen).W))
+-  val vxrm         = Output(UInt(2.W))
+-  val vxsat        = Output(Bool())
++  val vstart       = Output(Vec(p.contextCount, UInt(log2Ceil(p.rvvVlen).W)))
++  val vxrm         = Output(Vec(p.contextCount, UInt(2.W)))
++  val vxsat        = Input(Bool())
+   val frm          = Input(UInt(3.W))
++  val writeOwner   = Input(new OwnerTag(p))
+   val vstart_write = Input(Valid(UInt(log2Ceil(p.rvvVlen).W)))
+   val vxrm_write   = Input(Valid(UInt(2.W)))
+-  val vxsat_write  = Input(Valid(Bool()))
+-  val fflags       = Output(Valid(UInt(5.W)))
++  // Fault restart state is a separate channel: a peer CSR write can coincide.
++  val faultOwner   = Input(new OwnerTag(p))
++  val faultVstart  = Input(Valid(UInt(log2Ceil(p.rvvVlen).W)))
+ }
+diff --git a/hdl/chisel/src/coralnpu/rvv/RvvDecode.scala b/hdl/chisel/src/coralnpu/rvv/RvvDecode.scala
+--- a/hdl/chisel/src/coralnpu/rvv/RvvDecode.scala
++++ b/hdl/chisel/src/coralnpu/rvv/RvvDecode.scala
+@@ -36,7 +36,7 @@
+   val pc      = UInt(p.programCounterBits.W)
+   val opcode  = RvvCompressedOpcode()
+   val bits    = UInt(25.W)
+-  val rob_tag = UInt(log2Ceil(p.retirementBufferSize).W)
++  val rob_tag = UInt(p.nativeRobTagBits.W)
+ 
+   def originalEncoding(): UInt = {
+     val lower7bits = MuxLookup(opcode, 0.U)(
+diff --git a/hdl/verilog/rvv/design/RvvCore.sv b/hdl/verilog/rvv/design/RvvCore.sv
+--- a/hdl/verilog/rvv/design/RvvCore.sv
++++ b/hdl/verilog/rvv/design/RvvCore.sv
+@@ -13,6 +13,8 @@
+ // limitations under the License.
+ 
+ module RvvCore #(parameter N = 4,
++                 parameter CONTEXT_COUNT = 1,
++                 parameter CTX_BITS = (CONTEXT_COUNT <= 1) ? 1 : $clog2(CONTEXT_COUNT),
+                  parameter CMD_BUFFER_MAX_CAPACITY = 16,
+                  type RegDataT=logic [31:0],
+                  type VRegDataT=logic [127:0],
+@@ -23,8 +25,10 @@
+   input clk,
+   input rstn,
+ 
+-  input logic [`VSTART_WIDTH-1:0] vstart,
+-  input logic vstart_valid,
++  input logic [CTX_BITS-1:0] ctx_select,
++  input logic [CONTEXT_COUNT-1:0] ctx_reset,
++  input logic [CONTEXT_COUNT-1:0] vstart_update_valid,
++  input logic [CONTEXT_COUNT-1:0][`VSTART_WIDTH-1:0] vstart_update_data,
+   input logic [1:0] vxrm,
+   input logic vxsat,
+   input logic [2:0] frm,
+@@ -46,17 +50,24 @@
+   output logic [N-1:0] reg_write_valid,
+   output RegAddrT [N-1:0] reg_write_addr,
+   output RegDataT [N-1:0] reg_write_data,
++  output logic [N-1:0][`ROB_TAG_WIDTH-1:0] reg_write_tag,
++  output logic [N-1:0] cfg_valid, cfg_wr_vl, cfg_wr_vtype, cfg_wr_mtype,
++  output logic [N-1:0][`ROB_TAG_WIDTH-1:0] cfg_tag,
++  output logic [N-1:0][`VL_WIDTH-1:0] cfg_vl,
++  output logic [N-1:0][`XLEN-1:0] cfg_vtype, cfg_mtype,
+ 
+   // Scalar Regfile writeback for non-configuration functions.
+   output logic async_rd_valid,
+   output RegAddrT async_rd_addr,
+   output RegDataT async_rd_data,
++  output logic [`ROB_TAG_WIDTH-1:0] async_rd_tag,
+   input logic async_rd_ready,
+ 
+   // Floating Point Regfile writeback.
+   output logic async_frd_valid,
+   output RegAddrT async_frd_addr,
+   output RegDataT async_frd_data,
++  output logic [`ROB_TAG_WIDTH-1:0] async_frd_tag,
+   input logic async_frd_ready,
+ 
+   // RVV to LSU
+@@ -105,16 +116,17 @@
+   output logic trap_valid_o,
+   output RVVInstruction trap_data_o,
+ 
+-  // VXSAT update from backend (fixes C3 bug: previously dead-end wires)
+-  output logic                            wr_vxsat_valid_o,
+-  output logic    [`VCSR_VXSAT_WIDTH-1:0] wr_vxsat_o,
+-
+-  // Floating point fflags update from backend
+-  output logic                            wr_fflags_valid_o,
+-  output logic    [4:0]                   wr_fflags_o
++  // One delta per accepted native uop, preserving its complete parent identity.
++  output logic [`NUM_RT_UOP-1:0] cn_flags_valid_o,
++  output logic [`NUM_RT_UOP-1:0][`ROB_TAG_WIDTH-1:0] cn_flags_tag_o,
++  output logic [`NUM_RT_UOP-1:0][4:0] cn_fflags_o,
++  output logic [`NUM_RT_UOP-1:0] cn_vxsat_o
+ `ifdef ZVT_ON
+   ,
+   // VME to LSU (store data)
++  output logic [`NUM_BLK-1:0] cn_zvt_flags_valid_o,
++  output logic [`NUM_BLK-1:0][`ROB_TAG_WIDTH-1:0] cn_zvt_flags_tag_o,
++  output logic [`NUM_BLK-1:0][4:0] cn_zvt_fflags_o,
+   output logic uop_vme2lsu_valid,
+   output VRegDataT uop_vme2lsu_data,
+   input logic uop_vme2lsu_ready,
+@@ -133,11 +145,14 @@
+   logic [N-1:0] frontend_cmd_valid;
+   RVVCmd [N-1:0] frontend_cmd_data;
+   logic [$clog2(2*N + 1)-1:0] queue_capacity_internal;
+-  RvvFrontEnd#(.N(N), .RegDataT(RegDataT), .RegAddrT(RegAddrT)) frontend(
++  RvvFrontEnd#(.N(N), .CONTEXT_COUNT(CONTEXT_COUNT), .CTX_BITS(CTX_BITS),
++               .RegDataT(RegDataT), .RegAddrT(RegAddrT)) frontend(
+       .clk(clk),
+       .rstn(rstn),
+-      .vstart_i(vstart),
+-      .vstart_valid_i(vstart_valid),
++      .ctx_select_i(ctx_select),
++      .ctx_reset_i(ctx_reset),
++      .vstart_update_valid_i(vstart_update_valid),
++      .vstart_update_data_i(vstart_update_data),
+       .vxrm_i(vxrm),
+       .vxsat_i(vxsat),
+       .frm_i(frm),
+@@ -151,6 +166,15 @@
+       .reg_write_valid_o(reg_write_valid),
+       .reg_write_addr_o(reg_write_addr),
+       .reg_write_data_o(reg_write_data),
++      .reg_write_tag_o(reg_write_tag),
++      .cfg_valid_o(cfg_valid),
++      .cfg_tag_o(cfg_tag),
++      .cfg_wr_vl_o(cfg_wr_vl),
++      .cfg_wr_vtype_o(cfg_wr_vtype),
++      .cfg_wr_mtype_o(cfg_wr_mtype),
++      .cfg_vl_o(cfg_vl),
++      .cfg_vtype_o(cfg_vtype),
++      .cfg_mtype_o(cfg_mtype),
+       .cmd_valid_o(frontend_cmd_valid),
+       .cmd_data_o(frontend_cmd_data),
+       .queue_capacity_i(queue_capacity_internal),
+@@ -223,6 +247,7 @@
+     async_rd_valid = rt_xrf_valid_rvv2rvs[0];
+     async_rd_addr = rt_rvs_rvv2rvs[0].rt_index;
+     async_rd_data = rt_rvs_rvv2rvs[0].rt_data;
++    async_rd_tag = rt_rvs_rvv2rvs[0].rob_tag;
+     for (int i = 1; i < `NUM_RT_UOP; i++) begin
+       rt_rvs_ready_rvs2rvv[i] = 0;
+     end
+@@ -248,26 +273,17 @@
+   assign async_frd_valid = rvv2rvs_frd_valid[0];
+   assign async_frd_addr = rvv2rvs_frd_addr[0];
+   assign async_frd_data = rvv2rvs_frd_data[0];
+-
+-  // Backpressure
+-  logic wr_vxsat_ready;
+-  always_comb begin
+-    // TODO(derekjchow): Actually accept
+-    wr_vxsat_ready = 1;
+-  end
+-
+-  // CSR Update, unused for now
+-  logic                            wr_vxsat_valid;
+-  logic    [`VCSR_VXSAT_WIDTH-1:0] wr_vxsat;
+-
+-  // Floating point CSR Update, unused for now
+-  logic    rt2fcsr_write_valid;
+-  RVFEXP_t rt2fcsr_write_data;
+-  logic    fcsr2rt_write_ready;
+-  always_comb begin
+-    // TODO(derekjchow): Actually accept and use
+-    fcsr2rt_write_ready = 1;
+-  end
++  assign async_frd_tag = rvv2rvs_frd_rob_tag[0];
++`ifndef ZVE32F_ON
++  assign rvv2rvs_frd_valid = '0;
++  assign rvv2rvs_frd_addr = '0;
++  assign rvv2rvs_frd_data = '0;
++  assign rvv2rvs_frd_rob_tag = '0;
++`ifdef TB_SUPPORT
++  assign rvv2rvs_frd_pc = '0;
++`endif
++`endif
++
+ 
+   // Trap handling
+   logic  trap_valid_rvs2rvv;
+@@ -330,15 +346,10 @@
+       .async_frd_ready(rvv2rvs_frd_ready),
+ `endif
+ 
+-      .wr_vxsat_valid(wr_vxsat_valid),
+-      .wr_vxsat(wr_vxsat),
+-      .wr_vxsat_ready(wr_vxsat_ready),
+-
+-`ifdef ZVE32F_ON
+-      .rt2fcsr_write_valid(rt2fcsr_write_valid),
+-      .rt2fcsr_write_data(rt2fcsr_write_data),
+-      .fcsr2rt_write_ready(fcsr2rt_write_ready),
+-`endif
++      .cn_flags_valid_o(cn_flags_valid_o),
++      .cn_flags_tag_o(cn_flags_tag_o),
++      .cn_fflags_o(cn_fflags_o),
++      .cn_vxsat_o(cn_vxsat_o),
+       .trap_valid_rvs2rvv(trap_valid_rvs2rvv),
+       .trap_ready_rvv2rvs(trap_ready_rvv2rvs),
+       .vcsr_valid(vcsr_valid),
+@@ -358,21 +369,12 @@
+       .vme_lsuflush_rdy(),
+       .vmeRtVld(vmeRtVld_o),
+       .vmeRt(vmeRt_o),
+-      .vmeRtRdy(vmeRtRdy_i)
++      .vmeRtRdy(vmeRtRdy_i),
++      .cn_zvt_flags_valid_o(cn_zvt_flags_valid_o),
++      .cn_zvt_flags_tag_o(cn_zvt_flags_tag_o),
++      .cn_zvt_fflags_o(cn_zvt_fflags_o)
+ `endif
+   );
+ 
+-  // Connect vxsat signals to outputs (fixes C3 bug)
+-  assign wr_vxsat_valid_o = wr_vxsat_valid;
+-  assign wr_vxsat_o = wr_vxsat;
+-
+-  // Connect fflags signals to outputs
+-`ifdef ZVE32F_ON
+-  assign wr_fflags_valid_o = rt2fcsr_write_valid;
+-  assign wr_fflags_o = rt2fcsr_write_data;
+-`else
+-  assign wr_fflags_valid_o = 1'b0;
+-  assign wr_fflags_o = 5'b0;
+-`endif
+ 
+ endmodule
+diff --git a/hdl/verilog/rvv/inc/rvv_backend_define.svh b/hdl/verilog/rvv/inc/rvv_backend_define.svh
+--- a/hdl/verilog/rvv/inc/rvv_backend_define.svh
++++ b/hdl/verilog/rvv/inc/rvv_backend_define.svh
+@@ -131,12 +131,9 @@
+ `endif
+ 
+ `define ROB_DEPTH_WIDTH         $clog2(`ROB_DEPTH)
+-// Matches log2(p.retirementBufferSize) for retirementBufferSize = 16 in CoralNPU
+-`ifdef RTBUF_DEPTH
+-  `define ROB_TAG_WIDTH         $clog2(`RTBUF_DEPTH)
+-`else
+-  `define ROB_TAG_WIDTH         4
+-`endif
++// Opaque scalar instruction identity; never index the native ROB with this value.
++// Matches Parameters.nativeRobTagBits, including Context and slot generations.
++`define ROB_TAG_WIDTH           64
+ 
+ `define NUM_RT_UOP              4
+ `define PC_WIDTH                32

@@ -1,0 +1,1291 @@
+diff --git a/hdl/chisel/src/coralnpu/RetirementBuffer.scala b/hdl/chisel/src/coralnpu/RetirementBuffer.scala
+--- a/hdl/chisel/src/coralnpu/RetirementBuffer.scala
++++ b/hdl/chisel/src/coralnpu/RetirementBuffer.scala
+@@ -48,10 +48,37 @@
+   val trapPending             = Output(Bool())
+   val trapRetired             = Output(Bool())
+   val staleCompletionRejected = Output(UInt(16.W))
+-  val flagsDelta   = Input(Valid(new ParkedFlagsDeltaIO(p)))
++  // Scalar FloatCore plus every independent native retirement lane.
++  val flagsDelta   = Input(Vec(p.flagsDeltaPorts, Valid(new ParkedFlagsDeltaIO(p))))
+   val csrPark      = Input(Valid(new ParkedCsrDeltaIO(p)))
+   val retiredDelta = Output(Vec(p.retirementLanes, new RetiredFlagsDeltaIO(p)))
++  // Dispatch-time ordered entry classes (W2-04 Context-local CSR interlock counters).
++  val flagsCapable      = Input(Vec(p.instructionLanes, Bool()))
++  val configCapable     = Input(Vec(p.instructionLanes, Bool()))
++  // vset/mset lanes: the entry must NOT retire (not even via the no-GPR-write path,
++  // rd=x0) before its OWN tagged config payload parks at its slot. C-class CSR
++  // accesses set configCapable but never expect a payload.
++  val cfgPayloadExpected = Input(Vec(p.instructionLanes, Bool()))
++  val flagsInFlight     = Output(Bool())
++  val configInFlight    = Output(Bool())
++  val parkedFlagsPresent = Output(Bool())
+   val isVector                = Option.when(p.enableRvv)(Input(Vec(p.instructionLanes, Bool())))
++  // C027 cancel-isolation observability (private, not a frozen ABI): per PHYSICAL slot,
++  //   liveMask(x)  — slot x currently holds an entry (its age-ordinal
++  //                  (x - deqPtr) mod bufferSize is inside the nEnqueued window);
++  //   readyMask(x) — live AND its result is complete AND cfDone (the entry itself could
++  //                  retire in this scan if no older lane blocks it).
++  // Consumers snapshot these bitmaps across another Context's cancel/reuse to prove
++  // bit-for-bit invariance of B's partition (W2-D06 / RET-06).
++  val liveMask  = Output(UInt(p.retirementBufferSize.W))
++  val readyMask = Output(UInt(p.retirementBufferSize.W))
++  val pendingDataMask = Output(UInt(p.retirementBufferSize.W))
++  // Retire-point config commit: the IMMUTABLE per-op payload (captured at the
++  // vset/mset op's own execution, parked at its slot) published at that entry's own
++  // retirement — never a sample of the shared engine state at retire time.
++  val retiredConfig = Output(Valid(new RetiredConfigIO(p)))
++  // Per-op config payload park input (owner + rob_tag identity, field masks, values).
++  val configDelta = Input(Vec(p.configDeltaPorts, Valid(new ParkedConfigIO(p))))
+   val isTile                  = Option.when(p.enableVme)(Input(Vec(p.instructionLanes, Bool())))
+   val clearVstart             = Option.when(p.enableRvv)(Output(Bool()))
+   val writeDataTile = Option.when(p.enableVme)(
+@@ -91,6 +118,13 @@
+     val isBranch             = Bool()
+     val isVector             = Bool()
+     val resetsVstart         = Bool()
++    // W2-04 ordered classes: flags-capable entries block same-Context flags/config CSR
++    // reads until retired; config-capable entries block vector-op dispatch until retired.
++    val flagsCapable  = Bool()
++    val configCapable = Bool()
++    // True only for vset/mset: retirement waits for its own parked config payload
++    // (valid bit, not data: a legitimate VL=0 / illegal-vtype payload is all zero).
++    val needsCfgPayload = Bool()
+     // Target storage removed in favor of linkOk check for area optimization
+     val linkOk       = Bool()
+     val isEcall      = Bool()
+@@ -160,7 +194,10 @@
+     isBranch: Bool,
+     isTile: Bool,
+     linkOk: Bool,
+-    isFault: Bool
++    isFault: Bool,
++    flagsCapable: Bool = false.B,
++    configCapable: Bool = false.B,
++    cfgPayloadExpected: Bool = false.B
+   ): Instruction = {
+     val floatValid = floatAddr.map(_.valid).getOrElse(false.B)
+     val fAddr      = floatAddr.map(_.addr).getOrElse(0.U)
+@@ -223,6 +260,9 @@
+     instr.linkOk        := linkOk
+     instr.isEcall       := (finst.inst === 0x73.U)
+     instr.isMpause      := (finst.inst === 0x08000073.U)
++    instr.flagsCapable    := flagsCapable && !isFault
++    instr.configCapable   := configCapable && !isFault
++    instr.needsCfgPayload := cfgPayloadExpected && !isFault
+     instr.isTile        := isTile
+     instr.isMtypeWrite  := (if (p.enableVme) RvvCompressedInstruction.writesMtype(finst.inst)
+                            else false.B)
+@@ -337,7 +377,10 @@
+         io.branch(i),
+         isTile,
+         linkOk,
+-        isDecodeFault
++        isDecodeFault,
++        flagsCapable       = io.flagsCapable(i),
++        configCapable      = io.configCapable(i),
++        cfgPayloadExpected = io.cfgPayloadExpected(i)
+       )
+     )
+   })
+@@ -479,6 +522,17 @@
+     }
+   }
+ 
++  // Config payload park array (declared before the retire scan: the scan gates
++  // vset/mset retirement on its OWN payload being parked — rd=x0 entries have no
++  // GPR writeback and must not retire early and drop a later payload).
++  val parkedCfg = RegInit(VecInit.fill(bufferSize)(0.U.asTypeOf(new ParkedConfigIO(p))))
++  val cfgParkHit = Wire(Vec(bufferSize, Bool()))
++  val cfgParkValue = Wire(Vec(bufferSize, new ParkedConfigIO(p)))
++  val cfgPortHits = Seq.fill(p.configDeltaPorts)(Wire(Vec(bufferSize, Bool())))
++  val ordinalBySlot = VecInit.tabulate(bufferSize) { slot =>
++    if (bufferSize > 1) (slot.U(robSlotWidth.W) - accDeqPtr)(robSlotWidth - 1, 0) else 0.U(1.W)
++  }
++
+   // Compute update based on register writeback.
+   // Note: The shift when committing instructions will be handled in a later block.
+   val resultUpdate = Wire(Vec(bufferSize, Valid(new InstructionUpdate)))
+@@ -493,7 +547,7 @@
+     // Check if this entry is an operation that doesn't require a register write, but is not a store.
+     val nonWritingInstr =
+       (bufferEntry.idx === noWriteRegIdx) && !bufferEntry.isTile &&
+-        (!bufferEntry.isMtypeWrite || mtypeReady)
++        (!bufferEntry.isMtypeWrite || mtypeReady || bufferEntry.needsCfgPayload)
+     val storeInstr = bufferEntry.idx === storeRegIdx
+ 
+     // Match scalar and float writebacks strictly by OwnerTag (no bare register-number matching).
+@@ -689,6 +743,8 @@
+     val currentCfDone   = prevCfDone || newCfDone
+ 
+     // If updated, mark this buffer entry as complete for the next cycle.
++    // Data completion latches INDEPENDENTLY of the config payload (an early rd!=x0
++    // writeback must not be lost waiting for it); retirement visibility requires BOTH.
+     resultUpdate(i).valid       := currentDataDone
+     resultUpdate(i).bits.cfDone := currentCfDone
+     resultUpdate(i).bits.result := 0.U
+@@ -727,13 +783,23 @@
+ 
+   val hasTrap = resultUpdate.map(x => x.valid && x.bits.trap).reduce(_ || _)
+ 
++  // Preserve data completion independently; only retirement waits for the
++  // matching config payload. A trap may retire without a successful payload.
++  val entryCanRetire = VecInit.tabulate(bufferSize) { i =>
++    val slot = if (bufferSize > 1) (accDeqPtr +& i.U)(robSlotWidth - 1, 0) else 0.U(1.W)
++    val cfgReady = !instBuffer.io.dataOut(i).needsCfgPayload ||
++      parkedCfg(slot).valid || cfgParkHit(slot) || resultUpdate(i).bits.trap
++    (i.U < instBuffer.io.nEnqueued) && resultUpdate(i).valid &&
++      resultUpdate(i).bits.cfDone && cfgReady
++  }
++
+   val deqReady = {
+     val blockRetire = VecInit
+       .tabulate(p.retirementLanes) { i =>
+         if (i == 0) {
+-          !resultUpdate(i).valid || !resultUpdate(i).bits.cfDone
++          !entryCanRetire(i)
+         } else {
+-          !resultUpdate(i).valid || !resultUpdate(i).bits.cfDone || resultUpdate(i - 1).bits.trap
++          !entryCanRetire(i) || resultUpdate(i - 1).bits.trap
+         }
+       }
+       .asUInt
+@@ -744,11 +810,8 @@
+   io.deqReadyOut         := deqReady
+ 
+   val trapRetired = {
+-    val laneReady = VecInit(
+-      resultUpdate.take(p.retirementLanes).map(x => x.valid && x.bits.cfDone)
+-    )
+-    // This does not consider previous traps because we're going to reduce.
+-    val laneCanTrap = laneReady.scanLeft(true.B)(_ && _).drop(1)
++    // Prefix eligibility is shared with dequeue, including config readiness.
++    val laneCanTrap = entryCanRetire.take(p.retirementLanes).scanLeft(true.B)(_ && _).drop(1)
+     VecInit
+       .tabulate(p.retirementLanes) { i =>
+         laneCanTrap(i) && resultUpdate(i).bits.trap
+@@ -777,9 +840,11 @@
+     }
+   }
+ 
+-  // W2-04 ordered deltas: a parallel parked-delta register array keyed by ROB slot.
+-  // (instBuffer.io.dataOut is a read-only view; deltas live here and are consumed at
+-  // the slot's own retirement beat, then cleared — CFG-04, no first-to-arrive merge.)
++  // W2-04 ordered deltas: a parallel parked-delta register array keyed by PHYSICAL ROB
++  // slot. `instBuffer.io.dataOut` is a read-only, AGE-ORDERED view (ordinal 0 = oldest
++  // entry); the physical slot of ordinal `o` is `(accDeqPtr + o) mod bufferSize`. Deltas
++  // live here and are consumed at the slot's own retirement beat, then cleared — CFG-04,
++  // no first-to-arrive merge.
+   class ParkedEntry extends Bundle {
+     val valid = Bool()
+     val fflags = UInt(5.W)
+@@ -790,31 +855,93 @@
+     val frmVal = UInt(3.W)
+   }
+   val parked = RegInit(VecInit.fill(bufferSize)(0.U.asTypeOf(new ParkedEntry)))
+-  val parkHwOH = VecInit((0 until bufferSize).map { x =>
+-    val slotRobTag = RobTag.make(p)(ctxSlotU, x.U, slotGen(x))
+-    io.flagsDelta.valid && RobTag.matches(io.flagsDelta.bits.rob_tag, slotRobTag)
+-  })
+-  val csrParkOH = VecInit((0 until bufferSize).map { x =>
+-    io.csrPark.valid && OwnerTag.matches(io.csrPark.bits.owner, instBuffer.io.dataOut(x).owner)
+-  })
++
++  private def physSlotOf(o: UInt): UInt =
++    if (bufferSize > 1) (accDeqPtr +& o)(robSlotWidth - 1, 0) else 0.U(1.W)
++
++  // Both identity domains must match the live physical slot, including task reuse.
++  val hwParkHit = Seq.fill(p.flagsDeltaPorts)(Wire(Vec(bufferSize, Bool())))
++  for (j <- 0 until p.flagsDeltaPorts; slot <- 0 until bufferSize) {
++    val ordinal = ordinalBySlot(slot)
++    val entry = instBuffer.io.dataOut(ordinal)
++    val expectedTag = RobTag.make(p)(ctxSlotU, slot.U(robSlotWidth.W), slotGen(slot))
++    hwParkHit(j)(slot) := io.flagsDelta(j).valid && (ordinal < instBuffer.io.nEnqueued) &&
++      RobTag.matches(io.flagsDelta(j).bits.rob_tag, expectedTag) &&
++      OwnerTag.matches(io.flagsDelta(j).bits.owner, entry.owner)
++  }
++  // Software CSR park: the owner rides Csr's one-beat req pipeline, so it matches exactly
++  // one live entry (mapped through the age-ordered view to its PHYSICAL slot).
++  val csrParkHit = Wire(Vec(bufferSize, Bool()))
++  for (slot <- 0 until bufferSize) {
++    val ordinal = ordinalBySlot(slot)
++    csrParkHit(slot) := io.csrPark.valid && (ordinal < instBuffer.io.nEnqueued) &&
++      OwnerTag.matches(io.csrPark.bits.owner, instBuffer.io.dataOut(ordinal).owner)
++  }
++
++  // Pure old-state -> new-state fold for one incoming delta. Deliberately NOT a
++  // when/assign helper on a mutable entry: a Wire field assigned `w := w | x` reads its
++  // own final value (combinational loop), and two conditional whens on the same
++  // register field drop the first arrival under last-connect-wins. Folding through
++  // explicit intermediate values keeps every arrival and stays loop-free.
++  private def foldOne(
++    oF:  UInt,
++    oV:  Bool,
++    oRF: Bool,
++    oRV: Bool,
++    fire: Bool,
++    fflags: UInt,
++    vxsat: Bool,
++    repF: Bool,
++    repV: Bool
++  ): (UInt, Bool, Bool, Bool) = {
++    val nF  = Mux(fire && repF, fflags, Mux(fire, oF | fflags, oF))
++    val nV  = Mux(fire && repV, vxsat, Mux(fire, oV | vxsat, oV))
++    val nRF = oRF || (fire && repF)
++    val nRV = oRV || (fire && repV)
++    (nF, nV, nRF, nRV)
++  }
++
++  private def foldArrivals(oldPk: ParkedEntry, slot: UInt): (UInt, Bool, Bool, Bool, Bool, UInt, Bool) = {
++    val hw = (0 until p.flagsDeltaPorts).foldLeft(
++      (oldPk.fflags, oldPk.vxsat, oldPk.repF, oldPk.repV)
++    ) { (acc, j) =>
++      val d = io.flagsDelta(j).bits
++      foldOne(acc._1, acc._2, acc._3, acc._4,
++        hwParkHit(j)(slot), d.fflags, d.vxsat, d.replaceFflags, d.replaceVxsat)
++    }
++    val a2 = foldOne(hw._1, hw._2, hw._3, hw._4,
++      csrParkHit(slot), io.csrPark.bits.fflags, io.csrPark.bits.vxsat,
++      io.csrPark.bits.replaceFflags, io.csrPark.bits.replaceVxsat)
++    val frmB    = oldPk.frm || (csrParkHit(slot) && io.csrPark.bits.commitsFrm)
++    val frmVal  = Mux(csrParkHit(slot) && io.csrPark.bits.commitsFrm,
++      io.csrPark.bits.frmValue, oldPk.frmVal)
++    val anyFire = hwParkHit.map(_(slot)).reduce(_ || _) || csrParkHit(slot)
++    (a2._1, a2._2, a2._3, a2._4, frmB, frmVal, oldPk.valid || anyFire)
++  }
++
+   for (x <- 0 until bufferSize) {
+-    when(parkHwOH(x)) {
+-      parked(x).valid := true.B
+-      when(io.flagsDelta.bits.replaceFflags) {
+-        parked(x).fflags := io.flagsDelta.bits.fflags; parked(x).repF := true.B
+-      } .otherwise { parked(x).fflags := parked(x).fflags | io.flagsDelta.bits.fflags }
+-      when(io.flagsDelta.bits.replaceVxsat) {
+-        parked(x).vxsat := io.flagsDelta.bits.vxsat; parked(x).repV := true.B
+-      } .otherwise { parked(x).vxsat := parked(x).vxsat | io.flagsDelta.bits.vxsat }
+-    }
+-    when(csrParkOH(x)) {
+-      val w = io.csrPark.bits
+-      parked(x).valid := true.B
+-      when(w.replaceFflags) { parked(x).fflags := w.fflags; parked(x).repF := true.B }
+-      .otherwise { parked(x).fflags := parked(x).fflags | w.fflags }
+-      when(w.replaceVxsat) { parked(x).vxsat := w.vxsat; parked(x).repV := true.B }
+-      .otherwise { parked(x).vxsat := parked(x).vxsat | w.vxsat }
+-      when(w.commitsFrm) { parked(x).frm := true.B; parked(x).frmVal := w.frmValue }
++    val folded = foldArrivals(parked(x), x.U)
++    when(hwParkHit.map(_(x)).reduce(_ || _) || csrParkHit(x)) {
++      parked(x).valid  := folded._7
++      parked(x).fflags := folded._1
++      parked(x).vxsat  := folded._2
++      parked(x).repF   := folded._3
++      parked(x).repV   := folded._4
++      parked(x).frm    := folded._5
++      parked(x).frmVal := folded._6
++    }
++    // Slot lifecycle clears — placed AFTER the park writes above so last-connect-wins
++    // never resurrects an entry that is simultaneously leaving the buffer:
++    //   trapRetired flushes the WHOLE partition (all parked deltas of this Context die);
++    //   re-allocation of a physical slot clears any residue of its previous occupant.
++    val isEnqueuingSlot = (0 until p.instructionLanes)
++      .map { k =>
++        val slotIdx = if (bufferSize > 1) (accEnqPtr +& k.U)(robSlotWidth - 1, 0) else 0.U(1.W)
++        (k.U < instBuffer.io.enqValid) && (x.U === slotIdx)
++      }
++      .reduce(_ || _)
++    when(trapRetired || isEnqueuingSlot) {
++      parked(x) := 0.U.asTypeOf(new ParkedEntry)
+     }
+   }
+ 
+@@ -845,10 +972,45 @@
+   val staleFault = faultRetire.valid && !faultRetire.bits.is_rvv.getOrElse(false.B) &&
+     (faultRetire.bits.owner.ctx_slot === ctxSlotU) &&
+     (faultRetire.bits.owner.ctx_generation =/= io.ctxGeneration)
++  // Deltas addressed to THIS Context slot that match no live occupant are stale
++  // (recycled slot, wrong slot_generation, or an old task generation after perCtxReset):
++  // rejected and counted, never merged into the new occupant (W2-04 reject+count).
++  val staleDeltaVec = VecInit((0 until p.flagsDeltaPorts).map { j =>
++    io.flagsDelta(j).valid && (io.flagsDelta(j).bits.rob_tag.ctx_slot === ctxSlotU) &&
++      !hwParkHit(j).asUInt.orR
++  })
++  val staleCsrPark = io.csrPark.valid && (io.csrPark.bits.owner.ctx_slot === ctxSlotU) &&
++    !csrParkHit.asUInt.orR
++  val staleConfigVec = VecInit((0 until p.configDeltaPorts).map { j =>
++    io.configDelta(j).valid && (io.configDelta(j).bits.rob_tag.ctx_slot === ctxSlotU) &&
++      !cfgPortHits(j).asUInt.orR
++  })
+   val staleReg = RegInit(0.U(16.W))
+   staleReg := staleReg + staleStore.asUInt +& PopCount(staleScalarVec) +&
+-    staleFloatCount +& staleVecCount +& staleFault.asUInt
++    staleFloatCount +& staleVecCount +& staleFault.asUInt +&
++    PopCount(staleDeltaVec) +& staleCsrPark.asUInt +& PopCount(staleConfigVec)
+   io.staleCompletionRejected := staleReg
++
++  // W2-04 Context-local interlock projections: flags/config-class entries still in the
++  // buffer, and parked deltas not yet consumed by their slot's retirement.
++  io.flagsInFlight := (0 until bufferSize).map { o =>
++    (o.U < instBuffer.io.nEnqueued) && instBuffer.io.dataOut(o).flagsCapable
++  }.reduce(_ || _)
++  io.configInFlight := (0 until bufferSize).map { o =>
++    (o.U < instBuffer.io.nEnqueued) && instBuffer.io.dataOut(o).configCapable
++  }.reduce(_ || _)
++  io.parkedFlagsPresent := parked.map { pk =>
++    pk.valid && (pk.fflags =/= 0.U || pk.vxsat || pk.repF || pk.repV || pk.frm)
++  }.reduce(_ || _)
++
++  // C027 cancel-isolation observability: physical-slot live/completion bitmaps (see IO).
++  io.liveMask := VecInit(ordinalBySlot.map(_ < instBuffer.io.nEnqueued)).asUInt
++  io.pendingDataMask := VecInit(ordinalBySlot.map(o =>
++    (o < instBuffer.io.nEnqueued) && !resultUpdate(o).valid)).asUInt
++  io.readyMask := VecInit((0 until bufferSize).map { x =>
++    val o = ordinalBySlot(x)
++    entryCanRetire(o)
++  }).asUInt
+ 
+   if (p.enableRvv) {
+ 
+@@ -902,17 +1064,87 @@
+     val laneRetiring = (lane.U < deqReady) && !resultUpdate(lane).bits.trap
+     val entry        = instBuffer.io.dataOut(lane)
+     val laneSlot     = if (bufferSize > 1) (accDeqPtr +& lane.U)(robSlotWidth - 1, 0) else 0.U(1.W)
+-    val pk           = parked(laneSlot)
+-    io.retiredDelta(lane).valid := laneRetiring && pk.valid &&
+-      (pk.fflags =/= 0.U || pk.vxsat || pk.repF || pk.repV || pk.frm)
++    // Publish the parked value MERGED with any delta arriving in this same beat: a slot
++    // whose completion and retirement coincide (e.g. FloatCore result + fflags in one
++    // beat) must not lose its delta to the clearing connect below. Pure fold (same
++    // helper as the register write path) — no self-referential Wire reads.
++    val eff = foldArrivals(parked(laneSlot), laneSlot)
++    io.retiredDelta(lane).valid := laneRetiring && eff._7 &&
++      (eff._1 =/= 0.U || eff._2 || eff._3 || eff._4 || eff._5)
+     io.retiredDelta(lane).owner         := entry.owner
+-    io.retiredDelta(lane).fflags        := pk.fflags
+-    io.retiredDelta(lane).vxsat         := pk.vxsat
+-    io.retiredDelta(lane).replaceFflags := pk.repF
+-    io.retiredDelta(lane).replaceVxsat  := pk.repV
+-    io.retiredDelta(lane).commitsFrm    := pk.frm
+-    io.retiredDelta(lane).frmValue      := pk.frmVal
++    io.retiredDelta(lane).fflags        := eff._1
++    io.retiredDelta(lane).vxsat         := eff._2
++    io.retiredDelta(lane).replaceFflags := eff._3
++    io.retiredDelta(lane).replaceVxsat  := eff._4
++    io.retiredDelta(lane).commitsFrm    := eff._5
++    io.retiredDelta(lane).frmValue      := eff._6
+     when(laneRetiring) { parked(laneSlot) := 0.U.asTypeOf(new ParkedEntry) }
++  }
++
++  // Each native lane publishes its own immutable config result. Matching uses
++  // physical slot identity, never a sample of mutable engine state at retirement.
++  for (slot <- 0 until bufferSize) {
++    val ordinal = ordinalBySlot(slot)
++    val expectedTag = RobTag.make(p)(ctxSlotU, slot.U(robSlotWidth.W), slotGen(slot))
++    val hits = VecInit((0 until p.configDeltaPorts).map { j =>
++      val d = io.configDelta(j)
++      val hit = d.valid && (ordinal < instBuffer.io.nEnqueued) &&
++        RobTag.matches(d.bits.rob_tag, expectedTag) &&
++        OwnerTag.matches(d.bits.owner, instBuffer.io.dataOut(ordinal).owner)
++      cfgPortHits(j)(slot) := hit
++      hit
++    })
++    assert(PopCount(hits) <= 1.U, "duplicate config payload for one ROB entry")
++    cfgParkHit(slot) := hits.asUInt.orR
++    cfgParkValue(slot) := Mux1H(hits, io.configDelta.map(_.bits))
++    cfgParkValue(slot).valid := hits.asUInt.orR
++    when(cfgParkHit(slot)) { parkedCfg(slot) := cfgParkValue(slot) }
++    val isEnqueuingCfg = (0 until p.instructionLanes)
++      .map { k =>
++        val slotIdx = if (bufferSize > 1) (accEnqPtr +& k.U)(robSlotWidth - 1, 0) else 0.U(1.W)
++        (k.U < instBuffer.io.enqValid) && (slot.U === slotIdx)
++      }
++      .reduce(_ || _)
++    when(trapRetired || isEnqueuingCfg) {
++      parkedCfg(slot) := 0.U.asTypeOf(new ParkedConfigIO(p))
++    }
++  }
++  // Fold ALL retiring config records in lane (program) order instead of selecting
++  // one youngest record: writers with disjoint masks (one VL/VTYPE, another MTYPE) in
++  // the same retire beat must ALL land, each field last-writer-wins in program order.
++  // A configDelta arriving in the SAME beat as its slot's retirement bypasses into the
++  // fold (arrival+retire), exactly like the flags publication path.
++  val retiredCfgFolded = (0 until p.retirementLanes).foldLeft(
++    0.U.asTypeOf(new RetiredConfigIO(p))
++  ) { (acc, lane) =>
++    val s    = physSlotOf(lane.U)
++    val fire = (lane.U < deqReady) && !resultUpdate(lane).bits.trap &&
++      instBuffer.io.dataOut(lane).needsCfgPayload && (parkedCfg(s).valid || cfgParkHit(s))
++    val src = Wire(new ParkedConfigIO(p))
++    src := parkedCfg(s)
++    when(cfgParkHit(s)) { src := cfgParkValue(s) }
++    val r = Wire(new RetiredConfigIO(p))
++    r := acc
++    when(fire) {
++      when(src.wrVl) { r.vl := src.vl }
++      when(src.wrVtype) { r.vtype := src.vtype }
++      when(src.wrMtype) { r.mtype := src.mtype }
++      r.wrVl := acc.wrVl || src.wrVl
++      r.wrVtype := acc.wrVtype || src.wrVtype
++      r.wrMtype := acc.wrMtype || src.wrMtype
++      r.valid := true.B
++      r.rob_tag := src.rob_tag
++    }
++    r
++  }
++  io.retiredConfig.valid := retiredCfgFolded.valid
++  io.retiredConfig.bits := retiredCfgFolded
++  // Consume the payload at its slot's retirement.
++  for (lane <- 0 until p.retirementLanes) {
++    val s = physSlotOf(lane.U)
++    when((lane.U < deqReady) && !resultUpdate(lane).bits.trap) {
++      parkedCfg(s) := 0.U.asTypeOf(new ParkedConfigIO(p))
++    }
+   }
+ 
+   resultBuffer := Mux(
+diff --git a/hdl/chisel/src/coralnpu/scalar/Csr.scala b/hdl/chisel/src/coralnpu/scalar/Csr.scala
+--- a/hdl/chisel/src/coralnpu/scalar/Csr.scala
++++ b/hdl/chisel/src/coralnpu/scalar/Csr.scala
+@@ -28,7 +28,6 @@
+   val vxsat  = Input(Bool())
+   // VME (Zvt). Tied to 0 when enableVme=false.
+   val mtype  = Input(UInt(p.xlen.W))
+-  val fflags = Input(Valid(UInt(5.W)))
+   // From Csr to RvvCore
+   val vstart_write = Output(Valid(UInt(log2Ceil(p.rvvVlen).W)))
+   val vxrm_write   = Output(Valid(UInt(2.W)))
+@@ -262,10 +261,22 @@
+     val retiredFflagsValid   = Input(Bool())
+     val retiredFflagsBits    = Input(UInt(5.W))
+     val retiredFrmCommit     = Input(Valid(UInt(3.W)))
++    // W2-04: number of frm-class writers retiring THIS beat (the flat bus coalesces
++    // several retiring lanes into one last-lane value; the pending-shadow counter must
++    // decrement by the exact writer count or it deadlocks nonzero).
++    val retiredFrmCommitCount = Input(UInt(log2Ceil(p.retirementLanes + 1).W))
+     // W2-04: software writes to fflags/fcsr(frm part)/frm are OBSERVED here and
+     // exported for ROB parking; the architectural commit happens at retirement.
+     val csrParkOut = Output(Valid(new ParkedCsrDeltaIO(p)))
+     val reqOwner   = Input(new OwnerTag(p))  // owner of the CSR op observed at req beat
++    // W2-04: true when the request came from the Debug Module arbiter port. DM writes
++    // have no ROB slot to park at, so flags-class DM writes apply architecturally at
++    // the req beat (upstream legacy semantics) and never park.
++    val reqFromDm    = Input(Bool())
++    // Trap flush of the owning Context: in-flight frm-class writers die with the flush,
++    // so their pending shadow must drop this beat.
++    val flushPending  = Input(Bool())
++    val frmPendingOut = Output(Bool())
+     val obsFflags            = Output(UInt(5.W))
+     val obsFrm               = Output(UInt(3.W))
+     val obsMscratch          = Output(UInt(p.xlen.W))
+@@ -613,7 +624,6 @@
+ 
+   val rvv_dirty_event = Option.when(p.enableRvv) {
+     (is_csr_write && (vstartEn.get || vxrmEn.get || vxsatEn.get || vlEn.get || vtypeEn.get)) ||
+-    io.rvv.get.fflags.valid ||
+     io.rvv_dirty.get ||
+     (if (p.enableVme) io.vme_vs_dirty.get else false.B)
+   }
+@@ -651,22 +661,53 @@
+     io.retiredFflagsBits,
+     Mux(io.retiredFflagsValid, fflags | io.retiredFflagsBits, fflags),
+   ))
++  // DM writes have no ROB slot, so they keep the direct (execute-beat) legacy write.
++  when(req.valid && io.reqFromDm && is_csr_write && (fflagsEn || fcsrEn)) {
++    fflags_base := wdata(4, 0)
++  }
+   when(io.retiredFrmCommit.valid) { frm := io.retiredFrmCommit.bits }
+-  // W2-04 ordered flags: software fflags/fcsr/frm writes NEVER touch the architectural
+-  // state at the execute beat. They park at the owning ROB slot (via csrParkOut) and
+-  // commit only when that slot retires. A write REPLACES the accumulator (wdata already
+-  // folds the op semantics: CSRRW/CSRRS/CSRRC merged against the pre-op rdata).
+-  val csrIsFflags = req.valid && is_csr_write && (fflagsEn || fcsrEn)
+-  val csrIsFrm    = req.valid && is_csr_write && (frmEn || fcsrEn)
+-  io.csrParkOut.valid := csrIsFflags || csrIsFrm
++  when(req.valid && io.reqFromDm && is_csr_write && (frmEn || fcsrEn)) {
++    frm := Mux(fcsrEn, localWdata(Cat(frm, fflags))(7, 5), localWdata(frm)(2, 0))
++  }
++
++  // ---- W2-04 ordered flags: software flags/config writes park at their ROB slot -----
++  // fflags/fcsr/frm/vxsat writes NEVER touch the architectural state at the execute
++  // beat. They park via csrParkOut and commit only when their slot retires, in Context
++  // program order. A write REPLACES the accumulator (wdata already folds the op
++  // semantics: CSRRW/CSRRS/CSRRC merged against the pre-op rdata). A CSRRS/CSRRC with
++  // rs1 == x0 is a pure read (is_csr_write false) and parks nothing.
++  val csrIsFflags = req.valid && is_csr_write && !io.reqFromDm && (fflagsEn || fcsrEn)
++  val csrIsFrm    = req.valid && is_csr_write && !io.reqFromDm && (frmEn || fcsrEn)
++  val csrIsVxsat  = req.valid && is_csr_write && !io.reqFromDm && vxsatEn.getOrElse(false.B)
++  io.csrParkOut.valid := csrIsFflags || csrIsFrm || csrIsVxsat
+   io.csrParkOut.bits.valid := true.B
+   io.csrParkOut.bits.owner := io.reqOwner
+   io.csrParkOut.bits.replaceFflags := csrIsFflags
+   io.csrParkOut.bits.fflags := Mux(csrIsFflags, wdata(4, 0), 0.U)
+-  io.csrParkOut.bits.replaceVxsat := false.B
+-  io.csrParkOut.bits.vxsat := false.B
++  io.csrParkOut.bits.replaceVxsat := csrIsVxsat
++  io.csrParkOut.bits.vxsat := Mux(csrIsVxsat, wdata(0), false.B)
+   io.csrParkOut.bits.commitsFrm := csrIsFrm
+   io.csrParkOut.bits.frmValue := Mux(fcsrEn, localWdata(Cat(frm, fflags))(7, 5), localWdata(frm)(2, 0))
++
++  // ---- frm pending shadow: dispatch-beat snapshot consumed by younger ops -----------
++  // While any older frm-class write is observed-but-unretired, younger FP/vector
++  // consumers see the shadow (the value the newest OLDER write will commit), never a
++  // pre-retire architectural value. Observation order equals program order (CSR ops
++  // issue alone on slot 0), so the newest shadow is always the value the next younger
++  // consumer must use. Counted (not boolean) so nested writers unwind in retire order;
++  // a trap flush clears it because flushed writers never retire.
++  val frmObserve = io.csrParkOut.valid && io.csrParkOut.bits.commitsFrm
++  val frmShadow  = RegInit(0.U(3.W))
++  val frmPendingCnt = RegInit(0.U(log2Ceil(p.retirementBufferSize + 1).W))
++  frmShadow := Mux(frmObserve, io.csrParkOut.bits.frmValue, frmShadow)
++  frmPendingCnt := Mux(
++    io.flushPending,
++    0.U,
++    frmPendingCnt + frmObserve.asUInt - io.retiredFrmCommitCount
++  )
++  io.frmPendingOut := frmPendingCnt =/= 0.U
++  val frmNextShadow = Mux(frmObserve, io.csrParkOut.bits.frmValue, frmShadow)
++  val frmView = Mux(frmPendingCnt =/= 0.U || frmObserve, frmNextShadow, frm)
+   when(req.valid) {
+     // fflags/frm/fcsr: architectural effect happens at retirement via the parked delta.
+     when(is_csr_write && mstatusEn) {
+@@ -701,7 +742,10 @@
+     io.rvv.get.vstart_write.bits  := wdata(log2Ceil(p.rvvVlen) - 1, 0)
+     io.rvv.get.vxrm_write.valid   := req.valid && vxrmEn.get
+     io.rvv.get.vxrm_write.bits    := wdata(1, 0)
+-    io.rvv.get.vxsat_write.valid  := req.valid && vxsatEn.get
++    // W2-04: software vxsat writes park at their ROB slot and commit at retire-point
++    // (CtxCsr aggregates the retiring lanes and SCore forwards the commit to the vector
++    // unit). Only DM writes keep the direct execute-beat path.
++    io.rvv.get.vxsat_write.valid  := req.valid && vxsatEn.get && io.reqFromDm
+     io.rvv.get.vxsat_write.bits   := wdata(0)
+   }
+ 
+@@ -815,22 +859,8 @@
+     mepc := mepcWord(io.bru.in.mepc.bits)
+   }
+ 
+-  if (p.enableFloat || p.enableRvv) {
+-    val float_fflags_valid = if (p.enableFloat) io.float.get.in.fflags.valid else false.B
+-    val float_fflags_bits  = if (p.enableFloat) io.float.get.in.fflags.bits else 0.U
+-    val rvv_fflags_valid   = if (p.enableRvv) io.rvv.get.fflags.valid else false.B
+-    val rvv_fflags_bits    = if (p.enableRvv) io.rvv.get.fflags.bits else 0.U
+-
+-    when(float_fflags_valid || rvv_fflags_valid) {
+-      val incoming_fflags = Mux(float_fflags_valid, float_fflags_bits, 0.U) |
+-        Mux(rvv_fflags_valid, rvv_fflags_bits, 0.U)
+-      fflags := fflags_base | incoming_fflags
+-    }.otherwise {
+-      fflags := fflags_base
+-    }
+-  } else {
+-    fflags := fflags_base
+-  }
++  // Both scalar and native flags arrive through their owning ROB entry.
++  fflags := fflags_base
+ 
+   // Interrupt generation
+   val in_debug          = mode === CsrMode.Debug
+@@ -865,19 +895,15 @@
+   io.bru.out.mepc  := Mux(mepcEn && req.valid, mepcWord(localWdata(mepc)), mepc)
+   io.bru.out.mtvec := Mux(mtvecEn && req.valid, mtvec_w, mtvec)
+ 
+-  val frmBypass = MuxCase(
+-    frm,
+-    Seq(
+-      (frmEn && req.valid)  -> localWdata(frm)(2, 0),
+-      (fcsrEn && req.valid) -> localWdata(Cat(frm, fflags))(7, 5)
+-    )
+-  )
+-
++  // W2-04: the rounding mode handed to FP/vector execution is the dispatch-beat
++  // SNAPSHOT (frmView = pending shadow while an older frm-class write is in flight),
++  // not the architectural frm (which only moves at retire-point). The old one-beat
++  // `frmBypass` window is subsumed: frmObserve fires in exactly that beat.
+   if (p.enableFloat) {
+-    io.float.get.out.frm := frmBypass
++    io.float.get.out.frm := frmView
+   }
+   if (p.enableRvv) {
+-    io.rvv.get.frm := frmBypass
++    io.rvv.get.frm := frmView
+   }
+ 
+   io.csr.out.value(0) := io.csr.in.value(12)
+diff --git a/hdl/chisel/src/coralnpu/scalar/Decode.scala b/hdl/chisel/src/coralnpu/scalar/Decode.scala
+--- a/hdl/chisel/src/coralnpu/scalar/Decode.scala
++++ b/hdl/chisel/src/coralnpu/scalar/Decode.scala
+@@ -384,6 +384,22 @@
+ 
+     val fbusPortAddr = Option.when(p.enableFloat)(Output(UInt(5.W)))
+ 
++    // W2-04 ordered-entry classes: flags-capable (float/rvv op or F-class CSR access)
++    // and config-capable (vset/mset or C-class CSR access), recorded in the ROB entry.
++    val flagsClass  = Output(Vec(p.instructionLanes, Bool()))
++    val configClass = Output(Vec(p.instructionLanes, Bool()))
++    // vset/mset only: their ROB entry must wait for its own tagged config payload.
++    val cfgPayloadExpected = Output(Vec(p.instructionLanes, Bool()))
++    // W2-04 Context-local CSR interlock projections for the ACTIVE Context (CFG-01..05;
++    // replaces the old "CSR waits for ROB empty" and cross-Context rvvIdle terms):
++    //   csrFlagsPending  — flags-capable entries of this Context not yet retired;
++    //   csrFrmPending    — an older frm-class write observed but un-retired (shadow);
++    //   csrConfigPending — config-class entries of this Context not yet retired;
++    //   rvvOrderedPending— parked flags delta or config-class entry still in flight.
++    val csrFlagsPending   = Input(Bool())
++    val csrFrmPending     = Input(Bool())
++    val csrConfigPending  = Input(Bool())
++    val rvvOrderedPending = Input(Bool())
+     val retirement_buffer_nSpace       = Input(UInt(log2Ceil(p.retirementBufferSize + 1).W))
+     val retirement_buffer_empty        = Input(Bool())
+     val retirement_buffer_trap_pending = Input(Bool())
+@@ -653,6 +669,92 @@
+     if (i == 0) { false.B }
+     else { decodedInsts(i).undef }
+   )
++
++  // ---------------------------------------------------------------------------
++  // W2-04 per-CSR ordered classification (CFG-01..05).
++  //
++  // Every CSR address the scalar core can dispatch falls in exactly one class:
++  //   F (flags/ordered):   fflags 0x001, frm 0x002, fcsr 0x003, vxsat 0x009.
++  //                        Writes park at their ROB slot and commit at retire-point
++  //                        (ordered merge, CFG-04). Accesses whose architectural READ
++  //                        value is visible (rd != x0) stall until no flags-capable
++  //                        entry of THIS Context is in flight (no forwarding); pure
++  //                        writes (rd == x0) proceed and park.
++  //   C (vector config):   vstart 0x008, vcsr 0x00F, vxrm 0x00A, vl 0xC20, vtype
++  //                        0xC21, mtype 0xC23. Reads/config effect must observe
++  //                        vset/mset/config-writer retirement; gated on the
++  //                        Context-local config/flags pending projections.
++  //   M (trap-affecting):  mstatus 0x300, mie 0x304, mtvec 0x305, mepc 0x341,
++  //                        mcause 0x342, mtval 0x343, dcsr 0x790, dpc 0x711. These
++  //                        keep the (per-active-Context) ROB-empty serialization so an
++  //                        older instruction's trap never consumes a younger write.
++  //   D (dispatch-free):   every other writable CSR (mscratch, mpc, msp, mcontext*,
++  //                        dscratch*, tselect/tdata*, mcycle/minstret(+h), kisa,
++  //                        kscm*) plus all read-only info CSRs — upstream dispatch-beat
++  //                        semantics, no ROB wait.
++  // vset/mset are RVV instructions: the native frontend computes their immutable
++  // configuration payload, and the owning scalar ROB entry commits it.
++  private def csrOrderedClass(idx: UInt): (Bool, Bool, Bool) = {
++    val isF = Seq(CsrAddress.FFLAGS, CsrAddress.FRM, CsrAddress.FCSR, CsrAddress.VXSAT)
++      .map(_.asUInt === idx).reduce(_ || _)
++    val isC = Seq(CsrAddress.VSTART, CsrAddress.VXRM, CsrAddress.VL, CsrAddress.VTYPE)
++      .map(_.asUInt === idx).reduce(_ || _) ||
++      (if (p.enableVme) idx === CsrAddress.MTYPE.asUInt else false.B)
++    val isM = Seq(
++      CsrAddress.MSTATUS, CsrAddress.MIE, CsrAddress.MTVEC, CsrAddress.MEPC,
++      CsrAddress.MCAUSE, CsrAddress.MTVAL, CsrAddress.DCSR, CsrAddress.DPC
++    ).map(_.asUInt === idx).reduce(_ || _)
++    (isF, isC, isM)
++  }
++
++  val csrOrderedGate = (0 until p.instructionLanes).map(i => {
++    val d               = decodedInsts(i)
++    val (isF, isC, isM) = csrOrderedClass(io.inst(i).bits.inst(31, 20))
++    val readsArch = io.inst(i).bits.inst(11, 7) =/= 0.U // rd != x0: read visible
++    // Only a true write-only op may bypass the read interlock: CSRRW/CSRRWI compute
++    // wdata from rs1 alone. CSRRS/CSRRC (even with rd == x0) read-modify-write against
++    // the architectural flags, so their parked REPLACE value is only correct once every
++    // older delta/config writer has merged — they wait exactly like visible reads.
++    val isCsrrw   = io.inst(i).bits.inst(13, 12) === "b01".U // CSRRW and CSRRWI
++    val pureWrite = !readsArch && isCsrrw
++    val fOk = !isF || pureWrite || (!io.csrFlagsPending && !io.csrFrmPending)
++    // C-class: config effect and reads wait for this Context's config/flags writers.
++    val cOk = !isC || (!io.csrConfigPending && !io.csrFlagsPending)
++    // M-class: keep per-active-Context ROB-empty serialization (trap-ordering safety).
++    val mOk = !isM || io.retirement_buffer_empty
++    !d.isCsr() || (fOk && cOk && mOk)
++  })
++
++  // W2-04 vector-op ordered interlock: an RVV op waits until no parked flags delta and
++  // no config-class entry of THIS Context is in flight (W2-D04 a+b, CFG-01..03). This is
++  // Context-local — it never inspects another Context's state, and unlike the deleted
++  // cross-Context rvvIdle criterion it cannot stall B because A parked.
++  val rvvOrderedInterlock = (0 until p.instructionLanes).map(i =>
++    if (p.enableRvv) {
++      !decodedInsts(i).rvv.get.valid || !io.rvvOrderedPending
++    } else {
++      true.B
++    }
++  )
++
++  // W2-04 ordered-entry classes recorded into the ROB (RetirementBuffer per-entry bits).
++  io.flagsClass := (0 until p.instructionLanes).map(i => {
++    val d             = decodedInsts(i)
++    val (isF, _, _)   = csrOrderedClass(io.inst(i).bits.inst(31, 20))
++    d.isFloat() || (if (p.enableRvv) d.rvv.get.valid else false.B) || (d.isCsr() && isF)
++  })
++  io.configClass := (0 until p.instructionLanes).map(i => {
++    val d           = decodedInsts(i)
++    val (_, isC, _) = csrOrderedClass(io.inst(i).bits.inst(31, 20))
++    (d.isCsr() && isC) ||
++    (if (p.enableRvv) d.rvv.get.valid && d.rvv.get.bits.isVset() else false.B) ||
++    (if (p.enableVme) d.isVmeMset() else false.B)
++  })
++  io.cfgPayloadExpected := (0 until p.instructionLanes).map(i => {
++    val d = decodedInsts(i)
++    (if (p.enableRvv) d.rvv.get.valid && d.rvv.get.bits.isVset() else false.B) ||
++    (if (p.enableVme) d.isVmeMset() else false.B)
++  })
+ 
+   // ---------------------------------------------------------------------------
+   // Core idle
+@@ -704,8 +806,8 @@
+       !undefInterlock(i) &&                  // Ensure undef is only dispatched from first slot
+       (i.U < io.retirement_buffer_nSpace) && // Retirement buffer needs space for our slot
+       !io.retirement_buffer_trap_pending &&  // Stall dispatch when a trap is pending
+-      (!decodedInsts(i)
+-        .isCsr() || io.retirement_buffer_empty) && // CSRs must wait for ROB to be empty
++      csrOrderedGate(i) &&      // W2-04: per-CSR class gates replace global serialization
++      rvvOrderedInterlock(i) && // W2-04: Context-local vector-op ordered interlock
+       singleStepInterlock(i) &&
+       mpauseInterlock(i)
+   )
+@@ -976,16 +1078,13 @@
+       val is_csr_write     = !(csr.bits.isOneOf(CsrOp.CSRRS, CsrOp.CSRRC) && rs1Addr(0) === 0.U)
+       val is_csr_read_only = csr_bits_index(11, 10) === 3.U
+       val csr_op_valid     = csr_address_valid && !(is_csr_write && is_csr_read_only)
+-      // Stall reads of vxsat (0x009), vcsr (0x00F), and (when VME is enabled)
+-      // mtype (0xC23) until the vector unit is idle. These CSRs can be
+-      // modified by in-flight vector instructions: saturating arithmetic sets
+-      // vxsat (vcsr contains vxsat as a bitfield); mset* updates mtype.
+-      val isVxsatOrVcsr = csr_bits_index === 0x009.U || csr_bits_index === 0x00f.U ||
+-        (if (p.enableVme) { csr_bits_index === 0xc23.U }
+-         else { false.B })
+-      val rvvIdleOrNotVxsat = io.rvvIdle.getOrElse(true.B) || !isVxsatOrVcsr
+-      io.csr.valid := tryDispatch && csr.valid && csr_op_valid &&
+-        io.float.map(_.ready).getOrElse(true.B) && rvvIdleOrNotVxsat
++      // W2-04 (CFG-05): the old cross-Context `rvvIdle` read gate for vxsat/vcsr/mtype
++      // is DELETED, and so is the global FloatCore-queue-ready term: a CSR access never
++      // uses the FP instruction queue, so an unrelated Context's busy float unit must
++      // not serialize a Context with no local pending deltas/config. Ordered reads are
++      // gated by `csrOrderedGate` on THIS Context's state; FP-op dispatch backpressure
++      // (io.float ready) is unchanged for actual float instructions.
++      io.csr.valid := tryDispatch && csr.valid && csr_op_valid
+       io.csr.bits.addr  := rdAddr(i)
+       io.csr.bits.index := csr_bits_index
+       io.csr.bits.rs1   := rs1Addr(i)
+@@ -1355,7 +1454,17 @@
+     if (p.enableFloat) {
+       val float      = FloatInstruction.decode(p, op, addr)
+       val floatValid = float.valid && float.bits.validate_csrfrm(csrFrm)
+-      d.float.get := MakeValid(floatValid, float.bits)
++      // W2-04 dispatch snapshot (H14): a DYN-rounded float op captures the rounding
++      // mode CURRENT at its own dispatch beat. FloatCore would otherwise resolve DYN
++      // against the LIVE frm at its execute beat, so a younger (parked, un-retired)
++      // csrw frm could re-round an older in-flight op. Embedding the static rm here
++      // makes the dispatched instruction immune to later frm observations; loads and
++      // stores encode their width in this field (never 111), so the rewrite is exact.
++      val floatSnap  = WireDefault(float.bits)
++      when(float.bits.rm === "b111".U) {
++        floatSnap.rm := csrFrm
++      }
++      d.float.get := MakeValid(floatValid, floatSnap)
+     }
+ 
+     // Stub out decoder state not used beyond pipeline0.
+diff --git a/hdl/chisel/src/coralnpu/scalar/SCore.scala b/hdl/chisel/src/coralnpu/scalar/SCore.scala
+--- a/hdl/chisel/src/coralnpu/scalar/SCore.scala
++++ b/hdl/chisel/src/coralnpu/scalar/SCore.scala
+@@ -19,7 +19,7 @@
+ import chisel3.util._
+ import common._
+ import coralnpu.float.FloatCore
+-import coralnpu.rvv.{Rob2Rt, RvvCoreIO}
++import coralnpu.rvv.{NativeScalarResult, Rob2Rt, RvvCoreIO}
+ 
+ object SCore {
+   def apply(p: Parameters): SCore = {
+@@ -89,9 +89,24 @@
+   regfile.io.perCtxFlush := rob_io.perCtxTrapRetired
+ 
+   rob_io.activeCtx       := activeCtx
+-  // W2-04: delta-park defaults; the FloatCore wiring overrides inside enableFloat.
+-  rob_io.flagsDelta.valid := false.B
+-  rob_io.flagsDelta.bits := DontCare
++  // Every producer has a dedicated port; simultaneous native lanes are lossless.
++  for (j <- 0 until p.flagsDeltaPorts) {
++    rob_io.flagsDelta(j).valid := false.B
++    rob_io.flagsDelta(j).bits := 0.U.asTypeOf(new ParkedFlagsDeltaIO(p))
++  }
++  for (j <- 0 until p.configDeltaPorts) {
++    rob_io.configDelta(j).valid := false.B
++    rob_io.configDelta(j).bits := 0.U.asTypeOf(new ParkedConfigIO(p))
++  }
++  // W2-04 ordered-entry classes and Context-local interlock projections.
++  rob_io.flagsCapable  := dispatch.io.flagsClass
++  rob_io.configCapable := dispatch.io.configClass
++  rob_io.cfgPayloadExpected := dispatch.io.cfgPayloadExpected
++  dispatch.io.csrFlagsPending   := rob_io.perCtxFlagsInFlight(activeCtx)
++  dispatch.io.csrConfigPending  := rob_io.perCtxConfigInFlight(activeCtx)
++  dispatch.io.rvvOrderedPending := rob_io.perCtxParkedFlags(activeCtx) ||
++    rob_io.perCtxConfigInFlight(activeCtx)
++  dispatch.io.csrFrmPending := csr.io.perCtxFrmPending(activeCtx)
+   rob_io.perCtxGen       := perCtxGenWire
+   rob_io.perCtxReset     := io.ctx.advanceGen
+   rob_io.dispatchOpSeq   := laneOpSeq
+@@ -107,14 +122,42 @@
+   dispatch.io.retirement_buffer_empty        := rob_io.empty
+   dispatch.io.retirement_buffer_trap_pending := rob_io.trapPending
+ 
+-  // Track composite RobTag / OwnerTag per RVV rob_slot until W3-02 partitions RvvCore ROB.
++  // Record every issued parent key. Native returns carry that immutable key;
++  // FloatCore's OwnerTag-only return uses the associative view of the same map.
+   val rvvSlotWidth = math.max(1, log2Ceil(p.retirementBufferSize))
+-  val rvvSlotOwner = Option.when(p.enableRvv)(
+-    RegInit(VecInit.fill(p.retirementBufferSize)(0.U.asTypeOf(new OwnerTag(p))))
+-  )
+-  val rvvSlotRobTag = Option.when(p.enableRvv)(
+-    RegInit(VecInit.fill(p.retirementBufferSize)(0.U.asTypeOf(new RobTag(p))))
+-  )
++  val flagsPark    = Module(new FlagsParkMap(p))
++  val flagsCamMiss = RegInit(0.U(16.W))
++  val nativeRejected = scala.collection.mutable.ArrayBuffer.empty[(UInt, Bool)]
++  flagsPark.io.liveMask := rob_io.perCtxLiveMask
++  flagsPark.io.generation := perCtxGenWire
++  flagsPark.io.pendingData := rob_io.perCtxPendingData
++  flagsPark.io.trap := rob_io.perCtxTrapRetired
++  flagsPark.io.settled.foreach { done => done.valid := false.B; done.bits := 0.U }
++  def nativeLive(raw: UInt, allowFlushed: Boolean = false): Bool = {
++    val key = NativeRobIdentity.unpack(p)(raw)
++    val inRange = key.ctx_slot < p.contextCount.U
++    val rawIndex = (key.ctx_slot << rvvSlotWidth) | key.rob_slot
++    val indexW = math.max(1, log2Ceil(p.contextCount * p.retirementBufferSize))
++    val index = Mux(inRange, rawIndex, 0.U)(indexW - 1, 0)
++    val eligible = if (allowFlushed) flagsPark.io.returnable(index) else flagsPark.io.live(index)
++    inRange && eligible && (flagsPark.io.expectedKeys(index) === raw)
++  }
++  def rejectNative(raw: UInt, fire: Bool, good: Bool): Unit = {
++    nativeRejected += ((NativeRobIdentity.unpack(p)(raw).ctx_slot, fire && !good))
++  }
++  for (i <- 0 until p.instructionLanes) {
++    val prevInstFires = PopCount((0 until i).map(j => dispatch.io.inst(j).fire))
++    val allocSlot = if (p.retirementBufferSize > 1) {
++      (rob_io.enqPtr + prevInstFires)(rvvSlotWidth - 1, 0)
++    } else {
++      0.U(1.W)
++    }
++    flagsPark.io.alloc(i).valid := dispatch.io.inst(i).fire
++    flagsPark.io.alloc(i).bits.owner := laneOwners(i)
++    flagsPark.io.alloc(i).bits.rob_tag := RobTag.make(p)(activeCtx, allocSlot, rob_io.enqSlotGen(i))
++  }
++
++  flagsPark.io.float.req := OwnerTag.zero(p)
+ 
+   val rvvFlushReg = Option.when(p.enableRvv)(RegNext(rob_io.trapRetired, false.B))
+   if (p.enableRvv) {
+@@ -130,11 +173,14 @@
+     )
+     rvvRdPipedBits := io.rvvcore.get.rd_rob2rt_o
+     (0 until p.rvvRetireLanes).foreach(i => {
+-      val rawSlot = rvvRdPipedBits(i).rob_tag
+-      rob_io.writeDataVector.get(i).valid        := rvvRdPipedValid(i)
++      val rawTag = rvvRdPipedBits(i).rob_tag
++      val identity = NativeRobIdentity.unpack(p)(rawTag)
++      val good = nativeLive(rawTag)
++      rejectNative(rawTag, rvvRdPipedValid(i), good)
++      rob_io.writeDataVector.get(i).valid        := rvvRdPipedValid(i) && good
+       rob_io.writeDataVector.get(i).bits.w_valid := rvvRdPipedBits(i).w_valid
+       rob_io.writeDataVector.get(i).bits.addr    := rvvRdPipedBits(i).w_index
+-      rob_io.writeDataVector.get(i).bits.rob_tag := rvvSlotRobTag.get(rawSlot)
++      rob_io.writeDataVector.get(i).bits.rob_tag := identity.robTag
+       if (p.enableVerification) {
+         rob_io.writeDataVector.get(i).bits.data.get   := rvvRdPipedBits(i).w_data.get
+         rob_io.writeDataVector.get(i).bits.uop_pc.get := rvvRdPipedBits(i).uop_pc.get
+@@ -144,8 +190,10 @@
+     if (p.enableVme) {
+       rob_io.isTile.get := dispatch.io.isTile.get
+       val vmeRtIn       = io.rvvcore.get.vmeRt.get
+-      rob_io.writeDataTile.get.valid         := vmeRtIn.valid
+-      rob_io.writeDataTile.get.bits.rob_tag  := rvvSlotRobTag.get(vmeRtIn.bits.rob_tag)
++      val tileGood = nativeLive(vmeRtIn.bits.rob_tag)
++      rejectNative(vmeRtIn.bits.rob_tag, vmeRtIn.valid, tileGood)
++      rob_io.writeDataTile.get.valid := vmeRtIn.valid && tileGood
++      rob_io.writeDataTile.get.bits.rob_tag := NativeRobIdentity.unpack(p)(vmeRtIn.bits.rob_tag).robTag
+       rob_io.writeDataTile.get.bits.is_store := vmeRtIn.bits.is_store
+       rob_io.writeDataTile.get.bits.mask     := vmeRtIn.bits.mask
+       rob_io.writeDataTile.get.bits.idx      := vmeRtIn.bits.idx
+@@ -155,14 +203,17 @@
+       }
+       for (k <- 0 until p.instructionLanes) {
+         val mwb = io.rvvcore.get.vmeMtypeWb.get(k)
+-        rob_io.vmeMtypeWb.get(k).valid        := mwb.valid
+-        rob_io.vmeMtypeWb.get(k).bits.rob_tag := rvvSlotRobTag.get(mwb.bits.rob_tag)
++        val good = nativeLive(mwb.bits.rob_tag)
++        rejectNative(mwb.bits.rob_tag, mwb.valid, good)
++        rob_io.vmeMtypeWb.get(k).valid := mwb.valid && good
++        rob_io.vmeMtypeWb.get(k).bits.rob_tag := NativeRobIdentity.unpack(p)(mwb.bits.rob_tag).robTag
+         if (p.enableVerification) {
+           rob_io.vmeMtypeWb.get(k).bits.data.get := mwb.bits.data.get
+         }
+       }
+       dispatch.io.mstatusMs.get := csr.io.mstatus_ms.get
+       val vmeEventValid = !(rob_io.trapRetired || rvvFlushReg.get || io.rvvcore.get.trap.valid)
++      csr.io.vmeOwner.get := RegNext(laneOwners(0), OwnerTag.zero(p))
+       csr.io.vme_discard.get  := RegNext(dispatch.io.vmeDiscard.get, false.B) && vmeEventValid
+       csr.io.vme_ms_dirty.get := RegNext(dispatch.io.vmeMsDirty.get, false.B) && vmeEventValid
+       csr.io.vme_vs_dirty.get := RegNext(dispatch.io.vmeVsDirty.get, false.B) && vmeEventValid
+@@ -234,16 +285,18 @@
+   }
+   fault_manager.io.in.memory_fault := lsu.io.fault
+   if (p.enableRvv) {
+-    fault_manager.io.in.rvv_fault.get.valid       := io.rvvcore.get.trap.valid
++    val trapKey = NativeRobIdentity.unpack(p)(io.rvvcore.get.trap.bits.rob_tag)
++    val trapGood = nativeLive(io.rvvcore.get.trap.bits.rob_tag)
++    rejectNative(io.rvvcore.get.trap.bits.rob_tag, io.rvvcore.get.trap.valid, trapGood)
++    fault_manager.io.in.rvv_fault.get.valid := io.rvvcore.get.trap.valid && trapGood
+     fault_manager.io.in.rvv_fault.get.bits.mepc   := io.rvvcore.get.trap.bits.pc
+     fault_manager.io.in.rvv_fault.get.bits.mcause := 2.U(32.W)
+     fault_manager.io.in.rvv_fault.get.bits.mtval  :=
+       io.rvvcore.get.trap.bits.originalEncoding()
+     fault_manager.io.in.rvv_fault.get.bits.decode      := false.B
+-    val trapSlot = io.rvvcore.get.trap.bits.rob_tag
+-    fault_manager.io.in.rvv_fault.get.bits.owner       := rvvSlotOwner.get(trapSlot)
+-    fault_manager.io.in.rvv_fault.get.bits.is_rvv.get  := true.B
+-    fault_manager.io.in.rvv_fault.get.bits.rob_tag.get := rvvSlotRobTag.get(trapSlot)
++    fault_manager.io.in.rvv_fault.get.bits.owner := trapKey.owner
++    fault_manager.io.in.rvv_fault.get.bits.is_rvv.get := true.B
++    fault_manager.io.in.rvv_fault.get.bits.rob_tag.get := trapKey.robTag
+     fault_manager.io.in.rvv_fault.get.bits.vstart.get  := MakeInvalid(0.U)
+   }
+   bru(0).io.fault_manager.get := fault_manager.io.out
+@@ -275,16 +328,14 @@
+   bru(0).io.csr.get <> csr.io.bru
+   csr.io.bruOwner      := bru(0).io.trapOwner.get
+ 
+-  // Instruction counters & retired flags delta (ordered merge connected in C027)
++  // Instruction counters & retired flags delta (ordered merge connected below)
+   csr.io.perCtxNRetired := rob_io.perCtxNRetired
+-  for (k <- 0 until p.retirementLanes) {
+-    csr.io.retiredDelta(k).valid         := false.B
+-    csr.io.retiredDelta(k).owner         := OwnerTag.zero(p)
+-    csr.io.retiredDelta(k).fflags        := 0.U
+-    csr.io.retiredDelta(k).vxsat         := false.B
+-    csr.io.retiredDelta(k).replaceFflags := false.B
+-    csr.io.retiredDelta(k).replaceVxsat  := false.B
+-  }
++  // A trap flush of any Context kills that Context's parked/pending writers: CtxCsr
++  // drops the frm shadow and the ROB partitions clear their parked arrays.
++  csr.io.perCtxTrapRetired := rob_io.perCtxTrapRetired
++  // Retire-point config commit pulses (vset/mset writers and C-class CSR writes):
++  // CtxCsr latches the architectural per-Context config values at these beats.
++  csr.io.perCtxRetiredConfig := rob_io.perCtxRetiredConfig
+ 
+   // ---------------------------------------------------------------------------
+   // Control Status Unit
+@@ -305,6 +356,9 @@
+     laneOwners(0),
+     OwnerTag.make(p)(activeCtx, activeCtxGen, 0.U)
+   )
++  // W2-04: DM (debug-module) CSR writes have no ROB slot, so they bypass the ordered
++  // park and keep direct execute-beat semantics inside Csr.
++  csr.io.reqFromDm := csrReqArbiter.io.chosen === 1.U
+   // W2-04: software flags/frm CSR writes park at their ROB slot (observed one beat
+   // after dispatch, when Csr computes wdata); merge at retirement, never before.
+   rob_io.csrPark := csr.io.csrParkOut
+@@ -401,8 +455,16 @@
+     val csr0Data  = if (i == 0) csr.io.rd.bits.data else 0.U
+     val csr0Owner = if (i == 0) csr.io.rd.bits.owner else OwnerTag.zero(p)
+ 
+-    val rvvSyncOwner   = RegNext(laneOwners(i), OwnerTag.zero(p))
+-    val rvvCoreRdValid = io.rvvcore.map(_.rd(i).valid).getOrElse(false.B)
++    val nativeRdTag = io.rvvcore.map(_.rd(i).bits.tag).getOrElse(0.U(p.nativeRobTagBits.W))
++    val rvvSyncOwner = NativeRobIdentity.unpack(p)(nativeRdTag).owner
++    val nativeRdValid = io.rvvcore.map(_.rd(i).valid).getOrElse(false.B)
++    val nativeRdGood = if (p.enableRvv) nativeLive(nativeRdTag, allowFlushed = true) else false.B
++    val rvvCoreRdValid = nativeRdValid && nativeRdGood
++    if (p.enableRvv) {
++      rejectNative(nativeRdTag, nativeRdValid, nativeRdGood)
++      flagsPark.io.settled(i).valid := rvvCoreRdValid
++      flagsPark.io.settled(i).bits := nativeRdTag
++    }
+     val rvvCoreRdAddr  = MuxOR(rvvCoreRdValid, io.rvvcore.map(_.rd(i).bits.addr).getOrElse(0.U))
+     val rvvCoreRdData  = MuxOR(rvvCoreRdValid, io.rvvcore.map(_.rd(i).bits.data).getOrElse(0.U))
+ 
+@@ -452,7 +514,10 @@
+   val floatWritePorts = 2
+   val fRegfile =
+     Option.when(p.enableFloat)(Module(new BankedFRegfile(p, floatReadPorts, floatWritePorts)))
+-  val lastRvvAsyncOwner = RegInit(0.U.asTypeOf(new OwnerTag(p)))
++  if (p.enableRvv && !p.enableFloat) {
++    io.rvvcore.get.async_frd.ready := true.B
++    assert(!io.rvvcore.get.async_frd.valid, "FPR return in a profile without scalar floating point")
++  }
+   if (p.enableFloat) {
+     fRegfile.get.io.activeCtx    := activeCtx
+     fRegfile.get.io.floatReadCtx := Mux(
+@@ -531,8 +596,12 @@
+     val lsuWriting = floatCore.get.io.write_ports(1).valid
+     if (p.enableRvv) {
+       val asyncFrd = io.rvvcore.get.async_frd
+-      asyncFrd.ready                       := !lsuWriting
+-      fRegfile.get.io.write_ports(1).valid := lsuWriting || asyncFrd.valid
++      val good = nativeLive(asyncFrd.bits.tag, allowFlushed = true)
++      asyncFrd.ready := !good || !lsuWriting
++      rejectNative(asyncFrd.bits.tag, asyncFrd.fire, good)
++      flagsPark.io.settled(p.instructionLanes + 1).valid := asyncFrd.fire && good
++      flagsPark.io.settled(p.instructionLanes + 1).bits := asyncFrd.bits.tag
++      fRegfile.get.io.write_ports(1).valid := lsuWriting || (asyncFrd.valid && good)
+       fRegfile.get.io.write_ports(1).addr  := Mux(
+         lsuWriting,
+         floatCore.get.io.write_ports(1).addr,
+@@ -546,7 +615,7 @@
+       fRegfile.get.io.write_ports(1).owner := Mux(
+         lsuWriting,
+         floatCore.get.io.writeOwner(1),
+-        lastRvvAsyncOwner
++        NativeRobIdentity.unpack(p)(asyncFrd.bits.tag).owner
+       )
+     } else {
+       fRegfile.get.io.write_ports(1).valid := floatCore.get.io.write_ports(1).valid
+@@ -562,17 +631,21 @@
+     dispatch.io.csrFrm.get      := csr.io.float.get.out.frm
+     floatCore.get.io.csr <> csr.io.float.get
+     csr.io.floatOwner.get := floatCore.get.io.fflagsOwner
+-    // W2-04: FloatCore deltas park at the owning ROB slot; merge only at retirement.
+-    val fflagsHit  = VecInit((0 until p.retirementBufferSize).map { x =>
+-      OwnerTag.matches(rvvSlotOwner.get(x), floatCore.get.io.fflagsOwner)
+-    })
+-    val fflagsSlot = OHToUInt(fflagsHit.asUInt)
+-    rob_io.flagsDelta.valid := floatCore.get.io.csr.in.fflags.valid && fflagsHit.asUInt.orR
+-    rob_io.flagsDelta.bits.rob_tag := rvvSlotRobTag.get(fflagsSlot)
+-    rob_io.flagsDelta.bits.fflags := floatCore.get.io.csr.in.fflags.bits
+-    rob_io.flagsDelta.bits.vxsat := false.B
+-    rob_io.flagsDelta.bits.replaceFflags := false.B
+-    rob_io.flagsDelta.bits.replaceVxsat := false.B
++    // W2-04: FloatCore deltas park at the owning ROB slot (FlagsParkMap CAM over the
++    // unified dispatch table — works for pure-scalar float programs, no enableRvv
++    // required); they merge only at that slot's retirement. A completing owner that no
++    // live slot matches (late delta after retire / swept slot) is dropped and counted.
++    flagsPark.io.float.req := floatCore.get.io.fflagsOwner
++    rob_io.flagsDelta(0).valid := floatCore.get.io.csr.in.fflags.valid &&
++      flagsPark.io.float.resp.valid
++    rob_io.flagsDelta(0).bits.owner := floatCore.get.io.fflagsOwner
++    rob_io.flagsDelta(0).bits.rob_tag := flagsPark.io.float.resp.bits
++    rob_io.flagsDelta(0).bits.fflags := floatCore.get.io.csr.in.fflags.bits
++    rob_io.flagsDelta(0).bits.vxsat := false.B
++    rob_io.flagsDelta(0).bits.replaceFflags := false.B
++    rob_io.flagsDelta(0).bits.replaceVxsat := false.B
++    flagsCamMiss := flagsCamMiss +
++      (floatCore.get.io.csr.in.fflags.valid && !flagsPark.io.float.resp.valid).asUInt
+     floatCore.get.io.rs1 := regfile.io.readData(0)
+     floatCore.get.io.rs2 := regfile.io.readData(1)
+ 
+@@ -603,13 +676,27 @@
+     w
+   }
+ 
++  def validateNativeScalar(src: DecoupledIO[NativeScalarResult]): DecoupledIO[OwnedRegfileWriteDataIO] = {
++    val dst = Wire(Decoupled(new OwnedRegfileWriteDataIO(p)))
++    val good = nativeLive(src.bits.tag, allowFlushed = true)
++    dst.valid := src.valid && good
++    dst.bits.addr := src.bits.addr
++    dst.bits.data := src.bits.data
++    dst.bits.owner := NativeRobIdentity.unpack(p)(src.bits.tag).owner
++    src.ready := !good || dst.ready
++    rejectNative(src.bits.tag, src.fire, good)
++    flagsPark.io.settled(p.instructionLanes).valid := src.fire && good
++    flagsPark.io.settled(p.instructionLanes).bits := src.bits.tag
++    dst
++  }
++
+   val dmWriteOwner = OwnerTag.make(p)(activeCtx, activeCtxGen, 0.U)
+   val mluDvuOffset = p.instructionLanes
+   val mluDvuInputs = Seq(
+     wrapOwnedDecoupled(mlu.io.rd, mlu.io.rdOwner),
+     wrapOwnedDecoupled(dvu.io.rd, dvu.io.rdOwner)
+   ) ++
+-    io.rvvcore.map(x => Seq(wrapOwnedDecoupled(x.async_rd, lastRvvAsyncOwner))).getOrElse(Seq()) ++
++    io.rvvcore.map(x => Seq(validateNativeScalar(x.async_rd))).getOrElse(Seq()) ++
+     floatCore.map(x => Seq(wrapOwnedDecoupled(x.io.scalar_rd, x.io.scalarRdOwner))).getOrElse(Seq()) ++
+     Seq(wrapOwnedDecoupled(io.dm.scalar_rd, dmWriteOwner))
+ 
+@@ -639,7 +726,10 @@
+   // ---------------------------------------------------------------------------
+   // Rvv Extension
+   if (p.enableRvv) {
+-    // Connect dispatch with dedicated ROB tag metadata and record composite RobTag / OwnerTag
++    io.rvvcore.get.ctxSelect := activeCtx
++    io.rvvcore.get.ctxReset := io.ctx.advanceGen
++    io.rvvcore.get.ctxGeneration := perCtxGenWire
++    io.rvvcore.get.nativeControlAccept := nativeLive(io.rvvcore.get.nativeControl.bits)
+     val tagWidth = math.max(1, log2Ceil(p.retirementBufferSize))
+     for (i <- 0 until p.instructionLanes) {
+       val prevFires = PopCount((0 until i).map(j => dispatch.io.inst(j).fire))
+@@ -648,16 +738,10 @@
+ 
+       io.rvvcore.get.inst(i).valid        := dispatch.io.rvv.get(i).valid
+       io.rvvcore.get.inst(i).bits         := dispatch.io.rvv.get(i).bits
+-      io.rvvcore.get.inst(i).bits.rob_tag := tag
++      val scalarTag = RobTag.make(p)(activeCtx, tag, rob_io.enqSlotGen(i))
++      io.rvvcore.get.inst(i).bits.rob_tag := NativeRobIdentity.pack(p)(laneOwners(i), scalarTag)
+       dispatch.io.rvv.get(i).ready        := io.rvvcore.get.inst(i).ready
+ 
+-      when(dispatch.io.rvv.get(i).fire) {
+-        rvvSlotOwner.get(tag)  := laneOwners(i)
+-        rvvSlotRobTag.get(tag) := RobTag.make(p)(activeCtx, tag, rob_io.enqSlotGen(i))
+-        when(dispatch.io.rvv.get(i).bits.writesRd() || dispatch.io.rvv.get(i).bits.writesFrd()) {
+-          lastRvvAsyncOwner := laneOwners(i)
+-        }
+-      }
+     }
+     dispatch.io.rvvState.get         := io.rvvcore.get.configState
+     dispatch.io.rvvIdle.get          := io.rvvcore.get.rvv_idle
+@@ -688,31 +772,44 @@
+       }
+     }
+ 
+-    val fault_vstart = fault_manager.io.out.bits.vstart.getOrElse(MakeInvalid(0.U))
+-    val vstart_write = Mux(fault_vstart.valid, fault_vstart, csr.io.rvv.get.vstart_write)
+-    io.rvvcore.get.csr.vstart_write := vstart_write
++    // Fault restart state travels with the registered native flush, not through
++    // the combinational dispatch/config-state feedback path. Keep its owner
++    // separate from a simultaneous CSR write by another Context.
++    val faultVstart = fault_manager.io.out.bits.vstart.get
++    val faultVstartValid = fault_manager.io.out.valid && faultVstart.valid
++    io.rvvcore.get.csr.faultVstart.valid := RegNext(faultVstartValid, false.B)
++    io.rvvcore.get.csr.faultVstart.bits := RegEnable(faultVstart.bits, 0.U, faultVstartValid)
++    io.rvvcore.get.csr.faultOwner :=
++      RegEnable(fault_manager.io.out.bits.owner, OwnerTag.zero(p), faultVstartValid)
++    io.rvvcore.get.csr.vstart_write := csr.io.rvv.get.vstart_write
++    io.rvvcore.get.csr.writeOwner := csr.io.rvv.get.writeOwner
+     io.rvvcore.get.csr.vxrm_write <> csr.io.rvv.get.vxrm_write
+-    io.rvvcore.get.csr.vxsat_write <> csr.io.rvv.get.vxsat_write
++    for (i <- 0 until p.nativeFlagLanes) {
++      rob_io.flagsDelta(1 + i) := io.rvvcore.get.nativeFlags(i)
++    }
++    if (p.enableVme) {
++      for (i <- 0 until p.nativeMatrixFlagLanes) {
++        rob_io.flagsDelta(1 + p.nativeFlagLanes + i) := io.rvvcore.get.matrixFlags.get(i)
++      }
++    }
++    rob_io.configDelta := io.rvvcore.get.configDelta
++    io.rvvcore.get.csr.vxsat := csr.io.rvv.get.vxsat
+     io.rvvcore.get.csr.frm := csr.io.rvv.get.frm
+     csr.io.rvv.get.vstart  := io.rvvcore.get.csr.vstart
+-    csr.io.rvv.get.vl      := io.rvvcore.get.configState.bits.vl
+-    csr.io.rvv.get.vtype   := io.rvvcore.get.configState.bits.vtype
+     csr.io.rvv.get.vxrm    := io.rvvcore.get.csr.vxrm
+-    csr.io.rvv.get.vxsat   := io.rvvcore.get.csr.vxsat
+-    csr.io.rvv.get.fflags  := io.rvvcore.get.csr.fflags
+-    csr.io.rvvOwner.get    := lastRvvAsyncOwner
+     // Register the flush into the RVV core to break the cross-core combinational
+     // path from branch resolution / retirement buffer trap scan through RVV ROB
+     // and queue capacity into dispatch and LSU.
+     io.rvvcore.get.flush        := rvvFlushReg.get
+-    io.rvvcore.get.clear_vstart := rob_io.clearVstart.getOrElse(false.B)
+-    if (p.enableVme) {
+-      csr.io.rvv.get.mtype := io.rvvcore.get.configState.bits.mtype.get
+-    } else {
+-      csr.io.rvv.get.mtype := 0.U
+-    }
+-    csr.io.rvv_dirty.get := io.rvvcore.get.rd_rob2rt_o.map(_.valid).reduce(_ || _) ||
+-      io.rvvcore.get.rd.map(_.valid).reduce(_ || _)
++    io.rvvcore.get.clear_vstart := rob_io.perCtxClearVstart.get
++    for (c <- 0 until p.contextCount) {
++      val dirty = io.rvvcore.get.rd_rob2rt_o.map { record =>
++        val identity = NativeRobIdentity.unpack(p)(record.rob_tag)
++        record.valid && identity.ctx_slot === c.U &&
++          identity.ctx_generation === perCtxGenWire(c)
++      }
++      csr.io.perCtxRvvDirty.get(c) := dirty.reduce(_ || _)
++    }
+   }
+   val hasFetchedInstructions = fetch.io.inst.lanes.map(_.valid).reduce(_ || _)
+   val floatIdle              = fRegfile.map(_.io.scoreboard === 0.U).getOrElse(true.B)
+@@ -736,8 +833,22 @@
+   io.ctx.perCtxNRetired     := rob_io.perCtxNRetired
+   io.ctx.perCtxTrapRetired  := rob_io.perCtxTrapRetired
+   io.ctx.staleRfRejected    := regfile.io.staleWriteRejected + fRegfile.map(_.io.staleWriteRejected).getOrElse(0.U)
+-  io.ctx.staleRobRejected   := rob_io.staleRejected
+-  io.ctx.staleCsrRejected   := csr.io.staleRejected
++  val rejectedByContext = RegInit(VecInit.fill(p.contextCount)(0.U(16.W)))
++  for (c <- 0 until p.contextCount) {
++    val increment = nativeRejected.foldLeft(0.U(16.W)) { case (sum, (slot, rejected)) =>
++      sum + (rejected && slot === c.U).asUInt
++    }
++    rejectedByContext(c) := Mux(io.ctx.advanceGen(c), 0.U, rejectedByContext(c) + increment)
++  }
++  val rejectedInvalidSlot = RegInit(0.U(16.W))
++  rejectedInvalidSlot := rejectedInvalidSlot +
++    nativeRejected.foldLeft(0.U(16.W)) { case (sum, (slot, rejected)) =>
++      sum + (rejected && slot >= p.contextCount.U).asUInt
++    }
++  io.ctx.staleRobRejected := rob_io.staleRejected + rejectedByContext.reduce(_ +& _) + rejectedInvalidSlot
++  // W2-04: FlagsParkMap CAM misses (deltas whose owner no longer owns a live slot,
++  // e.g. a late delta after its slot retired) are rejected and counted here.
++  io.ctx.staleCsrRejected   := csr.io.staleRejected + flagsCamMiss
+ 
+   // ---------------------------------------------------------------------------
+   // Fetch Bus
+diff --git a/hdl/chisel/src/coralnpu/Interfaces.scala b/hdl/chisel/src/coralnpu/Interfaces.scala
+--- a/hdl/chisel/src/coralnpu/Interfaces.scala
++++ b/hdl/chisel/src/coralnpu/Interfaces.scala
+@@ -202,7 +202,7 @@
+ }
+ 
+ class TileWriteDataIO(p: Parameters) extends Bundle {
+-  val rob_tag  = UInt(log2Ceil(p.retirementBufferSize).W)
++  val rob_tag  = UInt(p.nativeRobTagBits.W)
+   val is_store = Bool()
+   val mask     = UInt(p.vmeMaxTileWrites.W)
+   val idx      = UInt(p.vmeRegCountWidth.W)
+@@ -213,7 +213,7 @@
+ }
+ 
+ class MtypeWriteDataIO(p: Parameters) extends Bundle {
+-  val rob_tag = UInt(log2Ceil(p.retirementBufferSize).W)
++  val rob_tag = UInt(p.nativeRobTagBits.W)
+   val data    = Option.when(p.enableVerification)(UInt(p.xlen.W))
+ }
+ 
+@@ -323,7 +323,7 @@
+   val data           = Option.when(p.enableVerification)(Input(UInt(p.lsuDataBits.W)))
+   val uop_pc         = Option.when(p.enableVerification)(Input(UInt(p.programCounterBits.W)))
+   val last_uop_valid = Input(Bool())
+-  val rob_tag        = Input(UInt(log2Ceil(p.retirementBufferSize).W))
++  val rob_tag        = Input(UInt(p.nativeRobTagBits.W))
+ }
+ 
+ class FabricIO(p: Parameters) extends Bundle {
+diff --git a/hdl/chisel/src/coralnpu/scalar/CsrTest.scala b/hdl/chisel/src/coralnpu/scalar/CsrTest.scala
+--- a/hdl/chisel/src/coralnpu/scalar/CsrTest.scala
++++ b/hdl/chisel/src/coralnpu/scalar/CsrTest.scala
+@@ -54,10 +54,20 @@
+     dut.io.rvv.get.vtype.poke(0.U)
+     dut.io.rvv.get.vxrm.poke(0.U)
+     dut.io.rvv.get.vxsat.poke(false.B)
+-    dut.io.rvv.get.fflags.valid.poke(false.B)
+-    dut.io.rvv.get.fflags.bits.poke(0.U)
+     dut.io.rvv.get.vstart.poke(0.U)
+     dut.io.rvv_dirty.get.poke(false.B)
++    dut.io.reqFromDm.poke(false.B)
++    dut.io.reqOwner.ctx_slot.poke(0.U)
++    dut.io.reqOwner.ctx_generation.poke(0.U)
++    dut.io.reqOwner.owner_op_seq.poke(0.U)
++    dut.io.reqOwner.subop_id.poke(0.U)
++    dut.io.retiredFflagsReplace.poke(false.B)
++    dut.io.retiredFflagsValid.poke(false.B)
++    dut.io.retiredFflagsBits.poke(0.U)
++    dut.io.retiredFrmCommit.valid.poke(false.B)
++    dut.io.retiredFrmCommit.bits.poke(0.U)
++    dut.io.retiredFrmCommitCount.poke(0.U)
++    dut.io.flushPending.poke(false.B)
+     dut.io.req.valid.poke(false.B)
+     dut.io.req.bits.addr.poke(0.U)
+     dut.io.req.bits.index.poke(0.U)
+diff --git a/hdl/chisel/src/coralnpu/Parameters.scala b/hdl/chisel/src/coralnpu/Parameters.scala
+--- a/hdl/chisel/src/coralnpu/Parameters.scala
++++ b/hdl/chisel/src/coralnpu/Parameters.scala
+@@ -151,6 +151,13 @@
+   var ownerOpSeqBits     = 32
+   var slotGenerationBits = 8
+   var subopIdBits        = 8
++  // Opaque native return envelope, not a physical ROB index or a frozen binary ABI.
++  val nativeRobTagBits = 64
++  def nativeFlagLanes: Int = instructionLanes // NUM_RT_UOP in rvv_backend_define.svh
++  def nativeMatrixFlagLanes: Int = 4 // NUM_BLK in rvv_backend_define.svh
++  def flagsDeltaPorts: Int =
++    1 + (if (enableRvv) nativeFlagLanes else 0) + (if (enableVme) nativeMatrixFlagLanes else 0)
++  def configDeltaPorts: Int = instructionLanes
+   def retirementBufferIdxWidth: Int = {
+     val activeFloatRegCount = (if (enableFloat) { floatRegCount }
+                                else { 0 })

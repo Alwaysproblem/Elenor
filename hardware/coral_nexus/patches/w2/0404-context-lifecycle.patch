@@ -1,0 +1,208 @@
+diff --git a/hdl/chisel/src/coralnpu/scalar/SCore.scala b/hdl/chisel/src/coralnpu/scalar/SCore.scala
+--- a/hdl/chisel/src/coralnpu/scalar/SCore.scala
++++ b/hdl/chisel/src/coralnpu/scalar/SCore.scala
+@@ -51,6 +51,7 @@
+   val activeCtx = if (p.contextCount == 1) 0.U(1.W) else io.ctx.ctxSelect
+   val perCtxGenWire = Wire(Vec(p.contextCount, UInt(p.ctxGenerationBits.W)))
+   val activeCtxGen  = perCtxGenWire(activeCtx)
++  val safeAdvance = Wire(Vec(p.contextCount, Bool()))
+ 
+   // Monotonic per-Context parent instruction sequence (`owner_op_seq`).
+   val perCtxOpSeq = RegInit(VecInit.fill(p.contextCount)(0.U(p.ownerOpSeqBits.W)))
+@@ -64,6 +65,35 @@
+   val csr      = Module(new CtxCsr(p))
+   val dispatch = Module(new DispatchV2(p))
+ 
++  // ContextManager owns lifecycle/acknowledgement. These are its live-generation
++  // projections: park/cancel stop NEW dispatch, never accepted completion traffic.
++  val cancelled = RegInit(VecInit.fill(p.contextCount)(false.B))
++  val cancelLive = Wire(Vec(p.contextCount, Bool()))
++  val parked = Wire(Vec(p.contextCount, Bool()))
++  val staleControls = Wire(Vec(p.contextCount, UInt(2.W)))
++  val staleControlCount = RegInit(VecInit.fill(p.contextCount)(0.U(16.W)))
++  val failStop = RegInit(false.B)
++  for (c <- 0 until p.contextCount) {
++    val cancelMatches = io.ctx.cancelGen(c) === perCtxGenWire(c)
++    val parkMatches = io.ctx.parkGen(c) === perCtxGenWire(c)
++    cancelLive(c) := io.ctx.cancelValid(c) && cancelMatches
++    parked(c) := (io.ctx.perCtxPark(c) && parkMatches) || csr.io.perCtxWfi(c) ||
++      io.ctx.waitBusy(c) || io.ctx.regionBusy(c)
++    staleControls(c) := (io.ctx.cancelValid(c) && !cancelMatches).asUInt +&
++      (io.ctx.perCtxPark(c) && !parkMatches).asUInt
++    when(safeAdvance(c)) {
++      cancelled(c) := false.B
++    }.elsewhen(cancelLive(c)) {
++      cancelled(c) := true.B
++    }
++    staleControlCount(c) := Mux(safeAdvance(c), 0.U, staleControlCount(c) + staleControls(c))
++    io.ctx.perCtxCancelled(c) := cancelled(c) || cancelLive(c)
++    io.ctx.perCtxParked(c) := parked(c)
++  }
++  io.ctx.staleControlRejected := staleControlCount.reduce(_ +& _) +
++    io.rvvcore.map(_.staleControlRejected).getOrElse(0.U)
++  io.ctx.tileIssueFreeze := failStop || csr.io.fault
++
+   for (i <- 0 until p.instructionLanes) {
+     val prevFires = PopCount((0 until i).map(j => dispatch.io.inst(j).fire))
+     laneOpSeq(i)  := perCtxOpSeq(activeCtx) + prevFires
+@@ -71,7 +101,7 @@
+   }
+   val totalFires = PopCount((0 until p.instructionLanes).map(j => dispatch.io.inst(j).fire))
+   for (c <- 0 until p.contextCount) {
+-    when(io.ctx.advanceGen(c)) {
++    when(safeAdvance(c)) {
+       perCtxOpSeq(c) := 0.U
+     }.elsewhen(activeCtx === c.U) {
+       perCtxOpSeq(c) := perCtxOpSeq(c) + totalFires
+@@ -85,7 +115,7 @@
+ 
+   regfile.io.activeCtx   := activeCtx
+   regfile.io.perCtxGen   := perCtxGenWire
+-  regfile.io.perCtxReset := io.ctx.advanceGen
++  regfile.io.perCtxReset := safeAdvance
+   regfile.io.perCtxFlush := rob_io.perCtxTrapRetired
+ 
+   rob_io.activeCtx       := activeCtx
+@@ -108,7 +138,7 @@
+     rob_io.perCtxConfigInFlight(activeCtx)
+   dispatch.io.csrFrmPending := csr.io.perCtxFrmPending(activeCtx)
+   rob_io.perCtxGen       := perCtxGenWire
+-  rob_io.perCtxReset     := io.ctx.advanceGen
++  rob_io.perCtxReset     := safeAdvance
+   rob_io.dispatchOpSeq   := laneOpSeq
+   rob_io.inst            := dispatch.io.inst
+   rob_io.jump            := dispatch.io.jump
+@@ -259,7 +289,18 @@
+   // Decode
+   // Decode/Dispatch
+   dispatch.io.inst <> fetch.io.inst.lanes
+-  dispatch.io.halted := csr.io.halted || csr.io.wfi || csr.io.dm.debug_mode || csr.io.dm.entering_debug_mode
++  val activeCancelled = cancelled(activeCtx) || cancelLive(activeCtx)
++  dispatch.io.halted := csr.io.halted || parked(activeCtx) || activeCancelled ||
++    safeAdvance(activeCtx) || io.ctx.tileIssueFreeze ||
++    csr.io.dm.debug_mode || csr.io.dm.entering_debug_mode
++  // Discard only the selected cancelled Context's unaccepted payload. No RF/ROB
++  // flush is issued; accepted memory/arithmetic operations still settle normally.
++  when(activeCancelled) {
++    for (i <- 0 until p.instructionLanes) {
++      dispatch.io.inst(i).valid := false.B
++      fetch.io.inst.lanes(i).ready := true.B
++    }
++  }
+   dispatch.io.lsuActive        := lsu.io.active
+   dispatch.io.lsuQueueCapacity := lsu.io.queueCapacity
+   dispatch.io.scoreboard.comb  := regfile.io.scoreboard.comb
+@@ -324,7 +365,7 @@
+   }
+ 
+   csr.io.activeCtx     := activeCtx
+-  csr.io.advanceGen    := io.ctx.advanceGen
++  csr.io.advanceGen    := safeAdvance
+   bru(0).io.csr.get <> csr.io.bru
+   csr.io.bruOwner      := bru(0).io.trapOwner.get
+ 
+@@ -395,7 +436,7 @@
+   // ---------------------------------------------------------------------------
+   // Status
+   io.halted           := csr.io.halted
+-  io.fault            := csr.io.fault
++  io.fault            := io.ctx.tileIssueFreeze
+   io.wfi              := csr.io.wfi
+   csr.io.irq          := io.irq
+   csr.io.timer_irq    := io.timer_irq
+@@ -526,7 +567,7 @@
+       floatCore.get.io.activeOwner.ctx_slot
+     )
+     fRegfile.get.io.perCtxGen   := perCtxGenWire
+-    fRegfile.get.io.perCtxReset := io.ctx.advanceGen
++    fRegfile.get.io.perCtxReset := safeAdvance
+     fRegfile.get.io.perCtxFlush := rob_io.perCtxTrapRetired
+     lsu.io.busPort_flt.get      := fRegfile.get.io.busPort
+     fRegfile.get.io.busPortAddr := dispatch.io.fbusPortAddr.get
+@@ -727,7 +768,7 @@
+   // Rvv Extension
+   if (p.enableRvv) {
+     io.rvvcore.get.ctxSelect := activeCtx
+-    io.rvvcore.get.ctxReset := io.ctx.advanceGen
++    io.rvvcore.get.ctxReset := safeAdvance
+     io.rvvcore.get.ctxGeneration := perCtxGenWire
+     io.rvvcore.get.nativeControlAccept := nativeLive(io.rvvcore.get.nativeControl.bits)
+     val tagWidth = math.max(1, log2Ceil(p.retirementBufferSize))
+@@ -838,7 +879,7 @@
+     val increment = nativeRejected.foldLeft(0.U(16.W)) { case (sum, (slot, rejected)) =>
+       sum + (rejected && slot === c.U).asUInt
+     }
+-    rejectedByContext(c) := Mux(io.ctx.advanceGen(c), 0.U, rejectedByContext(c) + increment)
++    rejectedByContext(c) := Mux(safeAdvance(c), 0.U, rejectedByContext(c) + increment)
+   }
+   val rejectedInvalidSlot = RegInit(0.U(16.W))
+   rejectedInvalidSlot := rejectedInvalidSlot +
+@@ -849,6 +890,29 @@
+   // W2-04: FlagsParkMap CAM misses (deltas whose owner no longer owns a live slot,
+   // e.g. a late delta after its slot retired) are rejected and counted here.
+   io.ctx.staleCsrRejected   := csr.io.staleRejected + flagsCamMiss
++
++  val faultOwnerLive = (0 until p.contextCount).map { c =>
++    !safeAdvance(c) &&
++      OwnerTag.sameContext(fault_manager.io.out.bits.owner, c.U, perCtxGenWire(c))
++  }.reduce(_ || _)
++  when(fault_manager.io.out.valid && faultOwnerLive) {
++    failStop := true.B // recovery is Group reset, never another Context's admission
++  }
++  for (c <- 0 until p.contextCount) {
++    val rfDrained = regfile.io.perCtxOutstanding(c) === 0.U &&
++      fRegfile.map(_.io.perCtxOutstanding(c) === 0.U).getOrElse(true.B)
++    val drained = rob_io.perCtxEmpty(c) && rfDrained &&
++      !io.ctx.pendingLaunch(c) && !io.ctx.waitBusy(c) && !io.ctx.regionBusy(c)
++    io.ctx.perCtxBackendDrained(c) := drained
++    safeAdvance(c) := io.ctx.advanceGen(c) && drained
++    when(io.ctx.advanceGen(c)) {
++      assert(drained, "Context generation cannot advance with live backend obligations")
++    }
++  }
++  io.ctx.tileQuiescent := (0 until p.contextCount).map { c =>
++    (parked(c) || cancelled(c) || csr.io.perCtxHalted(c)) &&
++      io.ctx.perCtxBackendDrained(c)
++  }.reduce(_ && _) && !io.ctx.tileIssueFreeze && !lsu.io.active && rvvIdle
+ 
+   // ---------------------------------------------------------------------------
+   // Fetch Bus
+diff --git a/hdl/chisel/src/coralnpu/scalar/Regfile.scala b/hdl/chisel/src/coralnpu/scalar/Regfile.scala
+--- a/hdl/chisel/src/coralnpu/scalar/Regfile.scala
++++ b/hdl/chisel/src/coralnpu/scalar/Regfile.scala
+@@ -84,6 +84,8 @@
+       val regd = Output(UInt(p.scalarRegCount.W))
+       val comb = Output(UInt(p.scalarRegCount.W))
+     }
++    // Includes flushed instructions whose accepted writebacks have not settled.
++    val outstanding = Output(UInt(p.scalarRegCount.W))
+   })
+ 
+   // The scalar registers.
+@@ -130,6 +132,7 @@
+ 
+   io.scoreboard.regd := scoreboard
+   io.scoreboard.comb := scoreboard & ~scoreboard_clr
++  io.outstanding := scoreboard | flushed_scoreboard
+ 
+   // ***************************************************************************
+   // The read port response.
+diff --git a/hdl/chisel/src/coralnpu/scalar/FRegfile.scala b/hdl/chisel/src/coralnpu/scalar/FRegfile.scala
+--- a/hdl/chisel/src/coralnpu/scalar/FRegfile.scala
++++ b/hdl/chisel/src/coralnpu/scalar/FRegfile.scala
+@@ -27,6 +27,7 @@
+     val pipelineFlush  = Input(Bool())
+     val scoreboard_set = Input(UInt(p.floatRegCount.W))
+     val scoreboard     = Output(UInt(p.floatRegCount.W))
++    val outstanding    = Output(UInt(p.floatRegCount.W))
+     val exception      = Output(Bool())
+ 
+     val busPort     = new RegfileBusPortIO(p)
+@@ -50,6 +51,7 @@
+     flushed_scoreboard := flushed_scoreboard & ~scoreboard_clr
+   }
+   io.scoreboard := scoreboard
++  io.outstanding := scoreboard | flushed_scoreboard
+ 
+   val scoreboard_error = RegInit(false.B)
+   val dm_write_valid   = io.dm_write_valid

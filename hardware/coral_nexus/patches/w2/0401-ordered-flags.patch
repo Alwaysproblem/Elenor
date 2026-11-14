@@ -219,7 +219,7 @@ index 6c8d497..20ba07f 100644
 
    val dmRs1 = Wire(new RegfileReadDataIO(p))
    dmRs1.valid  := true.B
-@@ -549,6 +562,17 @@ class SCore(p: Parameters) extends Module {
+@@ -549,5 +562,16 @@ class SCore(p: Parameters) extends Module {
      dispatch.io.csrFrm.get      := csr.io.float.get.out.frm
      floatCore.get.io.csr <> csr.io.float.get
      csr.io.floatOwner.get := floatCore.get.io.fflagsOwner

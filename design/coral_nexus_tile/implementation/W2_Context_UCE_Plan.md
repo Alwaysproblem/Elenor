@@ -96,7 +96,7 @@
 | W2-01 | 无硬前置（可立即开工）；消费 `pipeline_validator/config.py`、`parameters`、设计稿；不改 Python、不执行 build                                                                           | W2-01 裁决 `rob_tag.yaml`；W1-01 message/ctx ABI、W3-01 RVV 声明、W4-04 页授权、W6-01 事件、W5-01 helper ABI（W2 只固定需求输入/owner tag 摘要）                                                                                                             |
 | W2-02 | `hardware/coral_nexus/patches/reqs/w2-to-w3-rvv-rob-owner.md`（W2-01 落）；`rtl/scalar/doc/rob_tag.yaml`（W2-01 落）；W0-01 workspace、W0-02 `env build`；W2-01 五 YAML freeze hash    | W2-02 落 `0201-core-ctx-ports.patch`（Core/Parameters 集成面）+ `banked_rf/rob/CSR` 模块；接口经 `banked_rf.yaml`（W2 内部，W3-02 消费 owner-tag 输入）                                                                                                      |
 | W2-03 | W2-01 `rtl/scalar/doc/{rob_tag,oracle_requirements}.yaml` hash；W2-02 `banked_rf` 模块 hash                                                                                            | W2-03 落 `per-ctx fetch/issue/scheduler` 模块与 `perctx_issue.yaml`                                                                                                                                                                                          |
-| W2-04 | W2-03 模块（issue 边界、owner 路由已存在）；W2-01 `rtl/scalar/doc/{ctx_ctrl,csr_flag}.yaml`；W3-01 RVV 声明 freeze；W6-01 ctx_ctrl 事件 freeze                                         | W2-04 落 `ordered_flags/ctx park`/`ctx cancel` 模块与 `ctx_owner_cancel.yaml`                                                                                                                                                                                |
+| W2-04 | C026/W2-02；C010 Context/owner、C012 RVV/VME 声明、C019 容量合同；不依赖 C028/W2-03 完成                                                                                               | ordered flags、Context park/cancel、私有 `ctx_owner_cancel_impl.yaml`；不追加 seal                                                                                                                                                                           |
 | W2-05 | W2-04 模块；W0-04 `cs1_c1/cs1_c2` target（native ISA 依赖）；W1-03 cosim 骨架（C ABI 驱动，`libcn_cosim.so` 的 `bp_*` 最终 exports）；W4-02 L1、W5-02 基础 kernel、W6-02 WAIT 逻辑实现 | `hardware/coral_nexus/patches/w2/0501-native-loop.patch`（native scalar 闭环 wiring）与 `verification/unit/w2/W2_05_native_loop.py`。验收时区分：c1 是退化功能回归，c2 才同时承载 P1（仅 1 Context 活跃）与 PN（多 Context 活跃）两类 workload（需求 §16.3） |
 
 依赖规则（对齐父合同）：**freeze 消费级**：W2-02..04 消费 `-01` freeze hash，不依赖对方任务 DONE；若对方 `-01` 未产出 freeze hash，W2-02..04 报 `BLOCKED` 并记录缺失项名。**W2-05 的闭环必须真（不用 stub 替身）**：native scalar closed loop 必须真实跑 `W4-03/04` 的真实 LSU/L1 端口、`W5-02/04` 真实 program install 映像、`W6-02` 真实 WAIT/terminal 端点 —— 这三者的真实产物是 W2-05 的**验收**；freeze hash 只是消费顺序（若 `W4-02/03/04`、`W5-02/04`、`W6-02` 中任何一项未真实产出，W2-05 报 BLOCKED，不报 DONE，也不降级成 Python/抽象 stub 冒充闭环）。
@@ -280,34 +280,35 @@ P1/PN 口径（parent 裁定，需求 §16.3）：P1 = 改造后同一硬件仅 
 1. 落 `hardware/coral_nexus/patches/w2/0401-ordered-flags.patch`：`Csr.scala` flags 写路径（L365-443 的 `fflagsEn`、`fcsr` 写、`io.float.in.fflags`/`io.rvv.fflags` 累加）改为"**每 ROB 条目 5 bit fflags delta + 1 bit vxsat delta**"（W2-02 已扩 `RetirementBuffer.Instruction`），合并规则 = **该条目退休（`deqReady` 扫描中本 entry 被选中 retire）时** `fflags_arch := (fflags_arch | entry.fdelta)`，不要求 `resultUpdate.valid` 与 retire 同拍（早完成条目的 delta 驻留槽位等待，不丢）（CFG-04，禁止先到先合并）；软件 `csrw fflags/fcsr/vxsat` 的**替代动作**也在本条目自身 retire 拍合并（把写值当条目 delta，先落槽位再在 retire 拍生效），不是 dispatch 拍直接写累加器。FloatCore/RvvCore 的 `io.*.fflags.valid` 改成**带 owner 的 delta 上报**（W3-02 接同款接口，FloatCore 改造由 W2-02 拥有，本 patch 落）。
 2. 落 `hardware/coral_nexus/patches/w2/0402-csr-interlock.patch`：`Decode.scala`（DispatchV2）的 CSR dispatch 拍读互锁改造：`csrr fflags/vxsat/vl/vtype/mtype`（L683-708 `canDispatch`、L976-993 vxsat 读、L502/L530/L544 `configInvalid`）增加"**同 Context 内没有在途 flags delta / `vset/mset` 未 retire**"两个 gate；**`vset*/mset*`/`frm`/`vtype`/`vl`/`mtype` 架构配置在本 Context retire-point commit（W2-04），dispatch 拍 snapshot 供 younger op；管理类副作用 CSR（如 `mscratch/mstatus` 特定字段）单独走 dispatch 拍（per-CSR 分类清单在本 patch 内落）**；替代"全局 CSR 等 ROB 空 & `rvvIdle`"（CFG-01..05；`retirement_buffer_empty`/`rvvIdle` 保留作为非 CSR 指令的既有 fence/idle 语义，不删）；`isVxsatOrVcsr` 的跨 Context `rvvIdle` 判据删（W2-03 已在 per-Context 侧生效，本步删除旧路径）。
 3. 落 `hardware/coral_nexus/rtl/scalar/Context.scala` Context FSM/槽位表：`FREE→HELD→ACCEPTED/INIT→READY→WAIT_EVENT/WAIT_RESOURCE(sub: wait_engine_queue/wait_stream/wait_region/wait_fetch/wait_operand/wait_dest)→DONE/FAULT`（validator `_UCEContextState` tile.py L55-64 的超集）；`ctx_generation` 递增与旧代拒收;`park` 投影位 + W6 wait 只读摘要（wait 记录本体在 W6，W2 不落 [对齐设计 owner 表]）。
-4. 落 `hardware/coral_nexus/patches/w2/0403-park-csr-quiescence.patch`：`Csr.scala` `wfi`（L437-443）与 `halted/wfi`（L243-245）语义拆为"per-Context park 输出＋Tile quiescence 聚合"两件事；`CoreAxi.scala` L109 `(!csr.io.cg && !core.io.wfi)` 钟控条件移除，**本 patch（W2 是 CoreAxi 实体唯一编辑者）**：删除直接耦合 + 暴露 tile 级 `gate_ctl` 输入接口（信号名/语义由 W6 提供、由 W6-04 消费并按 per-Context 状态驱动；W2 不写 quiescence 算法本体）。`SCore.scala` L147 `dispatch.io.halted := csr.halted||csr.wfi||dm.*` 拆 per-Context + dm 聚合。
-5. 落 `hardware/coral_nexus/patches/w2/0404-cancel-iso.patch`：接收 W6 `CANCEL_TASK(generation)`，动作 = 本 Context 停发 + 已接受在途任务正常完成或被隔离、未接受 payload 丢弃（`dispatch-ctx-mux` 上的 `cancel_mask`）；RF/ROB/LSU 的清理只按 owner 进行，不误清他 Context（RET-06，spec 验证）；`CoreAxi` gate_ctl（W6-04 算法 owner、W2 实体编辑）与 W2 停发的耦合用 `quiescence` 单向信号（W1-04 消费）。fault 路径 (`FaultManager` per-Context + `flt-01` Tile 停发) 在本步统一到 fail-stop 单一路径，`FLT-02a` 明确不实现。
+4. 落 `hardware/coral_nexus/patches/w2/0403-core-clock-gating.patch`：WFI 只 park 发射，不隐含 LSU fence；`CoreAxi` 删除 `(!csr.io.cg && !core.io.wfi)` 直接钟控耦合，暴露 `gate_ctl`，按 quiescence 与 IRQ/debug 唤醒条件接线。CoreTlul 同步迁移接口。W2 是实体编辑 owner；完整 oneTile 组装归 C040，W6/G4 提供 gate-control 策略。
+5. 落 `hardware/coral_nexus/patches/w2/0404-context-lifecycle.patch`：live-generation cancel 只停本 Context 新发射并丢弃未接受 payload，已接受义务继续 settle；不清 peer RF/ROB。RF outstanding（含 flush 后未返回项）与 ROB、launch/wait/region 投影共同约束安全复用。任一真实 fault 冻结 Tile issue；普通分支 redirect 不等同于 fault，`FLT-02a` 不实现。
 6. 落 `EXEC_DRAINED` 本地判定：`RetirementPartitionBank` 空 + per-Context launch 事件完成计数（validator `_complete_context` tile.py L1298-1320 口径）+ W6 wait/region 投影空闲 ⇒ 置 `EXEC_DRAINED`（W6 内部通知输入名，逻辑名，不做终态发布）；W6 推进 RETIRE_READY/`RETIRE`/`TASK_COMPLETION` 的消费由 W2-05/W6-02 真实联仿覆盖（本步只做本地判定与 W6 消息字段对齐，`ctx_ctrl.yaml` 已固定）。
 7. 落 Context 槽复用 gate：旧 Task 终态 + 本地义务闭合 + `ctx_generation` 递增 + RF/CSR/ROB/flags 桶清零 + 旧 owner 拒收计数清（CTX-15 三条件；保守实现等 TASK_COMPLETION 接收，本计划采纳保守版，等 W6-02 的 TASK_COMPLETION 接收位）。
 8. 落 `hardware/coral_nexus/verification/unit/w2/W2_04_sched_park_spec.scala`：
    - A 头 wait_region 停靠，B 独立运行（T-28/T-62 的 UCE 侧），断言 A 年轻指令零发射、B 正常服务、`region_done` 唤醒 A 后在原头继续（W3 授予信号只读投影，`MAT-12`）。
    - A 头 `WAIT_EVENT` park，B 补位（T-04）；同周期唤醒/发射的优先序 = 完成回写→可退休→新授予→状态推进（SCH-08，spec 用固定测试序列逐拍断言）。
    - WFI：A WFI park、B 在途、B 关钟不触发（`CoreAxi` patch 后）；全 Context park + 后端在途 ⇒ quiescence 拉低（T-27/ISA-04/CLK-01..06）。
-9. 落 `hardware/coral_nexus/verification/unit/w2/W2_04_cancel_retire_spec.scala`：
+9. 行为验收分别落 `W2_04_ordered_flags_spec.scala`、`W2_04_csr_config_spec.scala`、`W2_04_cancel_retire_spec.scala`，并由真实 Core 与原生 SV tb 验证 producer 路径：
    - flags 有序合并：`older FP→csrw fflags(清 0)→younger FP`、年轻者早完成（T-06/CFG-04），断言"三条全退休后架构 fflags 恰为 younger delta"，**逐条 delta 记录落 spec 日志**（本条目就是设计 §8 表中的行）。
    - CSR 互锁：本 Context 未合并 delta/未 retire `vset` ⇒ `csrr fflags` 不发射、读值在合并后 = 新值；其他 Context CSR 读不被本 gate 阻塞（CFG-05）。
    - CANCEL 局部性：cancel A，断言 B 的 scoreboard/ROB 位图逐 bit 不变（RET-06 硬不变量）。
    - 独立退休：A 队首因 store/fault 迟回被延迟期间，断言 B 的退休/完成仍推进且 retire 记录与 oracle 单跑一致（结果序与条目内容对拍，不以时间戳差为唯一判据）；配合 bounded-RR 机会计数：N 个 eligible Context 任一无限窗口内每个 eligible Context 的 issue 机会数 = `k*N + c`（c 小常数；RR 精确 N eligible 机会计数，不给泛化阈值）。负例：把 retirementPartitionBank 退化成共享 FIFO head，该负例必须被 oracle 对拍或机会计数之一检出失败。
    - 槽位复用：A 终态→`ctx_generation++`→旧 owner 注入旧 delta/旧写回/旧信号 ⇒ 全部拒收 + 计数 + 信用守恒（T-08/CTX-15/W2-D06）。
-   - 饥饿：B 长期饱和（如 `div` 长链 or 长 store 链），断言 A `issue_service_interval ≤ 仲裁上限`（SCH-03），上限由 W4-02 仲裁冻结提供，未冻结前 spec 记录原始数据、不判 PASS。
+   - 饥饿：B 长期饱和时，A 在 N 个 accepted eligible 机会内获得服务；N 取 C019 Context 数。本地 RR 上界由本卡自证，不等待 C030，也不将机会数解释成下游存储延迟界。
 
 ### 8.3 输入/输出与验收
 
-- 输入：W2-02/03 的 all-pass 输出；`W3-01`（RVV 声明/owner 接口）与 `W6-01`（事件/wait 记录 owner）的 contract freeze hash；`W4-03/04` 的 LSU owner-tag 变更请求接收（非阻塞，若缺失本步只记录 BLOCKED 項）。
-- 输出：patch `0401-{ordered-flags,csr-interlock,park-csr-quiescence,cancel-iso}`、`Context.scala`、两个 spec、`ctx_owner_cancel.yaml`（cancel/park/quiescence 字段，W6-04/W1-04 消费）。
-- 验收命令【未来】：`bash hardware/coral_nexus/scripts/cn.sh unit --suite w2 --config hardware/coral_nexus/configs/cs1_c2.yaml --out out/coral_nexus/w2-04-unit/`（spec 通过）；`bash hardware/coral_nexus/scripts/cn.sh sources verify`。无 grep/源码存在当 PASS。
-- 负例先行：spec 8/9 的"关闭互锁/关闭局部 cancel/PC-only 匹配旧键复活"三条负例，必须先失败；`ctx_owner_cancel.yaml` 的字段 freeze 有 YAML schema 校验（W2-01 同款）。
+- 输入：C026/W2-02 实现；C010 Context/owner、C012 RVV/VME 声明、C019 容量合同。C027 在 C028/W2-03 之前交付局部 arbiter/park 控制，不依赖后者完成。
+- 输出：W2 `0401-ordered-flags`、`0402-csr-interlock`、`0403-core-clock-gating`、`0404-context-lifecycle`；W3 文件所有权下的 `0402-native-flags`、`0403-native-config-snapshot`、`0404-native-parent-identity`；Context/CSR/ROB 模块、六个 Scala spec、三个原生 SV tb，以及私有 `ctx_owner_cancel_impl.yaml`。
+- 验收入口：`verification/unit/w2/test_w2_c027.py`（命令见 `../execution/G2_scalar.md#c027`），不调用 C026 pytest；全量 `cn unit --suite w2` 仍包含两卡。原生 SV 使用同一 locked builder 与 Bazel hermetic Verilator；不得以源码 grep 或仅 elaboration 当作行为 PASS。
+- 负例先行：关闭互锁、跨 Context cancel、PC-only store、共享 retirement head 四个 mutant，必须产生真实行为断言失败及 JUnit 失败记录，构建失败不算检出。独立退休使用 full ROB 的 PC、instruction、rd/data、trap、flags 与 C021 pinned Spike 单跑逐条比较，并检查 Context/generation/op_seq；不以同一 RTL 单跑代替 ISA oracle。
+- 私有 metadata 不属于跨界合同，**不追加或重封 PROTOCOL_FREEZE.json**；runner 检查其字节 hash 不变。
 
 ### 8.4 失败/成功/取消/旧代
 
-- 失败：flags 有序负例未重现（older delta 抹掉）⇒ FAIL，上报 parent；`SCH-03` 饥饿上限未冻结 ⇒ 该用例标 BLOCKED（不是 PASS），等 W4-02 freeze。
-- 成功：spec 8/9 全过 + patch 0401-{ordered-flags,csr-interlock,park-csr-quiescence,cancel-iso}.patch 四个全部落地 + `ctx_owner_cancel.yaml` freeze hash 进 `PROTOCOL_FREEZE.json`（jointseal）。
-- 取消：本步自身不引入 cancel；W6 `CANCEL_TASK` 只作用于本 Context（W2-D06）。
+- 失败：任一正例失败、mutant 仅构建失败、oracle 记录不一致或封印变化，均不满足 C027；不得修改预期或屏蔽异常以通过。
+- 成功：上述行为验收、原生 producer 端到端用例、CoreAxi elaboration 与 `sources verify` 完成，按 `execution/G2_scalar.md` 记录实际 attempt；不运行 G2 gate，也不宣称 C040 顶层组装已完成。
+- 取消：W6 `CANCEL_TASK` 只作用于匹配 generation 的 Context；peer 位图与其独立退休不受影响（W2-D06）。
 - 旧代：`ctx_generation` 拒收旧 delta（spec 9 最后一例）。
 
 ## 9. W2-05 C1/C2 原生标量闭环

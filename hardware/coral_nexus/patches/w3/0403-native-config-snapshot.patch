@@ -1,0 +1,1085 @@
+diff --git a/hdl/verilog/rvv/design/RvvFrontEnd.sv b/hdl/verilog/rvv/design/RvvFrontEnd.sv
+--- a/hdl/verilog/rvv/design/RvvFrontEnd.sv
++++ b/hdl/verilog/rvv/design/RvvFrontEnd.sv
+@@ -13,30 +13,68 @@
+ // limitations under the License.
+ 
+ // A module that assembles RVVInstructions into RVVCmd before storing into the
+-// RVVInstructionQueue. It's also responsible for handling architectural
+-// configuration state (ie. LMUL, SEW). Inputs to this module maybe unaligned
+-// (ie [invalid, valid, valid, invalid]) while outputs will always be aligned
+-// (ie [valid, valid, invalid, invalid]).
++// RVVInstructionQueue. It's also responsible for handling the FRONTEND WORKING
++// configuration state (ie. LMUL, SEW) per Context. Inputs to this module maybe
++// unaligned (ie [invalid, valid, valid, invalid]) while outputs will always be
++// aligned (ie [valid, valid, invalid, invalid]).
+ // Arguments from the scalar register file (for vx or configuration
+ // instructions) arrive one cycle after the Instruction is dispatched, so this
+ // module introduces one cycle of latency before putting the command into the
+ // queue.
++//
++// W3 native per-Context config snapshot (C027):
++// - The working config state is a per-Context dispatch/execute SHADOW, one
++//   entry per Context. The Context of an instruction is named by the low
++//   CTX_BITS of its rob_tag; the rob_tag itself is an OPAQUE parent key
++//   (full ROB_TAG_WIDTH preserved on every output, never used as a backend
++//   array index).
++// - cfg_*_o are per-lane IMMUTABLE per-op results derived from the actual
++//   vset/mset computation of that instruction (lane_out[i]), for
++//   retire-point architectural commit on the scalar side. They are valid
++//   independent of rd!=x0 and of nonzero values. Field masks mirror the
++//   native ISA's ACTUAL architectural field writes (Zvt as computed below):
++//   vset* writes VL+VTYPE and implicitly zeroes MTYPE; msetmtype/msetmtypei
++//   write VL(=0)+VTYPE+MTYPE; msettn writes VL only; msettm/msettk write
++//   MTYPE only.
++// - frm/vstart/vxrm/vxsat are captured at accept time per lane; the emitted
++//   RVVCmd and the lane's working snapshot use those values, so neither
++//   vector DYN rounding nor vstart-relative execution observes a later scalar
++//   value rebanked by a ctx_select switch (vstart updates are OWNER-QUALIFIED
++//   per Context and land on their own Context; vxrm/vxsat/frm describe the
++//   SELECTED Context and land there).
++// - The architectural vset/mset commit is the scalar ROB/CtxCsr; the
++//   config_state output is only a decode-time view of the selected Context's
++//   working snapshot, selected by ctx_select_i.
+ module RvvFrontEnd#(parameter N = 4,
+                     parameter CAPACITYBITS=$clog2(2*N + 1),
+                     parameter REDUCE_LMUL = 1,
++                    parameter CONTEXT_COUNT = 1,
++                    // Context index width: max(1, $clog2(CONTEXT_COUNT)).
++                    parameter CTX_BITS = (CONTEXT_COUNT <= 1) ? 1 : $clog2(CONTEXT_COUNT),
+                     type RegDataT = logic [31:0],
+                     type RegAddrT = logic [4:0])
+ (
+   input clk,
+   input rstn,
+ 
+-  input logic [`VSTART_WIDTH-1:0]     vstart_i,
+-  input logic                         vstart_valid_i,
++  // Owner-qualified vstart update channels, one per Context: a CSR write for
++  // one Context and a native-trap update for another can arrive in the same
++  // beat, so vstart is NOT routed by ctx_select (unlike the xrm/xsat/frm
++  // selected snapshots below). Each channel applies to its own Context.
++  input logic [CONTEXT_COUNT-1:0] vstart_update_valid_i,
++  input logic [CONTEXT_COUNT-1:0][`VSTART_WIDTH-1:0] vstart_update_data_i,
+   input logic [`VCSR_VXRM_WIDTH-1:0]  vxrm_i,
+   input logic [`VCSR_VXSAT_WIDTH-1:0] vxsat_i,
+   input logic [2:0]                   frm_i,
+   input logic                         flush_i,
+ 
++  // Per-Context control. ctx_select_i picks which Context's working snapshot
++  // the config_state/config_state_valid query outputs reflect. ctx_reset_i[c]
++  // restores ONLY Context c's working snapshot to the architectural reset
++  // state (Context reuse); it does not touch any other Context.
++  input logic [CTX_BITS-1:0]          ctx_select_i,
++  input logic [CONTEXT_COUNT-1:0]     ctx_reset_i,
++
+   // Instruction input.
+   input logic [N-1:0] inst_valid_i,
+   input RVVInstruction [N-1:0] inst_data_i,
+@@ -53,6 +91,23 @@
+   output logic [N-1:0] reg_write_valid_o,
+   output RegAddrT [N-1:0] reg_write_addr_o,
+   output RegDataT [N-1:0] reg_write_data_o,
++  // Producer identity of each writeback lane (opaque native key).
++  output logic [N-1:0][`ROB_TAG_WIDTH-1:0] reg_write_tag_o,
++
++  // Per-lane immutable per-op config results (vset/mset) for scalar-side
++  // retire-point commit. Payloads come from the instruction's OWN computed
++  // post-state, never from the shared working snapshot. Each wr_* mask names
++  // exactly the fields that instruction architecturally writes (including
++  // implicit zero writes); masked-off fields are still driven with the
++  // computed value for observability but MUST be ignored by the consumer.
++  output logic [N-1:0] cfg_valid_o,
++  output logic [N-1:0][`ROB_TAG_WIDTH-1:0] cfg_tag_o,
++  output logic [N-1:0] cfg_wr_vl_o,
++  output logic [N-1:0] cfg_wr_vtype_o,
++  output logic [N-1:0] cfg_wr_mtype_o,
++  output logic [N-1:0][`VL_WIDTH-1:0] cfg_vl_o,
++  output logic [N-1:0][`XLEN-1:0] cfg_vtype_o,
++  output logic [N-1:0][`XLEN-1:0] cfg_mtype_o,
+ 
+   // Command output.
+   output logic [N-1:0] cmd_valid_o,
+@@ -64,8 +119,8 @@
+   output logic trap_valid_o,
+   output RVVInstruction trap_data_o,
+ 
+-  // Config state
+-  output config_state_valid,
++  // Config state (working snapshot of the Context named by ctx_select_i).
++  output logic config_state_valid,
+   output RVVConfigState config_state,
+ 
+   // VME configuration writeback per lane
+@@ -77,25 +132,59 @@
+   typedef logic [COUNTBITS-1:0] count_t;
+   typedef logic [CAPACITYBITS-1:0] capacity_t;
+ 
+-  // vtype architectural state
++  // vtype architectural state (per Context)
+   logic vill;
+-  RVVConfigState config_state_q;
++  RVVConfigState config_state_q [CONTEXT_COUNT];
+ 
+   // Instructions to assemble into commands
+   logic [N-1:0] valid_inst_q;     // If the instruction in this slot is valid
+   count_t valid_inst_count_q;     // The sum of valid_inst_q
+   RVVInstruction inst_q [N-1:0];  // The instruction in the slot
+ 
++  // Accept-time scalar CSR view per lane (frm, vstart write, vxrm, vxsat):
++  // the values architecturally visible when the instruction was accepted.
++  // vstart comes from the ACCEPTING instruction's own owner-qualified update
++  // channel; vxrm/vxsat/frm are banked BY SELECTION in the parent. Either
++  // way a pending instruction consumes its own captures, never a later live
++  // value belonging to another Context (vector DYN rounding and
++  // vstart-relative execution must not retroactively change mid-flight).
++  logic [2:0] frm_q [N-1:0];
++  logic [`VSTART_WIDTH-1:0] vstart_q [N-1:0];
++  logic vstart_valid_q [N-1:0];
++  logic [`VCSR_VXRM_WIDTH-1:0] vxrm_q [N-1:0];
++  logic [`VCSR_VXSAT_WIDTH-1:0] vxsat_q [N-1:0];
++
++  // Per-Context selection helpers. CONTEXT_COUNT == 1 keeps a single working
++  // snapshot regardless of selector/tag bits (upstream-compatible).
++  function automatic int ctx_index(input logic [CTX_BITS-1:0] sel);
++    ctx_index = ((CONTEXT_COUNT == 1) || (32'(sel) >= CONTEXT_COUNT)) ? 0
++                                                                     : int'(sel);
++  endfunction
++
++  function automatic int ctx_of(input logic [`ROB_TAG_WIDTH-1:0] tag);
++    // The rob_tag is an OPAQUE parent key; only its low CTX_BITS name the
++    // Context, every other bit is carried through untouched.
++    ctx_of = (CONTEXT_COUNT == 1) ? 0
++             : ((32'(tag[CTX_BITS-1:0]) >= CONTEXT_COUNT) ? 0
++                                                          : int'(tag[CTX_BITS-1:0]));
++  endfunction
++
++  // Context of the instruction registered in each lane.
++  int lane_ctx [N-1:0];
++
+   // State, for time being lets do not state forwarding for timing
+-  logic config_state_reduction;
++  // Working-state query: outputs reflect the Context named by ctx_select_i.
++  // config_state_valid means the queried Context has no instruction pending
++  // in the frontend (per-Context, not global).
+   always_comb begin
+-    config_state_reduction = 1;
++    config_state = config_state_q[ctx_index(ctx_select_i)];
++    config_state_valid = 1'b1;
+     for (int i = 0; i < N; i++) begin
+-      config_state_reduction = config_state_reduction & (!valid_inst_q[i]);
+-    end
+-  end
+-  assign config_state_valid = config_state_reduction;
+-  assign config_state = config_state_q;
++      if (valid_inst_q[i] && (lane_ctx[i] == ctx_index(ctx_select_i))) begin
++        config_state_valid = 1'b0;
++      end
++    end
++  end
+ 
+   capacity_t queue_capacity;
+   assign queue_capacity_o = queue_capacity;
+@@ -143,13 +232,47 @@
+     end
+   end
+ 
+-  // Update configuration architectural state
+-  RVVConfigState inst_config_state [N:0];
++  always_ff @(posedge clk) begin
++    for (int i = 0; i < N; i++) begin
++      if (inst_accepted[i]) begin
++        // Capture only the ACCEPTING instruction's own Context's vstart
++        // update channel (owner-qualified, not selection-routed).
++        frm_q[i] <= frm_i;
++        vstart_q[i] <= vstart_update_data_i[ctx_of(inst_data_i[i].rob_tag)];
++        vstart_valid_q[i] <=
++            vstart_update_valid_i[ctx_of(inst_data_i[i].rob_tag)];
++        vxrm_q[i] <= vxrm_i;
++        vxsat_q[i] <= vxsat_i;
++      end
++    end
++  end
++
++  // Update per-Context working configuration state
++  // Per-lane state snapshots. lane_in[i] is the incoming working state of
++  // lane i (its OWN Context's latest state); lane_out[i] is lane i's
++  // post-state and is NEVER overwritten by a later lane, so outputs for
++  // lane i always read lane i's own result even when the successor lane
++  // is idle or belongs to another Context.
++  RVVConfigState lane_in [N-1:0];
++  RVVConfigState lane_out [N-1:0];
++  // Per-Context walking state: seed = registered snapshot (+ live scalar CSR
++  // overlay for the SELECTED Context only); during the lane walk it
++  // accumulates this Context's accepted config changes. The walk stops at
++  // the first trapping lane of ANY Context (globally), matching the
++  // emission-side trap suppression below.
++  RVVConfigState ctx_seed [CONTEXT_COUNT];
++  RVVConfigState ctx_state [CONTEXT_COUNT];
++  RVVConfigState next_config_state [CONTEXT_COUNT];
++  logic walk_trap_seen;
+   RegDataT avl [N-1:0];
+   RegDataT vlmax [N-1:0];
+   logic vconfig_change [N-1:0];
+   logic setvl_reserved_bits [N-1:0];
+   logic [`VL_WIDTH-1:0] vl_minus_one [N-1:0];
++  // Whole-register moves ignore vtype (RVV 1.0 16.6); needed for the trap
++  // decision, which is computed during the config walk below.
++  logic [N-1:0] is_whole_reg;
++  logic [N-1:0] unaligned_trap_valid;  // Should this instruction trap
+ `ifdef ZVT_ON
+   // tm = min(tm, LMUL*EVE, ETE) = min(tm, 16)
+   localparam logic [13:0] TILE_EDGE_DIM = 14'd16;
+@@ -163,19 +286,50 @@
+   logic is_msettype [N-1:0];
+ `endif
+   always_comb begin
+-    inst_config_state[0] = config_state_q;
+-    if (vstart_valid_i) begin
+-      inst_config_state[0].vstart = vstart_i;
+-    end
+-    inst_config_state[0].xrm = RVVXRM'(vxrm_i);
+-    inst_config_state[0].xsat = vxsat_i;
++    for (int c = 0; c < CONTEXT_COUNT; c++) begin
++      ctx_seed[c] = config_state_q[c];
++      // vstart updates apply to EACH corresponding Context through its own
++      // channel, independent of ctx_select (a CSR write for one Context and
++      // a native-trap update for another can arrive in the same beat).
++      if (vstart_update_valid_i[c]) begin
++        ctx_seed[c].vstart = vstart_update_data_i[c];
++      end
++    end
++    // The remaining live scalar CSR inputs (xrm/xsat/frm) are banked BY
++    // SELECTION in the parent shim: they describe the Context named by
++    // ctx_select_i. Overlay them ONLY onto that Context's seed; other
++    // Contexts' pending instructions instead consume their own accept-time
++    // captures below, so they never see a foreign Context's live values.
++    ctx_seed[ctx_index(ctx_select_i)].xrm = RVVXRM'(vxrm_i);
++    ctx_seed[ctx_index(ctx_select_i)].xsat = vxsat_i;
+ `ifdef ZVE32F_ON
+-    inst_config_state[0].frm = RVFRM'(frm_i);
++    ctx_seed[ctx_index(ctx_select_i)].frm = RVFRM'(frm_i);
+ `endif  // ZVE32F_ON
++    for (int c = 0; c < CONTEXT_COUNT; c++) begin
++      ctx_state[c] = ctx_seed[c];
++    end
++    // Global trap prefix: the first trapping lane in lane order stops ALL
++    // later publications, of every Context.
++    walk_trap_seen = 1'b0;
+     for (int i = 0; i < N; i++) begin
+-      inst_config_state[i+1] = inst_config_state[i];
++      // Lane's incoming state is the latest state of ITS OWN Context, so
++      // interleaved Contexts never observe each other's working state.
++      lane_ctx[i] = ctx_of(inst_q[i].rob_tag);
++      lane_in[i] = ctx_state[lane_ctx[i]];
++      // Accept-time CSR view: this instruction executes with the vstart
++      // write, vxrm, vxsat (and frm) visible when IT was accepted — immune
++      // to a later ctx_select switch rebanking the shared inputs.
++      lane_in[i].xrm = RVVXRM'(vxrm_q[i]);
++      lane_in[i].xsat = vxsat_q[i];
++`ifdef ZVE32F_ON
++      lane_in[i].frm = RVFRM'(frm_q[i]);
++`endif  // ZVE32F_ON
++      if (vstart_valid_q[i]) begin
++        lane_in[i].vstart = vstart_q[i];
++      end
++      lane_out[i] = lane_in[i];
+       if (valid_inst_q[i]) begin
+-        inst_config_state[i+1].vstart = 0;
++        lane_out[i].vstart = 0;
+       end
+       avl[i] = 0;
+       vlmax[i] = 0;
+@@ -196,39 +350,39 @@
+           // Set AVL based on encoding (see Section 6.2 of RVV spec)
+           unique case (inst_q[i].bits[12:8])
+             0: unique case (inst_q[i].bits[4:0])
+-              0:  avl[i] = inst_config_state[i].vl;  // rd = x0, rs1 = x0
++              0:  avl[i] = lane_in[i].vl;  // rd = x0, rs1 = x0
+               default: avl[i] = 32'hFFFFFFFF;        // rd != x0, rs1 = x0
+             endcase
+             default: avl[i] = reg_read_data_i[2*i];  // rs1 != x0
+           endcase
+ 
+-          inst_config_state[i+1].lmul_orig = RVVLMUL'(inst_q[i].bits[15:13]);
+-          inst_config_state[i+1].sew = RVVSEW'(inst_q[i].bits[18:16]);
+-          inst_config_state[i+1].ta = inst_q[i].bits[19];
+-          inst_config_state[i+1].ma = inst_q[i].bits[20];
++          lane_out[i].lmul_orig = RVVLMUL'(inst_q[i].bits[15:13]);
++          lane_out[i].sew = RVVSEW'(inst_q[i].bits[18:16]);
++          lane_out[i].ta = inst_q[i].bits[19];
++          lane_out[i].ma = inst_q[i].bits[20];
+           setvl_reserved_bits[i] = |inst_q[i].bits[23:22];
+ `ifdef ZVT_ON
+           // Zvt §12.1.1.4: vset[i]vl[i] instructions write zero to mtype CSR
+-          inst_config_state[i+1].mtwiden = 2'b00;
+-          inst_config_state[i+1].tk     = 3'b000;
+-          inst_config_state[i+1].tm     = 14'd0;
+-          inst_config_state[i+1].altfmt = inst_q[i].bits[21];
++          lane_out[i].mtwiden = 2'b00;
++          lane_out[i].tk     = 3'b000;
++          lane_out[i].tm     = 14'd0;
++          lane_out[i].altfmt = inst_q[i].bits[21];
+ `endif
+           vconfig_change[i] = 1;
+         end else if (inst_q[i].bits[24:23] == 2'b11) begin  // vsetivli
+           avl[i] =
+               {{(`VL_WIDTH - 5){1'b0}}, inst_q[i].bits[12:8]};
+-          inst_config_state[i+1].lmul_orig = RVVLMUL'(inst_q[i].bits[15:13]);
+-          inst_config_state[i+1].sew = RVVSEW'(inst_q[i].bits[18:16]);
+-          inst_config_state[i+1].ta = inst_q[i].bits[19];
+-          inst_config_state[i+1].ma = inst_q[i].bits[20];
++          lane_out[i].lmul_orig = RVVLMUL'(inst_q[i].bits[15:13]);
++          lane_out[i].sew = RVVSEW'(inst_q[i].bits[18:16]);
++          lane_out[i].ta = inst_q[i].bits[19];
++          lane_out[i].ma = inst_q[i].bits[20];
+           setvl_reserved_bits[i] = inst_q[i].bits[22];
+ `ifdef ZVT_ON
+           // Zvt §12.1.1.4: vset[i]vl[i] instructions write zero to mtype CSR
+-          inst_config_state[i+1].mtwiden = 2'b00;
+-          inst_config_state[i+1].tk     = 3'b000;
+-          inst_config_state[i+1].tm     = 14'd0;
+-          inst_config_state[i+1].altfmt = inst_q[i].bits[21];
++          lane_out[i].mtwiden = 2'b00;
++          lane_out[i].tk     = 3'b000;
++          lane_out[i].tm     = 14'd0;
++          lane_out[i].altfmt = inst_q[i].bits[21];
+ `endif
+           vconfig_change[i] = 1;
+         end else if (inst_q[i].bits[24:18] == 7'b1000000) begin  // vsetvl
+@@ -238,24 +392,24 @@
+           // Set AVL based on encoding (see Section 6.2 of RVV spec)
+           unique case (inst_q[i].bits[12:8])
+             0: unique case (inst_q[i].bits[4:0])
+-              0:  avl[i] = inst_config_state[i].vl;  // rd = x0, rs1 = x0
++              0:  avl[i] = lane_in[i].vl;  // rd = x0, rs1 = x0
+               default: avl[i] = 32'hFFFFFFFF;        // rd != x0, rs1 = x0
+             endcase
+             default: avl[i] = reg_read_data_i[2*i];  // rs1 != x0
+           endcase
+-          inst_config_state[i+1].lmul_orig =
++          lane_out[i].lmul_orig =
+               RVVLMUL'(reg_read_data_i[(2*i) + 1][2:0]);
+-          inst_config_state[i+1].sew =
++          lane_out[i].sew =
+               RVVSEW'(reg_read_data_i[(2*i) + 1][5:3]);
+-          inst_config_state[i+1].ta = reg_read_data_i[(2*i) + 1][6];
+-          inst_config_state[i+1].ma = reg_read_data_i[(2*i) + 1][7];
++          lane_out[i].ta = reg_read_data_i[(2*i) + 1][6];
++          lane_out[i].ma = reg_read_data_i[(2*i) + 1][7];
+           setvl_reserved_bits[i] = |reg_read_data_i[(2*i) + 1][31:9];
+ `ifdef ZVT_ON
+           // Zvt §12.1.1.4: vset[i]vl[i] instructions write zero to mtype CSR
+-          inst_config_state[i+1].mtwiden = 2'b00;
+-          inst_config_state[i+1].tk     = 3'b000;
+-          inst_config_state[i+1].tm     = 14'd0;
+-          inst_config_state[i+1].altfmt = reg_read_data_i[(2*i) + 1][8];
++          lane_out[i].mtwiden = 2'b00;
++          lane_out[i].tk     = 3'b000;
++          lane_out[i].tm     = 14'd0;
++          lane_out[i].altfmt = reg_read_data_i[(2*i) + 1][8];
+ `endif
+           vconfig_change[i] = 1;
+         end
+@@ -264,10 +418,10 @@
+         // msetmtype: funct7 = 7'b1000010, rd = x0 (bits[4:0] == 5'b00000)
+         else if (inst_q[i].bits[24:18] == 7'b1000010 && inst_q[i].bits[4:0] == 5'b00000) begin
+           // mtype <- rs1, vtype <- rs2 (vsetvl semantics), vl <- 0.
+-          inst_config_state[i+1].mtwiden = reg_read_data_i[2*i][1:0];
+-          inst_config_state[i+1].sew =
++          lane_out[i].mtwiden = reg_read_data_i[2*i][1:0];
++          lane_out[i].sew =
+               RVVSEW'(reg_read_data_i[(2*i) + 1][5:3]);
+-          inst_config_state[i+1].altfmt = reg_read_data_i[(2*i) + 1][8];
++          lane_out[i].altfmt = reg_read_data_i[(2*i) + 1][8];
+           setvl_reserved_bits[i] = |reg_read_data_i[(2*i) + 1][31:9];
+           if (reg_read_data_i[2*i][1:0] != 2'b00) begin
+             // Zvt §12.1.1.4: When mtwiden != 0, setting any reserved bit of rs1
+@@ -282,40 +436,40 @@
+             //   SEW8  -> LMUL1 (3'b000)
+             //   SEW16 -> LMUL2 (3'b001)
+             //   SEW32 -> LMUL4 (3'b010)
+-            inst_config_state[i+1].ta = 1'b1;
+-            inst_config_state[i+1].ma = 1'b1;
+-            unique case (inst_config_state[i+1].sew)
++            lane_out[i].ta = 1'b1;
++            lane_out[i].ma = 1'b1;
++            unique case (lane_out[i].sew)
+               SEW8: begin
+-                inst_config_state[i+1].lmul_orig = LMUL1;
+-                inst_config_state[i+1].tk = (reg_read_data_i[2*i][7:5] > 3'd4)
++                lane_out[i].lmul_orig = LMUL1;
++                lane_out[i].tk = (reg_read_data_i[2*i][7:5] > 3'd4)
+                                             ? 3'd4 : reg_read_data_i[2*i][7:5];
+               end
+               SEW16: begin
+-                inst_config_state[i+1].lmul_orig = LMUL2;
+-                inst_config_state[i+1].tk = (reg_read_data_i[2*i][7:5] > 3'd2)
++                lane_out[i].lmul_orig = LMUL2;
++                lane_out[i].tk = (reg_read_data_i[2*i][7:5] > 3'd2)
+                                             ? 3'd2 : reg_read_data_i[2*i][7:5];
+               end
+               SEW32: begin
+-                inst_config_state[i+1].lmul_orig = LMUL4;
+-                inst_config_state[i+1].tk = (reg_read_data_i[2*i][7:5] > 3'd1)
++                lane_out[i].lmul_orig = LMUL4;
++                lane_out[i].tk = (reg_read_data_i[2*i][7:5] > 3'd1)
+                                             ? 3'd1 : reg_read_data_i[2*i][7:5];
+               end
+               default: begin
+-                inst_config_state[i+1].lmul_orig = LMULRESERVED;
+-                inst_config_state[i+1].tk = 3'd0;
++                lane_out[i].lmul_orig = LMULRESERVED;
++                lane_out[i].tk = 3'd0;
+               end
+             endcase
+             // tm = min(tm, LMUL*EVE, ETE) = min(tm, 16)
+-            inst_config_state[i+1].tm = (reg_read_data_i[2*i][23:10] > TILE_EDGE_DIM)
++            lane_out[i].tm = (reg_read_data_i[2*i][23:10] > TILE_EDGE_DIM)
+                                         ? TILE_EDGE_DIM : reg_read_data_i[2*i][23:10];
+           end else begin
+             // Unconfigured (mtwiden == 0): mtype is 0, vtype takes rs2 as if by vsetvl.
+-            inst_config_state[i+1].tk        = 3'b000;
+-            inst_config_state[i+1].tm        = 14'd0;
+-            inst_config_state[i+1].lmul_orig =
++            lane_out[i].tk        = 3'b000;
++            lane_out[i].tm        = 14'd0;
++            lane_out[i].lmul_orig =
+                 RVVLMUL'(reg_read_data_i[(2*i) + 1][2:0]);
+-            inst_config_state[i+1].ta        = reg_read_data_i[(2*i) + 1][6];
+-            inst_config_state[i+1].ma        = reg_read_data_i[(2*i) + 1][7];
++            lane_out[i].ta        = reg_read_data_i[(2*i) + 1][6];
++            lane_out[i].ma        = reg_read_data_i[(2*i) + 1][7];
+           end
+           // avl stays 0 -> vconfig_change post-processing will set vl=0 (when not vill).
+           vconfig_change[i] = 1;
+@@ -325,25 +479,25 @@
+                      (inst_q[i].bits[15:13] == 3'b100) &&
+                      (inst_q[i].bits[12:10] == 3'b000) &&
+                      (inst_q[i].bits[4:0] == 5'b00000)) begin  // msetmtypei
+-          inst_config_state[i+1].mtwiden = inst_q[i].bits[9:8];
+-          inst_config_state[i+1].tk     = 3'b000;
+-          inst_config_state[i+1].tm     = 14'd0;
+-          inst_config_state[i+1].sew     =
++          lane_out[i].mtwiden = inst_q[i].bits[9:8];
++          lane_out[i].tk     = 3'b000;
++          lane_out[i].tm     = 14'd0;
++          lane_out[i].sew     =
+               RVVSEW'({1'b0, inst_q[i].bits[17:16]});
+-          inst_config_state[i+1].altfmt = inst_q[i].bits[21];
++          lane_out[i].altfmt = inst_q[i].bits[21];
+           if (inst_q[i].bits[9:8] != 2'b00) begin
+-            inst_config_state[i+1].ta = 1'b1;
+-            inst_config_state[i+1].ma = 1'b1;
+-            unique case (inst_config_state[i+1].sew)
+-              SEW8:    inst_config_state[i+1].lmul_orig = LMUL1;
+-              SEW16:   inst_config_state[i+1].lmul_orig = LMUL2;
+-              SEW32:   inst_config_state[i+1].lmul_orig = LMUL4;
+-              default: inst_config_state[i+1].lmul_orig = LMULRESERVED;
++            lane_out[i].ta = 1'b1;
++            lane_out[i].ma = 1'b1;
++            unique case (lane_out[i].sew)
++              SEW8:    lane_out[i].lmul_orig = LMUL1;
++              SEW16:   lane_out[i].lmul_orig = LMUL2;
++              SEW32:   lane_out[i].lmul_orig = LMUL4;
++              default: lane_out[i].lmul_orig = LMULRESERVED;
+             endcase
+           end else begin
+-            inst_config_state[i+1].lmul_orig = LMUL1;
+-            inst_config_state[i+1].ta = 1'b0;
+-            inst_config_state[i+1].ma = 1'b0;
++            lane_out[i].lmul_orig = LMUL1;
++            lane_out[i].ta = 1'b0;
++            lane_out[i].ma = 1'b0;
+           end
+           vconfig_change[i] = 1;
+           is_msettype[i] = 1;
+@@ -351,12 +505,12 @@
+                      (inst_q[i].bits[17:15] == 3'b000)) begin  // msettn / msettm / msettk
+           unique case (inst_q[i].bits[14:13])
+             2'b00: begin  // msettn rd, rs1
+-              if (inst_config_state[i].mtwiden == 2'b00) begin
++              if (lane_in[i].mtwiden == 2'b00) begin
+                 // Zvt §12.1.1.5: When mtwiden == 0, msettn sets vl and writes rd
+                 // as if by vsetvli/vsetvl (including rs1 == x0 Table 46 semantics).
+                 unique case (inst_q[i].bits[12:8])
+                   0: unique case (inst_q[i].bits[4:0])
+-                    0:  avl[i] = inst_config_state[i].vl;  // rd = x0, rs1 = x0
++                    0:  avl[i] = lane_in[i].vl;  // rd = x0, rs1 = x0
+                     default: avl[i] = 32'hFFFFFFFF;        // rd != x0, rs1 = x0
+                   endcase
+                   default: avl[i] = reg_read_data_i[2*i];  // rs1 != x0
+@@ -370,30 +524,30 @@
+               is_msettn[i] = 1;
+             end
+             2'b01: begin  // msettm rd, rs1 - mtype.tm <- min(rs1, TE)
+-              if (inst_config_state[i].mtwiden == 2'b00) begin
++              if (lane_in[i].mtwiden == 2'b00) begin
+                 mset_illegal_trap[i] = 1'b1;
+                 // TODO: Potentially remove if unreachable for coverage (tm/tk are already 0 when mtwiden == 0).
+-                inst_config_state[i+1].tm = 14'd0;
+-                inst_config_state[i+1].tk = 3'd0;
++                lane_out[i].tm = 14'd0;
++                lane_out[i].tk = 3'd0;
+               end else begin
+                 logic [13:0] msettm_new_tm;
+                 msettm_new_tm = (reg_read_data_i[2*i] > {18'd0, TILE_EDGE_DIM}) ? TILE_EDGE_DIM
+                                                                                 : reg_read_data_i[2*i][13:0];
+-                inst_config_state[i+1].tm = msettm_new_tm;
++                lane_out[i].tm = msettm_new_tm;
+                 mset_writes_rd[i] = 1;
+                 mset_rd_data[i] = {18'd0, msettm_new_tm};
+               end
+             end
+             2'b10: begin  // msettk rd, rs1 - mtype.tk <- min(rs1, KMAX).
+-              if (inst_config_state[i].mtwiden == 2'b00) begin
++              if (lane_in[i].mtwiden == 2'b00) begin
+                 mset_illegal_trap[i] = 1'b1;
+                 // TODO: Potentially remove if unreachable for coverage (tm/tk are already 0 when mtwiden == 0).
+-                inst_config_state[i+1].tm = 14'd0;
+-                inst_config_state[i+1].tk = 3'd0;
++                lane_out[i].tm = 14'd0;
++                lane_out[i].tk = 3'd0;
+               end else begin
+                 logic [2:0] kmax;
+                 logic [2:0] msettk_new_tk;
+-                unique case (inst_config_state[i+1].sew)
++                unique case (lane_out[i].sew)
+                   SEW8:    kmax = 3'd4;
+                   SEW16:   kmax = 3'd2;
+                   SEW32:   kmax = 3'd1;
+@@ -401,7 +555,7 @@
+                 endcase
+                 msettk_new_tk = (reg_read_data_i[2*i] > {29'd0, kmax}) ? kmax
+                                                                        : reg_read_data_i[2*i][2:0];
+-                inst_config_state[i+1].tk = msettk_new_tk;
++                lane_out[i].tk = msettk_new_tk;
+                 mset_writes_rd[i] = 1;
+                 mset_rd_data[i] = {29'd0, msettk_new_tk};
+               end
+@@ -413,100 +567,100 @@
+       end
+ 
+       if (vconfig_change[i]) begin
+-        inst_config_state[i+1].vstart = 0;
++        lane_out[i].vstart = 0;
+         // Compute legality of vtype.
+-        unique case (inst_config_state[i+1].sew)
++        unique case (lane_out[i].sew)
+           SEW8:
+-            unique case(inst_config_state[i+1].lmul_orig)
+-              LMULRESERVED: inst_config_state[i+1].vill = 1;
+-              LMUL1_8: inst_config_state[i+1].vill = 1;
+-              default: inst_config_state[i+1].vill = 0;
++            unique case(lane_out[i].lmul_orig)
++              LMULRESERVED: lane_out[i].vill = 1;
++              LMUL1_8: lane_out[i].vill = 1;
++              default: lane_out[i].vill = 0;
+             endcase
+           SEW16:
+-            unique case(inst_config_state[i+1].lmul_orig)
+-              LMULRESERVED: inst_config_state[i+1].vill = 1;
+-              LMUL1_8: inst_config_state[i+1].vill = 1;
+-              LMUL1_4: inst_config_state[i+1].vill = 1;
+-              default: inst_config_state[i+1].vill = 0;
++            unique case(lane_out[i].lmul_orig)
++              LMULRESERVED: lane_out[i].vill = 1;
++              LMUL1_8: lane_out[i].vill = 1;
++              LMUL1_4: lane_out[i].vill = 1;
++              default: lane_out[i].vill = 0;
+             endcase
+           SEW32:
+-            unique case(inst_config_state[i+1].lmul_orig)
+-              LMULRESERVED: inst_config_state[i+1].vill = 1;
+-              LMUL1_8: inst_config_state[i+1].vill = 1;
+-              LMUL1_4: inst_config_state[i+1].vill = 1;
+-              LMUL1_2: inst_config_state[i+1].vill = 1;
+-              default: inst_config_state[i+1].vill = 0;
++            unique case(lane_out[i].lmul_orig)
++              LMULRESERVED: lane_out[i].vill = 1;
++              LMUL1_8: lane_out[i].vill = 1;
++              LMUL1_4: lane_out[i].vill = 1;
++              LMUL1_2: lane_out[i].vill = 1;
++              default: lane_out[i].vill = 0;
+             endcase
+-          default: inst_config_state[i+1].vill = 1;
++          default: lane_out[i].vill = 1;
+         endcase
+         if (setvl_reserved_bits[i]) begin
+-          inst_config_state[i+1].vill = 1'b1;
++          lane_out[i].vill = 1'b1;
+         end
+ 
+ `ifdef ZVT_ON
+         if (is_msettn[i]) begin
+           // Zvt §12.1.1.4: msettn only updates vl; it preserves the existing vtype (including vill).
+-          inst_config_state[i+1].vill = inst_config_state[i].vill;
++          lane_out[i].vill = lane_in[i].vill;
+         end else begin
+           // Zvt §12.1.1.8: altfmt=1 is supported for SEW8 (Zvti8i32mm) and SEW16
+           // (Zvtbf16fmm), and is illegal for SEW >= SEW32.
+-          if (inst_config_state[i+1].altfmt && (inst_config_state[i+1].sew >= SEW32)) begin
+-            inst_config_state[i+1].vill = 1'b1;
++          if (lane_out[i].altfmt && (lane_out[i].sew >= SEW32)) begin
++            lane_out[i].vill = 1'b1;
+           end
+           // Zvt §12.1.1.4: vill |= (SEW * TWIDEN > ELEN). With ELEN=32:
+           // SEW16 with mtwiden=3 (TWIDEN=4) -> TEW=64 > 32
+           // SEW32 with mtwiden>=2 (TWIDEN>=2) -> TEW>=64 > 32
+-          if (inst_config_state[i+1].mtwiden != 2'b00) begin
+-            if ((inst_config_state[i+1].sew == SEW16 && inst_config_state[i+1].mtwiden == 2'd3) ||
+-                (inst_config_state[i+1].sew == SEW32 && inst_config_state[i+1].mtwiden >= 2'd2) ||
+-                (inst_config_state[i+1].sew > SEW32)) begin
+-              inst_config_state[i+1].vill = 1'b1;
++          if (lane_out[i].mtwiden != 2'b00) begin
++            if ((lane_out[i].sew == SEW16 && lane_out[i].mtwiden == 2'd3) ||
++                (lane_out[i].sew == SEW32 && lane_out[i].mtwiden >= 2'd2) ||
++                (lane_out[i].sew > SEW32)) begin
++              lane_out[i].vill = 1'b1;
+             end
+           end
+         end
+ `endif
+ 
+         // Compute vl to set (saturating with necessary)
+-        unique case (inst_config_state[i+1].lmul_orig)
+-          LMUL1_8: vlmax[i] = ((`VLENB)/8) >> inst_config_state[i+1].sew;
+-          LMUL1_4: vlmax[i] = ((`VLENB)/4) >> inst_config_state[i+1].sew;
+-          LMUL1_2: vlmax[i] = ((`VLENB)/2) >> inst_config_state[i+1].sew;
+-          LMUL1: vlmax[i] = (`VLENB) >> inst_config_state[i+1].sew;
+-          LMUL2: vlmax[i] = (2*(`VLENB)) >> inst_config_state[i+1].sew;
+-          LMUL4: vlmax[i] = (4*(`VLENB)) >> inst_config_state[i+1].sew;
+-          LMUL8: vlmax[i] = (8*(`VLENB)) >> inst_config_state[i+1].sew;
++        unique case (lane_out[i].lmul_orig)
++          LMUL1_8: vlmax[i] = ((`VLENB)/8) >> lane_out[i].sew;
++          LMUL1_4: vlmax[i] = ((`VLENB)/4) >> lane_out[i].sew;
++          LMUL1_2: vlmax[i] = ((`VLENB)/2) >> lane_out[i].sew;
++          LMUL1: vlmax[i] = (`VLENB) >> lane_out[i].sew;
++          LMUL2: vlmax[i] = (2*(`VLENB)) >> lane_out[i].sew;
++          LMUL4: vlmax[i] = (4*(`VLENB)) >> lane_out[i].sew;
++          LMUL8: vlmax[i] = (8*(`VLENB)) >> lane_out[i].sew;
+           default: vlmax[i] = 0;
+         endcase
+ 
+-        if (inst_config_state[i+1].vill) begin
++        if (lane_out[i].vill) begin
+           // If illegal, set to 0. See end of section 6.1 of RVV spec.
+-          inst_config_state[i+1].vl = 0;
+-          inst_config_state[i+1].sew = SEW8;
+-          inst_config_state[i+1].lmul = LMUL1;
+-          inst_config_state[i+1].lmul_orig = LMUL1;
+-          inst_config_state[i+1].ta = 0;
+-          inst_config_state[i+1].ma = 0;
++          lane_out[i].vl = 0;
++          lane_out[i].sew = SEW8;
++          lane_out[i].lmul = LMUL1;
++          lane_out[i].lmul_orig = LMUL1;
++          lane_out[i].ta = 0;
++          lane_out[i].ma = 0;
+ `ifdef ZVT_ON
+           // Zvt §12.1.1.4: if vtype.vill || mtype.mtwiden == 0: mtype = 0
+-          inst_config_state[i+1].mtwiden = 2'b00;
+-          inst_config_state[i+1].tk     = 3'b000;
+-          inst_config_state[i+1].tm     = 14'd0;
+-          inst_config_state[i+1].altfmt = 1'b0;
++          lane_out[i].mtwiden = 2'b00;
++          lane_out[i].tk     = 3'b000;
++          lane_out[i].tm     = 14'd0;
++          lane_out[i].altfmt = 1'b0;
+ `endif
+         end else if (avl[i] > vlmax[i]) begin
+           // One possible valid impl according to 6.3 of RVV spec.
+-          inst_config_state[i+1].vl = vlmax[i][`VL_WIDTH-1:0];
+-          inst_config_state[i+1].lmul = inst_config_state[i+1].lmul_orig;
++          lane_out[i].vl = vlmax[i][`VL_WIDTH-1:0];
++          lane_out[i].lmul = lane_out[i].lmul_orig;
+         end else begin
+-          inst_config_state[i+1].vl = avl[i][`VL_WIDTH-1:0];
+-          inst_config_state[i+1].lmul = inst_config_state[i+1].lmul_orig;
++          lane_out[i].vl = avl[i][`VL_WIDTH-1:0];
++          lane_out[i].lmul = lane_out[i].lmul_orig;
+         end
+ 
+         // TODO: filter out illegal lmul for widening ALU ops and non-indexed
+         // LSU ops where eew>sew.
+-        if (REDUCE_LMUL && !inst_config_state[i+1].vill
+-`ifdef ZVT_ON
+-            && (inst_config_state[i+1].mtwiden == 2'b00)
++        if (REDUCE_LMUL && !lane_out[i].vill
++`ifdef ZVT_ON
++            && (lane_out[i].mtwiden == 2'b00)
+ `endif
+         ) begin
+           // We use vl here, it's guaranteed to be <= vlmax. This operation
+@@ -516,128 +670,84 @@
+           //   we don't increase it, so we cannot generate emul>8.
+           // - we must keep lmul valid for the current sew, like lmul>=m1 for
+           //   sew=e32. The resulting enul must also be valid.
+-          vl_minus_one[i] = (inst_config_state[i+1].vl == (`VL_WIDTH)'('b0)) ?
++          vl_minus_one[i] = (lane_out[i].vl == (`VL_WIDTH)'('b0)) ?
+               (`VL_WIDTH)'('b0) :
+-              inst_config_state[i+1].vl - (`VL_WIDTH)'('b1);
+-          unique case (inst_config_state[i+1].sew)
++              lane_out[i].vl - (`VL_WIDTH)'('b1);
++          unique case (lane_out[i].sew)
+             SEW8: begin
+               if (vl_minus_one[i][`VL_WIDTH-2+:2] != 'b00) begin
+                 // vl from VLEN/2+1 to VLEN
+-                inst_config_state[i+1].lmul = LMUL8;
++                lane_out[i].lmul = LMUL8;
+               end else if (vl_minus_one[i][`VL_WIDTH-3] == 'b1) begin
+                 // vl from VLEN/4+1 to VLEN/2
+-                inst_config_state[i+1].lmul = LMUL4;
++                lane_out[i].lmul = LMUL4;
+               end else if (vl_minus_one[i][`VL_WIDTH-4] == 'b1) begin
+                 // vl from VLEN/8+1 to VLEN/4
+-                inst_config_state[i+1].lmul = LMUL2;
++                lane_out[i].lmul = LMUL2;
+               end else if (vl_minus_one[i][`VL_WIDTH-5] == 'b1) begin
+                 // vl from VLEN/16+1 to VLEN/8
+-                inst_config_state[i+1].lmul = LMUL1;
++                lane_out[i].lmul = LMUL1;
+               end else if (vl_minus_one[i][`VL_WIDTH-6] == 'b1) begin
+                 // vl from VLEN/32+1 to VLEN/16
+-                inst_config_state[i+1].lmul = LMUL1_2;
++                lane_out[i].lmul = LMUL1_2;
+               end else begin
+                 // vl from 0 to VLEN/32
+-                inst_config_state[i+1].lmul = LMUL1_4;
++                lane_out[i].lmul = LMUL1_4;
+               end
+             end
+             SEW16: begin
+               if (vl_minus_one[i][`VL_WIDTH-3+:2] != 'b00) begin
+                 // vl from VLEN/4+1 to VLEN/2
+-                inst_config_state[i+1].lmul = LMUL8;
++                lane_out[i].lmul = LMUL8;
+               end else if (vl_minus_one[i][`VL_WIDTH-4] == 'b1) begin
+                 // vl from VLEN/8+1 to VLEN/4
+-                inst_config_state[i+1].lmul = LMUL4;
++                lane_out[i].lmul = LMUL4;
+               end else if (vl_minus_one[i][`VL_WIDTH-5] == 'b1) begin
+                 // vl from VLEN/16+1 to VLEN/8
+-                inst_config_state[i+1].lmul = LMUL2;
++                lane_out[i].lmul = LMUL2;
+               end else if (vl_minus_one[i][`VL_WIDTH-6] == 'b1) begin
+                 // vl from VLEN/32+1 to VLEN/16
+-                inst_config_state[i+1].lmul = LMUL1;
++                lane_out[i].lmul = LMUL1;
+               end else if (vl_minus_one[i][`VL_WIDTH-7] == 'b1) begin
+                 // vl from VLEN/64+1 to VLEN/32
+-                inst_config_state[i+1].lmul = LMUL1_2;
++                lane_out[i].lmul = LMUL1_2;
+               end else begin
+                 // vl from 0 to VLEN/64
+-                inst_config_state[i+1].lmul = LMUL1_4;
++                lane_out[i].lmul = LMUL1_4;
+               end
+             end
+             SEW32: begin
+               if (vl_minus_one[i][`VL_WIDTH-4+:2] != 'b00) begin
+                 // vl from VLEN/8+1 to VLEN/4
+-                inst_config_state[i+1].lmul = LMUL8;
++                lane_out[i].lmul = LMUL8;
+               end else if (vl_minus_one[i][`VL_WIDTH-5] == 'b1) begin
+                 // vl from VLEN/16+1 to VLEN/8
+-                inst_config_state[i+1].lmul = LMUL4;
++                lane_out[i].lmul = LMUL4;
+               end else if (vl_minus_one[i][`VL_WIDTH-6] == 'b1) begin
+                 // vl from VLEN/32+1 to VLEN/16
+-                inst_config_state[i+1].lmul = LMUL2;
++                lane_out[i].lmul = LMUL2;
+               end else if (vl_minus_one[i][`VL_WIDTH-7] == 'b1) begin
+                 // vl from VLEN/64+1 to VLEN/32
+-                inst_config_state[i+1].lmul = LMUL1;
++                lane_out[i].lmul = LMUL1;
+               end else if (vl_minus_one[i][`VL_WIDTH-8] == 'b1) begin
+                 // vl from VLEN/128+1 to VLEN/64
+-                inst_config_state[i+1].lmul = LMUL1_2;
++                lane_out[i].lmul = LMUL1_2;
+               end else begin
+                 // vl from 0 to VLEN/128
+-                inst_config_state[i+1].lmul = LMUL1_4;
++                lane_out[i].lmul = LMUL1_4;
+               end
+             end
+           endcase
+         end
+       end
+-    end
+-  end
+-
+-  // Propagate outputs
+-  logic [N-1:0] unaligned_cmd_valid;
+-  RVVCmd [N-1:0] unaligned_cmd_data;
+-  logic [N-1:0] unaligned_trap_valid;  // Should this instruction trap
+-  RVVInstruction [N-1:0] unaligned_trap_data;
+-  logic [N-1:0] is_whole_reg;
+-  RVVConfigState next_config_state;
+-
+-  always_ff @(posedge clk or negedge rstn) begin
+-    if (!rstn) begin
+-      // Per Section 3.11 of RVV spec, the recommended state on reset is
+-      // vill is set, with the remain vtype bits and vl being set to 0.
+-      config_state_q.vill <= 1;
+-      config_state_q.vl <= 0;
+-      config_state_q.vstart <= 0;
+-      config_state_q.ma <= 0;
+-      config_state_q.ta <= 0;
+-      config_state_q.xrm <= RNU;
+-      config_state_q.xsat <= 0;
+-`ifdef ZVE32F_ON
+-      config_state_q.frm <= RVFRM'('0);
+-`endif  // ZVE32F_ON
+-      config_state_q.sew <= SEW8;
+-      config_state_q.lmul <= LMUL1;
+-      config_state_q.lmul_orig <= LMUL1;
+-`ifdef ZVT_ON
+-      // VME (Zvt) §12.1.1.2 says mtype is implicitly zero when mtwiden==0
+-      // ("matrix unit is not configured"). Reset to that state.
+-      config_state_q.altfmt  <= 1'b0;
+-      config_state_q.mtwiden <= 2'b00;
+-      config_state_q.tk     <= 3'b000;
+-      config_state_q.tm     <= 14'd0;
+-`endif
+-    end else begin
+-      // Update config state next cycle, stopping before the first trapping lane.
+-      config_state_q <= next_config_state;
+-      if (flush_i || vstart_valid_i) begin
+-        config_state_q.vstart <= vstart_i;
+-      end
+-    end
+-  end
+-
+-  always_comb begin
+-    logic seen_trap;
+-    seen_trap = 1'b0;
+-    next_config_state = inst_config_state[0];
+-    for (int i = 0; i < N; i++) begin
+-      // Whole-register moves (vmv<nr>r.v: opcode=RVV, funct3=OPIVI, funct6=VSMUL_VMVNRR, vm=1, vs1[4:3]=00)
+-      // ignore vtype and execute even when vill is set (RVV 1.0 §16.6).
++
++      // Per-lane trap decision. Computed here (not in the output block) so the
++      // SAME condition both suppresses emission and stops this Context's
++      // working-state walk, matching the upstream single-Context seen_trap
++      // ordering (a trapping lane's own post-state is not taken).
++      // Whole-register moves (vmv<nr>r.v: opcode=RVV, funct3=OPIVI,
++      // funct6=VSMUL_VMVNRR, vm=1, vs1[4:3]=00) ignore vtype and execute even
++      // when vill is set (RVV 1.0 §16.6).
+       is_whole_reg[i] = (inst_q[i].opcode == RVV) &&
+                         (inst_q[i].bits[7:5] == OPIVI) &&
+                         (inst_q[i].bits[24:19] == VSMUL_VMVNRR) &&
+@@ -649,10 +759,10 @@
+       // violate vill are trapped in scalar decode to avoid hanging the scalar LSU.
+       // Configuration instructions (vset*/mset*) do not trap on vill.
+       unaligned_trap_valid[i] = valid_inst_q[i] && (
+-          ((inst_q[i].opcode == RVV) && !vconfig_change[i] && !is_whole_reg[i] && inst_config_state[i+1].vill)
++          ((inst_q[i].opcode == RVV) && !vconfig_change[i] && !is_whole_reg[i] && lane_out[i].vill)
+ `ifdef ZVT_ON
+           || mset_illegal_trap[i]
+-          || ((inst_q[i].opcode == RVV) && !vconfig_change[i] && (inst_config_state[i+1].mtwiden == 2'b00) && (
++          || ((inst_q[i].opcode == RVV) && !vconfig_change[i] && (lane_out[i].mtwiden == 2'b00) && (
+               ((inst_q[i].bits[7:5] == 3'b110) && (inst_q[i].bits[24:19] == 6'b010000) && (inst_q[i].bits[17:13] == 5'b11111)) || // vtmv.v.t
+               ((inst_q[i].bits[7:5] == 3'b110) && (inst_q[i].bits[24:19] == 6'b010111)) || // vtmv.t.v
+               ((inst_q[i].bits[7:5] == 3'b110) && (inst_q[i].bits[24:19] == 6'b010000) && (inst_q[i].bits[17:13] == 5'b11110)) || // vtzero
+@@ -660,10 +770,109 @@
+           ))
+ `endif
+       );
++
++      // Publish this lane's post-state to its OWN Context only if the lane
++      // holds a VALID instruction and no trap has been seen up to and
++      // including this lane. Idle lanes MUST NOT publish: they retain their
++      // last accept's stale tag and CSR captures, which would overwrite a
++      // valid lane's fresh publication (and would resurrect a consumed
++      // vstart or undo a ctx_reset on every idle cycle). Idle cycles keep
++      // the live-seeded state instead (the seed flows to
++      // next_config_state). The trap stop is GLOBAL (same trap-prefix
++      // eligibility as the emission suppression below): a trap in one
++      // Context suppresses younger lanes' cfg/reg_write/cmd AND their shadow
++      // publication, so no Context's working snapshot ever advances past a
++      // trap without emitting the corresponding result — exactly the
++      // upstream single-Context seen_trap semantics (upstream's idle lanes
++      // published an identity copy; skipping them is equivalent).
++      walk_trap_seen = walk_trap_seen || unaligned_trap_valid[i];
++      if (valid_inst_q[i] && !walk_trap_seen) begin
++        ctx_state[lane_ctx[i]] = lane_out[i];
++      end
++    end
++    for (int c = 0; c < CONTEXT_COUNT; c++) begin
++      next_config_state[c] = ctx_state[c];
++    end
++  end
++
++  // Propagate outputs
++  logic [N-1:0] unaligned_cmd_valid;
++  RVVCmd [N-1:0] unaligned_cmd_data;
++  RVVInstruction [N-1:0] unaligned_trap_data;
++
++  always_ff @(posedge clk or negedge rstn) begin
++    if (!rstn) begin
++      // Per Section 3.11 of RVV spec, the recommended state on reset is
++      // vill is set, with the remain vtype bits and vl being set to 0.
++      for (int c = 0; c < CONTEXT_COUNT; c++) begin
++        config_state_q[c].vill <= 1;
++        config_state_q[c].vl <= 0;
++        config_state_q[c].vstart <= 0;
++        config_state_q[c].ma <= 0;
++        config_state_q[c].ta <= 0;
++        config_state_q[c].xrm <= RNU;
++        config_state_q[c].xsat <= 0;
++`ifdef ZVE32F_ON
++        config_state_q[c].frm <= RVFRM'('0);
++`endif  // ZVE32F_ON
++        config_state_q[c].sew <= SEW8;
++        config_state_q[c].lmul <= LMUL1;
++        config_state_q[c].lmul_orig <= LMUL1;
++`ifdef ZVT_ON
++        // VME (Zvt) §12.1.1.2 says mtype is implicitly zero when mtwiden==0
++        // ("matrix unit is not configured"). Reset to that state.
++        config_state_q[c].altfmt  <= 1'b0;
++        config_state_q[c].mtwiden <= 2'b00;
++        config_state_q[c].tk     <= 3'b000;
++        config_state_q[c].tm     <= 14'd0;
++`endif
++      end
++    end else begin
++      for (int c = 0; c < CONTEXT_COUNT; c++) begin
++        if (ctx_reset_i[c]) begin
++          // Context reuse: restore ONLY this Context's working snapshot to the
++          // architectural reset state. Assert only after the Context's
++          // instructions have drained (scalar quiescence).
++          config_state_q[c].vill <= 1;
++          config_state_q[c].vl <= 0;
++          config_state_q[c].vstart <= 0;
++          config_state_q[c].ma <= 0;
++          config_state_q[c].ta <= 0;
++          config_state_q[c].xrm <= RNU;
++          config_state_q[c].xsat <= 0;
++`ifdef ZVE32F_ON
++          config_state_q[c].frm <= RVFRM'('0);
++`endif  // ZVE32F_ON
++          config_state_q[c].sew <= SEW8;
++          config_state_q[c].lmul <= LMUL1;
++          config_state_q[c].lmul_orig <= LMUL1;
++`ifdef ZVT_ON
++          config_state_q[c].altfmt  <= 1'b0;
++          config_state_q[c].mtwiden <= 2'b00;
++          config_state_q[c].tk     <= 3'b000;
++          config_state_q[c].tm     <= 14'd0;
++`endif
++        end else begin
++          // Update this Context's working state next cycle. A vstart update
++          // lands ONLY when this Context's own owner-qualified channel is
++          // valid. flush_i alone must NOT write vstart: the parent drives
++          // silent channels with valid=false, bits=0, so a flush-qualified
++          // write would clear a non-updated Context's vstart. (A flush that
++          // must change vstart asserts the corresponding channel.)
++          config_state_q[c] <= next_config_state[c];
++          if (vstart_update_valid_i[c]) begin
++            config_state_q[c].vstart <= vstart_update_data_i[c];
++          end
++        end
++      end
++    end
++  end
++
++  always_comb begin
++    logic seen_trap;
++    seen_trap = 1'b0;
++    for (int i = 0; i < N; i++) begin
+       seen_trap = seen_trap || unaligned_trap_valid[i];
+-      if (!seen_trap) begin
+-        next_config_state = inst_config_state[i+1];
+-      end
+       unaligned_trap_data[i] = inst_q[i];
+       unaligned_cmd_valid[i] = valid_inst_q[i] && !vconfig_change[i]
+ `ifdef ZVT_ON
+@@ -678,8 +887,10 @@
+ `endif
+       unaligned_cmd_data[i].opcode = inst_q[i].opcode;
+       unaligned_cmd_data[i].bits = inst_q[i].bits;
+-      unaligned_cmd_data[i].arch_state = inst_config_state[i+1];
+-      unaligned_cmd_data[i].arch_state.vstart = inst_config_state[i].vstart;
++      // arch_state carries lane_out[i], whose vstart/vxrm/vxsat/frm came from
++      // the accept-time captures (see lane_in overlay in the config walk).
++      unaligned_cmd_data[i].arch_state = lane_out[i];
++      unaligned_cmd_data[i].arch_state.vstart = lane_in[i].vstart;
+       // TODO: Handle rs propagation for loads/stores
+       // funct3 == inst[14:12] == bits[7:5]; bits[7] == funct3[2] indicates
+       // scalar rs1 is used (OPIVX, OPFVF, OPMVX, OPCFG). For OPFVF the scalar
+@@ -708,16 +919,72 @@
+ `ifdef ZVT_ON
+           mset_writes_rd[i] ? mset_rd_data[i] :
+ `endif
+-          {{(`XLEN-(`VL_WIDTH)){1'b0}}, inst_config_state[i+1].vl};
++          {{(`XLEN-(`VL_WIDTH)){1'b0}}, lane_out[i].vl};
++      // Producer identity of this writeback lane (opaque native key).
++      reg_write_tag_o[i] = inst_q[i].rob_tag;
+ 
+ `ifdef ZVT_ON
+       vme_mtype_valid_o[i] = ((vconfig_change[i] && !is_msettn[i]) || mset_writes_rd[i]) && !seen_trap;
+-      vme_mtype_data_o[i]  = {8'd0, inst_config_state[i+1].tm, 2'd0, inst_config_state[i+1].tk, 3'd0, inst_config_state[i+1].mtwiden};
++      vme_mtype_data_o[i]  = {8'd0, lane_out[i].tm, 2'd0, lane_out[i].tk, 3'd0, lane_out[i].mtwiden};
+       vme_mtype_tag_o[i]   = inst_q[i].rob_tag;
+ `else
+       vme_mtype_valid_o[i] = 1'b0;
+       vme_mtype_data_o[i]  = 32'd0;
+       vme_mtype_tag_o[i]   = '0;
++`endif
++
++      // Immutable per-op config results for scalar retire-point commit.
++      // Payload = this lane's OWN computed post-state (vset/mset arithmetic
++      // above), valid independent of rd==x0 and of nonzero values. Masks
++      // mirror the ACTUAL architectural field writes of the native ISA
++      // (Zvt §12.1.1.4/§12.1.1.5 as computed above):
++      //   vsetvli/vsetivli/vsetvl -> VL + VTYPE + MTYPE (mtype implicitly
++      //                              zeroed; a real architectural write)
++      //   msetmtype/msetmtypei    -> VL (cleared to 0) + VTYPE + MTYPE
++      //   msettn                  -> VL only (preserves VTYPE incl. vill
++      //                              and MTYPE)
++      //   msettm/msettk           -> MTYPE only (preserve VL and VTYPE)
++      // so the scalar consumer folds exactly the fields the instruction
++      // architecturally changed, implicit zero writes included.
++`ifdef ZVT_ON
++      cfg_valid_o[i] = (vconfig_change[i] || mset_writes_rd[i]) && !seen_trap;
++      cfg_wr_vl_o[i] = vconfig_change[i];
++      cfg_wr_vtype_o[i] = vconfig_change[i] && !is_msettn[i];
++      cfg_wr_mtype_o[i] = (vconfig_change[i] && !is_msettn[i]) || mset_writes_rd[i];
++`else
++      cfg_valid_o[i] = vconfig_change[i] && !seen_trap;
++      cfg_wr_vl_o[i] = vconfig_change[i];
++      cfg_wr_vtype_o[i] = vconfig_change[i];
++      cfg_wr_mtype_o[i] = 1'b0;
++`endif
++      cfg_tag_o[i] = inst_q[i].rob_tag;
++      cfg_vl_o[i] = lane_out[i].vl;
++`ifdef ZVT_ON
++      // vtype CSR layout (RVV 1.0 §3.4 + Zvt §12.1.1.4 bit 8 altfmt),
++      // identical to the packed view the scalar side constructs.
++      cfg_vtype_o[i] = {lane_out[i].vill,
++                        {(`XLEN-10){1'b0}},
++                        lane_out[i].altfmt,
++                        lane_out[i].ma,
++                        lane_out[i].ta,
++                        3'(lane_out[i].sew),
++                        3'(lane_out[i].lmul_orig)};
++      // mtype CSR layout (Zvt §12.1.1.2): [1:0] mtwiden, [7:5] tk,
++      // [23:10] tm.
++      cfg_mtype_o[i] = {{(`XLEN-24){1'b0}},
++                        lane_out[i].tm,
++                        2'd0,
++                        lane_out[i].tk,
++                        3'd0,
++                        lane_out[i].mtwiden};
++`else
++      cfg_vtype_o[i] = {lane_out[i].vill,
++                        {(`XLEN-9){1'b0}},
++                        lane_out[i].ma,
++                        lane_out[i].ta,
++                        3'(lane_out[i].sew),
++                        3'(lane_out[i].lmul_orig)};
++      cfg_mtype_o[i] = '0;
+ `endif
+     end
+   end

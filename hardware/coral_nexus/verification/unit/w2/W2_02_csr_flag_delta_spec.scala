@@ -35,11 +35,14 @@ class W2_02_CsrFlagDeltaSpec extends AnyFreeSpec with ChiselSim {
     for (c <- 0 until dut.io.advanceGen.length) {
       dut.io.advanceGen(c).poke(false.B)
       dut.io.perCtxNRetired(c).poke(0.U)
+      dut.io.perCtxTrapRetired(c).poke(false.B)
+      dut.io.perCtxRetiredConfig(c).valid.poke(false.B)
     }
     for (i <- 0 until dut.io.csr.in.value.length) {
       dut.io.csr.in.value(i).poke(0.U)
     }
     dut.io.req.valid.poke(false.B)
+    dut.io.reqFromDm.poke(false.B)
     dut.io.req.bits.addr.poke(0.U)
     dut.io.req.bits.index.poke(0.U)
     dut.io.req.bits.rs1.poke(0.U)
@@ -74,25 +77,19 @@ class W2_02_CsrFlagDeltaSpec extends AnyFreeSpec with ChiselSim {
     dut.io.floatOwner.get.owner_op_seq.poke(0.U)
     dut.io.floatOwner.get.subop_id.poke(0.U)
 
-    dut.io.rvv.get.vstart.poke(0.U)
-    dut.io.rvv.get.vl.poke(0.U)
-    dut.io.rvv.get.vtype.poke(0.U)
-    dut.io.rvv.get.vxrm.poke(0.U)
-    dut.io.rvv.get.vxsat.poke(false.B)
-    dut.io.rvv.get.fflags.valid.poke(false.B)
-    dut.io.rvv.get.fflags.bits.poke(0.U)
-    dut.io.rvv.get.mtype.poke(0.U)
-    dut.io.rvvOwner.get.ctx_slot.poke(0.U)
-    dut.io.rvvOwner.get.ctx_generation.poke(0.U)
-    dut.io.rvvOwner.get.owner_op_seq.poke(0.U)
-    dut.io.rvvOwner.get.subop_id.poke(0.U)
+    dut.io.rvv.get.vstart.foreach(_.poke(0.U))
+    dut.io.rvv.get.vxrm.foreach(_.poke(0.U))
 
     dut.io.float_dirty.get.poke(false.B)
-    dut.io.rvv_dirty.get.poke(false.B)
+    dut.io.perCtxRvvDirty.get.foreach(_.poke(false.B))
     dut.io.vme_discard.get.poke(false.B)
     dut.io.vme_ms_dirty.get.poke(false.B)
     dut.io.vme_vs_dirty.get.poke(false.B)
     dut.io.vme_fp_dirty.get.poke(false.B)
+    dut.io.vmeOwner.get.ctx_slot.poke(0.U)
+    dut.io.vmeOwner.get.ctx_generation.poke(0.U)
+    dut.io.vmeOwner.get.owner_op_seq.poke(0.U)
+    dut.io.vmeOwner.get.subop_id.poke(0.U)
 
     for (k <- 0 until dut.io.retiredDelta.length) {
       dut.io.retiredDelta(k).valid.poke(false.B)
@@ -100,6 +97,8 @@ class W2_02_CsrFlagDeltaSpec extends AnyFreeSpec with ChiselSim {
       dut.io.retiredDelta(k).vxsat.poke(false.B)
       dut.io.retiredDelta(k).replaceFflags.poke(false.B)
       dut.io.retiredDelta(k).replaceVxsat.poke(false.B)
+      dut.io.retiredDelta(k).commitsFrm.poke(false.B)
+      dut.io.retiredDelta(k).frmValue.poke(0.U)
       dut.io.retiredDelta(k).owner.ctx_slot.poke(0.U)
       dut.io.retiredDelta(k).owner.ctx_generation.poke(0.U)
       dut.io.retiredDelta(k).owner.owner_op_seq.poke(0.U)

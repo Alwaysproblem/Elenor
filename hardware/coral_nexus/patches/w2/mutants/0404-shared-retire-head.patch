@@ -1,0 +1,21 @@
+diff --git a/hdl/chisel/src/coralnpu/scalar/RetirementPartitionBank.scala b/hdl/chisel/src/coralnpu/scalar/RetirementPartitionBank.scala
+--- a/hdl/chisel/src/coralnpu/scalar/RetirementPartitionBank.scala
++++ b/hdl/chisel/src/coralnpu/scalar/RetirementPartitionBank.scala
+@@ -135,12 +135,15 @@
+       part.io.writeAddrScalar(i).addr  := io.writeAddrScalar(i).addr
+     }
+ 
+-    part.io.storeComplete.valid := io.storeComplete.valid && (io.storeComplete.bits.ctx_slot === c.U)
++    // MUTANT(0404-shared-retire-head): degrade to a shared retire stream -- every
++    // completion drains through partition 0, so a peer can never retire behind a
++    // stalled head. Must FAIL w2_04_cancel_retire_spec (B-retires-while-A-stalled).
++    part.io.storeComplete.valid := io.storeComplete.valid && (c == 0).B
+     part.io.storeComplete.bits  := io.storeComplete.bits
+ 
+     for (j <- 0 until p.instructionLanes + 2) {
+       part.io.writeDataScalar(j).valid := io.writeDataScalar(j).valid &&
+-        (io.writeDataScalar(j).bits.owner.ctx_slot === c.U)
++        (io.writeDataScalar(j).bits.owner.ctx_slot === c.U) && (c == 0).B
+       part.io.writeDataScalar(j).bits := io.writeDataScalar(j).bits
+     }
+ 
