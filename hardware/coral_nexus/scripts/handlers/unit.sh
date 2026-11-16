@@ -2,9 +2,8 @@
 # unit --suite <name> handler: runs the registered pytest files of one suite
 # and writes a machine-readable summary next to the pytest log.
 #
-# Suites are registered in scripts/commands.yaml (C003 registers only the
-# environment suite). The dispatcher already validated the suite name; an
-# unregistered suite never reaches this handler.
+# Suites are registered in scripts/commands.yaml. The dispatcher validates the
+# suite name; an unregistered suite never reaches this handler.
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,12 +11,13 @@ H="$(cd "$here/../.." && pwd)"
 ROOT="$(cd "$H/../.." && pwd)"
 
 suite=""
+config=""
 out="${OUT:-out/coral_nexus/unit}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --suite) suite="$2"; shift 2 ;;
     --out) out="$2"; shift 2 ;;
-    --config) shift 2 ;; # accepted for forward compatibility, unused here
+    --config) config="$2"; shift 2 ;;
     *) echo "error: unit: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -41,7 +41,8 @@ PY
 )"
 [ -n "$tests" ] || { echo "error: suite $suite has no tests registered" >&2; exit 3; }
 
-conda run -n elenor-validator python -m pytest -n0 -q $tests \
+CN_UNIT_CONFIG="$config" conda run -n elenor-validator python -m pytest -n0 -q $tests \
+  --basetemp "$out/pytest" \
   > "$out/pytest.log" 2>&1
 rc=$?
 python3 - "$out" "$rc" "$suite" <<'PY'

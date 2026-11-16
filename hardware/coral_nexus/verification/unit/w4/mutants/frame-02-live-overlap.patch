@@ -1,0 +1,11 @@
+--- a/slot_frame.sv
++++ b/slot_frame.sv
+@@ -346,7 +346,7 @@
+                   overlap = 1'b1;
+               end
+             end
+-            if (bad_range || overlap) begin
++            if (bad_range) begin
+               state <= ST_ACTIVE;
+               stat_permission_faults_o <= increment(stat_permission_faults_o);
+               respond(overlap ? FR_FAULT_OVERLAP : FR_FAULT_BANK_POLICY,

@@ -198,9 +198,10 @@ W1 权威接口对齐（按 PlanW1 计划）：协议冻结产物由 W1-01 单�
 - **优先级**：P0。**硬前置**：W4-01 fragment 冻结 hash；W0-03 P0 原核（提供真实 RTL 验证工作台）。**并行窗口**：与 W1-02（`TilePort`）、W2-02（RF/ROB）并行。
 - **输入**：W4 设计 §3.3/§3.4/§3.6、§4.6、§6 参数表；`mshr.py`/`cache.py`/`l1_slot_frame.py` 基线。
 - **产物**：§2.2 表 `l1_bank.sv`、`slot_frame.sv`、`arena_ledger.sv`、`mshr_table.sv`、`cache.sv`、`transfer_outbridge.sv`、`l1_program_port.sv`（含 `tile_program.sv` 安装/取指端口仲裁）＋各 tb；`pipeline_validator/tests/test_w4_mshr_cache.py`。
+- **执行卡拆分**：C029 仅落地 bank／Frame／arena ledger（含 §5.5 第 3 步 hold-retire）；cache／MSHR／程序物理端口归 C030，外侧服务归 C023。C029 的 48 B indexed fixture 只以已知地址／字节序列驱动 bank，不声称 Gather／Scatter FSM 已实现。
 - **机械步骤**：
   1. `l1_bank.sv`：逐 bank 独立 busy/holder，`try_issue` 语义（`transfer.py:346-474` 参照：请求多 bank 同步占用/释放）；SPM+cache 分区由 profile 驱动（PRO-02 一致比例逐 bank 同 layout），`system_reserved_spm_per_bank`（默认 2048）不参与 arena 计账。
-  2. `slot_frame.sv`：`prepare`/`bind_view`/`bind`/`release`/`assert_slot_binding` 语义（`l1_slot_frame.py:127-295`），Frame FSM 8 states×1 cycle（`...:52-62,209-229`），校验不在 launch 关键路径（FRM-02）。
+  2. `slot_frame.sv`：`prepare`/`bind_view`/`bind`/`release`/`assert_slot_binding` 语义（`l1_slot_frame.py:127-295`）落为实际检查／握手 FSM。模型的 8-cycle bind 仅是估时参考，不强制每态恰 1 cycle；tb 测量每态 latency，并按 C013/C019 的 bank／slot 容量证明实现的算法上界。
   3. `arena_ledger.sv`：hold/bound 账本（§5.1 fragment）；HOLD/COMMIT/COMPENSATE 状态迁移；W4 设计 §3.7 顺序合同。
   4. `mshr_table.sv`：token 分配/合并/cancel（`mshr.py:46-179` 语义），**token 生命周期按 §4.4**；每 entry 附 64B＋validity fill 缓冲；`profile generation` 分域；`_downgrade_after_eviction` 语义（`engines.py:1169-1204` 参照）。
   5. `cache.sv`：行结构 tag+validity+data+dirty；refill/clean/invalidate携 generation；`reconfigure`（`cache.py:546-563`）仅在 commit 后生效；`begin_maintenance`/`complete_clean`（`cache.py:441-519`）。
@@ -272,6 +273,7 @@ W1 权威接口对齐（按 PlanW1 计划）：协议冻结产物由 W1-01 单�
 - **优先级**：P0（CN-G3/G4 关口）。**硬前置**：W4-02（bank/cache/MSHR 计数端口）；W4-03（真在途）；W4-04（真外写）。**并行窗口**：与 W3-05、W5-05 并行。
 - **输入**：W4 设计 §3.5/§3.6/§3.7、§4.7；`profile_controller.py:473-491/551-594/607-752/1013-1043/1306-1358/1385-1419`；`cache.py:441-519`；`arena.py:961-1022`。
 - **产物**：`profile_member.sv`、`arena_ledger.sv` 扩展（hold-retire）＋tb；`profile_controller.py`（gate_open 事件发出/事件驱动 retry，非 tick 轮询）＋`tile.py` L1ArenaManager Python 镜像＋`test_w4_hold_retire.py` 既有/新例。
+- **C029 边界**：仅实现下面第 3 步的本地 hold-retire 链及其 Python 参考回归；不新增 Python L1 执行账本，不将 Profile FSM、范围维护或 gate 双唤醒计为已完成。
 - **机械步骤**：
   1. `profile_member.sv`：12 步（ACQUIRE→…→RELEASE，`profiles.py:22-35`）/9 步（`profiles.py:36-46`）逐 step FSM；PREPARE 静止判定（`profile_controller.py:1013-1043` 四条：cache pending_clean==0、dirty==0、MSHR active==0、Arena/View pin/inflight==0，**换成 RTL 侧计数**）；COMMIT 校验 shadow 与已准备事务一致后原子切 active 并递增 generation（PRO-12/15）；失败/超时→gate 锁闭进 recovery，需 `reset_mode` 显式重驱动（PRO-17，模型 2,000,000 cycle）。
   2. gate 双唤醒（合同方案 7/ADM-06/ADM-10；W1 计划 §5.4 为 Python 侧共享接线）：Tile 侧不再 tick 轮询 gate——`profile_controller.py` 由每 tick 主动检查改为**事件驱动** retry（GateNotify 消息触发 `_step_task_admission`/`dispatch_role` 重试）；Python 侧 `admission_version` token 补 L1 gate 项（`tile_group.py:2070-2078` 差异项，由 W1-04 落）。**Tile 端口 passive**（W6 计划 §5.1：`Tile 端点 passive 执行组命令、不自动推进`）。

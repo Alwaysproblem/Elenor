@@ -1,0 +1,11 @@
+--- a/slot_frame.sv
++++ b/slot_frame.sv
+@@ -121,7 +121,7 @@
+   endfunction
+ 
+   function automatic logic binding_matches(input binding_t value);
+-    return value.allocation_id == h_view_alloc_id && value.owner == h_owner &&
++    return value.owner == h_owner &&
+       value.generation == h_arena_alloc_gen && value.base == h_base_addr &&
+       value.size == h_logical;
+   endfunction

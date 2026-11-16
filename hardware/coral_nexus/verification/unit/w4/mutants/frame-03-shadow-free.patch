@@ -1,0 +1,11 @@
+--- a/slot_frame.sv
++++ b/slot_frame.sv
+@@ -269,7 +269,7 @@
+             else begin
+               if (h_op == FOP_VIEW_FREE) begin
+                 live_mask[SLOT_AW'(h_slot)] <= 1'b0;
+-                shadow_mask[SLOT_AW'(h_slot)] <= 1'b0;
++                shadow_mask[SLOT_AW'(h_slot)] <= shadow_mask[SLOT_AW'(h_slot)];
+                 live[SLOT_AW'(h_slot)] <= '0; shadow[SLOT_AW'(h_slot)] <= '0;
+                 stat_view_frees_o <= increment(stat_view_frees_o);
+               end

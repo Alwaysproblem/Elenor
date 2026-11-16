@@ -1,0 +1,12 @@
+--- a/l1_bank.sv
++++ b/l1_bank.sv
+@@ -554,8 +554,7 @@
+   always_comb begin : fin_decode
+     for (int c = 0; c < CONTEXT_COUNT; c++) begin
+       fin_ready_o[c] = 1'b1;
+-      fin_match[c] = fin_valid_i[c] && active[c] && (fin_txn_i[c] == ptxn[c])
+-        && (fin_generation_i[c] == holder_generation[c]);
++      fin_match[c] = fin_valid_i[c] && active[c];
+       fin_accept[c] = fin_match[c] && pdone[c];
+     end
+   end

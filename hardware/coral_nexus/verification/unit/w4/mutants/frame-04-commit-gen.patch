@@ -1,0 +1,11 @@
+--- a/slot_frame.sv
++++ b/slot_frame.sv
+@@ -232,7 +232,7 @@
+                          h_profile_generation != profile_gen) begin
+               respond(FR_REJ_IDENTITY, 64'd1, '0);
+             end else begin
+-              arena_gen <= h_arena_alloc_gen;
++              arena_gen <= arena_gen + ID_W'(1);
+               state <= ST_ACTIVE;
+               respond(FR_OK, 64'd1, h_arena_alloc_gen);
+             end

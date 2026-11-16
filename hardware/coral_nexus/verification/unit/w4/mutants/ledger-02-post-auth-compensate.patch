@@ -1,0 +1,14 @@
+--- a/arena_ledger.sv
++++ b/arena_ledger.sv
+@@ -416,9 +416,9 @@
+               end
+             end
+             PREPARE, FRAME_RELEASE, COMMIT, COMPENSATE: begin
+-              if (request.op == COMPENSATE && context_state[request.ctx] == C_BOUND)
++              if (1'b0)
+                 reply(POST_AUTH_COMPENSATE, '0, '0);
+-              else if (context_state[request.ctx] != C_HELD) reply(NOT_HELD, '0, '0);
++              else if (context_state[request.ctx] != C_HELD && !(request.op == COMPENSATE && context_state[request.ctx] == C_BOUND)) reply(NOT_HELD, '0, '0);
+               else if (!owner_matches()) reply(STALE, '0, '0);
+               else if ((request.op == PREPARE || request.op == COMMIT) &&
+                        request.profile_gen != profile_generation_i) reply(BAD_PROFILE, '0, '0);

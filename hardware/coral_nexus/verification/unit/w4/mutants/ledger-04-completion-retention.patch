@@ -1,0 +1,11 @@
+--- a/arena_ledger.sv
++++ b/arena_ledger.sv
+@@ -646,7 +646,7 @@
+               for (int s = 0; s < SLOTS; s++) begin
+                 views[request.ctx][s] <= '0; view_state[request.ctx][s] <= V_EMPTY;
+               end
+-              context_state[request.ctx] <= request.op == RETIRE ? C_COMPLETE : C_FREE;
++              context_state[request.ctx] <= C_FREE;
+               reply(request.op == RETIRE ? RETIRED : COMPENSATED, arenas[request.ctx], '0);
+             end
+             default: reply(FRAME_FAULT, '0, '0);

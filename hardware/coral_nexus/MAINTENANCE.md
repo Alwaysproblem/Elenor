@@ -149,6 +149,54 @@ frontend's tagged-port tests cover delayed/out-of-order responses; the native
 Core adapter retains the existing fixed-next-cycle IBus timing. Neither result
 claims C030 physical-port arbitration or C040 full-Tile assembly is complete.
 
+## Focused C029 acceptance
+
+C029 consumes the sealed C013 memory bounds and C019 C1/C2 targets through
+`scripts/lib/gen_memory_params.py`. Its generated `c029_params_pkg.sv` is an
+experimental geometry consumer, not a new capacity authority or silicon-width
+freeze. Regeneration must not modify the protocol seal.
+
+```bash
+python3 hardware/coral_nexus/scripts/lib/gen_memory_params.py --check
+EVIDENCE=out/coral_nexus/C029/attempt-NNN
+bash hardware/coral_nexus/scripts/cn.sh unit --suite w4 \
+  --config hardware/coral_nexus/configs/cs1_c2.yaml --out "$EVIDENCE/unit"
+conda run -n elenor-validator python -m pytest \
+  pipeline_validator/tests/test_memory_invariants.py -n0 -q \
+  -k "double_release or stale_generation"
+```
+
+The unit handler forwards `--config` as `CN_UNIT_CONFIG` and retains pytest
+temporary artifacts under `<out>/pytest`. The W4 runner rejects a config that
+differs from its sealed target; C2 also exercises the C1 same-RTL degradation
+direction. It builds the pinned Verilator from the existing offline
+`cache/w2_bazel` caches inside the locked builder, then runs behavioral mutants
+before the bank, SlotFrame and integrated arena-ledger benches. A mutation
+must compile and reach an RTL assertion; build failures and process timeouts
+are not mutation kills.
+
+Bank clients capture `req_generation_o` on acceptance and echo that incarnation
+in `fin_generation_i`; caller txn IDs alone are not lifetime identities.
+Invalidation waits for bank ownership, clears one sourced data word per cycle,
+and ACKs only after the final clear. It never rewrites the SRAM bytes.
+
+Frame PREPARE streams immutable layout records without imposing a whole-program
+buffer-count limit. VIEW_BIND consumes the resident descriptor owner's immutable
+per-buffer lookup; Frame storage remains bounded by live Slots. The ledger
+returns a fresh `rsp_view_alloc_id`, and its engine-facing shadow query exposes
+the actual handle. Closing views are no longer query-valid.
+
+`exec_drained` is a current-Task retirement handshake, not merely an empty ROB
+bit; `exec_drained_generation_i` must match the current Context. The ledger uses
+a selected sourced profile (`ACTIVE_PROFILE_IDX`); integrated runtime profile
+sequencing remains C058. Reference events must arrive exactly once from their
+producer, which retains transaction de-duplication ownership.
+
+The 48-byte indexed stimulus verifies actual bank bytes and ordering, not an
+unimplemented Gather/Scatter FSM. Python lifecycle tests use existing reference
+objects only; they do not create a second L1 execution ledger. This entry does
+not execute C026/C027/C028 or claim C030/C040 completion.
+
 ## Offline seeds (C004)
 
 - Inventory: `env/seed_targets.json` — every seed has URL/path + sha256 +

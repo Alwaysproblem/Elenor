@@ -261,22 +261,35 @@ ROB 同 PC 双 Context store、错误 op_seq、独立退休、局部 fault flush
 - **任务**：W4-02, W4-05（bank/Frame/arena/hold-retire 部分）
 - **前置**：C020
 - **建议 commit**：`feat(coral-mem): L1 banks, slot frames and hold-bind-retire arena ledger`
-- **输入/先读**：`../implementation/W4_Memory_Subsystem_Plan.md` §5.2 步骤 1–3、§5.5 步骤 3（hold-retire）；`V/memory/l1_slot_frame.py:127-295`、`V/memory/arena.py:1424-1435` 基线；C013 合同 fragment hash。
-- **修改边界**：H（新 `H/rtl/memory/{l1_bank,slot_frame,arena_ledger}.sv`（ledger 含 hold-retire 扩展）+ 各 tb；注册 `cn unit --suite w4` case；`V/tests/test_w4_hold_retire.py` 新增）。共享表把 W4-02 的 cache/MSHR/程序端口拆到 C030、外腿拆到 C023；本卡 = bank/Frame/ledger。
+- **输入/先读**：`../implementation/W4_Memory_Subsystem_Plan.md` §5.2 步骤 1–3、§5.5 步骤 3（hold-retire）；`V/memory/l1_slot_frame.py:127-295`、`V/memory/arena.py:1424-1435` 基线；`V/memory/byte_store.py:75-84` 的 L1 allocation/generation/profile 独立有效性域；C013 合同 fragment hash。
+- **修改边界**：H（新 `H/rtl/memory/{l1_bank,slot_frame,arena_ledger}.sv`（ledger 含 hold-retire 扩展）+ 各 tb；`scripts/lib/gen_memory_params.py` 将已封印 C013/C019 参数消费为私有 `rtl/memory/c029_params_pkg.sv`，不形成第二套容量权威；注册 `cn unit --suite w4` case；`V/tests/test_w4_hold_retire.py` 新增）。共享表把 W4-02 的 cache/MSHR/程序端口拆到 C030、外腿拆到 C023；本卡 = bank/Frame/ledger。
 - **实现步骤**：
   1. `l1_bank.sv`：逐 bank busy/holder、`try_issue` 多 bank 同步占用/释放；SPM/cache 分区和保留容量取 C013/C019 生成参数。模型默认值是来源证据，不直接复制为新的 RTL 固定容量。
-  2. `slot_frame.sv`：prepare/bind_view/bind/release/assert_slot_binding；"8 态×1 cycle"是 Python 模型估时参考，RTL 按检查/握手实际推进，tb 实测每态 latency 并断言上界（以 C019 容量约束为准），不强制逐态恰 1 cycle。
-  3. `arena_ledger.sv`：HOLD/COMMIT/COMPENSATE 迁移 + hold-retire 链（HOLD→COMMIT_FINAL→RETIRE_READY→RETIRE 授权→本地回收 view/Frame/Arena）；不变量逐 bank `allocated+free==user_spm_per_bank`、`allocated=held+bound`。
+  2. `slot_frame.sv`：prepare/bind_view/bind/release/assert_slot_binding；"8 态×1 cycle"是 Python 模型估时参考，RTL 按实际检查/握手推进。Slot 容量只约束同时 live 的绑定，不约束整程序 buffer 数；PREPARE 流式验证 immutable layout，VIEW_BIND 消费对应的只读 layout lookup，允许不同 lifetime 复用 Slot/地址并改变 shape。tb 测量 latency，以实际 layout record 数与 C013/C019 bank/Slot 容量给出工作量界，输入背压单独计量。新绑定发布时范围必须无旧有效字节：reset 初态、此前 VIEW_FREE 的精确范围清理 ACK、以及 RETIRE 的整 Arena 清理 ACK 维持此不变量；不必清空 SRAM 字节，不得清掉 peer 范围的有效性。
+  3. `arena_ledger.sv`：HOLD/COMMIT/COMPENSATE 迁移 + hold-retire 链（HOLD→COMMIT_FINAL→RETIRE_READY→RETIRE 授权→本地回收 view/Frame/Arena）；逐 bank `allocated+free==user_spm_per_bank`、`allocated=held+bound`。每 Context/bank 至多一个 reserve extent，空闲区由保留表的补集导出；分配 ID 由 ledger 单调产生，禁止重绑定产生 ABA。执行排空信号须匹配当前 Context generation；Frame shadow lookup 对外提供真实绑定，closing view 不再可查。Profile FSM 仍归 C058，本卡只消费选定的 sourced profile。
   4. tb：按已知 48 B indexed fixture 的地址/字节序列驱动 bank 端口，验证读回与竞争；此处只证明 bank，不声称尚未实现的 gather/scatter FSM 已执行。越界/越 reserved 下限/双 free、hold 期间重复预留均须拒绝。
 - **验证**：
 
   ```bash
   : "${EVIDENCE:?按总入口设置本卡新 attempt}"
+  python3 hardware/coral_nexus/scripts/lib/gen_memory_params.py --check
   cn unit --suite w4 --config "$C2" --out "$EVIDENCE/unit"
-  python -m pytest pipeline_validator/tests/test_memory_invariants.py -q -k "double_release or stale_generation"
+  conda run -n elenor-validator python -m pytest \
+    pipeline_validator/tests/test_memory_invariants.py -n0 -q \
+    -k "double_release or stale_generation"
   ```
 
 - **通过/交接**：tb 正负例 PASS（先 RED 后 GREEN）；消费者：C030（cache/MSHR 挂 bank 端口）、C035（准入 hold 消费 ledger）、C040（顶层）。
+
+**本轮执行结果：C029 完成。**
+
+- 实际命令入口 `cn unit --suite w4 --config cs1_c2.yaml`：**6 passed in 169.17s**，含完整 RTL 验收驱动及 5 个 Python 参考回归。`double_release or stale_generation` 定向回归另有 **2 passed，74 deselected**。
+- `tb_l1_bank`、`tb_slot_frame`、`tb_arena_ledger` 在 C1/C2 下共 **6 次完整执行全 PASS**；**11 个 mutant** 均先编译成功、再由真实 RTL 行为断言检出，构建失败／超时不算检出。全套没有跳过用例，也没有运行 C026/C027/C028 或 G2 gate。
+- bank 已验证全 bank 原子占用、无效请求不抢占仲裁、disjoint 进展、背压、实际 48 B 字节序列，以及同 txn ID 跨 lifetime 的旧 fin 拒收。bank 自己生成 holder generation；profile commit 与新请求／invalidation 不同拍接收；精确有效性清理逐 word 推进并等待当前 holder 排空。
+- Frame 已验证整程序 buffer 数大于 live Slot 数、不同 lifetime 改变 shape 后复用 Slot、当前 live view 的 overlap 拒绝、真实 shadow lookup、Context/profile/Arena identity、空 Frame 和响应背压。准备时间按实际 record 数、bank 数与输入等待计量，不把模型 8 cycles 冒充 RTL 时序。
+- ledger 驱动真实 Frame 和真实 bank：first-fit／capacity／fragmentation、HOLD 不超卖、授权后禁止补偿、引用未闭合拒绝 FREE、分配 ID 不发生 ABA、旧 generation 排空信号拒收、精确 tail 清理保留邻居有效字节、RETIRE 后回收 Arena／Frame，以及 completion 保留到精确 ACK 均通过。Python 只用既有参考对象，无第二套 L1 执行账本。
+- 主证据：`out/coral_nexus/C029/attempt-006/unit/pytest/c0290/evidence/`（`result.json`、`source-sha256.json`、逐 case build/run 日志与 rc）；命令摘要为同 attempt 的 `unit/summary.json`；定向回归为 `memory-invariants/pytest.log`。`out/` 为 gitignored 运行证据，不等同归档。
+- C013/C019 与 `protocol_seq=3` seal 未改；验证前后 SHA-256 均为 `5cd30e2e080a6c3ea46e152e295560b100b0a13151e30c691a87f3815ef2ef46`。C029 变更路径的 pre-commit hooks 通过（mypy 局部类型声明修正后通过）。不声明 cache/MSHR、Gather/Scatter FSM、运行期 Profile FSM 或完整 Tile top 已完成；消费者边界仍为 C030/C035/C040/C058。
 
 <a id="c030"></a>
 

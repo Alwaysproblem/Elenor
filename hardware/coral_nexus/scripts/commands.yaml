@@ -101,3 +101,7 @@ commands:
           - hardware/coral_nexus/verification/unit/w2/test_w2_c026.py
           - hardware/coral_nexus/verification/unit/w2/test_w2_c027.py
           - hardware/coral_nexus/verification/unit/w2/test_w2_c028.py
+      w4:
+        tests:
+          - hardware/coral_nexus/verification/unit/w4/test_w4_c029.py
+          - pipeline_validator/tests/test_w4_hold_retire.py

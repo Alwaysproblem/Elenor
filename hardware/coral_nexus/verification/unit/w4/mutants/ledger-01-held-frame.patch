@@ -1,0 +1,11 @@
+--- a/arena_ledger.sv
++++ b/arena_ledger.sv
+@@ -400,7 +400,7 @@
+               for (int c = 0; c < CONTEXT_COUNT; c++)
+                 if (context_state[c] != C_FREE && tickets[c] == request.ticket) duplicate = 1;
+               if (duplicate) reply(DUP_TICKET, '0, '0);
+-              else if (context_state[request.ctx] != C_FREE) reply(BAD_STATE, '0, '0);
++              else if (1'b0) reply(BAD_STATE, '0, '0);
+               else if (context_seen[request.ctx] && request.context_gen <= context_gen[request.ctx])
+                 reply(STALE, '0, '0);
+               else if (request.profile_gen != profile_generation_i) reply(BAD_PROFILE, '0, '0);
