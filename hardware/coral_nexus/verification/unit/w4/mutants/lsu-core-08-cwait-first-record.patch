@@ -1,0 +1,11 @@
+--- a/lsu_mslot.sv
++++ b/lsu_mslot.sv
+@@ -626,7 +626,7 @@
+         for (int i = 0; i < CAP; i++) begin
+           if (s_state[c][i] == S_CWAIT
+               && (cache_rsp_i[c].record_id == RECORD_W'(i))) begin
+-            cw_hit[c] = i;
++            if (cw_hit[c] == NONE) cw_hit[c] = 0;
+           end
+         end
+       end

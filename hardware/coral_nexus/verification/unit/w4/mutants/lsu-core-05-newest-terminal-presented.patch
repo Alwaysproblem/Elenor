@@ -1,0 +1,12 @@
+--- a/lsu_mslot.sv
++++ b/lsu_mslot.sv
+@@ -448,8 +448,7 @@
+         if (s_state[c][i] == S_FREE) begin
+           // free: neither terminal nor launchable
+         end else if (s_state[c][i] == S_TERM) begin
+-          if (o_term[c] == NONE) o_term[c] = i;
+-          else if (seq_older(s_seq[c][i], s_seq[c][o_term[c]])) o_term[c] = i;
++          o_term[c] = i;
+         end else begin
+           if (o_nonterm[c] == NONE) o_nonterm[c] = i;
+           else if (seq_older(s_seq[c][i], s_seq[c][o_nonterm[c]]))

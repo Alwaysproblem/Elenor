@@ -1,0 +1,11 @@
+--- a/lsu_mslot.sv
++++ b/lsu_mslot.sv
+@@ -541,7 +541,7 @@
+       // Launch presentation: bank engine free, oldest eligible SPM record.
+       bp_idx[c] = NONE;
+       if (b_act[c] == NONE && issue_enable_i && o_reg_spm[c] != NONE
+-          && !fence_blocks(c, o_reg_spm[c]))
++          && !fence_blocks(c, o_reg_spm[c]) && 1'b0) ;;
+         bp_idx[c] = o_reg_spm[c];
+       breq_valid[c] = (bp_idx[c] != NONE);
+       breq_txn[c] = (bp_idx[c] != NONE)

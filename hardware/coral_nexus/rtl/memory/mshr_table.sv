@@ -65,6 +65,17 @@ module mshr_table
   output logic [63:0] stale_rejects_o,
   output logic [GEN_W-1:0] profile_gen_o,
   output logic [ENTRIES-1:0] entry_busy_o,
+  // C031 read-only readiness views: a waiter CONSUME succeeds on
+  // entry_filled_o (data ready) or entry_cancelled_o (terminal no-data); a
+  // slot with refill_pend_o still owes its external TERMINAL_ACK. The settle
+  // pulse is the one-cycle OP_TERMINAL accept that closes the obligation of
+  // exactly (settle_slot_o, settle_gen_o).
+  output logic [ENTRIES-1:0] entry_filled_o,
+  output logic [ENTRIES-1:0] entry_cancelled_o,
+  output logic [ENTRIES-1:0] refill_pend_o,
+  output logic settle_valid_o,
+  output logic [$clog2(ENTRIES)-1:0] settle_slot_o,
+  output logic [EGEN_W-1:0] settle_gen_o,
   output logic invariant_error_o
 );
   localparam int unsigned SLOT_W = $clog2(ENTRIES);
@@ -104,6 +115,15 @@ module mshr_table
   assign stale_rejects_o = stale_rejects;
   assign invariant_error_o = inv_err;
   assign cmd_ready = rst_n && !rsp_valid;
+
+  // C031 readiness masks (read-only views of the entry FSM).
+  always_comb begin
+    for (int e = 0; e < ENTRIES; e++) begin
+      entry_filled_o[e] = (state[e] == S_PENDING) && !cancelled[e];
+      entry_cancelled_o[e] = cancelled[e] && (state[e] != S_FREE);
+      refill_pend_o[e] = refill_out[e];
+    end
+  end
 
   always_comb begin
     int n;
@@ -149,6 +169,7 @@ module mshr_table
       rsp_valid <= 1'b0;
       rsp_code <= '0; rsp_slot <= '0; rsp_entry_gen <= '0; rsp_waiter <= '0;
       rsp_data <= '0; rsp_mask <= '0;
+      settle_valid_o <= 1'b0; settle_slot_o <= '0; settle_gen_o <= '0;
       profile_gen <= '0;
       merged <= '0; stalls <= '0; stale_rejects <= '0;
       inv_err <= 1'b0;
@@ -159,6 +180,7 @@ module mshr_table
       end
     end else begin
       if (rsp_valid && rsp_ready) rsp_valid <= 1'b0;
+      settle_valid_o <= 1'b0;
       if (cmd_valid && cmd_ready) begin
         s = cmd_slot;
         for (int w = 0; w < WAITERS; w++) ws[w] = wstate[s][w];
@@ -280,6 +302,9 @@ module mshr_table
               respond(R_BAD_STATE, s, egen[s], '0, '0, '0);
             else begin
               refill_out[s] <= 1'b0;
+              settle_valid_o <= 1'b1;
+              settle_slot_o <= s;
+              settle_gen_o <= egen[s];
               if (can_free(state[s], cancelled[s], 1'b0, ws)) begin
                 state[s] <= S_FREE;
                 for (int w = 0; w < WAITERS; w++) wstate[s][w] <= W_NONE;

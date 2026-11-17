@@ -14,11 +14,22 @@
 //
 // MSHR OP_TERMINAL is raised ONLY by the outbridge settle channel after its
 // TERMINAL_ACK handshake, never by the bench shortcut.
+//
+// C031 additions (defaults preserve C030 standalone behaviour): MSHR_KEY_W
+// parameterises the full provenance key width; m_rsp_waiter returns the merged
+// waiter id; mshr_filled_o/mshr_cancelled_o wake waiters without NOT_FILLED
+// polling; mshr_refill_pend_o/mshr_merged_o and the settle pulse
+// (settle_valid_o/settle_slot_o/settle_gen_o, matched on slot+entry_gen so a
+// reused slot cannot alias) expose the obligation state; fault_valid_o pulses
+// when the outbridge fault-cancels an MSHR entry (external fault, distinct from
+// user cancellation); the wire MEMORY ctx/arena/scope fields are no longer
+// dropped.
 `timescale 1ns/1ps
 module l1_miss_path
   import c029_params_pkg::*;
 #(
-  parameter int unsigned WAITERS = 4
+  parameter int unsigned WAITERS = 4,
+  parameter int unsigned MSHR_KEY_W = 64
 ) (
   input  logic clk,
   input  logic rst_n,
@@ -27,7 +38,7 @@ module l1_miss_path
   input  logic m_valid,
   output logic m_ready,
   input  logic [2:0] m_op,
-  input  logic [63:0] m_key,
+  input  logic [MSHR_KEY_W-1:0] m_key,
   input  logic [31:0] m_profile_gen,
   input  logic [$clog2(MSHR_ENTRIES)-1:0] m_slot,
   input  logic [31:0] m_entry_gen,
@@ -42,6 +53,7 @@ module l1_miss_path
   output logic [31:0] m_rsp_entry_gen,
   output logic [LINE_BYTES*8-1:0] m_rsp_data,
   output logic [LINE_BYTES-1:0] m_rsp_mask,
+  output logic [$clog2(WAITERS)-1:0] m_rsp_waiter,
 
   // ---- cache command port ----
   input  logic c_valid,
@@ -103,6 +115,10 @@ module l1_miss_path
   output logic [31:0] mem_req_binding_generation,
   output logic [31:0] mem_req_binding_offset,
   output logic [31:0] mem_req_length,
+  output logic [31:0] mem_req_ctx_slot_o,
+  output logic [31:0] mem_req_ctx_generation_o,
+  output logic [31:0] mem_req_arena_alloc_gen_o,
+  output logic [31:0] mem_req_scope_epoch_o,
   input  logic mem_rsp_valid,
   output logic mem_rsp_ready,
   input  logic [31:0] mem_rsp_txn_id,
@@ -120,6 +136,16 @@ module l1_miss_path
   // ---- observability ----
   output logic [$clog2(MSHR_ENTRIES+1)-1:0] mshr_active_o,
   output logic [MSHR_ENTRIES-1:0] mshr_busy_o,
+  output logic [MSHR_ENTRIES-1:0] mshr_filled_o,
+  output logic [MSHR_ENTRIES-1:0] mshr_cancelled_o,
+  output logic [MSHR_ENTRIES-1:0] mshr_refill_pend_o,
+  output logic [63:0] mshr_merged_o,
+  output logic settle_valid_o,
+  output logic [$clog2(MSHR_ENTRIES)-1:0] settle_slot_o,
+  output logic [31:0] settle_gen_o,
+  output logic fault_valid_o,
+  output logic [$clog2(MSHR_ENTRIES)-1:0] fault_slot_o,
+  output logic [31:0] fault_gen_o,
   output logic [31:0] cache_resident_o,
   output logic [31:0] cache_dirty_o,
   output logic [31:0] cache_pending_cleans_o,
@@ -154,6 +180,7 @@ module l1_miss_path
   output logic invariant_error_o
 );
   localparam logic [2:0] OP_TERMINAL = 3'd7;
+  localparam logic [2:0] MOP_CANCEL = 3'd5;
 
   // The bridge owns FILL / CANCEL / TERMINAL (fault) commands to the MSHR and
   // wins the single MSHR command port over the bench/LSU command. Responses to
@@ -179,7 +206,7 @@ module l1_miss_path
   logic [LINE_BYTES*8-1:0] ms_cmd_data;
   logic [LINE_BYTES-1:0] ms_cmd_mask;
   logic ms_cmd_last;
-  logic [63:0] ms_cmd_key;
+  logic [MSHR_KEY_W-1:0] ms_cmd_key;
   logic [31:0] ms_cmd_pgen;
 
   always_comb begin
@@ -211,19 +238,32 @@ module l1_miss_path
   assign m_rsp_mask = mshr_rsp_mask;
   assign mshr_rsp_ready = rsp_from_bridge ? 1'b1 : m_rsp_ready;
 
+  // External fault notification: the outbridge cancels an MSHR entry ONLY on a
+  // faulted MEM_RSP, never on user cancellation (which this wrapper forwards
+  // nowhere). The pulse is the accepting edge of that MSHR CANCEL command.
+  assign fault_valid_o = mc_valid && mc_ready && (mc_op == MOP_CANCEL);
+  assign fault_slot_o = mc_slot;
+  assign fault_gen_o = mc_gen;
+
   logic mshr_invariant_error, cache_invariant_error, bridge_invariant_error;
   assign invariant_error_o = mshr_invariant_error | cache_invariant_error | bridge_invariant_error;
 
-  mshr_table #(.ENTRIES(MSHR_ENTRIES), .LINE_B(LINE_BYTES), .WAITERS(WAITERS)) u_mshr (
+  mshr_table #(.ENTRIES(MSHR_ENTRIES), .LINE_B(LINE_BYTES), .WAITERS(WAITERS),
+               .KEY_W(MSHR_KEY_W)) u_mshr (
     .clk, .rst_n,
     .cmd_valid(ms_valid), .cmd_ready(mshr_cmd_ready), .cmd_op(ms_cmd_op), .cmd_key(ms_cmd_key),
     .cmd_profile_gen(ms_cmd_pgen), .cmd_slot(ms_cmd_slot), .cmd_entry_gen(ms_cmd_gen),
     .cmd_waiter(ms_cmd_waiter), .cmd_data(ms_cmd_data), .cmd_mask(ms_cmd_mask), .cmd_last(ms_cmd_last),
     .rsp_valid(mshr_rsp_valid), .rsp_ready(mshr_rsp_ready), .rsp_code(mshr_rsp_code),
-    .rsp_slot(mshr_rsp_slot), .rsp_entry_gen(mshr_rsp_gen), .rsp_waiter(),
+    .rsp_slot(mshr_rsp_slot), .rsp_entry_gen(mshr_rsp_gen), .rsp_waiter(m_rsp_waiter),
     .rsp_data(mshr_rsp_data), .rsp_mask(mshr_rsp_mask),
-    .active_o(mshr_active_o), .merged_o(), .stalls_o(), .stale_rejects_o(), .profile_gen_o(),
-    .entry_busy_o(mshr_busy_o), .invariant_error_o(mshr_invariant_error)
+    .active_o(mshr_active_o), .merged_o(mshr_merged_o), .stalls_o(), .stale_rejects_o(),
+    .profile_gen_o(),
+    .entry_busy_o(mshr_busy_o),
+    .entry_filled_o(mshr_filled_o), .entry_cancelled_o(mshr_cancelled_o),
+    .refill_pend_o(mshr_refill_pend_o),
+    .settle_valid_o(settle_valid_o), .settle_slot_o(settle_slot_o), .settle_gen_o(settle_gen_o),
+    .invariant_error_o(mshr_invariant_error)
   );
 
   cache #(.LINE_B(LINE_BYTES)) u_cache (
@@ -261,8 +301,9 @@ module l1_miss_path
     .req_arena_alloc_gen(iss_arena_alloc_gen), .req_scope_epoch(iss_scope_epoch),
     .mem_req_valid, .mem_req_ready, .mem_req_txn_id, .mem_req_slice_id, .mem_req_slice_count,
     .mem_req_binding_id, .mem_req_binding_generation, .mem_req_binding_offset,
-    .mem_req_ctx_slot(), .mem_req_ctx_generation(), .mem_req_arena_alloc_gen(),
-    .mem_req_scope_epoch(), .mem_req_length,
+    .mem_req_ctx_slot(mem_req_ctx_slot_o), .mem_req_ctx_generation(mem_req_ctx_generation_o),
+    .mem_req_arena_alloc_gen(mem_req_arena_alloc_gen_o), .mem_req_scope_epoch(mem_req_scope_epoch_o),
+    .mem_req_length,
     .mem_rsp_valid, .mem_rsp_ready, .mem_rsp_txn_id, .mem_rsp_slice_id,
     .mem_rsp_binding_generation, .mem_rsp_status, .mem_rsp_data,
     .cancel_valid, .cancel_mshr_slot, .cancel_mshr_gen,

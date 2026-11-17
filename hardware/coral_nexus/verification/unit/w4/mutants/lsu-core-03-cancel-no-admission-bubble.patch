@@ -1,0 +1,11 @@
+--- a/lsu_mslot.sv
++++ b/lsu_mslot.sv
+@@ -525,7 +525,7 @@
+   logic [CONTEXT_COUNT-1:0] alloc_fire;
+   always_comb begin : ingress_gate
+     for (int c = 0; c < CONTEXT_COUNT; c++) begin
+-      req_ready_o[c] = (alloc_slot[c] != NONE) && !cxl_eff[c]
++      req_ready_o[c] = (alloc_slot[c] != NONE)
+                        && !(config_valid_i && (config_context_i == 32'(c)));
+       alloc_fire[c] = req_valid_i[c] && req_ready_o[c];
+     end

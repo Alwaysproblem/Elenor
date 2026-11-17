@@ -1,0 +1,11 @@
+--- a/lsu_mslot.sv
++++ b/lsu_mslot.sv
+@@ -1044,7 +1044,7 @@
+                     if (offb >= 0 && offb < int'(s_bc[c][bi])) begin
+                       // Stored per-byte validity gates the got mask: a
+                       // never-written byte is never exposed as valid data.
+-                      got_d[offb] = br_ben[c][b];
++                      got_d[offb] = 1'b1;
+                       if (br_ben[c][b]) begin
+                         s_rbytes[c][bi][8*offb +: 8] <= br_data[c][8*b +: 8];
+                       end

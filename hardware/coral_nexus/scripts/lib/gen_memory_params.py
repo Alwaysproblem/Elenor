@@ -95,6 +95,17 @@ def parameters() -> dict[str, Any]:
       raise ValueError(f"{target['name']}: C013/C019 per-bank capacities disagree")
     result[f"C{index}_CONTEXTS"] = _integer(capacity["context_count"], "context_count")
     result[f"C{index}_TARGET_SHA256"] = target["fingerprints"]["constraints_sha256"]
+  decisions = yaml.safe_load(fc.W4_DECISIONS.read_text())["decisions"]
+  if fc.open_budgets():
+    raise ValueError("C031 requires closed sealed W4 capacity decisions")
+  result["LSU_CREDIT_CAP"] = _integer(
+    decisions["per_ctx_outstanding_credit_cap"]["value"], "per_ctx_outstanding_credit_cap"
+  )
+  # Retain fill buffers until every possible LSU record has consumed its
+  # waiter. This is not the independent early-release response-record pool.
+  result["LSU_MSHR_WAITERS"] = _integer(
+    result["C2_CONTEXTS"] * result["LSU_CREDIT_CAP"], "bounded retained LSU waiters"
+  )
   result["C013_SHA256"] = hashlib.sha256(dw.CONTRACT.read_bytes()).hexdigest()
   result["SEAL_SHA256"] = hashlib.sha256((H / "protocol/PROTOCOL_FREEZE.json").read_bytes()).hexdigest()
   return result

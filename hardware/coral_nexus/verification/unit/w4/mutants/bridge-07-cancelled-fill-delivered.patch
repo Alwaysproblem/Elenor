@@ -1,7 +1,7 @@
 --- a/transfer_outbridge.sv
 +++ b/transfer_outbridge.sv
-@@ -153,7 +153,7 @@
-       if (rstate[i] == R_TERM && !term_have) begin term_have = 1'b1; term_pick = SW'(i); end
+@@ -161,7 +161,7 @@
+       end
        if (rstate[i] == R_SETTLE && !settle_have) begin settle_have = 1'b1; settle_pick = SW'(i); end
        if (rstate[i] == R_FCANCEL && !fcancel_have) begin fcancel_have = 1'b1; fcancel_pick = SW'(i); end
 -      if (rstate[i] == R_FILL && !rcancel[i] && !fill_have) begin fill_have = 1'b1; fill_pick = SW'(i); end

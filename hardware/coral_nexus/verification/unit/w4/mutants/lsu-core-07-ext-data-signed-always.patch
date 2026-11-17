@@ -1,0 +1,11 @@
+--- a/lsu_mslot.sv
++++ b/lsu_mslot.sv
+@@ -235,7 +235,7 @@
+                                            input logic [2:0] bc,
+                                            input logic unsigned_load);
+     case (int'(bc))
+-      1: ext_data = unsigned_load ? {24'b0, rj[7:0]} : {{24{rj[7]}}, rj[7:0]};
++      1: ext_data = {{24{rj[7]}}, rj[7:0]};
+       2: ext_data = unsigned_load ? {16'b0, rj[15:0]} : {{16{rj[15]}}, rj[15:0]};
+       default: ext_data = rj;
+     endcase

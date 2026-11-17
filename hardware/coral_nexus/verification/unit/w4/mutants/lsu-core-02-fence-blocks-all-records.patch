@@ -1,0 +1,11 @@
+--- a/lsu_mslot.sv
++++ b/lsu_mslot.sv
+@@ -494,7 +494,7 @@
+ 
+   // Launch eligibility: a younger record never passes a queued older fence.
+   function automatic logic fence_blocks(input int c, input int cand);
+-    if (o_fence[c] == NONE) fence_blocks = 1'b0;
++    if (o_fence[c] == NONE) fence_blocks = (o_nonterm[c] != NONE);
+     else if (cand == NONE) fence_blocks = 1'b1;
+     else fence_blocks = seq_older(s_seq[c][o_fence[c]], s_seq[c][cand]);
+   endfunction

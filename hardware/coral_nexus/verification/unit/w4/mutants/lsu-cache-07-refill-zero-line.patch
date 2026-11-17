@@ -1,0 +1,13 @@
+--- a/lsu_cache_path.sv
++++ b/lsu_cache_path.sv
+@@ -681,8 +681,8 @@
+                       r_p1d[r][8*b +: 8] <= m_rsp_data[8*b +: 8];
+                 end
+                 if (r_leader[r] && r_cache_on[r]) begin
+-                  r_line[r] <= m_rsp_data;
+-                  r_lmask[r] <= m_rsp_mask;
++                  r_line[r] <= '0;
++                  r_lmask[r] <= '0;
+                   st[r] <= R_REFILL;
+                 end else begin
+                   st[r] <= R_RELEASE;

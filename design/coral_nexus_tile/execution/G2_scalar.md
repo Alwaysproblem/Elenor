@@ -350,6 +350,18 @@ ROB 同 PC 双 Context store、错误 op_seq、独立退休、局部 fault flush
 
 - **通过/交接**：tb 全 PASS、storeComplete 键断言落地、无队首串行化回归；消费者：C032（MFE 共享 bank 端口）、C040（顶层 LSU 实例）、G3 C043（RVV 访存）。
 
+**本轮执行结果：C031 完成（RTL 验收）。**
+
+- 交付两个真实 RTL owner 与两个 slice：`rtl/memory/lsu_mslot.sv`（per-Context 16 槽记录表、RR 分配、真实 `l1_bank` 实例、fence、逐记录取消、owner/代验证、跨 stripe 分段、符号/零扩展、精确 bank 完成代捕获）与 `rtl/memory/lsu_cache_path.sv`（C030 cache/MSHR/outbridge 的真实并发读客户端，完整 96 位 provenance key，settle 按 `(slot, entry_gen)` 匹配，取消只标记本地 waiter）。`l1_miss_path` 增 `MSHR_KEY_W`、`m_rsp_data/m_rsp_mask/m_rsp_waiter`、filled/cancelled/refill-pend 掩码、settle/fault 脉冲与 MEMORY ctx/arena/scope sideband；`mshr_table` 只增只读掩码与 settle 脉冲；`transfer_outbridge` 的 MEM_REQ/TERMINAL 改为最早 txn 选择，避免背压下字段跳变。
+- 每 Context 在途上限取已封印 `configs/w4_capacity_decisions.yaml` 的 `per_ctx_outstanding_credit_cap=16`（`LSU_CREDIT_CAP`），保留 waiter 预算 `LSU_MSHR_WAITERS=32`；未沿用上游单 Context 的 `lsuSlotTxidEntries=8`，也未另立容量权威。
+- 单元验收：`lsu_mslot` slice 在 CONTEXT_COUNT 1/2 下 `C031_PASS checks=664/777`；`lsu-cache` 集成 slice（真实 C023 `MemoryService` FIFO 字节与终态 ACK）`C031_PASS checks=27456/44996`，外部请求 15/33 与终态 ACK 15/33 一一闭合、零残留引用。集成 bench 覆盖跨行 1/2/4 字节、暖命中零外发、旧 refill 挂起时同伴推进、MSHR 满 16 项 + 32 保留 waiter 合并、同 line 取消隔离、终态背压、注入 FAULTED、重复响应、fence 有序、binding_id/代不可别名。
+- 行为 mutant 全部先成功编译、再由已执行断言检出（构建失败不计）：`lsu-core-*` 10 个（fence 阻断、fence 过宽、取消同拍气泡、credit 在 valid 而非 fire 释放、最新终态呈现、单记录 bank 引擎、符号扩展、CWAIT 记录 id、ben gating、profile 传递）与 `lsu-cache-*` 10 个（含 drain 提前、fault→ISOLATED、取消杀死共享 refill、key 截断、piece-1 丢失、leader 跳过 refill、refill 零行、waiter id 归零、同拍取消遗漏、bridge 选择回退）全部检出。`lsu-cache-03` 初版为等价变异（取消 token `{0,0}` 永不匹配 MSHR 代），已重写为真实转发 cancelled leader token 到 bridge cancel 端口后检出。
+- 真实原生返回键：memory slice 运行期从 materialized Core 重新发射**完整** C026 `RetirementPartitionBank`（`--enableVerification=True`，不是 C030 的 mini ROB），同 PC/同 rd/同 seq 的双 Context store/load/FLW 独立退休；错误 op_seq 与旧 `ctx_generation` 的注入完成被真实 partition 拒收并计数。
+- 该集成测试发现并修复了一个真实 RTL 缺陷：`lsu_cache_path` 两处 `else` 误绑定到内层 `if (b < r_n0)`，导致 piece-0 消费同时污染 `r_p1d`、piece-1 与命中路径不写入，跨行读返回错字节。修法为显式 `begin/end`；修前所有 mutant 都死于同一条坏 bench 断言，修后 10 个 mutant 的杀死断言才分散到各自语义。另修正 drain 不变量：OP_TERMINAL 在释放槽的同拍发 settle 脉冲，排空记录晚一拍采样，原不变量会在该拍误报；改为容忍该记录自身在途、token 匹配的 settle 脉冲（未删除断言，脉冲可达性由构造保证）。
+- 参考回归：`pipeline_validator/tests/test_w4_lsu.py`（bank 全占原子性/旁路进展、终态 ACK 不可替代、旧 binding 代拒绝）与 `test_tile_indexed.py` 通过；只作独立 oracle，不执行 RTL、不建第二套 L1 执行账本。
+- 全量入口：`cn unit --suite w4 --config <绝对路径>/cs1_c2.yaml` **26 passed in 1268.84s**（含 C029/C030 原有测试）；`cn sources verify` 通过。作用于所属文件的 pre-commit 通过。
+- 已知限制：本卡是模块级 LSU/缓存客户端，不是 C040 完整 Tile top；runtime Profile 12 步 FSM 归 C058；外侧取消/`cancel_tracker` 与 MFE 直搬归 C032；页授权逐段 lease 归 C055–C057。`mem_rsp` 的延迟/乱序/重复由 bench 注入，`MemoryService` 只提供真实外部字节与终态引用；没有任何仿真数值 kernel。主证据：`out/coral_nexus/C031/acc-core/`、`acc-mem4/`、`full/`、`sources/`；`out/` 为 gitignored 运行证据，不等同归档。
+
 <a id="c032"></a>
 
 ## C032 — MFE 直搬与逐事务结算

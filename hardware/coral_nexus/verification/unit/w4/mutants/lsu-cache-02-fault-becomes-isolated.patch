@@ -1,0 +1,11 @@
+--- a/lsu_cache_path.sv
++++ b/lsu_cache_path.sv
+@@ -146,7 +146,7 @@
+     return r_p0d[r] | shifted;
+   endfunction
+   function automatic logic [1:0] rec_final(input int unsigned r);
+-    return r_faulted[r] ? FAULTED : (r_cancelled[r] ? ISOLATED : COMPLETED);
++    return (r_faulted[r] || r_cancelled[r]) ? ISOLATED : COMPLETED;
+   endfunction
+   function automatic logic [3:0] rec_error(input int unsigned r);
+     return (r_faulted[r] || r_bad[r]) ? ERR_MEMORY : ERR_NONE;

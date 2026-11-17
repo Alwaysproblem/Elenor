@@ -1,0 +1,11 @@
+--- a/lsu_cache_path.sv
++++ b/lsu_cache_path.sv
+@@ -142,7 +142,7 @@
+   function automatic logic [31:0] rec_data(input int unsigned r);
+     logic [31:0] shifted;
+     shifted = 32'd0;
+-    if (r_has_p1[r]) shifted = r_p1d[r] << (8 * r_n0[r]);
++    if (1'b0) shifted = r_p1d[r] << (8 * r_n0[r]);
+     return r_p0d[r] | shifted;
+   endfunction
+   function automatic logic [1:0] rec_final(input int unsigned r);

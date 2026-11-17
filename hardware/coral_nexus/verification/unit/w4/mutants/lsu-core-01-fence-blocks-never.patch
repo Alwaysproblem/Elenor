@@ -1,0 +1,11 @@
+--- a/lsu_mslot.sv
++++ b/lsu_mslot.sv
+@@ -496,7 +496,7 @@
+   function automatic logic fence_blocks(input int c, input int cand);
+     if (o_fence[c] == NONE) fence_blocks = 1'b0;
+     else if (cand == NONE) fence_blocks = 1'b1;
+-    else fence_blocks = seq_older(s_seq[c][o_fence[c]], s_seq[c][cand]);
++    else fence_blocks = 1'b0;
+   endfunction
+ 
+   // Segment bank mask of a record (its holder channels in the bank).

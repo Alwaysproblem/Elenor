@@ -21,7 +21,8 @@ import shlex
 import shutil
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -68,6 +69,7 @@ class Bench:
   extra_sources: tuple[str, ...] = ()
   args_by_context: dict[int, str] = field(default_factory=dict)
   timeout_s: int = 300
+  run_args: tuple[str, ...] = ()  # {label}: unique per mutant/green service endpoint
 
 
 @dataclass
@@ -82,6 +84,9 @@ class Slice:
   pre_toolchain_steps: Sequence[str] = field(default_factory=list)
   post_toolchain_steps: Sequence[str] = field(default_factory=list)
   mutant_contexts: int | None = None  # None: the requested target's Context count
+  assert_markers: tuple[str, ...] = ("C030_ASSERT",)
+  service: Callable[[Path, Sequence[str]], AbstractContextManager[None]] | None = None
+  host_sources: tuple[Path, ...] = ()
 
 
 def selected_target() -> dict[str, Any]:
@@ -108,12 +113,13 @@ def _compile_and_run(label: str, bench: Bench, root: str, contexts: int | None) 
   extra = " ".join(shlex.quote(path.format(contexts=contexts)) for path in bench.extra_sources)
   gen = "" if contexts is None else f"-GCONTEXT_COUNT={contexts} "
   args = bench.args_by_context.get(contexts, "") if contexts is not None else ""
+  run_args = " ".join(shlex.quote(arg.format(label=label)) for arg in bench.run_args)
   return [
     "rc=0",
     f'"${{VEXE[0]}}" --binary --timing --assert -j 4 --top-module {bench.top} {gen}{args} '
     f"--Mdir /out/obj-{label} {sources} {extra} > /out/{label}.build.log 2>&1 || rc=$?",
     f'printf "%s\\n" "$rc" > /out/{label}.build.rc',
-    f"if (( rc == 0 )); then timeout {bench.timeout_s} /out/obj-{label}/V{bench.top} "
+    f"if (( rc == 0 )); then timeout {bench.timeout_s} /out/obj-{label}/V{bench.top} {run_args} "
     f"> /out/{label}.log 2>&1 || rc=$?; fi",
     f'printf "%s\\n" "$rc" > /out/{label}.rc',
   ]
@@ -141,6 +147,7 @@ def run_slice(spec: Slice, tmp_path_factory: pytest.TempPathFactory) -> dict[str
     mutants.extend(matched)
   assert len(mutants) >= spec.min_mutants, f"{spec.name}: expected >= {spec.min_mutants} mutants"
   required = {RTL / s for b in [*spec.benches, spec.mutant_bench] for s in b.sources} | set(mutants)
+  required.update(spec.host_sources)
   before = _sha(sorted(required))
   (evidence / "source-sha256.json").write_text(json.dumps(before, indent=2) + "\n")
 
@@ -217,7 +224,13 @@ def run_slice(spec: Slice, tmp_path_factory: pytest.TempPathFactory) -> dict[str
     "bash",
     "/out/run.sh",
   ]
-  run = subprocess.run(command, capture_output=True, text=True, check=False, timeout=3600)
+  cases: list[dict[str, Any]] = [*negative, *positive]
+  labels = [case["label"] for case in cases]
+  service: AbstractContextManager[None] = (
+    spec.service(evidence, labels) if spec.service else nullcontext()
+  )
+  with service:
+    run = subprocess.run(command, capture_output=True, text=True, check=False, timeout=3600)
   (evidence / "runner.log").write_text(run.stdout + run.stderr)
   assert run.returncode == 0, f"{spec.name} runner failed; evidence={evidence}\n{run.stderr}"
   assert before == _sha(sorted(required)), f"{spec.name}: source changed during acceptance"
@@ -229,6 +242,7 @@ def run_slice(spec: Slice, tmp_path_factory: pytest.TempPathFactory) -> dict[str
     "negative": negative,
     "requested_target": target["name"],
     "seal_sha256": params["SEAL_SHA256"],
+    "assert_markers": spec.assert_markers,
   }
 
 
@@ -243,7 +257,10 @@ def check_verdicts(evidence: dict[str, Any], *, pass_marker: str) -> None:
     rc = int((path / f"{label}.rc").read_text())
     assert rc in (1, 134), f"{case['patch']}: not a simulator assertion exit ({rc})\n{log[-8000:]}"
     assert any(
-      ("%Error:" in line or "%Fatal:" in line) and "C030_ASSERT" in line for line in log.splitlines()
+      ("%Error:" in line or "%Fatal:" in line)
+      and any(marker in line for marker in evidence["assert_markers"])
+      and "watchdog" not in line.lower()
+      for line in log.splitlines()
     ), f"{case['patch']}: no executed RTL assertion\n{log[-8000:]}"
   for case in evidence["positive"]:
     label = case["label"]

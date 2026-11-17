@@ -108,5 +108,7 @@ commands:
           - hardware/coral_nexus/verification/unit/w4/test_w4_c030_port.py
           - hardware/coral_nexus/verification/unit/w4/test_w4_c030_miss.py
           - hardware/coral_nexus/verification/unit/w4/test_w4_c030_fetch.py
+          - hardware/coral_nexus/verification/unit/w4/test_w4_c031.py
           - pipeline_validator/tests/test_w4_hold_retire.py
           - pipeline_validator/tests/test_w4_mshr_cache.py
+          - pipeline_validator/tests/test_w4_lsu.py

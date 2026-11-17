@@ -1,0 +1,11 @@
+--- a/lsu_mslot.sv
++++ b/lsu_mslot.sv
+@@ -617,7 +617,7 @@
+         (cp_idx[c] != NONE) ? s_arena[c][cp_idx[c]] : '0;
+       cache_req_o[c].scope_epoch =
+         (cp_idx[c] != NONE) ? s_scope[c][cp_idx[c]] : '0;
+-      cache_req_o[c].profile_generation = prof_gen32;
++      cache_req_o[c].profile_generation = 32'd0;
+       cache_req_o[c].byte_count = (cp_idx[c] != NONE) ? s_bc[c][cp_idx[c]] : '0;
+       cp_acc[c] = cache_req_valid_o[c] && cache_req_ready_i[c];
+ 

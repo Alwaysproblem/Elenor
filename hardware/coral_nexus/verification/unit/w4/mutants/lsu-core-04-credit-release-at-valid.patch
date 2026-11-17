@@ -1,0 +1,11 @@
+--- a/lsu_mslot.sv
++++ b/lsu_mslot.sv
+@@ -817,7 +817,7 @@
+         cnt_d = int'(c_count[c]);
+         stale_d = int'(c_stale[c]);
+         c_acc[c] <= c_acc[c] + 64'(alloc_fire[c]);
+-        c_term[c] <= c_term[c] + 64'(rsp_fire[c]);
++        c_term[c] <= c_term[c] + 64'(rsp_valid_o[c]);
+         if (cancel_i[c] && !cxl_eff[c]) stale_d = stale_d + 1;
+         if (cwait_any[c]) c_wmshr[c] <= c_wmshr[c] + 64'd1;
+         if (issue_enable_i && o_reg_spm[c] != NONE

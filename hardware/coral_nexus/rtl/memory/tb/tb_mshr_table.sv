@@ -65,7 +65,10 @@ module tb_mshr_table
   logic [E-1:0] entry_busy_o;
   logic invariant_error_o;
 
-  mshr_table #(.ENTRIES(E), .LINE_B(LB), .WAITERS(W)) dut (.*);
+  mshr_table #(.ENTRIES(E), .LINE_B(LB), .WAITERS(W)) dut (
+    .entry_filled_o(), .entry_cancelled_o(), .refill_pend_o(),
+    .settle_valid_o(), .settle_slot_o(), .settle_gen_o(), .*
+  );
 
   always #5 clk = ~clk;
   initial begin #5_000_000; $fatal(1, "C030_ASSERT mshr watchdog"); end

@@ -1,0 +1,11 @@
+--- a/lsu_cache_path.sv
++++ b/lsu_cache_path.sv
+@@ -773,7 +773,7 @@
+           if (r_backoff[i] != 5'd0) r_backoff[i] <= r_backoff[i] - 5'd1;
+           else st[i] <= R_ALLOC;
+         end
+-        if (st[i] == R_DRAIN && r_settled[i]) begin
++        if (st[i] == R_DRAIN && 1'b1) begin
+           // The exact external obligation drained before the result reports.
+           if (r_faulted[i] || r_cancelled[i]) st[i] <= R_RSP;
+           else if (!r_piece[i] && r_has_p1[i]) begin

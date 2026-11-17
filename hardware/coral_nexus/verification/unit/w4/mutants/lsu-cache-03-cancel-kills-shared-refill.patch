@@ -1,0 +1,31 @@
+--- a/lsu_cache_path.sv
++++ b/lsu_cache_path.sv
+@@ -223,6 +223,19 @@
+   logic [63:0] mp_cache_evictions_o;
+   logic clean_valid;
+ 
++  // MUTANT: forward a cancelled leader's token, killing the shared refill.
++  logic cxl_fwd_valid;
++  logic [TOKEN_W-1:0] cxl_fwd_slot;
++  logic [31:0] cxl_fwd_gen;
++  always_comb begin
++    cxl_fwd_valid = 1'b0; cxl_fwd_slot = '0; cxl_fwd_gen = '0;
++    for (int unsigned i = 0; i < NREC; i++)
++      if (!cxl_fwd_valid && r_cancelled[i] && r_leader[i] &&
++          st[i] inside {R_WAIT, R_CONSUME, R_REFILL, R_RELEASE, R_DRAIN}) begin
++        cxl_fwd_valid = 1'b1; cxl_fwd_slot = r_slot[i]; cxl_fwd_gen = r_mgen[i];
++      end
++  end
++
+   l1_miss_path #(.WAITERS(LSU_MSHR_WAITERS), .MSHR_KEY_W(MSHR_KEY_W)) mp (
+     .clk, .rst_n,
+     .m_valid, .m_ready, .m_op, .m_key, .m_profile_gen, .m_slot, .m_entry_gen, .m_waiter,
+@@ -239,7 +252,7 @@
+     .iss_valid, .iss_ready, .iss_binding_id, .iss_binding_generation, .iss_binding_offset,
+     .iss_ctx_slot, .iss_ctx_generation, .iss_arena_alloc_gen, .iss_scope_epoch,
+     .iss_mshr_slot, .iss_mshr_gen,
+-    .cancel_valid(1'b0), .cancel_mshr_slot('0), .cancel_mshr_gen('0),
++    .cancel_valid(cxl_fwd_valid), .cancel_mshr_slot(cxl_fwd_slot), .cancel_mshr_gen(cxl_fwd_gen),
+     .mem_req_valid(mp_mem_req_valid), .mem_req_ready(mp_mem_req_ready),
+     .mem_req_txn_id(mp_mem_req_txn_id), .mem_req_slice_id(mp_mem_req_slice_id),
+     .mem_req_slice_count(mp_mem_req_slice_count), .mem_req_binding_id(mp_mem_req_binding_id),

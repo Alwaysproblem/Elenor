@@ -1,0 +1,11 @@
+--- a/lsu_cache_path.sv
++++ b/lsu_cache_path.sv
+@@ -526,7 +526,7 @@
+           r_faulted[r] <= 1'b0; r_cancelled[r] <= 1'b0; r_settled[r] <= 1'b0;
+           // A request accepted on the same edge as its Context's cancel is
+           // born cancelled: the cancellation snapshot must not miss it.
+-          if (cancel_i[c] && req_i[c].owner.ctx_generation == cancel_generation_i[c])
++          if (1'b0)
+             r_cancelled[r] <= 1'b1;
+           r_line[r] <= '0; r_lmask[r] <= '0; r_backoff[r] <= '0;
+           if (req_i[c].byte_count inside {3'd1, 3'd2, 3'd4}) begin

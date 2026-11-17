@@ -1,0 +1,11 @@
+--- a/lsu_cache_path.sv
++++ b/lsu_cache_path.sv
+@@ -137,7 +137,7 @@
+     return (r_off[r] & ~32'(LINE_BYTES - 1)) + (r_piece[r] ? 32'(LINE_BYTES) : 32'd0);
+   endfunction
+   function automatic logic [MSHR_KEY_W-1:0] rec_key(input int unsigned r);
+-    return {r_bid[r], r_bgen[r], rec_line_off(r)};
++    return MSHR_KEY_W'(r_bgen[r] ^ rec_line_off(r));
+   endfunction
+   function automatic logic [31:0] rec_data(input int unsigned r);
+     logic [31:0] shifted;

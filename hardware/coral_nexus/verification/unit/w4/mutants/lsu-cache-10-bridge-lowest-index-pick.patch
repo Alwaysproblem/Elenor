@@ -1,0 +1,16 @@
+--- a/transfer_outbridge.sv
++++ b/transfer_outbridge.sv
+@@ -152,11 +152,11 @@
+       // presented under backpressure keeps its record until the handshake, so
+       // a newly allocated lower-index record can never change the presented
+       // wire fields while valid is held without acceptance.
+-      if (rstate[i] == R_REQ && (!req_have || rtxn[i] < rtxn[req_pick])) begin
++      if (rstate[i] == R_REQ && !req_have) begin
+         req_have = 1'b1; req_pick = SW'(i);
+       end
+       if (rstate[i] == R_FREE && !free_have) begin free_have = 1'b1; free_pick = SW'(i); end
+-      if (rstate[i] == R_TERM && (!term_have || rtxn[i] < rtxn[term_pick])) begin
++      if (rstate[i] == R_TERM && !term_have) begin
+         term_have = 1'b1; term_pick = SW'(i);
+       end
+       if (rstate[i] == R_SETTLE && !settle_have) begin settle_have = 1'b1; settle_pick = SW'(i); end

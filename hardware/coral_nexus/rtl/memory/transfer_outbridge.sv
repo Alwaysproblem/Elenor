@@ -148,9 +148,17 @@ module transfer_outbridge
     req_pick = '0; free_pick = '0; term_pick = '0; settle_pick = '0; fcancel_pick = '0; fill_pick = '0;
     for (int i = 0; i < RECORDS; i++) begin
       if (rstate[i] != R_FREE) n++;
-      if (rstate[i] == R_REQ && !req_have) begin req_have = 1'b1; req_pick = SW'(i); end
+      // Oldest-transaction (service FIFO) selection: a MEM_REQ or TERMINAL
+      // presented under backpressure keeps its record until the handshake, so
+      // a newly allocated lower-index record can never change the presented
+      // wire fields while valid is held without acceptance.
+      if (rstate[i] == R_REQ && (!req_have || rtxn[i] < rtxn[req_pick])) begin
+        req_have = 1'b1; req_pick = SW'(i);
+      end
       if (rstate[i] == R_FREE && !free_have) begin free_have = 1'b1; free_pick = SW'(i); end
-      if (rstate[i] == R_TERM && !term_have) begin term_have = 1'b1; term_pick = SW'(i); end
+      if (rstate[i] == R_TERM && (!term_have || rtxn[i] < rtxn[term_pick])) begin
+        term_have = 1'b1; term_pick = SW'(i);
+      end
       if (rstate[i] == R_SETTLE && !settle_have) begin settle_have = 1'b1; settle_pick = SW'(i); end
       if (rstate[i] == R_FCANCEL && !fcancel_have) begin fcancel_have = 1'b1; fcancel_pick = SW'(i); end
       if (rstate[i] == R_FILL && !rcancel[i] && !fill_have) begin fill_have = 1'b1; fill_pick = SW'(i); end

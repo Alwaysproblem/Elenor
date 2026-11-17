@@ -221,6 +221,34 @@ that no longer applies fails the whole runner rather than a single mutant.
 Benches must stay valid at CONTEXT_COUNT 1 and 2: index peer Contexts through
 a clamped constant, never a bare `[1]`.
 
+## Focused C031 acceptance
+
+C031 is the scalar LSU module-level integration, not the complete C040 Tile
+top. `rtl/memory/lsu_mslot.sv` owns bounded per-Context requests, real bank
+accesses and reliable owner-tagged completions. `lsu_cache_path.sv` drives the
+C030 cache/MSHR/outbridge; cached windows are trusted read-only bindings, not
+free global pointers. The per-Context limit is consumed from the sealed
+`configs/w4_capacity_decisions.yaml`; do not substitute the upstream
+single-Context transaction-ID count.
+
+```bash
+EVIDENCE=out/coral_nexus/C031/attempt-NNN
+CN_UNIT_CONFIG="$PWD/hardware/coral_nexus/configs/cs1_c2.yaml" \
+  conda run --no-capture-output -n elenor-validator python -m pytest \
+  hardware/coral_nexus/verification/unit/w4/test_w4_c031.py \
+  -n0 -v --basetemp="$EVIDENCE/pytest"
+```
+
+The integration bench exchanges actual requests and terminal ACKs over local
+FIFOs with `pipeline_validator.cosim.memory_service.MemoryService`. That service
+owns only external bytes and terminal references; Python never executes L1.
+Each mutant/green run gets an isolated service, with `memory-service.json` and
+`*.service.log` retaining the request/terminal history. Delayed, reordered and
+duplicate transport responses must not duplicate completion or return credit
+before terminal settlement. The native-return proof uses the generated full
+C026 retirement bank; the mini-ROB emitted by the default CoreMiniVerification
+target is not sufficient evidence.
+
 ## Offline seeds (C004)
 
 - Inventory: `env/seed_targets.json` — every seed has URL/path + sha256 +

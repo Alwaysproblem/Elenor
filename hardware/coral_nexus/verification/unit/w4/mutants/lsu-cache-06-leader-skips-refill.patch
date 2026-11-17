@@ -1,0 +1,11 @@
+--- a/lsu_cache_path.sv
++++ b/lsu_cache_path.sv
+@@ -680,7 +680,7 @@
+                     if (b < int'(r_n1[r]))
+                       r_p1d[r][8*b +: 8] <= m_rsp_data[8*b +: 8];
+                 end
+-                if (r_leader[r] && r_cache_on[r]) begin
++                if (1'b0) begin
+                   r_line[r] <= m_rsp_data;
+                   r_lmask[r] <= m_rsp_mask;
+                   st[r] <= R_REFILL;

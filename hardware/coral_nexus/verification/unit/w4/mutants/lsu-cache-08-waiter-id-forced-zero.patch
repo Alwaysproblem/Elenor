@@ -1,0 +1,11 @@
+--- a/lsu_cache_path.sv
++++ b/lsu_cache_path.sv
+@@ -616,7 +616,7 @@
+                 MR_MERGED: begin
+                   r_slot[r] <= m_rsp_slot;
+                   r_mgen[r] <= m_rsp_entry_gen;
+-                  r_waiter[r] <= m_rsp_waiter;
++                  r_waiter[r] <= '0;
+                   r_leader[r] <= 1'b0;
+                   // A merge into an entry whose obligation ALREADY settled (mask
+                   // view read in this response cycle) missed that settle pulse;

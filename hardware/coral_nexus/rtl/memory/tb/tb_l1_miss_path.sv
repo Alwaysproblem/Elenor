@@ -112,6 +112,19 @@ module tb_l1_miss_path
   logic [63:0] cache_evictions_o;
   logic [$clog2(E+1)-1:0] bridge_outstanding_o;
   logic [63:0] bridge_sent_o, bridge_terminals_o, bridge_absorbed_o, bridge_stale_rsp_o;
+  // C031 wrapper additions (pure observers; scenario stimulus unchanged)
+  logic [WW-1:0] m_rsp_waiter;
+  logic [E-1:0] mshr_filled_o, mshr_cancelled_o, mshr_refill_pend_o;
+  logic [63:0] mshr_merged_o;
+  logic settle_valid_o, fault_valid_o;
+  logic [SW-1:0] settle_slot_o, fault_slot_o;
+  logic [31:0] settle_gen_o, fault_gen_o;
+  logic [31:0] mem_req_ctx_slot_o, mem_req_ctx_generation_o;
+  logic [31:0] mem_req_arena_alloc_gen_o, mem_req_scope_epoch_o;
+  int settle_count = 0, fault_count = 0;
+  logic [SW-1:0] last_settle_slot, last_fault_slot;
+  logic [31:0] last_settle_gen, last_fault_gen;
+  logic [WW-1:0] a_w1;
   logic invariant_error_o;
 
   // ---------------- real l1_bank behind the cache's cp_* data port ----------------
@@ -237,6 +250,10 @@ module tb_l1_miss_path
     if (rst_n && mem_req_valid && mem_req_ready) begin
       require(mem_req_slice_id == 0 && mem_req_slice_count == 1 && mem_req_length == LB,
               "MEM_REQ shape");
+      require(mem_req_ctx_slot_o == iss_ctx_slot && mem_req_ctx_generation_o == iss_ctx_generation &&
+              mem_req_arena_alloc_gen_o == iss_arena_alloc_gen &&
+              mem_req_scope_epoch_o == iss_scope_epoch,
+              "MEM_REQ carries full ctx/arena/scope provenance");
       for (int i = 0; i < E; i++)
         if (!svc_open[i]) begin
           svc_open[i] = 1; svc_open_txn[i] = mem_req_txn_id; svc_refs++; break;
@@ -253,6 +270,17 @@ module tb_l1_miss_path
         end
       require(found, "TERMINAL_ACK names an open service reference (no forged/duplicate ack)");
       svc_acks++; svc_last_final = term_final_state; svc_last_ack_txn = term_txn_id;
+    end
+  end
+
+  // C031 event observers: settle closes one exact (slot, entry_gen) obligation;
+  // the fault pulse is the outbridge fault-cancel of an MSHR entry.
+  always @(posedge clk) begin
+    if (rst_n && settle_valid_o) begin
+      settle_count++; last_settle_slot = settle_slot_o; last_settle_gen = settle_gen_o;
+    end
+    if (rst_n && fault_valid_o) begin
+      fault_count++; last_fault_slot = fault_slot_o; last_fault_gen = fault_gen_o;
     end
   end
 
@@ -420,6 +448,8 @@ module tb_l1_miss_path
     mcmd(M_ALLOC, 64'hA000, 0, 0, 0, 0, MR_LEADER, "leader");
     a_slot = m_rsp_slot; a_gen = m_rsp_entry_gen;
     mcmd(M_ALLOC, 64'hA000, 0, 0, 0, 0, MR_MERGED, "second waiter merges");
+    a_w1 = m_rsp_waiter;
+    require(a_w1 == WW'(1), "merge assigned the next free waiter id");
     issue_refill(a_slot, a_gen);
     settle_cycles(3);
     require(q_count == q_before + 1 && svc_refs == 1, "one MEM_REQ, one service reference");
@@ -429,6 +459,8 @@ module tb_l1_miss_path
     term_ready = 0;
     wire_rsp(txn_a, 1, 0, gold);
     settle_cycles(6);
+    require(mshr_filled_o[a_slot], "fill mask raised for the filled entry");
+    require(mshr_refill_pend_o[a_slot], "refill obligation still owed before the ACK");
     require(svc_refs == 1 && svc_acks == 0 && term_valid, "terminal ACK is held under backpressure");
     require(bridge_terminals_o == 0, "no terminal counted before the ACK handshake");
     // Install the line into the cache, then evict it with capacity pressure.
@@ -454,10 +486,10 @@ module tb_l1_miss_path
     require(m_rsp_slot != a_slot, "pending slot is not reused");
     drain_slot[0] = m_rsp_slot;
     drain_gen0 = m_rsp_entry_gen;
-    mcmd(M_CONSUME, 0, 0, a_slot, a_gen, 1, MR_OK, "delayed waiter 1 delivery");
+    mcmd(M_CONSUME, 0, 0, a_slot, a_gen, a_w1, MR_OK, "delayed waiter 1 delivery");
     require(m_rsp_data == gold && m_rsp_mask == '1, "delayed waiter gets the original bytes");
     require(mshr_busy_o[a_slot], "slot busy until the delayed reference closes");
-    mcmd(M_RELEASE, 0, 0, a_slot, a_gen, 1, MR_OK, "waiter 1 release");
+    mcmd(M_RELEASE, 0, 0, a_slot, a_gen, a_w1, MR_OK, "waiter 1 release");
     // Both waiters delivered and released, but the terminal is unacknowledged: the
     // token must still be busy and survive allocation pressure.
     require(mshr_busy_o[a_slot], "all waiters closed but terminal unacked: slot busy");
@@ -474,6 +506,8 @@ module tb_l1_miss_path
     require(svc_refs == 0 && svc_last_final == 2'd0 && svc_last_ack_txn == txn_a && bridge_terminals_o == 1,
             "COMPLETED terminal ACK handshake closes the reference");
     require(!mshr_busy_o[a_slot], "token freed only after the ACK handshake");
+    require(!mshr_refill_pend_o[a_slot] && settle_count == 1 && last_settle_slot == a_slot &&
+            last_settle_gen == a_gen, "settle pulse closed this exact obligation");
     mcmd(M_ALLOC, 64'hB1FF, 0, 0, 0, 0, MR_LEADER, "slot reusable after the ACK");
     require(m_rsp_slot == a_slot && m_rsp_entry_gen != a_gen, "reuse after the ACK carries a fresh generation");
     pressure_slot[E-2] = m_rsp_slot; pressure_gen[E-2] = m_rsp_entry_gen;
@@ -514,6 +548,8 @@ module tb_l1_miss_path
     @(negedge clk); cancel_mshr_slot = a_slot; cancel_mshr_gen = a_gen; cancel_valid = 1;
     @(negedge clk); cancel_valid = 0;
     mcmd(M_CANCEL, 0, 0, a_slot, a_gen, 0, MR_OK, "mshr cancel mark");
+    require(mshr_cancelled_o[a_slot] && !mshr_filled_o[a_slot],
+            "cancel mask raised, no fill for the cancelled entry");
     for (int w = 0; w < 2; w++) begin
       mcmd(M_CONSUME, 0, 0, a_slot, a_gen, WW'(w), MR_CANCELLED, "cancelled waiter terminal response");
       require(m_rsp_data == '0 && m_rsp_mask == '0, "cancelled waiter gets no data");
@@ -527,6 +563,8 @@ module tb_l1_miss_path
             "ISOLATED terminal ack closes the service reference");
     require(bridge_absorbed_o >= 1, "late data was absorbed, not delivered");
     require(!mshr_busy_o[a_slot], "slot freed only after the terminal ack settled the MSHR");
+    require(last_settle_slot == a_slot && last_settle_gen == a_gen,
+            "S2 settle pulse names the cancelled token");
     require(int'(bridge_outstanding_o) == 0, "bridge record closed");
 
     // ---------------- S2b: cancel and MEM_RSP land in the same cycle ----------------
@@ -564,6 +602,10 @@ module tb_l1_miss_path
     settle_cycles(8);
     require(svc_last_final == 2'd2 && svc_last_ack_txn == txn_a && svc_refs == 0,
             "FAULTED terminal ack closes the service reference");
+    require(fault_count == 1 && last_fault_slot == a_slot && last_fault_gen == a_gen,
+            "fault pulse names the fault-canceled token");
+    require(mshr_cancelled_o[a_slot] && !mshr_filled_o[a_slot],
+            "fault-canceled entry shows the cancel mask, never a fill");
     mcmd(M_CONSUME, 0, 0, a_slot, a_gen, 0, MR_CANCELLED, "fault: waiter gets a terminal response");
     require(m_rsp_data == '0, "fault response carries no data");
     require(mshr_busy_o[a_slot], "faulted entry busy until its waiter releases");

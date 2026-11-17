@@ -16,6 +16,8 @@ package c029_params_pkg;
   localparam string C1_TARGET_SHA256 = "f09ab86ff7b461338047c1c3f4dc488b9d49642f2dcf8e3c32bb4232b7b0754b";
   localparam int unsigned C2_CONTEXTS = 2;
   localparam string C2_TARGET_SHA256 = "8a0108cfec4e3b28d5b8e3aa4ab1dbda92ee160f7f6103b09ac6b1296fca3b8f";
+  localparam int unsigned LSU_CREDIT_CAP = 16;
+  localparam int unsigned LSU_MSHR_WAITERS = 32;
   localparam string C013_SHA256 = "a2a1abd522597027543dbac5c0c4f916a848795f5f5a4a8834cf4461a41cb290";
   localparam string SEAL_SHA256 = "5cd30e2e080a6c3ea46e152e295560b100b0a13151e30c691a87f3815ef2ef46";
   localparam int unsigned SPM_BYTES_PER_BANK [PROFILE_COUNT] = '{65536, 57344, 49152, 32768};
