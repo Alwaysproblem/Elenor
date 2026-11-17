@@ -162,6 +162,23 @@ class TransferStatus(Enum):
   FAULTED = "faulted"
   CANCELLED = "cancelled"
 
+_EXTERNAL_WRITE_LEG_KINDS = frozenset(
+  {
+    TransferLegKind.HBM_WRITE,
+    TransferLegKind.L2_WRITE,
+    TransferLegKind.GLOBAL_DMA,
+    TransferLegKind.NOC_REQUEST,
+  }
+)
+"""Legs whose completion moves bytes out of the owning tile/context (C032).
+
+Once such a leg really completes after a cancel request, the external effect
+has happened and the only truthful terminal is completion: the transaction
+runs its remaining route to ``DONE`` and can never settle as isolated.  Tile
+local legs (L1/L2/NoC reads, local DMA, cache fill/lookup) stay
+isolation-eligible because their effect is retractable with the context.
+"""
+
 
 @dataclass(frozen=True)
 class TransferLeg:
@@ -246,6 +263,11 @@ class MemoryTransaction:
   conservative_source_ranges: tuple[tuple[str, int, int, int], ...] = ()
   cancel_requested_cycle: int = -1
   isolation_confirmed_cycle: int = -1
+  # C032 settlement state: an isolation-failure report is not a terminal
+  # (the accepted obligation is still owed), and a completed external write
+  # leg binds a cancelled transaction to real completion.
+  isolation_failed_cycle: int = -1
+  cancel_effect_bound: bool = False
   fault_reason: str = ""
   # True only after the owner-side L2 reference hook registered every
   # endpoint view/backing for this accepted transaction.  Acknowledgement
@@ -539,6 +561,12 @@ class TransferManager:
     self._faulted: set[str] = set()
     self._terminal_history: OrderedDict[str, TransferStatus] = OrderedDict()
     self._cancel_requested: set[str] = set()
+    # Sticky isolation poison (C032): a failed isolation leaves the manager
+    # refusing new work until an explicit quiescent clear_poison(); it is
+    # never cleared implicitly by stepping or resetting other state.
+    self._poisoned_reason: str = ""
+    # Transaction ids that consumed exactly one real boundary TERMINAL_ACK.
+    self._terminal_acked: set[str] = set()
     # Run/profile generation provider state.  Transactions must stamp
     # ``run_generation`` and ``profile_generations`` explicitly; the manager
     # never synthesises or repairs them.
@@ -710,6 +738,11 @@ class TransferManager:
       self._profile_generations[key] = generation
 
   def begin_run(self, run_generation: int) -> None:
+    if self._poisoned_reason:
+      raise MemoryInvariantError(
+        f"transfer manager is poisoned: {self._poisoned_reason}; "
+        "begin_run refused until clear_poison()"
+      )
     if not isinstance(run_generation, int) or run_generation < 0:
       raise ValueError("run generation must be a non-negative integer")
     if run_generation <= self._run_generation:
@@ -835,6 +868,11 @@ class TransferManager:
     Cancel/fault tombstones are bounded.  When the bound is full, only new
     issue is blocked; existing completions and isolation continue to advance.
     """
+    if self._poisoned_reason:
+      raise MemoryInvariantError(
+        f"transfer manager is poisoned: {self._poisoned_reason}; "
+        "submit refused until clear_poison()"
+      )
     if (
       transaction.transaction_id in self._transactions
       or transaction.transaction_id in self._terminal_history
@@ -1585,8 +1623,16 @@ class TransferManager:
     txn.noc_tag = ""
     txn.noc_vc = 0
     if txn.status is TransferStatus.CANCEL_REQUESTED:
-      self._finish_cancelled(txn, cycle)
-      return
+      leg = txn.legs[txn.current_leg] if txn.current_leg < len(txn.legs) else None
+      if leg is not None and leg.kind in _EXTERNAL_WRITE_LEG_KINDS:
+        # The accepted external write leg really completed: the effect
+        # happened, so the only truthful terminal is completion.  The
+        # transaction runs its remaining route to DONE and can never
+        # settle as isolated (C032 / transfer_cancel_tracker semantics).
+        txn.cancel_effect_bound = True
+      if not txn.cancel_effect_bound:
+        self._finish_cancelled(txn, cycle)
+        return
     txn.current_leg += 1
     if txn.current_leg >= len(txn.legs):
       # Collapsed fidelity routes have no explicit source/destination legs;
@@ -1595,9 +1641,15 @@ class TransferManager:
         return
       if not self._commit_destination(txn, cycle, force=True):
         return
+      if txn.destination_committed_cycle < 0 and txn.cancel_effect_bound:
+        # A cancelled write-bound transaction with no local destination view
+        # still produced its external effect: the completed write leg is the
+        # visibility boundary.
+        txn.destination_committed_cycle = cycle
       txn.status = TransferStatus.DONE
       txn.wait_reason = StageWaitReason.NONE
       txn.completed_cycle = cycle
+      self._cancel_requested.discard(txn.transaction_id)
       self._record_terminal(txn.transaction_id, TransferStatus.DONE)
       self.pmu_completed_count += 1
       self._count_transaction_bytes(txn)
@@ -1709,6 +1761,7 @@ class TransferManager:
       self.reference_release(txn, cycle)
       txn.reference_acquired = False
     self._transactions.pop(transaction_id)
+    self._terminal_acked.discard(transaction_id)
 
   def acknowledge_all_terminals(self, cycle: int) -> int:
     """Acknowledge every confirmed terminal transaction after owner cleanup."""
@@ -1740,7 +1793,7 @@ class TransferManager:
     self._stage_for_leg(leg, txn).cancel(txn.transaction_id)
 
   def _request_cancel(self, txn: MemoryTransaction, cycle: int) -> None:
-    if txn.status in (TransferStatus.DONE, TransferStatus.CANCELLED):
+    if txn.status in (TransferStatus.DONE, TransferStatus.CANCELLED, TransferStatus.FAULTED):
       return
     if txn.status is TransferStatus.CANCEL_REQUESTED:
       return
@@ -1794,14 +1847,116 @@ class TransferManager:
     return not self._cancel_requested
 
   def confirm_isolation(self, transaction_id: str, cycle: int) -> None:
+    """Confirm an explicit isolation: exactly one CANCELLED terminal.
+
+    Only a ``CANCEL_REQUESTED`` transaction that never completed an external
+    write leg may be isolated; a duplicate or unknown confirmation raises and
+    leaves the ledger unchanged.
+    """
     txn = self._transactions.get(transaction_id)
     if txn is None:
       raise MemoryInvariantError("unknown transfer isolation confirmation")
     if txn.status is not TransferStatus.CANCEL_REQUESTED:
       raise MemoryInvariantError("isolation confirmation requires CANCEL_REQUESTED")
+    if transaction_id in self._terminal_acked:
+      raise MemoryInvariantError("duplicate transfer terminal acknowledgement")
+    if txn.cancel_effect_bound:
+      raise MemoryInvariantError(
+        "isolation refused: the cancelled transaction's completion is already"
+        " bound (external write leg completed or boundary reported COMPLETED)"
+      )
+    self._terminal_acked.add(transaction_id)
     self._cancel_txn_resources(txn)
     txn.isolation_confirmed_cycle = cycle
     self._finish_cancelled(txn, cycle)
+
+  def isolation_failed(self, transaction_id: str, cycle: int, reason: str) -> None:
+    """Record a failed isolation attempt and poison the manager (C032).
+
+    The transaction stays ``CANCEL_REQUESTED`` — its accepted obligation is
+    still owed and may only settle through real completion, an explicit
+    isolation confirmation or a fault terminal.  The manager refuses new
+    ``submit``/``begin_run`` work until ``clear_poison()`` after quiescence;
+    the poison is never cleared implicitly by stepping or resetting other
+    state.
+    """
+    txn = self._transactions.get(transaction_id)
+    if txn is None:
+      raise MemoryInvariantError("unknown transfer isolation failure")
+    if transaction_id in self._terminal_acked:
+      raise MemoryInvariantError("duplicate transfer terminal acknowledgement")
+    if txn.isolation_failed_cycle >= 0:
+      raise MemoryInvariantError("duplicate transfer isolation failure")
+    if txn.status is not TransferStatus.CANCEL_REQUESTED:
+      raise MemoryInvariantError("isolation failure requires CANCEL_REQUESTED")
+    txn.isolation_failed_cycle = cycle
+    if not self._poisoned_reason:
+      self._poisoned_reason = f"isolation failed for {transaction_id} at cycle {cycle}: {reason}"
+
+  def clear_poison(self) -> None:
+    """Recover a poisoned manager; allowed only at transfer quiescence.
+
+    The failed isolation's obligation must have really settled — a terminal
+    reached and acknowledged, nothing in flight, no cancellation pending —
+    before new work may start.
+    """
+    if not self._poisoned_reason:
+      return
+    if self._cancel_requested:
+      raise MemoryInvariantError("transfer poison cannot clear while a cancellation is pending")
+    if self.inflight_count:
+      raise MemoryInvariantError("transfer poison cannot clear while transfers are in flight")
+    self._poisoned_reason = ""
+
+  def terminal_ack(self, transaction_id: str, final_state: str, cycle: int) -> TransferStatus:
+    """Settle one transaction from a real boundary TERMINAL_ACK (C032).
+
+    Exactly one terminal is consumed per transaction: duplicates, unknown ids
+    and already-settled transactions are refused.  ``ISOLATED`` confirms
+    isolation (cancel requested, no external effect owed); ``COMPLETED``
+    keeps the unchanged normal completion path — the transaction settles
+    through its real accepted-leg completion and consumer acknowledgement,
+    never as isolated; ``FAULTED`` settles the fault terminal directly and is
+    never reported as isolation.
+    """
+    if final_state not in ("COMPLETED", "ISOLATED", "FAULTED"):
+      raise MemoryInvariantError(f"unknown transfer terminal state {final_state!r}")
+    txn = self._transactions.get(transaction_id)
+    if txn is None:
+      raise MemoryInvariantError("unknown transfer terminal acknowledgement")
+    if transaction_id in self._terminal_acked:
+      raise MemoryInvariantError("duplicate transfer terminal acknowledgement")
+    if txn.status in (TransferStatus.DONE, TransferStatus.CANCELLED, TransferStatus.FAULTED):
+      raise MemoryInvariantError("duplicate transfer terminal acknowledgement")
+    if final_state == "ISOLATED":
+      # confirm_isolation consumes the terminal itself and still enforces
+      # the CANCEL_REQUESTED (never write-bound) precondition.
+      self.confirm_isolation(transaction_id, cycle)
+      return TransferStatus.CANCELLED
+    self._terminal_acked.add(transaction_id)
+    if final_state == "FAULTED":
+      # A fault terminal is never isolation: release the accepted leg's
+      # resources and settle the fault terminal exactly once.
+      self._cancel_txn_resources(txn)
+      self._fault_transaction(txn, "external TERMINAL_ACK reported FAULTED", cycle)
+      return TransferStatus.FAULTED
+    # COMPLETED: the effect stands.  For a cancelled transaction the boundary's
+    # terminal is authoritative, so the real completion path must run the
+    # remaining route to DONE (never a CANCELLED settle); non-cancelled
+    # transactions keep the unchanged completion/acknowledge path.
+    if txn.status is TransferStatus.CANCEL_REQUESTED:
+      txn.cancel_effect_bound = True
+    return txn.status
+
+  @property
+  def poisoned(self) -> bool:
+    """True while a failed isolation refuses new work (sticky)."""
+    return bool(self._poisoned_reason)
+
+  @property
+  def poisoned_reason(self) -> str | None:
+    """First isolation-failure reason, or None when the manager is healthy."""
+    return self._poisoned_reason or None
 
   @property
   def cancellation_pending(self) -> bool:
@@ -1928,6 +2083,9 @@ class TransferManager:
     self._faulted.clear()
     self._terminal_history.clear()
     self._cancel_requested.clear()
+    # Terminal bookkeeping resets with the ledger; the isolation poison is
+    # deliberately NOT cleared here — only clear_poison() at quiescence may.
+    self._terminal_acked.clear()
     for stage in self._all_stages():
       stage.reset()
     self.pmu_issued_count = 0

@@ -1,0 +1,11 @@
+--- a/transfer_cancel_tracker.sv
++++ b/transfer_cancel_tracker.sv
+@@ -214,7 +214,7 @@
+       if (obligate_valid_i && estate[obligate_slot_i] != E_FREE)
+         owed[obligate_slot_i] <= owed[obligate_slot_i] + ACK_W'(1);
+       if (ack_valid_i && estate[ack_slot_i] != E_FREE)
+-        done_cnt[ack_slot_i] <= done_cnt[ack_slot_i] + ACK_W'(1);
++        done_cnt[ack_slot_i] <= done_cnt[ack_slot_i];
+ 
+       if (push) begin
+         estate[settle_slot_i] <= E_SETTLED;

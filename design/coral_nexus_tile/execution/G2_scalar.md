@@ -387,6 +387,15 @@ ROB 同 PC 双 Context store、错误 op_seq、独立退休、局部 fault flush
 
 - **通过/交接**：直搬 byte 相等、三终态/取消结算语义、零泄漏终局断言；消费者：C034（drain 判据消费传输静止）、G4 C055–C057（indexed/segment/页授权在其上扩展）。
 
+**本轮执行结果：C032 完成。**
+
+- 交付 `rtl/memory/mfe_top.sv`（直搬 FSM：S_PARSE→S_AUTHORIZE→S_SEGMENT→S_MOVE→S_WAIT→S_TERM→S_DONE；分段 L2↔HBM binding、写 payload 取本事务真实读回字节）、`rtl/memory/transfer_cancel_tracker.sv`（每 txn 恰一终态、obligate/ack 计数、release 前置、sticky poison）与 `rtl/memory/c032_mfe_pkg.sv`。`tb/tb_mfe_top.sv` 通过 FIFO 接真实 C023 `MemoryService`（读写双向），断言字节相等、三终态、重复终态/未 ACK 释放被拒、poison 拒新启动直到 quiescent reset、账本闭合。
+- 取消语义两域一致：已接受并完成的**外写** leg 把事务绑定到 COMPLETED（效果已发生），纯入向或未发外写才可 ISOLATED；同拍 cancel/settle 只产一个终态；reset 在非静止时被拒且不清 poison。Python 侧以 `terminal_ack` 作为边界 TERMINAL_ACK 接缝（ISOLATED→`confirm_isolation`、COMPLETED→真实完成路径、FAULTED→fault 终态且永不伪装隔离），新增 `isolation_failed`/`clear_poison`（仅静止可清）并把 `_advance_leg` 的取消结算改为"外写已完成即为 DONE"；`tile_group.release_context_memory` 遇 poison 直接抛出，不再永久返回 False。
+- 真实缺陷（Python，先 RED 后 GREEN）：原 `_advance_leg` 把取消后完成的**外写**事务结算成 CANCELLED（违背 MEM-09/MEM-12）；边界宣告 COMPLETED 后仍会被 `_finish_cancelled` 覆盖。新增 `pipeline_validator/tests/test_w4_cancel_isolation.py` 6 用例钉住：写腿取消→COMPLETED 且可见提交、读腿唯一终态、COMPLETED 绑定完成路径、FAULTED≠ISOLATED、poison 到静止清除、非取消态确认被拒。
+- 真实验收：C032 slice `C032_PASS tb_mfe_top contexts=1 checks=2224 external=18 terminals=18 absorbed=1`（服务侧 18 请求/18 唯一终态/零残留）；`mfe-*` 8 个 mutant 全部先成功编译、再由已执行断言检出（取消段内被忽略、写后取消报 ISOLATED、取消后继续发起、poison 不 sticky、带在途义务 reset 清 poison、重复终态接受、未 ACK 释放接受、ack 不计数）。其中两个初版为等价变异：`mfe-03` 在读侧差别不可观察，改为新增"marked record granted a wire transaction"不变量后检出；`mfe-05` 的 CODE_RESET 分支本身会重设 poison，改为去掉 `quiescent` 的 live-entry 项后检出。
+- 全量入口：`cn unit --suite w4 --config <绝对路径>/cs1_c2.yaml` **33 passed in 1294.26s**；`cn sources verify` 通过；作用于所属文件的 pre-commit 通过；validator 全量通过。
+- 已知限制：只做直搬；indexed/gather/scatter 与页授权逐段 lease 归 C055–C057（未接生产、未留空模块）；`mem_rsp` 的延迟/背压由 bench 注入，`MemoryService` 只提供真实外部字节与终态引用；没有任何数值 kernel。主证据：`out/coral_nexus/C032/acc-mfe2/`、`full/`、`sources/`；`out/` 为 gitignored 运行证据，不等同归档。
+
 <a id="c033"></a>
 
 ## C033 — 本地持久事件、WAIT 与阶段信号

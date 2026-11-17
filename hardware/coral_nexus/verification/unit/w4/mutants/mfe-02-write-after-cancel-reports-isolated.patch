@@ -1,0 +1,11 @@
+--- a/mfe_top.sv
++++ b/mfe_top.sv
+@@ -401,7 +401,7 @@
+                 r_wirefinal[i] <= MFE_COMPLETED;
+                 if (tk_marked[i] || r_moved[i] + r_seglen[i] == r_bytes[i]) begin
+                   r_err[i] <= ERR_NONE;
+-                  r_final[i] <= MFE_COMPLETED;
++                  r_final[i] <= MFE_ISOLATED;
+                   r_after[i] <= GO_DONE;
+                 end else r_after[i] <= GO_SEG;
+                 rstate[i] <= S_TERM;

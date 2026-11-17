@@ -1,0 +1,11 @@
+--- a/transfer_cancel_tracker.sv
++++ b/transfer_cancel_tracker.sv
+@@ -139,7 +139,7 @@
+     if (release_valid_i) begin
+       if (estate[release_slot_i] == E_FREE) refusal_code = CODE_DUPLICATE_RELEASE;
+       else if (estate[release_slot_i] == E_RUN) refusal_code = CODE_RELEASE_EARLY;
+-      else if (owed[release_slot_i] != done_cnt[release_slot_i])
++      else if (1'b0)
+         refusal_code = CODE_RELEASE_WITHOUT_ACK;
+     end
+     if ((obligate_valid_i && estate[obligate_slot_i] == E_FREE) ||

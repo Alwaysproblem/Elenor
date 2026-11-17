@@ -1059,6 +1059,15 @@ class TileGroup:
 
   def release_context_memory(self, cycle: int) -> bool:
     """Retire cancelled owners only after real transfer and member isolation."""
+    poison_reason = self.transfer_manager.poisoned_reason
+    if poison_reason is not None:
+      # A failed isolation means polling can never reach quiescence: surface
+      # the poison instead of returning False forever (C032).
+      raise MemoryInvariantError(
+        f"transfer manager is poisoned: {poison_reason}; "
+        "settle the owed terminal, acknowledge it and clear_poison() before "
+        "releasing context memory"
+      )
     for sequencer in self._active_sequencers:
       self.scheduler.cancel_context(sequencer, cycle)
     self.transfer_manager.cancel_all(cycle)

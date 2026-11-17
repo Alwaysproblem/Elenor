@@ -249,6 +249,30 @@ before terminal settlement. The native-return proof uses the generated full
 C026 retirement bank; the mini-ROB emitted by the default CoreMiniVerification
 target is not sufficient evidence.
 
+## Focused C032 acceptance
+
+C032 covers the MFE direct-move engine plus per-transaction settlement. The
+bench drives real read and write payloads against the C023
+`pipeline_validator.cosim.memory_service.MemoryService` over FIFO endpoints, so
+`c032_mfe_peer.py` owns only external bytes and terminal references — no L1
+execution and no completion timers. Run it through the registered slice:
+
+```bash
+EVIDENCE=out/coral_nexus/C032/attempt-NNN
+CN_UNIT_CONFIG="$PWD/hardware/coral_nexus/configs/cs1_c2.yaml" \
+  conda run --no-capture-output -n elenor-validator python -m pytest \
+  hardware/coral_nexus/verification/unit/w4/test_w4_c032.py \
+  -n0 -v --basetemp="$EVIDENCE/pytest"
+```
+
+The MFE has no Context dimension; the bench declares only a registration shim,
+so do not add it to a `contexts=(1, 2)` list. Settlement rule shared with the
+Python manager: a cancel settles ISOLATED only when no external write leg was
+accepted for that transaction; an already-completed write binds COMPLETED, and
+the tracker/cancel_tracker poison may only be cleared by an explicit quiescent
+reset. `test_w4_cancel_isolation.py` pins the Python half of that rule and is
+registered in the w4 suite, so a Python-only regression also fails the suite.
+
 ## Offline seeds (C004)
 
 - Inventory: `env/seed_targets.json` — every seed has URL/path + sha256 +

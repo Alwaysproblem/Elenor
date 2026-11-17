@@ -1,0 +1,11 @@
+--- a/mfe_top.sv
++++ b/mfe_top.sv
+@@ -187,7 +187,7 @@
+   always_comb begin
+     seg_grant_have = 1'b0; seg_grant = '0;
+     for (int i = 0; i < INFLIGHT; i++)
+-      if (rstate[i] == S_SEGMENT && !tk_marked[i] && !seg_grant_have) begin
++      if (rstate[i] == S_SEGMENT && !seg_grant_have) begin
+         seg_grant_have = 1'b1; seg_grant = SW'(i);
+       end
+   end

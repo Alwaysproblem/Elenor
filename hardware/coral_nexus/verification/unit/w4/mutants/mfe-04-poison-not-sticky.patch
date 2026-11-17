@@ -1,0 +1,11 @@
+--- a/transfer_cancel_tracker.sv
++++ b/transfer_cancel_tracker.sv
+@@ -191,7 +191,7 @@
+         end
+         poisoned <= 1'b1;
+       end else begin
+-        if (isolation_failed_i) poisoned <= 1'b1;
++        if (isolation_failed_i) poisoned <= 1'b0;
+         if (quiescent_reset_i && poisoned && quiescent) poisoned <= 1'b0;
+       end
+ 

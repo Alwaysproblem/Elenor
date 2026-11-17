@@ -1,0 +1,11 @@
+--- a/mfe_top.sv
++++ b/mfe_top.sv
+@@ -349,7 +349,7 @@ module mfe_top
+             // issuing — no write leg is accepted after the mark. A completed
+             // external write leg already binds the effect (COMPLETED); only a
+             // transaction with zero completed write legs may settle ISOLATED.
+-            if (tk_marked[i]) begin
++            if (1'b0) begin
+               r_err[i] <= ERR_NONE;
+               r_final[i] <= (!r_dir_in[i] && r_moved[i] != 32'd0)
+                             ? MFE_COMPLETED : MFE_ISOLATED;
