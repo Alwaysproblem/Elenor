@@ -1,0 +1,11 @@
+--- a/l1_program_port.sv
++++ b/l1_program_port.sv
+@@ -283,7 +283,7 @@
+       if (fet_len[actx] == 8'd0) fet_code = F_ZERO;
+       else if (32'(fet_len[actx]) != FETCH_BYTES) fet_code = F_LEN;
+       else if ((aw & (32'(FETCH_BYTES) - 32'd1)) != 32'd0) fet_code = F_ALIGN;
+-      else if (aw + 32'(FETCH_BYTES) > 32'(SRAM_BYTES)) fet_code = F_RANGE;
++      else if (aw + 32'(FETCH_BYTES) > 32'(SRAM_BYTES + SRAM_BYTES)) fet_code = F_RANGE;
+       else if (aw + 32'(FETCH_BYTES) <= 32'(SRAM_BYTES)) begin
+         // The guard keeps a broken range check from reading out of bounds.
+         for (int b = 0; b < FETCH_BYTES; b++)

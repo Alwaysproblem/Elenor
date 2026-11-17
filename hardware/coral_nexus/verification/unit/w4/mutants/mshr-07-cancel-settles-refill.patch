@@ -1,0 +1,10 @@
+--- a/mshr_table.sv
++++ b/mshr_table.sv
+@@ -270,6 +270,7 @@
+               respond(R_STALE_PROFILE, s, egen[s], '0, '0, '0);
+             end else begin
+               cancelled[s] <= 1'b1;
++              refill_out[s] <= 1'b0;
+               respond(R_OK, s, egen[s], '0, '0, '0);
+             end
+           end

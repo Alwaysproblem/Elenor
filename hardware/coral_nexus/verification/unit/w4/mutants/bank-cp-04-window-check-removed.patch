@@ -1,0 +1,11 @@
+--- a/l1_bank.sv
++++ b/l1_bank.sv
+@@ -513,8 +513,6 @@
+       cp_fault = REJ_SHAPE;
+     end else if (int'(cp_addr_i) + int'(cp_beats_i) * DATA_BYTES > BANK_BYTES) begin
+       cp_fault = REJ_OVERFLOW;
+-    end else if (int'(cp_addr_i) < spm_bound) begin
+-      cp_fault = REJ_NOT_CACHE_WINDOW;
+     end
+   end
+ 

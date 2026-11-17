@@ -50,6 +50,8 @@ def parameters() -> dict[str, Any]:
     "SLOT_COUNT": "frame_slot_budget",
     "DATA_BYTES": "l1_bank_bytes_per_cycle",
     "BANK_LATENCY_CYCLES": "l1_access_latency_cycles",
+    "MSHR_ENTRIES": "l1_mshr_entries",
+    "LINE_BYTES": "cache_line_bytes",
   }
   result: dict[str, Any] = {
     key: _integer(values[source], source, 0 if key == "BANK_LATENCY_CYCLES" else 1)
@@ -65,6 +67,19 @@ def parameters() -> dict[str, Any]:
   result["SPM_BYTES_PER_BANK"] = [
     _integer(values[f"spm_bytes_per_bank_mode{mode}"], f"SPM profile {mode}") for mode in modes
   ]
+  cache_modes = sorted(
+    int(match[1])
+    for name in values
+    if (match := re.fullmatch(r"cache_bytes_per_bank_mode(\d+)", name))
+  )
+  if cache_modes != modes:
+    raise ValueError("C030 requires a cache profile table matching the SPM profile table")
+  result["CACHE_BYTES_PER_BANK"] = [
+    int(values[f"cache_bytes_per_bank_mode{mode}"]) for mode in cache_modes
+  ]
+  for spm, cache in zip(result["SPM_BYTES_PER_BANK"], result["CACHE_BYTES_PER_BANK"], strict=True):
+    if cache < 0 or cache % result["LINE_BYTES"] or spm + cache != result["BANK_BYTES"]:
+      raise ValueError("C030 cache/SPM partition is not line-aligned or does not fill the bank")
   result["PROFILE_COUNT"] = len(modes)
   for size in result["SPM_BYTES_PER_BANK"]:
     if not result["SYSTEM_RESERVED_BYTES"] <= size <= result["BANK_BYTES"]:
@@ -95,16 +110,18 @@ def render() -> str:
     "package c029_params_pkg;",
   ]
   for name, value in values.items():
-    if name == "SPM_BYTES_PER_BANK":
+    if name in ("SPM_BYTES_PER_BANK", "CACHE_BYTES_PER_BANK"):
       continue
     if isinstance(value, str):
       lines.append(f"  localparam string {name} = {json.dumps(value)};")
     else:
       lines.append(f"  localparam int unsigned {name} = {value};")
   sizes = ", ".join(str(value) for value in values["SPM_BYTES_PER_BANK"])
+  cache_sizes = ", ".join(str(value) for value in values["CACHE_BYTES_PER_BANK"])
   lines.extend(
     [
       f"  localparam int unsigned SPM_BYTES_PER_BANK [PROFILE_COUNT] = '{{{sizes}}};",
+      f"  localparam int unsigned CACHE_BYTES_PER_BANK [PROFILE_COUNT] = '{{{cache_sizes}}};",
       "endpackage",
       "",
     ]

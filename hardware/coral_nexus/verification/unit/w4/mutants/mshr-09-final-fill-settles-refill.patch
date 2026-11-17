@@ -1,0 +1,11 @@
+--- a/mshr_table.sv
++++ b/mshr_table.sv
+@@ -230,7 +230,7 @@
+               for (int b = 0; b < LINE_B; b++)
+                 if (cmd_mask[b]) fbuf[s][b*8 +: 8] <= cmd_data[b*8 +: 8];
+               fmask[s] <= fmask[s] | cmd_mask;
+-              if (cmd_last) state[s] <= S_PENDING;
++              if (cmd_last) begin state[s] <= S_PENDING; refill_out[s] <= 1'b0; end
+               respond(R_OK, s, egen[s], '0, '0, '0);
+             end
+           end

@@ -1,0 +1,11 @@
+--- a/l1_bank.sv
++++ b/l1_bank.sv
+@@ -494,7 +494,7 @@
+       inv_fault[c] = seg_fault(inv_bank_i[c], inv_addr_i[c], inv_len_i[c], spm_bound);
+       inv_ready_o[c] = !profile_set_valid_i && !inv_active[c]
+         && ((inv_fault[c] != REJ_NONE)
+-            || (!taken[inv_bank_i[c]] && !(cp_urgent && (inv_bank_i[c] == cp_bank_i))));
++            || (!busy[inv_bank_i[c]] && !(cp_urgent && (inv_bank_i[c] == cp_bank_i))));
+       inv_accept[c] = inv_valid_i[c] && inv_ready_o[c];
+       inv_fire[c] = inv_accept[c] && (inv_fault[c] == REJ_NONE);
+       if (inv_fire[c]) taken[inv_bank_i[c]] = 1'b1;

@@ -1,0 +1,11 @@
+--- a/l1_program_port.sv
++++ b/l1_program_port.sv
+@@ -214,7 +214,7 @@
+     g_found = 1'b0;
+     g_idx = 0;
+     for (int i = 0; i < REQS; i++) begin
+-      automatic int unsigned idx = (32'(rr_ptr) + i) % REQS;
++      automatic int unsigned idx = (i + 1) % REQS;
+       if (!g_found && req[idx]) begin
+         g_found = 1'b1;
+         g_idx = idx;

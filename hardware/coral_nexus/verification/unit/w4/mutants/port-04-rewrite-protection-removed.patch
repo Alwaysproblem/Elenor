@@ -1,0 +1,11 @@
+--- a/l1_program_port.sv
++++ b/l1_program_port.sv
+@@ -317,7 +317,7 @@
+             automatic int unsigned off;
+             off = aw + b;
+             if (byte_valid[off]) begin
+-              if (ref_of(byte_pid[off], byte_ep[off]) != 16'd0)
++              if (ref_of(byte_pid[off], byte_ep[off]) == 16'hBEEF)
+                 ins_exec_hit = 1'b1;
+               if (mem[off] != ins_data[b*8 +: 8] || byte_pid[off] != ins_prog_id ||
+                   byte_ep[off] != ins_epoch)

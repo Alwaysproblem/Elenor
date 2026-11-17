@@ -1,0 +1,11 @@
+--- a/l1_program_port.sv
++++ b/l1_program_port.sv
+@@ -387,7 +387,7 @@
+             end
+         end
+       end
+-      if (a_fire) begin
++      if (a_fire && !(rsp_push_idx == RSP_DEPTH-1 && !delivering)) begin
+         rsp_q_key[rsp_push_idx] <= fet_key[actx];
+         rsp_q_data[rsp_push_idx] <= fet_rdata;
+         rsp_q_code[rsp_push_idx] <= fet_code;

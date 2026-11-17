@@ -1,0 +1,11 @@
+--- a/cache.sv
++++ b/cache.sv
+@@ -345,7 +345,7 @@
+                 else if (cmd_profile_gen != profile_gen) begin
+                   stale_rejects <= stale_rejects + 64'd1;
+                   respond(R_STALE_PROFILE, '0, '0);
+-                end else if (bank_profile_i != prof_idx) respond(R_PROFILE_SKEW, '0, '0);
++                end else if (1'b0) respond(R_PROFILE_SKEW, '0, '0);
+                 else if (cmd_line_offset % 32'(LINE_B) != 0) respond(R_BAD_CMD, '0, '0);
+                 else if (cmd_dirty && !write_back) respond(R_READ_ONLY, '0, '0);
+                 else start_scan(1'b0);

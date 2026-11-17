@@ -1,0 +1,11 @@
+--- a/cache.sv
++++ b/cache.sv
+@@ -239,7 +239,7 @@
+ 
+   // physical placement of a slot
+   function automatic logic [BANK_IDX_W-1:0] slot_bank(input logic [SLOT_W-1:0] s);
+-    return BANK_IDX_W'(int'(s) % BANK_COUNT);
++    return '0;
+   endfunction
+   function automatic logic [BANK_ADDR_W-1:0] slot_addr(input logic [SLOT_W-1:0] s);
+     return BANK_ADDR_W'(SPM_BYTES_PER_BANK[prof_idx] + (int'(s) / BANK_COUNT) * LINE_B);

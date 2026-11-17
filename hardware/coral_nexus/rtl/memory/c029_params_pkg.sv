@@ -9,6 +9,8 @@ package c029_params_pkg;
   localparam int unsigned SLOT_COUNT = 16;
   localparam int unsigned DATA_BYTES = 32;
   localparam int unsigned BANK_LATENCY_CYCLES = 1;
+  localparam int unsigned MSHR_ENTRIES = 16;
+  localparam int unsigned LINE_BYTES = 64;
   localparam int unsigned PROFILE_COUNT = 4;
   localparam int unsigned C1_CONTEXTS = 1;
   localparam string C1_TARGET_SHA256 = "f09ab86ff7b461338047c1c3f4dc488b9d49642f2dcf8e3c32bb4232b7b0754b";
@@ -17,4 +19,5 @@ package c029_params_pkg;
   localparam string C013_SHA256 = "a2a1abd522597027543dbac5c0c4f916a848795f5f5a4a8834cf4461a41cb290";
   localparam string SEAL_SHA256 = "5cd30e2e080a6c3ea46e152e295560b100b0a13151e30c691a87f3815ef2ef46";
   localparam int unsigned SPM_BYTES_PER_BANK [PROFILE_COUNT] = '{65536, 57344, 49152, 32768};
+  localparam int unsigned CACHE_BYTES_PER_BANK [PROFILE_COUNT] = '{0, 8192, 16384, 32768};
 endpackage

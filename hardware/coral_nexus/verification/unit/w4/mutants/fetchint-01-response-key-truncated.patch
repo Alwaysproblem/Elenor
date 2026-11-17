@@ -1,0 +1,11 @@
+--- a/l1_program_port.sv
++++ b/l1_program_port.sv
+@@ -388,7 +388,7 @@
+         end
+       end
+       if (a_fire) begin
+-        rsp_q_key[rsp_push_idx] <= fet_key[actx];
++        rsp_q_key[rsp_push_idx] <= {fet_key[actx][KEY_W-1 -: CTX_W], {(KEY_W-CTX_W){1'b0}}};
+         rsp_q_data[rsp_push_idx] <= fet_rdata;
+         rsp_q_code[rsp_push_idx] <= fet_code;
+       end

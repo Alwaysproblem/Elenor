@@ -1,0 +1,12 @@
+--- a/l1_bank.sv
++++ b/l1_bank.sv
+@@ -521,8 +521,7 @@
+   // cp_pending deliberately excludes the accept condition: cp_urgent feeds
+   // req/inv arbitration and must not depend on it (no combinational loop).
+   always_comb begin : cp_ready_decode
+-    cp_ready_o = !cp_busy_q && !profile_set_valid_i && (cp_fault == REJ_NONE)
+-                 && !spm_taken[cp_bank_i];
++    cp_ready_o = !cp_busy_q && !profile_set_valid_i && (cp_fault == REJ_NONE);
+     cp_accept = cp_valid_i && cp_ready_o;
+     cp_rej_o = cp_valid_i && (cp_fault != REJ_NONE);
+     cp_rej_code_o = cp_fault;

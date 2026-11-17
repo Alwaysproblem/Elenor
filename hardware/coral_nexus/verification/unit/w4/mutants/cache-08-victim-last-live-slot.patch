@@ -1,0 +1,11 @@
+--- a/cache.sv
++++ b/cache.sv
+@@ -404,7 +404,7 @@
+                 if (aid[ix] == c_aid && agen[ix] == c_agen && aoff[ix] == c_off && !f_found) begin
+                   f_found = 1'b1; f_hit = ix;
+                 end
+-                if (!f_vic_found || stamp[ix] < f_best) begin
++                if (1'b1) begin
+                   f_vic_found = 1'b1; f_vic = ix; f_best = stamp[ix];
+                 end
+               end else if (!f_free_found) begin

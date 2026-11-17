@@ -1,0 +1,11 @@
+--- a/mshr_table.sv
++++ b/mshr_table.sv
+@@ -289,7 +289,7 @@
+           end
+           OP_RECONFIG: begin
+             if (cmd_profile_gen <= profile_gen) respond(R_STALE_PROFILE, '0, '0, '0, '0, '0);
+-            else if (active_o != 0) respond(R_ACTIVE, '0, '0, '0, '0, '0);
++            else if (1'b0) respond(R_ACTIVE, '0, '0, '0, '0, '0);
+             else begin
+               profile_gen <= cmd_profile_gen;
+               respond(R_OK, '0, '0, '0, '0, '0);

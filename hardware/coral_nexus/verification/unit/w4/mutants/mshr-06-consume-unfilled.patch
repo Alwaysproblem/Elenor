@@ -1,0 +1,11 @@
+--- a/mshr_table.sv
++++ b/mshr_table.sv
+@@ -242,7 +242,7 @@
+               // Terminal cancelled response carries no data.
+               wstate[s][cmd_waiter] <= W_DELIVERED;
+               respond(R_CANCELLED, s, egen[s], cmd_waiter, '0, '0);
+-            end else if (state[s] != S_PENDING) respond(R_NOT_FILLED, s, egen[s], cmd_waiter, '0, '0);
++            end else if (1'b0) respond(R_NOT_FILLED, s, egen[s], cmd_waiter, '0, '0);
+             else begin
+               wstate[s][cmd_waiter] <= W_DELIVERED;
+               respond(R_OK, s, egen[s], cmd_waiter, fbuf[s], fmask[s]);

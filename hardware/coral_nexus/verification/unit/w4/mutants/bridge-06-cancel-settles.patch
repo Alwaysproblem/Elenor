@@ -1,0 +1,11 @@
+--- a/transfer_outbridge.sv
++++ b/transfer_outbridge.sv
+@@ -247,7 +247,7 @@
+         for (int i = 0; i < RECORDS; i++)
+           if ((rstate[i] == R_REQ || rstate[i] == R_SENT || rstate[i] == R_FILL) &&
+               SW'(rmslot[i]) == cancel_mshr_slot && rmgen[i] == cancel_mshr_gen)
+-            rcancel[i] <= 1'b1;
++            begin rcancel[i] <= 1'b1; rstate[i] <= R_FREE; end
+ 
+       if (mem_rsp_valid && mem_rsp_ready) begin
+         if (rsp_match) begin

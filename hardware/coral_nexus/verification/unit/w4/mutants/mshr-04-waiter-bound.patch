@@ -1,0 +1,11 @@
+--- a/mshr_table.sv
++++ b/mshr_table.sv
+@@ -181,7 +181,7 @@
+               w_found = 1'b0; wfree = '0;
+               for (int w = 0; w < WAITERS; w++)
+                 if (wstate[hit][w] == W_NONE && !w_found) begin w_found = 1'b1; wfree = WAIT_W'(w); end
+-              if (!w_found) begin
++              if (1'b0) begin
+                 stalls <= stalls + 64'd1;
+                 respond(R_WAITERS_FULL, hit, egen[hit], '0, '0, '0);
+               end else begin

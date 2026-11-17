@@ -1,0 +1,20 @@
+--- a/cache.sv
++++ b/cache.sv
+@@ -276,7 +276,7 @@
+   task automatic start_scan(input logic early);
+     s_idx <= '0;
+     s_found <= 1'b0; s_free_found <= 1'b0; s_vic_found <= 1'b0; s_any_dirty <= 1'b0;
+-    s_hit <= '0; s_free <= '0; s_vic <= '0; s_best <= '1;
++    s_hit <= '0; s_free <= '0; s_vic <= '0; s_best <= '0;
+     s_early <= early;
+     go(S_SCAN);
+   endtask
+@@ -404,7 +404,7 @@
+                 if (aid[ix] == c_aid && agen[ix] == c_agen && aoff[ix] == c_off && !f_found) begin
+                   f_found = 1'b1; f_hit = ix;
+                 end
+-                if (!f_vic_found || stamp[ix] < f_best) begin
++                if (!f_vic_found || stamp[ix] > f_best) begin
+                   f_vic_found = 1'b1; f_vic = ix; f_best = stamp[ix];
+                 end
+               end else if (!f_free_found) begin

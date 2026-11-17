@@ -1,0 +1,11 @@
+--- a/transfer_outbridge.sv
++++ b/transfer_outbridge.sv
+@@ -212,7 +212,7 @@
+       // A good response whose obligation was cancelled before delivery: the
+       // data is absorbed and the MSHR refill obligation still needs its terminal.
+       for (int i = 0; i < RECORDS; i++)
+-        if (rstate[i] == R_FILL && rcancel[i]) begin
++        if (1'b0) begin
+           absorbed <= absorbed + 64'd1;
+           rstate[i] <= R_TERM;
+         end

@@ -1,0 +1,11 @@
+--- a/cache.sv
++++ b/cache.sv
+@@ -342,7 +342,7 @@
+               end
+               OP_REFILL: begin
+                 if (capacity_lines == 0) respond(R_DISABLED, '0, '0);
+-                else if (cmd_profile_gen != profile_gen) begin
++                else if (1'b0) begin
+                   stale_rejects <= stale_rejects + 64'd1;
+                   respond(R_STALE_PROFILE, '0, '0);
+                 end else if (bank_profile_i != prof_idx) respond(R_PROFILE_SKEW, '0, '0);

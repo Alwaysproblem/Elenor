@@ -1,0 +1,16 @@
+--- a/mshr_table.sv
++++ b/mshr_table.sv
+@@ -203,11 +203,11 @@
+               refill_out[freeslot] <= 1'b0;
+               key[freeslot] <= cmd_key;
+               egen_profile[freeslot] <= profile_gen;
+-              egen[freeslot] <= egen[freeslot] + EGEN_W'(1);
++              egen[freeslot] <= egen[freeslot];
+               fmask[freeslot] <= '0;
+               fbuf[freeslot] <= '0;
+               for (int w = 0; w < WAITERS; w++) wstate[freeslot][w] <= (w == 0) ? W_REG : W_NONE;
+-              respond(R_LEADER, freeslot, egen[freeslot] + EGEN_W'(1), '0, '0, '0);
++              respond(R_LEADER, freeslot, egen[freeslot], '0, '0, '0);
+             end
+           end
+           OP_ISSUE: begin

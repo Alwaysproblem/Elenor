@@ -1,0 +1,14 @@
+--- a/l1_bank.sv
++++ b/l1_bank.sv
+@@ -914,10 +914,10 @@
+         assert (cp_busy_q)
+           else $error("C029_ASSERT l1_bank cp_release_matches_accept: release without active cp");
+         cp_busy_q <= 1'b0;
+-        cp_done_o <= 1'b1;
+       end else begin
+         cp_done_o <= 1'b0;
+         if (cp_accept) begin
++          cp_done_o <= 1'b1;
+           cp_busy_q <= 1'b1;
+           cp_write_q <= cp_write_i;
+           cp_bank_q <= cp_bank_i;

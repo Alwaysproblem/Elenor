@@ -123,7 +123,15 @@ module tb_arena_ledger #(
     .inv_addr_i(b_inv_addr), .inv_len_i(inv_len_o), .inv_ack_o(inv_ack_i),
     .inv_rej_o(inv_rej_i), .inv_rej_code_o(),
     .profile_set_valid_i(1'b0), .profile_index_i('0), .profile_generation_i(profile_generation_i),
-    .profile_set_ready_o(), .profile_ack_o(), .profile_rej_o(), .profile_rej_code_o()
+    .profile_set_ready_o(), .profile_ack_o(), .profile_rej_o(), .profile_rej_code_o(),
+    // C030 cache data port: the ledger bench never drives the cache master;
+    // tie the request side off and report the cache idle/quiescent.
+    .cp_valid_i(1'b0), .cp_write_i(1'b0), .cp_bank_i('0), .cp_addr_i('0),
+    .cp_beats_i('0), .cp_wmode_i(1'b0), .cp_wdata_valid_i(1'b0), .cp_wdata_i('0),
+    .cp_wben_i('0), .cp_rdata_ready_i(1'b0), .cache_quiescent_i(1'b1),
+    .cp_ready_o(), .cp_rej_o(), .cp_rej_code_o(), .cp_wdata_ready_o(),
+    .cp_rdata_valid_o(), .cp_rdata_o(), .cp_rben_o(), .cp_done_o(), .cp_busy_o(),
+    .active_profile_o(), .profile_generation_o()
   );
   always #5 clk = ~clk;
   always @(posedge clk) begin

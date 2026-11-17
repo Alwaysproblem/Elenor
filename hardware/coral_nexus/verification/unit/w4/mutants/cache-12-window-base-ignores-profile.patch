@@ -1,0 +1,11 @@
+--- a/cache.sv
++++ b/cache.sv
+@@ -242,7 +242,7 @@
+     return BANK_IDX_W'(int'(s) % BANK_COUNT);
+   endfunction
+   function automatic logic [BANK_ADDR_W-1:0] slot_addr(input logic [SLOT_W-1:0] s);
+-    return BANK_ADDR_W'(SPM_BYTES_PER_BANK[prof_idx] + (int'(s) / BANK_COUNT) * LINE_B);
++    return BANK_ADDR_W'(SPM_BYTES_PER_BANK[0] + (int'(s) / BANK_COUNT) * LINE_B);
+   endfunction
+ 
+   always_comb begin

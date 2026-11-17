@@ -1,0 +1,11 @@
+--- a/transfer_outbridge.sv
++++ b/transfer_outbridge.sv
+@@ -192,7 +192,7 @@
+     rsp_match = 1'b0; rsp_idx = '0;
+     for (int i = 0; i < RECORDS; i++)
+       if (rstate[i] == R_SENT && rtxn[i] == mem_rsp_txn_id && mem_rsp_slice_id == 32'd0 &&
+-          rbgen[i] == mem_rsp_binding_generation && !rsp_match) begin
++          !rsp_match) begin
+         rsp_match = 1'b1; rsp_idx = SW'(i);
+       end
+   end

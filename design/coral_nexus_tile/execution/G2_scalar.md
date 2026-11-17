@@ -317,6 +317,15 @@ ROB 同 PC 双 Context store、错误 op_seq、独立退休、局部 fault flush
 
 - **通过/交接**：tb 全 PASS、token 生命周期断言常开；消费者：C031（LSU miss 走 MSHR leader）、C039（安装服务消费端口）、C058（profile FSM）。
 
+**本轮执行结果：C030 完成（RTL 验收）。**
+
+- 实际命令入口 `cn unit --suite w4 --config <绝对路径>/cs1_c2.yaml`：**21 passed in 870.86s**。`--config` 必须是路径，裸文件名 `cs1_c2.yaml` 会在每个 runner 的 setup 阶段 `FileNotFoundError`（耗时 3 s，未触及 Docker）。此前 `commands.yaml` 的 `w4` 只登记 C029 与 hold-retire，C030 的 4 个 runner 与 `test_w4_mshr_cache.py` 不会被该入口执行，本卡已登记。
+- 四个 RTL 切片均在 CONTEXT_COUNT 1 与 2 下跑绿：MSHR（831 checks，16 entries）、程序端口（C1 339 / C2 404 checks）、集成 miss path（35932 checks）、原生 C028 取指集成（C1 196 / C2 271 checks，`fetch_outstanding=2`、`fetch_bytes=32`，对真实生成的 `PerCtxFetchMux` 在 contextCount 1/2、sealed 256 位取指宽度下驱动真实端口）。
+- 行为 mutant 全部先成功编译、再由已执行的断言以退出码 1 检出（构建失败不计）：C030 四个 runner 共 47 个死于 `C030_ASSERT`（MSHR 9、程序端口 8、cache+bridge 22 [15+7]、取指集成 8）；另有 bank 的 cache 数据端口 11 个 `bank-cp-*`，由 C029 runner（`bank-*` family）执行、死于 `C029_ASSERT`，该 family 共 13 个 bank mutant 在同一次套件运行中全部检出。cache 的 15 个按重写后的 `cache.sv` 重新生成，旧 7 个对新源码全部无法 apply。
+- cache 为顺序行扫描、slot 条带化到真实 `l1_bank`、容量取已封印 profile 的聚合值；miss bench 驱动真实 bank，覆盖多 lane victim 选择、cache 与 SPM 持有者在同一 bank 上的仲裁（cache 操作在持有期内等待而非静默跳过）、以及 bank profile 与 cache profile 不一致时拒绝并保持行状态。
+- 已知限制：集成 miss bench 的 `CONTEXT_COUNT` 只放大 SPM 侧，两个 Context 数下 check 数相同（35932），C1 仅证明可 elaborate 与运行，不增加第二 Context 覆盖；mutant 02/08/09 同被“原行被淘汰”断言检出，未单独证明跨 lane 组折叠的失败模式。
+- C013/C019 与 seal 未改；`cn sources verify` 通过（`out/coral_nexus/C030/final-008/`），作用于所属文件的 pre-commit 全部通过且未改写任何冻结产物。主证据：`out/coral_nexus/C030/final-007/pytest/`。`out/` 为 gitignored 运行证据，不等同归档。未重跑 C026/C027/C028，未运行 G2 gate；runtime Profile FSM 归 C058，完整 Tile top 归 C040。
+
 <a id="c031"></a>
 
 ## C031 — 真实多 Context LSU 在途与完成

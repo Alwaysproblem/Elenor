@@ -1,0 +1,11 @@
+--- a/l1_program_port.sv
++++ b/l1_program_port.sv
+@@ -399,7 +399,7 @@
+         ins_count <= ins_count - (ins_delivering ? 1 : 0) + (ins_fire ? 1 : 0);
+       // Honest counters: only real port handshakes move them.
+       if (ins_fire) install_beats <= install_beats + 64'd1;
+-      if (a_fire) fetch_accepted <= fetch_accepted + 64'd1;
++      if (a_fire || (fet_valid[0] && !fet_ready[0])) fetch_accepted <= fetch_accepted + 64'd1;
+       if (delivering) rsp_delivered <= rsp_delivered + 64'd1;
+       if (g_found) port_busy <= port_busy + 64'd1;
+       if (bound_now != 0) bound_hits <= bound_hits + 64'(bound_now);

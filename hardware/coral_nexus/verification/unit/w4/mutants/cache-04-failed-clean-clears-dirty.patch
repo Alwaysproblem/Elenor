@@ -1,0 +1,11 @@
+--- a/cache.sv
++++ b/cache.sv
+@@ -596,7 +596,7 @@
+               ix = SLOT_W'(s_idx);
+               if (slot_live(ix) && pend[ix] && pid[ix] == c_cid) begin
+                 pend[ix] <= 1'b0; pend_cnt <= pend_cnt - 32'd1;
+-                if (c_cok) begin
++                if (1'b1) begin
+                   dirty[ix] <= 1'b0; dirty_cnt <= dirty_cnt - 32'd1;
+                   if (inv_after[ix]) begin
+                     v[ix] <= 1'b0; resident_cnt <= resident_cnt - 32'd1;

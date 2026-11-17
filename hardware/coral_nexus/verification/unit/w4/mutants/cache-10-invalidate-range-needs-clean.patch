@@ -1,0 +1,11 @@
+--- a/cache.sv
++++ b/cache.sv
+@@ -620,7 +620,7 @@
+               end else begin
+                 // invalidate_range (clean=false, invalidate=true) must still drop CLEAN lines
+                 // (cache.py:499: `elif invalidate: remove`); only dirty lines need the clean.
+-                if (c_inv) begin
++                if (c_clean && c_inv) begin
+                   v[ix] <= 1'b0; resident_cnt <= resident_cnt - 32'd1;
+                 end
+                 s_idx <= s_idx + 32'd1;

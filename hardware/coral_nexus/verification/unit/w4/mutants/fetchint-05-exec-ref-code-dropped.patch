@@ -1,0 +1,11 @@
+--- a/l1_program_port.sv
++++ b/l1_program_port.sv
+@@ -331,7 +331,7 @@
+             end else ins_same = 1'b0;
+           end
+         end
+-        if (ins_exec_hit) ins_code = I_EXEC_REF;
++        if (ins_exec_hit && !ins_exec_hit) ins_code = I_EXEC_REF;
+         else if (ins_same) ins_code = I_ALREADY;
+         else ins_code = I_OK;
+       end

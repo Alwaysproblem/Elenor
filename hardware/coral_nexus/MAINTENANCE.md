@@ -197,6 +197,30 @@ unimplemented Gather/Scatter FSM. Python lifecycle tests use existing reference
 objects only; they do not create a second L1 execution ledger. This entry does
 not execute C026/C027/C028 or claim C030/C040 completion.
 
+## Focused C030 acceptance
+
+C030 (MSHR, banked cache, program port, native fetch integration) runs under
+the same `cn unit --suite w4` entry as C029. All four RTL runners share
+`verification/unit/w4/w4_rtl_harness.py` (sealed-target fence, source/seal
+hashes, offline Verilator build, Docker run, mutant/green verdict rules); a
+runner only declares its bench, sources and mutant globs. A slice's mutants
+must match every glob it names, and each must compile and then die on an
+executed `C030_ASSERT`.
+
+```bash
+EVIDENCE=out/coral_nexus/C030/attempt-NNN
+bash hardware/coral_nexus/scripts/cn.sh unit --suite w4 \
+  --config "$PWD/hardware/coral_nexus/configs/cs1_c2.yaml" --out "$EVIDENCE/unit"
+```
+
+`--config` must be a path, not a bare name. Tests run only if registered in
+`scripts/commands.yaml` under `unit.suites.w4`; an unregistered runner is
+silently skipped by this entry. Editing `cache.sv` or `transfer_outbridge.sv`
+requires regenerating the matching `cache-*`/`bridge-*` patches, since a patch
+that no longer applies fails the whole runner rather than a single mutant.
+Benches must stay valid at CONTEXT_COUNT 1 and 2: index peer Contexts through
+a clamped constant, never a bare `[1]`.
+
 ## Offline seeds (C004)
 
 - Inventory: `env/seed_targets.json` — every seed has URL/path + sha256 +

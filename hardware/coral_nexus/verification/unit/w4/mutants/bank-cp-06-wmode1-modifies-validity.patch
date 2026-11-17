@@ -1,0 +1,11 @@
+--- a/l1_bank.sv
++++ b/l1_bank.sv
+@@ -703,7 +703,7 @@
+             mem_data[cp_bank_q][WORD_ADDR_W'(seg_base_word(cp_addr_q) + cp_wbeat_q)][byi]
+               <= cp_wdata_i[8*byi +: 8];
+           end
+-          if (!cp_wmode_q) begin
++          if (1'b1) begin
+             mem_bval[cp_bank_q][WORD_ADDR_W'(seg_base_word(cp_addr_q) + cp_wbeat_q)][byi]
+               <= cp_wben_i[byi];
+           end

@@ -1,0 +1,10 @@
+--- a/cache.sv
++++ b/cache.sv
+@@ -379,7 +379,6 @@
+                   prof_idx <= cmd_profile_idx;
+                   capacity_lines <= 32'(BANK_COUNT * (CACHE_BYTES_PER_BANK[cmd_profile_idx] / LINE_B));
+                   write_back <= cmd_write_back;
+-                  resident_cnt <= '0;
+                   respond(R_OK, '0, '0);
+                 end
+               end

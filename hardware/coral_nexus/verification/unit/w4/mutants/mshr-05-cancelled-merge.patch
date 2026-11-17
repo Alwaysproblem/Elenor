@@ -1,0 +1,11 @@
+--- a/mshr_table.sv
++++ b/mshr_table.sv
+@@ -166,7 +166,7 @@
+           OP_ALLOC: begin
+             found = 1'b0; hit = '0; have_free = 1'b0; freeslot = '0;
+             for (int e = 0; e < ENTRIES; e++) begin
+-              if (state[e] != S_FREE && !cancelled[e] && key[e] == cmd_key &&
++              if (state[e] != S_FREE && key[e] == cmd_key &&
+                   egen_profile[e] == profile_gen && !found) begin
+                 found = 1'b1; hit = SLOT_W'(e);
+               end

@@ -1,0 +1,11 @@
+--- a/transfer_outbridge.sv
++++ b/transfer_outbridge.sv
+@@ -275,7 +275,7 @@
+ 
+       if (mc_valid && mc_ready) begin
+         case (mc_op)
+-          MOP_FILL: begin rdelivered[mc_pick] <= 1'b1; rstate[mc_pick] <= R_TERM; end
++          MOP_FILL: begin rdelivered[mc_pick] <= 1'b1; rstate[mc_pick] <= R_FREE; end
+           MOP_CANCEL: rstate[mc_pick] <= R_TERM;
+           default: rstate[mc_pick] <= R_FREE;
+         endcase

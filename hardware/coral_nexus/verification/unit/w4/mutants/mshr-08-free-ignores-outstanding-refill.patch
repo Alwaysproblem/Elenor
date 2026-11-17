@@ -1,0 +1,11 @@
+--- a/mshr_table.sv
++++ b/mshr_table.sv
+@@ -121,7 +121,7 @@
+   function automatic logic can_free(input logic [1:0] st, input logic canc, input logic refill,
+                                     input logic [1:0] ws [WAITERS]);
+     logic ok;
+-    ok = (canc || st == S_PENDING) && !refill;
++    ok = (canc || st == S_PENDING);
+     for (int w = 0; w < WAITERS; w++)
+       if (ws[w] != W_NONE && ws[w] != W_CLOSED) ok = 1'b0;
+     return ok;

@@ -1,0 +1,11 @@
+--- a/cache.sv
++++ b/cache.sv
+@@ -395,7 +395,7 @@
+           // wins with the lower index on a tie), then commit once with nonblocking writes.
+           f_found = s_found; f_hit = s_hit;
+           f_free_found = s_free_found; f_free = s_free;
+-          f_vic_found = s_vic_found; f_vic = s_vic; f_best = s_best;
++          f_vic_found = 1'b0; f_vic = '0; f_best = '1;
+           for (int l = 0; l < SCAN_LANES; l++) begin
+             base = s_idx + 32'(l);
+             ix = SLOT_W'(base);

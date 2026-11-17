@@ -46,6 +46,16 @@
 //       becomes valid again while uncleared/neighbouring validity is not
 //       fabricated.
 //
+//   CP1..CP6 (C030 cache data port, identical on C1 and C2 — the port is a
+//      single independent channel): cp byte/validity semantics per write
+//      mode (CP1), cache-window bounds and fault codes with SPM isolation
+//      (CP2), arbitration against SPM holders/invalidations including the
+//      fin-identity hazard and same-cycle SPM priority (CP3), CP_MAX_WAIT
+//      anti-starvation under sustained back-to-back SPM pressure with the
+//      measured bound (CP4), profile-switch gating on cp_busy /
+//      cache_quiescent_i and window movement (CP5), and protocol shape:
+//      backpressure stability, ready gating, one-cycle done pulse,
+//      side-effect-free rejects (CP6).
 // Builds: package, then l1_bank.sv, then this bench; Verilator --assert with
 // -GCONTEXT_COUNT=1 and =2. Prints C029_PASS tb_l1_bank only after every
 // check passed; failures print C029_ASSERT markers and end non-zero.
@@ -54,7 +64,9 @@
 module tb_l1_bank
   import c029_params_pkg::*;
 #(
-  parameter int CONTEXT_COUNT = C2_CONTEXTS
+  parameter int CONTEXT_COUNT = C2_CONTEXTS,
+  // Mirrors the DUT fairness knob so CP4 asserts the bound it configures.
+  parameter int CP_MAX_WAIT = 8
 );
 
   localparam int unsigned TXN_W = 64;
@@ -64,6 +76,7 @@ module tb_l1_bank
   localparam int unsigned BANK_LEN_W = $clog2(BANK_BYTES + 1);
   localparam int unsigned SEG_CNT_W = $clog2(MAX_SEG + 1);
   localparam int unsigned PROFILE_IDX_W = $clog2(PROFILE_COUNT);
+  localparam int unsigned BEAT_W = $clog2(BANK_BYTES / DATA_BYTES + 1);
   localparam int DW = DATA_BYTES * 8;
 
   // First user-visible byte of every bank (reserved region below it).
@@ -125,9 +138,26 @@ module tb_l1_bank
   logic                         profile_rej_o;
   logic [1:0]                   profile_rej_code_o;
 
+  // Cache data port (C030).
+  logic        cp_valid_i, cp_write_i, cp_wmode_i;
+  logic        cp_wdata_valid_i, cp_rdata_ready_i, cache_quiescent_i;
+  logic [BANK_IDX_W-1:0]  cp_bank_i;
+  logic [BANK_ADDR_W-1:0] cp_addr_i;
+  logic [BEAT_W-1:0]      cp_beats_i;
+  logic [DW-1:0]          cp_wdata_i;
+  logic [DATA_BYTES-1:0]  cp_wben_i;
+  logic        cp_ready_o, cp_rej_o, cp_wdata_ready_o;
+  logic        cp_rdata_valid_o, cp_done_o, cp_busy_o;
+  logic [2:0]  cp_rej_code_o;
+  logic [DW-1:0] cp_rdata_o;
+  logic [DATA_BYTES-1:0] cp_rben_o;
+  logic [PROFILE_IDX_W-1:0] active_profile_o;
+  logic [63:0] profile_generation_o;
+
   l1_bank #(
     .CONTEXT_COUNT(CONTEXT_COUNT),
-    .TXN_ID_WIDTH (TXN_W)
+    .TXN_ID_WIDTH (TXN_W),
+    .CP_MAX_WAIT  (CP_MAX_WAIT)
   ) dut (
     .clk                  (clk),
     .rstn                 (rstn),
@@ -175,7 +205,29 @@ module tb_l1_bank
     .profile_set_ready_o  (profile_set_ready_o),
     .profile_ack_o        (profile_ack_o),
     .profile_rej_o        (profile_rej_o),
-    .profile_rej_code_o   (profile_rej_code_o)
+    .profile_rej_code_o   (profile_rej_code_o),
+    .cp_valid_i           (cp_valid_i),
+    .cp_write_i           (cp_write_i),
+    .cp_bank_i            (cp_bank_i),
+    .cp_addr_i            (cp_addr_i),
+    .cp_beats_i           (cp_beats_i),
+    .cp_wmode_i           (cp_wmode_i),
+    .cp_wdata_valid_i     (cp_wdata_valid_i),
+    .cp_wdata_i           (cp_wdata_i),
+    .cp_wben_i            (cp_wben_i),
+    .cp_rdata_ready_i     (cp_rdata_ready_i),
+    .cache_quiescent_i    (cache_quiescent_i),
+    .cp_ready_o           (cp_ready_o),
+    .cp_rej_o             (cp_rej_o),
+    .cp_rej_code_o        (cp_rej_code_o),
+    .cp_wdata_ready_o     (cp_wdata_ready_o),
+    .cp_rdata_valid_o     (cp_rdata_valid_o),
+    .cp_rdata_o           (cp_rdata_o),
+    .cp_rben_o            (cp_rben_o),
+    .cp_done_o            (cp_done_o),
+    .cp_busy_o            (cp_busy_o),
+    .active_profile_o     (active_profile_o),
+    .profile_generation_o (profile_generation_o)
   );
 
   always #5 clk = ~clk;
@@ -202,6 +254,13 @@ module tb_l1_bank
         end
       end
     end
+  end
+
+  // Global cycle counter (posedge count) for arbitration-bound measurement.
+  int unsigned cyc;
+  always @(posedge clk) begin
+    if (!rstn) cyc <= 0;
+    else cyc <= cyc + 1;
   end
 
   // Timeout guard: any hang (e.g. a request that never becomes ready) fails
@@ -522,6 +581,132 @@ module tb_l1_bank
     end
   endtask
 
+  // -------------------------------------------------- cache-port helpers
+  // Drive a staged cp request (call at a negedge; hold until cp_push).
+  task automatic cp_drive(input bit wr, input int bk, input int adr, input int beats,
+                          input bit wmode);
+    begin
+      cp_valid_i = 1'b1;
+      cp_write_i = wr;
+      cp_bank_i = BANK_IDX_W'(bk);
+      cp_addr_i = BANK_ADDR_W'(adr);
+      cp_beats_i = BEAT_W'(beats);
+      cp_wmode_i = wmode;
+    end
+  endtask
+
+  task automatic cp_push(output int waits);
+    begin
+      waits = 0;
+      #1;
+      while (!cp_ready_o) begin
+        @(negedge clk);
+        #1;
+        waits = waits + 1;
+      end
+      @(posedge clk);
+      #1;
+      cp_valid_i = 1'b0;
+    end
+  endtask
+
+  // Drive a staged cp request, verify a stable fault code, withdraw; no
+  // state may change (busy stays low, no write stream).
+  task automatic cp_expect_reject(input logic [2:0] code, input string what);
+    logic [2:0] code_first;
+    begin
+      #1;
+      check_bit(cp_ready_o, 1'b0, {what, ": rejected cp not accepted"});
+      check_bit(cp_rej_o, 1'b1, {what, ": cp reject flag"});
+      check_val({61'd0, cp_rej_code_o}, {61'd0, code}, {what, ": cp fault code"});
+      code_first = cp_rej_code_o;
+      check_bit(cp_busy_o, 1'b0, {what, ": reject has no side effect (busy)"});
+      check_bit(cp_wdata_ready_o, 1'b0, {what, ": reject opens no write stream"});
+      @(negedge clk);
+      #1;
+      check_bit(cp_rej_o, 1'b1, {what, ": cp reject stable"});
+      check_val({61'd0, cp_rej_code_o}, {61'd0, code_first}, {what, ": cp code stable"});
+      cp_valid_i = 1'b0;
+      #1;
+    end
+  endtask
+
+  // Push one cp write beat (ready is high while a cp write is active).
+  task automatic cp_wbeat(input logic [DW-1:0] wd, input logic [DATA_BYTES-1:0] ben);
+    begin
+      @(negedge clk);
+      cp_wdata_valid_i = 1'b1;
+      cp_wdata_i = wd;
+      cp_wben_i = ben;
+      #1;
+      check_bit(cp_wdata_ready_o, 1'b1, "cp wdata ready while write active");
+      @(posedge clk);
+      #1;
+      cp_wdata_valid_i = 1'b0;
+    end
+  endtask
+
+  // Pop one cp read beat; stall_cycles checks valid/payload stability.
+  task automatic cp_rpop(input int stall, output logic [DW-1:0] d,
+                         output logic [DATA_BYTES-1:0] en);
+    begin
+      @(negedge clk);
+      #1;
+      while (!cp_rdata_valid_o) begin
+        @(negedge clk);
+        #1;
+      end
+      d = cp_rdata_o;
+      en = cp_rben_o;
+      for (int i = 0; i < stall; i++) begin
+        @(negedge clk);
+        #1;
+        check_bit(cp_rdata_valid_o, 1'b1, "cp rdata valid held under backpressure");
+        check_bit((cp_rdata_o == d) && (cp_rben_o == en), 1'b1,
+                  "cp rdata payload stable under backpressure");
+      end
+      cp_rdata_ready_i = 1'b1;
+      #1;
+      check_bit(cp_rdata_valid_o, 1'b1, "cp rdata valid at accept");
+      @(posedge clk);
+      #1;
+      cp_rdata_ready_i = 1'b0;
+    end
+  endtask
+
+  task automatic cp_rpop_check(input int stall, input logic [DW-1:0] ed,
+                               input logic [DATA_BYTES-1:0] een, input string what);
+    logic [DW-1:0] d;
+    logic [DATA_BYTES-1:0] en;
+    begin
+      cp_rpop(stall, d, en);
+      check_beat(d, en, ed, een, what);
+    end
+  endtask
+
+  // Wait for the one-cycle done pulse; busy must have cleared at the
+  // release edge and the pulse must not repeat.
+  task automatic cp_wait_done(input int max_wait, input string what);
+    int n;
+    begin
+      n = 0;
+      @(negedge clk);
+      #1;
+      while (!cp_done_o && n <= max_wait) begin
+        @(negedge clk);
+        #1;
+        n = n + 1;
+      end
+      check_bit(cp_done_o, 1'b1, {what, ": cp done pulse"});
+      check_bit(n <= max_wait, 1'b1, {what, ": cp done bounded"});
+      check_bit(cp_busy_o, 1'b0, {what, ": cp busy cleared at release edge"});
+      check_bit(cp_wdata_ready_o, 1'b0, {what, ": cp write stream closed at done"});
+      @(negedge clk);
+      #1;
+      check_bit(cp_done_o, 1'b0, {what, ": cp done is a one-cycle pulse"});
+      check_bit(cp_busy_o, 1'b0, {what, ": cp stays idle after done"});
+    end
+  endtask
   // ------------------------------------------------------------ fixtures
   localparam logic [DW-1:0] W_A0  = {64{4'h1}};
   localparam logic [DW-1:0] W_A1  = {64{4'h2}};
@@ -552,6 +737,8 @@ module tb_l1_bank
   localparam logic [DATA_BYTES-1:0] EN_B2831 = 32'hF000_0000;
   localparam logic [DATA_BYTES-1:0] EN_B31   = 32'h8000_0000;
   localparam logic [DATA_BYTES-1:0] EN_B8    = 32'h0000_0100;
+  localparam logic [DATA_BYTES-1:0] EN_B47   = 32'h0000_00F0;
+  localparam logic [DW-1:0] W_CP1F = {192'd0, 32'h2222_2222, 32'h1111_1111};
 
   localparam logic [63:0] TXN_S0  = 64'h0000_1000_0000_0001;
   localparam logic [63:0] TXN_DW  = 64'h0000_1000_0000_0002;
@@ -585,8 +772,21 @@ module tb_l1_bank
   localparam logic [63:0] TXN_8B  = 64'h0000_4000_0000_0002;
   localparam logic [63:0] TXN_8C  = 64'h0000_4000_0000_0003;
   localparam logic [63:0] TXN_8D  = 64'h0000_4000_0000_0004;
+  localparam logic [63:0] TXN_CP2  = 64'h0000_6000_0000_0000;
+  localparam logic [63:0] TXN_CP3A = 64'h0000_6000_0000_0001;
+  localparam logic [63:0] TXN_CP3B = 64'h0000_6000_0000_0002;
+  localparam logic [63:0] TXN_CP3B2 = 64'h0000_6000_0000_0003;
+  localparam logic [63:0] TXN_CP3C = 64'h0000_6000_0000_0004;
+  localparam logic [63:0] TXN_CP3D = 64'h0000_6000_0000_0005;
+  localparam logic [63:0] TXN_CP3E = 64'h0000_6000_0000_0006;
+  localparam logic [63:0] TXN_CP4  = 64'h0000_6000_0000_0010;
+  localparam logic [63:0] TXN_CP4M = 64'h0000_6000_0000_0011;
+  localparam logic [63:0] TXN_CP5  = 64'h0000_6000_0000_0020;
 
   int w;
+  int cw;
+  int unsigned t_a, t_b, t_cp0, t_cp1, drain_q, lat_q;
+  bit cp_got;
 
   // ------------------------------------------------------------- sequence
   initial begin
@@ -616,6 +816,17 @@ module tb_l1_bank
     profile_set_valid_i = 1'b0;
     profile_index_i = '0;
     profile_generation_i = '0;
+    cp_valid_i = 1'b0;
+    cp_write_i = 1'b0;
+    cp_bank_i = '0;
+    cp_addr_i = '0;
+    cp_beats_i = '0;
+    cp_wmode_i = 1'b0;
+    cp_wdata_valid_i = 1'b0;
+    cp_wdata_i = '0;
+    cp_wben_i = '0;
+    cp_rdata_ready_i = 1'b0;
+    cache_quiescent_i = 1'b1;
     for (int pc = 0; pc < 2; pc++) begin
       s_txn[pc] = '0;
       s_write[pc] = 1'b0;
@@ -1277,6 +1488,454 @@ module tb_l1_bank
     rpop_check(P0, 0, '0, '0, 64'h9030, "S9 read starts only after full invalidation");
     wait_done(P0, 8, "S9 post-clear read");
     fin_push(P0, 64'h9030, 1, 0, "S9 post-clear release");
+
+    // ================= C030 cache data port scenarios (profile 1 after S6:
+    // cache window [57344, 65536) per bank) =================
+
+    // ---- CP1: real bytes — write-mode byte/validity semantics.
+    $display("TB_L1_BANK: CP1 cp write-mode byte semantics");
+    @(negedge clk);
+    cp_drive(1, 6, 57344, 2, 0);
+    cp_push(cw);
+    check_bit(cw == 0, 1'b1, "CP1 cp accepted on idle cache bank");
+    check_bit(cp_busy_o, 1'b1, "CP1 cp busy from accept edge");
+    cp_wbeat(W_VA, EN_LO16);
+    check_bit(cp_done_o, 1'b0, "CP1 no done before final beat");
+    cp_wbeat(W_VB, EN_B2431);
+    cp_wait_done(4, "CP1 refill write");
+    @(negedge clk);
+    cp_drive(0, 6, 57344, 2, 0);
+    cp_push(cw);
+    check_bit(cp_wdata_ready_o, 1'b0, "CP1 no wdata_ready during cp read");
+    cp_rpop_check(0, W_VA, EN_LO16, "CP1 refill beat0 validity == wben");
+    cp_rpop_check(0, W_VB, EN_B2431, "CP1 refill beat1 validity == wben");
+    cp_wait_done(4, "CP1 refill readback");
+    // Same slot rewritten with FEWER valid bytes (wmode 0): stale validity
+    // must clear.
+    @(negedge clk);
+    cp_drive(1, 6, 57344, 1, 0);
+    cp_push(cw);
+    cp_wbeat(W_A0, EN_B07);
+    cp_wait_done(4, "CP1 narrower refill");
+    @(negedge clk);
+    cp_drive(0, 6, 57344, 1, 0);
+    cp_push(cw);
+    cp_rpop_check(0, W_A0, EN_B07, "CP1 wmode0 clears stale validity");
+    cp_wait_done(4, "CP1 narrower readback");
+    // wmode 1 (data-only): only wben bytes change, validity untouched.
+    @(negedge clk);
+    cp_drive(1, 6, 57344, 1, 1);
+    cp_push(cw);
+    cp_wbeat(W_A1, EN_B47);
+    cp_wait_done(4, "CP1 data-only write");
+    @(negedge clk);
+    cp_drive(0, 6, 57344, 1, 0);
+    cp_push(cw);
+    cp_rpop_check(0, W_CP1F, EN_B07, "CP1 wmode1 keeps validity, updates bytes");
+    cp_wait_done(4, "CP1 data-only readback");
+
+    // ---- CP2: window bounds and fault codes.
+    $display("TB_L1_BANK: CP2 cp window bounds");
+    req_stage(P0, 1, 1, TXN_CP2);
+    seg_set(P0, 0, 6, 4096, 32);
+    req_push(P0, w);
+    wbeat_push(P0, W_P0);
+    wait_done(P0, 8, "CP2 spm user write");
+    fin_push(P0, TXN_CP2, 1, 0, "CP2 spm user release");
+    // Below the window: reserved, user SPM, one word below the bound -> 7.
+    @(negedge clk);
+    cp_drive(1, 6, SYSTEM_RESERVED_BYTES, 1, 0);
+    cp_expect_reject(3'd7, "CP2 reserved below window");
+    @(negedge clk);
+    cp_drive(1, 6, 4096, 1, 0);
+    cp_expect_reject(3'd7, "CP2 user spm below window");
+    @(negedge clk);
+    cp_drive(1, 6, 57344 - DATA_BYTES, 1, 0);
+    cp_expect_reject(3'd7, "CP2 word below bound");
+    // One byte below the bound is misaligned: SHAPE outranks the window.
+    @(negedge clk);
+    cp_drive(0, 6, 57344 - 1, 1, 0);
+    cp_expect_reject(3'd1, "CP2 byte below bound is misaligned");
+    // SHAPE battery: zero beats, misaligned window word. (A bad bank index
+    // is not encodable: BANK_IDX_W covers exactly 0..BANK_COUNT-1.)
+    @(negedge clk);
+    cp_drive(1, 6, 57344, 0, 0);
+    cp_expect_reject(3'd1, "CP2 zero beats");
+    @(negedge clk);
+    cp_drive(1, 6, 57344 + 1, 1, 0);
+    cp_expect_reject(3'd1, "CP2 misaligned window word");
+    // OVERFLOW: last beat past the bank end.
+    @(negedge clk);
+    cp_drive(1, 6, 65536 - DATA_BYTES, 2, 0);
+    cp_expect_reject(3'd3, "CP2 overflow past bank bytes");
+    @(negedge clk);
+    cp_drive(0, 6, 60000, 2048, 0);
+    cp_expect_reject(3'd3, "CP2 huge beat count overflow");
+    // Exactly the first cache address and the last beats of the bank work.
+    @(negedge clk);
+    cp_drive(1, 6, 65536 - 2*DATA_BYTES, 2, 0);
+    cp_push(cw);
+    check_bit(cw == 0, 1'b1, "CP2 accept immediate after rejects (no state)");
+    cp_wbeat(W_A2B, EN_FULL);
+    cp_wbeat(W_B2B, EN_FULL);
+    cp_wait_done(4, "CP2 bank-top write");
+    @(negedge clk);
+    cp_drive(0, 6, 65536 - 2*DATA_BYTES, 2, 0);
+    cp_push(cw);
+    cp_rpop_check(0, W_A2B, EN_FULL, "CP2 bank-top beat0");
+    cp_rpop_check(0, W_B2B, EN_FULL, "CP2 bank-top final beat");
+    cp_wait_done(4, "CP2 bank-top readback");
+    // SPM into the cache window is STILL rejected (bit-identical C029 rule).
+    req_stage(P0, 1, 1, TXN_CP2);
+    seg_set(P0, 0, 6, 57344, 32);
+    req_expect_reject(P0, 3'd5, "CP2 spm into cache window still REJ_CACHE");
+    req_stage(P0, 1, 1, TXN_CP2);
+    seg_set(P0, 0, 6, 57344 - DATA_BYTES, 33);
+    req_expect_reject(P0, 3'd5, "CP2 spm crossing bound still REJ_CACHE");
+    // In-window traffic and SPM user bytes never disturb each other.
+    @(negedge clk);
+    cp_drive(1, 6, 57440, 1, 0);
+    cp_push(cw);
+    cp_wbeat(W_B9, EN_FULL);
+    cp_wait_done(4, "CP2 in-window write");
+    req_stage(P0, 1, 0, TXN_CP2);
+    seg_set(P0, 0, 6, 4096, 32);
+    req_push(P0, w);
+    rpop_check(P0, 0, W_P0, EN_FULL, TXN_CP2, "CP2 spm user intact after cp traffic");
+    wait_done(P0, 8, "CP2 spm readback");
+    fin_push(P0, TXN_CP2, 1, 0, "CP2 spm readback release");
+    @(negedge clk);
+    cp_drive(0, 6, 57440, 1, 0);
+    cp_push(cw);
+    cp_rpop_check(0, W_B9, EN_FULL, "CP2 cp window intact after spm traffic");
+    cp_wait_done(4, "CP2 cp readback");
+
+    // ---- CP3: arbitration against SPM holders and invalidations.
+    $display("TB_L1_BANK: CP3 cp/SPM arbitration");
+    // (a) stalled SPM holder on bank 3: cp waits; a cp on a free bank
+    // proceeds while the holder stalls; after the fin the cp is accepted.
+    req_stage(P0, 1, 1, TXN_CP3A);
+    seg_set(P0, 0, 3, USER0, 64);
+    req_push(P0, w);
+    wbeat_push(P0, W_A0);
+    @(negedge clk);
+    cp_drive(0, 3, 57344, 1, 0);
+    #1;
+    check_bit(cp_ready_o, 1'b0, "CP3a cp waits behind stalled SPM holder");
+    cp_valid_i = 1'b0;  // single-outstanding port: withdraw first
+    @(negedge clk);
+    cp_drive(0, 10, 57344, 1, 0);
+    cp_push(cw);
+    check_bit(cw == 0, 1'b1, "CP3a cp on free bank proceeds while SPM stalls");
+    cp_rpop_check(0, '0, '0, "CP3a unwritten window reads validity 0");
+    cp_wait_done(4, "CP3a other-bank cp read");
+    @(negedge clk);
+    cp_drive(0, 3, 57344, 1, 0);
+    wbeat_push(P0, W_A1);
+    wait_done(P0, 8, "CP3a spm resume");
+    fin_push(P0, TXN_CP3A, 1, 0, "CP3a spm release");
+    cp_push(cw);
+    check_bit(cw == 0, 1'b1, "CP3a cp accepted the cycle after SPM fin");
+    cp_rpop_check(0, '0, '0, "CP3a bank3 window beat");
+    cp_wait_done(4, "CP3a bank3 cp read");
+
+    // (b) cp holds bank 3: SPM naming bank 3 waits (compound requests leave
+    // the other bank free), invalidation naming bank 3 waits, other banks
+    // proceed.
+    @(negedge clk);
+    cp_drive(1, 3, 57344, 2, 0);
+    cp_push(cw);
+    cp_wbeat(W_A0, EN_FULL);
+    check_bit(cp_busy_o, 1'b1, "CP3b cp busy while holding");
+    req_stage(P0, 1, 1, TXN_CP3B);
+    seg_set(P0, 0, 3, USER0, 32);
+    @(negedge clk);
+    req_drive(P0);
+    #1;
+    check_ready(P0, 1'b0, "CP3b SPM request waits on cp-held bank");
+    req_stage(P0, 2, 1, TXN_CP3B2);
+    seg_set(P0, 0, 3, USER0, 32);
+    seg_set(P0, 1, 10, USER0, 32);
+    @(negedge clk);
+    req_drive(P0);
+    #1;
+    check_ready(P0, 1'b0, "CP3b compound request waits, no partial occupancy");
+    req_undrive(P0);
+    @(negedge clk);
+    inv_valid_i[P0] = 1'b1;
+    inv_bank_i[P0] = BANK_IDX_W'(3);
+    inv_addr_i[P0] = BANK_ADDR_W'(USER0);
+    inv_len_i[P0] = BANK_LEN_W'(32);
+    #1;
+    check_bit(inv_ready_o[P0], 1'b0, "CP3b invalidation waits on cp-held bank");
+    @(posedge clk);
+    #1;
+    inv_valid_i[P0] = 1'b0;
+    if (CONTEXT_COUNT >= 2) begin
+      req_stage(P1, 1, 1, TXN_CP3E);
+      seg_set(P1, 0, 10, USER0, 32);
+      req_push(P1, w);
+      wbeat_push(P1, W_C);
+      wait_done(P1, 8, "CP3b other-bank write while cp holds");
+      fin_push(P1, TXN_CP3E, 1, 0, "CP3b other-bank release");
+    end else begin
+      req_stage(P0, 1, 1, TXN_CP3E);
+      seg_set(P0, 0, 10, USER0, 32);
+      req_push(P0, w);
+      check_bit(w == 0, 1'b1, "CP3b other bank free for SPM while cp holds");
+      wbeat_push(P0, W_C);
+      wait_done(P0, 8, "CP3b other-bank write while cp holds");
+      fin_push(P0, TXN_CP3E, 1, 0, "CP3b other-bank release");
+    end
+    cp_wbeat(W_A1, EN_FULL);
+    cp_wait_done(4, "CP3b cp write done");
+    req_stage(P0, 1, 1, TXN_CP3B);
+    seg_set(P0, 0, 3, USER0, 32);
+    req_push(P0, w);
+    check_bit(w <= 1, 1'b1, "CP3b SPM accepted right after cp done");
+    wbeat_push(P0, W_P0);
+    wait_done(P0, 8, "CP3b post-cp SPM write");
+    fin_push(P0, TXN_CP3B, 1, 0, "CP3b post-cp SPM release");
+
+    // (c) same-cycle SPM accept vs cp request on the same free bank: SPM
+    // wins, the cache request completes afterwards.
+    req_stage(P0, 1, 1, TXN_CP3C);
+    seg_set(P0, 0, 3, USER0 + 32, 32);
+    @(negedge clk);
+    req_drive(P0);
+    cp_drive(1, 3, 57344 + 32, 1, 0);
+    #1;
+    check_ready(P0, 1'b1, "CP3c same-cycle SPM wins the free bank");
+    check_bit(cp_ready_o, 1'b0, "CP3c cp waits one more cycle");
+    @(posedge clk);
+    #1;
+    req_undrive(P0);
+    wbeat_push(P0, W_D10);
+    wait_done(P0, 8, "CP3c spm write");
+    fin_push(P0, TXN_CP3C, 1, 0, "CP3c spm release");
+    cp_push(cw);
+    check_bit(cw == 0, 1'b1, "CP3c cp accepted after the SPM txn");
+    cp_wbeat(W_B9, EN_FULL);
+    cp_wait_done(4, "CP3c cp write");
+
+    // (d) a port-0 fin with numeric txn 0 on ANOTHER bank must not free a
+    // bank held by the cp (the hold lives outside busy[]/holder_*).
+    @(negedge clk);
+    cp_drive(1, 3, 57344 + 64, 2, 0);
+    cp_push(cw);
+    cp_wbeat(W_A2B, EN_FULL);
+    req_stage(P0, 1, 1, 64'd0);
+    seg_set(P0, 0, 10, USER0 + 64, 32);
+    req_push(P0, w);
+    wbeat_push(P0, W_D11);
+    wait_done(P0, 8, "CP3d txn0 write");
+    fin_push(P0, 64'd0, 1, 0, "CP3d txn0 fin on another bank");
+    req_stage(P0, 1, 1, TXN_CP3D);
+    seg_set(P0, 0, 3, USER0, 32);
+    @(negedge clk);
+    req_drive(P0);
+    #1;
+    check_ready(P0, 1'b0, "CP3d port0/txn0 fin does not free the cp bank");
+    req_undrive(P0);
+    cp_wbeat(W_B2B, EN_FULL);
+    cp_wait_done(4, "CP3d cp write done");
+    req_push(P0, w);
+    wbeat_push(P0, W_P1);
+    wait_done(P0, 8, "CP3d post-cp write");
+    fin_push(P0, TXN_CP3D, 1, 0, "CP3d post-cp release");
+
+    // ---- CP4: anti-starvation under sustained back-to-back SPM pressure.
+    $display("TB_L1_BANK: CP4 cp fairness bound");
+    // Measure one quick SPM txn (accept -> busy clear) for the bound term.
+    req_stage(P0, 1, 1, TXN_CP4M);
+    seg_set(P0, 0, 5, USER0, DATA_BYTES);
+    req_push(P0, w);
+    t_a = cyc;
+    wbeat_push(P0, W_A0);
+    wait_done(P0, 8, "CP4 measure write");
+    fin_push(P0, TXN_CP4M, 1, 0, "CP4 measure release");
+    t_b = cyc;
+    drain_q = t_b - t_a;
+    // Sustained pressure: re-issue the instant the bank frees.
+    @(negedge clk);
+    cp_drive(1, 5, 57344, 1, 0);
+    req_stage(P0, 1, 1, TXN_CP4);
+    seg_set(P0, 0, 5, USER0, DATA_BYTES);
+    req_drive(P0);
+    #1;
+    check_ready(P0, 1'b1, "CP4 same-cycle free bank goes to SPM");
+    check_bit(cp_ready_o, 1'b0, "CP4 cp waits when SPM claims the bank");
+    @(posedge clk);
+    #1;
+    req_undrive(P0);
+    t_cp0 = cyc;
+    wbeat_push(P0, W_A1);
+    wait_done(P0, 8, "CP4 spm txn");
+    fin_push(P0, TXN_CP4, 1, 0, "CP4 spm release");
+    cp_got = 1'b0;
+    for (int i = 1; i <= 24 && !cp_got; i++) begin
+      req_stage(P0, 1, 1, TXN_CP4 + 64'(i));
+      seg_set(P0, 0, 5, USER0, DATA_BYTES);
+      @(negedge clk);
+      req_drive(P0);
+      #1;
+      if (req_ready_o[P0]) begin
+        check_bit(cp_ready_o, 1'b0, "CP4 SPM granted only while cp not granted");
+        @(posedge clk);
+        #1;
+        req_undrive(P0);
+        wbeat_push(P0, W_A2);
+        wait_done(P0, 8, "CP4 spm pressure write");
+        fin_push(P0, TXN_CP4 + 64'(i), 1, 0, "CP4 spm pressure release");
+      end else begin
+        // Urgent window: new SPM traffic on the cp bank is held off and
+        // the cache request is granted instead.
+        check_ready(P0, 1'b0, "CP4 urgent window blocks new SPM on cp bank");
+        check_bit(cp_ready_o, 1'b1, "CP4 urgent window grants cp");
+        @(posedge clk);
+        #1;
+        req_undrive(P0);
+        cp_valid_i = 1'b0;
+        cp_got = 1'b1;
+      end
+    end
+    t_cp1 = cyc;
+    lat_q = t_cp1 - t_cp0;
+    cp_valid_i = 1'b0;
+    check_bit(cp_got, 1'b1, "CP4 cp accepted under sustained SPM pressure");
+    check_bit(lat_q <= CP_MAX_WAIT + drain_q + 2, 1'b1,
+              "CP4 fairness bound CP_MAX_WAIT + drain + 2");
+    $display("TB_L1_BANK: CP4 cp accept latency=%0d cycles, bound=%0d (CP_MAX_WAIT=%0d drain=%0d)",
+             lat_q, CP_MAX_WAIT + drain_q + 2, CP_MAX_WAIT, drain_q);
+    cp_wbeat(W_A2B, EN_FULL);
+    cp_wait_done(4, "CP4 cp write");
+
+    // ---- CP5: profile switch vs the cache port.
+    $display("TB_L1_BANK: CP5 profile switch gate");
+    @(negedge clk);
+    cp_drive(1, 6, 57344 + 64, 2, 0);
+    cp_push(cw);
+    cp_wbeat(W_A0, EN_FULL);
+    profile_push(PROFILE_IDX_W'(0), 64'd20, 0, 2'd2, "CP5 switch blocked while cp busy");
+    cp_wbeat(W_A1, EN_FULL);
+    cp_wait_done(4, "CP5 cp write done");
+    cache_quiescent_i = 1'b0;
+    profile_push(PROFILE_IDX_W'(0), 64'd20, 0, 2'd2,
+                 "CP5 switch blocked while cache not quiescent");
+    cache_quiescent_i = 1'b1;
+    profile_push(PROFILE_IDX_W'(0), 64'd20, 1, 0, "CP5 switch accepted when idle");
+    check_val(64'(active_profile_o), 64'd0, "CP5 active_profile_o tracks switch");
+    check_val(profile_generation_o, 64'd20, "CP5 profile_generation_o tracks switch");
+    // Profile 0: the whole bank is SPM — the old window addresses became
+    // user SPM, so the cp is refused there and the SPM port may write them.
+    @(negedge clk);
+    cp_drive(0, 6, 57344, 1, 0);
+    cp_expect_reject(3'd7, "CP5 old first window address now spm");
+    @(negedge clk);
+    cp_drive(0, 6, 40000, 1, 0);
+    cp_expect_reject(3'd7, "CP5 mid-bank address now spm");
+    req_stage(P0, 1, 1, TXN_CP5);
+    seg_set(P0, 0, 6, 57344, 32);
+    req_push(P0, w);
+    wbeat_push(P0, W_P1);
+    wait_done(P0, 8, "CP5 old window byte writable via spm");
+    fin_push(P0, TXN_CP5, 1, 0, "CP5 old window spm release");
+    // And vice versa: profile 3 (bound 32768) turns 40000 into cache window.
+    profile_push(PROFILE_IDX_W'(3), 64'd21, 1, 0, "CP5 switch to profile 3");
+    check_val(64'(active_profile_o), 64'd3, "CP5 active_profile_o profile 3");
+    check_val(profile_generation_o, 64'd21, "CP5 profile_generation_o 21");
+    @(negedge clk);
+    cp_drive(1, 6, 40000, 1, 0);
+    cp_push(cw);
+    cp_wbeat(W_B9, EN_FULL);
+    cp_wait_done(4, "CP5 new window write");
+    @(negedge clk);
+    cp_drive(0, 6, 40000, 1, 0);
+    cp_push(cw);
+    cp_rpop_check(0, W_B9, EN_FULL, "CP5 new window readback");
+    cp_wait_done(4, "CP5 new window readback");
+    req_stage(P0, 1, 1, TXN_CP5);
+    seg_set(P0, 0, 6, 57344, 32);
+    req_expect_reject(P0, 3'd5, "CP5 57344 back to cache partition for spm");
+    @(negedge clk);
+    cp_drive(0, 6, 32768 - DATA_BYTES, 1, 0);
+    cp_expect_reject(3'd7, "CP5 word below profile-3 bound");
+    @(negedge clk);
+    cp_drive(0, 6, 32768, 1, 0);
+    cp_push(cw);
+    cp_rpop_check(0, '0, '0, "CP5 first profile-3 window word");
+    cp_wait_done(4, "CP5 profile-3 window read");
+
+    // ---- CP6: protocol shape.
+    $display("TB_L1_BANK: CP6 cp protocol");
+    check_bit(cp_busy_o, 1'b0, "CP6 cp idle between transactions");
+    check_bit(cp_wdata_ready_o, 1'b0, "CP6 no wdata_ready when idle");
+    check_bit(cp_rdata_valid_o, 1'b0, "CP6 no rdata when idle");
+    check_bit(cp_done_o, 1'b0, "CP6 no done when idle");
+    @(negedge clk);
+    cp_drive(1, 6, 57344 + 128, 2, 0);
+    cp_push(cw);
+    cp_wbeat(W_A0, EN_LO16);
+    repeat (3) begin
+      @(negedge clk);
+      #1;
+      check_bit(cp_busy_o, 1'b1, "CP6 busy held between write beats");
+      check_bit(cp_wdata_ready_o, 1'b1, "CP6 wdata_ready while write active");
+      check_bit(cp_done_o, 1'b0, "CP6 no done before final beat");
+      check_bit(cp_rdata_valid_o, 1'b0, "CP6 no read beat during write");
+    end
+    cp_wbeat(W_A1, EN_HI16);
+    cp_wait_done(4, "CP6 stalled write done");
+    @(negedge clk);
+    cp_drive(0, 6, 57344 + 128, 2, 0);
+    cp_push(cw);
+    check_bit(cp_wdata_ready_o, 1'b0, "CP6 no wdata_ready during read");
+    cp_rpop_check(3, W_A0, EN_LO16, "CP6 beat0 stable under backpressure");
+    cp_rpop_check(2, W_A1, EN_HI16, "CP6 beat1 stable under backpressure");
+    cp_wait_done(4, "CP6 backpressured read done");
+    // A rejected request leaves the port idle and immediately usable.
+    @(negedge clk);
+    cp_drive(1, 6, 32768 - DATA_BYTES, 1, 0);
+    cp_expect_reject(3'd7, "CP6 reject changes no state");
+    @(negedge clk);
+    cp_drive(1, 6, 57344 + 128, 1, 0);
+    cp_push(cw);
+    check_bit(cw == 0, 1'b1, "CP6 accept immediate after reject");
+    cp_wbeat(W_15, EN_FULL);
+    cp_wait_done(4, "CP6 post-reject write");
+    @(negedge clk);
+    cp_drive(0, 6, 57344 + 128, 1, 0);
+    cp_push(cw);
+    cp_rpop_check(0, W_15, EN_FULL, "CP6 last-beat data observable after done");
+    cp_wait_done(4, "CP6 post-reject readback");
+
+    // A reset in the middle of a cp write must clear the cp hold, the done
+    // pulse and the wait counter (X-safety for 4-state simulation), and the
+    // bank must be free for SPM immediately afterwards.
+    @(negedge clk);
+    cp_drive(1, 6, 57344 + 160, 2, 0);
+    cp_push(cw);
+    cp_wbeat(W_A0, EN_FULL);  // mid-write: hold active, one beat outstanding
+    @(negedge clk);
+    rstn = 1'b0;
+    cp_valid_i = 1'b0;
+    @(posedge clk);
+    #1;
+    check_bit(cp_busy_o, 1'b0, "CP6 reset clears the cp hold");
+    check_bit(cp_done_o, 1'b0, "CP6 reset clears cp_done");
+    repeat (2) @(negedge clk);
+    rstn = 1'b1;
+    @(negedge clk);
+    #1;
+    check_bit(cp_busy_o, 1'b0, "CP6 hold stays clear after reset release");
+    check_val(64'(active_profile_o), 64'd0, "CP6 reset returns profile 0");
+    req_stage(P0, 1, 1, 64'h0000_6000_0000_0007);
+    seg_set(P0, 0, 6, USER0, 32);
+    req_push(P0, w);
+    check_bit(w == 0, 1'b1, "CP6 cp bank free for SPM after reset");
+    wbeat_push(P0, W_P0);
+    wait_done(P0, 8, "CP6 post-reset write");
+    fin_push(P0, 64'h0000_6000_0000_0007, 1, 0, "CP6 post-reset release");
 
     // ---------------------------------------------------------------- done
     if (errors == 0) begin

@@ -1,10 +1,11 @@
 // l1_bank.sv — C029 / W4: L1 bank SRAM bytes/validity, per-bank busy and exact
 // transaction-holder tracking.
 //
-// Scope (C029 card, G2_scalar.md#c029): the bank primitive only. Cache/MSHR and
-// the program physical port are C030; the LSU/MFE transfer FSM is C031+. This
-// module proves real SRAM byte behavior plus atomic multi-bank occupancy, not a
-// gather/scatter FSM.
+// Scope (C029 card, G2_scalar.md#c029): the bank primitive. C029 delivered
+// the SPM request/holder/invalidation machinery; C030 adds the cache data
+// port (cp) that stores cache lines in the bank cache partition. The cache
+// master (rtl/memory/cache.sv), MSHR and the program physical port are
+// separate C030 modules; the LSU/MFE transfer FSM is C031+.
 //
 // Internal interface contract (boring, standalone; consumed by tb_l1_bank and
 // the C029 slot-frame/arena-ledger bench):
@@ -19,8 +20,9 @@
 //   * Bank-local layout per bank (profiles.py MemoryProfile + arena.py
 //     reconfigure_free_intervals): [0, SYSTEM_RESERVED_BYTES) system reserved,
 //     [SYSTEM_RESERVED_BYTES, SPM_BYTES_PER_BANK[profile]) user SPM,
-//     [SPM_BYTES_PER_BANK[profile], BANK_BYTES) cache partition (C030; this
-//     port never touches it, accesses there are rejected).
+//     [SPM_BYTES_PER_BANK[profile], BANK_BYTES) cache partition (C030 line
+//     storage; SPM requests there stay REJ_CACHE, the cache data port below
+//     is its only accessor).
 //   * All-or-none acquisition (transfer.py try_issue semantics): every
 //     requested bank/address/partition is preflighted before any occupancy;
 //     any busy bank in the set, or any invalid range, accepts nothing. A
@@ -56,10 +58,38 @@
 //     arena_alloc_gen) and quiescent bank service, including invalidations.
 //     Its commit edge accepts no new data or invalidation request.
 //
-// Fault codes (req_rej_code_o and inv_rej_code_o, priority order):
-//   0 none; 1 bad seg_count / bank index (SHAPE); 2 zero length (LEN0);
+//   * Cache data port (C030, single outstanding transaction, whole
+//     DATA_BYTES beats inside one bank's cache partition): fault checks are
+//     combinational with no side effects, priority SHAPE (bad bank, zero
+//     beats, misaligned address) > OVERFLOW > NOT_CACHE_WINDOW. Accept
+//     additionally needs an idle cp, no profile command, and a bank free of
+//     SPM holders, active invalidations and same-cycle SPM/invalidation
+//     claims (same-cycle conflict: the SPM request wins, the cache request
+//     waits one more cycle). While active the cp exclusively owns its bank
+//     through a dedicated hold mask OR'd into the request/invalidation
+//     taken masks — never through busy[]/holder_*, which fin_decode
+//     releases by (holder_port, holder_txn) match. Write wmode 0 (refill)
+//     writes every beat byte and sets its validity := wben; wmode 1
+//     (data-only) writes only wben bytes and never touches validity.
+//     Reads mirror the SPM read pipeline (BANK_LATENCY_CYCLES, payload
+//     stable under backpressure) and report stored per-byte validity only.
+//     cp_done_o is a single-cycle registered pulse in the cycle after the
+//     releasing (final-beat) edge; from that cycle the bank is free again.
+//     Anti-starvation CP_MAX_WAIT (policy knob only, unsourced, no PPA
+//     claim): after a valid fault-free cp request has waited CP_MAX_WAIT
+//     cycles, new SPM requests/invalidations naming its bank are held off
+//     until the cache is served (existing holders keep draining). Profile
+//     switches additionally require an idle cp and cache_quiescent_i;
+//     physical bytes survive a switch, only the window bound moves.
+//
+// Fault codes (req_rej_code_o, inv_rej_code_o, cp_rej_code_o; the first
+// six are shared, priority order):
+//   0 none; 1 bad seg_count / bank index, and for cp zero beats or a
+//   misaligned address (SHAPE); 2 zero length (LEN0, requests only);
 //   3 addr+len beyond bank bytes (OVERFLOW); 4 reserved bytes (RESERVED);
-//   5 cache partition (CACHE); 6 holder generation exhausted (requests only).
+//   5 cache partition for an SPM request (CACHE); 6 holder generation
+//   exhausted (requests only); 7 below the active SPM bound, i.e. not in
+//   the cache window — reserved or user SPM (cp only; NOT_CACHE_WINDOW).
 //   fin codes: 0 none; 1 stale/duplicate/wrong holder; 2 data incomplete.
 //   profile codes: 0 none; 1 bad index or non-increasing generation;
 //   2 not quiescent.
@@ -74,6 +104,10 @@ module l1_bank
   parameter int TXN_ID_WIDTH = 64,
   parameter int PROFILE_GEN_WIDTH = 64,
   parameter int HOLDER_GEN_WIDTH = 64,
+  // Cache-port arbitration fairness knob (policy only, unsourced, no PPA
+  // claim): cycles a valid fault-free cache request may wait before new SPM
+  // requests/invalidations naming its bank are held off.
+  parameter int CP_MAX_WAIT = 8,
   localparam int MAX_SEG = BANK_COUNT,
   // Derived widths (localparam entries: resolved from the package above,
   // not overridable by instantiation).
@@ -149,7 +183,32 @@ module l1_bank
   output logic                         profile_set_ready_o,
   output logic                         profile_ack_o,
   output logic                         profile_rej_o,
-  output logic [1:0]                   profile_rej_code_o
+  output logic [1:0]                   profile_rej_code_o,
+
+  // C030 cache data port (single outstanding transaction; the cache master
+  // is rtl/memory/cache.sv). Appended after the C029 port list.
+  input  logic                       cp_valid_i,
+  input  logic                       cp_write_i,
+  input  logic [BANK_IDX_W-1:0]      cp_bank_i,
+  input  logic [BANK_ADDR_W-1:0]     cp_addr_i,
+  input  logic [BEAT_W-1:0]          cp_beats_i,
+  input  logic                       cp_wmode_i,
+  input  logic                       cp_wdata_valid_i,
+  input  logic [DATA_BYTES*8-1:0]    cp_wdata_i,
+  input  logic [DATA_BYTES-1:0]      cp_wben_i,
+  input  logic                       cp_rdata_ready_i,
+  input  logic                       cache_quiescent_i,
+  output logic                       cp_ready_o,
+  output logic                       cp_rej_o,
+  output logic [2:0]                 cp_rej_code_o,
+  output logic                       cp_wdata_ready_o,
+  output logic                       cp_rdata_valid_o,
+  output logic [DATA_BYTES*8-1:0]    cp_rdata_o,
+  output logic [DATA_BYTES-1:0]      cp_rben_o,
+  output logic                       cp_done_o,
+  output logic                       cp_busy_o,
+  output logic [PROFILE_IDX_W-1:0]   active_profile_o,
+  output logic [PROFILE_GEN_WIDTH-1:0] profile_generation_o
 );
 
   // Fault code encodings (documented in the header comment).
@@ -160,6 +219,7 @@ module l1_bank
   localparam logic [2:0] REJ_RESERVED = 3'd4;
   localparam logic [2:0] REJ_CACHE = 3'd5;
   localparam logic [2:0] REJ_GENERATION_EXHAUSTED = 3'd6;
+  localparam logic [2:0] REJ_NOT_CACHE_WINDOW = 3'd7;
   localparam logic [1:0] FIN_REJ_NOT_HOLDER = 2'd1;
   localparam logic [1:0] FIN_REJ_NOT_COMPLETE = 2'd2;
   localparam logic [1:0] PROF_REJ_ARGS = 2'd1;
@@ -279,6 +339,27 @@ module l1_bank
   logic [CONTEXT_COUNT-1:0][BEAT_W-1:0] inv_beat;
   logic [BANK_COUNT-1:0] inv_reserved_mask;
 
+  // ------------------------------------------------ cache port (C030) state
+  // The cp hold is deliberately NOT encoded in busy[]/holder_*: fin_decode
+  // releases banks by (holder_port, holder_txn) match, so a cp hold stored
+  // there could be freed by an unrelated fin. cp_hold_mask is a separate
+  // register OR'd into the req/inv taken masks.
+  logic cp_busy_q;
+  logic cp_write_q, cp_wmode_q;
+  logic [BANK_IDX_W-1:0] cp_bank_q;
+  logic [BANK_ADDR_W-1:0] cp_addr_q;
+  logic [BEAT_W-1:0] cp_beats_q, cp_wbeat_q, cp_rbeat_q;
+  logic cp_out_valid_q, cp_out_last_q, cp_rfin_q;
+  logic [DATA_BYTES*8-1:0] cp_out_data_q;
+  logic [DATA_BYTES-1:0] cp_out_ben_q;
+  logic [2:0] cp_fault;
+  logic cp_accept, cp_pending, cp_urgent;
+  logic cp_wfire, cp_wlast, cp_rissue, cp_rfire, cp_release;
+  int unsigned cp_wait;
+  logic [BANK_COUNT-1:0] cp_hold_mask, spm_taken;
+
+  assign cp_hold_mask = cp_busy_q ? (BANK_COUNT'(1) << cp_bank_q) : '0;
+
   // ------------------------------------------------------- request decode
   logic [CONTEXT_COUNT-1:0][BANK_COUNT-1:0] req_mask;
   logic [CONTEXT_COUNT-1:0][2:0] req_fault;
@@ -313,13 +394,21 @@ module l1_bank
       end
       // All-or-none preflight: no partial occupancy, no acceptance while any
       // requested bank is busy (including same-cycle grants of lower ports).
+      // Anti-starvation (C030): once a valid fault-free cache request has
+      // waited CP_MAX_WAIT cycles, new SPM requests naming its bank are held
+      // off until the cache is served.
       req_ready_o[c] = !profile_set_valid_i && !active[c] && (req_fault[c] == REJ_NONE)
+                       && !(cp_urgent && req_mask[c][cp_bank_i])
                        && ((req_mask[c] & taken) == '0);
       req_accept[c] = req_valid_i[c] && req_ready_o[c];
       if (req_accept[c]) taken |= req_mask[c];
       req_rej_o[c] = req_valid_i[c] && (req_fault[c] != REJ_NONE);
       req_rej_code_o[c] = req_fault[c];
     end
+    // Final occupancy mask (busy, active/same-cycle invalidations, the cp
+    // hold and every accepted same-cycle SPM claim): the cache port accepts
+    // only onto a fully free bank.
+    spm_taken = taken;
   end
 
   // ------------------------------------------------------ streamer decode
@@ -397,19 +486,121 @@ module l1_bank
   // Only accepted requests reserve resources in this arbitration pass.
   always_comb begin : inv_decode
     logic [BANK_COUNT-1:0] taken;
-    taken = busy;
+    taken = busy | cp_hold_mask;
     for (int c = 0; c < CONTEXT_COUNT; c++) begin
       if (inv_active[c]) taken[inv_bank[c]] = 1'b1;
     end
     for (int c = 0; c < CONTEXT_COUNT; c++) begin
       inv_fault[c] = seg_fault(inv_bank_i[c], inv_addr_i[c], inv_len_i[c], spm_bound);
       inv_ready_o[c] = !profile_set_valid_i && !inv_active[c]
-        && ((inv_fault[c] != REJ_NONE) || !taken[inv_bank_i[c]]);
+        && ((inv_fault[c] != REJ_NONE)
+            || (!taken[inv_bank_i[c]] && !(cp_urgent && (inv_bank_i[c] == cp_bank_i))));
       inv_accept[c] = inv_valid_i[c] && inv_ready_o[c];
       inv_fire[c] = inv_accept[c] && (inv_fault[c] == REJ_NONE);
       if (inv_fire[c]) taken[inv_bank_i[c]] = 1'b1;
     end
     inv_reserved_mask = taken;
+  end
+
+  // ------------------------------------------------------- cache port decode
+  // Fault priority: SHAPE (bad bank / zero beats / misaligned) > OVERFLOW >
+  // NOT_CACHE_WINDOW (reserved or user SPM: only [spm_bound, BANK_BYTES) is
+  // cache line storage). Combinational, stable, no side effects.
+  always_comb begin : cp_fault_decode
+    cp_fault = REJ_NONE;
+    if ((int'(cp_bank_i) >= BANK_COUNT) || (cp_beats_i == '0)
+        || ((int'(cp_addr_i) % DATA_BYTES) != 0)) begin
+      cp_fault = REJ_SHAPE;
+    end else if (int'(cp_addr_i) + int'(cp_beats_i) * DATA_BYTES > BANK_BYTES) begin
+      cp_fault = REJ_OVERFLOW;
+    end else if (int'(cp_addr_i) < spm_bound) begin
+      cp_fault = REJ_NOT_CACHE_WINDOW;
+    end
+  end
+
+  // cp_pending deliberately excludes the accept condition: cp_urgent feeds
+  // req/inv arbitration and must not depend on it (no combinational loop).
+  always_comb begin : cp_ready_decode
+    cp_ready_o = !cp_busy_q && !profile_set_valid_i && (cp_fault == REJ_NONE)
+                 && !spm_taken[cp_bank_i];
+    cp_accept = cp_valid_i && cp_ready_o;
+    cp_rej_o = cp_valid_i && (cp_fault != REJ_NONE);
+    cp_rej_code_o = cp_fault;
+    cp_pending = cp_valid_i && (cp_fault == REJ_NONE) && !cp_busy_q;
+    cp_urgent = cp_pending && (cp_wait >= CP_MAX_WAIT);
+  end
+
+  // cp stream decode: write beats strictly in address order; the read
+  // pipeline mirrors the SPM one (one registered output stage, payload held
+  // under backpressure).
+  always_comb begin : cp_stream_decode
+    cp_wdata_ready_o = cp_busy_q && cp_write_q;
+    cp_wfire = cp_wdata_ready_o && cp_wdata_valid_i;
+    cp_wlast = (cp_wbeat_q == cp_beats_q - BEAT_W'(1));
+    cp_rdata_valid_o = cp_out_valid_q;
+    cp_rdata_o = cp_out_data_q;
+    cp_rben_o = cp_out_ben_q;
+    cp_rissue = cp_busy_q && !cp_write_q && !cp_rfin_q
+                && (!cp_out_valid_q || cp_rdata_ready_i);
+    cp_rfire = cp_out_valid_q && cp_rdata_ready_i;
+    cp_release = cp_busy_q && (cp_write_q
+                  ? (cp_wfire && cp_wlast)
+                  : (cp_rfire && cp_out_last_q));
+    cp_busy_o = cp_busy_q;
+  end
+
+  // C030 live invariants: window discipline, exclusive bank ownership.
+  always_comb begin : cp_invariants
+    logic inv_on_cp_bank;
+    inv_on_cp_bank = 1'b0;
+    for (int c = 0; c < CONTEXT_COUNT; c++) begin
+      if (inv_active[c] && (inv_bank[c] == cp_bank_q)) inv_on_cp_bank = 1'b1;
+    end
+    if (cp_busy_q) begin
+      assert (!busy[cp_bank_q] && !inv_on_cp_bank)
+        else $error("C029_ASSERT l1_bank cp_single_owner_of_bank: bank %0d shared while cp busy",
+                    cp_bank_q);
+    end
+    if (cp_accept) begin
+      assert ((int'(cp_bank_i) < BANK_COUNT) && (cp_beats_i != '0)
+              && ((int'(cp_addr_i) % DATA_BYTES) == 0)
+              && (int'(cp_addr_i) + int'(cp_beats_i) * DATA_BYTES <= BANK_BYTES)
+              && (int'(cp_addr_i) >= spm_bound))
+        else $error("C029_ASSERT l1_bank cp_access_within_cache_window: accept");
+    end
+  end
+
+  // cp read pipeline: sourced synchronous SRAM latency, one beat per cycle,
+  // beats in address order; the final beat parks in the output stage until
+  // consumed.
+  always_ff @(posedge clk) begin : cp_read_pipe
+    if (!rstn) begin
+      cp_rbeat_q <= '0;
+      cp_out_valid_q <= 1'b0;
+      cp_out_last_q <= 1'b0;
+      cp_rfin_q <= 1'b0;
+      cp_out_data_q <= '0;
+      cp_out_ben_q <= '0;
+    end else if (cp_accept) begin
+      cp_rbeat_q <= '0;
+      cp_out_valid_q <= 1'b0;
+      cp_out_last_q <= 1'b0;
+      cp_rfin_q <= 1'b0;
+    end else if (cp_rissue) begin
+      assert ((int'(cp_bank_q) < BANK_COUNT) && (int'(cp_addr_q) >= spm_bound)
+              && (int'(cp_addr_q) + int'(cp_beats_q) * DATA_BYTES <= BANK_BYTES))
+        else $error("C029_ASSERT l1_bank cp_access_within_cache_window: read");
+      cp_out_valid_q <= 1'b1;
+      cp_out_data_q <= mem_data[cp_bank_q][WORD_ADDR_W'(seg_base_word(cp_addr_q) + cp_rbeat_q)];
+      cp_out_ben_q <= mem_bval[cp_bank_q][WORD_ADDR_W'(seg_base_word(cp_addr_q) + cp_rbeat_q)];
+      cp_out_last_q <= (cp_rbeat_q == cp_beats_q - BEAT_W'(1));
+      cp_rfin_q <= (cp_rbeat_q == cp_beats_q - BEAT_W'(1));
+      if (cp_rbeat_q != cp_beats_q - BEAT_W'(1)) begin
+        cp_rbeat_q <= cp_rbeat_q + BEAT_W'(1);
+      end
+    end else if (cp_rfire) begin
+      cp_out_valid_q <= 1'b0;
+    end
   end
 
   always_ff @(posedge clk) begin : invalidation
@@ -499,6 +690,25 @@ module l1_bank
           end
         end
       end
+      // C030 cache-port write beat: same arrays, exclusive bank (no SPM
+      // write can name the cp bank while it is held, see cp_invariants).
+      // wmode 0 (refill): every beat byte written, validity := wben.
+      // wmode 1 (data-only): only wben bytes written, validity untouched.
+      if (cp_wfire) begin
+        assert ((int'(cp_bank_q) < BANK_COUNT) && (int'(cp_addr_q) >= spm_bound)
+                && (int'(cp_addr_q) + int'(cp_beats_q) * DATA_BYTES <= BANK_BYTES))
+          else $error("C029_ASSERT l1_bank cp_access_within_cache_window: write");
+        for (int byi = 0; byi < DATA_BYTES; byi++) begin
+          if (cp_wmode_q ? cp_wben_i[byi] : 1'b1) begin
+            mem_data[cp_bank_q][WORD_ADDR_W'(seg_base_word(cp_addr_q) + cp_wbeat_q)][byi]
+              <= cp_wdata_i[8*byi +: 8];
+          end
+          if (!cp_wmode_q) begin
+            mem_bval[cp_bank_q][WORD_ADDR_W'(seg_base_word(cp_addr_q) + cp_wbeat_q)][byi]
+              <= cp_wben_i[byi];
+          end
+        end
+      end
     end
   end
 
@@ -563,11 +773,16 @@ module l1_bank
   logic profile_quiescent, profile_args_ok;
 
   always_comb begin : profile_decode
-    profile_quiescent = (busy == '0) && (active == '0) && (inv_active == '0);
+    profile_quiescent = (busy == '0) && (active == '0) && (inv_active == '0)
+                        && !cp_busy_q && cache_quiescent_i;
     profile_args_ok = (int'(profile_index_i) < PROFILE_COUNT)
                       && (profile_generation_i > profile_generation);
     profile_set_ready_o = 1'b1;
   end
+
+  // C030 exports of the live profile state for the cache master.
+  assign active_profile_o = active_profile;
+  assign profile_generation_o = profile_generation;
 
   always_ff @(posedge clk) begin : control
     logic [BANK_COUNT-1:0] busy_d;
@@ -593,6 +808,9 @@ module l1_bank
       profile_ack_o <= '0;
       profile_rej_o <= '0;
       profile_rej_code_o <= '0;
+      cp_busy_q <= 1'b0;
+      cp_done_o <= 1'b0;
+      cp_wait <= 0;
     end else begin
       busy_d = busy;
       for (int c = 0; c < CONTEXT_COUNT; c++) begin
@@ -688,6 +906,33 @@ module l1_bank
         profile_rej_o <= 1'b0;
         profile_rej_code_o <= '0;
       end
+
+      // ------------------------------------------------- cache port control
+      // Accept latches the request; the hold releases exactly at the final
+      // beat edge and cp_done_o pulses once in the following cycle.
+      if (cp_release) begin
+        assert (cp_busy_q)
+          else $error("C029_ASSERT l1_bank cp_release_matches_accept: release without active cp");
+        cp_busy_q <= 1'b0;
+        cp_done_o <= 1'b1;
+      end else begin
+        cp_done_o <= 1'b0;
+        if (cp_accept) begin
+          cp_busy_q <= 1'b1;
+          cp_write_q <= cp_write_i;
+          cp_bank_q <= cp_bank_i;
+          cp_addr_q <= cp_addr_i;
+          cp_beats_q <= cp_beats_i;
+          cp_wmode_q <= cp_wmode_i;
+          cp_wbeat_q <= '0;
+        end else if (cp_wfire) begin
+          cp_wbeat_q <= cp_wbeat_q + BEAT_W'(1);
+        end
+      end
+      // Anti-starvation wait counter: counts cycles a valid fault-free cache
+      // request has waited unaccepted; cleared on accept or withdrawal.
+      if (cp_accept || !cp_pending) cp_wait <= 0;
+      else cp_wait <= cp_wait + 1;
 
       busy <= busy_d;
     end

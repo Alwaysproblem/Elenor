@@ -1,0 +1,11 @@
+--- a/transfer_outbridge.sv
++++ b/transfer_outbridge.sv
+@@ -278,7 +278,7 @@
+       end
+ 
+       if (term_valid && term_ready) begin
+-        rstate[term_pick] <= R_SETTLE;
++        rstate[term_pick] <= (rfault[term_pick] || rcancel[term_pick]) ? R_SETTLE : R_FREE;
+         terms <= terms + 64'd1;
+       end
+     end

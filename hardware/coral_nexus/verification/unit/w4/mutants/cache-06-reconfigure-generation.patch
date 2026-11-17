@@ -1,0 +1,11 @@
+--- a/cache.sv
++++ b/cache.sv
+@@ -370,7 +370,7 @@
+                 go(S_MAINT_STEP);
+               end
+               OP_RECONFIG: begin
+-                if (cmd_profile_gen <= profile_gen) respond(R_STALE_PROFILE, '0, '0);
++                if (cmd_profile_gen < profile_gen) respond(R_STALE_PROFILE, '0, '0);
+                 else if (dirty_cnt != 0 || pend_cnt != 0) respond(R_BUSY, '0, '0);
+                 else if (bank_profile_i != cmd_profile_idx) respond(R_PROFILE_SKEW, '0, '0);
+                 else begin

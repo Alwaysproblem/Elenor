@@ -1,0 +1,10 @@
+--- a/l1_bank.sv
++++ b/l1_bank.sv
+@@ -398,7 +398,6 @@
+       // waited CP_MAX_WAIT cycles, new SPM requests naming its bank are held
+       // off until the cache is served.
+       req_ready_o[c] = !profile_set_valid_i && !active[c] && (req_fault[c] == REJ_NONE)
+-                       && !(cp_urgent && req_mask[c][cp_bank_i])
+                        && ((req_mask[c] & taken) == '0);
+       req_accept[c] = req_valid_i[c] && req_ready_o[c];
+       if (req_accept[c]) taken |= req_mask[c];

@@ -1,0 +1,11 @@
+--- a/l1_program_port.sv
++++ b/l1_program_port.sv
+@@ -209,7 +209,7 @@
+   always_comb begin
+     req[0] = ins_valid && (ins_count < INS_RSP_DEPTH);
+     for (int c = 0; c < CONTEXT_COUNT; c++)
+-      req[1+c] = fet_valid[c] && (inf[c] < INF_W'(FETCH_OUTSTANDING));
++      req[1+c] = fet_valid[c] && (inf[c] <= INF_W'(FETCH_OUTSTANDING));
+     for (int q = 0; q < REQS; q++) grant[q] = 1'b0;
+     g_found = 1'b0;
+     g_idx = 0;

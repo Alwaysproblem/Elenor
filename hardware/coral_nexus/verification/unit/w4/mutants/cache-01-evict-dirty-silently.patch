@@ -1,0 +1,11 @@
+--- a/cache.sv
++++ b/cache.sv
+@@ -445,7 +445,7 @@
+                 if (!s_vic_found) begin
+                   inv_err <= 1'b1;
+                   respond(R_BAD_CMD, '0, '0);
+-                end else if (dirty[s_vic] || pend[s_vic]) respond(R_EVICT_DIRTY, '0, '0);
++                end else if (1'b0) respond(R_EVICT_DIRTY, '0, '0);
+                 else begin
+                   t_slot <= s_vic;
+                   start_bank(s_vic, 1'b1, 1'b0, c_data, c_val, A_AFTER_WRITE);

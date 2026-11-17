@@ -1,0 +1,11 @@
+--- a/l1_program_port.sv
++++ b/l1_program_port.sv
+@@ -161,7 +161,7 @@
+   assign rsp_valid = rsp_count != 0;
+   assign rsp_key = rsp_q_key[0];
+   assign rsp_data = rsp_q_data[0];
+-  assign rsp_fault = rsp_q_code[0] != F_OK;
++  assign rsp_fault = 1'b0;
+   assign rsp_code = rsp_q_code[0];
+   assign ins_rsp_valid = ins_count != 0;
+   assign ins_rsp_code = ins_q_code[0];

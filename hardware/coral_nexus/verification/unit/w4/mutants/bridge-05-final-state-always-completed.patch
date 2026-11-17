@@ -1,0 +1,11 @@
+--- a/transfer_outbridge.sv
++++ b/transfer_outbridge.sv
+@@ -184,7 +184,7 @@
+   assign term_txn_id = rtxn[term_pick];
+   assign term_slice_id = 32'd0;
+   assign term_slice_count = 32'd1;
+-  assign term_final_state = rfault[term_pick] ? F_FAULTED : (rdelivered[term_pick] ? F_COMPLETED : F_ISOLATED);
++  assign term_final_state = F_COMPLETED;
+ 
+   logic rsp_match;
+   logic [SW-1:0] rsp_idx;

@@ -1,0 +1,11 @@
+--- a/l1_bank.sv
++++ b/l1_bank.sv
+@@ -486,7 +486,7 @@
+   // Only accepted requests reserve resources in this arbitration pass.
+   always_comb begin : inv_decode
+     logic [BANK_COUNT-1:0] taken;
+-    taken = busy | cp_hold_mask;
++    taken = busy;
+     for (int c = 0; c < CONTEXT_COUNT; c++) begin
+       if (inv_active[c]) taken[inv_bank[c]] = 1'b1;
+     end
