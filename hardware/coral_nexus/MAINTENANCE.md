@@ -290,6 +290,67 @@ reordered MEM_RSP under sustained ACK backpressure, whole offered ACK stable,
 each handshake exactly once) or an equivalence proof plus a rebase onto
 observable behavior — never a watchdog, tautological or source-only assertion.
 
+## Focused C033 acceptance
+
+C033 is W6-02 unit evidence: `tb_c033` instantiates the real `rtl/w6`
+`event_table` and `terminal_store` (with their internal `wait_record` and
+`completion_bus`). It is not full-Tile assembly (C040), not the retirement
+chain (C035), and not the reset/drain FSM (C034).
+
+```bash
+EVIDENCE=out/coral_nexus/C033/attempt-NNN
+bash hardware/coral_nexus/scripts/cn.sh unit --suite w6 \
+  --config "$PWD/hardware/coral_nexus/configs/cs1_c2.yaml" --out "$EVIDENCE/unit"
+```
+
+The suite is registered in `scripts/commands.yaml` under `unit.suites.w6`;
+an unregistered runner is silently skipped by this entry. The runner shares
+`verification/unit/w4/w4_rtl_harness.py` (sealed-target fence, source/seal
+hash fence, offline Verilator build in the locked builder, Docker run,
+mutant/green verdict rules) with `rtl_dir`/`mutants_dir` pointed at the W6
+roots; the W4 defaults are unchanged.
+
+Geometry: CONTEXT_COUNT is generated from the sealed target (C1 and C2 both
+run). FRONTIER=2, OPERANDS=3 and the terminal reserve of 1 follow the C015
+`make` test fixture; COUNTER_BITS=4 is deliberately narrowed so stress runs
+saturate the counters, and SOURCES=4 stands for the four producer classes
+(engine/MFE/VME/Group). All are verification geometry instantiated inside the
+bench, not frozen silicon values; identities are full 64-bit transport words.
+Greens are exactly `tb_c033` at the C1 and requested counts plus
+`tb_c033_min` — the same fixture file instantiated with OPERANDS=2, this
+bench's configured WAITALL ceiling (it matches the explicit
+`make(..., waitall_max=2)` C015 boundary test; the sealed contract makes 2 the
+WAITALL minimum and leaves the maximum unresolved, owner C018) — at C1 only;
+no mutant runs against the alternate top.
+
+The runner loads the nine explicit scenario YAMLs
+(`verification/scenarios/w6/u2?_*.yaml`, cases `U2-a`..`U2-i`, each with a
+`seed` and an `expect` mapping) fail-closed, and materializes them as twelve
+space-separated lowercase-hex 64-bit words per row (four seed words then
+eight expected: armed, success, failure, consumer_refs, future_uses, phases,
+retire_ready, completions), rows sorted a..i, into
+`evidence/c033-vectors.txt`. Every simulator invocation — mutants included —
+receives `+VECTORS=/out/c033-vectors.txt`; the bench owns comparing real RTL
+state against those words and emits exactly one `C033_CASE U2-x` line per case
+plus a single `C033_PASS <top> contexts=N checks=M` record. The runner never
+hard-codes green output: it requires the nine case lines exactly once per green
+run, binds each PASS record's top and `contexts=N` to that run's planned
+identity, asserts the exact (top, Context count) green pairs, replays each
+green's PHASE_SIGNAL handshakes through the live C024
+EventService/Group (`c033_phase_replay.py`), and derives C1/C2 from the real
+sealed config.
+
+Receipts retained per attempt: `requested-target.json`, `source-sha256.json`
+(nine YAMLs, runner, harness, phase replay, EventService and its Group replay
+inputs `tile_group.py`/`test_runtime.py`, both C015 contract fragments, W6 RTL
+sources and mutant patches — fenced before and after), `c033-scenarios.json`
+(per-case file hash plus validated seed/expect) and `c015-fragments.json`
+(both fragment hashes cross-checked against the actual C020
+`PROTOCOL_FREEZE.json`; the seal itself must stay byte-identical).
+Behavioral mutants live under `verification/unit/w6/mutants/event-*.patch`;
+at least nine must apply, compile, and die on an executed `C033_ASSERT` —
+build failures, timeouts and watchdogs are not mutation kills.
+
 ## Offline seeds (C004)
 
 - Inventory: `env/seed_targets.json` — every seed has URL/path + sha256 +

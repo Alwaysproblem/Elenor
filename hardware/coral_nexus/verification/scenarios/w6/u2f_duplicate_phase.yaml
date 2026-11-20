@@ -1,0 +1,14 @@
+# Real pow_task launch 0 / dispatch 0, task 0. The Group, not the Tile, rejects the second message.
+case: U2-f
+seed: { id: 0, generation: 0, sequence: 4294967361, future_uses: 0 }
+expect:
+  {
+    armed: 0,
+    success: 0,
+    failure: 0,
+    consumer_refs: 0,
+    future_uses: 0,
+    phases: 2,
+    retire_ready: 1,
+    completions: 1,
+  }

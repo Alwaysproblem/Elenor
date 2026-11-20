@@ -1,0 +1,11 @@
+--- a/wait_record.sv
++++ b/wait_record.sv
+@@ -121,7 +121,7 @@
+ 
+   // ---- wake evaluation on an accepted-completion cycle ----
+   assign stored_fail_any = |(probe_fail_i & armed_en);
+-  assign stored_all_term = &(probe_term_i | ~armed_en);
++  assign stored_all_term = |(probe_term_i & armed_en);
+ 
+   assign wake_ok_o   = armed_q && eval_cycle_i && !stored_fail_any && stored_all_term && !fault_hit;
+   assign wake_fail_o = armed_q && eval_cycle_i && stored_fail_any && !fault_hit;

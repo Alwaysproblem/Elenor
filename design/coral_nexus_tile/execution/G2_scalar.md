@@ -430,6 +430,14 @@ ROB 同 PC 双 Context store、错误 op_seq、独立退休、局部 fault flush
 
 - **通过/交接**：U2-a..i 全 PASS（负例键失配四类分别计数且状态不变）；消费者：C034（first-fault/drain 消费终态）、C035（退休链消费 terminal_store）、C038（kernel WAIT helper）。
 
+**C033 完成（本地 RTL 单元验收）。** C020 joint seal 的两份 C015 fragment 是事件和终态语义来源。C1/C2 来自封印 target；C019 没有冻结本地事件表深度或 WAITALL 上限。`FRONTIER=2`、`OPERANDS=3` 取自 C015 测试夹具，另用 `OPERANDS=2` 验证最小合法 WAITALL；4 位计数器只用于实测饱和，不代表硅参数。
+
+- 终态存储只接收 W2/W4/Group 的排空、退休授权和回收证据，不生成这些证据。`RETIRE_READY` 不是成功；`TIMEOUT` 不是隔离证据。已接受但还未发出的 `PHASE_SIGNAL` 阻止本 Context 报告排空，不阻塞其他 Context。终态端口背压时保留被选槽号，直到握手后才允许复用身份。
+- Group 侧使用现有实现判重复与聚合，不在 Tile 去重。原有重复信号回归 1 passed；Transformer 多 Context 阶段偏序回归 7 passed、1 skipped（prefill 不适用 decode 分区交接测试）；validator 全量 608 passed、1 skipped。这些是 Python 结果，不能替代 RTL 验收。对应收据在 `out/coral_nexus/C033/accept-OFmQmTbq/`。
+- 实测反例：把 WAITALL 操作数计数缩回一位，等待者在第一个 DONE 即错误唤醒；相同 Verilator 探针用 `$clog2(OPERANDS+1)` 后只在第二个 DONE 释放两个引用（`width-probe/results/minwidth0/evidence/`）。修正前把非法 WAIT 操作数计入完成通知的错误类别，集成 bench 在 U2-e 第 53 拍检出（`order-before/semantic.log`）。以上路径相对于本次收据目录。
+- 注册入口 `cn unit --suite w6 --config "$C2" --out "$EVIDENCE/unit"`：**1 passed in 148.77s**。常规测试（`OPERANDS=3`）：C1 **708**、C2 **837** 项检查；最小测试（`OPERANDS=2`）：C1 **708** 项检查。每次均执行全部九个 YAML 场景；C2 另验证同名事件跨 Context 不串扰、同一共享事件在一拍唤醒两个等待者并归还两个引用，以及一方阶段消息被背压时另一方仍能发送终态。三个仿真分别回放实际握手的 PHASE_SIGNAL 到真实 Group：重复的两条只触发一次协议故障；合法的八条在各自四个 Task 到齐后才完成相应阶段。此回放比较消息与状态，不比较 Python/RTL 周期。
+- **9/9 行为 mutant** 均先成功编译，再由非 watchdog 的 `C033_ASSERT` 检出（运行退出码均为 1）。覆盖提前回收、漏掉同拍完成、WAITALL 误作 WAIT_ANY、错误 scope、遗漏 frontier 迁移、阶段指令与排空同拍、遗漏同拍取消、未等 W4 证据即完成，以及背压中撤回终态。证据：`unit/pytest/c033w60/evidence/` 内各 `red-*.log`、`green-*.log` 和 32 项源码哈希；`cn sources verify` **57/57**。本卡不宣称 C034 复位、C035 退休链、C040 完整 Tile top 或 G2 gate 已通过。
+
 <a id="c034"></a>
 
 ## C034 — 可靠终态、first-fault 与基础安全排空

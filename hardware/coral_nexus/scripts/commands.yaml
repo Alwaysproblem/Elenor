@@ -114,3 +114,6 @@ commands:
           - pipeline_validator/tests/test_w4_mshr_cache.py
           - pipeline_validator/tests/test_w4_lsu.py
           - pipeline_validator/tests/test_w4_cancel_isolation.py
+      w6:
+        tests:
+          - hardware/coral_nexus/verification/unit/w6/test_w6_c033.py

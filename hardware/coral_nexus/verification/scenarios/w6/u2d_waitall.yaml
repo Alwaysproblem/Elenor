@@ -1,0 +1,14 @@
+# One all-DONE wait, three parked failures (ERROR/TIMEOUT/RESET), one direct ERROR.
+case: U2-d
+seed: { id: 51, generation: 11, sequence: 41, future_uses: 1 }
+expect:
+  {
+    armed: 0,
+    success: 1,
+    failure: 4,
+    consumer_refs: 0,
+    future_uses: 0,
+    phases: 0,
+    retire_ready: 0,
+    completions: 0,
+  }

@@ -1,0 +1,11 @@
+--- a/terminal_store.sv
++++ b/terminal_store.sv
+@@ -244,7 +244,7 @@
+           if (!cmd_owner_ok || (st_cmd != LS_RETIRED)) begin
+             cmd_ready_o  = 1'b1;    // FINISH only after authority
+             cmd_reject_o = cmd_valid_i;
+-          end else if (!(local_reclaimed_i && w4_closed_i)) begin
++          end else if (!local_reclaimed_i) begin
+             cmd_ready_o = 1'b0;     // absent evidence (real W4 closure)
+           end else begin
+             cmd_ready_o = 1'b1;

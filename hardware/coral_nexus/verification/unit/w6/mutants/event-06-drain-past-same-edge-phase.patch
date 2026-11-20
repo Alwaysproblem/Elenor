@@ -1,0 +1,11 @@
+--- a/terminal_store.sv
++++ b/terminal_store.sv
+@@ -224,7 +224,7 @@
+             cmd_ready_o  = 1'b1;    // wrong owner / order (duplicate)
+             cmd_reject_o = cmd_valid_i;
+           end else if (!(exec_drained_i && no_old_inflight_i && region_ended_i)
+-                       || r_ctx[sel_cmd].ph_full || phase_edge_cmd) begin
++                       || r_ctx[sel_cmd].ph_full) begin
+             cmd_ready_o = 1'b0;     // absent evidence or owed phase byte
+           end else begin
+             cmd_ready_o = 1'b1;

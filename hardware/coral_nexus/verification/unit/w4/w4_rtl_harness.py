@@ -87,6 +87,11 @@ class Slice:
   assert_markers: tuple[str, ...] = ("C030_ASSERT",)
   service: Callable[[Path, Sequence[str]], AbstractContextManager[None]] | None = None
   host_sources: tuple[Path, ...] = ()
+  # Real-RTL and mutant patch bases. Defaults keep the W4 memory slices; a
+  # suite outside rtl/memory points these at its own roots instead of
+  # duplicating this runner.
+  rtl_dir: Path = RTL
+  mutants_dir: Path = MUTANTS
 
 
 def selected_target() -> dict[str, Any]:
@@ -141,12 +146,14 @@ def run_slice(spec: Slice, tmp_path_factory: pytest.TempPathFactory) -> dict[str
 
   mutants = []
   for glob in spec.mutant_globs:
-    matched = sorted(MUTANTS.glob(glob))
+    matched = sorted(spec.mutants_dir.glob(glob))
     # A glob that silently matches nothing would drop a whole mutant family from acceptance.
     assert matched, f"{spec.name}: mutant glob {glob!r} matches no patch"
     mutants.extend(matched)
   assert len(mutants) >= spec.min_mutants, f"{spec.name}: expected >= {spec.min_mutants} mutants"
-  required = {RTL / s for b in [*spec.benches, spec.mutant_bench] for s in b.sources} | set(mutants)
+  required = {
+    spec.rtl_dir / s for b in [*spec.benches, spec.mutant_bench] for s in b.sources
+  } | set(mutants)
   required.update(spec.host_sources)
   before = _sha(sorted(required))
   (evidence / "source-sha256.json").write_text(json.dumps(before, indent=2) + "\n")
@@ -217,9 +224,9 @@ def run_slice(spec: Slice, tmp_path_factory: pytest.TempPathFactory) -> dict[str
     "-v",
     f"{evidence.resolve()}:/out",
     "-v",
-    f"{RTL.resolve()}:/rtl:ro",
+    f"{spec.rtl_dir.resolve()}:/rtl:ro",
     "-v",
-    f"{MUTANTS.resolve()}:/mutants:ro",
+    f"{spec.mutants_dir.resolve()}:/mutants:ro",
     image,
     "bash",
     "/out/run.sh",

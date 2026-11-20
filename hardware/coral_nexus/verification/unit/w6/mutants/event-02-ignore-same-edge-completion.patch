@@ -1,0 +1,11 @@
+--- a/event_table.sv
++++ b/event_table.sv
+@@ -344,7 +344,7 @@
+       wop_fut_ok[i]  = !wop_hit[i] ||
+                        (tbl_q[wop_bank[i]][wop_slot[i]].future_uses != word_t'(0));
+       wres_ok[i] = wop_route_ok[i] && wop_hit[i] && wop_rule_ok[i] && wop_fut_ok[i];
+-      wterm[i]   = wres_ok[i] && (eff_status(wop_bank[i], wop_slot[i]) == EV_DONE);
++      wterm[i]   = wres_ok[i] && (tbl_q[wop_bank[i]][wop_slot[i]].status == EV_DONE);
+       wfail[i]   = wres_ok[i] && status_is_fail(eff_status(wop_bank[i], wop_slot[i]));
+     end
+   end

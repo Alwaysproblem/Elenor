@@ -1,0 +1,14 @@
+# Terminal A and pending B fill the frontier. A still owes two future consumers.
+case: U2-a
+seed: { id: 17, generation: 4294967303, sequence: 11, future_uses: 2 }
+expect:
+  {
+    armed: 0,
+    success: 1,
+    failure: 0,
+    consumer_refs: 0,
+    future_uses: 1,
+    phases: 0,
+    retire_ready: 0,
+    completions: 0,
+  }

@@ -1,0 +1,14 @@
+# Four tasks in the real pow_task grid. Each sends INPUT_RELEASED followed by OUTPUT_READY.
+case: U2-g
+seed: { id: 0, generation: 0, sequence: 4294967393, future_uses: 0 }
+expect:
+  {
+    armed: 0,
+    success: 0,
+    failure: 0,
+    consumer_refs: 0,
+    future_uses: 0,
+    phases: 8,
+    retire_ready: 4,
+    completions: 4,
+  }

@@ -1,0 +1,11 @@
+--- a/event_table.sv
++++ b/event_table.sv
+@@ -213,7 +213,7 @@
+     end else begin
+       comp_ctx_ok   = tbl_q[comp_bank][comp_slot].key.ctx.ctx_generation
+                       == comp_g.key.ctx.ctx_generation;
+-      comp_scope_ok = tbl_q[comp_bank][comp_slot].key.scope == comp_g.key.scope;
++      comp_scope_ok = 1'b1;
+       comp_evgen_ok = tbl_q[comp_bank][comp_slot].key.event_generation
+                       == comp_g.key.event_generation;
+       comp_seq_ok   = tbl_q[comp_bank][comp_slot].key.seq == comp_g.key.seq;

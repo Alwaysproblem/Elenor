@@ -1,0 +1,11 @@
+--- a/event_table.sv
++++ b/event_table.sv
+@@ -469,7 +469,7 @@
+     if (|rec_fire) begin
+       for (int unsigned i = 0; i < OPERANDS; i++) begin
+         if (wait_en[i]) begin
+-          dec_fut[wop_bank[i]][wop_slot[i]] = 1'b1;
++          dec_fut[wop_bank[i]][wop_slot[i]] = !park_o;
+           if (park_o) begin
+             dref[wop_bank[i]][wop_slot[i]] = dref[wop_bank[i]][wop_slot[i]] + 1;
+           end
