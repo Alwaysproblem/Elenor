@@ -1,0 +1,10 @@
+--- a/mfe_top.sv
++++ b/mfe_top.sv
+@@ -464,6 +464,6 @@
+       if (term_ack_fire) begin
+         term_parked <= 1'b0;
+       end else if (term_ack_valid_o && !term_ack_ready_i) begin
+-        term_parked <= 1'b1;
++        term_parked <= 1'b0;
+         term_parked_idx <= term_pick;
+       end

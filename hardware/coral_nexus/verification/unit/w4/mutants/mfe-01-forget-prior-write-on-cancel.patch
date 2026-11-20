@@ -1,0 +1,12 @@
+--- a/mfe_top.sv
++++ b/mfe_top.sv
+@@ -366,8 +366,7 @@ module mfe_top
+             // transaction with zero completed write legs may settle ISOLATED.
+             if (tk_marked[i]) begin
+               r_err[i] <= ERR_NONE;
+-              r_final[i] <= (!r_dir_in[i] && r_moved[i] != 32'd0)
+-                            ? MFE_COMPLETED : MFE_ISOLATED;
++              r_final[i] <= MFE_ISOLATED;
+               rstate[i] <= S_DONE;
+             end
+             // Otherwise the grant block below moves the lowest record on.

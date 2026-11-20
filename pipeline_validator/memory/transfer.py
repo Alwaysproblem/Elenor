@@ -162,21 +162,22 @@ class TransferStatus(Enum):
   FAULTED = "faulted"
   CANCELLED = "cancelled"
 
-_EXTERNAL_WRITE_LEG_KINDS = frozenset(
+_GLOBAL_DMA_WRITE_OPS = frozenset(
   {
-    TransferLegKind.HBM_WRITE,
-    TransferLegKind.L2_WRITE,
-    TransferLegKind.GLOBAL_DMA,
-    TransferLegKind.NOC_REQUEST,
+    TransferOp.SCATTER_WRITE,
+    TransferOp.GLOBAL_STORE,
+    TransferOp.HOST_WRITE,
+    TransferOp.CACHE_CLEAN_L1,
+    TransferOp.CACHE_CLEAN_L2,
   }
 )
-"""Legs whose completion moves bytes out of the owning tile/context (C032).
+"""Ops whose full route uses the shared Global-DMA stage outbound (C032).
 
-Once such a leg really completes after a cancel request, the external effect
-has happened and the only truthful terminal is completion: the transaction
-runs its remaining route to ``DONE`` and can never settle as isolated.  Tile
-local legs (L1/L2/NoC reads, local DMA, cache fill/lookup) stay
-isolation-eligible because their effect is retractable with the context.
+``GLOBAL_DMA`` is bidirectional: HOST_READ/PREFETCH run it en route to
+``NOC_RESPONSE`` (a read returning to the consumer), while the store routes
+above run it en route to ``HBM_WRITE``.  Collapsed single-leg DMA always
+targets L2/HBM and is likewise outbound.  ``TransferManager.
+_leg_is_outbound_write`` is the single classifier built on this.
 """
 
 
@@ -265,7 +266,8 @@ class MemoryTransaction:
   isolation_confirmed_cycle: int = -1
   # C032 settlement state: an isolation-failure report is not a terminal
   # (the accepted obligation is still owed), and a completed external write
-  # leg binds a cancelled transaction to real completion.
+  # leg with a real outbound write effect binds the transaction to real
+  # completion, whether or not a cancellation is pending yet.
   isolation_failed_cycle: int = -1
   cancel_effect_bound: bool = False
   fault_reason: str = ""
@@ -566,6 +568,9 @@ class TransferManager:
     # never cleared implicitly by stepping or resetting other state.
     self._poisoned_reason: str = ""
     # Transaction ids that consumed exactly one real boundary TERMINAL_ACK.
+    # ISOLATED/FAULTED acks settle their terminal immediately, so membership
+    # on a live transaction is exactly the COMPLETED authority: cancellation
+    # can never settle such a transaction as CANCELLED.
     self._terminal_acked: set[str] = set()
     # Run/profile generation provider state.  Transactions must stamp
     # ``run_generation`` and ``profile_generations`` explicitly; the manager
@@ -1391,6 +1396,28 @@ class TransferManager:
       or (leg.kind == TransferLegKind.L1_WRITE and txn.dst.handle.memory_space == "l1")
     )
 
+  @staticmethod
+  def _leg_is_outbound_write(leg: TransferLeg, txn: MemoryTransaction) -> bool:
+    """True when a completing leg really wrote out of the issuing context.
+
+    One classification, irrespective of cancel arrival and without needing a
+    resolved destination view (timing-mode transactions classify the same
+    way): ``HBM_WRITE``/``L2_WRITE``/``NOC_REQUEST`` are write-path legs;
+    the shared Global-DMA stage counts only on an actual write route (an op
+    in ``_GLOBAL_DMA_WRITE_OPS``, or a collapsed DMA leg whose destination
+    tier is L2/HBM), never for HOST_READ/PREFETCH reads running it en route
+    to ``NOC_RESPONSE``.
+    """
+    if leg.kind in (
+      TransferLegKind.HBM_WRITE,
+      TransferLegKind.L2_WRITE,
+      TransferLegKind.NOC_REQUEST,
+    ):
+      return True
+    if leg.kind is TransferLegKind.GLOBAL_DMA:
+      return txn.op in _GLOBAL_DMA_WRITE_OPS or leg.dst_space in ("l2", "hbm")
+    return False
+
   def _capture_source(self, txn: MemoryTransaction, cycle: int, *, force: bool = False) -> bool:
     if txn.captured_data is not None or txn.src is None or self.byte_store is None:
       return True
@@ -1622,17 +1649,24 @@ class TransferManager:
     txn.leg_completion_cycle = -1
     txn.noc_tag = ""
     txn.noc_vc = 0
-    if txn.status is TransferStatus.CANCEL_REQUESTED:
-      leg = txn.legs[txn.current_leg] if txn.current_leg < len(txn.legs) else None
-      if leg is not None and leg.kind in _EXTERNAL_WRITE_LEG_KINDS:
-        # The accepted external write leg really completed: the effect
-        # happened, so the only truthful terminal is completion.  The
-        # transaction runs its remaining route to DONE and can never
-        # settle as isolated (C032 / transfer_cancel_tracker semantics).
-        txn.cancel_effect_bound = True
-      if not txn.cancel_effect_bound:
-        self._finish_cancelled(txn, cycle)
-        return
+    leg = txn.legs[txn.current_leg] if txn.current_leg < len(txn.legs) else None
+    if leg is not None and self._leg_is_outbound_write(leg, txn):
+      # A real outbound write leg completed: the effect happened, so the only
+      # truthful terminal is completion.  The transaction runs its remaining
+      # route to DONE and can never settle as isolated (C032 /
+      # transfer_cancel_tracker semantics), whether or not a cancellation is
+      # pending yet.
+      txn.cancel_effect_bound = True
+    if (
+      txn.status is TransferStatus.CANCEL_REQUESTED
+      and not txn.cancel_effect_bound
+      and txn.transaction_id not in self._terminal_acked
+    ):
+      # A bound completion (real outbound write effect) or the authoritative
+      # boundary COMPLETED decision (terminal_acked) keeps the truthful
+      # terminal DONE; only an unbound cancellation settles isolated.
+      self._finish_cancelled(txn, cycle)
+      return
     txn.current_leg += 1
     if txn.current_leg >= len(txn.legs):
       # Collapsed fidelity routes have no explicit source/destination legs;
@@ -1641,10 +1675,18 @@ class TransferManager:
         return
       if not self._commit_destination(txn, cycle, force=True):
         return
-      if txn.destination_committed_cycle < 0 and txn.cancel_effect_bound:
-        # A cancelled write-bound transaction with no local destination view
-        # still produced its external effect: the completed write leg is the
-        # visibility boundary.
+      if (
+        txn.destination_committed_cycle < 0
+        and txn.cancel_effect_bound
+        and txn.cancel_requested_cycle >= 0
+      ):
+        # A genuinely write-bound cancelled transaction with no local
+        # destination view still produced its external effect: the completed
+        # write leg is the visibility boundary.  Only a really completed
+        # outbound write leg sets the flag, and the synthetic stamp is
+        # reserved for transactions a cancellation actually intercepted;
+        # ordinary non-cancelled completion is unchanged, and a boundary
+        # COMPLETED ack alone moves no bytes.
         txn.destination_committed_cycle = cycle
       txn.status = TransferStatus.DONE
       txn.wait_reason = StageWaitReason.NONE
@@ -1798,27 +1840,37 @@ class TransferManager:
     if txn.status is TransferStatus.CANCEL_REQUESTED:
       return
     txn.cancel_requested_cycle = cycle
-    if not txn.legs or txn.current_leg >= len(txn.legs):
-      self._finish_cancelled(txn, cycle)
-      return
-    leg = txn.legs[txn.current_leg]
-    # Work not yet accepted by a stage can be withdrawn synchronously.  A NoC
-    # flit still in the upstream queue has not consumed downstream credit and
-    # is likewise unissued.
-    if leg.kind in (TransferLegKind.NOC_RESPONSE, TransferLegKind.NOC_REQUEST):
-      if not txn.noc_tag:
+    # Completion-bound: a real outbound write effect already completed
+    # (cancel_effect_bound) or a real boundary TERMINAL_ACK reported COMPLETED
+    # — ISOLATED/FAULTED acks settle their terminal immediately, so on a live
+    # transaction _terminal_acked membership is exactly the COMPLETED
+    # authority.  The decision is authoritative whatever the cancel/ack
+    # arrival order, so synchronous withdrawal is skipped entirely.
+    if not txn.cancel_effect_bound and txn.transaction_id not in self._terminal_acked:
+      # Work not yet accepted by a stage can be withdrawn synchronously.  A
+      # NoC flit still in the upstream queue has not consumed downstream
+      # credit and is likewise unissued.
+      if not txn.legs or txn.current_leg >= len(txn.legs):
         self._finish_cancelled(txn, cycle)
         return
-      if self.noc is not None and self.noc.contains(txn.noc_tag):
-        self.noc.cancel(txn.noc_tag)
-        self._noc_traversed.pop(txn.noc_tag, None)
-        txn.noc_tag = ""
-        txn.noc_vc = 0
+      leg = txn.legs[txn.current_leg]
+      if leg.kind in (TransferLegKind.NOC_RESPONSE, TransferLegKind.NOC_REQUEST):
+        if not txn.noc_tag:
+          self._finish_cancelled(txn, cycle)
+          return
+        if self.noc is not None and self.noc.contains(txn.noc_tag):
+          self.noc.cancel(txn.noc_tag)
+          self._noc_traversed.pop(txn.noc_tag, None)
+          txn.noc_tag = ""
+          txn.noc_vc = 0
+          self._finish_cancelled(txn, cycle)
+          return
+      elif txn.leg_start_cycle < 0:
         self._finish_cancelled(txn, cycle)
         return
-    elif txn.leg_start_cycle < 0:
-      self._finish_cancelled(txn, cycle)
-      return
+    # One common mark: completion-bound transactions park for the ordinary
+    # step drain to the truthful DONE terminal; accepted-leg transactions
+    # wait for real completion.  CANCEL_REQUESTED is never terminal.
     txn.status = TransferStatus.CANCEL_REQUESTED
     txn.wait_reason = StageWaitReason.NONE
     self._cancel_requested.add(txn.transaction_id)
@@ -1863,7 +1915,7 @@ class TransferManager:
     if txn.cancel_effect_bound:
       raise MemoryInvariantError(
         "isolation refused: the cancelled transaction's completion is already"
-        " bound (external write leg completed or boundary reported COMPLETED)"
+        " bound (an accepted external write leg really completed)"
       )
     self._terminal_acked.add(transaction_id)
     self._cancel_txn_resources(txn)
@@ -1916,8 +1968,9 @@ class TransferManager:
     isolation (cancel requested, no external effect owed); ``COMPLETED``
     keeps the unchanged normal completion path — the transaction settles
     through its real accepted-leg completion and consumer acknowledgement,
-    never as isolated; ``FAULTED`` settles the fault terminal directly and is
-    never reported as isolation.
+    never as isolated, whether the cancellation arrives before or after the
+    ack; ``FAULTED`` settles the fault terminal directly and is never
+    reported as isolation.
     """
     if final_state not in ("COMPLETED", "ISOLATED", "FAULTED"):
       raise MemoryInvariantError(f"unknown transfer terminal state {final_state!r}")
@@ -1933,6 +1986,13 @@ class TransferManager:
       # the CANCEL_REQUESTED (never write-bound) precondition.
       self.confirm_isolation(transaction_id, cycle)
       return TransferStatus.CANCELLED
+    if final_state == "COMPLETED" and (txn.status is TransferStatus.PENDING or not txn.legs):
+      # An unadmitted transaction (e.g. left PENDING and legless by a
+      # refused submit) has no route that could ever drain to DONE, so the
+      # boundary cannot have completed it.  Refuse before consuming the
+      # terminal: the ledger stays unchanged, nothing binds, and ordinary
+      # cancellation can still withdraw the leftover.
+      raise MemoryInvariantError("COMPLETED terminal acknowledgement requires a runnable transfer")
     self._terminal_acked.add(transaction_id)
     if final_state == "FAULTED":
       # A fault terminal is never isolation: release the accepted leg's
@@ -1940,12 +2000,14 @@ class TransferManager:
       self._cancel_txn_resources(txn)
       self._fault_transaction(txn, "external TERMINAL_ACK reported FAULTED", cycle)
       return TransferStatus.FAULTED
-    # COMPLETED: the effect stands.  For a cancelled transaction the boundary's
-    # terminal is authoritative, so the real completion path must run the
-    # remaining route to DONE (never a CANCELLED settle); non-cancelled
-    # transactions keep the unchanged completion/acknowledge path.
-    if txn.status is TransferStatus.CANCEL_REQUESTED:
-      txn.cancel_effect_bound = True
+    # COMPLETED: the effect stands.  The boundary's terminal is authoritative
+    # whatever the cancel/ack arrival order: ``_request_cancel`` and
+    # ``_advance_leg`` consult the consumed terminal (``_terminal_acked``) so
+    # a later cancellation can never settle CANCELLED, while the real
+    # completion path still runs the remaining route to DONE with unchanged
+    # byte accounting and consumer acknowledgement.  It deliberately does not
+    # touch ``cancel_effect_bound`` or ``destination_committed_cycle``: an
+    # ack alone moves no bytes.
     return txn.status
 
   @property

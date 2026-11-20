@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from math import ceil
 
 import pytest
 
@@ -24,7 +25,7 @@ from pipeline_validator.memory import (
 from pipeline_validator.memory.allocator import ContextBufferOwner
 from pipeline_validator.memory.arena import ArenaPool, RootInvocation
 from pipeline_validator.memory.byte_store import ByteStore
-from pipeline_validator.memory.cache import CacheLineIdentity, CacheProvenance
+from pipeline_validator.memory.cache import CacheLineIdentity, CacheProvenance, CacheRange
 from pipeline_validator.profiles import (
   MaintenanceRange,
   MemoryMaintenanceDesc,
@@ -888,27 +889,60 @@ class TestBoundedMaintenance:
     assert group.transfer_manager.snapshot()["retained_transactions"] == 0
 
   def test_t30_faulted_clean_drains_before_explicit_destructive_recovery(self):
-    group, oracle, binding, _payload, cycle = self.dirty_group(timeout=500, latency=1000)
+    timeout, latency = 500, 1000
+    group, oracle, binding, payload, cycle = self.dirty_group(timeout=timeout, latency=latency)
     controller = group.profile_controller
     command = _descriptor(group, "timed-out-clean", "l1", 0)
     assert controller.submit(command, "device@1", cycle)
-    for current in range(cycle, cycle + 1000):
+    for current in range(cycle, cycle + timeout):
       group.step(current)
-      if controller.status(command.command_id) == "faulted":
-        break
+
+    # Before the fault, a bounded subset of lines has crossed outbound DMA
+    # and is at its final HBM write. Capture the owed ranges *before* cancel
+    # so prematurely withdrawing a write cannot also change our oracle.
+    manager = group.transfer_manager
+    pending = set(manager.outstanding_transactions)
+    assert all(t["leg"] == t["total_legs"] - 1 for t in manager.snapshot()["transactions"])
+    handle = group.hbm.get_handle(binding.name)
+    assert handle is not None
+    line_bytes = group.tiles[0].l1_cache.line_bytes
+    owed = [
+      off for off in range(0, binding.size_bytes, line_bytes)
+      if manager.range_inflight((CacheRange(handle.allocation_id, handle.generation, off, line_bytes),))
+    ]
+    assert 1 < len(owed) == len(pending) < binding.size_bytes // line_bytes
+    expected = bytearray(binding.size_bytes)
+    for off in owed:
+      expected[off : off + line_bytes] = payload[off : off + line_bytes]
+    assert oracle.read_hbm(binding.base_iova, binding.size_bytes) == bytes(binding.size_bytes)
+
+    current = cycle + timeout
+    group.step(current)
     state = controller.snapshot()["commands"][command.command_id]
-    assert state["completed_cycle"] - state["accepted_cycle"] == 500
+    assert state["completed_cycle"] - state["accepted_cycle"] == timeout
     assert controller.cancellation_pending
     with pytest.raises(MemoryInvariantError):
       controller.recover(current)
     with pytest.raises(MemoryInvariantError):
       controller.begin_run(2)
-    fault_tick = current
-    for current in range(fault_tick + 1, fault_tick + 3000):
-      group.step(current)
-      assert controller.issue_gate_closed("l1")
-      if not controller.cancellation_pending:
-        break
+    # With one HBM credit, writes already past DMA serialize. Require forward
+    # progress within one line's service time (+ one controller tick), rather
+    # than granting an arbitrary timeout to the entire batch.
+    cfg = group.cfg
+    bytes_per_cycle = 1000 * cfg.hbm_bandwidth_gbs / (cfg.clock_mhz * cfg.hbm_channels)
+    wire_bytes = ceil(line_bytes / cfg.hbm_burst_bytes) * cfg.hbm_burst_bytes
+    service_bound = latency + ceil(wire_bytes / bytes_per_cycle) + 1
+    while pending:
+      previous = pending
+      for _ in range(service_bound):
+        current += 1
+        group.step(current)
+        assert controller.issue_gate_closed("l1")
+        pending = set(manager.outstanding_transactions)
+        if pending != previous:
+          break
+      assert pending < previous, "an owed HBM write must retire; no new clean may be issued"
+    assert oracle.read_hbm(binding.base_iova, binding.size_bytes) == expected
     assert not controller.cancellation_pending
     assert group.transfer_manager.snapshot()["retained_transactions"] == 0
     assert controller.status(command.command_id) == "faulted"
@@ -923,8 +957,8 @@ class TestBoundedMaintenance:
     assert controller.active_modes == {"l1": 1, "l2": 0}
     assert group.tiles[0].l1_cache.stats.resident_lines == 0
     assert group.tiles[0].l1_cache.stats.discarded_dirty_lines > 0
-    # Recovery is not a fabricated writeback or a successful workload result.
-    assert oracle.read_hbm(binding.base_iova + 7 * 64, 64) == bytes(64)
+    # Recovery may not flush any of the dirty lines that never left the Tile.
+    assert oracle.read_hbm(binding.base_iova, binding.size_bytes) == expected
 
 
 _IO_TILE_BODY = """%view = tile.subview %buffer offsets = [0] sizes = [64] strides = [1]

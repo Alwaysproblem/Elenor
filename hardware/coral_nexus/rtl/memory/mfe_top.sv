@@ -150,6 +150,8 @@ module mfe_top
   logic req_have, term_have, rsp_match;
   logic [SW-1:0] req_pick, term_pick, rsp_idx;
   logic mem_fire, rsp_fire, term_ack_fire;
+  logic term_parked;
+  logic [SW-1:0] term_parked_idx;
   logic [INFLIGHT-1:0] engine_free_mask;
   logic [LINE_BYTES*8-1:0] req_payload;
 
@@ -200,12 +202,24 @@ module mfe_top
       end
   end
 
+  // The wire TERMINAL_ACK presenter parks its selection. The min-id rescan
+  // below runs every cycle, and a reordered MEM_RSP can move an OLDER wire id
+  // into S_TERM while a younger one is already offered under
+  // term_ack_ready_i=0; without the park the offered payload would be
+  // swapped before its handshake. While parked, the parked record is the
+  // only selection: its own fire is the only event that can take a record
+  // out of S_TERM, so the park can never point at an overwritten or
+  // re-allocated slot (r_wtxn/r_wirefinal are held constant in S_TERM).
   always_comb begin
     term_have = 1'b0; term_pick = '0;
-    for (int i = 0; i < INFLIGHT; i++)
-      if (rstate[i] == S_TERM && (!term_have || r_wtxn[i] < r_wtxn[term_pick])) begin
-        term_have = 1'b1; term_pick = SW'(i);
-      end
+    if (term_parked && rstate[term_parked_idx] == S_TERM) begin
+      term_have = 1'b1; term_pick = term_parked_idx;
+    end else begin
+      for (int i = 0; i < INFLIGHT; i++)
+        if (rstate[i] == S_TERM && (!term_have || r_wtxn[i] < r_wtxn[term_pick])) begin
+          term_have = 1'b1; term_pick = SW'(i);
+        end
+    end
   end
 
   // A cancelled record must never have a write accepted after the mark: marked
@@ -278,6 +292,7 @@ module mfe_top
     if (!rst_n) begin
       next_wtxn <= 32'd1;
       sent <= 64'd0; rsps <= 64'd0; acks <= 64'd0; absorbed <= 64'd0; stale_rsp <= 64'd0;
+      term_parked <= 1'b0; term_parked_idx <= '0;
       for (int i = 0; i < INFLIGHT; i++) begin
         rstate[i] <= S_FREE;
         r_src_kind[i] <= KIND_LOCAL; r_dst_kind[i] <= KIND_LOCAL; r_dir_in[i] <= 1'b0;
@@ -439,6 +454,18 @@ module mfe_top
                                ? 32'(LINE_BYTES) : (r_bytes[seg_grant] - r_moved[seg_grant]);
         rstate[seg_grant] <= S_MOVE;
         next_wtxn <= next_wtxn + 32'd1;
+      end
+      // Park an offered-but-stalled S_TERM record at the first stalled edge;
+      // its own fire releases the park in the same edge that advances the
+      // record, so the tracker's ack_slot and the S_TERM advance below always
+      // count exactly the offered record. A record that fires in its first
+      // offered cycle is never parked, so a continuously high ready keeps the
+      // back-to-back ACK rate with no mandatory bubble.
+      if (term_ack_fire) begin
+        term_parked <= 1'b0;
+      end else if (term_ack_valid_o && !term_ack_ready_i) begin
+        term_parked <= 1'b1;
+        term_parked_idx <= term_pick;
       end
 
       if (mem_fire) sent <= sent + 64'd1;

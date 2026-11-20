@@ -392,9 +392,16 @@ ROB 同 PC 双 Context store、错误 op_seq、独立退休、局部 fault flush
 - 交付 `rtl/memory/mfe_top.sv`（直搬 FSM：S_PARSE→S_AUTHORIZE→S_SEGMENT→S_MOVE→S_WAIT→S_TERM→S_DONE；分段 L2↔HBM binding、写 payload 取本事务真实读回字节）、`rtl/memory/transfer_cancel_tracker.sv`（每 txn 恰一终态、obligate/ack 计数、release 前置、sticky poison）与 `rtl/memory/c032_mfe_pkg.sv`。`tb/tb_mfe_top.sv` 通过 FIFO 接真实 C023 `MemoryService`（读写双向），断言字节相等、三终态、重复终态/未 ACK 释放被拒、poison 拒新启动直到 quiescent reset、账本闭合。
 - 取消语义两域一致：已接受并完成的**外写** leg 把事务绑定到 COMPLETED（效果已发生），纯入向或未发外写才可 ISOLATED；同拍 cancel/settle 只产一个终态；reset 在非静止时被拒且不清 poison。Python 侧以 `terminal_ack` 作为边界 TERMINAL_ACK 接缝（ISOLATED→`confirm_isolation`、COMPLETED→真实完成路径、FAULTED→fault 终态且永不伪装隔离），新增 `isolation_failed`/`clear_poison`（仅静止可清）并把 `_advance_leg` 的取消结算改为"外写已完成即为 DONE"；`tile_group.release_context_memory` 遇 poison 直接抛出，不再永久返回 False。
 - 真实缺陷（Python，先 RED 后 GREEN）：原 `_advance_leg` 把取消后完成的**外写**事务结算成 CANCELLED（违背 MEM-09/MEM-12）；边界宣告 COMPLETED 后仍会被 `_finish_cancelled` 覆盖。新增 `pipeline_validator/tests/test_w4_cancel_isolation.py` 6 用例钉住：写腿取消→COMPLETED 且可见提交、读腿唯一终态、COMPLETED 绑定完成路径、FAULTED≠ISOLATED、poison 到静止清除、非取消态确认被拒。
-- 真实验收：C032 slice `C032_PASS tb_mfe_top contexts=1 checks=2224 external=18 terminals=18 absorbed=1`（服务侧 18 请求/18 唯一终态/零残留）；`mfe-*` 8 个 mutant 全部先成功编译、再由已执行断言检出（取消段内被忽略、写后取消报 ISOLATED、取消后继续发起、poison 不 sticky、带在途义务 reset 清 poison、重复终态接受、未 ACK 释放接受、ack 不计数）。其中两个初版为等价变异：`mfe-03` 在读侧差别不可观察，改为新增"marked record granted a wire transaction"不变量后检出；`mfe-05` 的 CODE_RESET 分支本身会重设 poison，改为去掉 `quiescent` 的 live-entry 项后检出。
-- 全量入口：`cn unit --suite w4 --config <绝对路径>/cs1_c2.yaml` **33 passed in 1294.26s**；`cn sources verify` 通过；作用于所属文件的 pre-commit 通过；validator 全量通过。
+- 初次验收（`c6cb756909`）：C032 slice `C032_PASS tb_mfe_top contexts=1 checks=2224 external=18 terminals=18 absorbed=1`，18 个服务引用均由唯一 ACK 关闭。当时 8 个 `mfe-*` 都编译成功且运行退出码为 1，但 `acc-mfe2/c032mfe0/evidence/red-0.log` 中的 `mfe-01` 仅耗尽等待终态的 30000 拍上限；按「超时不计行为检出」规则，初次结果为 **7 个行为检出、1 个进展超时**。`mfe-03` 由取消后不得授予 wire txn 的不变量检出，`mfe-05` 则实际触发了带活跃记录的 reset 拒绝。
+- 初次全量入口：`cn unit --suite w4 --config <绝对路径>/cs1_c2.yaml` **33 passed in 1294.26s**；`cn sources verify`、作用域 pre-commit、validator 全量均通过。这些是当时的结果，不包含后加的乱序 ACK 场景。
 - 已知限制：只做直搬；indexed/gather/scatter 与页授权逐段 lease 归 C055–C057（未接生产、未留空模块）；`mem_rsp` 的延迟/背压由 bench 注入，`MemoryService` 只提供真实外部字节与终态引用；没有任何数值 kernel。主证据：`out/coral_nexus/C032/acc-mfe2/`、`full/`、`sources/`；`out/` 为 gitignored 运行证据，不等同归档。
+
+**补验：同拍取消与乱序 wire ACK。**
+
+- 对同一笔已接受的单段 `TILE_LOAD`，Python 分别先送 `COMPLETED` ACK、先送取消，再排空真实 L1 写腿。`test_w4_c032.py` 用 RTL 同拍场景返回的 64 B 驱动这两种顺序，对比本地终态和写入数据：均为 `DONE`（RTL `COMPLETED`），ACK 本身不提前发布目标字节。出向写腿已完成但下一腿尚未发出的取消、只读 DMA 与拒收事务的 ACK 另有 Python 回归。
+- 两笔请求以 wire ID 20、21 发出，21 的响应先到。原先 20 的响应会替换正在背压的 ACK；修复后 valid 和完整 payload 保持到握手，服务按 **21、20** 各释放一次。C032 定向 slice：2422 checks，20 请求 / 20 唯一 ACK / 零残留引用。9 个 mutant 均以成功构建后的行为断言检出；重选停置 ACK 的 `mfe-09` 命中稳定性断言，重写的 `mfe-01` 命中外写后错误终态而非超时。证据：`out/coral_nexus/C032/ack-order-final-ia6q89ME/rtl/c032mfe0/evidence/`。
+- T30（超时后的 cache clean）：命令受理 500 拍后如期报告故障，issue gate 仍关闭。8 条脏行中 5 条在故障前已完成出向 DMA，必须通过唯一 HBM 信用逐笔写回；其余 3 条不得写入。回归在取消前记录这些范围，逐笔检查排空进展，并在排空后、显式恢复后各核对全部 512 B。同一测试在旧提交 `c6cb756909` 首次字节不一致位于偏移 64（应为 `0x02`，实为 `0x00`）；修复后通过。红/绿对照：`out/coral_nexus/C032/ack-order-final-ia6q89ME/{t30-before-fix,t30}.log`。
+- 补验后的 validator 全量：**608 passed，1 skipped**（`out/coral_nexus/C032/ack-order-final-ia6q89ME/validator-final.xml`）。本次 RTL 只重跑 C032 定向 slice，未重跑整个 W4 或 G2 gate。
 
 <a id="c033"></a>
 

@@ -273,6 +273,23 @@ the tracker/cancel_tracker poison may only be cleared by an explicit quiescent
 reset. `test_w4_cancel_isolation.py` pins the Python half of that rule and is
 registered in the w4 suite, so a Python-only regression also fails the suite.
 
+Wire ACK versus local visibility: each accepted MEM_REQ leg gets exactly one
+wire TERMINAL_ACK (`term_ack_o`), which settles only the transport obligation,
+while each accepted descriptor gets exactly one local terminal (`term_o`, via
+the tracker). Only a successful, non-absorbed inbound MEM_RSP writes the local
+window — cancelled (absorbed) or faulted inbound responses write nothing — and
+those bytes commit on the MEM_RSP itself, before that leg's wire ACK, so they
+are peekable while the ACK stalls.
+
+The `S_TERM` presenter in `rtl/memory/mfe_top.sv` parks its selected record, so
+a reordered older MEM_RSP arriving while a younger ACK stalls under
+`term_ack_ready_i=0` cannot swap the offered payload: valid and payload stay
+stable through the fire cycle and the tracker counts exactly that record. A
+surviving mutant against this logic needs a distinguishing legal input (a
+reordered MEM_RSP under sustained ACK backpressure, whole offered ACK stable,
+each handshake exactly once) or an equivalence proof plus a rebase onto
+observable behavior — never a watchdog, tautological or source-only assertion.
+
 ## Offline seeds (C004)
 
 - Inventory: `env/seed_targets.json` — every seed has URL/path + sha256 +

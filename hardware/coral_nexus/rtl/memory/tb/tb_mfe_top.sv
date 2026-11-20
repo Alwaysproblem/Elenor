@@ -13,6 +13,7 @@
 //   * a cancel before any write leg is accepted settles ISOLATED with zero
 //     writes, and a cancelled inbound step absorbs its late response;
 //   * same-edge cancel+completion produces exactly one terminal;
+//   * a younger wire ACK held under backpressure survives an older response;
 //   * duplicate terminal / release-without-ACK / duplicate release /
 //     terminal-after-release are refused with distinct codes (injected on a
 //     standalone tracker instance);
@@ -113,6 +114,7 @@ module tb_mfe_top;
   int checks = 0, cycles = 0, issued_count = 0;
   logic [1:0] final_exp [1024];
   logic [3:0] err_exp [1024];
+  mfe_terminal_t last_terminal;
   logic got_term [1024], issued [1024];
   int term_count [1024];
   task automatic require(input logic ok, input string why);
@@ -144,6 +146,7 @@ module tb_mfe_top;
         require(term.final_state == final_exp[term.txn_id] &&
                 term.error == err_exp[term.txn_id], "real terminal class and error");
         got_term[term.txn_id] = 1;
+        last_terminal = term;
         term_count[term.txn_id]++;
       end
     end
@@ -153,6 +156,8 @@ module tb_mfe_top;
   integer request_file, response_file, scan_status;
   string endpoint;
   logic deliver = 1, request_enable = 1, fault_next = 0, ack_enable = 1;
+  // Release the second of two queued responses, withholding the first.
+  logic younger_only = 0;
   logic [31:0] service_status, service_vis;
   logic [LINE_BYTES*8-1:0] service_data;
   mfe_mem_rsp_t queued [8];
@@ -166,7 +171,7 @@ module tb_mfe_top;
 
   always @(posedge clk) begin
     if (!rst_n) begin
-      qhead = 0; qtail = 0; qcount = 0; mr_valid = 0; mr = '0;
+      qhead = 0; qtail = 0; qcount = 0; mr_valid <= 0; mr <= '0;
     end else begin
       if (mem_valid && mem_ready) begin
         require(mem.slice_id == 32'd0 && mem.slice_count == 32'd1, "single-slice request");
@@ -204,15 +209,21 @@ module tb_mfe_top;
         seg_wr[sent] = mem.write;
         sent++;
       end
-      if (mr_valid && mr_ready) mr_valid = 0;
-      else if (!mr_valid && deliver && qcount > 0) begin
-        mr = queued[qhead];
+      if (mr_valid && mr_ready) mr_valid <= 0;
+      else if (!mr_valid && deliver && qcount > (younger_only ? 1 : 0)) begin
+        mfe_mem_rsp_t next_rsp;
+        if (younger_only) begin
+          qtail = (qtail + $size(queued) - 1) % $size(queued);
+          next_rsp = queued[qtail];
+        end else begin
+          next_rsp = queued[qhead];
+          qhead = (qhead + 1) % $size(queued);
+        end
         if (fault_next) begin
-          mr.status = 32'd1;
+          next_rsp.status = 32'd1;
           fault_next = 0;
         end
-        mr_valid = 1;
-        qhead = (qhead + 1) % 8; qcount--;
+        mr <= next_rsp; mr_valid <= 1; qcount--;
       end
       if (ack_valid && ack_ready) begin
         $fdisplay(request_file, "T %h %h %h %h", ack.txn_id, ack.slice_id,
@@ -268,7 +279,7 @@ module tb_mfe_top;
     int bound;
     bound = 0;
     while (!got_term[t] && bound < 30000) begin @(negedge clk); bound++; end
-    require(got_term[t], "bounded transaction terminal");
+    require(got_term[t], "watchdog waiting for descriptor terminal");
   endtask
 
   task automatic drain;
@@ -358,6 +369,8 @@ module tb_mfe_top;
   initial begin : run
     int baseline, b0;
     logic [63:0] r0, absb;
+    logic [31:0] race_wire_id;
+    logic [LINE_BYTES*8-1:0] race_payload;
     require($value$plusargs("SERVICE=%s", endpoint), "service endpoint provided");
     request_file = $fopen({endpoint, ".req"}, "w");
     response_file = $fopen({endpoint, ".rsp"}, "r");
@@ -495,10 +508,17 @@ module tb_mfe_top;
     while (sent == baseline) @(negedge clk);
     @(negedge clk); deliver = 1;
     @(negedge clk); cancel_txn = 32'd115; cancel_valid = 1;
+    #1;
+    require(mr_valid && mr_ready && mr.status == 0, "cancel coincides with a successful response");
+    race_wire_id = mr.txn_id; race_payload = mr.data;
     @(posedge clk);
     @(negedge clk); cancel_valid = 0;
     await_term(115); drain();
-    require(term_count[115] == 1, "same-edge cancel and completion settle once");
+    require(term_count[115] == 1 && last_terminal.txn_id == 115,
+            "same-edge cancel and completion settle once");
+    require_local_seed(896, LINE_BYTES, 800, 0, "same-edge completion delivered the response bytes");
+    $display("C032_INBOUND_RACE wire=%0d local_final=%0d payload=%h",
+             race_wire_id, last_terminal.final_state, race_payload);
 
     // Transport fault on the external leg: FAULTED, never ISOLATED.
     fault_next = 1;
@@ -599,6 +619,42 @@ module tb_mfe_top;
     await_term(121); drain();
     reset_pulse;
     require(!poisoned, "reset clears poison after quiescence");
+
+    // Both responses are real MemoryService replies. Return B first, stall
+    // its ACK, then return A. The existing ack_held monitor also covers the
+    // release edge: neither valid nor the complete ACK may change before fire.
+    begin : reordered_acks
+      logic [31:0] older, younger;
+      int first_ack, bound;
+      first_ack = acked; r0 = rsps_c;
+      deliver = 0; ack_enable = 0;
+      issue(122, KIND_EXT, KIND_LOCAL, 17, 1, 1536, 928, 8, MFE_COMPLETED, ERR_NONE);
+      issue(123, KIND_EXT, KIND_LOCAL, 17, 1, 1600, 944, 8, MFE_COMPLETED, ERR_NONE);
+      for (bound = 0; qcount < 2 && bound < 200; bound++) @(negedge clk);
+      require(qcount == 2, "both independent read responses are queued");
+      older = queued[qhead].txn_id;
+      younger = queued[(qhead + 1) % $size(queued)].txn_id;
+      require(older < younger, "responses have distinct ordered wire IDs");
+
+      younger_only = 1; deliver = 1;
+      for (bound = 0; !ack_valid && bound < 200; bound++) @(negedge clk);
+      require(ack_valid && ack.txn_id == younger, "younger ACK offered first");
+      @(negedge clk); younger_only = 0;
+      for (bound = 0; rsps_c < r0 + 2 && bound < 200; bound++) @(negedge clk);
+      require(rsps_c == r0 + 2 && acked == first_ack, "both responses accepted without any ACK fire");
+      repeat (2) @(negedge clk);
+      require(ack_valid && ack.txn_id == younger, "younger ACK still offered before release");
+      ack_enable = 1;
+      @(posedge clk);
+      require(ack_valid && ack_ready && ack.txn_id == younger, "first ACK fire consumes the stalled ID");
+      @(negedge clk);
+      for (bound = 0; !ack_valid && bound < 200; bound++) @(negedge clk);
+      require(ack_valid && ack_ready && ack.txn_id == older, "older ACK served next");
+      await_term(122); await_term(123); drain();
+      require(acked == first_ack + 2, "each reordered wire obligation closed exactly once");
+      require_local_seed(928, 8, 1536, 0, "older response reached its own local destination");
+      require_local_seed(944, 8, 1600, 0, "younger response reached its own local destination");
+    end
 
     // Ledger closure.
     drain();

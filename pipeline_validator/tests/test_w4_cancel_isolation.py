@@ -16,6 +16,8 @@ from __future__ import annotations
 import pytest
 
 from pipeline_validator.memory.allocator import MemoryInvariantError
+from pipeline_validator.memory.byte_store import ByteStore
+from pipeline_validator.memory.transfer import TransferStatus, slice_resolved_view
 
 
 def _task_owner(tile: int = 0, ctx: int = 0, task: int = 0, buf: str = "l1"):
@@ -92,8 +94,9 @@ def _drive_until_write_leg(manager, noc, txn, limit: int = 400) -> None:
   raise AssertionError("write leg never accepted")
 
 
-def test_write_after_cancel_completes_with_the_real_effect() -> None:
-  from pipeline_validator.memory.transfer import TransferOp, TransferStatus
+@pytest.mark.parametrize("after_write_leg", (False, True), ids=("during-write-leg", "between-legs"))
+def test_write_after_cancel_completes_with_the_real_effect(after_write_leg: bool) -> None:
+  from pipeline_validator.memory.transfer import TransferLegKind, TransferOp
 
   _config, noc, manager = _manager()
   owner = _task_owner()
@@ -103,11 +106,22 @@ def test_write_after_cancel_completes_with_the_real_effect() -> None:
   manager.submit(txn, cycle=0)
   _drive_until_write_leg(manager, noc, txn)
 
-  assert manager.cancel_owner(owner, cycle=txn.leg_start_cycle) is False
+  cancel_cycle = txn.leg_start_cycle
+  if after_write_leg:
+    # The outbound DMA leg completed, but the final HBM leg has not issued yet.
+    cancel_cycle = txn.leg_completion_cycle
+    manager.note_traversed(noc.step(cancel_cycle), cancel_cycle)
+    manager.step(cancel_cycle)
+    assert txn.legs[txn.current_leg].kind is TransferLegKind.HBM_WRITE
+    assert txn.leg_start_cycle < 0
+  assert manager.cancel_owner(owner, cycle=cancel_cycle) is False
   assert manager.status("scatter") is TransferStatus.CANCEL_REQUESTED
   assert txn.destination_committed_cycle < 0
+  if after_write_leg:
+    with pytest.raises(MemoryInvariantError):
+      manager.terminal_ack("scatter", "ISOLATED", cancel_cycle)
 
-  for cycle in range(txn.leg_start_cycle + 1, txn.leg_start_cycle + 400):
+  for cycle in range(cancel_cycle + 1, cancel_cycle + 400):
     traversed = noc.step(cycle)
     manager.note_traversed(traversed, cycle)
     manager.step(cycle)
@@ -175,24 +189,90 @@ def test_isolation_failure_poisons_new_work_until_quiescent_clear() -> None:
   manager.step(cycle=3)
 
 
-def test_completed_terminal_ack_binds_a_cancelled_transaction_to_completion() -> None:
-  from pipeline_validator.memory.transfer import TransferOp, TransferStatus
+def run_inbound_completion_race(payload: bytes, *, ack_first: bool) -> tuple[TransferStatus, bytes]:
+  """Drive a real TILE_LOAD to its last write, then deliver both events in one cycle."""
+  from pipeline_validator.memory.transfer import TransferLegKind, TransferOp
 
-  _config, _noc, manager = _manager()
+  _, noc, manager = _manager()
+  store = ByteStore()
+  manager.set_byte_store(store)
   owner = _task_owner()
-  txn = _transaction("acked", TransferOp.INDEX_READ, dst=_view("l1", owner), owner=owner)
+  src = slice_resolved_view(_view("l2", owner), 0, len(payload))
+  dst = slice_resolved_view(_view("l1", owner), 0, len(payload))
+  assert src is not None and dst is not None
+  untouched = bytes(b ^ 0xFF for b in payload)
+  store.write_view(src, payload)
+  store.write_view(dst, untouched)
+  txn = _transaction(
+    "inbound", TransferOp.TILE_LOAD, src=src, dst=dst, owner=owner, bytes_total=len(payload)
+  )
   manager.submit(txn, cycle=0)
-  manager.step(cycle=0)
-  completion = txn.leg_completion_cycle
-  assert manager.cancel_owner(owner, cycle=0) is False
-  assert manager.status("acked") is TransferStatus.CANCEL_REQUESTED
+  for cycle in range(400):
+    manager.note_traversed(noc.step(cycle), cycle)
+    manager.step(cycle)
+    if txn.leg_start_cycle >= 0 and txn.legs[txn.current_leg].kind is TransferLegKind.L1_WRITE:
+      break
+  else:
+    pytest.fail("inbound transfer never issued its local write")
 
-  # The boundary really finished the work: that terminal is authoritative.
-  manager.terminal_ack("acked", "COMPLETED", cycle=0)
-  manager.step(cycle=completion)
-  assert manager.status("acked") is TransferStatus.DONE
-  with pytest.raises(MemoryInvariantError):
-    manager.terminal_ack("acked", "ISOLATED", cycle=completion + 1)
+  completion = txn.leg_completion_cycle
+  if ack_first:
+    manager.terminal_ack(txn.transaction_id, "COMPLETED", cycle)
+  manager.cancel_owner(owner, cycle)
+  if not ack_first:
+    manager.terminal_ack(txn.transaction_id, "COMPLETED", cycle)
+  # The ACK decides the outcome. It does not make the local write happen early.
+  assert store.read_view(dst) == untouched
+  with pytest.raises(MemoryInvariantError, match="duplicate"):
+    manager.terminal_ack(txn.transaction_id, "ISOLATED", cycle)
+  with pytest.raises(MemoryInvariantError, match="non-terminal"):
+    manager.acknowledge(txn.transaction_id, cycle)
+  assert manager.step(completion) == (txn,)
+  assert manager.step(completion + 1) == ()
+  outcome = manager.status(txn.transaction_id)
+  manager.acknowledge(txn.transaction_id, completion + 1)
+  assert not manager.outstanding_transactions and not manager.cancellation_pending
+  return outcome, store.read_view(dst)
+
+
+@pytest.mark.parametrize("ack_first", (False, True), ids=("cancel-before-ack", "ack-before-cancel"))
+def test_inbound_completion_wins_same_cycle_cancel(ack_first: bool) -> None:
+  payload = bytes(range(64))
+  assert run_inbound_completion_race(payload, ack_first=ack_first) == (TransferStatus.DONE, payload)
+
+
+@pytest.mark.parametrize(
+  ("during_dma", "completed_ack"),
+  ((True, False), (False, False), (False, True)),
+  ids=("cancel-in-read-dma", "withdraw-after-read-dma", "completed-before-next-leg"),
+)
+def test_read_only_dma_is_not_an_external_write(during_dma: bool, completed_ack: bool) -> None:
+  from pipeline_validator.memory.transfer import TransferLegKind, TransferOp
+
+  _, noc, manager = _manager()
+  owner = _task_owner()
+  txn = _transaction("read", TransferOp.HOST_READ, src=_view("hbm", owner), owner=owner)
+  manager.submit(txn, cycle=0)
+  for cycle in range(400):
+    manager.note_traversed(noc.step(cycle), cycle)
+    manager.step(cycle)
+    leg = txn.legs[txn.current_leg].kind
+    if during_dma and leg is TransferLegKind.GLOBAL_DMA and txn.leg_start_cycle >= 0:
+      break
+    if not during_dma and leg is TransferLegKind.NOC_RESPONSE and not txn.noc_tag:
+      break  # DMA finished; the queued response leg has not yet issued.
+  else:
+    pytest.fail("host read never reached its cancellation point")
+  if completed_ack:
+    manager.terminal_ack(txn.transaction_id, "COMPLETED", cycle)
+  manager.cancel_owner(owner, cycle)
+  for tick in range(cycle + 1, cycle + 400):
+    if txn.status in (TransferStatus.DONE, TransferStatus.CANCELLED):
+      break
+    manager.note_traversed(noc.step(tick), tick)
+    manager.step(tick)
+  assert txn.status is (TransferStatus.DONE if completed_ack else TransferStatus.CANCELLED)
+  assert txn.destination_committed_cycle < 0
 
 
 def test_faulted_terminal_ack_is_never_isolation() -> None:
@@ -209,6 +289,21 @@ def test_faulted_terminal_ack_is_never_isolation() -> None:
   assert manager.status("faulted") is TransferStatus.FAULTED
   with pytest.raises(MemoryInvariantError):
     manager.terminal_ack("faulted", "ISOLATED", cycle=2)
+
+
+def test_rejected_submit_cannot_acquire_a_completion_obligation() -> None:
+  from pipeline_validator.memory.transfer import TransferOp
+
+  _, _, manager = _manager()
+  txn = _transaction("not-admitted", TransferOp.GATHER_L1_LOOKUP)
+  txn.bypass_levels = ("invalid-level",)
+  with pytest.raises(MemoryInvariantError, match="bypass level"):
+    manager.submit(txn, cycle=0)
+  with pytest.raises(MemoryInvariantError):
+    manager.terminal_ack(txn.transaction_id, "COMPLETED", cycle=1)
+  assert manager.cancel_all(cycle=2)
+  manager.acknowledge_all_terminals(cycle=2)
+  assert not manager.outstanding_transactions and not manager.cancellation_pending
 
 
 def test_isolation_confirmation_requires_a_cancelled_transaction() -> None:
