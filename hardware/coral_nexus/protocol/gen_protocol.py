@@ -45,11 +45,17 @@ PROTOCOL_DIR = H / "protocol"
 GENERATED_DIR = PROTOCOL_DIR / "generated"
 WIRE_PY = REPO / "pipeline_validator/cosim/wire.py"
 SCHEMA_FILE = "wire_schema_v1.yaml"
-REQUEST_FILES = ("w2.yaml", "w3.yaml", "w4.yaml", "w5.yaml", "w6.yaml")
+REQUEST_FILES = ("w1.yaml", "w2.yaml", "w3.yaml", "w4.yaml", "w5.yaml", "w6.yaml")
 DIRS = ("G2T", "T2G", "H2G")
 KINDS = ("uint", "enum", "bool", "bitset", "digest")
 _BANNED_FIELD = re.compile(r"(^|_)(addr|address|opcode|pc)($|_)")
-_ONE_WORD_KINDS = {"uint", "enum", "bool", "bitset"}
+# The v3 identity of the reserved msg_type block, held HERE (generator code, outside every
+# editable YAML) so wire_schema_v1.yaml cannot drop tail entries and re-fingerprint its way to a
+# renumbered v3: any reserved list must keep at least V3_RESERVED_COUNT entries, and its first
+# V3_RESERVED_COUNT names must hash to V3_RESERVED_FINGERPRINT (derived from the v3 sealed
+# layout's 0..47 order; extending the list appends AFTER them and leaves this invariant alone).
+V3_RESERVED_COUNT = 48
+V3_RESERVED_FINGERPRINT = "aeeefc19e3a165b0522baf269476516bd6b538f7b813278df048a79ccc80b9c3"
 _INPUTS = (
   "cn_protocol_v1.yaml",
   SCHEMA_FILE,
@@ -192,6 +198,43 @@ def _build(data: dict[str, Any], errors: list[str]) -> dict[str, Any]:
   for n in catalog_order:
     if n not in schema["messages"]:
       errors.append(f"message {n}: in the C009 catalog but missing from the schema")
+  # Index reservation (C035): msg_type numbers assigned by an earlier seal never move. The
+  # reserved prefix is verified against the effective order, so a rename, removal, a catalog
+  # insertion or a reordered new_messages list is refused instead of silently renumbering
+  # sealed consumers (C header, SV offsets, wire.py MSG_INDEX).
+  reservation = schema.get("index_reservation") or {}
+  reserved = list(reservation.get("reserved") or [])
+  if not reserved:
+    errors.append("index_reservation: missing; previously assigned msg_type numbers must remain pinned")
+  fingerprint = reservation.get("reserved_fingerprint")
+  if not isinstance(fingerprint, str) or not fingerprint:
+    errors.append("index_reservation.reserved_fingerprint: missing; the reserved list is bound to it")
+  elif reserved and hashlib.sha256("\n".join(reserved).encode()).hexdigest() != fingerprint:
+    errors.append(
+      "index_reservation: the reserved list no longer matches its fingerprint; a truncated or "
+      "edited list cannot shrink the pinned prefix -- re-derive it deliberately with a new seal"
+    )
+  if len(set(reserved)) != len(reserved):
+    errors.append("index_reservation.reserved: a name appears twice")
+  if len(reserved) < V3_RESERVED_COUNT:
+    errors.append(
+      f"index_reservation: {len(reserved)} entries is shorter than the {V3_RESERVED_COUNT} messages "
+      "the v3 seal numbered; dropping entries and re-fingerprinting cannot renumber v3"
+    )
+  else:
+    head = hashlib.sha256("\n".join(reserved[:V3_RESERVED_COUNT]).encode()).hexdigest()
+    if head != V3_RESERVED_FINGERPRINT:
+      errors.append(
+        "index_reservation: the first 48 entries no longer match the v3 identity held by the "
+        "generator; a v3 msg_type number never moves"
+      )
+  for i, want in enumerate(reserved):
+    got = order[i] if i < len(order) else None
+    if got != want:
+      errors.append(
+        f"index_reservation: sealed position {i} holds {got!r}, not {want!r}; a msg_type "
+        "number assigned by an earlier seal never moves -- append new messages at the end"
+      )
   for n in new_by_name:
     if n in catalog:
       errors.append(f"message {n}: listed as new but already in the catalog")

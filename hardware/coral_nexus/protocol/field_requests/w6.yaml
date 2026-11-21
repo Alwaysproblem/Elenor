@@ -141,7 +141,7 @@ parameters:
       owner: C019,
       from: protocol/w6_terminal_reset.contract.yaml,
       key: reset_endpoint.max_drain_cycles.value,
-      why: "no config key exists today; frozen with a measured baseline",
+      why: "an explicit config key exists since C035 (HardwareConfig.max_drain_cycles, model default 100); the silicon value is still frozen with a measured baseline",
     }
   - {
       name: debug_fifo_depth,

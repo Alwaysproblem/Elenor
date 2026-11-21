@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..execution_ir import ExecGroupActionOp, ExecTileGroupTask
 from ..profiles import (
@@ -28,6 +28,9 @@ from .arena import ArenaPool
 from .cache import CacheCleanRequest, CacheRange, DeterministicLRUCache
 from .mshr import MshrTable
 from .transfer import MemoryTransaction, ResolvedMemoryView, TransferManager, TransferOp, TransferStatus
+
+if TYPE_CHECKING:
+  from ..tile_group import TileGroup
 
 _TERMINAL = frozenset(("completed", "faulted", "cancelled"))
 
@@ -145,7 +148,7 @@ class _Command:
 class ProfileController:
   """The unique profile/configuration writer for one TileGroup."""
 
-  def __init__(self, group: object, *, trace=None) -> None:
+  def __init__(self, group: TileGroup, *, trace=None) -> None:
     self.group = group
     self.trace = trace
     self._registry: ProfileRegistry | None = None
@@ -180,6 +183,16 @@ class ProfileController:
     self._recovery_acks: set[tuple[str, tuple[str, int, int], str]] = set()
     self._recovery_phase = "prepare"
 
+  def _local_pool_ids(self, profile: MemoryProfile) -> tuple[int, ...]:
+    if profile.level == "l2":
+      return tuple(range(profile.pools))
+    return tuple(self.group.python_tiles_by_id)
+
+  def _local_members(self, profile: MemoryProfile) -> tuple[tuple[str, int, int], ...]:
+    if profile.level == "l2" or not self.group.boundary_ports:
+      return profile.member_ids
+    return tuple(m for m in profile.member_ids if m[1] in self.group.python_tiles_by_id)
+
   # -- public lifecycle ------------------------------------------------
 
   @property
@@ -202,9 +215,13 @@ class ProfileController:
       target = getattr(registry.target, level)
       profile = registry.profile(level, target.reset_mode)
       self._active_modes_mut[level] = profile.mode
+      if level == "l1" and (
+        set(self.group.python_tiles_by_id) | set(self.group.boundary_ports) != set(range(profile.pools))
+      ):
+        raise MemoryInvariantError("L1 target and Tile ownership partition disagree")
       self._generations_mut[level] = 0
       self._verify_level_components(level, profile, generation=0)
-      for member_id in profile.member_ids:
+      for member_id in self._local_members(profile):
         if member_id in self._members:
           raise MemoryInvariantError("duplicate profile member identity")
         self._members[member_id] = _MemberState(
@@ -254,7 +271,7 @@ class ProfileController:
       next_generation = self._generations_mut[level] + 1
       self._recovery_targets[level] = profile.mode
       self._recovery_generations[level] = next_generation
-      for member_id in profile.member_ids:
+      for member_id in self._local_members(profile):
         self._requests.append(
           _BusRequest("recover", "recover", member_id, "PREPARE", profile.mode, next_generation)
         )
@@ -271,7 +288,7 @@ class ProfileController:
     expected: set[tuple[str, tuple[str, int, int], str]] = set()
     for level in ("l1", "l2"):
       profile = self._registry.profile(level, self._recovery_targets[level])
-      for member_id in profile.member_ids:
+      for member_id in self._local_members(profile):
         expected.add((level, member_id, stage))
     return expected
 
@@ -283,7 +300,7 @@ class ProfileController:
       for level in ("l1", "l2"):
         profile = self._registry.profile(level, self._recovery_targets[level])
         generation = self._recovery_generations[level]
-        for member_id in profile.member_ids:
+        for member_id in self._local_members(profile):
           self._requests.append(
             _BusRequest("recover", "recover", member_id, "COMMIT", profile.mode, generation)
           )
@@ -310,7 +327,7 @@ class ProfileController:
       profile = self._registry.profile(level, self._recovery_targets[level])
       caches = self._caches(level)
       mshrs = self._mshrs(level)
-      if len(caches) != profile.pools or len(mshrs) != profile.pools:
+      if len(caches) != len(self._local_pool_ids(profile)) or len(mshrs) != len(caches):
         raise MemoryInvariantError(f"{level} recovery component count mismatch")
       if any(mshr.stats.active for mshr in mshrs):
         raise MemoryInvariantError(f"{level} recovery reset has active cache refills")
@@ -325,13 +342,13 @@ class ProfileController:
       mshrs = self._mshrs(level)
       for cache, mshr in zip(caches, mshrs, strict=True):
         discarded_dirty_lines += cache.reset_after_isolation(refills_quiescent=not bool(mshr.stats.active))
-      for pool_id in range(profile.pools):
+      for pool_id in self._local_pool_ids(profile):
         self._pool(level, pool_id).reconfigure(profile, generation, cycle)
       for cache in caches:
         cache.reconfigure(profile.cache_bytes, generation, write_policy=profile.cache_write_policy)
       for mshr in mshrs:
         mshr.reconfigure(generation)
-      for member_id in profile.member_ids:
+      for member_id in self._local_members(profile):
         member = self._members[member_id]
         member.active_mode = profile.mode
         member.generation = generation
@@ -341,7 +358,7 @@ class ProfileController:
         member.committed_runtime_id = ""
       self._active_modes_mut[level] = profile.mode
       self._generations_mut[level] = generation
-      self._transfer_manager().note_profile_commit(level, tuple(range(profile.pools)), generation)
+      self._transfer_manager().note_profile_commit(level, self._local_pool_ids(profile), generation)
     self._commands.clear()
     self._active_command = None
     self._awaits.clear()
@@ -612,6 +629,8 @@ class ProfileController:
       raise MemoryInvariantError("profile command registry hash mismatch")
     if command.level not in ("l1", "l2"):
       raise MemoryInvariantError("profile command level must be l1 or l2")
+    if command.level == "l1" and self.group.boundary_ports:
+      raise MemoryInvariantError("L1 reconfiguration requires an external profile command endpoint")
     if command.expected_mode != self._active_modes_mut[command.level]:
       raise MemoryInvariantError("profile command expected mode is not active")
     if command.target_mode == command.expected_mode:
@@ -631,6 +650,8 @@ class ProfileController:
       raise MemoryInvariantError("maintenance command omits or reorders required steps")
     if not command.levels or any(level not in ("l1", "l2") for level in command.levels):
       raise MemoryInvariantError("maintenance command has invalid levels")
+    if "l1" in command.levels and self.group.boundary_ports:
+      raise MemoryInvariantError("L1 maintenance requires an external cache maintenance endpoint")
     if len(command.levels) != len(set(command.levels)):
       raise MemoryInvariantError("maintenance command levels are duplicated")
     if not command.ranges:
@@ -916,10 +937,10 @@ class ProfileController:
     if level == "l2":
       pool = self._require_attr(self.group, "l2_sram")
     else:
-      tiles = self._tiles()
-      if not 0 <= pool_id < len(tiles):
-        raise MemoryInvariantError("L1 profile member names an unknown Tile")
-      pool = self._require_attr(tiles[pool_id], "l1_allocator")
+      tile = self.group.python_tiles_by_id.get(pool_id)
+      if tile is None:
+        raise MemoryInvariantError("L1 profile member is not locally owned")
+      pool = tile.l1_allocator
     if not isinstance(pool, ArenaPool):
       raise MemoryInvariantError(f"{level} profile backend requires ArenaPool")
     return pool
@@ -958,7 +979,7 @@ class ProfileController:
     return manager
 
   def _verify_level_components(self, level: str, profile: MemoryProfile, generation: int) -> None:
-    for pool_id in range(profile.pools):
+    for pool_id in self._local_pool_ids(profile):
       pool = self._pool(level, pool_id)
       if pool.profile.mode != profile.mode or pool.profile_generation != generation:
         raise MemoryInvariantError(f"{level} ArenaPool reset profile is not installed")
@@ -1032,13 +1053,13 @@ class ProfileController:
       raise MemoryInvariantError("member ArenaPool retains references")
     if not 0 <= bank_id < pool.banks:
       raise MemoryInvariantError("profile member bank is out of range")
-    cache = self._caches(level)[pool_id if level == "l1" else 0]
+    cache = self.group.python_tiles_by_id[pool_id].l1_cache if level == "l1" else self.group.l2_cache
     cache_stats = cache.stats
     if cache_stats.pending_cleans:
       raise MemoryInvariantError("member cache clean isolation is incomplete")
     if cache_stats.dirty_lines and not allow_dirty:
       raise MemoryInvariantError("member cache maintenance is incomplete")
-    mshr = self._mshrs(level)[pool_id if level == "l1" else 0]
+    mshr = self.group.python_tiles_by_id[pool_id].l1_mshr if level == "l1" else self.group.l2_mshr
     if mshr.stats.active:
       raise MemoryInvariantError("member MSHR refills are not drained")
 
@@ -1109,10 +1130,10 @@ class ProfileController:
       return False
     pools: list[ArenaPool] = []
     if level == "l1":
-      pools.extend(self._pool("l1", index) for index, _ in enumerate(self._tiles()))
+      pools.extend(tile.l1_allocator for tile in self.group.tiles)
     else:
       pools.append(self._pool("l2", 0))
-      pools.extend(self._pool("l1", index) for index, _ in enumerate(self._tiles()))
+      pools.extend(tile.l1_allocator for tile in self.group.tiles)
     for pool in pools:
       snapshot = pool.snapshot()
       if (
@@ -1381,7 +1402,7 @@ class ProfileController:
       member.committed_runtime_id = ""
     self._active_modes_mut[command.level] = command.target_mode
     self._generations_mut[command.level] = generation
-    self._transfer_manager().note_profile_commit(command.level, tuple(range(profile.pools)), generation)
+    self._transfer_manager().note_profile_commit(command.level, self._local_pool_ids(profile), generation)
 
   def _isolation_complete(self, record: _Command) -> bool:
     queued = any(item.runtime_id == record.runtime_id for item in self._requests) or any(

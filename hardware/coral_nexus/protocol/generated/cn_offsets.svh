@@ -4,7 +4,7 @@
 localparam int CN_HEADER_WORDS = 4;
 localparam int CN_CONTEXT_SLOTS = 64;
 localparam int CN_DEDUP_ENTRIES = 256;
-localparam int CN_MSG_COUNT = 48;
+localparam int CN_MSG_COUNT = 49;
 localparam int CN_ERR_COUNT = 17;
 localparam int CN_LINKS = 15;
 localparam int CN_DIRS = 3;
@@ -56,6 +56,7 @@ localparam int CN_MSG_REGION_REQUEST = 44;
 localparam int CN_MSG_REGION_GRANT = 45;
 localparam int CN_MSG_REGION_DONE = 46;
 localparam int CN_MSG_PROGRAM_REGISTER = 47;
+localparam int CN_MSG_TICKET_ROLLBACK = 48;
 localparam int CN_ERR_OK = 0;
 localparam int CN_ERR_TRUNCATED = 1;
 localparam int CN_ERR_TRAILING = 2;
@@ -352,6 +353,15 @@ localparam int CN_WORDS_PROGRAM_REGISTER = 6;
 localparam int CN_OFF_PROGRAM_REGISTER_PROGRAM_ID = 0;
 localparam int CN_OFF_PROGRAM_REGISTER_VERSION = 1;
 localparam int CN_OFF_PROGRAM_REGISTER_PACKAGE_HASH = 2;
+localparam int CN_WORDS_TICKET_ROLLBACK = 8;
+localparam int CN_OFF_TICKET_ROLLBACK_LAUNCH_GENERATION = 0;
+localparam int CN_OFF_TICKET_ROLLBACK_ROOT_LAUNCH_GENERATION = 1;
+localparam int CN_OFF_TICKET_ROLLBACK_DISPATCH_ORDINAL = 2;
+localparam int CN_OFF_TICKET_ROLLBACK_TASK_ID = 3;
+localparam int CN_OFF_TICKET_ROLLBACK_CONTEXT_HANDLE = 4;
+localparam int CN_OFF_TICKET_ROLLBACK_TXN_ID = 5;
+localparam int CN_OFF_TICKET_ROLLBACK_CTX_SLOT = 6;
+localparam int CN_OFF_TICKET_ROLLBACK_CTX_GENERATION = 7;
 localparam int CN_CSR_NEXUS_MCTX_DISPATCH_SNAPSHOT = 12'h7c8;
 localparam int CN_CSR_NEXUS_MSNAP_CONFIG = 12'h7c9;
 localparam int CN_CSR_NEXUS_MREGION_START = 12'h7ca;
@@ -411,6 +421,7 @@ function automatic int cn_msg_words(input int m);
     45: cn_msg_words = 5;
     46: cn_msg_words = 5;
     47: cn_msg_words = 6;
+    48: cn_msg_words = 8;
     default: cn_msg_words = -1;
   endcase
 endfunction
@@ -464,6 +475,7 @@ function automatic int cn_msg_chan(input int m);
     45: cn_msg_chan = 0;
     46: cn_msg_chan = 0;
     47: cn_msg_chan = 2;
+    48: cn_msg_chan = 0;
     default: cn_msg_chan = -1;
   endcase
 endfunction
@@ -517,6 +529,7 @@ function automatic int cn_msg_dir(input int m);
     45: cn_msg_dir = 0;
     46: cn_msg_dir = 1;
     47: cn_msg_dir = 2;
+    48: cn_msg_dir = 0;
     default: cn_msg_dir = -1;
   endcase
 endfunction
@@ -570,6 +583,7 @@ function automatic int cn_msg_nfields(input int m);
     45: cn_msg_nfields = 5;
     46: cn_msg_nfields = 5;
     47: cn_msg_nfields = 3;
+    48: cn_msg_nfields = 8;
     default: cn_msg_nfields = 0;
   endcase
 endfunction
@@ -623,6 +637,7 @@ function automatic int cn_msg_nconds(input int m);
     45: cn_msg_nconds = 0;
     46: cn_msg_nconds = 0;
     47: cn_msg_nconds = 0;
+    48: cn_msg_nconds = 1;
     default: cn_msg_nconds = 0;
   endcase
 endfunction
@@ -676,6 +691,7 @@ function automatic int cn_msg_txn(input int m);
     45: cn_msg_txn = -1;
     46: cn_msg_txn = -1;
     47: cn_msg_txn = -1;
+    48: cn_msg_txn = 5;
     default: cn_msg_txn = -1;
   endcase
 endfunction
@@ -729,6 +745,7 @@ function automatic int cn_msg_ctx_slot(input int m);
     45: cn_msg_ctx_slot = 1;
     46: cn_msg_ctx_slot = 1;
     47: cn_msg_ctx_slot = -1;
+    48: cn_msg_ctx_slot = 6;
     default: cn_msg_ctx_slot = -1;
   endcase
 endfunction
@@ -782,6 +799,7 @@ function automatic int cn_msg_ctx_gen(input int m);
     45: cn_msg_ctx_gen = 2;
     46: cn_msg_ctx_gen = 2;
     47: cn_msg_ctx_gen = -1;
+    48: cn_msg_ctx_gen = 7;
     default: cn_msg_ctx_gen = -1;
   endcase
 endfunction
@@ -835,6 +853,7 @@ function automatic int cn_msg_stage(input int m);
     45: cn_msg_stage = -1;
     46: cn_msg_stage = -1;
     47: cn_msg_stage = -1;
+    48: cn_msg_stage = -1;
     default: cn_msg_stage = -1;
   endcase
 endfunction
@@ -888,6 +907,7 @@ function automatic int cn_msg_ack_for(input int m);
     45: cn_msg_ack_for = -1;
     46: cn_msg_ack_for = -1;
     47: cn_msg_ack_for = -1;
+    48: cn_msg_ack_for = -1;
     default: cn_msg_ack_for = -1;
   endcase
 endfunction
@@ -941,6 +961,7 @@ function automatic int cn_msg_establishes(input int m);
     45: cn_msg_establishes = 0;
     46: cn_msg_establishes = 0;
     47: cn_msg_establishes = 0;
+    48: cn_msg_establishes = 0;
     default: cn_msg_establishes = 0;
   endcase
 endfunction
@@ -1177,6 +1198,14 @@ function automatic int cn_field_off(input int m, input int i);
     32'h002f0000: cn_field_off = 0;
     32'h002f0001: cn_field_off = 1;
     32'h002f0002: cn_field_off = 2;
+    32'h00300000: cn_field_off = 0;
+    32'h00300001: cn_field_off = 1;
+    32'h00300002: cn_field_off = 2;
+    32'h00300003: cn_field_off = 3;
+    32'h00300004: cn_field_off = 4;
+    32'h00300005: cn_field_off = 5;
+    32'h00300006: cn_field_off = 6;
+    32'h00300007: cn_field_off = 7;
     default: cn_field_off = -1;
   endcase
 endfunction
@@ -1413,6 +1442,14 @@ function automatic int cn_field_kind(input int m, input int i);
     32'h002f0000: cn_field_kind = 0;
     32'h002f0001: cn_field_kind = 0;
     32'h002f0002: cn_field_kind = 4;
+    32'h00300000: cn_field_kind = 0;
+    32'h00300001: cn_field_kind = 0;
+    32'h00300002: cn_field_kind = 0;
+    32'h00300003: cn_field_kind = 0;
+    32'h00300004: cn_field_kind = 0;
+    32'h00300005: cn_field_kind = 0;
+    32'h00300006: cn_field_kind = 0;
+    32'h00300007: cn_field_kind = 0;
     default: cn_field_kind = 0;
   endcase
 endfunction
@@ -1450,7 +1487,7 @@ function automatic longint unsigned cn_field_limit(input int m, input int i);
     32'h00050006: cn_field_limit = 64'd0;
     32'h00050007: cn_field_limit = 64'd0;
     32'h00060000: cn_field_limit = 64'd0;
-    32'h00060001: cn_field_limit = 64'd48;
+    32'h00060001: cn_field_limit = 64'd49;
     32'h00060002: cn_field_limit = 64'd0;
     32'h00060003: cn_field_limit = 64'd6;
     32'h00060004: cn_field_limit = 64'd6;
@@ -1649,6 +1686,14 @@ function automatic longint unsigned cn_field_limit(input int m, input int i);
     32'h002f0000: cn_field_limit = 64'd0;
     32'h002f0001: cn_field_limit = 64'd0;
     32'h002f0002: cn_field_limit = 64'd0;
+    32'h00300000: cn_field_limit = 64'd0;
+    32'h00300001: cn_field_limit = 64'd0;
+    32'h00300002: cn_field_limit = 64'd0;
+    32'h00300003: cn_field_limit = 64'd0;
+    32'h00300004: cn_field_limit = 64'd0;
+    32'h00300005: cn_field_limit = 64'd0;
+    32'h00300006: cn_field_limit = 64'd0;
+    32'h00300007: cn_field_limit = 64'd0;
     default: cn_field_limit = 64'd0;
   endcase
 endfunction
@@ -1664,6 +1709,7 @@ function automatic int cn_cond_kind(input int m, input int i);
     32'h000d0000: cn_cond_kind = 0;
     32'h000f0000: cn_cond_kind = 0;
     32'h00230000: cn_cond_kind = 0;
+    32'h00300000: cn_cond_kind = 0;
     default: cn_cond_kind = 0;
   endcase
 endfunction
@@ -1679,6 +1725,7 @@ function automatic int cn_cond_a(input int m, input int i);
     32'h000d0000: cn_cond_a = 1;
     32'h000f0000: cn_cond_a = 1;
     32'h00230000: cn_cond_a = 1;
+    32'h00300000: cn_cond_a = 1;
     default: cn_cond_a = 0;
   endcase
 endfunction
@@ -1694,6 +1741,7 @@ function automatic int cn_cond_b(input int m, input int i);
     32'h000d0000: cn_cond_b = 0;
     32'h000f0000: cn_cond_b = 0;
     32'h00230000: cn_cond_b = 0;
+    32'h00300000: cn_cond_b = 0;
     default: cn_cond_b = 0;
   endcase
 endfunction
@@ -1709,6 +1757,7 @@ function automatic int cn_cond_value(input int m, input int i);
     32'h000d0000: cn_cond_value = 0;
     32'h000f0000: cn_cond_value = 0;
     32'h00230000: cn_cond_value = 0;
+    32'h00300000: cn_cond_value = 0;
     default: cn_cond_value = 0;
   endcase
 endfunction

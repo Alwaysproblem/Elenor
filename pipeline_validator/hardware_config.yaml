@@ -129,6 +129,11 @@ control:
     bind_cycles: 8 # slot frame 3.2 FSM
     slot_count: 16 # fixed L1 slot ABI
 
+  group_reset:
+    # DRAIN watchdog（W1-04/C035）：严格大于语义——drain_cycles 超过上限才强制
+    # cancel，恰等于 N 不触发。实验基线（模型默认），非硅冻结值。
+    max_drain_cycles: 100
+
 fabric:
   # 当前 validator 的 group-level HBM <-> L2 DMA 模型。
   dma:

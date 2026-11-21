@@ -306,6 +306,31 @@ def test_a_digest_must_be_four_words(pdir: Path, tmp_path: Path) -> None:
   _fails(pdir, tmp_path, "digest")
 
 
+def test_a_renumbered_sealed_message_is_refused(pdir: Path, tmp_path: Path) -> None:
+  def renumber(doc: dict[str, Any]) -> None:
+    # any rename, removal or insertion inside the v3-reserved block moves a sealed msg_type number
+    doc["messages"]["CANCEL_TASKX"] = doc["messages"].pop("CANCEL_TASK")
+    for m in doc["new_messages"]:
+      if m["name"] == "CANCEL_TASK":
+        m["name"] = "CANCEL_TASKX"
+
+  _mutate_schema(pdir, renumber)
+  _fails(pdir, tmp_path, "index_reservation: sealed position")
+
+
+def test_dropping_the_index_reservation_is_refused(pdir: Path, tmp_path: Path) -> None:
+  _mutate_schema(pdir, lambda d: d.pop("index_reservation"))
+  _fails(pdir, tmp_path, "index_reservation: missing")
+
+
+def test_a_message_appended_after_the_reserved_block_keeps_every_sealed_number(pdir: Path) -> None:
+  # the legal direction: one more message after PROGRAM_REGISTER moves no earlier id
+  before = gp.build_model(pdir)
+  ids = {m["name"]: m["id"] for m in before["messages"]}
+  assert ids["PROGRAM_REGISTER"] == 47 and ids["TICKET_ROLLBACK"] == 48
+  assert len(ids) == 49
+
+
 # ---------------------------------------------------------------------------------------------------
 # widths: nothing is invented
 # ---------------------------------------------------------------------------------------------------
@@ -461,6 +486,30 @@ def test_freeze_record_hash_mismatch_and_bad_state_are_rejected(tmp_path: Path) 
   bad = copy.deepcopy(record)
   bad["inputs"]["hardware/coral_nexus/protocol/missing.yaml"] = "0" * 64
   assert any("missing" in e for e in freeze_check.verify(bad))
+
+
+def test_the_drain_watchdog_is_verified_and_drift_is_refused(
+  tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+  # the committed tree verifies: budget record == explicit config default, no getattr fallback
+  assert freeze_check.verify_watchdog() == []
+  # a drifted budget value is caught against the explicit default
+  proto = tmp_path / "protocol"
+  shutil.copytree(PROTO, proto, ignore=shutil.ignore_patterns("__pycache__"))
+  budgets = proto / "channel_budgets.yaml"
+  budgets.write_text(budgets.read_text().replace("value: 100,", "value: 101,"))
+  monkeypatch.setattr(freeze_check.gp, "PROTOCOL_DIR", proto)
+  assert any("differs from the explicit default" in e for e in freeze_check.verify_watchdog())
+  # a reintroduced getattr fallback, a non-strict comparison and a lost explicit read are caught
+  source = (REPO_ROOT / "pipeline_validator/runtime/reset_domain.py").read_text()
+  consumer = tmp_path / "reset_domain.py"
+  monkeypatch.setattr(freeze_check, "WATCHDOG_CONSUMER", str(consumer))
+  consumer.write_text(source.replace("cfg.max_drain_cycles:", 'getattr(cfg, "max_drain_cycles", 100):'))
+  assert any("getattr fallback" in e for e in freeze_check.verify_watchdog())
+  consumer.write_text(source.replace("> cfg.max_drain_cycles:", ">= cfg.max_drain_cycles:"))
+  assert any("strictly greater" in e for e in freeze_check.verify_watchdog())
+  consumer.write_text(source.replace("cfg.max_drain_cycles", "self._drain_limit"))
+  assert any("strictly greater" in e for e in freeze_check.verify_watchdog())
 
 
 def test_the_required_seal_set_is_held_by_the_checker() -> None:
@@ -660,6 +709,14 @@ def _scenarios() -> dict[str, list[Case]]:
     (_port("ACK"), _ack("TASK_COMMIT_FINAL", "ACCEPTED", 2)),
     (_port("TASK_COMMIT_FINAL"), wire.pack("TASK_COMMIT_FINAL", final, 2)),
   ]  # fmt: skip
+  rollback: list[Case] = [
+    (_port("TASK_COMMIT"), wire.pack("TASK_COMMIT", commit, 0)),
+    (_port("ACK"), _ack("TASK_COMMIT", "HOLD_READY", 0)),
+    (_port("ACK"), _ack("TICKET_ROLLBACK", "COMPENSATED", 1)),  # not issued
+    (_port("TICKET_ROLLBACK"), wire.pack("TICKET_ROLLBACK", final, 1)),
+    (_port("ACK"), _ack("TICKET_ROLLBACK", "COMPENSATED", 2)),
+    (_port("ACK"), _ack("TICKET_ROLLBACK", "COMPENSATED", 3)),
+  ]
   old_gen = {"ctx_generation": 4}
   retire = {**TASK_KEY, **old_gen, "drain_evidence_seq": 1}
   limit = wire.DEDUP_ENTRIES
@@ -676,7 +733,7 @@ def _scenarios() -> dict[str, list[Case]]:
     (_port("CANCEL_TASK"), wire.pack("CANCEL_TASK", {**TASK_KEY, **old_gen, "ctx_slot": 2}, 5)),
     (_port("RETIRE_READY"), wire.pack("RETIRE_READY", {**retire, "ctx_slot": 2}, 0)),
   ]  # fmt: skip
-  return {"handshake": handshake, "flood": flood, "stale": stale}
+  return {"handshake": handshake, "rollback": rollback, "flood": flood, "stale": stale}
 
 
 def test_scenario_outcomes_are_the_documented_ones() -> None:
@@ -684,6 +741,9 @@ def test_scenario_outcomes_are_the_documented_ones() -> None:
   assert [line.split()[0] for line in _python_lines(scenarios["handshake"])] == [
     "OK", "OK", "OK", "OK", "DUPLICATE_STAGE", "DUPLICATE_STAGE"
   ]  # fmt: skip
+  assert [line.split()[0] for line in _python_lines(scenarios["rollback"])] == [
+    "OK", "OK", "ACK_MISMATCH", "OK", "OK", "DUPLICATE_STAGE"
+  ]
   flood = [line.split()[0] for line in _python_lines(scenarios["flood"])]
   assert flood[: wire.DEDUP_ENTRIES] == ["OK"] * wire.DEDUP_ENTRIES and flood[-2:] == ["CAPACITY"] * 2
   assert [line.split()[0] for line in _python_lines(scenarios["stale"])] == [

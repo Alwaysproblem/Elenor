@@ -420,7 +420,7 @@ Behavioral mutants live under `verification/unit/w6/mutants/reset-*.patch`;
 at least nine distinct patches must apply, compile and die on an executed
 `C034_ASSERT` — build failures, timeouts and watchdogs are not kills.
 
-C015 anchor drift: the frozen contracts cite ten Python statements in
+C015 anchor drift at the C034/v3 baseline: the frozen contracts cited ten Python statements in
 `pipeline_validator/tile_group.py` and
 `pipeline_validator/runtime/reset_domain.py` whose lines moved (six had
 already drifted at the C033 base; four moved with the C034 ResetDomain
@@ -428,7 +428,7 @@ rework; all statements are unchanged and remain in the same owning methods).
 `validate_w6_contract.py` binds exactly those ten citations by their contract
 identity (label + field location) AND their sealed (file, original line,
 needle) triple, in a fail-closed author-time table (`ANCHOR_RELOCATIONS`,
-derived from seal revision `5ed2217`). The sealed identity is verified
+derived from seal revision `5ed2217`; C035/v4 re-pins only the changed watchdog comparison). The sealed identity is verified
 FIRST: an altered line, needle, file or a swapped citation fails with the
 ordinary SOURCE_LINE_MISMATCH before any text is read back, so pointing a
 citation at today's moved text — or at a comment or docstring — cannot
@@ -446,6 +446,45 @@ line, source and owner) only when the live line actually moved. Every other
 citation keeps its exact-line check; the validator never calls git at
 runtime, there is no fuzzy needle search, and source lines are never padded
 to preserve numbers.
+
+## C035 admission and residual-resource retirement
+
+`cn unit --suite w1 --config "$PWD/hardware/coral_nexus/configs/cs1_c2.yaml" --out "$EVIDENCE/unit"`
+exercises the Python Group and the locked Verilated C ABI **unit** endpoint. The C035 tests run the
+same conda interpreter read-only inside the builder: loading the builder's `.so` into an older host
+glibc is not equivalent. No network, Python-package installation or system changes are required.
+Each directed run retains `c035.json` with submitted frames, actual collected replies and final
+parent-resource observations under the unit's pytest evidence directory.
+
+Admission reports `WAIT_SLOT` for an unavailable Context slot and `WAIT_CONTROL_RESOURCE` for
+an exhausted CTRL link or ticket table. A free, explicitly pinned Context does not consume
+a ticket, R lease or L2 pin while the Group is waiting for CTRL credit.
+
+For an external Tile, `TASK_PLAN` is not a commitment. Parent preparation takes an R lease, L2 access
+pins and a participant reference on the already-reserved dispatch event. This reference is not a new
+event slot or a compiler dependency. `TASK_COMMIT` obtains a local hold. An issued
+`TASK_COMMIT_FINAL` cannot be withdrawn; only the matched `ACCEPTED` reply announces the Task.
+Before that grant is issued, a held transaction is withdrawn by `TICKET_ROLLBACK`; reusing its
+control slot requires the matching `COMPENSATED` reply. `CANCEL_TASK` remains a different operation.
+
+The Tile re-checks the planned pool version against its live allocator at HOLD. If another
+reservation or release invalidates that snapshot, the HOLD returns `STALE`, not `FAULT`.
+The Group unwinds R, pins and the event reference. It retries the same Task with a fresh
+transaction and the Tile's newer version only after both the compensation ACK and the matching
+`RESOURCE_UPDATE`. Either channel can arrive first. A stale report's Arena generation describes
+the physical slot's history; only `HOLD_READY` binds an allocation to the ticket.
+
+`RESOURCE_UPDATE` supplies the Tile's allocation generation. `RETIRE_READY` plus that identity
+permits `RETIRE` without waiting for parent R or input pins. A queued authorization is not a
+handshake: parent cleanup requires `TASK_COMPLETION` after the physical grant. An input phase
+releases only actual pure readers and only after all participants report it. A retired participant
+can release its own remaining pins earlier. Neither action retires a root with a live Route, L2 view
+or outstanding job.
+
+`Simulator(..., boundary_ports={tile_id: port})` uses a concrete port instead of allocating a
+`ComputeTile` at that physical ID. Without ports, admission and retirement remain on the local
+Python path. These tests do not implement external dynamic L1 profile transitions, C036 gate wake,
+C039 program installation or C040 oneTile execution; a unit stub is not CS1 evidence.
 
 ## Offline seeds (C004)
 

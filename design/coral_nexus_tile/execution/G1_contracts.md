@@ -264,3 +264,13 @@ cn gate --stage G1 --out "$EVIDENCE/gate"
 ```
 
 - **通过/交接**：全部必需合同和资源证据闭合；联合 seal 的故意缺项/陈旧输入负例拒绝。W1-01 可关闭；W0-04 静态目标生成完成但其生成到真实 RTL 的消费者证明仍由 C040/C065 验收。CN-G1 关闭，C021 以后实现只消费明确的 frozen 输入。
+
+<a id="c035-g1-reopen"></a>
+
+## C035 版本化重开（seal v3 → v4；仅协议面，C035 卡的一部分）
+
+用户批准的 G1 版本化重开：归档 v3、追加事务回滚、显式化 watchdog、重生成后重新封印。本节只记录协议面事实；准入/退休协调器与行为测试归 C035 主体（G2_scalar.md #c035），不在本文件展开。
+
+- **追加 `TICKET_ROLLBACK`（CTRL/G2T，owner W1，request `field_requests/w1.yaml`）**：字段 `[task_key 组, txn_id, ctx_slot, ctx_generation]`，8 payload words，id=48。成功 ACK 仅在本地释放真实发生后发出：`ACK(txn_id, ack_for_message_type=TICKET_ROLLBACK, outcome=COMPENSATED)`；FINAL 授权后不再回滚（ADM-04，取消走 CANCEL_TASK/drain）。**旧索引全部保留**（含 host-only PROGRAM_REGISTER=47）：`wire_schema_v1.yaml` 新增 `index_reservation`（v3 已封 48 名单 + `reserved_fingerprint` sha256 绑定），生成器强制有效消息序以该名单为前缀且名单与指纹一致，重命名/删除/插入/截断即拒绝。
+- **watchdog 显式化**：`HardwareConfig.max_drain_cycles: int = 100`（YAML 路径 `control.group_reset.max_drain_cycles`，模型基线，非硅冻结）；`runtime/reset_domain.py` 改读显式字段（严格大于语义保留，getattr fallback 移除）。`channel_budgets.yaml` 新增顶层 `watchdog` 段（恰一条，value/unit/bounds/comparison 逐字面校验，source=config 显式字段声明行）；`freeze_check.py` 新增 `verify_watchdog()` 并接入 seal 拒绝与 `verify_seal`：预算记录↔显式默认值↔字段声明行↔`ResetDomain.step` 内恰一条 `if self.drain_cycles > cfg.max_drain_cycles:`（AST 精确，注释/`>=`/方法外同文均拒绝；坏输入报错不抛栈）。C015 合同 `w6_terminal_reset.contract.yaml` 的 `config_key_exists` 改 true 并引用显式键；value 仍 `unresolved`（硅值仍归 C019 容量证明）。
+- **引用迁移**：C013 的 L1 退休证据改为 `RetirementCoordinator.step_python` 中实际执行的 `retire_arena`，不是复位清扫路径。C015 的事件表引用随真实 participant ref 迁移；watchdog 引用改为 `ResetDomain.step` 的显式字段比较。`task_commits_per_tile_per_tick` 引用协调器限制同一 Tile 每拍至多一个 FINAL 的分支；它不是消息到达率。

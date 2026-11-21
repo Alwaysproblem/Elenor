@@ -10,7 +10,7 @@
       "name": "context_count_min",
       "value": 1,
       "unit": "count",
-      "provenance": { "file": "pipeline_validator/config.py", "line": 495 }
+      "provenance": { "file": "pipeline_validator/config.py", "line": 505 }
     },
     {
       "name": "context_count_max",

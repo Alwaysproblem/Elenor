@@ -505,6 +505,20 @@ ROB 同 PC 双 Context store、错误 op_seq、独立退休、局部 fault flush
 
 - **通过/交接**：Python 侧与 stub 驱动版对拍（相同背压/取消注入下相同接受集、补偿终态、unclosed 清零）；消费者：C036、C039（INSTALL 经准入）、C040（oneTile 全链）。本卡不宣称 CS1 级 PASS。
 
+**C035 已通过 W1-04 准入/退休单元验收。** 本卡使用[版本化重开的 G1 合同](G1_contracts.md#c035-g1-reopen)。旧 seal 和消息 0–47 的编号保留；`TICKET_ROLLBACK` 为 48。`CANCEL_TASK` 不充当票据回滚，MEMORY `TERMINAL_ACK` 不充当 Task 退休凭证。`RETIRE` 所带 Arena generation 来自 Tile 的 `RESOURCE_UPDATE`，不是 Group 根据 Context generation 推算的。
+
+- 未替换的 Tile 保留 `route.admissions`；显式绑定 `TilePort` 的位置不构造 Python `ComputeTile`。两种后端通过同一 Group 收尾逻辑归还剩余 L2 pin、R 和 Route；外部 Tile 的 Frame/Arena 只由端点回收。Group 在真实 `TASK_COMPLETION` 前不释放这些剩余父资源。
+- Loader 与 `IR_SPEC.md` §4.10 对齐：有实际读写必须发相应阶段；没有访问时可显式声明空阶段，两方向仍各至多一次。独立 verifier 同时核对编译后实际指令、dispatch policy 和事件标签；一个没有 L2 输入的阶段可以聚合，但不会创造或解除一个 pin。
+- 纯 Python 双任务用例与基线 `a98e47f9de` 均在第 541 拍结束，五条生命周期记录逐项相同。对含四个 L2 读绑定的 Grid，最后一个输入信号到达后才统一解剩余纯读 pin；若一个 Task 已先退休，先清它自己的 pin。四个空输入 Task 同样能完成一次聚合，读 pin 始终为 0。这里验证 Group 账本，不代表 stub 执行了四次真实内存读取。
+- v4 W1 定向覆盖十三个准入/退休和五个阶段场景，均使用锁定容器中的 Verilated C ABI 单元端点。FINAL 前撤销：接受集为空，收到 `COMPENSATED`，无 Task 终态；FINAL 后取消：一个已接受 Task 以 `RESET` 退休，无回滚。FINAL 安装失败与取消的两种到达次序均保留原故障引用 1，最终为 `ERROR` 而非 `DONE`。单 Tile 的 R 峰值在 R=1/2 配置下分别为 1/2。
+  单独阻塞 EVENT 链路时，`COMPENSATED` 可以先到，但此时还不能回 `DRAIN`；释放背压后先观测到旧 HOLD 的 `RESOURCE_UPDATE`，再收到 `DRAIN` 的六位全真 ACK。这个负例防止用“没有票据”冒充“所有链路已排空”。
+- ADM-02：两个 Context 真实地以 pool version 0 发 PLAN；第一个 HOLD 占用资源后，第二个 HOLD 返回 `STALE` 而不是 root fault。父资源全退，`COMPENSATED` 与同代 `RESOURCE_UPDATE(version=1)` 均收到后才用新事务号重做 PLAN；该 Task 和 Context generation 不变。分别阻塞 CTRL 与 EVENT 验证两种顺序，最终都是两个 `DONE`、无残留，过期票据从未发 FINAL。
+- ADM-05：当 `RUN_BEGIN` 占用唯一的 CTRL credit，而指定 Context 1 空闲时，Route 报 `WAIT_CONTROL_RESOURCE`，不领取票据、R 或 L2 pin；credit 归还后仍在 Context 1 提交并以 `DONE` 退休。旧代码误报 `WAIT_SLOT`，红/绿收据为 `free-slot-ctrl-{red,green}.log`。
+- C039/C040 接线注意：HOLD 同拍分配 Arena 并发送 `RESOURCE_UPDATE` 时，必须报告**本拍新分配值**。首版单元端点读了非阻塞赋值前的旧寄存器，实际线上出现 `RESOURCE_UPDATE(arena_alloc_gen=0)` → `RETIRE(0)` 无终态、R 仍为 1；修复上报源后原退休判据未改。不能靠忽略 Arena generation 来消除停顿。
+- G1 v4 seal SHA-256 为 `b3a0ed7cf674a9e185b86f15ecf29da575af555f36c5a4ece6076bbdd16646ea`；`PROTOCOL_FREEZE.v3.json` 与旧 seal 逐字节一致。G1 gate 通过，contracts 1330 项通过，`sources verify` 57/57。独立 oracle 的能力等级与预期位串均未变，只更新引用摘要后重新验收；不能用旧 seal 的结果替代 v4 的通过记录。
+- v4 注册入口全部通过：W1 35、W2 8、W4 39、W6 5、W7 220。W2 采用已修正的独立测试夹具 `55111edcc3`；原始失败、修正观测口后的失败和独立 Spike 对照都保留在证据包中。全量 validator 为 616 passed、1 skipped（split-KV 分区交接只适用于 decode）；全量及变更文件 pre-commit 通过。
+- 验收包：`out/coral_nexus/C035/accept-B6QOqhkR/C035-evidence.tar.gz`，SHA-256 `9fc2d21b6423df4919d48fcdbf2576bf6d2be73517189eefae5a492ae42cd430`。包内含注册入口结果、Verilated 端点收发记录和源文件摘要。本卡未运行 CN-G2 gate，不是 CS1 或 oneTile 整链验收；C036 的 gate 唤醒不在此结论内。
+
 <a id="c036"></a>
 
 ## C036 — gate 版本变化唤醒 Route 与 Task

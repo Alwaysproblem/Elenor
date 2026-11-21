@@ -182,18 +182,25 @@ reset_endpoint:
     owner: group
     tile_copy: forbidden
     upper_limit_action: "Group forces cancellation of in-flight transfers; the drain is still complete only on real evidence or isolation"
-    config_key_exists: false
+    comparison: strictly_greater
+    config_key_exists: true
+    config_key_source:
+      {
+        file: pipeline_validator/config.py,
+        line: 246,
+        needle: "max_drain_cycles: int",
+      }
     source:
       {
         file: pipeline_validator/runtime/reset_domain.py,
-        line: 89,
-        needle: 'getattr(cfg, "max_drain_cycles", 100)',
+        line: 171,
+        needle: "cfg.max_drain_cycles",
       }
     value:
       {
         value: unresolved,
         owner: C019,
-        reason: "the model value 100 is a getattr default and not a config key; frozen by the capacity proof",
+        reason: "the explicit config key exists since C035 (HardwareConfig.max_drain_cycles, model default 100); the default is an exploration baseline, not a silicon freeze, and the value stays the capacity proof's to freeze",
       }
   mark_events:
     writer: tile

@@ -93,7 +93,20 @@ class RtlTileBackend:
     cfg.inject_abort_at_tick = self._inject_abort_at_tick
     cfg.trace = 0
     cfg.reserved[0] = self._stub_flags & 0xFF
+    # Physical link identity for lifecycle sessions (RESOURCE_UPDATE/RETIRE carry it;
+    # the C ABI rejects unsupported ids at attach instead of the stub guessing).
+    tile = self._tile_id & 0xFFFFFFFF
+    cfg.reserved[1] = tile & 0xFF
+    cfg.reserved[2] = (tile >> 8) & 0xFF
+    cfg.reserved[3] = (tile >> 16) & 0xFF
+    cfg.reserved[4] = (tile >> 24) & 0xFF
     return cfg
+
+  # A freeze NEVER blocks transport here: every already-queued G2T frame (admissions
+  # included) keeps draining to the DUT, so a freeze cannot deadlock rollback, cancel,
+  # retire or any other committed control reply behind a stalled head-of-line packet.
+  # New-admission enforcement during a freeze is the coordinator's job: it simply stops
+  # enqueueing new admission work.
 
   @property
   def tile_id(self) -> int:
@@ -102,6 +115,22 @@ class RtlTileBackend:
   @property
   def backend_kind(self) -> BackendKind:
     return "stub" if self._is_unit_stub else "rtl"
+
+  def g2t_accepted_seq(self, channel: str) -> int:
+    """Last G2T message_seq the DUT actually accepted on this link, or -1.
+
+    Pure computation over the credit ledger (never advanced by `send` staging):
+    per-channel contiguous numbering gives `next_tx_seq - in_flight - 1`, where
+    `in_flight` covers queued AND P1-stalled frames, so a merely-enqueued
+    RETIRE/FINAL cannot make a premature ACK or completion look accepted.
+    """
+    if channel not in wire.CHANNELS:
+      raise ValueError(f"unknown channel {channel!r}")
+    return (
+      self._tx_seq.get((channel, "G2T"), 0)
+      - self.credits.pool(channel, "G2T").in_flight
+      - 1
+    )
 
   def can_accept_context(self, context_id: int | None = None) -> bool:
     _ = context_id
@@ -151,6 +180,12 @@ class RtlTileBackend:
     return msg
 
   def step(self, cycle: int, *, freeze_new_work: bool = False) -> None:
+    """One `bp_drive -> bp_tick -> bp_collect` cycle.
+
+    `freeze_new_work` never blocks transport: every already-queued G2T frame keeps
+    draining (no head-of-line blocking behind a stalled admission). The coordinator
+    enforces freezes by not enqueueing new work. The DUT fatal path is unchanged.
+    """
     if self._last_step_cycle == cycle:
       raise RuntimeError(f"RtlTileBackend(tile={self._tile_id}) stepped twice in cycle {cycle}")
     if self.fatal_incomplete is not None:
@@ -160,7 +195,7 @@ class RtlTileBackend:
     drive_items: list[tuple[int, bytes | memoryview]] = []
     for ch in wire.CHANNELS:
       sid = self._g2t_slot_by_ch[ch]
-      if self._g2t_inflight[ch] is None and not freeze_new_work and self._g2t_queues[ch]:
+      if self._g2t_inflight[ch] is None and self._g2t_queues[ch]:
         self._g2t_inflight[ch] = self._g2t_queues[ch].popleft()
       inflight = self._g2t_inflight[ch]
       if inflight is not None:
@@ -293,6 +328,7 @@ class RtlTileBackend:
       "fatal_code": int(st.fatal_code),
       "proto_err": int(st.proto_err),
       "staged_pending": int(st.staged_pending),
+      "g2t_accepted_seq": {ch: self.g2t_accepted_seq(ch) for ch in wire.CHANNELS},
       "credits": self.credits.snapshot(),
       "fatal_incomplete": self.fatal_incomplete,
     }

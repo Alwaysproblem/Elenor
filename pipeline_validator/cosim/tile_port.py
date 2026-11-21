@@ -18,6 +18,7 @@ Invariants (execution_guide.md §6 & W1_Boundary_Cosimulation_Plan.md §8.5):
 
 from __future__ import annotations
 
+import struct
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -28,6 +29,11 @@ from . import wire
 BackendKind = Literal["python", "rtl", "stub"]
 VALID_BACKEND_KINDS: frozenset[str] = frozenset({"python", "rtl", "stub"})
 CS1_ELIGIBLE_BACKEND_KINDS: frozenset[str] = frozenset({"python", "rtl"})
+
+def wire_message_seq(frame: bytes) -> int:
+  """Read word 2 of a packed C017 header returned by TilePort.send."""
+  return struct.unpack_from("<Q", frame, 16)[0]
+
 
 # Default per-(channel, dir) boundary FIFO credit capacities derived from C009 channel_budgets.yaml
 # transaction_capacity entries (CTRL=16 dispatch_capacity, EVENT=64 bounded window, PROGRAM=8,
@@ -296,6 +302,10 @@ class TilePort(Protocol):
 
   def send(self, msg: BoundaryMessage) -> bytes: ...
 
+  def g2t_accepted_seq(self, channel: str) -> int:
+    """Last G2T message_seq accepted on this link, or -1. Enqueue alone is not acceptance."""
+    ...
+
   def poll_inbound(self) -> bool: ...
 
   def pop_inbound(self) -> BoundaryMessage | None: ...
@@ -349,6 +359,9 @@ class TileProtocolStub:
 
   def outbox_ready(self, channel: str = "CTRL") -> bool:
     return self.credits.pool(channel, "G2T").can_send()
+
+  def g2t_accepted_seq(self, channel: str) -> int:
+    return self._tx_seq.get((channel, "G2T"), 0) - self.credits.pool(channel, "G2T").in_flight - 1
 
   def send(self, msg: BoundaryMessage) -> bytes:
     if not isinstance(msg, BoundaryMessage):

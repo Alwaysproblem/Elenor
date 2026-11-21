@@ -23,7 +23,7 @@ ownership:
         source:
           {
             file: pipeline_validator/memory/transfer.py,
-            line: 646,
+            line: 679,
             needle: _l1_stage,
           },
       }
@@ -73,7 +73,7 @@ ownership:
         source:
           {
             file: pipeline_validator/memory/transfer.py,
-            line: 1796,
+            line: 1901,
             needle: "def confirm_isolation",
           },
       }
@@ -118,7 +118,7 @@ ownership:
         source:
           {
             file: pipeline_validator/tile_group.py,
-            line: 1534,
+            line: 1449,
             needle: "def retire_context_arena",
           },
       }
@@ -429,8 +429,8 @@ lifecycle:
         rule: "the freed view does NOT shrink allocated bytes; the L1 Arena + Frame + UCE slot themselves return ONLY at Task safe retirement",
         source:
           {
-            file: pipeline_validator/tile_group.py,
-            line: 1746,
+            file: pipeline_validator/cosim/retirement.py,
+            line: 155,
             needle: retire_arena,
           },
       }
@@ -440,7 +440,7 @@ lifecycle:
         source:
           {
             file: pipeline_validator/tile_group.py,
-            line: 795,
+            line: 816,
             needle: "def release_l2",
           },
       }
@@ -458,7 +458,7 @@ lifecycle:
         source:
           {
             file: pipeline_validator/tile_group.py,
-            line: 1534,
+            line: 1449,
             needle: "def retire_context_arena",
           },
       }
@@ -471,7 +471,7 @@ lifecycle:
         source:
           {
             file: pipeline_validator/tile_group.py,
-            line: 1021,
+            line: 1042,
             needle: "def _unpin_grid_readers",
           },
       }

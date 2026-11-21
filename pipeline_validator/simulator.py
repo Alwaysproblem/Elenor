@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 
 from .compiled_program import CompiledProgram, LoadedProgram
 from .config import HardwareConfig, SimConfig
+from .cosim.tile_port import TilePort
 from .device import CpuDeviceController
 from .execution_ir import ExecDeviceOp, ExecModel, ExecTileGroupTask, GlobalBinding
 from .immutable import canonical_value
@@ -49,7 +50,10 @@ class Simulator:
   _host_environment: HostEnvironment | None = None
   _compiled_entry: CompiledProgram | None = None
 
-  def __init__(self, hw: HardwareConfig, sim: SimConfig, enable_tracer: bool = False, *, byte_store=None):
+  def __init__(
+    self, hw: HardwareConfig, sim: SimConfig, enable_tracer: bool = False, *, byte_store=None,
+    boundary_ports: Mapping[int, TilePort] | None = None,
+  ):
     self.hw = hw
     self.sim = sim
     self.tracer = Tracer(hw) if enable_tracer else None
@@ -63,6 +67,7 @@ class Simulator:
       scheduler_config=sim.group,
       byte_store=byte_store,
       backend_kind=sim.backend_kind,
+      boundary_ports=boundary_ports,
     )
     self.cycle = 0
     self._trace: list = []
@@ -478,8 +483,12 @@ class Simulator:
     del bindings
 
   def _configuration(self, bindings: Mapping[str, GlobalBinding]) -> dict:
-    return {
+    result = {
       "hardware": canonical_value(self.hw),
       "simulation": canonical_value(self.sim),
       "bindings": canonical_value(bindings),
     }
+    if self.group.boundary_ports:
+      # Unit endpoints can exercise the real transport, never upgrade a run to CS1 evidence.
+      result["boundary_backends"] = {str(i): p.backend_kind for i, p in self.group.boundary_ports.items()}
+    return result

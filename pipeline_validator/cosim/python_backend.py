@@ -60,6 +60,9 @@ class PythonTileBackend:
   def outbox_ready(self, channel: str = "CTRL") -> bool:
     return self.credits.pool(channel, "G2T").can_send()
 
+  def g2t_accepted_seq(self, channel: str) -> int:
+    return self._tx_seq.get((channel, "G2T"), 0) - self.credits.pool(channel, "G2T").in_flight - 1
+
   def send(self, msg: BoundaryMessage) -> bytes:
     """Enqueue one G2T `BoundaryMessage` without stepping `ComputeTile` or `TileUCE`."""
     if not isinstance(msg, BoundaryMessage):

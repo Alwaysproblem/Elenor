@@ -446,6 +446,7 @@ class _ProgramEffects:
   global_writes: tuple[int, ...]
   uses_l1: bool
   gather_levels: frozenset[str]
+  emitted_phases: tuple[bool, bool]  # input_released, output_ready
   scatter_formals: frozenset[int] = frozenset()
   gather_scopes: Mapping[int, str | None] = field(default_factory=dict)
 
@@ -607,7 +608,7 @@ def _verify_program(
     descriptor_views[name] = tuple(effects)
 
   _verify_cache_contract(program, registry, where)
-  _verify_tile_instructions(program, descriptor_views, layout, where)
+  emitted_phases = _verify_tile_instructions(program, descriptor_views, layout, where)
   return _ProgramEffects(
     FrozenMap(descriptor_views),
     tuple(dict.fromkeys(l2_reads)),
@@ -616,6 +617,7 @@ def _verify_program(
     tuple(dict.fromkeys(global_writes)),
     bool(l1_buffers or descriptor_views),
     frozenset(gather_levels),
+    emitted_phases,
     frozenset(scatter_formals),
     FrozenMap(gather_scopes),
   )
@@ -722,7 +724,7 @@ def _verify_tile_instructions(
   descriptors: Mapping[str, tuple[tuple[ExecMemoryView, bool], ...]],
   layout: ArenaLayout,
   where: str,
-) -> None:
+) -> tuple[bool, bool]:
   layout_by_id = {item.buffer_id: item for item in layout.buffer_layouts}
   live: dict[str, BufferLayout] = {}
   allocated: set[str] = set()
@@ -850,8 +852,9 @@ def _verify_tile_instructions(
   has_l2_writes = any(
     view.space == "l2" and writing for views in descriptors.values() for view, writing in views
   )
-  if input_signal != int(has_l2_reads) or output_signal != int(has_l2_writes):
+  if not (int(has_l2_reads) <= input_signal <= 1 and int(has_l2_writes) <= output_signal <= 1):
     _fail(f"{where} has incomplete or duplicate L2 lifetime signals")
+  return bool(input_signal), bool(output_signal)
 
 
 def _descriptor_launch_events(program: ExecTileProgram, descriptor_name: str) -> tuple[str, ...]:
@@ -1487,6 +1490,8 @@ def _verify_task(
         request.output_ready_event
       ) != bool(request.signal_policy.output_ready):
         _fail(f"{action_where} phase events differ from declared signal policy")
+      if (bool(request.input_released_event), bool(request.output_ready_event)) != effects.emitted_phases:
+        _fail(f"{action_where} phase events differ from Tile Program signals")
       tile_contract = binding.tile_program.resource_contract
       if not isinstance(tile_contract, TileResources):
         _fail(f"{action_where} Tile Program is missing its resource contract")

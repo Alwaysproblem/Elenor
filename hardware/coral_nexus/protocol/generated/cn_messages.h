@@ -60,7 +60,8 @@ enum cn_msg_type {
   CN_MSG_REGION_GRANT = 45,
   CN_MSG_REGION_DONE = 46,
   CN_MSG_PROGRAM_REGISTER = 47,
-  CN_MSG_COUNT = 48
+  CN_MSG_TICKET_ROLLBACK = 48,
+  CN_MSG_COUNT = 49
 };
 
 enum cn_error {
@@ -216,6 +217,7 @@ enum cn_enum_msg_type {
   CN_MSG_TYPE_REGION_GRANT = 45,
   CN_MSG_TYPE_REGION_DONE = 46,
   CN_MSG_TYPE_PROGRAM_REGISTER = 47,
+  CN_MSG_TYPE_TICKET_ROLLBACK = 48,
 };
 
 typedef struct {
@@ -851,6 +853,25 @@ _Static_assert(sizeof(cn_program_register_t) == 48, "PROGRAM_REGISTER size");
 _Static_assert(offsetof(cn_program_register_t, program_id) == 0, "PROGRAM_REGISTER.program_id offset");
 _Static_assert(offsetof(cn_program_register_t, version) == 8, "PROGRAM_REGISTER.version offset");
 _Static_assert(offsetof(cn_program_register_t, package_hash) == 16, "PROGRAM_REGISTER.package_hash offset");
+typedef struct {
+  uint64_t launch_generation;
+  uint64_t root_launch_generation;
+  uint64_t dispatch_ordinal;
+  uint64_t task_id;
+  uint64_t context_handle;
+  uint64_t txn_id;
+  uint64_t ctx_slot;
+  uint64_t ctx_generation;
+} cn_ticket_rollback_t;
+_Static_assert(sizeof(cn_ticket_rollback_t) == 64, "TICKET_ROLLBACK size");
+_Static_assert(offsetof(cn_ticket_rollback_t, launch_generation) == 0, "TICKET_ROLLBACK.launch_generation offset");
+_Static_assert(offsetof(cn_ticket_rollback_t, root_launch_generation) == 8, "TICKET_ROLLBACK.root_launch_generation offset");
+_Static_assert(offsetof(cn_ticket_rollback_t, dispatch_ordinal) == 16, "TICKET_ROLLBACK.dispatch_ordinal offset");
+_Static_assert(offsetof(cn_ticket_rollback_t, task_id) == 24, "TICKET_ROLLBACK.task_id offset");
+_Static_assert(offsetof(cn_ticket_rollback_t, context_handle) == 32, "TICKET_ROLLBACK.context_handle offset");
+_Static_assert(offsetof(cn_ticket_rollback_t, txn_id) == 40, "TICKET_ROLLBACK.txn_id offset");
+_Static_assert(offsetof(cn_ticket_rollback_t, ctx_slot) == 48, "TICKET_ROLLBACK.ctx_slot offset");
+_Static_assert(offsetof(cn_ticket_rollback_t, ctx_generation) == 56, "TICKET_ROLLBACK.ctx_generation offset");
 
 static const cn_field_t cn_fields_query_caps[] = {
   {"txn_id", CN_KIND_UINT, 0, 1, 0ull},
@@ -915,7 +936,7 @@ static const cn_cond_t cn_conds_task_commit_final[] = {
 };
 static const cn_field_t cn_fields_ack[] = {
   {"txn_id", CN_KIND_UINT, 0, 1, 0ull},
-  {"ack_for_message_type", CN_KIND_ENUM, 1, 1, 48ull},
+  {"ack_for_message_type", CN_KIND_ENUM, 1, 1, 49ull},
   {"op_seq", CN_KIND_UINT, 2, 1, 0ull},
   {"outcome", CN_KIND_ENUM, 3, 1, 6ull},
   {"wait_reason", CN_KIND_ENUM, 4, 1, 6ull},
@@ -1323,6 +1344,19 @@ static const cn_field_t cn_fields_program_register[] = {
 static const cn_cond_t cn_conds_program_register[] = {
   {0, 0, 0, 0},
 };
+static const cn_field_t cn_fields_ticket_rollback[] = {
+  {"launch_generation", CN_KIND_UINT, 0, 1, 0ull},
+  {"root_launch_generation", CN_KIND_UINT, 1, 1, 0ull},
+  {"dispatch_ordinal", CN_KIND_UINT, 2, 1, 0ull},
+  {"task_id", CN_KIND_UINT, 3, 1, 0ull},
+  {"context_handle", CN_KIND_UINT, 4, 1, 0ull},
+  {"txn_id", CN_KIND_UINT, 5, 1, 0ull},
+  {"ctx_slot", CN_KIND_UINT, 6, 1, 0ull},
+  {"ctx_generation", CN_KIND_UINT, 7, 1, 0ull},
+};
+static const cn_cond_t cn_conds_ticket_rollback[] = {
+  {0, 1, 0, 0},
+};
 
 static const cn_msg_t cn_msgs[CN_MSG_COUNT] = {
   {"QUERY_CAPS", 0, 0, 0, 1, 1, 0, 0, -1, -1, -1, -1, 0, cn_fields_query_caps, cn_conds_query_caps},
@@ -1373,6 +1407,7 @@ static const cn_msg_t cn_msgs[CN_MSG_COUNT] = {
   {"REGION_GRANT", 0, 0, 0, 5, 5, 0, -1, 1, 2, -1, -1, 0, cn_fields_region_grant, cn_conds_region_grant},
   {"REGION_DONE", 0, 1, 0, 5, 5, 0, -1, 1, 2, -1, -1, 0, cn_fields_region_done, cn_conds_region_done},
   {"PROGRAM_REGISTER", 2, 2, 1, 6, 3, 0, -1, -1, -1, -1, -1, 0, cn_fields_program_register, cn_conds_program_register},
+  {"TICKET_ROLLBACK", 0, 0, 0, 8, 8, 1, 5, 6, 7, -1, -1, 0, cn_fields_ticket_rollback, cn_conds_ticket_rollback},
 };
 
 static const char* const cn_error_names[CN_ERR_COUNT] = {

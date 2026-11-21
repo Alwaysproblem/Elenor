@@ -17,12 +17,15 @@ re-rendering, never by trusting its own fields.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import shutil
 import sys
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 H = Path(__file__).resolve().parents[1]
 REPO = H.parents[1]
@@ -79,7 +82,7 @@ REQUIRED_INPUTS = (
   "hardware/coral_nexus/verification/contracts/replay_bundle_contract_v1.yaml",
   "hardware/coral_nexus/verification/contracts/trace_window_contract_v1.yaml",
   # field requests of every package
-  *(f"hardware/coral_nexus/protocol/field_requests/w{i}.yaml" for i in range(2, 8)),
+  *(f"hardware/coral_nexus/protocol/field_requests/w{i}.yaml" for i in range(1, 8)),
   # C018 measured resources (committed evidence record)
   "hardware/coral_nexus/verification/kernel_bootstrap/kernel_measurement.json",
 )
@@ -139,6 +142,111 @@ def _sha(path: Path) -> str:
 
 def _rel(path: Path) -> str:
   return str(path.resolve().relative_to(REPO))
+
+
+# Explicit drain watchdog (C035 / W1 plan §10.2 step 7). The model default is an exploration
+# baseline, never a silicon freeze: the silicon value stays the C019 capacity proof's to make. What
+# IS frozen is the wiring, verified fail-closed against the live tree:
+#   * channel_budgets.yaml records the watchdog with a source line that reads back as the explicit
+#     HardwareConfig field, and its value equals the hardware_config.yaml default;
+#   * reset_domain.py reads the explicit attribute with strictly-greater semantics and keeps no
+#     getattr fallback (a silent default would let the model and the record diverge unnoticed).
+WATCHDOG_ENTRY = "max_drain_cycles"
+WATCHDOG_HWYAML = "pipeline_validator/hardware_config.yaml"
+WATCHDOG_CONFIG = "pipeline_validator/config.py"
+WATCHDOG_CONSUMER = "pipeline_validator/runtime/reset_domain.py"
+
+
+def verify_watchdog() -> list[str]:
+  errors: list[str] = []
+  try:
+    budgets = yaml.safe_load((gp.PROTOCOL_DIR / "channel_budgets.yaml").read_text())
+  except (OSError, yaml.YAMLError) as exc:
+    return [f"channel_budgets.yaml: unreadable ({exc})"]
+  entries = budgets.get("watchdog") if isinstance(budgets, dict) else None
+  if not isinstance(entries, list) or len(entries) != 1 or not isinstance(entries[0], dict):
+    return [f"channel_budgets watchdog: exactly one entry is required, got {entries!r}"]
+  entry = entries[0]
+  if entry.get("name") != WATCHDOG_ENTRY:
+    return [f"channel_budgets watchdog: the one entry must be {WATCHDOG_ENTRY}, got {entry.get('name')!r}"]
+  expected = {"unit": "cycle", "bounds": "reset_drain_watchdog", "comparison": "strictly_greater"}
+  for key, want in expected.items():
+    if entry.get(key) != want:
+      errors.append(f"watchdog.{WATCHDOG_ENTRY}.{key}: expected {want!r}, got {entry.get(key)!r}")
+  value = entry.get("value")
+  if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+    errors.append(f"channel_budgets watchdog.{WATCHDOG_ENTRY}: value must be a positive integer")
+    value = None
+  # the explicit default: hardware_config.yaml is the single source of the default value
+  node: Any = None
+  try:
+    hw = yaml.safe_load((REPO / WATCHDOG_HWYAML).read_text())
+    node = hw["control"]["group_reset"][WATCHDOG_ENTRY]
+  except (OSError, yaml.YAMLError, KeyError, TypeError):
+    node = None
+  if isinstance(node, bool) or not isinstance(node, int):
+    errors.append(f"{WATCHDOG_HWYAML}: control.group_reset.{WATCHDOG_ENTRY} is missing or not an int")
+  elif value is not None and node != value:
+    errors.append(
+      f"channel_budgets watchdog.{WATCHDOG_ENTRY}={value} differs from the explicit default "
+      f"{node} in {WATCHDOG_HWYAML}"
+    )
+  # citations: the source must read back as the ACTIVE explicit field declaration (not a comment
+  # or any other file that merely mentions the name); the usage must read back in the consumer
+  field_decl = f'{WATCHDOG_ENTRY}: int = _HW_DEFAULTS["{WATCHDOG_ENTRY}"]'
+  for role, want_file, needle in (
+    ("source", WATCHDOG_CONFIG, field_decl),
+    ("usage", WATCHDOG_CONSUMER, f"cfg.{WATCHDOG_ENTRY}"),
+  ):
+    cite = entry.get(role) or {}
+    if cite.get("file") != want_file or not isinstance(cite.get("line"), int):
+      errors.append(f"channel_budgets watchdog.{WATCHDOG_ENTRY}.{role}: must cite {want_file} with a line")
+      continue
+    try:
+      lines = (REPO / want_file).read_text().splitlines()
+    except OSError:
+      errors.append(f"channel_budgets watchdog.{WATCHDOG_ENTRY}.{role}: {want_file} is unreadable")
+      continue
+    text = lines[cite["line"] - 1] if 0 < cite["line"] <= len(lines) else ""
+    if needle not in text:
+      errors.append(
+        f"channel_budgets watchdog.{WATCHDOG_ENTRY}.{role}: {want_file}:{cite['line']} does not "
+        f"carry {needle!r}"
+      )
+  # the consumer: AST-exact -- ResetDomain.step holds exactly one strict `if` on the explicit
+  # attribute (a comment, a >= or a same-text line outside the method all fail); no getattr fallback
+  try:
+    consumer = (REPO / WATCHDOG_CONSUMER).read_text()
+  except OSError as exc:
+    return [*errors, f"{WATCHDOG_CONSUMER}: unreadable ({exc})"]
+  if f'getattr(cfg, "{WATCHDOG_ENTRY}"' in consumer or f"getattr(cfg, '{WATCHDOG_ENTRY}'" in consumer:
+    errors.append(f"{WATCHDOG_CONSUMER}: the getattr fallback must not remain behind the explicit field")
+  try:
+    tree = ast.parse(consumer)
+  except SyntaxError as exc:
+    return [*errors, f"{WATCHDOG_CONSUMER}: unparsable ({exc})"]
+  classes = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "ResetDomain"]
+  methods = [n for c in classes for n in c.body if isinstance(n, ast.FunctionDef) and n.name == "step"]
+  strict_test = f"self.drain_cycles > cfg.{WATCHDOG_ENTRY}"
+  hits = 0
+  stack: list[ast.AST] = [stmt for m in methods for stmt in m.body]
+  seen: set[int] = set()
+  while stack:
+    n = stack.pop()
+    if id(n) in seen:
+      continue
+    seen.add(id(n))
+    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+      continue  # a scope nested inside step is not step's own statement
+    if isinstance(n, ast.If) and ast.unparse(n.test) == strict_test:
+      hits += 1
+    stack.extend(ast.iter_child_nodes(n))
+  if hits != 1:
+    errors.append(
+      f"{WATCHDOG_CONSUMER}: ResetDomain.step must hold exactly one `if {strict_test}:` "
+      f"(strictly greater, explicit field), found {hits}"
+    )
+  return errors
 
 
 def collect(directory: Path = gp.PROTOCOL_DIR) -> dict[str, Any]:
@@ -231,6 +339,9 @@ def seal(out: Path | None = None, *, bump: bool = False) -> dict[str, Any]:
     )
   if verify_generated():
     raise gp.GenError(verify_generated())
+  watchdog = verify_watchdog()
+  if watchdog:
+    raise gp.GenError(watchdog)
   inputs = {rel: _sha(REPO / rel) for rel in REQUIRED_INPUTS}
   generated = {rel: _sha(REPO / rel) for rel in REQUIRED_GENERATED}
   protocol_seq = 1
@@ -282,6 +393,7 @@ def verify_seal(path: Path | None = None) -> list[str]:
       elif _sha(file_path) != listed[rel]:
         errors.append(f"{rel}: sha256 differs from the seal (stale input or tampered artifact)")
   errors.extend(verify_generated())
+  errors.extend(verify_watchdog())
   budgets = open_budgets()
   if budgets:
     errors.append(

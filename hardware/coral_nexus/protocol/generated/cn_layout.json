@@ -152,7 +152,8 @@
       "REGION_REQUEST",
       "REGION_GRANT",
       "REGION_DONE",
-      "PROGRAM_REGISTER"
+      "PROGRAM_REGISTER",
+      "TICKET_ROLLBACK"
     ]
   },
   "bitsets": {
@@ -640,7 +641,7 @@
           "kind": "enum",
           "offset": 1,
           "words": 1,
-          "limit": 48,
+          "limit": 49,
           "enum": "msg_type",
           "optional": false
         },
@@ -3303,6 +3304,105 @@
       "stage": -1,
       "ack_for": -1,
       "establishes": false
+    },
+    {
+      "name": "TICKET_ROLLBACK",
+      "id": 48,
+      "channel": "CTRL",
+      "channel_index": 0,
+      "dir": "G2T",
+      "dir_index": 0,
+      "owner": "W1",
+      "host_only": false,
+      "payload_words": 8,
+      "fields": [
+        {
+          "name": "launch_generation",
+          "kind": "uint",
+          "offset": 0,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "root_launch_generation",
+          "kind": "uint",
+          "offset": 1,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "dispatch_ordinal",
+          "kind": "uint",
+          "offset": 2,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "task_id",
+          "kind": "uint",
+          "offset": 3,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "context_handle",
+          "kind": "uint",
+          "offset": 4,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "txn_id",
+          "kind": "uint",
+          "offset": 5,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_slot",
+          "kind": "uint",
+          "offset": 6,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        },
+        {
+          "name": "ctx_generation",
+          "kind": "uint",
+          "offset": 7,
+          "words": 1,
+          "limit": 0,
+          "enum": null,
+          "optional": false
+        }
+      ],
+      "conditions": [
+        {
+          "kind": "equal",
+          "a": 1,
+          "b": 0,
+          "value": 0
+        }
+      ],
+      "txn": 5,
+      "ctx_slot": 6,
+      "ctx_gen": 7,
+      "stage": -1,
+      "ack_for": -1,
+      "establishes": false
     }
   ],
   "csr": [
@@ -3368,7 +3468,7 @@
     "unresolved": [
       {
         "name": "txn_id",
-        "reason": "No sourced arrival rate for txn_id and no sourced accept->terminal-ACK lifetime. dispatch_capacity (16) bounds concurrent grid routes, not txn arrivals; reset_domain.py:89 (max_drain_cycles) is a reset-drain cancel threshold, not a txn lifetime.",
+        "reason": "No sourced arrival rate for txn_id and no sourced accept->terminal-ACK lifetime. dispatch_capacity (16) bounds concurrent grid routes, not txn arrivals; the explicit HardwareConfig.max_drain_cycles config key (reset_domain.py:171, C035) is a reset-drain cancel threshold, not a txn lifetime.",
         "needs": [
           "txn_arrival_rate_msg_per_tick",
           "txn_live_ticks"
@@ -3453,15 +3553,16 @@
   },
   "inputs": {
     "cn_protocol_v1.yaml": "ab8d448063a126d798631dae6abe9ef72fe9d4a4ab22e80a41f196265f7d207c",
-    "wire_schema_v1.yaml": "7403e7cda09d00236be4ac641bad4326e114ac8ffa4a5bb15c41b8b59ddf843e",
+    "wire_schema_v1.yaml": "b2e11bd3687b7e61361f8f9bc593c13f27a8b723f25d02b2b06ebc906f1ab33a",
     "csr_name_map.yaml": "8819944028986b1211adb073bb6c065bc5d1580a91f602abfe48151980c61b7b",
     "upstream_csr_occupied.json": "81491cb41ed1813c871d1b6676d9eb361af2cb8a7bf6a696c8c7ba606eb92c8e",
-    "channel_budgets.yaml": "604e830f60653f3f44628ee968929ad1c2e1e4fb249666ba2e1e3dc6a97481eb",
-    "lifetime_bounds.yaml": "cdf911ca22d99ac09ecffcbae6de56dda31ec07dc1a351bf8cc414be25c1030f",
+    "channel_budgets.yaml": "959f786fcd42c5e61345270d6285dcdda3f46f406a31859077133b3b8afd3e1b",
+    "lifetime_bounds.yaml": "90f825b1d58948279df7d8ec030d850a4ee73282ec2d831965e3d75def78f7a7",
+    "field_requests/w1.yaml": "d7db4f0f961f22988178f33a5a27c2e4af7a612d2cfeaba43d412e680e7c0f6b",
     "field_requests/w2.yaml": "32814fe480d57a4a7303537df94ea361638cf6745ff21540a0ba975d668034b0",
     "field_requests/w3.yaml": "5120c67efe4659335ae798e1090343533afe13b976fbb64bc45acc5117da6787",
     "field_requests/w4.yaml": "0f29e225dd829a9e172e1220153a3c4211468853b28d2b6d500296b8b1f34d81",
     "field_requests/w5.yaml": "f5e72e0fe7e443283016505fb8cf37ef8090d9549c43688efe507b17b845d393",
-    "field_requests/w6.yaml": "f2fdce444820112039e69d25a36e53ec96f0f1f88c0e9573a30cdf6e6497b563"
+    "field_requests/w6.yaml": "9a2ce98cb7aec3e4e8fd452287b8116f59cfe7f1b741b87baa89eab60066ae59"
   }
 }

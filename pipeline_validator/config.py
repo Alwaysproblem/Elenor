@@ -87,6 +87,7 @@ _HW_YAML_PATH_TO_FIELD = {
   "control.tile_uce.dispatch_per_cycle": "uce_dispatch_per_cycle",
   "control.slot_frame.slot_count": "frame_slot_capacity",
   "control.slot_frame.bind_cycles": "frame_bind_cycles",
+  "control.group_reset.max_drain_cycles": "max_drain_cycles",
   "fabric.dma.bandwidth_gbs": "group_dma_bandwidth_gbs",
   "fabric.dma.channels": "num_dma_channels",
   "fabric.dma.launch_cycles": "dma_launch_cycles",
@@ -237,6 +238,13 @@ class HardwareConfig:
   group_dma_bandwidth_gbs: float = _HW_DEFAULTS["group_dma_bandwidth_gbs"]  # per-channel peak
   num_dma_channels: int = _HW_DEFAULTS["num_dma_channels"]  # concurrent Global DMA channels
 
+  # --- Group reset watchdog (W1-04 / C035) -----------------------------
+  # Strictly-greater DRAIN watchdog: forced cancellation fires only once
+  # drain_cycles EXCEEDS the limit, never at exactly N.  Model default
+  # carried from the pre-C035 baseline; an exploration parameter, not a
+  # frozen silicon value (protocol side: channel_budgets.yaml watchdog).
+  max_drain_cycles: int = _HW_DEFAULTS["max_drain_cycles"]
+
   # --- Tile / L1 -------------------------------------------------------
   tile_l1_bytes: int = _HW_DEFAULTS["tile_l1_bytes"]  # 1 MB Balanced-small (12.3)
   tile_l1_banks: int = _HW_DEFAULTS["tile_l1_banks"]  # 12.4 banking
@@ -361,6 +369,8 @@ class HardwareConfig:
       raise ValueError("l2_mshr_entries must be > 0")
     if self.l1_mshr_entries <= 0:
       raise ValueError("l1_mshr_entries must be > 0")
+    if type(self.max_drain_cycles) is not int or self.max_drain_cycles < 1:
+      raise ValueError("max_drain_cycles must be a positive integer")
     build_registry(self)
 
   def cycle_ns(self) -> float:

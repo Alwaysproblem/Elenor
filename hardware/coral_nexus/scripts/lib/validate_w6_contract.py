@@ -205,6 +205,13 @@ BANNED_NUMBER_KEYS = ("address", "bits", "opcode", "width_bits", "encoding")
 # search, and no code may be padded to preserve line numbers.
 # ---------------------------------------------------------------------------------------------------
 ANCHOR_SEAL_REVISION = "5ed221794e7eb3d7d36d78ea9c88967a1ca66d83"
+# One pin was re-derived at the C035 G1 reopen (seal v4) rather than at revision 5ed2217: the
+# max_drain_cycles source now pins the explicit-field read `cfg.max_drain_cycles`, which did not
+# exist in 5ed2217. It reports its own revision identity so a future relocation of THAT pin is
+# never misattributed to the legacy revision (and vice versa).
+ANCHOR_REPIN_REVISIONS: dict[tuple[str, str], str] = {
+  ("terminal", ".reset_endpoint.max_drain_cycles.source"): "c035-g1-reopen-v4",
+}
 RELOCATABLE_ANCHOR_FILES = frozenset(
   ("pipeline_validator/tile_group.py", "pipeline_validator/runtime/reset_domain.py")
 )
@@ -257,8 +264,8 @@ ANCHOR_RELOCATIONS: dict[tuple[str, str], tuple[str, int, str, str, str, str]] =
     "ResetDomain", "step", "self.state = ResetState.MARK_EVENTS",
   ),
   ("terminal", ".reset_endpoint.max_drain_cycles.source"): (
-    "pipeline_validator/runtime/reset_domain.py", 89, 'getattr(cfg, "max_drain_cycles", 100)',
-    "ResetDomain", "step", 'if self.drain_cycles > getattr(cfg, "max_drain_cycles", 100):',
+    "pipeline_validator/runtime/reset_domain.py", 171, "cfg.max_drain_cycles",
+    "ResetDomain", "step", "if self.drain_cycles > cfg.max_drain_cycles:",
   ),
 }
 
@@ -381,7 +388,7 @@ def _verify_relocation(
     "owner": f"{cls_name}.{func_name}",
     "needle": needle,
     "statement": statement,
-    "seal_revision": ANCHOR_SEAL_REVISION,
+    "seal_revision": ANCHOR_REPIN_REVISIONS.get((label, where), ANCHOR_SEAL_REVISION),
   }
 
 

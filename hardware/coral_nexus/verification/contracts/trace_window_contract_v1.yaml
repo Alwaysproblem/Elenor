@@ -55,7 +55,7 @@ time:
       needle: "def discard_profile_initialization",
     }
   cycle_ns_source:
-    { file: pipeline_validator/config.py, line: 366, needle: "def cycle_ns" }
+    { file: pipeline_validator/config.py, line: 376, needle: "def cycle_ns" }
 
 sequence_domains:
   seq:

@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
+from ..config import HardwareConfig
 from ..memory.allocator import MemoryInvariantError
 from .fault_ring import FaultDomain, FaultRecord
 
@@ -95,7 +96,7 @@ class ResetDomain:
   local stage side effects still run exactly once per reset run.
   """
 
-  cfg: object
+  cfg: HardwareConfig
   state: ResetState = ResetState.IDLE
   request: ResetRequest | None = None
   start_cycle: int = 0
@@ -167,7 +168,7 @@ class ResetDomain:
         pass
       else:
         self.drain_cycles += 1
-        if self.drain_cycles > getattr(cfg, "max_drain_cycles", 100):
+        if self.drain_cycles > cfg.max_drain_cycles:
           if tm is not None:
             tm.cancel_all(cycle)
           for tile in getattr(group, "tiles", ()):

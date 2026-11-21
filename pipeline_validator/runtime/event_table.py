@@ -44,6 +44,7 @@ class EventEntry:
   consumer_refs: int = 0
   future_uses: int = 0
   managed: bool = False
+  participant_refs: int = 0  # live cross-boundary producers on this Route's existing dispatch event
 
 
 @dataclass
@@ -296,6 +297,22 @@ class EventTable:
     entry.producer_id = producer_id
     return entry
 
+  def acquire_participant(self, name: str, *, owner: str, generation: int) -> None:
+    """Hold the Route's reserved output, without consuming a compiler dependency or a second slot."""
+    entry = self._entries.get(name)
+    if not (entry and entry.managed and entry.producer_bound and entry.status is EventStatus.PENDING):
+      raise EventProtocolError(f"dispatch participant has no pending bound event {name!r}")
+    self._validate_identity(entry, owner, generation)
+    entry.participant_refs += 1
+
+  def release_participant(self, name: str, *, owner: str, generation: int, cycle: int) -> None:
+    entry = self._entries.get(name)
+    if not entry or not entry.participant_refs:
+      raise EventProtocolError(f"dispatch participant has no retained event {name!r}")
+    self._validate_identity(entry, owner, generation)
+    entry.participant_refs -= 1
+    self._maybe_reclaim(entry, cycle, "last dispatch participant released")
+
   def add_consumer(self, name: str, *, owner: str, generation: int) -> EventEntry:
     """Pin a dependency for a registered, not-yet-accepted action."""
 
@@ -496,6 +513,8 @@ class EventTable:
     return entry.sequence
 
   def _maybe_reclaim(self, entry: EventEntry, cycle: int, reason: str) -> bool:
+    if entry.participant_refs:
+      return False
     if not entry.managed or entry.status is EventStatus.PENDING or entry.consumer_refs or entry.future_uses:
       return False
     self._retire_entry(entry, cycle, reason)
@@ -530,6 +549,8 @@ class EventTable:
       entry for entry in self._entries.values() if entry.owner == owner and entry.generation == generation
     ]
     if quota is not None:
+      if any(entry.participant_refs for entry in entries):
+        raise EventProtocolError("cannot release event quota with live dispatch participants")
       if any(entry.status is EventStatus.PENDING for entry in entries):
         raise EventProtocolError("cannot release event quota with pending producers")
       if any(entry.consumer_refs for entry in entries):
@@ -553,6 +574,8 @@ class EventTable:
         entry.status = EventStatus.RESET
 
   def clear(self) -> None:
+    if any(entry.participant_refs for entry in self._entries.values()):
+      raise EventProtocolError("cannot clear events with live dispatch participants")
     self._entries.clear()
     self._quotas.clear()
     self._retired.clear()

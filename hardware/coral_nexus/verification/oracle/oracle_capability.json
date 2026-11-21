@@ -213,7 +213,7 @@
     "sealed_contracts": {
       "hardware/coral_nexus/protocol/cn_protocol_v1.yaml": "ab8d448063a126d798631dae6abe9ef72fe9d4a4ab22e80a41f196265f7d207c",
       "hardware/coral_nexus/protocol/csr_name_map.yaml": "8819944028986b1211adb073bb6c065bc5d1580a91f602abfe48151980c61b7b",
-      "hardware/coral_nexus/protocol/generated/cn_layout.json": "d43249c76ad972d0c73cfdfaa2095a3f12b44061a3f3796d628c7678d07f7fbf",
+      "hardware/coral_nexus/protocol/generated/cn_layout.json": "897dc5c5e1c75d9fc885bf24e7f00ce453f10db7d516f41263cee80a21d70408",
       "hardware/coral_nexus/protocol/w3_numeric_profile_v1.yaml": "36c5aa5ee8556f48485a9a4f299eb1033e58f53167f85707837285600b2c23a0",
       "hardware/coral_nexus/protocol/w3_vme_decl_abi_v1.json": "dacafbb4081c70c1408083894ccf6149b9a4fe51559b8903d33f33a6e09e70ff",
       "hardware/coral_nexus/protocol/w5_package.contract.yaml": "5ab74808ef0a87ba9926d16a312bc310859b12db809ad9e691654c8a19ceee1e"

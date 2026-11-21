@@ -326,6 +326,69 @@ groups:
       }
 
 # ---------------------------------------------------------------------------------------------------
+# Index reservation across versioned seal reopens (C035). The names below are the messages whose
+# msg_type numbers were assigned by an earlier seal (through PROTOCOL_FREEZE v3); the generator
+# refuses any input set whose message order does not start with EXACTLY this list, so a rename,
+# removal or insertion cannot silently renumber a sealed message -- including the host-only
+# PROGRAM_REGISTER. A new message may only appear after the last reserved name; extend this list
+# deliberately (at its end) together with the seal that assigns the new number.
+# ---------------------------------------------------------------------------------------------------
+index_reservation:
+  reserved_through: v3
+  reserved_fingerprint: aeeefc19e3a165b0522baf269476516bd6b538f7b813278df048a79ccc80b9c3
+  reserved:
+    [
+      QUERY_CAPS,
+      CAPS_RESP,
+      RUN_BEGIN,
+      TASK_PLAN,
+      TASK_COMMIT,
+      TASK_COMMIT_FINAL,
+      ACK,
+      RETIRE_READY,
+      RETIRE,
+      TASK_COMPLETION,
+      GATE_NOTIFY,
+      RESOURCE_UPDATE,
+      POST_EVENT,
+      PHASE_SIGNAL,
+      EVENT_NOTIFY,
+      EVENT_RETIRE,
+      PROGRAM_INSTALL,
+      PROGRAM_READ_REQ,
+      PROGRAM_READ_RESP,
+      PROGRAM_INSTALL_ACK,
+      PROGRAM_READY,
+      PROGRAM_INVALIDATE,
+      INVALIDATE_ACK,
+      MEM_REQ,
+      MEM_RSP,
+      TERMINAL_ACK,
+      STREAM_ACQUIRE,
+      STREAM_POP,
+      STREAM_PUSH,
+      STREAM_RELEASE,
+      STREAM_PUSH_EOS,
+      STREAM_EOS,
+      STREAM_ERROR,
+      GEN_WRAP_QUIESCE,
+      QUIESCE_RESP,
+      CANCEL_TASK,
+      RESET_PHASE_REQ,
+      RESET_PHASE_ACK,
+      FAULT_REPORT,
+      FAULT_ACK,
+      POISON,
+      LEASE_ACQUIRE,
+      LEASE_GRANT,
+      PAGE_REVOKE,
+      REGION_REQUEST,
+      REGION_GRANT,
+      REGION_DONE,
+      PROGRAM_REGISTER,
+    ]
+
+# ---------------------------------------------------------------------------------------------------
 # Messages. Field order is the wire order. `include` groups come first, in the order listed.
 # ---------------------------------------------------------------------------------------------------
 messages:
@@ -722,6 +785,17 @@ messages:
           words: 4,
           src: "protocol/w5_package.contract.yaml::algorithm: sha256",
         }
+  # ---- C035 (W1-04 admission compensation): appended AFTER the v3-reserved block -------------
+  # Group-initiated transaction rollback of an admission ticket that has not reached final
+  # authorization (ADM-04: after FINAL the only exits are CANCEL_TASK / drain).  The Tile answers
+  # one ACK(txn_id, ack_for_message_type=TICKET_ROLLBACK, outcome=COMPENSATED) ONLY after its
+  # local release has actually happened; the ticket stays open until every compensation ACK is in.
+  TICKET_ROLLBACK:
+    include: [task_key]
+    fields:
+      - { name: txn_id, kind: uint, ident: txn }
+      - { name: ctx_slot, kind: uint, ident: context_key }
+      - { name: ctx_generation, kind: uint, ident: context_key }
 
 # New messages: the field requests that ask for them name the owner and direction. Anything not in the C009
 # catalog must be listed here with a request that names it, or the generator refuses it.
@@ -781,4 +855,11 @@ new_messages:
       owner: W5,
       request: w5.yaml,
       host_only: true,
+    }
+  - {
+      name: TICKET_ROLLBACK,
+      channel: CTRL,
+      dir: G2T,
+      owner: W1,
+      request: w1.yaml,
     }

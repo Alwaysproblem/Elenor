@@ -18,11 +18,14 @@ EVENT_RETIRE broadcast: the Group-side producer of the retire broadcast (previou
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
-from ..execution_ir import TaskIdentity
-from ..tile import ComputeTile
-from ..tile_group import TileGroup
+from ..execution_ir import PhaseSignal, TaskIdentity
 from .tile_port import BoundaryMessage, ContextKey
+
+if TYPE_CHECKING:  # tile_group imports this module at module scope (C035); stay import-cycle free
+  from ..tile import ComputeTile
+  from ..tile_group import TileGroup
 
 PHASE_DIRECTIONS = ("input_released", "output_ready")
 
@@ -67,8 +70,8 @@ class EventService:
     self.stats["phase_signals"] += 1
     before = self._phase_counters()
     signal_phase = str(direction)
-    from ..tile_group import PhaseSignal  # local import keeps module import order stable
-
+    state = self.group._grid_signals.get(grid.grid)
+    completed_before = set(state.completed_phases) if state is not None else set()
     self.group._on_phase_signal(PhaseSignal(task=grid, phase=signal_phase), cycle)
     after = self._phase_counters()
     self._accumulate_phase_delta(before, after)
@@ -78,7 +81,7 @@ class EventService:
       return "duplicate"
     if (after["tile_signal_invalid"] - before["tile_signal_invalid"]) == 1:
       return "invalid"
-    if self._aggregate_fired(before, after, signal_phase):
+    if self._aggregate_fired(grid, signal_phase, completed_before):
       self.stats["phase_aggregates"] += 1
       return "aggregated"
     return "recorded"
@@ -96,16 +99,14 @@ class EventService:
     self.stats["phase_invalid"] += after["tile_signal_invalid"] - before["tile_signal_invalid"]
     self.stats["phase_duplicate"] += after["tile_signal_duplicate"] - before["tile_signal_duplicate"]
 
-  def _aggregate_fired(self, before: dict[str, int], after: dict[str, int], phase: str) -> bool:
-    # An aggregate completes a phase event exactly once; the observable is the sequencer's
-    # notified event for that phase. We detect it via the group trace-free signal: the grid
-    # signal state moved the phase into completed_phases this call.
-    _ = before, after
-    return self._last_phase_completed == phase
-
-  # The service records the last phase completed by the most recent `_on_phase_signal` call by
-  # checking grid signal completion sets before/after -- simplified: derived from group state.
-  _last_phase_completed: str | None = None
+  def _aggregate_fired(self, grid: TaskIdentity, phase: str, completed_before: set[str]) -> bool:
+    # An aggregate completes the phase event exactly once: the completing call is the one
+    # that moved `phase` into the grid signal state's `completed_phases`. Observed from
+    # real Group state before/after the delegated `_on_phase_signal` call -- never from a
+    # timer/freshness heuristic. A later duplicate is faulted before completion and can
+    # never re-fire the aggregate.
+    state = self.group._grid_signals.get(grid.grid)
+    return state is not None and phase in state.completed_phases and phase not in completed_before
 
   # -- POST_EVENT (T2G) ---------------------------------------------------
   def handle_post_event(self, msg: BoundaryMessage, *, producer: str, cycle: int) -> str:

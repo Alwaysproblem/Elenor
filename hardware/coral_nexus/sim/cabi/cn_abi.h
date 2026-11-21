@@ -44,14 +44,33 @@ extern "C" {
 #define CN_EP_PAYLOAD_READY_MISMATCH \
   1 /* payload mutated while valid&&!ready or post-edge mismatch */
 
-/* CnBeginCfg.reserved[0] unit-stub test flags (ignored by production tops). */
+/* CnBeginCfg.reserved[0] unit-stub test flags (rejected by production tops).
+ * Legacy transport fixtures (0x01..0x04) and the lifecycle fixture (0x08..0x20)
+ * are mutually exclusive: the ABI fails closed on unknown bits or invalid
+ * combinations at bp_begin. */
 #define CN_STUB_FLAG_CORRUPT_T2G \
-  0x01u /* flip bit 0 of DUT T2G payload word 0 */
+  0x01u /* legacy: flip bit 0 of DUT T2G payload word 0 */
 #define CN_STUB_FLAG_EMIT_MEM_REQ \
-  0x02u /* emit a full 136-byte MEM_REQ on MEMORY T2G at tick 0 */
+  0x02u /* legacy: emit a full 136-byte MEM_REQ on MEMORY T2G at tick 0 */
 #define CN_STUB_FLAG_GLITCH_PAYLOAD \
-  0x04u /* corrupt post-edge G2T snapshot inside stub */
+  0x04u /* legacy: corrupt post-edge G2T snapshot inside stub */
+#define CN_STUB_FLAG_LIFECYCLE                                             \
+  0x08u /* explicit unit lifecycle fixture (C035): finite-state admission, \
+           rollback, cancel and retirement on real C017 CTRL/EVENT frames */
+#define CN_STUB_FLAG_FAIL_HOLD                                               \
+  0x10u /* lifecycle: the FIRST otherwise-valid TASK_COMMIT is rejected once \
+           with ACK(FAULT); zero hold is established (safe retry) */
+#define CN_STUB_FLAG_INPUT_RELEASED                                \
+  0x20u /* lifecycle: every admitted task is seeded with the early \
+           input-release phase (exactly one PHASE_SIGNAL per task) */
+#define CN_STUB_FLAG_FAIL_FINAL                                              \
+  0x40u /* lifecycle: the FIRST valid TASK_COMMIT_FINAL is authorized, then  \
+           the local installation fails: ACK(FAULT), never a phase signal or \
+           success; closure is cancel -> drain -> RETIRE -> terminal */
+#define CN_STUB_FLAG_KNOWN_MASK 0x7fu
 
+#define CN_STUB_MAX_LIFECYCLE_TILES \
+  4u          /* highest physical link id + 1 a lifecycle session may claim */
 struct CnSim; /* opaque handle: C side is the sole owner */
 
 /* One tile x channel x direction port slot; the slot table is generated from
@@ -99,7 +118,7 @@ struct CnSlotLayout {
  * caller pointer. */
 struct CnBeginCfg {
   uint32_t abi_version; /* must equal CN_ABI_VERSION */
-  uint32_t tile_count;  /* 1 for the unit stub */
+  uint32_t tile_count;  /* must equal 1 for the unit stub */
   uint32_t ready_seed;  /* deterministic ready-lowering seed */
   int32_t
       inject_fatal_at_tick; /* -1 = never; else catchable fatal at that tick */
@@ -107,7 +126,11 @@ struct CnBeginCfg {
                                    tick */
   uint8_t trace;                /* 0 = no VCD */
   uint8_t
-      reserved[7]; /* reserved[0]: unit-stub test flags (0 in normal runs) */
+      reserved[7]; /* reserved[0]: unit-stub test flags (0 in normal runs);
+                      reserved[1..4]: physical link tile_id, little-endian u32
+                      (lifecycle sessions: < CN_STUB_MAX_LIFECYCLE_TILES;
+                      legacy sessions: must be 0; the stub never guesses or
+                      invents a tile identity); reserved[5..6]: must be 0 */
 };
 
 /* Read-only status POD; readable at any time without mutating functional state.

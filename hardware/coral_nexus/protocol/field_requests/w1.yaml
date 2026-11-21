@@ -1,0 +1,27 @@
+# W1 field request to W1-01, DRAFT (C035).
+#
+# A REQUEST, not an implementation: W1-01 (C017) merges it into the ABI and W1 defines no bits. No
+# CSR address, opcode, width or bit position appears here. The message below names the W1 plan
+# section and the C035 execution card that decided it, so the validator can check the request
+# against the wire those documents asked for. Joint freeze with C020; a missing request blocks the
+# seal and is never filled in by the generator.
+schema: cn_field_request/v1
+package: W1
+status: draft
+messages:
+  - {
+      message: TICKET_ROLLBACK,
+      new: true,
+      channel: CTRL,
+      dir: G2T,
+      from: implementation/W1_Boundary_Cosimulation_Plan.md,
+      key: task_key,
+      why: "Group rolls back one admission ticket before final authorization (ADM-04: after FINAL only CANCEL_TASK/drain remain); the Tile answers ACK(txn_id, TICKET_ROLLBACK, COMPENSATED) only after its local release, and a stale ctx_generation is rejected by the ordinary ABA guard",
+      fields_needed:
+        [
+          { name: task_key },
+          { name: txn_id },
+          { name: ctx_slot },
+          { name: ctx_generation },
+        ],
+    }

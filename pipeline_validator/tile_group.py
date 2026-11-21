@@ -10,12 +10,18 @@ from __future__ import annotations
 
 import zlib
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from .compiled_program import CompiledProgram
 from .config import GroupSchedulerConfig, HardwareConfig
+from .cosim.admission import AdmissionCoordinator, AdmissionProtocolError
+from .cosim.event_service import EventService
+from .cosim.retirement import RetirementCoordinator
+from .cosim.tile_port import BoundaryMessage, TilePort
 from .execution_ir import (
   ContextAdmissionStatus,
   ExecDispatchRequest,
@@ -74,7 +80,6 @@ from .tile_group_sequencer import TileGroupSequencer
 from .trace import MemoryTrace, Tracer
 
 if TYPE_CHECKING:
-  from .cosim.tile_port import BoundaryMessage
   from .runtime.group_port import _RootRequestRecord
 
 
@@ -206,17 +211,19 @@ class TileGroup:
     scheduler_config: GroupSchedulerConfig | None = None,
     byte_store=None,
     backend_kind: str = "python",
+    *,
+    boundary_ports: Mapping[int, TilePort] | None = None,
   ):
-    if backend_kind != "python":
-      # C022 introduces the seam only; the RTL Tile endpoint arrives with C025 (stub driver) and
-      # C040 (real oneTile top). Refusing here prevents an empty/partial backend from ever
-      # executing as if it were a Tile.
-      raise NotImplementedError('backend_kind="rtl" lands with C025/C040; only "python" exists')
-    self.backend_kind = backend_kind
-    # C024: Group-side cosim outer services (caps/program/event/reset/stream), registered by
-    # message family; routed from `_service_rtl_inbound` once RTL Tiles deliver real traffic.
-    self._cosim_services: dict[str, object] = {}
-    self._rtl_inbound: deque[object] = deque()
+    self.boundary_ports = MappingProxyType(dict(boundary_ports or {}))
+    kinds = {port.backend_kind for port in self.boundary_ports.values()}
+    if backend_kind != "python" and (backend_kind not in ("rtl", "stub") or kinds != {backend_kind}):
+      raise ValueError("the configured backend requires matching physical TilePorts")
+    for tile_id, port in self.boundary_ports.items():
+      if type(tile_id) is not int or not 0 <= tile_id < cfg.num_tiles or port.tile_id != tile_id:
+        raise ValueError(f"TilePort identity does not match physical tile {tile_id!r}")
+      if port.backend_kind not in ("rtl", "stub"):
+        raise ValueError("boundary_ports replaces a ComputeTile; a Python Tile must stay local")
+    self.backend_kind = "stub" if "stub" in kinds else "rtl" if kinds else "python"
     self.cfg = cfg
     self.tracer = tracer
     self.scheduler_config = scheduler_config or GroupSchedulerConfig()
@@ -285,7 +292,13 @@ class TileGroup:
         memory_trace=self.memory_trace,
       )
       for i in range(cfg.num_tiles)
+      if i not in self.boundary_ports
     ]
+    self.python_tiles_by_id = {tile.tile_id: tile for tile in self.tiles}
+    self._tile_owners = tuple(
+      self.boundary_ports[i] if i in self.boundary_ports else self.python_tiles_by_id[i]
+      for i in range(cfg.num_tiles)
+    )
     for tile in self.tiles:
       tile.precise_write_recorder = self._record_precise_scatter_write
     self.sequencer = TileGroupSequencer(self)
@@ -366,6 +379,9 @@ class TileGroup:
     self.fault_ring = FaultRing()
     self.program_table = ProgramResidencyManager(cfg)
     self.reset_domain = ResetDomain(cfg)
+    self.event_service = EventService(self)
+    self.admission = AdmissionCoordinator(self, context_count)
+    self.retirement = RetirementCoordinator(self)
     self.l2_sram = ArenaPool(l2_profile, trace=self.memory_trace)
     if self.memory_enabled:
       self.payload = PayloadTracker()
@@ -458,7 +474,11 @@ class TileGroup:
         pool = transaction.tile_id if handle.memory_space == "l1" else 0
         if (handle.memory_space, pool) not in identities:
           return False
-        allocator = self.tiles[pool].l1_allocator if handle.memory_space == "l1" else self.l2_sram
+        if handle.memory_space == "l1" and pool not in self.python_tiles_by_id:
+          return False
+        allocator = (
+          self.python_tiles_by_id[pool].l1_allocator if handle.memory_space == "l1" else self.l2_sram
+        )
         allocator.assert_live(handle)
         if handle.memory_space == "l2":
           self.l2_sram.assert_access(handle, "r" if phase.startswith("source_") else "w")
@@ -1072,6 +1092,11 @@ class TileGroup:
     for sequencer in self._active_sequencers:
       self.scheduler.cancel_context(sequencer, cycle)
     self.transfer_manager.cancel_all(cycle)
+    # The Tile alone can release a local hold or retire an authorized Task. While
+    # either receipt is owed the Group may not sweep the owning Route/pins.
+    if self.admission.tickets:
+      self.admission.cancel_all(cycle)
+      return False
     self.profile_controller.request_cancel_all(cycle)
     if (
       self.profile_controller.cancellation_pending
@@ -1088,7 +1113,9 @@ class TileGroup:
     self._unwind_grid_l2_pins(cycle)
     for route in tuple(self._grid_routes.values()):
       for tile_id, admission in tuple(route.admissions.items()):
-        tile = self.tiles[tile_id]
+        if tile_id in route.retired:
+          continue
+        tile = self.python_tiles_by_id[tile_id]
         for name, handle in tuple(admission.l1_handles.items()):
           if not tile.l1_allocator.is_released(handle):
             if not tile.l1_allocator.invalidate_view(handle, handle.owner, cycle):
@@ -1106,7 +1133,7 @@ class TileGroup:
           leases.remove(task)
           if not leases:
             del self._task_leases[lease_key]
-          self._trace_task_lease("task_lease_release", route, task, tile_id, cycle)
+          self._trace_task_lease("task_lease_release", route, task, tile_id, cycle, admission.context_id)
       del self._grid_routes[route.grid]
     self._retiring_tasks.clear()
     for key, handle in tuple(self._l2_handles.items()):
@@ -1174,7 +1201,9 @@ class TileGroup:
 
   def can_dispatch_role(self, binding: ExecTileRoleBinding) -> bool:
     return all(
-      t.can_accept_context(binding.context_id) for t in self.tiles if binding.tile_mask & (1 << t.tile_id)
+      t.can_accept_context(binding.context_id)
+      for t in self._tile_owners
+      if binding.tile_mask & (1 << t.tile_id)
     )
 
   def dispatch_role(
@@ -1195,7 +1224,7 @@ class TileGroup:
       return IssueResult(IssueStatus.BACKPRESSURE, reason="WAIT_CONTROL_RESOURCE")
     if not event or binding.task_domain is None or seq.task is None:
       return IssueResult(IssueStatus.FAULT, reason="dispatch lacks compiled Task domain/event")
-    selected = [tile.tile_id for tile in self.tiles if binding.tile_mask & (1 << tile.tile_id)]
+    selected = [tile_id for tile_id in range(self.cfg.num_tiles) if binding.tile_mask & (1 << tile_id)]
     count = binding.task_domain.to_task - binding.task_domain.from_task
     if count <= 0 or count != len(selected) or grid in self._grid_routes:
       return IssueResult(IssueStatus.FAULT, reason="invalid or duplicate Grid Route")
@@ -1247,129 +1276,6 @@ class TileGroup:
     )
     return IssueResult(IssueStatus.ACCEPTED, asynchronous=True, completion_event=event, adapter="dispatch")
 
-  def _step_task_admission(self, cycle: int) -> None:
-    """One commit per Tile per Tick; compare only SAME/COMPATIBLE bucket heads."""
-    if self.profile_controller.issue_gate_closed("l1"):
-      return
-    current = self.profile_controller.active_modes["l1"]
-    for tile in self.tiles:
-      heads: dict[bool, _GridRoute] = {}
-      for queued_route in self._grid_routes.values():
-        if (
-          queued_route.sequencer.faulted
-          or tile.tile_id not in queued_route.expected
-          or tile.tile_id in queued_route.admissions
-          or tile.tile_id in queued_route.retired
-        ):
-          continue
-        same = queued_route.request.requested_l1_mode == current
-        heads.setdefault(same, queued_route)
-      for same in (True, False):
-        route = heads.get(same)
-        if route is None:
-          continue
-        seq = route.sequencer
-        assert seq.task is not None and seq.task.resource_contract is not None
-        task = route.expected[tile.tile_id]
-        key = (seq.task.binding_id, seq.context_launch_generation, tile.tile_id)
-        leases = self._task_leases.get(key, set())
-        if len(leases) >= seq.task.resource_contract.requested_contexts_per_tile:
-          route.wait_reasons[tile.tile_id] = "WAIT_CONTEXT_LIMIT"
-          continue
-        candidate = tile.plan_admission(
-          route.binding.tile_program, route.grid, route.event_id, task.task_id, route.binding.context_id
-        )
-        if candidate is None:
-          route.wait_reasons[tile.tile_id] = "WAIT_SLOT"
-          continue
-        if isinstance(candidate, AdmissionFailure):
-          if candidate.kind is AdmissionFailureKind.TEMPORARY_CAPACITY:
-            assert candidate.wait_reason is not None
-            route.wait_reasons[tile.tile_id] = candidate.wait_reason.value
-            continue
-          seq.mark_fault(candidate.reason)
-          self.on_scheduler_fault(seq, candidate.reason, cycle)
-          break
-        try:
-          self._commit_route_task(route, candidate, cycle)
-        except (MemoryInvariantError, ValueError) as exc:
-          seq.mark_fault(f"Task admission failed: {exc}")
-          self.on_scheduler_fault(seq, seq.fault_reason, cycle)
-          break
-        self._task_leases.setdefault(key, set()).add(task)
-        route.admissions[tile.tile_id] = candidate
-        route.wait_reasons.pop(tile.tile_id, None)
-        self._trace_task_lease("task_lease_acquire", route, task, tile.tile_id, cycle)
-        break
-
-  def _commit_route_task(self, route: _GridRoute, admission: TileAdmission, cycle: int) -> None:
-    from .tile import _TileContextMemory
-
-    binding, seq, tile = route.binding, route.sequencer, admission.tile
-    program = binding.tile_program
-    task = route.expected[tile.tile_id]
-    generation = seq.context_launch_generation
-    l2_map = {
-      index: self._l2_handles[(generation, slot)]
-      for (index, _formal), slot in zip(
-        ((i, f) for i, f in enumerate(program.formals) if f.space == "l2"), binding.actuals
-      )
-    }
-    global_map = {}
-    global_formals = [(i, formal) for i, formal in enumerate(program.formals) if formal.space == "global"]
-    if len(global_formals) != len(binding.global_actuals):
-      raise MemoryInvariantError("global actual/formal count mismatch")
-    for (index, _formal), actual in zip(global_formals, binding.global_actuals):
-      view = self._resolve_view(actual, generation, seq.formal_bindings)
-      if view is None:
-        raise MemoryInvariantError("missing global actual view")
-      global_map[index] = view
-    tile.commit_admission(admission, program, cycle)
-    pinned = False
-    try:
-      self._pin_grid_l2(route.grid, binding, task, cycle)
-      pinned = True
-      self.program_table.register(
-        program.program_id, program.version, program.program_hash, 0, program.text_bytes
-      )
-      admission.prepare_cycles = (
-        self.program_table.ensure_resident(program.program_id, tile.tile_id, cycle)
-        if self.runtime_enabled
-        else 0
-      )
-      memory = _TileContextMemory(
-        task_identity=task,
-        l2_formal_handles=l2_map,
-        global_formal_views=global_map,
-        l1_handles=admission.l1_handles,
-        l2_resolver=self.l2_sram,
-        arena=admission.arena,
-        binding_id=route.request.binding_id,
-      )
-      context = tile.load_program(
-        program,
-        binding.role_id,
-        route.event_id,
-        admission.prepare_cycles,
-        admission.context_id,
-        memory,
-        task,
-      )
-      if context != admission.context_id:
-        raise MemoryInvariantError("UCE binding failed after Arena commit")
-      admission.bound = True
-      self.profile_controller.note_user_issue(("l1",))
-    except (MemoryInvariantError, ValueError):
-      if pinned:
-        self._unpin_task_l2(task, cycle)
-      tile.abort_admission(admission, cycle)
-      raise
-    self._role_l1_handles[route.event_id][tile.tile_id] = admission.l1_handles
-    tile.uce._phase_signal_callback = self._on_phase_signal
-    for queue_id, queue in self.queues.items():
-      tile.bind_stream(queue_id, queue)
-    self.pmu.add_cycle("program_cold_load", admission.prepare_cycles)
-
   def _unpin_task_l2(self, task: TaskIdentity, cycle: int) -> None:
     grid_pins = self._grid_l2_pins.get(task.grid)
     if grid_pins is None:
@@ -1381,11 +1287,10 @@ class TileGroup:
     self._sync_l2_pool_mirror(cycle)
 
   def _trace_task_lease(
-    self, event: str, route: _GridRoute, task: TaskIdentity, tile_id: int, cycle: int
+    self, event: str, route: _GridRoute, task: TaskIdentity, tile_id: int, cycle: int, ctx_id: int
   ) -> None:
     if self.tracer is None:
       return
-    admission = route.admissions[tile_id]
     program = route.binding.tile_program
     args = {
       "binding_id": route.request.binding_id,
@@ -1393,8 +1298,8 @@ class TileGroup:
       "launch_generation": task.grid.launch_generation,
       "context_name": task.grid.context_name,
       "tile_id": tile_id,
-      "ctx_id": admission.context_id,
-      "hardware_context_id": admission.context_id,
+      "ctx_id": ctx_id,
+      "hardware_context_id": ctx_id,
       "role_id": route.binding.role_id,
       "grid_event": route.event_id,
       "program": program.name,
@@ -1688,110 +1593,76 @@ class TileGroup:
         )
 
   def _step_tiles(self, cycle: int, *, freeze_new_work: bool) -> None:
-    """P4 dispatcher: advance every Tile exactly once this Tick.
-
-    Split per C022: `_step_python_tiles` keeps the pure-Python path byte-identical;
-    `_service_rtl_inbound` consumes tile->Group messages for RTL Tiles (none exist until
-    C025/C040, so it is provably empty today and asserts that invariant).
-    """
-    self._step_python_tiles(cycle, freeze_new_work=freeze_new_work)
-    self._service_rtl_inbound(cycle)
-
-  def register_cosim_service(self, name: str, service: object) -> None:
-    """Register one C024 outer service (caps/program/event/reset/stream) by family name."""
-    if name in self._cosim_services:
-      raise ValueError(f"cosim service {name!r} already registered")
-    self._cosim_services[name] = service
-
-  def _service_rtl_inbound(self, cycle: int) -> None:
-    """Consume MEMORY/CTRL/EVENT/PROGRAM/STREAM messages from RTL Tiles (C025/C040).
-
-    Boundary messages queued by RTL TilePorts are dispatched by message family to the
-    registered C024 services. With only Python Tiles constructed there is nothing queued;
-    the rtl_ports assertion keeps a silently-skipped RTL port from masquerading as serviced.
-    """
-    _ = cycle
-    while self._rtl_inbound:
-      msg = self._rtl_inbound.popleft()
-      family = getattr(msg, "channel", None)
-      service = self._cosim_services.get(str(family))
-      if service is None:
-        raise MemoryInvariantError(
-          f"RTL inbound {getattr(msg, 'message_type', '?')} has no registered service"
-        )
-    if getattr(self, "rtl_ports", None):
-      raise MemoryInvariantError("RTL Tile inbound servicing arrives with C025/C040")
-
-  def _step_python_tiles(self, cycle: int, *, freeze_new_work: bool) -> None:
-    for tile in self.tiles:
-      tile.step(cycle, freeze_new_work=freeze_new_work)
-      for terminal in tile.drain_context_terminals():
-        task = terminal.task_identity
-        if task is None:
-          raise MemoryInvariantError("terminal event lacks TaskIdentity")
-        route = self._grid_routes.get(task.grid)
-        if route is None or route.expected.get(tile.tile_id) != task:
-          raise MemoryInvariantError("stale or foreign Task terminal")
-        if terminal.status == "fault":
-          reason = f"tile{tile.tile_id}: {terminal.reason}"
-          self.on_scheduler_fault(route.sequencer, reason, cycle)
-          continue
-        self._retiring_tasks[task] = terminal
-    for task, terminal in tuple(self._retiring_tasks.items()):
-      route = self._grid_routes[task.grid]
-      tile = self.tiles[terminal.tile_id]
-      admission = route.admissions.get(tile.tile_id)
-      if admission is None or admission.arena is None:
-        raise MemoryInvariantError("terminal has no committed Task Arena")
-      if any(self.transfer_manager.has_inflight_access(handle) for handle in admission.l1_handles.values()):
-        continue
-      pending = False
-      for name, handle in tuple(admission.l1_handles.items()):
-        if not tile.l1_allocator.invalidate_view(handle, handle.owner, cycle):
-          pending = True
+    self.retirement.step_python(cycle, freeze_new_work=freeze_new_work)
+    if not self.boundary_ports:
+      return
+    for tile_id, port in self.boundary_ports.items():
+      port.step(cycle, freeze_new_work=freeze_new_work)
+      while (msg := port.pop_inbound()) is not None:
+        if msg.message_type in ("ACK", "RESOURCE_UPDATE"):
+          try:
+            self.admission.handle(tile_id, msg, cycle)
+          except AdmissionProtocolError as exc:
+            self.pmu.add_event("admission_protocol_fault")
+            if not (self.reset_domain.is_active or self.reset_domain.is_done):
+              self.trigger_fault(FaultCode.ADDRESS_FAULT, cycle=cycle, desc_id=str(exc))
+        elif msg.message_type in ("RETIRE_READY", "TASK_COMPLETION", "PHASE_SIGNAL"):
+          self.retirement.handle(tile_id, msg, cycle)
+        elif msg.message_type == "RESET_PHASE_ACK":
+          self.reset_domain.observe_tile_reset_ack(tile_id, msg)
+        elif msg.message_type == "FAULT_REPORT":
+          if msg.fields["tile_id"] != tile_id:
+            raise MemoryInvariantError("FAULT_REPORT arrived on another Tile's link")
+          self.accept_tile_fault(msg, cycle=cycle)
         else:
-          del admission.l1_handles[name]
-      if pending:
-        continue
-      if not tile.l1_allocator.retire_arena(admission.arena, cycle):
-        continue
-      self._unpin_task_l2(task, cycle)
-      tile.l1_frames[terminal.ctx_id].release()
-      key = (route.request.binding_id, task.grid.launch_generation, tile.tile_id)
-      leases = self._task_leases[key]
-      if task not in leases:
-        raise MemoryInvariantError("Task retirement has no R lease")
-      leases.remove(task)
-      if not leases:
-        del self._task_leases[key]
-      self._trace_task_lease("task_lease_release", route, task, tile.tile_id, cycle)
-      route.retired.add(tile.tile_id)
-      self._role_l1_handles[route.event_id].pop(tile.tile_id, None)
-      self._role_done_tiles[route.event_id].add(tile.tile_id)
-      del self._retiring_tasks[task]
-      if route.retired != set(route.expected):
-        continue
-      del self._grid_routes[task.grid]
-      self._role_l1_handles.pop(route.event_id, None)
+          raise MemoryInvariantError(f"no lifecycle handler for {msg.message_type} from tile {tile_id}")
+    if self.reset_domain.is_active:
+      self.admission.cancel_all(cycle)
+    self.admission.advance(cycle)
+    self.retirement.advance(cycle)
+    for tile_id, port in self.boundary_ports.items():
+      if tile_id in self.reset_domain.tile_reset_links and port.outbox_ready():
+        request = self.reset_domain.take_tile_reset_request(tile_id)
+        if request is not None:
+          port.send(request)
+
+  def _finish_route_task(
+    self, route: _GridRoute, task: TaskIdentity, tile_id: int, ctx_id: int, cycle: int, status: EventStatus
+  ) -> None:
+    """Release this participant's remaining parent resources, never the root's Arena."""
+    key = (route.request.binding_id, task.grid.launch_generation, tile_id)
+    leases = self._task_leases.get(key)
+    if route.expected.get(tile_id) != task or tile_id in route.retired or not leases or task not in leases:
+      raise MemoryInvariantError("Task retirement has no matching live Route and R lease")
+    self._unpin_task_l2(task, cycle)
+    leases.remove(task)
+    if not leases:
+      del self._task_leases[key]
+    self._trace_task_lease("task_lease_release", route, task, tile_id, cycle, ctx_id)
+    route.retired.add(tile_id)
+    self._role_l1_handles[route.event_id].pop(tile_id, None)
+    self._role_done_tiles[route.event_id].add(tile_id)
+    if status is not EventStatus.DONE:
+      self.on_scheduler_fault(route.sequencer, f"tile {tile_id} Task {task.task_id}: {status.name}", cycle)
+    if len(route.retired) != len(route.expected):
+      return
+    del self._grid_routes[task.grid]
+    self._role_l1_handles.pop(route.event_id, None)
+    if not self.reset_domain.is_active:
       route.sequencer.notify_event(
-        route.event_id, cycle, EventStatus.ERROR if route.sequencer.faulted else EventStatus.DONE
+        route.event_id, cycle, EventStatus.ERROR if route.sequencer.faulted else status
       )
-      if self.tracer is not None:
-        trace = self._role_trace[route.event_id]
-        self.tracer.complete(
-          "TileGroup",
-          f"TileRole:{trace.role_id}",
-          f"dispatch:role{trace.role_id}:{route.event_id}:run",
-          trace.start_cycle,
-          cycle,
-          args={
-            "event_id": route.event_id,
-            "binding_id": route.request.binding_id,
-            "tile_mask": trace.tile_mask,
-            "requested_l1_mode": route.request.requested_l1_mode,
-            "resolved_l1_mode": route.request.resolved_l1_mode,
-          },
-        )
+    if self.tracer is not None:
+      trace = self._role_trace[route.event_id]
+      self.tracer.complete(
+        "TileGroup", f"TileRole:{trace.role_id}", f"dispatch:role{trace.role_id}:{route.event_id}:run",
+        trace.start_cycle, cycle,
+        args={
+          "event_id": route.event_id, "binding_id": route.request.binding_id, "tile_mask": trace.tile_mask,
+          "requested_l1_mode": route.request.requested_l1_mode,
+          "resolved_l1_mode": route.request.resolved_l1_mode,
+        },
+      )
 
   def step(self, cycle: int) -> bool:
     """Advance one cycle.  Returns True if the whole task is done."""
@@ -1822,7 +1693,7 @@ class TileGroup:
     scheduler_frozen = freeze_new_work or self.reset_domain.is_active
     if not scheduler_frozen:
       self.scheduler.step(self._active_sequencers, cycle)
-      self._step_task_admission(cycle)
+      self.admission.step(cycle)
     else:
       self.scheduler._poll_controls(cycle)
     for active_seq in self._active_sequencers:
@@ -1891,13 +1762,7 @@ class TileGroup:
     role_events = [event_id for event_id, trace in self._role_trace.items() if trace.sequencer is sequencer]
     external_events = {event for event in sequencer._events_done if "ev_dma_" in event}
     if external_events:
-      from .cosim.event_service import EventService  # lazy: event_service imports tile_group
-
-      service = self._cosim_services.get("event")
-      if not isinstance(service, EventService):
-        service = EventService(self)
-        self._cosim_services["event"] = service
-      service.broadcast_event_retire(external_events, self.tiles)
+      self.event_service.broadcast_event_retire(external_events, self.tiles)
     for event_id in role_events:
       self._role_trace.pop(event_id, None)
       self._role_event_tile_mask.pop(event_id, None)
@@ -2064,10 +1929,20 @@ class TileGroup:
       or self.l2_sram.snapshot()["active_shared_references"]
     ):
       raise MemoryInvariantError("previous launch has not retired")
+    if self.boundary_ports:
+      if self.reset_domain.is_active or self.reset_domain.is_done or self.poisoned_reason is not None:
+        raise MemoryInvariantError("a boundary launch requires a healthy, recovered Group")
+      if not all(port.outbox_ready() for port in self.boundary_ports.values()):
+        raise MemoryInvariantError("RUN_BEGIN has no CTRL credit")
+      if self.reset_domain.tile_reset_links:
+        self.reset_domain.reset()  # clean previous launch; retire its wire epoch
     self.l2_sram.close_l2_claims()
     self._build_l2_manifest(program)
     self.loaded_program = program
     self.run_generation += 1
+    for tile_id, port in self.boundary_ports.items():
+      self.reset_domain.attach_tile_reset(tile_id, self.run_generation)
+      port.send(BoundaryMessage("RUN_BEGIN", "CTRL", "G2T", {"run_generation": self.run_generation}))
     self.l2_sram.run_generation = self.run_generation
     self.profile_controller.begin_run(self.run_generation)
     self.transfer_manager.begin_run(self.run_generation)
@@ -2377,7 +2252,7 @@ class TileGroup:
       "scheduler": self._scheduler_snapshot(),
       "event_table": self.event_table.snapshot(),
       "queues": {qid: q.snapshot() for qid, q in self.queues.items()},
-      "tiles": [t.snapshot() for t in self.tiles],
+      "tiles": [owner.snapshot() for owner in self._tile_owners],
       "memory": {
         "fidelity": self.fidelity,
         "hbm": self.hbm.snapshot(),
@@ -2415,10 +2290,12 @@ class TileGroup:
     }
 
   def all_tiles_done(self) -> bool:
-    return all(t.done for t in self.tiles)
+    return not self.admission.tickets and all(t.done for t in self.tiles)
 
   def credit_invariants_hold(self) -> bool:
-    return all(q.credit_invariant_holds() for q in self.queues.values())
+    return all(q.credit_invariant_holds() for q in self.queues.values()) and all(
+      port.credit_invariant_holds() for port in self.boundary_ports.values()
+    )
 
   def on_scheduler_fault(self, sequencer: TileGroupSequencer, reason: str, cycle: int) -> None:
     """Stop one owner and enter the existing bounded Group fault drain."""

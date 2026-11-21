@@ -95,7 +95,7 @@ states:
     source:
       {
         file: pipeline_validator/runtime/event_table.py,
-        line: 552,
+        line: 573,
         needle: "entry.status is EventStatus.PENDING",
       }
   fault_triggered_error_event:
@@ -128,7 +128,7 @@ reclaim:
   source:
     {
       file: pipeline_validator/runtime/event_table.py,
-      line: 499,
+      line: 518,
       needle: "entry.consumer_refs or entry.future_uses",
     }
   validator_difference: "EventTable.reset() converts PENDING to RESET but does not reclaim; the hardware table reclaims only by the predicate, so a RESET entry with live references stays"
@@ -137,7 +137,7 @@ reclaim:
     source:
       {
         file: pipeline_validator/runtime/event_table.py,
-        line: 372,
+        line: 389,
         needle: "cannot abandon future uses",
       }
 
@@ -159,7 +159,7 @@ signal:
   source:
     {
       file: pipeline_validator/runtime/event_table.py,
-      line: 441,
+      line: 458,
       needle: "entry.sequence != sequence",
     }
 
@@ -169,7 +169,7 @@ counters:
     source:
       {
         file: pipeline_validator/runtime/event_table.py,
-        line: 442,
+        line: 459,
         needle: "pmu_stale_sequence_count += 1",
       }
   wrong_owner:
@@ -177,7 +177,7 @@ counters:
     source:
       {
         file: pipeline_validator/runtime/event_table.py,
-        line: 436,
+        line: 453,
         needle: "pmu_wrong_owner_count += 1",
       }
   duplicate_signal:
@@ -185,7 +185,7 @@ counters:
     source:
       {
         file: pipeline_validator/runtime/event_table.py,
-        line: 448,
+        line: 465,
         needle: "pmu_duplicate_signal_count += 1",
       }
   capacity_reject:
@@ -193,7 +193,7 @@ counters:
     source:
       {
         file: pipeline_validator/runtime/event_table.py,
-        line: 126,
+        line: 127,
         needle: "pmu_capacity_reject_count += 1",
       }
   protocol_error:
@@ -201,12 +201,12 @@ counters:
     source:
       {
         file: pipeline_validator/runtime/event_table.py,
-        line: 116,
+        line: 117,
         needle: "pmu_protocol_error_count += 1",
       }
   unknown_event_notify:
     increment: "a completion names an entry that has no live slot (reclaimed or never registered)"
-    note: "the validator folds this into stale_sequence (event_table.py:423); the hardware keeps it separate so a reclaimed name is distinguishable from a stale sequence"
+    note: "the validator folds this into stale_sequence (event_table.py:440); the hardware keeps it separate so a reclaimed name is distinguishable from a stale sequence"
 saturation:
   sticky_bit_per_counter: true
   wrap: forbidden
@@ -223,7 +223,7 @@ capacity:
     source:
       {
         file: pipeline_validator/config.py,
-        line: 458,
+        line: 468,
         needle: "event_capacity: int = 4096",
       }
   frontier_slots_per_context:
@@ -276,7 +276,7 @@ capacity:
   group_figure_is_not_per_context_proof:
     {
       file: pipeline_validator/execution_verifier.py,
-      line: 2030,
+      line: 2035,
       needle: "budget.event_frontier != required_frontier",
     }
 

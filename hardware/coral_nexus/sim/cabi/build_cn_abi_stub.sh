@@ -22,12 +22,22 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Serialize concurrent cold builds (pytest-xdist): one builder per cache dir at a
+# time, from the cache-hit check through the final cleanup.
+mkdir -p "$CACHE_DIR"
+exec {BUILD_LOCK_FD}>"$CACHE_DIR/build.lock"
+flock "$BUILD_LOCK_FD"
+
 IMAGE="$(python3 -c "import json;print(json.load(open('$H/env/image.lock'))['tag'])")"
 VERILATOR_SEED="$ROOT/out/coral_nexus/cache/seeds/verilator-v5.052.tar.gz"
 VERILATOR_ROOT_HOST="${CN_VERILATOR_ROOT:-$ROOT/out/coral_nexus/C017/build/verilator-5.052}"
 
+# The SV consumes cn_offsets.svh via `include and the selftest driver includes
+# cn_messages.h, so both generated artifacts are recipe inputs: a protocol
+# regeneration must invalidate the cached .so, never reuse a stale object tree.
 RECIPE_SHA="$(sha256sum "$H/sim/cabi/cn_abi.h" "$H/sim/cabi/cn_abi.cc" "$H/sim/cabi/abi_selftest_driver.c" \
   "$H/sim/unit/cn_protocol_stub.sv" "$H/scripts/lib/gen_slot_table.py" "$H/protocol/generated/cn_layout.json" \
+  "$H/protocol/generated/cn_offsets.svh" "$H/protocol/generated/cn_messages.h" \
   "$H/protocol/cn_protocol_v1.yaml" "$0" | sha256sum | awk '{print $1}')"
 
 if [ "$FORCE" -eq 0 ] && [ -f "$CACHE_DIR/libcn_cosim_stub.so" ] && [ -f "$CACHE_DIR/abi_selftest_driver" ] \
@@ -42,7 +52,8 @@ if [ ! -x "$VERILATOR_ROOT_HOST/bin/verilator_bin" ]; then
   rm -rf "$VERILATOR_ROOT_HOST"
   tar -xzf "$VERILATOR_SEED" -C "$(dirname "$VERILATOR_ROOT_HOST")"
 fi
-
+# Never reuse a stale generated obj tree from a previously crashed run.
+rm -rf "$CACHE_DIR/work"
 mkdir -p "$CACHE_DIR/work"
 rm -rf "$CACHE_DIR/verilator-5.052"; cp -r "$VERILATOR_ROOT_HOST" "$CACHE_DIR/verilator-5.052"
 bash "$H/scripts/lib/docker_run.sh" "$IMAGE" "$CACHE_DIR" -- bash -exc '

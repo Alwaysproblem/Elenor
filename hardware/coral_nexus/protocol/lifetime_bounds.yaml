@@ -22,7 +22,7 @@ status: draft
 domains:
   - name: txn_id
     derivable: false
-    reason: "No sourced arrival rate for txn_id and no sourced accept->terminal-ACK lifetime. dispatch_capacity (16) bounds concurrent grid routes, not txn arrivals; reset_domain.py:89 (max_drain_cycles) is a reset-drain cancel threshold, not a txn lifetime."
+    reason: "No sourced arrival rate for txn_id and no sourced accept->terminal-ACK lifetime. dispatch_capacity (16) bounds concurrent grid routes, not txn arrivals; the explicit HardwareConfig.max_drain_cycles config key (reset_domain.py:171, C035) is a reset-drain cancel threshold, not a txn lifetime."
     needs: [txn_arrival_rate_msg_per_tick, txn_live_ticks]
     max_in_flight_candidate:
       {

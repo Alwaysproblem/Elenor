@@ -15,6 +15,12 @@
  * `clk=1`, `eval()` (the ONLY rising edge in the tick). P3: `clk=0`, `eval()`;
  * commit ONLY the P1-accepted set into the bounded collect ring. Outputs
  * asserted by the DUT at P2 are staged candidates for the NEXT tick only.
+ *   - bp_begin: validates the whole CnBeginCfg (tile_count == 1, known stub
+ * flags, legacy/lifecycle fixture exclusivity, physical link tile_id range,
+ * zeroed reserved[5..6]) and fails closed by returning NULL; each session owns
+ * its own VerilatedContext + DUT instance, so simultaneous independent Tile
+ * handles are real, never shared (C040 multi-tile single sessions remain out
+ * of scope).
  *   - bp_collect: copies committed records into caller's buffer (`CN_ERR_RANGE`
  * without truncation or loss when `buf_len` is too small; `CN_ERR_STATE` on
  * duplicate collect in the same tick; uncollected records survive across
@@ -185,7 +191,33 @@ uint32_t bp_abi_info(uint8_t out_hash[129]) {
 
 struct CnSim* bp_begin(const struct CnBeginCfg* cfg) {
   if (cfg == nullptr || cfg->abi_version != CN_ABI_VERSION ||
-      cfg->tile_count < 1) {
+      cfg->tile_count != 1u) {
+    return nullptr;
+  }
+  // Fail closed on unsupported session configuration: unknown flag bits,
+  // mixed legacy/lifecycle fixture flags, or an out-of-range physical link id.
+  const uint8_t flags = cfg->reserved[0];
+  const uint32_t tile_id =
+      (uint32_t)cfg->reserved[1] | ((uint32_t)cfg->reserved[2] << 8) |
+      ((uint32_t)cfg->reserved[3] << 16) | ((uint32_t)cfg->reserved[4] << 24);
+  const uint8_t legacy_flags = CN_STUB_FLAG_CORRUPT_T2G |
+                               CN_STUB_FLAG_EMIT_MEM_REQ |
+                               CN_STUB_FLAG_GLITCH_PAYLOAD;
+  if ((flags & ~CN_STUB_FLAG_KNOWN_MASK) != 0u) return nullptr;
+  if ((flags & legacy_flags) != 0u && (flags & CN_STUB_FLAG_LIFECYCLE) != 0u) {
+    return nullptr;
+  }
+  if ((flags & (CN_STUB_FLAG_FAIL_HOLD | CN_STUB_FLAG_INPUT_RELEASED |
+                CN_STUB_FLAG_FAIL_FINAL)) != 0u &&
+      (flags & CN_STUB_FLAG_LIFECYCLE) == 0u) {
+    return nullptr;
+  }
+  if ((flags & CN_STUB_FLAG_LIFECYCLE) != 0u) {
+    if (tile_id >= CN_STUB_MAX_LIFECYCLE_TILES) return nullptr;
+  } else if (tile_id != 0u) {
+    return nullptr;
+  }
+  if (cfg->reserved[5] != 0u || cfg->reserved[6] != 0u) {
     return nullptr;
   }
   auto* sim = new (std::nothrow) CnSim();
@@ -207,7 +239,6 @@ struct CnSim* bp_begin(const struct CnBeginCfg* cfg) {
     sim->t2g_ready_cfg[c] = 1u;
   }
 
-  const uint8_t flags = cfg->reserved[0];
   sim->top->clk = 0;
   sim->top->g2t_valid = 0;
   sim->top->g2t_words_flat = 0;
@@ -228,6 +259,12 @@ struct CnSim* bp_begin(const struct CnBeginCfg* cfg) {
   sim->top->cfg_emit_mem_req = (flags & CN_STUB_FLAG_EMIT_MEM_REQ) ? 1u : 0u;
   sim->top->cfg_glitch_payload =
       (flags & CN_STUB_FLAG_GLITCH_PAYLOAD) ? 1u : 0u;
+  sim->top->cfg_lifecycle = (flags & CN_STUB_FLAG_LIFECYCLE) ? 1u : 0u;
+  sim->top->cfg_fail_hold = (flags & CN_STUB_FLAG_FAIL_HOLD) ? 1u : 0u;
+  sim->top->cfg_fail_final = (flags & CN_STUB_FLAG_FAIL_FINAL) ? 1u : 0u;
+  sim->top->cfg_input_released =
+      (flags & CN_STUB_FLAG_INPUT_RELEASED) ? 1u : 0u;
+  sim->top->cfg_tile_id = tile_id;
   // Drive a real 1 -> 0 -> 1 `rst_n` transition so `always @(posedge clk or
   // negedge rst_n)` fires and loads `cfg_ready_seed` without advancing
   // `posedge_count`.
