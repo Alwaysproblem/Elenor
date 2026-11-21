@@ -187,7 +187,7 @@ class W2_04_CoreControlSpec extends AnyFreeSpec with ChiselSim {
       core.io.ctx.entryStart(c).valid.poke(false.B)
       core.io.ctx.entryStart(c).bits.poke(0.U)
     }
-    core.io.ctx.rfObserve.poke(true.B)
+    core.io.ctx.rfObserve.poke(false.B) // this bench reads GPRs through dm.scalar_rs
     core.io.ctx.rfDebugAddr.poke(0.U)
     core.io.csr.in.value.foreach(_.poke(0.U))
 
@@ -444,6 +444,9 @@ class W2_04_CoreControlSpec extends AnyFreeSpec with ChiselSim {
         core.clock.step()
         core.reset.poke(false.B)
         launch(core, 0, BigInt(0x0))
+        // A never-accepted slot is idle. Hold a real peer admission waiting for
+        // PROGRAM_READY so WFI on 0 cannot make the entire c2 Tile quiescent.
+        if (count == 2) core.io.ctx.ctxAccepted(1).poke(true.B)
         core.io.ctx.perCtxPark(0).poke(true.B)
         // addi x5,x0,42; wfi; nop; nop. A real instruction stream, not injected retirement.
         val line = BigInt("00000013000000131050007302a00293", 16)

@@ -253,6 +253,8 @@ ROB 同 PC 双 Context store、错误 op_seq、独立退休、局部 fault flush
 - 未重跑 C026/C027，未运行 G2 gate；本结果不关闭 C030 的真实物理端口仲裁或 C040 的完整 Tile 顶层。C1 elaboration 仍有单元素 Vec 索引宽度提示，不将功能通过称为零警告 lint。
 - 补充修复（attempt-011）：执行控制写 `mode/halt/fault/wfi` 按 `bruExecOwner` 路由，`mcause/mepc/mtval` 按 trap/fault payload owner 路由；两类旧代拒收分别归属，同一旧指令同时占两组时不重复计数。扩展后的 BRU 定向回归 **1 passed**：A 分别执行 WFI、MPAUSE、EBREAK、MRET，与 B 同拍 fault，检查两个 bank 的 WFI／halt／fault、MEPC／MCAUSE；MRET 还验证 A 从 Debug 返回 Machine、B 保持 Debug。证据：`out/coral_nexus/C028/attempt-011/bru-write-owners.{log,xml}`。本次补充未重跑全量 C028 或 C026/C027。
 - 全量复验（attempt-012，含上述 BRU 写侧修复）：由 subagent 运行未过滤的独立入口，**2 passed in 288.85s**；取指 **15**、前缀发射 **8**、真实 Core／BRU-CSR **3**，合计 **26** 个 Scala 行为用例全部通过。两个 mutant 均以真实行为断言失败检出，CoreAxi elaboration 通过；seal SHA-256 不变。主证据：`out/coral_nexus/C028/attempt-012/pytest/c0280/evidence/`；本次 `gen_frontend_params.py --check` 与 `sources verify` 也通过，证据分别为同 attempt 的 `frontend-params.log` 与 `sources/sources_report.json`。未重跑 C026/C027 或 G2 gate。
+- C035 重跑 W2 暴露了两处原测试夹具问题，未改 Core RTL。第一，C026/C027 以 `rfObserve=true` 固定读 x0，却通过 `dm.scalar_rs.idx` 请求其他 GPR；改为 DM 模式。C2 WFI 用例也明确让对端持有已接受、等待 `PROGRAM_READY` 的 Task，而非误把空槽当运行中的对端。第二，修正读口后 C026 的 Context 0 读出 x5=99：旧指令镜像在 A 和 B 之间只填 NOP。独立 Spike 从 A 启动，在 PC 偏移 `0x04` 写 x5=42，在 `0x44` 又写 x5=99，且单个 Context 就能产生两个预期 store。现于各自四条原指令后放置 WFI；要求每 Context 精确退休五条、Tile 排空，两笔 store 的地址和值均正确。原始失败与独立见证：`out/coral_nexus/C035/accept-B6QOqhkR/{w2/pytest.log,w2-observer/pytest.log,c026-isa-witness/result.json}`。
+  修正后，注册入口 `cn unit --suite w2` 在同一 v4 封印下 **8 passed**、无跳过；C026 两个变异体 Bazel 退出码为 3，原程序为 0。最终证据：`out/coral_nexus/C035/accept-B6QOqhkR/{w2-programs/summary.json,w2-programs.xml}`。
 
 <a id="c029"></a>
 

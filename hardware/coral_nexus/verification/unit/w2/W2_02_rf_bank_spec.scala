@@ -52,7 +52,7 @@ class W2_02_RfBankSpec extends AnyFreeSpec with ChiselSim {
       core.io.ctx.entryStart(c).valid.poke(false.B)
       core.io.ctx.entryStart(c).bits.poke(0.U)
     }
-    core.io.ctx.rfObserve.poke(true.B)
+    core.io.ctx.rfObserve.poke(false.B) // dm.scalar_rs.idx owns the debug read address
     core.io.ctx.rfDebugAddr.poke(0.U)
   }
 
@@ -308,8 +308,6 @@ class W2_02_RfBankSpec extends AnyFreeSpec with ChiselSim {
       for (i <- 0 until core.io.csr.in.value.length) {
         core.io.csr.in.value(i).poke(0.U)
       }
-      core.io.ctx.rfObserve.poke(true.B)
-      core.io.ctx.rfDebugAddr.poke(0.U)
       core.io.ibus.ready.poke(false.B)
       core.io.ibus.rdata.poke(0.U)
       core.io.ibus.fault.valid.poke(false.B)
@@ -353,18 +351,19 @@ class W2_02_RfBankSpec extends AnyFreeSpec with ChiselSim {
       val fetchLineCtx0 = BigInt("0060a0230252833302a00293000100b7", 16)
       val fetchLineCtx1 = BigInt("0060a2230252833306300293000100b7", 16)
       val nopLine       = BigInt("00000013000000130000001300000013", 16)
+      // Terminate each program in its own region. NOP padding alone lets
+      // Context 0 fall through to 0x040 and overwrite its own x5 with 99.
+      val stopLine      = BigInt("00000013000000130000001310500073", 16) // wfi; nop; nop; nop
       def lineAt(addr: BigInt): BigInt = addr match {
         case a if a == entry0 => fetchLineCtx0
         case a if a == entry1 => fetchLineCtx1
+        case a if a == entry0 + 16 || a == entry1 + 16 => stopLine
         case _                => nopLine
       }
 
-      var prevFire  = false
-      var prevAddr  = BigInt(0)
       var prevLine  = nopLine
-      val retired0  = Array(0L)
-      val retired1  = Array(0L)
-      val dbusStores = scala.collection.mutable.ArrayBuffer[BigInt]()
+      val retired = Array(0L, 0L)
+      val dbusStores = scala.collection.mutable.ArrayBuffer.empty[(BigInt, BigInt)]
 
       for (_ <- 0 until 120) {
         // 1-cycle delayed IMEM response for the previous beat's accepted request,
@@ -379,29 +378,27 @@ class W2_02_RfBankSpec extends AnyFreeSpec with ChiselSim {
           // Reconstruct the stored 32-bit word from wmask/wdata byte lanes.
           val wmask = core.io.dbus.wmask.peek().litValue
           val wdata = core.io.dbus.wdata.peek().litValue
-          val lane0 = (0 until 16).find(i => ((wmask >> i) & BigInt(1)) == BigInt(1)).getOrElse(0)
+          val lane0 = wmask.lowestSetBit
+          assert(lane0 >= 0 && wmask == (BigInt(15) << lane0), s"invalid SW mask $wmask")
           val word  = (0 until 4).foldLeft(BigInt(0)) { (acc, k) =>
             acc | (((wdata >> (8 * (lane0 + k))) & BigInt(0xff)) << (8 * k))
           }
-          dbusStores += word
+          val rowBase = (core.io.dbus.addr.peek().litValue >> 4) << 4 // 16-byte DTCM bus
+          dbusStores += ((rowBase + lane0, word))
         }
-        retired0(0) += core.io.ctx.perCtxNRetired(0).peek().litValue.toLong
-        retired1(0) += core.io.ctx.perCtxNRetired(1).peek().litValue.toLong
+        for (ctx <- retired.indices) {
+          retired(ctx) += core.io.ctx.perCtxNRetired(ctx).peek().litValue.toLong
+        }
 
         core.clock.step()
         prevLine = if (reqValid) lineAt(reqAddr) else prevLine
-        prevFire = reqValid
-        prevAddr = reqAddr
       }
 
-      assert(retired0(0) >= 4,
-        s"expected Context 0 to retire >= 4 instructions, got ${retired0(0)}")
-      assert(retired1(0) >= 4,
-        s"expected Context 1 to retire >= 4 instructions, got ${retired1(0)}")
-      assert(dbusStores.contains(BigInt(1764)),
-        s"expected Context 0 store 1764 in $dbusStores, retired0=${retired0(0)}")
-      assert(dbusStores.contains(BigInt(9801)),
-        s"expected Context 1 store 9801 in $dbusStores, retired1=${retired1(0)}")
+      core.io.ctx.perCtxParked.foreach(_.expect(true.B))
+      core.io.ctx.tileQuiescent.expect(true.B)
+      assert(retired.toSeq == Seq(5L, 5L), s"expected four instructions and WFI per Context: ${retired.toList}")
+      val expectedStores = Seq(BigInt(0x10000) -> BigInt(1764), BigInt(0x10004) -> BigInt(9801))
+      assert(dbusStores.toSeq.sortBy(_._1) == expectedStores, s"unexpected store addresses/data: $dbusStores")
 
       // Context 0 x5 == 42, x6 == 1764; Context 1 x5 == 99, x6 == 9801. The DM
       // debug reads select the bank through `ctxSelect` (debug ownership); issue
