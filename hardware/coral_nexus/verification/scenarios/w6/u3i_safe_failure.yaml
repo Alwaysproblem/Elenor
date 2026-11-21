@@ -1,0 +1,5 @@
+# A real RTL fault reaches the Group ring; reset reaches DONE with exactly one failed Task and no outstanding work.
+case: U3-i
+inject: { generation: 4294967361, tag: 61, hold_cycles: 6 }
+expect:
+  { winner: 61, suppressed: 0, marked: 1, terminals: 1, stale: 0, poisoned: 0 }

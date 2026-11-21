@@ -1,0 +1,5 @@
+# Two pending entries, a retained ERROR and a live Task. Replay MARK without a second write.
+case: U3-b
+inject: { generation: 4294967319, tag: 11, hold_cycles: 4 }
+expect:
+  { winner: 11, suppressed: 2, marked: 2, terminals: 1, stale: 0, poisoned: 0 }

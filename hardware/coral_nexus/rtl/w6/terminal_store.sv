@@ -51,6 +51,21 @@
 // offer carries is_completion=0 with neutral status/ref (never a bogus
 // terminal); the drain evidence sequence captured at DRAIN rides both kinds.
 //
+// C034 extension: issue_frozen_i (reset-endpoint freeze / Group poison)
+// observably rejects CMD_START and holds NEW phase admission — no new work
+// enters a frozen Tile — while owed phase bytes, DRAIN/RETIRE/FINISH
+// authority and both egress ports continue (older obligations are never
+// gated by the freeze). live_owner_o/aborted_o/phase_pending_o expose the
+// committed source records themselves, not a second binding ledger: a free
+// slot reads all-zero (owner cleared on the TASK_COMPLETION fire).
+// A GLOBAL RESET is a separate cutline (reset_failure_i + retained
+// reset_ref_i from the endpoint): an evidence-backed FINISH accepted while
+// a reset is live may not publish success — an earlier latched failure or
+// a same-edge scoped failure is preserved as-is, and absent either the
+// stored terminal is TS_RESET with the retained Group reset reference.
+// An ordinary issue freeze or Group poison alone is NOT a terminal.
+// Already stored terminals remain byte-stable either way.
+//
 // rst_ni is the synchronous active-low COLD reset, never a functional
 // protocol reset.
 `timescale 1ns/1ps
@@ -64,6 +79,15 @@ module terminal_store
 ) (
   input  logic         clk_i,
   input  logic         rst_ni,
+
+  // C034 freeze (reset endpoint / Group poison): no new Task admission, no
+  // new phase instruction. Existing obligations are unaffected.
+  input  logic         issue_frozen_i,
+
+  // C034 global-reset failure cutline: FINISH cannot store success while a
+  // reset is live (see header). Reference retained by the reset endpoint.
+  input  logic         reset_failure_i,
+  input  word_t        reset_ref_i,
 
   // Lifecycle command port (all kinds share it; routed by cmd_owner_i).
   input  logic           cmd_valid_i,
@@ -107,7 +131,12 @@ module terminal_store
   output logic [CONTEXT_COUNT-1:0] active_o,
   output logic [CONTEXT_COUNT-1:0] ready_pending_o,
   output logic [CONTEXT_COUNT-1:0] retire_sent_o,
-  output logic [CONTEXT_COUNT-1:0] completion_pending_o
+  output logic [CONTEXT_COUNT-1:0] completion_pending_o,
+
+  // C034 committed views for the reset endpoint (source records, no ledger).
+  output owner_t [CONTEXT_COUNT-1:0] live_owner_o,
+  output logic [CONTEXT_COUNT-1:0]    aborted_o,
+  output logic [CONTEXT_COUNT-1:0]    phase_pending_o
 );
 
   localparam logic [2:0] LS_FREE = 3'd0, LS_RUN = 3'd1, LS_RRPEND = 3'd2,
@@ -175,6 +204,7 @@ module terminal_store
   // backpressures (a post-cancel producer stays blocked, which is the
   // intended cutline).
   assign phase_ready_o = route_phase
+    && !issue_frozen_i
     && (r_ctx[sel_phase].state == LS_RUN)
     && !r_ctx[sel_phase].fail_latch
     && (r_ctx[sel_phase].owner == phase_owner_i)
@@ -211,11 +241,12 @@ module terminal_store
     end else begin
       case (cmd_kind_i)
         CMD_START: begin
-          if (st_cmd == LS_FREE) begin
+          if ((st_cmd == LS_FREE) && !issue_frozen_i) begin
             cmd_ready_o = 1'b1;
             acc_start   = cmd_valid_i;
           end else begin
-            cmd_ready_o  = 1'b1;    // reuse before the last terminal fire
+            // slot busy OR frozen issue: consumed with an observable reject
+            cmd_ready_o  = 1'b1;
             cmd_reject_o = cmd_valid_i;
           end
         end
@@ -261,8 +292,10 @@ module terminal_store
 
   // Stored-terminal bytes for an accepting FINISH. First failure wins: the
   // pre-edge latch beats everything; a same-edge accepted abort on the same
-  // slot is the first failure when nothing was latched yet and beats the
-  // FINISH inputs (no success out of an abort edge).
+  // slot is the first failure when nothing was latched yet. A live global
+  // reset (reset_failure_i) is the last success barrier: with no earlier
+  // fault, FINISH stores TS_RESET with the retained reset reference —
+  // never DONE out of a reset window (FLT-14; stored bytes untouched).
   task_status_t fin_status;
   word_t        fin_ref;
   always_comb begin
@@ -272,6 +305,9 @@ module terminal_store
     end else if (abort_hit && (sel_abort == sel_cmd)) begin
       fin_status = abort_status_i;
       fin_ref    = abort_ref_i;
+    end else if (reset_failure_i) begin
+      fin_status = TS_RESET;
+      fin_ref    = reset_ref_i;
     end else begin
       fin_status = finish_status_i;
       fin_ref    = first_fault_ref_i;
@@ -352,6 +388,10 @@ module terminal_store
                                      || (r_ctx[g].state == LS_RETIRED)
                                      || (r_ctx[g].state == LS_TERMPEND);
     assign completion_pending_o[g] = (r_ctx[g].state == LS_TERMPEND);
+    // C034 views (a FREE slot's owner was zeroed on its completion fire).
+    assign live_owner_o[g]   = r_ctx[g].owner;
+    assign aborted_o[g]      = r_ctx[g].fail_latch;
+    assign phase_pending_o[g] = r_ctx[g].ph_full;
   end
 
   // ------------------------------------------------------------------

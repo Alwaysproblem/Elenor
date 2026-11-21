@@ -1,4 +1,7 @@
 // event_table.sv — C033 local persistent event table + WAIT issue head (W6-02).
+// C034 (W6-03) adds the reset segment: MARK_EVENTS, residency abandon and
+// the committed live-event count. With mark_events_i / abandon_events_i idle
+// every C033 rule below is bit-identical.
 //
 // Per-Context persistent entry banks (ctx_slot x FRONTIER) with the two-count
 // frontier (consumer_refs / future_uses), one wait_record per Context
@@ -36,21 +39,43 @@
 //   * Scope rule: shared-scope operands are waitable from any Context; a
 //     task_private operand only by its own full context identity.
 //
+// Reset segment (C034; Tile endpoint commands, Group authority):
+//   * MARK executes on the rising edge of mark_events_i: live PENDING
+//     entries become EV_RESET, terminal entries and retained fields are
+//     preserved, and a same-edge accepted legit completion wins (excluded
+//     from the write and count). mark_count_o is the registered actual
+//     PENDING->RESET count: it updates at the executing MARK edge, holds
+//     until the next MARK (0 after cold reset) — sample it the cycle after.
+//     MARK broadcasts to armed records like a completion edge:
+//     wake_fail fires and pins release; zero future/ref slots reclaim by
+//     the normal predicate, entries with future uses or a resident
+//     consumer survive until Group-authorized cleanup.
+//   * No new alloc/WAIT is accepted on a MARK or executing abandon edge:
+//     an allocation is a plain stall, a presented well-formed WAIT is one
+//     protocol_error like any other rejected WAIT.
+//   * Abandon (INVALIDATE stage, after MARK) is refused while any live
+//     entry is PENDING or has attached consumer_refs (abandon_ready_o,
+//     committed view; a refused pulse has no effect). Accepted, it zeroes
+//     future declarations that can no longer issue and reclaims all
+//     terminal zero-ref entries. live_events_o is the committed live count.
+//
 // Counters (C015): aggregates and details describe a fired NOTIFY
 // (completion), classified in check order with one aggregate + at most one
 // detail per rejected notification. Every rejected presented WAIT — shape,
 // duplicate operands, unroutable context, unresolved/mismatched operand, no
-// remaining future use, busy record — is one registration violation: exactly
-// one protocol_error for the issuing Context (route-unattributable events
-// use Context 0 as the documented route bucket; a well-formed fault-killed
-// issue is not a violation and counts nothing). A malformed (non-terminal
-// status) completion is a protocol_error attributed to its routed Context.
-// Allocation rejections are protocol_error; a full frontier is backpressure
-// and counts capacity_reject. The three sources can reject on one edge: per
-// counter they contribute 0..3, added with saturation (wrap is forbidden,
+// remaining future use, busy record, or presented on a MARK/abandon edge —
+// is one registration violation: exactly one protocol_error for the issuing
+// Context (route-unattributable events use Context 0 as the documented route
+// bucket; a well-formed fault-killed issue is not a violation and counts
+// nothing). A malformed (non-terminal status) completion is a protocol_error
+// attributed to its routed Context. Allocation rejections are
+// protocol_error; a full frontier is backpressure and counts
+// capacity_reject. The three sources can reject on one edge: per counter
+// they contribute 0..3, added with saturation (wrap is forbidden,
 // COUNTER_BITS>=1). counts_seen_o is the sticky nonzero view of each
 // counter. consumer_refs are bounded by CONTEXT_COUNT (one pin per live
 // record per distinct event) and stored narrow; public counts stay word_t.
+// MARK and abandon themselves change no counter.
 //
 // Rejected inputs change counters only. All scans are bounded by elaboration
 // constants; identities are full 64-bit words. rst_ni is a synchronous
@@ -110,7 +135,14 @@ module event_table
 
   // per-Context PMU counters (saturating) and sticky seen flags
   output counts_t [CONTEXT_COUNT-1:0] counts_o,
-  output counter_flags_t [CONTEXT_COUNT-1:0] counts_seen_o
+  output counter_flags_t [CONTEXT_COUNT-1:0] counts_seen_o,
+
+  // C034 reset segment (Tile endpoint commands; Group authority)
+  input  logic                        mark_events_i,
+  output word_t                       mark_count_o,
+  input  logic                        abandon_events_i,
+  output logic                        abandon_ready_o,
+  output word_t                       live_events_o
 );
 
   // counts_t field order is frozen by the package; index map kept local.
@@ -220,17 +252,104 @@ module event_table
                       comp_ctx_ok && comp_scope_ok && comp_evgen_ok && comp_seq_ok &&
                       comp_prod_ok && comp_not_dup;
 
+  // ------------------------------------------------------------------
+  // C034 reset segment: MARK_EVENTS and INVALIDATE-residency abandon.
+  // MARK executes on the rising edge of its command (a held command
+  // executes once); a refused abandon has no effect at all.
+  // ------------------------------------------------------------------
+  logic mark_cmd_q;
+  logic mark_fire;
+  logic abandon_fire;
+  logic seg_freeze;
+
+  always_ff @(posedge clk_i) begin
+    if (!rst_ni) begin
+      mark_cmd_q <= 1'b0;
+    end else begin
+      mark_cmd_q <= mark_events_i;
+    end
+  end
+
+  assign mark_fire    = mark_events_i && !mark_cmd_q;
+  assign abandon_fire = abandon_events_i && abandon_ready_o;
+  assign seg_freeze   = mark_fire || abandon_fire;
+
+  // Abandon is accepted only with no live PENDING entry and no attached
+  // consumer_refs (committed view; MARK has already converted PENDING).
+  logic ab_pending_live, ab_refs_live;
+  always_comb begin
+    ab_pending_live = 1'b0;
+    ab_refs_live    = 1'b0;
+    for (int unsigned b = 0; b < CONTEXT_COUNT; b++) begin
+      for (int unsigned f = 0; f < FRONTIER; f++) begin
+        if (tbl_q[b][f].live) begin
+          ab_pending_live |= (tbl_q[b][f].status == EV_PENDING);
+          ab_refs_live    |= (tbl_q[b][f].consumer_refs != '0);
+        end
+      end
+    end
+  end
+  assign abandon_ready_o = !ab_pending_live && !ab_refs_live;
+
+  // MARK count: live PENDING entries converted on the executing edge; a
+  // same-edge accepted legit completion (comp_apply) wins and is excluded.
+  int mark_n;
+  always_comb begin
+    mark_n = 0;
+    for (int unsigned b = 0; b < CONTEXT_COUNT; b++) begin
+      for (int unsigned f = 0; f < FRONTIER; f++) begin
+        if (tbl_q[b][f].live && (tbl_q[b][f].status == EV_PENDING) &&
+            !(comp_apply && (comp_bank == int'(b)) && (comp_slot == int'(f)))) begin
+          mark_n++;
+        end
+      end
+    end
+  end
+
+  // Registered actual count: updates at the executing MARK edge (sample it
+  // the cycle after) and holds until the next MARK.
+  word_t mark_count_q;
+  always_ff @(posedge clk_i) begin
+    if (!rst_ni) begin
+      mark_count_q <= 64'd0;
+    end else if (mark_fire) begin
+      mark_count_q <= word_t'(mark_n);
+    end
+  end
+  assign mark_count_o = mark_count_q;
+
+  // Committed live-entry count (zero-extended).
+  int live_n;
+  always_comb begin
+    live_n = 0;
+    for (int unsigned b = 0; b < CONTEXT_COUNT; b++) begin
+      for (int unsigned f = 0; f < FRONTIER; f++) begin
+        if (tbl_q[b][f].live) begin
+          live_n++;
+        end
+      end
+    end
+    live_events_o = word_t'(live_n);
+  end
+
   // Effective status for same-cycle readers: committed state overlaid by the
-  // terminal a granted completion writes this edge.
+  // terminal a granted completion writes this edge, then by the RESET a MARK
+  // converts this edge (a same-edge accepted completion wins over MARK).
   function automatic event_status_t eff_status(input int b, input int f);
     if (comp_apply && (comp_bank == b) && (comp_slot == f)) begin
       return comp_g.status;
+    end else if (mark_fire && tbl_q[b][f].live && (tbl_q[b][f].status == EV_PENDING)) begin
+      return EV_RESET;
     end
     return tbl_q[b][f].status;
   endfunction
 
   function automatic logic status_is_fail(input event_status_t s);
     return (s == EV_ERROR) || (s == EV_TIMEOUT) || (s == EV_RESET);
+  endfunction
+
+  function automatic logic status_is_terminal(input event_status_t s);
+    return (s == EV_DONE) || (s == EV_ERROR) || (s == EV_TIMEOUT) || (s == EV_RESET);
   endfunction
 
   // ------------------------------------------------------------------
@@ -276,7 +395,8 @@ module event_table
   end
 
   assign alloc_full     = alloc_route_ok && !alloc_dup_live && !alloc_free_ok;
-  assign alloc_fire     = alloc_valid_i && alloc_route_ok && !alloc_dup_live && alloc_free_ok;
+  assign alloc_fire     = alloc_valid_i && alloc_route_ok && !alloc_dup_live && alloc_free_ok
+                          && !seg_freeze;  // no new allocation on MARK/abandon
   assign alloc_ready_o  = alloc_fire;  // full is a plain stall, never a reject
   assign alloc_reject_o = alloc_valid_i && (!alloc_route_ok || alloc_dup_live);
 
@@ -380,7 +500,7 @@ module event_table
 
   always_comb begin
     for (int unsigned c = 0; c < CONTEXT_COUNT; c++) begin
-      rec_issue_valid[c] = wait_go && (int'(c) == wait_bank);
+      rec_issue_valid[c] = wait_go && !seg_freeze && (int'(c) == wait_bank);
       rec_fault_valid[c] = fault_route_ok && (int'(c) == fault_bank);
     end
   end
@@ -433,7 +553,7 @@ module event_table
       .park_o         (rec_park[gc]),
       .armed_o        (rec_armed[gc]),
       .stored_keys_o  (rec_keys[gc]),
-      .eval_cycle_i   (comp_fire),
+      .eval_cycle_i   (comp_fire || mark_fire),  // MARK broadcasts like a completion
       .probe_term_i   (probe_term[gc]),
       .probe_fail_i   (probe_fail[gc]),
       .wake_ok_o      (rec_wake_ok[gc]),
@@ -486,16 +606,16 @@ module event_table
   end
 
   // Reclaim on post-delta values; a slot an allocation writes this edge is
-  // freshly PENDING and never reclaimed.
+  // freshly PENDING and never reclaimed. The terminal test reads the
+  // effective status, so a MARK-converted slot reclaims on the same edge.
   always_comb begin
     for (int unsigned b = 0; b < CONTEXT_COUNT; b++) begin
       for (int unsigned f = 0; f < FRONTIER; f++) begin
         slot_clr_q[b][f] = tbl_q[b][f].live && !slot_wr_q[b][f] &&
-          (((comp_apply && (comp_bank == int'(b)) && (comp_slot == int'(f))) ||
-            (tbl_q[b][f].status != EV_PENDING)) &&
-           ((int'(tbl_q[b][f].consumer_refs) + dref[b][f]) == 0) &&
-           (!dec_fut[b][f] ? (tbl_q[b][f].future_uses == word_t'(0))
-                           : (tbl_q[b][f].future_uses == word_t'(1))));
+          status_is_terminal(eff_status(int'(b), int'(f))) &&
+          ((int'(tbl_q[b][f].consumer_refs) + dref[b][f]) == 0) &&
+          (!dec_fut[b][f] ? (tbl_q[b][f].future_uses == word_t'(0))
+                          : (tbl_q[b][f].future_uses == word_t'(1)));
       end
     end
   end
@@ -526,6 +646,9 @@ module event_table
             if (comp_apply && (comp_bank == int'(b)) && (comp_slot == int'(f))) begin
               tbl_q[b][f].status     <= comp_g.status;  // sticky terminal
               tbl_q[b][f].error_code <= comp_g.error_code;
+            end else if (mark_fire && tbl_q[b][f].live &&
+                         (tbl_q[b][f].status == EV_PENDING)) begin
+              tbl_q[b][f].status <= EV_RESET;  // MARK: live PENDING only
             end
             if (dref[b][f] != 0) begin
               tbl_q[b][f].consumer_refs <= REF_W'(int'(tbl_q[b][f].consumer_refs) + dref[b][f]);
@@ -533,7 +656,11 @@ module event_table
             if (dec_fut[b][f]) begin
               tbl_q[b][f].future_uses <= tbl_q[b][f].future_uses - word_t'(1);
             end
-            if (slot_clr_q[b][f]) begin
+            if (abandon_fire && tbl_q[b][f].live && (tbl_q[b][f].status != EV_PENDING) &&
+                (tbl_q[b][f].consumer_refs == '0)) begin
+              tbl_q[b][f].future_uses <= word_t'(0);  // dead future declarations
+              tbl_q[b][f].live        <= 1'b0;        // reclaim terminal zero-ref
+            end else if (slot_clr_q[b][f]) begin
               tbl_q[b][f].live <= 1'b0;  // terminal, refs==0, future==0
             end
           end
@@ -603,14 +730,15 @@ module event_table
       inc_alloc[alloc_bank][C_CAP] = 1'b1;
     end
     // WAIT: every rejected presented issue is one registration violation
-    // (protocol_error only); a well-formed fault-killed issue counts nothing
+    // (protocol_error only), including one presented on a MARK/abandon
+    // edge; a well-formed fault-killed issue counts nothing
     if (wait_valid_i && !wait_route_ok) begin
       inc_wait[0][C_PROTO] = 1'b1;
     end
     if (wait_valid_i && wait_route_ok && (!wait_shape_ok || !wait_dup_ok)) begin
       inc_wait[wait_bank][C_PROTO] = 1'b1;
     end
-    if (wait_go && (!wait_ops_ok || rec_busy[wait_bank])) begin
+    if (wait_go && (seg_freeze || !wait_ops_ok || rec_busy[wait_bank])) begin
       inc_wait[wait_bank][C_PROTO] = 1'b1;
     end
     // sum the independent sources per counter, saturate on any carry

@@ -1,0 +1,11 @@
+--- a/w6/first_fault_latch.sv
++++ b/w6/first_fault_latch.sv
+@@ -84,7 +84,7 @@
+   // ---- strict lexicographic minimum over the valid lanes ----
+   function automatic logic lane_less(input fault_t a, input fault_t b);
+     if (a.source_id != b.source_id) begin
+-      return a.source_id < b.source_id;
++      return a.source_id > b.source_id;
+     end else if (a.engine_id != b.engine_id) begin
+       return a.engine_id < b.engine_id;
+     end else if (a.owner.ctx.ctx_slot != b.owner.ctx.ctx_slot) begin

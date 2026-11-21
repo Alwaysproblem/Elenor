@@ -1,0 +1,11 @@
+--- a/w6/reset_endpoint.sv
++++ b/w6/reset_endpoint.sv
+@@ -344,7 +344,7 @@
+ 
+   assign invalidate_valid_o = r_cmd_busy && !r_ack_valid
+                               && (r_cmd_phase == RP_INVALIDATE)
+-                              && refs_zero_i && abandon_ready_i;
++                              && abandon_ready_i;
+   logic invalidate_fire;
+   assign invalidate_fire  = invalidate_valid_o && invalidate_ready_i;
+   assign abandon_events_o = invalidate_fire;

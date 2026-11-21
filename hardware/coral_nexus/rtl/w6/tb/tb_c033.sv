@@ -22,6 +22,12 @@ module tb_c033 #(parameter int unsigned CONTEXT_COUNT=2, OPERANDS=3,
   event_view_t query_o;
   counts_t [CONTEXT_COUNT-1:0] counts_o;
   counter_flags_t [CONTEXT_COUNT-1:0] counts_seen_o;
+  // C033 exercises normal issue, not the cold or functional reset sequence.
+  wire mark_events_i = 1'b0, abandon_events_i = 1'b0, issue_frozen_i = 1'b0;
+  wire reset_failure_i = 1'b0;
+  wire word_t reset_ref_i = '0;
+  word_t mark_count_o, live_events_o;
+  logic abandon_ready_o;
   event_table #(.CONTEXT_COUNT(CONTEXT_COUNT), .FRONTIER(FRONTIER), .OPERANDS(OPERANDS),
                 .SOURCES(SOURCES), .COUNTER_BITS(4), .TILE_ID(0)) events (.*);
 
@@ -36,6 +42,8 @@ module tb_c033 #(parameter int unsigned CONTEXT_COUNT=2, OPERANDS=3,
   logic msg_valid_o, msg_ready_i;
   terminal_msg_t msg_o;
   logic [CONTEXT_COUNT-1:0] active_o, ready_pending_o, retire_sent_o, completion_pending_o;
+  owner_t [CONTEXT_COUNT-1:0] live_owner_o;
+  logic [CONTEXT_COUNT-1:0] aborted_o, phase_pending_o;
   terminal_store #(.CONTEXT_COUNT(CONTEXT_COUNT), .TILE_ID(0)) terminals (.*);
 
   // Only these fields cross into a new scenario: four seed words, eight observations.

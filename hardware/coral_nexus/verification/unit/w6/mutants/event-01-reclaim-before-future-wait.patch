@@ -1,13 +1,13 @@
 --- a/event_table.sv
 +++ b/event_table.sv
-@@ -493,9 +493,7 @@
+@@ -613,9 +613,7 @@
+       for (int unsigned f = 0; f < FRONTIER; f++) begin
          slot_clr_q[b][f] = tbl_q[b][f].live && !slot_wr_q[b][f] &&
-           (((comp_apply && (comp_bank == int'(b)) && (comp_slot == int'(f))) ||
-             (tbl_q[b][f].status != EV_PENDING)) &&
--           ((int'(tbl_q[b][f].consumer_refs) + dref[b][f]) == 0) &&
--           (!dec_fut[b][f] ? (tbl_q[b][f].future_uses == word_t'(0))
--                           : (tbl_q[b][f].future_uses == word_t'(1))));
-+           ((int'(tbl_q[b][f].consumer_refs) + dref[b][f]) == 0));
+           status_is_terminal(eff_status(int'(b), int'(f))) &&
+-          ((int'(tbl_q[b][f].consumer_refs) + dref[b][f]) == 0) &&
+-          (!dec_fut[b][f] ? (tbl_q[b][f].future_uses == word_t'(0))
+-                          : (tbl_q[b][f].future_uses == word_t'(1)));
++          ((int'(tbl_q[b][f].consumer_refs) + dref[b][f]) == 0);
        end
      end
    end

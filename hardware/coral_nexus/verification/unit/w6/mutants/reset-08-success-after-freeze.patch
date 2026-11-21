@@ -1,0 +1,13 @@
+--- a/w6/terminal_store.sv
++++ b/w6/terminal_store.sv
+@@ -306,8 +306,8 @@
+       fin_status = abort_status_i;
+       fin_ref    = abort_ref_i;
+     end else if (reset_failure_i) begin
+-      fin_status = TS_RESET;
+-      fin_ref    = reset_ref_i;
++      fin_status = finish_status_i;
++      fin_ref    = first_fault_ref_i;
+     end else begin
+       fin_status = finish_status_i;
+       fin_ref    = first_fault_ref_i;

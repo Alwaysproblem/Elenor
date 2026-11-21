@@ -117,3 +117,5 @@ commands:
       w6:
         tests:
           - hardware/coral_nexus/verification/unit/w6/test_w6_c033.py
+          - hardware/coral_nexus/verification/unit/w6/test_w6_c034.py
+          - pipeline_validator/tests/test_w6_reset_endpoint.py

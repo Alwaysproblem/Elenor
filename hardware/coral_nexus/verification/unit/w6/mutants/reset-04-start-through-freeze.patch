@@ -1,0 +1,11 @@
+--- a/w6/terminal_store.sv
++++ b/w6/terminal_store.sv
+@@ -229,7 +229,7 @@
+     end else begin
+       case (cmd_kind_i)
+         CMD_START: begin
+-          if ((st_cmd == LS_FREE) && !issue_frozen_i) begin
++          if (st_cmd == LS_FREE) begin
+             cmd_ready_o = 1'b1;
+             acc_start   = cmd_valid_i;
+           end else begin

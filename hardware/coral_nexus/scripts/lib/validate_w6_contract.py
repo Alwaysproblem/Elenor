@@ -16,6 +16,8 @@ What it checks:
 
 from __future__ import annotations
 
+import ast
+import functools
 import json
 import sys
 from pathlib import Path
@@ -185,6 +187,91 @@ BANNED_NUMBER_KEYS = ("address", "bits", "opcode", "width_bits", "encoding")
 
 
 # ---------------------------------------------------------------------------------------------------
+# C034 anchor relocation (fail-closed). The two mutable Python sources below may move the exact
+# statements the frozen C015 contracts cite. The ten known citations are bound here by their
+# contract identity (label + field location) AND their sealed (file, original line, needle)
+# triple, derived at author time from ANCHOR_SEAL_REVISION (the revision the seal's Python
+# citations were pinned at); the validator never calls git at runtime. For a pinned citation the
+# ORIGINAL tuple is verified FIRST — an altered line, needle, file or swapped citation fails with
+# the ordinary SOURCE_LINE_MISMATCH before any text is read back, so pointing a citation at
+# today's moved text, or at a comment/docstring, cannot bypass the pin. The pin is then ALWAYS
+# AST-verified: the current source must hold EXACTLY ONE statement/header with the exact
+# original text in the exact module-level class + DIRECT method, traversing statement bodies
+# (if/for/while/try/with) but never scopes nested inside that method — a matching statement in
+# an inner def, a docstring or a neighbouring method is not evidence. Root/ownership mismatches,
+# missing, ambiguous and edited statements are all rejected; relocation is reported (additively,
+# as `relocated_sources`) only when the verified live line differs from the sealed one.
+# Unrelated citations keep the exact-line check untouched; there is no global or fuzzy needle
+# search, and no code may be padded to preserve line numbers.
+# ---------------------------------------------------------------------------------------------------
+ANCHOR_SEAL_REVISION = "5ed221794e7eb3d7d36d78ea9c88967a1ca66d83"
+RELOCATABLE_ANCHOR_FILES = frozenset(
+  ("pipeline_validator/tile_group.py", "pipeline_validator/runtime/reset_domain.py")
+)
+CONTRACT_FILES = {
+  "facility": "w6_event_facility.contract.yaml",
+  "terminal": "w6_terminal_reset.contract.yaml",
+}
+# (contract label, field location) -> (file, original line, needle, owner class, owner method,
+#                                       full original statement/header)
+ANCHOR_RELOCATIONS: dict[tuple[str, str], tuple[str, int, str, str, str, str]] = {
+  ("facility", ".phase_signal.duplicate_source"): (
+    "pipeline_validator/tile_group.py", 1447, "tile_signal_duplicate",
+    "TileGroup", "_on_phase_signal", 'self.pmu.add_event("tile_signal_duplicate")',
+  ),
+  ("terminal", ".first_fault_latch.arm_source"): (
+    "pipeline_validator/tile_group.py", 2410,
+    "self.reset_domain.is_active or self.reset_domain.is_done",
+    "TileGroup", "on_scheduler_fault",
+    "if not (self.reset_domain.is_active or self.reset_domain.is_done):",
+  ),
+  ("terminal", ".fault_domain.source_function_supports_tile"): (
+    "pipeline_validator/tile_group.py", 2422,
+    "FaultDomain.TILE if tile_id >= 0 else FaultDomain.GROUP",
+    "TileGroup", "trigger_fault",
+    "domain = FaultDomain.TILE if tile_id >= 0 else FaultDomain.GROUP",
+  ),
+  ("terminal", ".reset_endpoint.poison.poison_source"): (
+    "pipeline_validator/tile_group.py", 2043, "self.poisoned_reason is not None",
+    "TileGroup", "begin_launch", "if self.poisoned_reason is not None:",
+  ),
+  ("terminal", ".reset_endpoint.poison.recovery_source"): (
+    "pipeline_validator/tile_group.py", 2286, "def reset(self)",
+    "TileGroup", "reset", "def reset(self) -> None:",
+  ),
+  ("terminal", ".task_terminal.root_arena_source"): (
+    "pipeline_validator/tile_group.py", 1534, "def retire_context_arena",
+    "TileGroup", "retire_context_arena",
+    "def retire_context_arena(self, sequencer: TileGroupSequencer, cycle: int) -> bool:",
+  ),
+  ("terminal", ".reset_endpoint.validator_sources.cancel_unissued"): (
+    "pipeline_validator/runtime/reset_domain.py", 75, "_cancel_unissued_engine_requests",
+    "ResetDomain", "step", "self._cancel_unissued_engine_requests(group, cycle)",
+  ),
+  ("terminal", ".reset_endpoint.validator_sources.mark_events"): (
+    "pipeline_validator/runtime/reset_domain.py", 101, "group.event_table.reset()",
+    "ResetDomain", "step", "group.event_table.reset()",
+  ),
+  ("terminal", ".reset_endpoint.drain.source"): (
+    "pipeline_validator/runtime/reset_domain.py", 86, "self.state = ResetState.MARK_EVENTS",
+    "ResetDomain", "step", "self.state = ResetState.MARK_EVENTS",
+  ),
+  ("terminal", ".reset_endpoint.max_drain_cycles.source"): (
+    "pipeline_validator/runtime/reset_domain.py", 89, 'getattr(cfg, "max_drain_cycles", 100)',
+    "ResetDomain", "step", 'if self.drain_cycles > getattr(cfg, "max_drain_cycles", 100):',
+  ),
+}
+
+# Parsed-source cache keyed by the actual contents: any edit naturally misses.
+assert all(pin[0] in RELOCATABLE_ANCHOR_FILES for pin in ANCHOR_RELOCATIONS.values())
+
+
+@functools.lru_cache(maxsize=2)  # only the two mutable Python sources are relocatable
+def _parse_cached(text: str) -> ast.Module:
+  return ast.parse(text)
+
+
+# ---------------------------------------------------------------------------------------------------
 def _read_line(file: str, line: int) -> str | None:
   for root in (REPO, UPSTREAM):
     path = root / file
@@ -207,12 +294,126 @@ def iter_sources(node: Any, where: str = "") -> list[tuple[str, dict]]:
   return found
 
 
-def check_sources(label: str, doc: dict[str, Any], errors: list[str]) -> int:
+def _parsed_source(path: Path) -> tuple[ast.Module, list[str]]:
+  """Parse once per identical contents; the citations of a file share one AST."""
+  text = path.read_text()
+  return _parse_cached(text), text.splitlines()
+
+
+def _direct_method(
+  tree: ast.Module, cls_name: str, func_name: str
+) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+  """The unique direct method of the single top-level class with that exact name.
+
+  A shadowed re-binding of the class name leaves the pinned statements in a
+  dead binding, so anything but exactly one top-level class rejects.
+  """
+  classes = [
+    node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == cls_name
+  ]
+  if len(classes) != 1:
+    return None
+  found = [
+    child
+    for child in classes[0].body
+    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == func_name
+  ]
+  return found[0] if len(found) == 1 else None
+
+
+def _own_statements(method: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ast.stmt]:
+  """The method's own statements: walk every descendant except nested lexical scopes.
+
+  Statement bodies are traversed wherever they sit (if/for/while/try/with and
+  match_case/except handler bodies included); a def/class/lambda nested inside
+  the method is a different scope and nothing inside it counts.
+  """
+  own: list[ast.stmt] = []
+  stack: list[ast.AST] = list(method.body)
+  while stack:
+    node = stack.pop()
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+      continue  # a scope nested inside the method is not the method's own statement
+    if isinstance(node, ast.stmt):
+      own.append(node)
+    stack.extend(ast.iter_child_nodes(node))
+  return own
+
+
+def _verify_relocation(
+  label: str, where: str, pin: tuple[str, int, str, str, str, str], errors: list[str]
+) -> dict[str, Any] | None:
+  """Exactly one own statement/header with the pinned text in the pinned direct method."""
+  file, original_line, needle, cls_name, func_name, statement = pin
+  path = next((root / file for root in (REPO, UPSTREAM) if (root / file).is_file()), None)
+  if path is None:
+    errors.append(f"{label}{where}: RELOCATION_SOURCE_MISSING {file}")
+    return None
+  try:
+    tree, lines = _parsed_source(path)
+  except SyntaxError as exc:
+    errors.append(f"{label}{where}: RELOCATION_SOURCE_UNPARSABLE {file}: {exc}")
+    return None
+  method = _direct_method(tree, cls_name, func_name)
+  if method is None:
+    errors.append(
+      f"{label}{where}: RELOCATION_OWNER_MISSING {file} {cls_name}.{func_name} "
+      "is not the unique direct method of the unique top-level class"
+    )
+    return None
+  header = lines[method.lineno - 1].strip() if method.lineno <= len(lines) else ""
+  candidates = [(method.lineno, header)] + [
+    (node.lineno, lines[node.lineno - 1].strip() if node.lineno <= len(lines) else "")
+    for node in _own_statements(method)
+  ]
+  hits = [lineno for lineno, text in candidates if text == statement and needle in text]
+  if len(hits) != 1:
+    errors.append(
+      f"{label}{where}: RELOCATION_STATEMENT_UNVERIFIED {file} {cls_name}.{func_name}: "
+      f"expected exactly one {statement!r}, found {len(hits)}"
+    )
+    return None
+  return {
+    "category": f"{CONTRACT_FILES.get(label, label)}{where}",
+    "file": file,
+    "original_line": original_line,
+    "current_line": hits[0],
+    "owner": f"{cls_name}.{func_name}",
+    "needle": needle,
+    "statement": statement,
+    "seal_revision": ANCHOR_SEAL_REVISION,
+  }
+
+
+def check_sources(
+  label: str,
+  doc: dict[str, Any],
+  errors: list[str],
+  relocated: list[dict[str, Any]] | None = None,
+  seen_pins: set[tuple[str, str]] | None = None,
+) -> int:
   count = 0
   for where, src in iter_sources(doc):
     count += 1
     if "needle" not in src:
       errors.append(f"{label}{where}: MISSING_SOURCE (need file/line/needle)")
+      continue
+    pin = ANCHOR_RELOCATIONS.get((label, where))
+    if pin is not None:
+      if seen_pins is not None:
+        seen_pins.add((label, where))
+      # The sealed identity is verified FIRST: an altered file/line/needle or a swapped
+      # citation fails before any text is read back, so pointing the citation at today's
+      # moved text cannot bypass the pin.
+      if (src["file"], src["line"], str(src["needle"])) != pin[:3]:
+        errors.append(
+          f"{label}{where}: SOURCE_LINE_MISMATCH {src['file']}:{src['line']} is not the sealed "
+          f"citation {pin[0]}:{pin[1]} with needle {pin[2]!r}"
+        )
+        continue
+      entry = _verify_relocation(label, where, pin, errors)
+      if entry is not None and entry["current_line"] != pin[1] and relocated is not None:
+        relocated.append(entry)
       continue
     text = _read_line(src["file"], src["line"])
     if text is None:
@@ -838,9 +1039,16 @@ def validate_docs(f: Any, t: Any, req: Any) -> dict[str, Any]:
       errors.append(f"{label}: document is malformed ({type(exc).__name__}: {exc})")
       return None
 
-  anchors = (guarded("sources", check_sources, "facility", f, errors) or 0) + (
-    guarded("sources", check_sources, "terminal", t, errors) or 0
+  relocated: list[dict[str, Any]] = []
+  seen_pins: set[tuple[str, str]] = set()
+  anchors = (guarded("sources", check_sources, "facility", f, errors, relocated, seen_pins) or 0) + (
+    guarded("sources", check_sources, "terminal", t, errors, relocated, seen_pins) or 0
   )
+  # A pinned citation that was deleted or retyped so the walk never sees it must
+  # fail too, not silently drop its relocation obligation.
+  for label, where in sorted(ANCHOR_RELOCATIONS):
+    if (label, where) not in seen_pins:
+      errors.append(f"{label}{where}: MISSING_SOURCE (pinned citation absent from its contract)")
   if f.get("status") != "draft" or t.get("status") != "draft":
     errors.append("status: must stay draft (C020 seals, not this card)")
   guarded("facility", check_facility, f, errors)
@@ -853,6 +1061,7 @@ def validate_docs(f: Any, t: Any, req: Any) -> dict[str, Any]:
     "valid": not errors,
     "errors": errors,
     "anchors_read_back": anchors,
+    "relocated_sources": relocated,
     "open": [
       "event/generation/sequence widths (C017)",
       "per-Context frontier slots (C018)",

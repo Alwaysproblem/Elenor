@@ -1,0 +1,11 @@
+--- a/w6/reset_endpoint.sv
++++ b/w6/reset_endpoint.sv
+@@ -359,7 +359,7 @@
+   assign cancel_done = r_cmd_busy && !r_ack_valid && (r_cmd_phase == RP_CANCEL)
+                        && r_clr_done && !sweep_ok;
+   assign drain_done  = r_cmd_busy && !r_ack_valid && (r_cmd_phase == RP_DRAIN)
+-                       && drain_all;
++                       && (|drain_evidence_i);
+ 
+   assign mark_events_o           = r_mark_pulse;
+   assign is_quiescent_snapshot_o = drain_evidence_i;

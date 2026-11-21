@@ -1,0 +1,5 @@
+# Stale before and after retirement, same live TaskKey with conflicting generation, then an exact repeat.
+case: U3-d
+inject: { generation: 4294967337, tag: 23, hold_cycles: 3 }
+expect:
+  { winner: 23, suppressed: 1, marked: 0, terminals: 2, stale: 2, poisoned: 0 }

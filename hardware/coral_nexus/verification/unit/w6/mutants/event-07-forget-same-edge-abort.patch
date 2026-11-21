@@ -1,6 +1,6 @@
 --- a/terminal_store.sv
 +++ b/terminal_store.sv
-@@ -270,8 +270,8 @@
+@@ -303,8 +303,8 @@
        fin_status = r_ctx[sel_cmd].fail_status;
        fin_ref    = r_ctx[sel_cmd].fail_ref;
      end else if (abort_hit && (sel_abort == sel_cmd)) begin
@@ -8,6 +8,6 @@
 -      fin_ref    = abort_ref_i;
 +      fin_status = finish_status_i;
 +      fin_ref    = first_fault_ref_i;
-     end else begin
-       fin_status = finish_status_i;
-       fin_ref    = first_fault_ref_i;
+     end else if (reset_failure_i) begin
+       fin_status = TS_RESET;
+       fin_ref    = reset_ref_i;

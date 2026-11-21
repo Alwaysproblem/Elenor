@@ -1,0 +1,5 @@
+# Rotate one open obligation beyond 100 cycles; on MARK accept one genuine competing completion.
+case: U3-c
+inject: { generation: 55, tag: 19, hold_cycles: 111 }
+expect:
+  { winner: 0, suppressed: 0, marked: 1, terminals: 0, stale: 0, poisoned: 0 }

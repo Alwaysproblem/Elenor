@@ -1,0 +1,5 @@
+# Inject failed W3 region at its event interface, after fault capture, without claiming a real VME executed.
+case: U3-h
+inject: { generation: 4294967351, tag: 53, hold_cycles: 4 }
+expect:
+  { winner: 53, suppressed: 0, marked: 0, terminals: 1, stale: 0, poisoned: 0 }

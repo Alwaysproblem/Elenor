@@ -150,6 +150,47 @@ def test_every_citation_is_read_back(docs: Any, where: str, mutate: Any, needle:
   caught(docs, **({"fm": mutate} if where == "facility" else {"tm": mutate}), needle=needle)
 
 
+def test_sealed_reset_citation_cannot_disappear(docs: Any) -> None:
+  caught(docs, tm=lambda t: t["reset_endpoint"]["drain"].pop("source"), needle="MISSING_SOURCE")
+
+
+@pytest.mark.parametrize(
+  "variant",
+  ["same_method", "other_method", "nested", "ambiguous", "edited_old_line", "old_comment", "swapped"],
+)
+def test_shifted_reset_anchor_requires_the_sealed_identity_and_one_live_statement(
+  tmp_path: Path, monkeypatch: pytest.MonkeyPatch, term_c: Any, variant: str
+) -> None:
+  src = copy.deepcopy(term_c["reset_endpoint"]["drain"]["source"])
+  path = tmp_path / src["file"]
+  path.parent.mkdir(parents=True)
+  statement = "self.state = ResetState.MARK_EVENTS"
+  lines = ["class ResetDomain:", "  def step(self):"]
+  if variant == "other_method":
+    # The right text in a docstring, comment and neighbouring method is not evidence.
+    lines.extend(['    """', f"    {statement}", '    """', f"    # {statement}", "  def unrelated(self):"])
+  if variant == "swapped":
+    src = copy.deepcopy(term_c["reset_endpoint"]["validator_sources"]["mark_events"])
+    statement = "group.event_table.reset()"  # another genuine citation, not the DRAIN anchor
+  if variant == "nested":
+    lines.extend(["    def not_executed():", f"      {statement}"])
+  elif variant == "old_comment":
+    lines.append("    pass")
+    lines.extend([""] * (src["line"] - len(lines) - 1))
+    lines.append(f"# {statement}")
+  else:
+    lines.append(f"    {statement}")
+  if variant == "ambiguous":
+    lines.extend(["    if self.retry:", f"      {statement}"])
+  if variant == "edited_old_line":
+    src["line"] = len(lines)  # invent a citation pointing at the right current text
+  path.write_text("\n".join(lines) + "\n")
+  monkeypatch.setattr(vw, "REPO", tmp_path)
+  errors: list[str] = []
+  vw.check_sources("terminal", {"reset_endpoint": {"drain": {"source": src}}}, errors)
+  assert (not errors) == (variant == "same_method"), errors
+
+
 def test_status_stays_draft(docs: Any) -> None:
   caught(docs, fm=lambda f: f.__setitem__("status", "frozen"), needle="draft")
   caught(docs, tm=lambda t: t.__setitem__("status", "frozen"), needle="draft")

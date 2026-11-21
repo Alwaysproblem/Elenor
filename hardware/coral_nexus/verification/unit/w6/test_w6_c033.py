@@ -42,7 +42,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 
 W6 = Path(__file__).resolve().parent
 W4 = W6.parent / "w4"
@@ -52,6 +51,7 @@ sys.path.insert(0, str(W4))
 sys.path.insert(0, str(H / "scripts/lib"))
 
 import gen_memory_params as memory_params  # noqa: E402
+import w6_scenario_io  # noqa: E402
 from c033_phase_replay import verify_group_phases  # noqa: E402
 from w4_rtl_harness import Bench, Slice, check_verdicts, run_slice, selected_target  # noqa: E402
 
@@ -73,7 +73,6 @@ EXPECT_KEYS = (
   "retire_ready",
   "completions",
 )
-WORD_MASK = (1 << 64) - 1
 PASS_RE = re.compile(r"^C033_PASS (\S+) contexts=(\d+) checks=(\d+)$", re.M)
 
 BENCH = Bench(
@@ -100,58 +99,24 @@ MIN_BENCH = Bench(top="tb_c033_min", sources=BENCH.sources, contexts=(1,),
                    run_args=BENCH.run_args)
 
 
-def _word(value: Any, where: str) -> int:
-  if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= WORD_MASK:
-    raise AssertionError(f"{where}: expected one unsigned 64-bit word, got {value!r}")
-  return value
-
-
 def load_scenarios() -> list[dict[str, Any]]:
   """Validate exactly the nine U2-a..U2-i seed+expect scenario rows, sorted a..i."""
-  rows: list[dict[str, Any]] = []
-  for path in sorted(SCENARIOS.glob("u2?_*.yaml")):
-    doc = yaml.safe_load(path.read_text())
-    where = f"{path}:"
-    if not isinstance(doc, dict) or set(doc) != {"case", "seed", "expect"}:
-      raise AssertionError(f"{where} expected exactly case/seed/expect, got {doc!r}")
-    if doc["case"] not in CASE_IDS:
-      raise AssertionError(f"{where} case {doc['case']!r} is outside U2-a..U2-i")
-    seed_doc, expect_doc = doc["seed"], doc["expect"]
-    if not isinstance(seed_doc, dict) or set(seed_doc) != set(SEED_KEYS):
-      raise AssertionError(f"{where} seed must have exactly {SEED_KEYS}")
-    if not isinstance(expect_doc, dict) or set(expect_doc) != set(EXPECT_KEYS):
-      raise AssertionError(f"{where} expect must have exactly {EXPECT_KEYS}")
-    seed = {key: _word(seed_doc[key], f"{where} seed.{key}") for key in SEED_KEYS}
-    expect = {key: _word(expect_doc[key], f"{where} expect.{key}") for key in EXPECT_KEYS}
-    if expect["armed"] not in (0, 1):
-      raise AssertionError(f"{where} expect.armed must be 0 or 1, got {expect['armed']}")
-    rows.append({"case": doc["case"], "file": path, "seed": seed, "expect": expect})
-  ids = [row["case"] for row in rows]
-  if sorted(ids) != list(CASE_IDS):
-    raise AssertionError(f"{SCENARIOS}: u2?_*.yaml must yield each of U2-a..U2-i once, got {ids}")
-  return sorted(rows, key=lambda row: row["case"])
+  rows = w6_scenario_io.load_scenarios(SCENARIOS, "u2?_*.yaml", CASE_IDS, SEED_KEYS, EXPECT_KEYS)
+  for row in rows:  # C033-only: armed is a 0/1 flag, not a counter
+    if row["expect"]["armed"] not in (0, 1):
+      raise AssertionError(f"{row['file']}: expect.armed must be 0 or 1, "
+                           f"got {row['expect']['armed']}")
+  return rows
 
 
 def vectors(scenarios: Sequence[dict[str, Any]]) -> str:
   """One row per case: twelve lowercase-hex words, four seed then eight expected."""
-  lines = []
-  for row in scenarios:
-    words = [row["seed"][key] for key in SEED_KEYS]
-    words += [row["expect"][key] for key in EXPECT_KEYS]
-    lines.append(" ".join(f"{word:x}" for word in words))
-  return "".join(f"{line}\n" for line in lines)
+  return w6_scenario_io.vectors(scenarios, SEED_KEYS, EXPECT_KEYS)
 
 
 def fragment_receipts() -> dict[str, str]:
   """Hash both C015 fragments and cross-check them against the real C020 seal."""
-  inputs = json.loads(SEAL.read_text())["inputs"]
-  receipts = {}
-  for path in FRAGMENTS:
-    rel = str(path.relative_to(REPO))
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    assert inputs.get(rel) == digest, f"{rel}: {digest} drifted from the C020 seal"
-    receipts[rel] = digest
-  return receipts
+  return w6_scenario_io.fragment_receipts(FRAGMENTS, SEAL, REPO)
 
 
 @pytest.fixture(scope="module")
@@ -191,6 +156,7 @@ def evidence(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
       host_sources=(
         W6 / "test_w6_c033.py",
         W6 / "c033_phase_replay.py",
+        W6 / "w6_scenario_io.py",
         W4 / "w4_rtl_harness.py",
         REPO / "pipeline_validator/cosim/event_service.py",
         REPO / "pipeline_validator/tile_group.py",

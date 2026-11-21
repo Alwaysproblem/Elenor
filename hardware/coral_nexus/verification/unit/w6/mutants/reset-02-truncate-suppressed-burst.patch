@@ -1,0 +1,11 @@
+--- a/w6/first_fault_latch.sv
++++ b/w6/first_fault_latch.sv
+@@ -125,7 +125,7 @@
+       end
+     end
+     sup_ext  = {{(SUP_INC_W+1-COUNTER_BITS){1'b0}}, suppressed_q} +
+-               (SUP_INC_W+1)'(n_sup);
++               (SUP_INC_W+1)'((COUNTER_BITS+2)'(n_sup));
+     sup_next = (|sup_ext[SUP_INC_W:COUNTER_BITS]) ? '1
+                                                        : sup_ext[COUNTER_BITS-1:0];
+   end

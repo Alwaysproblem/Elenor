@@ -74,6 +74,7 @@ from .tile_group_sequencer import TileGroupSequencer
 from .trace import MemoryTrace, Tracer
 
 if TYPE_CHECKING:
+  from .cosim.tile_port import BoundaryMessage
   from .runtime.group_port import _RootRequestRecord
 
 
@@ -2305,6 +2306,14 @@ class TileGroup:
       raise MemoryInvariantError("explicit reset requires retired or isolated work")
     if self.reset_domain.is_active:
       raise MemoryInvariantError("explicit reset requires a completed reset drain")
+    if not self.reset_domain.isolation_closure_satisfied:
+      # An externally reported isolation failure is closed only by a staged
+      # reset drain that began after the report — never by host inactivity
+      # or by evidence completed before it (C034).
+      raise MemoryInvariantError(
+        "explicit reset refused: an externally reported tile isolation failure "
+        "needs a finished staged reset drain"
+      )
     residual = self.unclosed_l2_objects()
     if residual:
       raise MemoryInvariantError(f"explicit reset requires physical L2 safety, found {residual}")
@@ -2425,11 +2434,106 @@ class TileGroup:
     """Inject a fault: write a FaultRecord and begin the reset/drain FSM
     (Driver-Firmware 3.3/3.4).  Returns the fault_record_index, or -1
     in timing_only fidelity (no-op).
+
+    Explicit test/diagnostic injection keeps the historical TILE-vs-GROUP
+    domain branch; production paths (on_scheduler_fault, accept_tile_fault)
+    always reset the GROUP domain (W6-03 §5.3).
     """
     rec = FaultRecord(code=code, tile_id=tile_id, desc_id=zlib.crc32(desc_id.encode()) & 0xFFFFFFFF)
-    idx = self.fault_ring.write(rec)
     domain = FaultDomain.TILE if tile_id >= 0 else FaultDomain.GROUP
-    req = ResetRequest(domain=domain, tile_id=tile_id, fault_record=rec)
+    return self._begin_fault_reset(rec, domain, cycle)
+
+  def _begin_fault_reset(self, rec: FaultRecord, domain: FaultDomain, cycle: int) -> int:
+    """Shared fault-record + reset-FSM begin for injection and reports.
+
+    begin() first: an attached-epoch rejection must not append — and evict —
+    a ring record for a fault the FSM never accepted; the request already
+    carries the same mutable record for the write after acceptance."""
+    req = ResetRequest(domain=domain, tile_id=rec.tile_id, fault_record=rec)
     self.reset_domain.begin(req, cycle)
+    idx = self.fault_ring.write(rec)
     self.pmu.add_event("fault_record", 1)
     return idx
+
+  def accept_tile_fault(self, msg: BoundaryMessage, *, cycle: int) -> int:
+    """Accept a sealed FAULT_REPORT from a Tile boundary and begin the
+    GROUP reset/drain (C034).
+
+    Only an attached external Tile link may report: a report whose tile has
+    no attached reset endpoint is a protocol error, so the GROUP reset
+    trigger and the Group poison path stay confined to real attached
+    endpoints (explicit ``trigger_fault`` injection is unaffected).  The
+    report's tile_id is diagnostic attribution only: the production fault
+    domain stays GROUP, a report never selects TILE-scoped recovery.
+
+    Attribution is retained in full on the FaultRecord's existing fields —
+    ``code`` (FaultCode, never truncated to a cause code), ``severity``,
+    ``source`` (source_id), ``engine_id``, diagnostic ``tile_id``, ctx slot
+    in ``context_id``, full uint64 ``op_seq`` in ``aux0`` and
+    ``ctx_generation`` in ``aux1`` (the v0 record has no dedicated fields
+    for those two).  A repeated report while a reset is active or done is
+    refused (-1): the FSM is not reinitialized and the accepted ring record
+    is not overwritten.
+    """
+    from .cosim import wire
+
+    if msg.message_type != "FAULT_REPORT" or msg.direction != "T2G":
+      raise ValueError(f"expected sealed FAULT_REPORT (CTRL, T2G), got {msg.message_type!r}")
+    _ = msg.pack_wire()  # sealed C017 codec: reject any malformed report
+    fields = msg.fields
+    code_value = fields.get("code")
+    if isinstance(code_value, str):
+      try:
+        code = FaultCode[code_value]
+      except KeyError as exc:
+        raise ValueError(f"unknown fault code {code_value!r}") from exc
+    else:
+      if isinstance(code_value, bool) or not isinstance(code_value, int):
+        raise ValueError(f"malformed fault code {code_value!r}")
+      if not 0 <= code_value < len(wire.ENUMS["fault_code"]):
+        raise ValueError(f"fault code index {code_value} out of range")
+      code = FaultCode[wire.ENUMS["fault_code"][code_value]]
+    reporting_tile = int(fields["tile_id"])
+    if reporting_tile not in self.reset_domain.tile_reset_links:
+      raise MemoryInvariantError(
+        f"FAULT_REPORT from tile {reporting_tile} has no attached reset endpoint"
+      )
+    if self.reset_domain.is_active or self.reset_domain.is_done:
+      return -1
+    rec = FaultRecord(
+      code=code,
+      tile_id=reporting_tile,
+      context_id=int(fields["ctx_slot"]),
+      engine_id=int(fields["engine_id"]),
+      source=int(fields["source_id"]),
+      severity=int(fields["severity"]),
+      aux0=int(fields["op_seq"]),
+      aux1=int(fields["ctx_generation"]),
+    )
+    return self._begin_fault_reset(rec, FaultDomain.GROUP, cycle)
+
+  def note_tile_isolation_failure(self, tile_id: int, run_generation: int) -> None:
+    """Record a real Tile isolation failure as sticky Group poison (C034).
+
+    The report must come from the attached tile of exactly this epoch and
+    before that tile's DRAIN ACK; see ``ResetDomain.note_isolation_failure``
+    for the late-contradictory and duplicate rules (fail-closed, never
+    rehabilitated by replayed receipts).  Sets the Group-owned
+    ``poisoned_reason`` (first reason wins; only the explicit quiescent
+    ``reset()`` clears it).  No terminal state is fabricated and no
+    resource is released early; authorized quiescence/recovery is owned by
+    the separate reset() path, not by Tile receipts.
+    """
+    self.reset_domain._check_tile_id(tile_id)
+    if (
+      isinstance(run_generation, bool)
+      or not isinstance(run_generation, int)
+      or run_generation < 0
+    ):
+      raise ValueError(f"run_generation must be a non-negative int, got {run_generation!r}")
+    first = self.reset_domain.note_isolation_failure(tile_id, run_generation)
+    if not first:
+      return  # idempotent duplicate of an already reported failure
+    self.pmu.add_event("tile_isolation_failure", 1)
+    if self.poisoned_reason is None:
+      self.poison(f"tile {tile_id}: isolation failure (run_generation {run_generation})")

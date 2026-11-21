@@ -1,0 +1,11 @@
+--- a/w6/reset_endpoint.sv
++++ b/w6/reset_endpoint.sv
+@@ -310,7 +310,7 @@
+ 
+   always_comb begin
+     if (cancel_conflict) begin
+-      cancel_class_o = CC_CONFLICT;
++      cancel_class_o = CC_STALE;
+     end else if (cancel_exact && !aborted_i[cancel_idx]
+                  && !terminal_committed_i[cancel_idx]) begin
+       cancel_class_o = CC_APPLY;

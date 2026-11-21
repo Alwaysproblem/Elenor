@@ -351,6 +351,98 @@ Behavioral mutants live under `verification/unit/w6/mutants/event-*.patch`;
 at least nine must apply, compile, and die on an executed `C033_ASSERT` —
 build failures, timeouts and watchdogs are not mutation kills.
 
+## Focused C034 acceptance
+
+C034 is W6-03 unit evidence: `tb_c034` instantiates the real `rtl/w6`
+`event_table`, `terminal_store`, `first_fault_latch` and `reset_endpoint`
+next to the real C032 `mfe_top` (internal `transfer_cancel_tracker`) and the
+real C023 MemoryService, so reset/drain behavior is checked against live
+Group cycles and live memory legs rather than a stub. It is not full-Tile
+assembly (C040), not the retirement chain (C035), and not C035 reset policy.
+
+```bash
+EVIDENCE=out/coral_nexus/C034/attempt-NNN
+bash hardware/coral_nexus/scripts/cn.sh unit --suite w6 \
+  --config "$PWD/hardware/coral_nexus/configs/cs1_c2.yaml" --out "$EVIDENCE/unit"
+```
+
+The `unit.suites.w6` registry entry keeps the unmodified C033 runner, adds
+`verification/unit/w6/test_w6_c034.py`, and registers the focused Python
+regression `pipeline_validator/tests/test_w6_reset_endpoint.py`; the gate
+therefore runs both C033 and C034. The runner reuses
+`verification/unit/w4/w4_rtl_harness.py` with `rtl_dir` pointed at
+`hardware/coral_nexus/rtl` so the W6 reset sources, the C032 tracker and
+`mfe_top` compile in one bench; sources are ordered `w6/c033_event_pkg.sv`,
+`w6/c034_reset_pkg.sv`, `w6/wait_record.sv`, `w6/completion_bus.sv`,
+`w6/event_table.sv`, `w6/terminal_store.sv`, `memory/c029_params_pkg.sv`,
+`memory/c032_mfe_pkg.sv`, `memory/transfer_cancel_tracker.sv`,
+`memory/mfe_top.sv`, `w6/first_fault_latch.sv`, `w6/reset_endpoint.sv`,
+`w6/tb/tb_c034_memory.sv`, `w6/tb/tb_c034.sv` — the memory testbench file
+compiles immediately before the reset top and carries the C032 MFE / C023
+service tasks, splitting them from the reset behavioral checks. Greens are
+exactly `tb_c034` at the C1 and requested Context counts; mutants run
+against the same bench.
+
+The runner loads the nine scenario YAMLs
+(`verification/scenarios/w6/u3?_*.yaml`, cases `U3-a`..`U3-i`, each an
+`inject` mapping of generation/tag/hold_cycles and an `expect` mapping of
+winner/suppressed/marked/terminals/stale/poisoned — all strict unsigned
+words) fail-closed and materializes them as nine lowercase-hex words per row
+(three inject then six expect), rows sorted a..i, behind
+`+VECTORS=/out/c034-vectors.txt`. Scenario loading, vector serialization and
+the C015-fragment seal receipts are shared with the C033 runner through
+`verification/unit/w6/w6_scenario_io.py`, fenced in both host_sources. Every
+simulator invocation also receives `+PEER=/out/<label>`.
+
+`c034_group_peer.py` is the live boundary behind `+PEER`; its module
+docstring is the command reference (every reply exactly three words, errors
+nonzero, never a hang). In brief: U3-f/U3-h/U3-i run real Group cycles —
+genuine Simulator/TileGroup, production `accept_tile_fault` (GROUP),
+per-phase requests from stepping the actual ResetDomain (bounded 64 steps
+per the C034 contract), observed RESET_PHASE_ACKs, the production isolation
+poison, explicit `TileGroup.reset()` recovery with ordered receipts, and a
+`Z` that demands the real DONE observation plus zero residue. U3-e/U3-f open
+real C023 windows through the reused `c032_mfe_peer.Peer`, and `G` observes
+a real bounded FaultRing (retention, oldest source, physical index).
+
+Receipts retained per attempt: the shared harness set plus `group-peer.json`
+(per-label live cycles, memory windows, ring observations, open-state
+residue, errors) and the per-label `.peer.log` transcripts. Greens must show
+three completed live Group resets with the U3-f ordered recovery exactly
+`(refused, poisoned)` then `(allowed, cleared)`, two closed memory windows
+whose ordered W4 terminal classes are exactly [0,1,2,0] (U3-e, with exactly
+one 8-byte write) and [1] (U3-f inbound), and real FaultRing observations.
+Behavioral mutants live under `verification/unit/w6/mutants/reset-*.patch`;
+at least eight distinct patches must apply, compile and die on an executed
+`C034_ASSERT` — build failures, timeouts and watchdogs are not kills.
+
+C015 anchor drift: the frozen contracts cite ten Python statements in
+`pipeline_validator/tile_group.py` and
+`pipeline_validator/runtime/reset_domain.py` whose lines moved (six had
+already drifted at the C033 base; four moved with the C034 ResetDomain
+rework; all statements are unchanged and remain in the same owning methods).
+`validate_w6_contract.py` binds exactly those ten citations by their contract
+identity (label + field location) AND their sealed (file, original line,
+needle) triple, in a fail-closed author-time table (`ANCHOR_RELOCATIONS`,
+derived from seal revision `5ed2217`). The sealed identity is verified
+FIRST: an altered line, needle, file or a swapped citation fails with the
+ordinary SOURCE_LINE_MISMATCH before any text is read back, so pointing a
+citation at today's moved text — or at a comment or docstring — cannot
+bypass the pin. The pin is then always AST-verified against the current
+source: exactly one statement/header with the exact original text in the
+single top-level class with the pinned name and its unique direct method
+(a shadowed class re-binding rejects), walking every descendant except
+nested lexical scopes (try/except and match-case bodies count; an inner
+def/class/lambda and anything inside it does not — nor does a docstring or
+a neighbouring method). A pinned citation deleted or retyped so the walk
+never sees it fails with MISSING_SOURCE. Root/ownership mismatches and
+missing, ambiguous or edited statements are rejected. Relocations are
+reported additively as `relocated_sources` (original and verified current
+line, source and owner) only when the live line actually moved. Every other
+citation keeps its exact-line check; the validator never calls git at
+runtime, there is no fuzzy needle search, and source lines are never padded
+to preserve numbers.
+
 ## Offline seeds (C004)
 
 - Inventory: `env/seed_targets.json` — every seed has URL/path + sha256 +

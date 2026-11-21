@@ -1,0 +1,5 @@
+# Seed local bytes by MEM_RSP. Cancel after the external write is accepted; the persisted bytes must survive.
+case: U3-e
+inject: { generation: 59, tag: 37, hold_cycles: 108 }
+expect:
+  { winner: 0, suppressed: 0, marked: 0, terminals: 1, stale: 0, poisoned: 0 }

@@ -1,0 +1,12 @@
+--- a/w6/event_table.sv
++++ b/w6/event_table.sv
+@@ -297,8 +297,7 @@
+     mark_n = 0;
+     for (int unsigned b = 0; b < CONTEXT_COUNT; b++) begin
+       for (int unsigned f = 0; f < FRONTIER; f++) begin
+-        if (tbl_q[b][f].live && (tbl_q[b][f].status == EV_PENDING) &&
+-            !(comp_apply && (comp_bank == int'(b)) && (comp_slot == int'(f)))) begin
++        if (tbl_q[b][f].live && (tbl_q[b][f].status == EV_PENDING)) begin
+           mark_n++;
+         end
+       end

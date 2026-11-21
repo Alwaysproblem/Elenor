@@ -1,0 +1,12 @@
+# Reverse four simultaneous reports after an authorized clear. The winner's bytes must match.
+case: U3-a
+inject: { generation: 4294967301, tag: 4294967301, hold_cycles: 5 }
+expect:
+  {
+    winner: 4294967301,
+    suppressed: 7,
+    marked: 0,
+    terminals: 0,
+    stale: 0,
+    poisoned: 0,
+  }

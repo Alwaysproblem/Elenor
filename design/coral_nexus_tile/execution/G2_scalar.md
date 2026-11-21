@@ -462,6 +462,15 @@ ROB 同 PC 双 Context store、错误 op_seq、独立退休、局部 fault flush
 
 - **通过/交接**：U3-a..g/i 及 U3-h 注入等价全 PASS、`is_quiescent_snapshot` 字段可被 Python 侧消费；消费者：C035（退休链/复位接线）、C040（顶层端点）、C046（真实 VME region 失败场景）、G4 C059（完整复位/poison 扩展）。
 
+**C034 完成（W6-03 端点验收）。** Group 仍是复位顺序与 poison 的唯一所有者。生产 `FAULT_REPORT` 的 `tile_id` 保留在故障记录中，但只触发 `GROUP` 域复位。Tile 只执行收到的阶段；DRAIN 检查同一拍的六项证据，MARK 的 ACK 取本地事件表实际提交的 PENDING→RESET 数量。错代、越序请求不能推进 FSM；已确认阶段的重复请求不重做资源操作。
+
+- C033 的终态存储区分两个时点：FREEZE 前已保存的结果保持到握手；FREEZE 时尚未保存的成功不能抢在 CANCEL 扫描前发布。之前已锁存的失败保留原始故障引用。复位只关闭新工作，不截断已发出的阶段消息或外写。
+- U3-e/f 将 DRAIN 接到真实 C032 `mfe_top`，内含 `transfer_cancel_tracker`；C023 `MemoryService` 在观测到 MEM_REQ 和 TERMINAL_ACK 的握手后更新实际字节和引用。U3-f/h/i 通过独立 FIFO 让实际 Python Group 发阶段请求、接收 RTL ACK。U3-h 注入的是失败 `region_done` 事件与 Task 终态路径，不是 C046 的真实 VME。W2 未接受队列、驻留引用与信用重建在此验证所有者握手条件，不替代 C035/C040 整 Tile 接线。
+- 三个回归约束：DRAIN ACK 延迟 101 拍只升级取消，不把超时当作隔离失败；宿主侧空闲不能清除尚未被 Tile 排空证据覆盖的隔离失败；同一已结束 epoch 的七个旧 ACK 不能证明第二次排空。原始反例收据：`out/coral_nexus/C034/accept-RuTJy9UO/{boundary-review-red.log,external-isolation-red.log,same-epoch-review.log}`。
+- Python validator 全量 **611 passed、1 skipped**；原有 Group 故障/超时/退出闭包回归 **8 passed**；`cn sources verify` **57/57**。C015 合同回归 **208 passed**，31 处引用全部回读：基线已偏移 6 处，本卡移动 4 处。对这 10 处，检查器先核对封印的原引用，再在同一类和方法中定位唯一的原语句；注释、同名内层函数和替换原行号均不能充作证据。没有更改 C015 fragment 或 C020 封印。
+- 每种 Context 配置的三个实时 Group 复位都收到七个有序 ACK；U3-f/h/i 的 MARK 数分别为 **1/0/1**，与各自 Tile 的实际事件表一致。U3-f 第一次显式恢复被拒且 poison 保持；真实排空后再次恢复才清除 poison。两个外存窗口共五个请求，每个都由唯一 ACK 关闭，末态零引用；已接受写的八个 HBM 字节 `03 14 25 36 47 58 69 7a` 在取消与排空后不变。
+- 注册入口 `cn unit --suite w6 --config "$C2" --out "$EVIDENCE/unit-final"`：**5 passed in 554.97s**。C034 的九个 U3 场景均在 C1/C2 通过（分别 1041/1040 项检查）；8 个 `reset-*` 均构建成功，再被行为断言检出，不计 watchdog。C033 同套件回归：三个配置全部通过，9/9 个 `event-*` 由行为断言检出。最终收据为本卡证据目录下 `unit-final/pytest/{c033w60,c034w60}/evidence/` 与 `validator-final.xml`。早先 `unit/pytest.log` 因 C033 的输入 `tile_group.py` 在验收中变化，被源码围栏拒绝，不计作整套通过。未运行 G2 gate，未开始 C035。
+
 <a id="c035"></a>
 
 ## C035 — 跨边界准入、补偿与剩余资源退休

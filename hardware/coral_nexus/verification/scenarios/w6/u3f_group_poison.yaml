@@ -1,0 +1,5 @@
+# Accepted read stays live on isolation failure. The recovered epoch must retire a new healthy Task.
+case: U3-f
+inject: { generation: 97, tag: 41, hold_cycles: 9 }
+expect:
+  { winner: 41, suppressed: 0, marked: 1, terminals: 2, stale: 0, poisoned: 0 }
