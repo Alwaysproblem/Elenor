@@ -1,5 +1,6 @@
 # Accepted read stays live on isolation failure. The recovered epoch must retire a new healthy Task.
 case: U3-f
-inject: { generation: 97, tag: 41, hold_cycles: 9 }
+# The recovered successor crosses bit 63; run generations are unsigned C017 words.
+inject: { generation: 0x7fffffffffffffff, tag: 41, hold_cycles: 9 }
 expect:
   { winner: 41, suppressed: 0, marked: 1, terminals: 2, stale: 0, poisoned: 0 }

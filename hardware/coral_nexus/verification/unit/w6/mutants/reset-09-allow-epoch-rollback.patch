@@ -1,0 +1,11 @@
+--- a/w6/reset_endpoint.sv
++++ b/w6/reset_endpoint.sv
+@@ -205,7 +205,7 @@
+                     && !r_ack_valid
+                     && drain_all
+                     && !(|live_i)
+-                    && (!r_run_active || (run_generation_i > r_run_gen));
++                    && (!r_run_active || (run_generation_i != r_run_gen));
+ 
+   logic run_accept;
+   assign run_accept = run_begin_i && run_ready_o;

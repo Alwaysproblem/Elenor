@@ -405,6 +405,10 @@ poison, explicit `TileGroup.reset()` recovery with ordered receipts, and a
 real C023 windows through the reused `c032_mfe_peer.Peer`, and `G` observes
 a real bounded FaultRing (retention, oldest source, physical index).
 
+In U3-f, an ordinary `RUN_BEGIN` after recovery must strictly increase the
+unsigned generation. Quiescence alone does not authorize restarting an old
+epoch or executing a delayed `FREEZE_ISSUE` for it.
+
 Receipts retained per attempt: the shared harness set plus `group-peer.json`
 (per-label live cycles, memory windows, ring observations, open-state
 residue, errors) and the per-label `.peer.log` transcripts. Greens must show
@@ -413,7 +417,7 @@ three completed live Group resets with the U3-f ordered recovery exactly
 whose ordered W4 terminal classes are exactly [0,1,2,0] (U3-e, with exactly
 one 8-byte write) and [1] (U3-f inbound), and real FaultRing observations.
 Behavioral mutants live under `verification/unit/w6/mutants/reset-*.patch`;
-at least eight distinct patches must apply, compile and die on an executed
+at least nine distinct patches must apply, compile and die on an executed
 `C034_ASSERT` — build failures, timeouts and watchdogs are not kills.
 
 C015 anchor drift: the frozen contracts cite ten Python statements in

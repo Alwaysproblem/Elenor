@@ -401,6 +401,7 @@ module tb_c034 #(parameter int unsigned CONTEXT_COUNT=2);
   task automatic group_failure(input bit isolate,input bit region);
     owner_t o; fault_t f;
     word_t a,b,expected_mark;
+    bit older_begin_fired, older_freeze_rejected;
     o=owner(tag); command(CMD_START,o); expected_mark=region?0:1;
     if(region) begin alloc(key(1),2,EV_KIND_REGION_DONE); park(key(1)); end
     else alloc(key(1),1);
@@ -433,8 +434,23 @@ module tb_c034 #(parameter int unsigned CONTEXT_COUNT=2);
     if(isolate) begin
       refuse_start(owner(tag+1)); peer("C",a,b); check(a==1 && b==0,"only explicit Group recovery authorizes reuse");
       group_poisoned_i=b[0]; memory.clear_poison(); memory.close_service(1);
+      check(is_quiescent_snapshot_o==6'h3f && live_i=='0 && !issue_frozen_o && !ack_valid_o && reset_done_o,
+            "replay checked on a quiescent, recovered Tile");
       run_begin_i=1; run_generation_i=gen; #1; check(!run_ready_o,"replay cannot rearm the same epoch");
-      run_generation_i=gen+1; #1; check(run_ready_o,"new authenticated run accepted after explicit recovery");
+      run_generation_i=gen-64'd1; #1; older_begin_fired=run_ready_o;
+      tick(); run_begin_i=0;
+      req_valid_i=1; req_phase_i=RP_FREEZE; req_generation_i=gen-64'd1; #1;
+      older_freeze_rejected=req_ready_o && req_reject_o;
+      tick(); req_valid_i=0;
+      check(!older_begin_fired && older_freeze_rejected && reset_done_o && !reset_active_o &&
+            !issue_frozen_o && !ack_valid_o,
+            $sformatf("epoch rollback: RUN_BEGIN(N-1) fire=%0b FREEZE(N-1) reject=%0b DONE=%0b",
+                      older_begin_fired,older_freeze_rejected,reset_done_o));
+      // An old message cannot rewind N's cursor or destroy its committed MARK receipt.
+      phase_step(RP_MARK,expected_mark);
+      check(marks==1 && reset_done_o,"retired N replays MARK without re-executing it");
+      run_begin_i=1; run_generation_i=gen+64'd1; #1;
+      check(run_ready_o,"unsigned successor accepted after rejecting a retired generation");
       tick(); run_begin_i=0; o=owner(tag+2); o.ctx.ctx_generation++; command(CMD_START,o); retire(o,TS_DONE,0);
       check(live_i=='0 && w4_quiet,"healthy task in recovered epoch retires without stale failure");
     end

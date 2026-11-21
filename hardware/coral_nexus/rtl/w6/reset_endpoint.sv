@@ -10,11 +10,14 @@
 // no_pending_debug, no_unaccepted_phase_or_post).
 //
 // Epoch: an authenticated epoch is one presented on the RUN_BEGIN link.
-// The first epoch or a DIFFERENT generation is admitted only with no live
-// Task, a truly quiet snapshot, no pending ACK/action, no active reset and
-// no Group poison; a replay of the running generation never rearms.
-// reset_done clears only when a NEW epoch is admitted; run activation never
-// touches the first-fault latch.
+// The first epoch is admitted at any generation (0 included); every later
+// admission requires an unsigned STRICTLY GREATER generation — the
+// ResetDomain.attach_tile_reset retired-watermark rule; an ordinary
+// RUN_BEGIN carries no proof authorizing wrap or reuse, so equal or lower
+// generations (including replays) never rearm. Admission also needs no
+// live Task, a truly quiet snapshot, no pending ACK/action, no active
+// reset and no Group poison; reset_done clears only when a NEW epoch is
+// admitted; run activation never touches the first-fault latch.
 //
 // Sequencing: one command outstanding; the permission pointer r_stage
 // (count of ACK-fired stages, 7 = epoch complete) advances only on the ACK
@@ -202,7 +205,7 @@ module reset_endpoint
                     && !r_ack_valid
                     && drain_all
                     && !(|live_i)
-                    && (!r_run_active || (run_generation_i != r_run_gen));
+                    && (!r_run_active || (run_generation_i > r_run_gen));
 
   logic run_accept;
   assign run_accept = run_begin_i && run_ready_o;

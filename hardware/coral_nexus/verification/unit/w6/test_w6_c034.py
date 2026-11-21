@@ -137,7 +137,7 @@ def evidence(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
       benches=(BENCH,),
       mutant_globs=("reset-*.patch",),
       mutant_bench=BENCH,
-      min_mutants=8,
+      min_mutants=9,
       assert_markers=("C034_ASSERT",),
       service=serve,
       host_sources=(

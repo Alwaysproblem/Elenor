@@ -471,6 +471,11 @@ ROB 同 PC 双 Context store、错误 op_seq、独立退休、局部 fault flush
 - 每种 Context 配置的三个实时 Group 复位都收到七个有序 ACK；U3-f/h/i 的 MARK 数分别为 **1/0/1**，与各自 Tile 的实际事件表一致。U3-f 第一次显式恢复被拒且 poison 保持；真实排空后再次恢复才清除 poison。两个外存窗口共五个请求，每个都由唯一 ACK 关闭，末态零引用；已接受写的八个 HBM 字节 `03 14 25 36 47 58 69 7a` 在取消与排空后不变。
 - 注册入口 `cn unit --suite w6 --config "$C2" --out "$EVIDENCE/unit-final"`：**5 passed in 554.97s**。C034 的九个 U3 场景均在 C1/C2 通过（分别 1041/1040 项检查）；8 个 `reset-*` 均构建成功，再被行为断言检出，不计 watchdog。C033 同套件回归：三个配置全部通过，9/9 个 `event-*` 由行为断言检出。最终收据为本卡证据目录下 `unit-final/pytest/{c033w60,c034w60}/evidence/` 与 `validator-final.xml`。早先 `unit/pytest.log` 因 C033 的输入 `tile_group.py` 在验收中变化，被源码围栏拒绝，不计作整套通过。未运行 G2 gate，未开始 C035。
 
+**补验：普通 `RUN_BEGIN` 不得让代次倒退。** 基线 `351ea558b1` 的 RTL 将「不同」当成「更新」，允许静止 Tile 重新接纳 `N−1`；Python Group 则拒绝不高于已退役代次的请求。两端现均按无符号 64 位数比较：冷启动可从 0 开始，此后只接纳严格更大的代次。阶段请求仍须与当前代次**相等**；普通 `RUN_BEGIN` 不授权回绕或复用。
+
+- U3-f 在无活跃 Task、六项排空证据全真且 poison 已清除时送入 `RUN_BEGIN(N−1)`，下一拍送入 `FREEZE(N−1)`。修复后两者均被拒绝，`DONE` 保持，`MARK_EVENTS(N)` 重放返回原计数且不重写事件表；随后可从 `0x7fffffffffffffff` 进入 `0x8000000000000000`。U3-g 另覆盖冷启动首代为 0。
+- C034 定向 RTL：C1 **1049**、C2 **1048** 项检查，**9/9** 个变异体由行为断言检出。`reset-09` 编译的模块体与 `351ea558b1` 一致，U3-f 第 532 拍实测 `RUN_BEGIN(N-1) fire=1 FREEZE(N-1) reject=0 DONE=0`。Python validator 全量 **611 passed、1 skipped**。收据：`out/coral_nexus/C034/epoch-order-bXfLItKl/rtl/c034w60/evidence/`、同次 `validator.xml`；本次未重跑整个 W6 或 G2 gate。
+
 <a id="c035"></a>
 
 ## C035 — 跨边界准入、补偿与剩余资源退休

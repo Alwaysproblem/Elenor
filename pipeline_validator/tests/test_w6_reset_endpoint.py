@@ -15,7 +15,7 @@ from pipeline_validator.runtime.fault_ring import FaultCode, FaultDomain
 from pipeline_validator.runtime.reset_domain import ResetRequest, ResetState
 from pipeline_validator.tests.test_runtime import make_sim
 
-GEN = (1 << 32) + 17
+GEN = (1 << 63) - 1
 PHASES = tuple(wire.ENUMS["reset_phase"])
 DRAIN_FIELDS = tuple(wire.BITSETS["drain_evidence"])
 REJECT = (ResetPhaseError, MemoryInvariantError, ValueError, wire.WireError)
@@ -133,6 +133,9 @@ def test_group_waits_for_each_real_link_and_valid_drain_evidence() -> None:
     domain.observe_tile_reset_ack(1, ack("DRAIN", mask=0x3F))
   assert domain.is_done and tuple(domain.tile_reset_observation(1)["phases"]) == PHASES
   group.reset()
+  for replay in (GEN - 1, GEN):
+    with pytest.raises(ValueError):
+      domain.attach_tile_reset(0, replay)
   domain.attach_tile_reset(0, GEN + 1)
   with pytest.raises(REJECT):
     domain.observe_tile_reset_ack(0, ack("DRAIN", mask=0x3F))

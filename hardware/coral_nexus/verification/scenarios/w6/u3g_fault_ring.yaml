@@ -1,5 +1,6 @@
 # A depth-two Python FaultRing overwrites; the Tile retains the first of twelve reports and saturates its count.
 case: U3-g
-inject: { generation: 103, tag: 0, hold_cycles: 12 }
+# With no admitted epoch since cold reset, the initial generation may be zero.
+inject: { generation: 0, tag: 0, hold_cycles: 12 }
 expect:
   { winner: 0, suppressed: 7, marked: 0, terminals: 0, stale: 0, poisoned: 0 }
