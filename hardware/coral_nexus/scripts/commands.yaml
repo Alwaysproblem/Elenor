@@ -15,6 +15,11 @@ commands:
     executor: host
     handler: scripts/handlers/env.sh
     subcommands: [build, verify, export, offline-rebuild, devcontainer-probe]
+  package:
+    summary: build, recheck, seal and reload one kernel package from a binding
+    executor: host
+    handler: scripts/handlers/package.sh
+    requires_config: true
   sources:
     summary: verify the pinned source lock
     executor: host
@@ -122,3 +127,6 @@ commands:
           - hardware/coral_nexus/verification/unit/w6/test_w6_c033.py
           - hardware/coral_nexus/verification/unit/w6/test_w6_c034.py
           - pipeline_validator/tests/test_w6_reset_endpoint.py
+      w5:
+        tests:
+          - pipeline_validator/tests/test_w5_package.py

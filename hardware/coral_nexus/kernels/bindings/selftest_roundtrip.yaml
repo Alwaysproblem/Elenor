@@ -1,0 +1,112 @@
+schema: cn_binding/v1
+# C037 selftest binding. The image is the C018 bootstrap control sequence (kernels/bootstrap/*, cited by
+# source hash in the package provenance and by ELF hash in the report); it is linked for real by the
+# pinned toolchain and is NOT a CS1 compute kernel (real kernels are C038).
+kernel: bootstrap
+layout: A
+numeric_profile_id: w3_bf16_fp32_rod_v1
+target:
+  tensor_input_bytes: 2
+  accumulator_bytes: 4
+  tensor_output_bytes: 2
+  rvv_vlen: 128
+  context_count: 2
+patch_mask:
+  - { field: param_area.shape, layer: runtime }
+manifest_kernel:
+  kernel_id: K-VME-BF16-ACC
+  kernel_version: 1
+  source_node: selftest_0
+  ins:
+    - {
+        handle: a,
+        shape: [16, 2],
+        dtype: bf16,
+        layout: contiguous,
+        permission: r,
+        alias: null,
+        actual_view: l1.a,
+      }
+    - {
+        handle: b,
+        shape: [2, 16],
+        dtype: bf16,
+        layout: contiguous,
+        permission: r,
+        alias: null,
+        actual_view: l1.b,
+      }
+  outs:
+    - {
+        handle: c,
+        shape: [16, 16],
+        dtype: bf16,
+        layout: contiguous,
+        permission: w,
+        alias: null,
+        actual_view: l1.c,
+      }
+  initial: { method: vtzero }
+  scratch: []
+  clobber: [t5, t6]
+  events: { completion: selftest_0.done }
+  numeric_profile: w3_bf16_fp32_rod_v1
+  mode_table: reference
+  region:
+    start: true
+    end: true
+    chains:
+      - {
+          id: 0,
+          steps:
+            [
+              CHAIN_FIRST,
+              CHAIN_CONTINUE,
+              CHAIN_CONTINUE,
+              CHAIN_CONTINUE,
+              CHAIN_CONTINUE,
+              CHAIN_FINAL,
+            ],
+        }
+  patch_mask: []
+  helpers:
+    - {
+        name: region_start,
+        csr: nexus.mregion.start,
+        observable: arms the pending declaration,
+        barrier: volatile_asm_memory_clobber,
+        params: [],
+        resources: { stack_bytes: 0 },
+      }
+    - {
+        name: chain_first,
+        csr: nexus.mregion.first,
+        observable: opens the FIRST chain step,
+        barrier: volatile_asm_memory_clobber,
+        params: [],
+        resources: { stack_bytes: 0 },
+      }
+    - {
+        name: chain_continue,
+        csr: nexus.mregion.continue,
+        observable: accumulates one CONTINUE step,
+        barrier: volatile_asm_memory_clobber,
+        params: [],
+        resources: { stack_bytes: 0 },
+      }
+    - {
+        name: chain_final,
+        csr: nexus.mregion.final,
+        observable: closes the chain with FINAL,
+        barrier: volatile_asm_memory_clobber,
+        params: [],
+        resources: { stack_bytes: 0 },
+      }
+    - {
+        name: region_end,
+        csr: nexus.mregion.end,
+        observable: closes the accepted-op set,
+        barrier: volatile_asm_memory_clobber,
+        params: [],
+        resources: { stack_bytes: 0 },
+      }

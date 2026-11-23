@@ -585,6 +585,17 @@ ROB 同 PC 双 Context store、错误 op_seq、独立退休、局部 fault flush
 
 - **通过/交接**：round-trip 与封印重载一致、负例全检出；消费者：C038（scalar kernel 封印）、C039（安装消费封印产物）、G3 C048–C052。`cn package` 命令自本卡起可用。
 
+### C037 实证与验证范围
+
+- **C037 已通过 W5-01 实现部分验收。** 新增 `pipeline_validator/package/{binding_ir,seal,loader}.py`（严格编解码、封印、只读 Loader；规则在导入时读取 C014 合同，不另存副本）与 `cn package`（真实链接 C018 bootstrap ELF → 资源复核 → 封印 → 重载）。不改 G1 封印、RTL 与 C014 合同。
+- **Loader 目标独立于 binding**：`cn package` 重载时 `rvv_vlen` 取自 `configs/params.d/upstream_coralnpu.json`（`rvv_vlen_bits`），`context_count` 取自 `--config`；三个字节宽度没有独立来源，仍取自 binding。Loader 拒绝的包会被删除，不留 `package.json`。回归：`test_real_build_checks_vlen_against_the_pinned_upstream_not_the_binding`，恢复旧行为后该测试失败（构建退出 0 且报告 `reload_identical`）。
+- **C014 参考消费者对照**：接受/拒绝逐项一致，错误码逐项一致，唯一例外是手写数字 CSR（`0x7c0`）——本实现报 `HAND_WRITTEN_ADDRESS`，参考实现先报 `HELPER_CSR_MISMATCH`，记于 `KNOWN_CODE_REFINEMENTS`。
+- **变异检验**：8 处破坏（重复键、未知字段、只读别名、目标不符、image 字节不校验、measured peak 当作界、非有限数、hash 不符被忽略）均被测试检出，还原后 26/26。
+- 注册命令：`cn unit --suite w5`（26 passed）；`cn unit --suite contracts`（1330 passed）；`cn sources verify`（pass）；全量 `pipeline_validator/tests/`：652 passed + 1 skipped（该次运行早于 VLEN 修复；其后只改了 `package_build.py` 与 w5 测试，未改验证器其余源码）。
+- `cn package` 产物 `package_hash` `cb4cf5dd4b179859a84c99c10ac9ebdeb89f3d7e0483e77a930b19f58d64928b`，image sha256 `42b83d9d0efcf40aab2eb328795082210a96ee74c3ecbd3344da87d9af1e786d`。
+- **范围边界**：镜像是 C018 bootstrap 控制序列，不是可加载的 CS1 计算 kernel；Loader 只证明合同层、image 字节与目标，不证明机器码本身；未做程序安装（C039）与 oneTile 执行（C040）。
+- 验收包：`out/coral_nexus/C037/final-143554/C037-evidence.tar.gz`，SHA-256 `132ab054db5d411f2aa751931cba4aef6270552ff8102fb035ba5e5c49ff5b6f`。消费者：C038、C039、G3 C048–C052。
+
 <a id="c038"></a>
 
 ## C038 — 真实 scalar 控制 kernel 与 ISA helper 适配

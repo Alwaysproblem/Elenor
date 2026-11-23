@@ -1,0 +1,214 @@
+"""cn package: build -> resource recheck -> seal -> reload (C037 / W5-01).
+
+The chain follows the contract's build order (AUTHORED, COMPILED, MEASURED, RECHECKED, SEALED, LOADED).
+A failure at any step returns to AUTHORED with a named reason and writes no package; nothing is patched in
+the Loader. The image is the REAL ELF the pinned C004 toolchain links (C018's ``measure_kernel``), and its
+text/static-data/stack numbers come from that link and the call-graph bound, never from an estimate.
+
+The selftest binding reuses the C018 bootstrap sources (explicitly cited by hash in the provenance). It
+registers the K-VME-BF16-ACC binding entry whose helper set is exactly what that image emits; real
+kernels are C038.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+LIB = Path(__file__).resolve().parent
+H = LIB.parents[1]
+REPO = H.parents[1]
+sys.path.insert(0, str(LIB))
+sys.path.insert(0, str(REPO))
+
+import measure_kernel as mk  # noqa: E402
+
+from pipeline_validator.package import (  # noqa: E402
+  PackageError,
+  encode,
+  load_file,
+  seal,
+  verify_image,
+)
+
+STATES = ("AUTHORED", "COMPILED", "MEASURED", "RECHECKED", "SEALED", "LOADED")
+
+
+class BuildError(Exception):
+  """A build refusal: ``state`` is the step that failed; the build then returns to AUTHORED."""
+
+  def __init__(self, state: str, code: str, detail: str) -> None:
+    super().__init__(f"{state}: {code}: {detail}")
+    self.state = state
+    self.code = code
+    self.detail = detail
+
+
+def _sha(data: bytes) -> str:
+  return hashlib.sha256(data).hexdigest()
+
+
+def read_binding(path: Path) -> dict[str, Any]:
+  doc = yaml.safe_load(path.read_text())
+  if not isinstance(doc, dict) or doc.get("schema") != "cn_binding/v1":
+    raise BuildError("AUTHORED", "BAD_BINDING", f"{path}: schema must be cn_binding/v1")
+  for key in ("kernel", "layout", "manifest_kernel", "numeric_profile_id", "target"):
+    if key not in doc:
+      raise BuildError("AUTHORED", "MISSING_FIELD", f"{path}: {key}")
+  return doc
+
+
+def control_plane() -> dict[str, Any]:
+  """A real compiled control-plane artifact (the existing pow workload), wrapped unchanged."""
+  from pipeline_validator.compiled_program import artifact_digest
+  from pipeline_validator.compiler import compile_program
+  from pipeline_validator.config import HardwareConfig, SimConfig
+  from pipeline_validator.workloads import PowWorkload
+
+  hw = HardwareConfig()
+  program = compile_program(
+    PowWorkload(num_group_chunks=1, hw=hw).module, hw, SimConfig(fidelity="runtime"), workload_info=None
+  )
+  return {
+    "schema_version": program.schema_version,
+    "compiler_abi": program.compiler_abi,
+    "artifact_hash": artifact_digest(program),
+    "source_hash": program.source_hash,
+  }
+
+
+UPSTREAM_PARAMS = H / "configs" / "params.d" / "upstream_coralnpu.json"
+
+
+def independent_target(binding_target: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+  """The target the Loader checks against: rvv_vlen from the pinned upstream parameter record and
+  context_count from the config, never from the binding that authored the package. Byte widths have no
+  independent source in either file, so they are taken from the binding."""
+  params = {p["name"]: p["value"] for p in json.loads(UPSTREAM_PARAMS.read_text())["params"]}
+  return {
+    **binding_target,
+    "rvv_vlen": params["rvv_vlen_bits"],
+    "context_count": config["constraints"]["context_count"],
+  }
+
+
+def build(binding_path: Path, config_path: Path, out: Path) -> dict[str, Any]:
+  binding = read_binding(binding_path)
+  config = yaml.safe_load(config_path.read_text())
+  if config.get("kind") != "cs1_target":
+    raise BuildError("AUTHORED", "BAD_CONFIG", f"{config_path}: a cs1_target config is required")
+  if binding["target"].get("context_count") != config["constraints"]["context_count"]:
+    raise BuildError(
+      "AUTHORED",
+      "TARGET_MISMATCH",
+      f"binding context_count {binding['target'].get('context_count')} != "
+      f"config {config['constraints']['context_count']}",
+    )
+  out.mkdir(parents=True, exist_ok=True)
+
+  # COMPILED + MEASURED: the real ELF and the real resource record.
+  try:
+    record = mk.measure(out / "measure")
+  except mk.MeasureError as exc:
+    raise BuildError("MEASURED", exc.code, str(exc)) from exc
+  layout = next(x for x in record["candidate_layouts"] if x["name"] == binding["layout"])
+  elf_path = out / "measure" / binding["layout"] / "bootstrap.elf"
+  elf = elf_path.read_bytes()
+  image_path = out / "image.elf"
+  image_path.write_bytes(elf)
+
+  # RECHECKED: capacity against the target the config names, before a hash exists.
+  c = config["constraints"]
+  rm = record["resource_manifest"]
+  if layout["text_bytes"] > c["itcm_bytes"]:
+    raise BuildError("RECHECKED", "TEXT_EXCEEDS_CAPACITY", f"{layout['text_bytes']} > {c['itcm_bytes']}")
+  if rm["static_data_bytes"] + rm["stack_bytes"] + rm["scratch_bytes"] > c["dtcm_bytes"]:
+    raise BuildError("RECHECKED", "DATA_EXCEEDS_CAPACITY", "static data + stack + scratch exceeds DTCM")
+
+  package = {
+    "package_schema": "cn_package/v1",
+    "control_plane": control_plane(),
+    "image": {
+      "bytes_sha256": _sha(elf),
+      "text_bytes": layout["text_bytes"],
+      "entry": record["entry"],
+      "link_layout": {
+        "text_base": layout["text_base"],
+        "text_bytes": layout["text_bytes"],
+        "data_base": layout["data_base"],
+        "data_bytes": layout["data_bytes"],
+      },
+      "provenance": {
+        "builder": json.loads((H / "env/image.lock").read_text())["tag"],
+        "toolchain_lock_sha256": record["provenance"]["toolchain_lock_sha256"],
+        "source_sha256": _sha(json.dumps(record["provenance"]["source_sha256"], sort_keys=True).encode()),
+      },
+    },
+    "binding_manifest": {"kernels": [binding["manifest_kernel"]]},
+    "resource_manifest": {
+      "text_bytes": rm["text_bytes"],
+      "static_data_bytes": rm["static_data_bytes"],
+      "stack_bytes": rm["stack_bytes"],
+      "scratch_bytes": rm["scratch_bytes"],
+      "bound_source": rm["bound_source"],
+    },
+    "target_fingerprint": binding["target"],
+    "numeric_profile_id": binding["numeric_profile_id"],
+    "patch_mask": binding.get("patch_mask", []),
+  }
+  # SEALED: validation first; a package that breaks the contract is never hashed.
+  try:
+    sealed = seal(package)
+  except PackageError as exc:
+    raise BuildError("SEALED", exc.code, str(exc)) from exc
+  package_path = out / "package.json"
+  package_path.write_text(encode(sealed))
+
+  # LOADED: re-read through the read-only Loader and require the identical sealed object.
+  target = independent_target(binding["target"], config)
+  try:
+    loaded = load_file(package_path, image_path=image_path, target=target)
+    verify_image(sealed, image_path.read_bytes())
+    if loaded.to_dict() != sealed:
+      raise PackageError("RELOAD_DIFFERS", "$", "the reloaded package is not the sealed package")
+  except PackageError as exc:
+    package_path.unlink(missing_ok=True)  # a package the Loader refuses is never left behind
+    raise BuildError("LOADED", exc.code, str(exc)) from exc
+  report = {
+    "schema": "cn_package_report/v1",
+    "states": list(STATES),
+    "package": str(package_path),
+    "image": str(image_path),
+    "package_hash": sealed["package_hash"],
+    "image_sha256": sealed["image"]["bytes_sha256"],
+    "resource_manifest": sealed["resource_manifest"],
+    "layout": layout,
+    "reload_identical": True,
+  }
+  (out / "package_report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
+  return report
+
+
+def main() -> None:
+  import argparse
+
+  parser = argparse.ArgumentParser(description=__doc__)
+  parser.add_argument("--binding", required=True)
+  parser.add_argument("--config", required=True)
+  parser.add_argument("--out", required=True)
+  args = parser.parse_args()
+  try:
+    report = build(Path(args.binding), Path(args.config), Path(args.out))
+  except BuildError as exc:
+    print(f"package: {exc}  (build returns to AUTHORED; nothing written to a sealed path)", file=sys.stderr)
+    raise SystemExit(1) from exc
+  print(json.dumps({k: report[k] for k in ("package_hash", "image_sha256", "reload_identical")}, indent=2))
+
+
+if __name__ == "__main__":
+  main()

@@ -1,0 +1,85 @@
+"""Read-only cn_package/v1 Loader (C037 / W5-01).
+
+The Loader never edits what it reads: it parses strictly, validates, verifies the seal and, when asked,
+the image bytes and the target. Every refusal is a ``PackageError`` that names the offending field. The
+returned object is a frozen view; patching at run time is only ever through ``patch_mask`` (``binding_ir.
+patch_allowed``) and never changes ``package_hash`` or resident text.
+
+Trust boundary (contract section 9): this proves the CONTRACT layer. It does not prove arbitrary machine
+code; the image is trusted through its controlled build and the numeric/protocol verification.
+"""
+
+from __future__ import annotations
+
+import copy
+from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any
+
+from .binding_ir import PackageError, parse_strict
+from .seal import verify, verify_image
+
+
+def _freeze(value: Any) -> Any:
+  if isinstance(value, dict):
+    return MappingProxyType({k: _freeze(v) for k, v in value.items()})
+  if isinstance(value, list):
+    return tuple(_freeze(v) for v in value)
+  return value
+
+
+@dataclass(frozen=True)
+class LoadedPackage:
+  """An immutable, verified package. ``raw`` is a private deep copy used only to re-serialize."""
+
+  view: Any
+  package_hash: str
+  _raw: dict[str, Any]
+
+  def to_dict(self) -> dict[str, Any]:
+    return copy.deepcopy(self._raw)
+
+
+def check_target(package: dict[str, Any], target: dict[str, Any]) -> None:
+  """A package is bound to one target fingerprint; any differing field refuses the load by name."""
+  want = package["target_fingerprint"]
+  for key in sorted(want):
+    if key not in target:
+      raise PackageError(
+        "TARGET_FIELD_MISSING", f"$.target_fingerprint.{key}", "the target did not state it"
+      )
+    if target[key] != want[key]:
+      raise PackageError(
+        "TARGET_MISMATCH", f"$.target_fingerprint.{key}", f"package {want[key]!r}, target {target[key]!r}"
+      )
+
+
+def load_text(
+  text: str, *, image_bytes: bytes | None = None, target: dict[str, Any] | None = None
+) -> LoadedPackage:
+  package = parse_strict(text)
+  verify(package)
+  if image_bytes is not None:
+    verify_image(package, image_bytes)
+  if target is not None:
+    check_target(package, target)
+  return LoadedPackage(
+    view=_freeze(package), package_hash=package["package_hash"], _raw=copy.deepcopy(package)
+  )
+
+
+def load_file(
+  path: Path, *, image_path: Path | None = None, target: dict[str, Any] | None = None
+) -> LoadedPackage:
+  try:
+    text = Path(path).read_text()
+  except OSError as exc:
+    raise PackageError("UNREADABLE", str(path), str(exc)) from exc
+  image = None
+  if image_path is not None:
+    try:
+      image = Path(image_path).read_bytes()
+    except OSError as exc:
+      raise PackageError("UNREADABLE", str(image_path), str(exc)) from exc
+  return load_text(text, image_bytes=image, target=target)
