@@ -181,8 +181,10 @@ class GateWakeCoordinator:
     }
 
   def _trace(self, name: str, record: GateStateRecord, **extra: object) -> None:
+    # Keep pure-Python baseline traces identical to C022; emit Cosim:GateWake
+    # instrumentation only when at least one external boundary TilePort is attached.
     tracer = self.group.tracer
-    if tracer is None:
+    if tracer is None or not self.group.boundary_ports:
       return
     tracer.instant(
       "TileGroup",

@@ -292,13 +292,14 @@ class GroupScheduler:
           self._queued.remove(record)
           self._gate_parked.append(record)
           self.gate_parked_total += 1
-          self._trace_action(
-            "group_action_gate_park",
-            record,
-            cycle,
-            level=gate_level,
-            wait_gate_epoch=record.wait_gate_epoch,
-          )
+          if self.group.boundary_ports:
+            self._trace_action(
+              "group_action_gate_park",
+              record,
+              cycle,
+              level=gate_level,
+              wait_gate_epoch=record.wait_gate_epoch,
+            )
         continue
       self._trace_action(
         "group_action_issue", record, cycle, status=result.status.value, reason=result.reason
@@ -397,8 +398,9 @@ class GroupScheduler:
     self._gate_parked = remaining
     self._queued.extend(woken)
     self.gate_woken_total += len(woken)
-    for record in woken:
-      self._trace_action("group_action_gate_wake", record, cycle, level=level, gate_epoch=gate_epoch)
+    if self.group.boundary_ports:
+      for record in woken:
+        self._trace_action("group_action_gate_wake", record, cycle, level=level, gate_epoch=gate_epoch)
     return len(woken)
 
   def _dependency_status(self, record: RegisteredAction) -> EventStatus:
