@@ -11,6 +11,7 @@ over itself. Two rules make the seal more than a checksum:
 from __future__ import annotations
 
 import hashlib
+import struct
 from collections.abc import Mapping
 from typing import Any
 
@@ -124,10 +125,110 @@ def verify(package: Any) -> None:
     )
 
 
+_PT_LOAD, _PF_X, _PF_W = 1, 1, 2
+_EM_RISCV = 243
+
+
+def _elf_layout(image_bytes: bytes) -> dict[str, int | None]:
+  """The execution-relevant identity of a linked RV32 ELF, from its header and PT_LOAD segments only.
+
+  Nothing here analyses machine code: it reads ``e_entry`` and the loaded segments' addresses and
+  lengths, so a manifest cannot claim a layout the shipped bytes do not have.
+  """
+
+  def fail(why: str) -> PackageError:
+    return PackageError("IMAGE_NOT_ELF", "$.image", why)
+
+  if len(image_bytes) < 52 or image_bytes[:4] != b"\x7fELF":
+    raise fail("not an ELF file")
+  if image_bytes[4] != 1 or image_bytes[5] != 1:
+    raise fail("only 32-bit little-endian ELF is a Coral image")
+  if struct.unpack_from("<H", image_bytes, 18)[0] != _EM_RISCV:
+    raise fail("not a RISC-V ELF")
+  entry, phoff = struct.unpack_from("<II", image_bytes, 24)[0], struct.unpack_from("<I", image_bytes, 28)[0]
+  phentsize, phnum = struct.unpack_from("<HH", image_bytes, 42)
+  if phentsize < 32 or phoff + phnum * phentsize > len(image_bytes):
+    raise fail("program header table is outside the file")
+  text: list[tuple[int, int]] = []
+  data: list[tuple[int, int, int]] = []
+  for index in range(phnum):
+    kind, _off, vaddr, _paddr, filesz, memsz, flags, _align = struct.unpack_from(
+      "<IIIIIIII", image_bytes, phoff + index * phentsize
+    )
+    if kind != _PT_LOAD or memsz == 0:
+      continue
+    if flags & _PF_X:
+      text.append((vaddr, filesz))
+    elif flags & _PF_W:
+      data.append((vaddr, filesz, memsz))
+  if len(text) != 1:
+    raise fail(f"expected exactly one executable PT_LOAD segment, found {len(text)}")
+  return {
+    "entry": entry,
+    "text_base": text[0][0],
+    "text_bytes": text[0][1],
+    "data_base": min(v for v, _f, _m in data) if data else None,
+    "data_filesz": sum(f for _v, f, _m in data),
+    "data_memsz": sum(m for _v, _f, m in data),
+  }
+
+
 def verify_image(package: dict[str, Any], image_bytes: bytes) -> None:
-  """The image identity is its bytes: a package that names an image must match the bytes it ships."""
+  """The image identity is its bytes, and the manifest's execution metadata must be what those bytes are.
+
+  ``image.bytes_sha256`` authenticates the bytes but ``entry`` and ``link_layout`` are not under the
+  package hash, so each is checked against the actual ELF (entry point, executable segment address and
+  length, data segment address and extent). Changing one of them without relinking is refused here.
+  """
+  image = package["image"]
   actual = hashlib.sha256(image_bytes).hexdigest()
-  if actual != package["image"]["bytes_sha256"]:
+  if actual != image["bytes_sha256"]:
     raise PackageError(
       "IMAGE_BYTES_MISMATCH", "$.image.bytes_sha256", f"image bytes hash to {actual[:12]}…"
+    )
+  elf = _elf_layout(image_bytes)
+  layout = image["link_layout"]
+  checks = (
+    ("$.image.entry", image["entry"], elf["entry"], "ENTRY_MISMATCH", "e_entry"),
+    (
+      "$.image.link_layout.text_base",
+      layout["text_base"],
+      elf["text_base"],
+      "LAYOUT_MISMATCH",
+      "text base",
+    ),
+    ("$.image.text_bytes", image["text_bytes"], elf["text_bytes"], "TEXT_BYTES_MISMATCH", "text length"),
+  )
+  for field, claimed, linked, code, what in checks:
+    if claimed != linked:
+      raise PackageError(code, field, f"manifest {claimed}, linked ELF {what} {linked}")
+  resource = package["resource_manifest"]
+  if elf["data_base"] is None:
+    if layout["data_bytes"] or resource["static_data_bytes"] or resource["stack_bytes"]:
+      raise PackageError(
+        "LAYOUT_MISMATCH",
+        "$.image.link_layout.data_base",
+        "the manifest declares data the ELF does not load",
+      )
+    return
+  if layout["data_base"] != elf["data_base"]:
+    raise PackageError(
+      "LAYOUT_MISMATCH",
+      "$.image.link_layout.data_base",
+      f"manifest {layout['data_base']}, linked ELF data base {elf['data_base']}",
+    )
+  assert elf["data_filesz"] is not None and elf["data_memsz"] is not None
+  if elf["data_filesz"] > layout["data_bytes"]:
+    raise PackageError(
+      "LAYOUT_MISMATCH",
+      "$.image.link_layout.data_bytes",
+      f"the ELF ships {elf['data_filesz']} initialized data bytes, "
+      f"the manifest declares {layout['data_bytes']}",
+    )
+  need = layout["data_bytes"] + resource["stack_bytes"] + resource["scratch_bytes"]
+  if need > elf["data_memsz"]:
+    raise PackageError(
+      "LAYOUT_MISMATCH",
+      "$.image.link_layout.data_bytes",
+      f"declared data + proven stack + scratch is {need}, the linked data region is {elf['data_memsz']}",
     )

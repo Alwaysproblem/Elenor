@@ -16,6 +16,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -53,7 +54,67 @@ import package_contract as ref  # noqa: E402  (independent C014 oracle, never im
 KNOWN_CODE_REFINEMENTS = {("HAND_WRITTEN_ADDRESS", "HELPER_CSR_MISMATCH")}
 
 
-IMAGE = b"C037 test image: stands in for the linked ELF the package names by hash"
+def make_elf(
+  *,
+  entry: int,
+  text_base: int,
+  text_bytes: int,
+  data_base: int | None,
+  data_filesz: int,
+  data_memsz: int,
+  machine: int = 243,
+) -> bytes:
+  """A minimal ELF32 little-endian RISC-V file: header + PT_LOAD program headers + the loaded bytes.
+  Only what ``verify_image`` reads is modelled (no sections, no code worth executing)."""
+  segments = [(text_base, text_bytes, text_bytes, 5)]
+  if data_base is not None:
+    segments.append((data_base, data_filesz, data_memsz, 6))
+  header = struct.pack(
+    "<4sBBBBB7xHHIIIIIHHHHHH",
+    b"\x7fELF",
+    1,
+    1,
+    1,
+    0,
+    0,
+    2,
+    machine,
+    1,
+    entry,
+    52,
+    0,
+    0,
+    52,
+    32,
+    len(segments),
+    0,
+    0,
+    0,
+  )
+  payload_at = 52 + 32 * len(segments)
+  program, payload = b"", b""
+  for vaddr, filesz, memsz, flags in segments:
+    program += struct.pack(
+      "<IIIIIIII", 1, payload_at + len(payload), vaddr, vaddr, filesz, memsz, flags, 16
+    )
+    payload += bytes((vaddr + i) & 0xFF for i in range(filesz))
+  return header + program + payload
+
+
+# The linked image the C014 example describes: entry 256 inside 1536 bytes of text at 0, 256 initialized
+# data bytes at DTCM slot 65536 followed (in one loaded region) by the 128-byte stack and 1024 scratch.
+_EXAMPLE_IMAGE = json.loads(EXAMPLE.read_text())["image"]
+_EXAMPLE_RES = json.loads(EXAMPLE.read_text())["resource_manifest"]
+IMAGE = make_elf(
+  entry=_EXAMPLE_IMAGE["entry"],
+  text_base=_EXAMPLE_IMAGE["link_layout"]["text_base"],
+  text_bytes=_EXAMPLE_IMAGE["text_bytes"],
+  data_base=_EXAMPLE_IMAGE["link_layout"]["data_base"],
+  data_filesz=_EXAMPLE_IMAGE["link_layout"]["data_bytes"],
+  data_memsz=_EXAMPLE_IMAGE["link_layout"]["data_bytes"]
+  + _EXAMPLE_RES["stack_bytes"]
+  + _EXAMPLE_RES["scratch_bytes"],
+)
 # The Coral target a load is checked against. It is read from the committed C014 example, never from the
 # package under test, so a package that edits its own fingerprint cannot make itself match.
 CORAL_TARGET: dict[str, Any] = json.loads(EXAMPLE.read_text())["target_fingerprint"]
@@ -594,6 +655,103 @@ def test_a_wrong_image_or_a_foreign_target_is_refused_at_load_text(
   assert wrong_target.value.code == "TARGET_MISMATCH"
 
 
+# ------------------------------------------------------------------- manifest metadata vs the real ELF
+def _metadata_edits() -> list[tuple[str, Any, str, str]]:
+  """(label, edit, expected code, expected field) for execution metadata that the package hash does NOT
+  cover: each stays structurally valid, so only the cross-check against the linked ELF can refuse it."""
+
+  def entry(p: dict[str, Any]) -> None:
+    p["image"]["entry"] += 4
+
+  def text_base(p: dict[str, Any]) -> None:
+    p["image"]["link_layout"]["text_base"] = 16  # entry 256 still lies inside [16, 1552)
+
+  def text_bytes(p: dict[str, Any]) -> None:
+    p["image"]["text_bytes"] = p["image"]["link_layout"]["text_bytes"] = 1024
+    p["resource_manifest"]["text_bytes"] = 1024  # the two manifests agree: structure stays valid
+
+  def data_base(p: dict[str, Any]) -> None:
+    p["image"]["link_layout"]["data_base"] = 69632
+
+  def data_bytes(p: dict[str, Any]) -> None:
+    p["image"]["link_layout"]["data_bytes"] = 128
+    p["resource_manifest"]["static_data_bytes"] = 128  # fewer initialized bytes than the ELF ships
+
+  return [
+    ("entry", entry, "ENTRY_MISMATCH", "$.image.entry"),
+    ("text_base", text_base, "LAYOUT_MISMATCH", "link_layout.text_base"),
+    ("text_bytes", text_bytes, "TEXT_BYTES_MISMATCH", "$.image.text_bytes"),
+    ("data_base", data_base, "LAYOUT_MISMATCH", "link_layout.data_base"),
+    ("data_bytes", data_bytes, "LAYOUT_MISMATCH", "link_layout.data_bytes"),
+  ]
+
+
+@pytest.mark.parametrize(("label", "edit", "code", "field"), _metadata_edits(), ids=lambda v: str(v)[:12])
+def test_manifest_execution_metadata_must_match_the_linked_elf(
+  good: dict[str, Any], compiled_text: str, label: str, edit: Any, code: str, field: str
+) -> None:
+  """image.entry and link_layout are not under package_hash, so an edit leaves the seal unchanged. The
+  ELF is the authority: each is compared with e_entry and the PT_LOAD segments of the shipped bytes."""
+  edited = copy.deepcopy(good)
+  edit(edited)
+  if label in ("entry", "text_base", "data_base"):
+    # these fields are outside the hash coverage: the edit leaves the sealed package_hash unchanged
+    assert package_hash(edited) == good["package_hash"]
+  edited = resealed(edited)  # where the edit also touched a covered part, make the seal consistent
+  verify(edited)  # the structural check accepts it: only the ELF can refuse it
+  with pytest.raises(PackageError) as caught:
+    verify_image(edited, IMAGE)
+  assert caught.value.code == code and field in caught.value.field, (label, str(caught.value))
+  with pytest.raises(PackageError) as at_load:
+    load_text(encode(edited), compiled_text=compiled_text, **TARGET())
+  assert at_load.value.code == code
+
+
+def test_a_stack_or_scratch_bound_larger_than_the_linked_data_region_is_refused(
+  good: dict[str, Any],
+) -> None:
+  small = make_elf(
+    entry=256, text_base=0, text_bytes=1536, data_base=65536, data_filesz=256, data_memsz=256 + 128
+  )
+  tight = copy.deepcopy(good)
+  tight["image"]["bytes_sha256"] = hashlib.sha256(small).hexdigest()
+  with pytest.raises(PackageError) as caught:
+    verify_image(tight, small)  # scratch (1024) does not fit the 384-byte region the ELF reserved
+  assert caught.value.code == "LAYOUT_MISMATCH" and "link_layout.data_bytes" in caught.value.field
+
+
+def test_a_file_that_is_not_a_coral_elf_is_refused_even_when_its_hash_matches(good: dict[str, Any]) -> None:
+  def named(blob: bytes) -> dict[str, Any]:
+    package = copy.deepcopy(good)
+    package["image"]["bytes_sha256"] = hashlib.sha256(blob).hexdigest()
+    return package
+
+  base: dict[str, Any] = {
+    "entry": 256,
+    "text_base": 0,
+    "text_bytes": 1536,
+    "data_base": 65536,
+    "data_filesz": 256,
+    "data_memsz": 1408,
+  }
+  two_text = bytearray(make_elf(**base))
+  two_text[44:46] = struct.pack("<H", 4000)  # a program-header count that runs far past the file
+  not_riscv = make_elf(**base, machine=62)
+  not_32bit = bytearray(make_elf(**base))
+  not_32bit[4] = 2
+  for label, blob in (
+    ("not an ELF", b"MZ" + bytes(100)),
+    ("empty", b""),
+    ("not RISC-V", not_riscv),
+    ("not 32-bit", bytes(not_32bit)),
+    ("header table past end of file", bytes(two_text)),
+    ("no executable segment", make_elf(**{**base, "text_bytes": 0})),
+  ):
+    with pytest.raises(PackageError) as caught:
+      verify_image(named(blob), blob)
+    assert caught.value.code == "IMAGE_NOT_ELF", label
+
+
 # --------------------------------------------------------------------------------------- real build
 HAVE_TOOLCHAIN = TOOLCHAIN.is_dir()
 
@@ -647,6 +805,52 @@ def test_real_build_chain_seals_and_reloads_identically(tmp_path: Path) -> None:
       target=copy.deepcopy(CORAL_TARGET),
     )
   assert caught.value.code == "IMAGE_BYTES_MISMATCH"
+
+
+@pytest.mark.skipif(not HAVE_TOOLCHAIN, reason="pinned C004 toolchain not extracted (cn env seed)")
+def test_real_build_manifest_metadata_is_the_real_elf_and_an_edited_entry_is_refused(
+  tmp_path: Path,
+) -> None:
+  """The accepted real image: the manifest's entry and layout equal the actual linked ELF's, and the exact
+  edit that used to pass (image.entry 0 -> 4, package_hash unchanged) is now refused at load."""
+  proc = subprocess.run(
+    [
+      "bash",
+      str(H / "scripts/cn.sh"),
+      "package",
+      "--binding",
+      str(BINDING),
+      "--config",
+      str(CONFIG),
+      "--out",
+      str(tmp_path),
+    ],
+    capture_output=True,
+    text=True,
+    timeout=300,
+  )
+  assert proc.returncode == 0, proc.stdout + proc.stderr
+  package = json.loads((tmp_path / "package.json").read_text())
+  elf = (tmp_path / "image.elf").read_bytes()
+  verify_image(package, elf)  # the real build's metadata is the real ELF's
+  assert package["image"]["entry"] == 0
+  edited = copy.deepcopy(package)
+  edited["image"]["entry"] = 4
+  assert package_hash({k: v for k, v in edited.items() if k != "package_hash"}) == package["package_hash"]
+  verify(edited)  # the old checks (range, hash) accept it
+  with pytest.raises(PackageError) as caught:
+    verify_image(edited, elf)
+  assert caught.value.code == "ENTRY_MISMATCH" and caught.value.field == "$.image.entry"
+  (tmp_path / "edited.json").write_text(encode(edited))
+  with pytest.raises(PackageError) as at_load:
+    load_file(
+      tmp_path / "edited.json",
+      compiled_path=tmp_path / "compiled_program.json",
+      **SEMANTIC(),
+      image_path=tmp_path / "image.elf",
+      target=copy.deepcopy(CORAL_TARGET),
+    )
+  assert at_load.value.code == "ENTRY_MISMATCH"
 
 
 @pytest.mark.skipif(not HAVE_TOOLCHAIN, reason="pinned C004 toolchain not extracted (cn env seed)")
