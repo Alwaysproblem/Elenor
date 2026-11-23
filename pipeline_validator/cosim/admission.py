@@ -394,7 +394,7 @@ class AdmissionCoordinator:
     if slot is None or slot in owners:
       route.wait_reasons[tile_id] = "WAIT_SLOT"
       return False
-    if not port.outbox_ready("CTRL"):
+    if not port.outbox_ready("CTRL") or group.gate_wake.has_pending_notify(tile_id, "l1"):
       route.wait_reasons[tile_id] = "WAIT_CONTROL_RESOURCE"
       return False
     ticket = AdmissionTicket(
@@ -436,6 +436,8 @@ class AdmissionCoordinator:
             ticket.wait_reason = "WAIT_CONTROL_RESOURCE"
             ticket.route.wait_reasons[ticket.tile_id] = "WAIT_CONTROL_RESOURCE"
             self.stats["hold_gate_park_events"] += 1
+            continue
+          if self.group.gate_wake.has_pending_notify(ticket.tile_id, "l1"):
             continue
           port = self._port_or_fail(ticket)
           if not ticket.parent_held:

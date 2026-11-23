@@ -72,6 +72,12 @@ class GateWakeCoordinator:
       raise ValueError(f"unknown gate level {level!r}")
     return self._closed[level]
 
+  def has_pending_notify(self, tile_id: int, level: str = "l1") -> bool:
+    """True while an unsent ``GATE_NOTIFY`` for ``(tile_id, level)`` is waiting for CTRL credit."""
+    if level not in _GATE_LEVELS:
+      raise ValueError(f"unknown gate level {level!r}")
+    return (tile_id, level) in self._pending_notify
+
   def register(
     self,
     level: str,

@@ -716,10 +716,100 @@ def native_hold_after_plan_gate_wake_case() -> dict:
       "hold_gate_wake_events": g.admission.stats["hold_gate_wake_events"],
     }
 
+  # Phase 4: Under CTRL capacity=1 backpressure, a pending GATE_NOTIFY(open) MUST cross the
+  # CTRL FIFO strictly before the woken TASK_COMMIT (HOLD), while TICKET_ROLLBACK is never
+  # blocked by a pending GATE_NOTIFY.
+  with ExitStack() as stack:
+    p = ObservedNative(
+      0,
+      ready_seed=0x10,
+      channel_capacities={"CTRL": 1},
+      stub_flags=abi.CN_STUB_FLAG_LIFECYCLE | abi.CN_STUB_FLAG_INPUT_RELEASED,
+    )
+    stack.callback(p.close)
+    p.set_t2g_ready("CTRL", False)
+    run = start(participants=1, grids=1, leases=1, reads=True, ports={0: p})
+    g = run.group
+    run.until(lambda: len(p.messages("TASK_PLAN", sent=True)) == 1)
+    plan_msg = p.messages("TASK_PLAN", sent=True)[0]
+    run.until(lambda: p.g2t_accepted_seq("CTRL") >= plan_msg.message_seq)
+
+    # Close L1 gate and park the PARENT_PREP ticket once PLAN ACK lands.
+    g.profile_controller._set_profile_gate("l1", True, cycle=run.cycle)
+    p.set_t2g_ready("CTRL", True)
+    run.until(lambda: g.admission.stats["hold_gate_park_events"] == 1)
+    run.until(lambda: p.outbox_ready("CTRL"))
+    # Fill the single CTRL credit with an unrelated L2 GATE_NOTIFY so GATE_NOTIFY(l1, open)
+    # cannot send immediately and stays pending when L1 opens.
+    g.profile_controller._set_profile_gate("l2", True, cycle=run.cycle)
+    assert not p.outbox_ready("CTRL")
+    # Open L1 gate while CTRL credit is 0: wake clears wait_gate_epoch, but pending GATE_NOTIFY(open)
+    # MUST hold back TASK_COMMIT on the first returned credit so GATE_NOTIFY(open) enters CTRL first.
+    g.profile_controller._generations_mut["l1"] = 1
+    g.profile_controller._set_profile_gate("l1", False, cycle=run.cycle)
+    assert g.gate_wake.has_pending_notify(0, "l1")
+    assert not p.messages("TASK_COMMIT", sent=True)
+
+    g.profile_controller._set_profile_gate("l2", False, cycle=run.cycle)
+    run.finish()
+    ctrl_sent = [m for m in p.sent if m.channel == "CTRL"]
+    open_idx = next(
+      i
+      for i, m in enumerate(ctrl_sent)
+      if m.message_type == "GATE_NOTIFY" and m.fields["level"] == "l1" and m.fields["state"] == "open"
+    )
+    hold_idx = next(i for i, m in enumerate(ctrl_sent) if m.message_type == "TASK_COMMIT")
+    assert open_idx < hold_idx, (
+      f"GATE_NOTIFY(l1, open) at CTRL seq {ctrl_sent[open_idx].message_seq} must precede "
+      f"TASK_COMMIT at seq {ctrl_sent[hold_idx].message_seq}"
+    )
+    assert ctrl_sent[open_idx].message_seq < ctrl_sent[hold_idx].message_seq
+    open_before_hold_summary = {
+      "open_seq": ctrl_sent[open_idx].message_seq,
+      "hold_seq": ctrl_sent[hold_idx].message_seq,
+      "open_precedes_hold": ctrl_sent[open_idx].message_seq < ctrl_sent[hold_idx].message_seq,
+    }
+
+  # Phase 5: Pending GATE_NOTIFY never blocks TICKET_ROLLBACK on CTRL capacity=1.
+  with ExitStack() as stack:
+    from pipeline_validator.runtime.fault_ring import FaultCode
+
+    p = ObservedNative(
+      0,
+      ready_seed=0x10,
+      channel_capacities={"CTRL": 1},
+      stub_flags=abi.CN_STUB_FLAG_LIFECYCLE | abi.CN_STUB_FLAG_INPUT_RELEASED,
+    )
+    stack.callback(p.close)
+    p.set_t2g_ready("CTRL", False)
+    run = start(participants=1, grids=1, leases=1, reads=True, ports={0: p})
+    g = run.group
+    run.until(lambda: len(p.messages("TASK_PLAN", sent=True)) == 1)
+    plan_msg = p.messages("TASK_PLAN", sent=True)[0]
+    run.until(lambda: p.g2t_accepted_seq("CTRL") >= plan_msg.message_seq)
+    # Fill the single CTRL credit with an L2 GATE_NOTIFY so GATE_NOTIFY(l1, closed) stays pending
+    # when fault triggers rollback.
+    run.until(lambda: p.outbox_ready("CTRL"))
+    g.profile_controller._set_profile_gate("l2", True, cycle=run.cycle)
+    assert not p.outbox_ready("CTRL")
+    g.profile_controller._set_profile_gate("l1", True, cycle=run.cycle)
+    assert g.gate_wake.has_pending_notify(0, "l1")
+    p.set_t2g_ready("CTRL", True)
+    g.trigger_fault(FaultCode.ADDRESS_FAULT, cycle=run.cycle, desc_id="c036-pending-notify-rollback")
+    run.finish(fault=True)
+    assert len(p.messages("TICKET_ROLLBACK", sent=True)) == 1
+    assert not p.messages("TASK_COMMIT", sent=True)
+    rollback_unblocked_summary = {
+      "rollbacks": len(p.messages("TICKET_ROLLBACK", sent=True)),
+      "holds": len(p.messages("TASK_COMMIT", sent=True)),
+    }
+
   return {
     "hold_wake": hold_wake_summary,
     "rollback_live": rollback_live_summary,
     "retire_live": retire_live_summary,
+    "open_before_hold": open_before_hold_summary,
+    "rollback_unblocked": rollback_unblocked_summary,
   }
 
 
@@ -748,6 +838,8 @@ def test_native_gate_wake_and_gate_notify_wire_roundtrip(tmp_path: Path) -> None
     "hold_gate_park_events": 1,
     "hold_gate_wake_events": 1,
   }
+  assert results["hold_after_plan"]["open_before_hold"]["open_precedes_hold"] is True
+  assert results["hold_after_plan"]["rollback_unblocked"] == {"rollbacks": 1, "holds": 0}
   # Wire-level sanity on encoded GATE_NOTIFY fields.
   msg = BoundaryMessage(
     "GATE_NOTIFY", "CTRL", "G2T", {"level": "l1", "state": "open", "profile_generation": 3}
