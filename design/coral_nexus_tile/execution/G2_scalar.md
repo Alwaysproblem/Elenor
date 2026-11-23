@@ -542,6 +542,20 @@ ROB 同 PC 双 Context store、错误 op_seq、独立退休、局部 fault flush
 
 - **通过/交接**：唤醒恰一次、无轮询探针、group_scheduler 改动最小 diff 供 parent 复核；消费者：C040（oneTile gate 路径）、G4 C058（profile 12 步真 FSM 消费同名唤醒）。W1-04 的 DONE 以总计划 master §8 更晚消费者门为准，此处不提前宣告闭合。
 
+### C036 实证与验证范围
+
+- **C036 已通过 W1-04（gate 唤醒部分）单元验收。** 本卡不修改 G1 封印（沿用 C035 v4 封印），不改 RTL，也不提前宣告 W1-04 DONE、CN-G2 或 CS1/oneTile 闭合。
+- 新增 `pipeline_validator/cosim/gate_wake.py`（`GateWakeCoordinator`）维护按层（`l1`/`l2`）单调递增的 `gate_epoch`：`ProfileController` 作为 `_profile_gates` 唯一写者在状态翻转步内（含 `CLOSE_ISSUE`、`OPEN_ISSUE`、fault 及初始化/恢复）调用 `gate_wake.register(level, ...)`，不依赖逐 tick 轮询。
+- Route 登记唤醒：`GroupScheduler` 仅做最小 gate 唤醒接线——因 `profile L1/L2 issue gate` 返回 BACKPRESSURE 的 `RegisteredAction` 记录 `wait_gate_level`/`wait_gate_epoch` 并暂离 `_queued`（仍计入 `queued` 动作表容量与 `s0` 队首约束），gate 恒关期间零重试探针；同层 `OPEN_ISSUE` 推进 epoch 后 `wake_gate_waiters` 一次性推回扫描队列。非 gate 类 BACKPRESSURE（如 `dispatch_capacity` 满）保持原有顺序与行为，不进入 gate park。
+- Task 提交与 HOLD 唤醒：`AdmissionCoordinator.step()` 在 L1 gate 关闭期间仅记录一次 `WAIT_CONTROL_RESOURCE` 并抑制后续 tick 候选扫描；`AdmissionCoordinator.advance()` 在 `PARENT_PREP`→`TASK_COMMIT`（HOLD）路径同样检查 L1 gate——PLAN 已 ACK 后若 L1 关门，则 park 该票据（零父资源获取、零 `TASK_COMMIT`），待 L1 `OPEN_ISSUE` 唤醒后发起恰一次 HOLD，同时保持 `TICKET_ROLLBACK` 补偿与已接受任务的 `RETIRE`→`TASK_COMPLETION` 退休通路畅通。
+- 统一唤醒令牌：`GroupPortAdapter` 统一采用 3 元组 `(admission_version, _slot_version, gate_epoch)`（无 cosim/非 cosim 双 shape 分支），`TileGroup.admission_version` 同步补齐 L1 gate 状态；gate 不变时零重试探针，gate 翻转时合并为单轮重试。
+- `GATE_NOTIFY`（G→T，CTRL，C017 wire 字段 `level`/`state`/`profile_generation`）：门状态变化时按 `(tile_id, level)` 排队并刷新至全部外部 `TilePort`；CTRL 背压期间连续翻转就地合并（coalesce），冷初始化/静态恢复不注入冗余通知。
+- 注册入口验证结果：
+  - `cn unit --suite w1 --config "$C2"`：**44 passed, 0 failed**（含新增 `pipeline_validator/tests/test_w1_gate_wake.py` 9 项，覆盖真实 12 步 `ProfileController` `CLOSE_ISSUE`→`OPEN_ISSUE` Route 唤醒、Task 准入零轮询、PLAN 后 HOLD 前关门零父获取/零 HOLD 与开闸单次 HOLD、关门期回滚与已接受任务退休畅通、连续翻转 coalesce、统一 `GroupPortAdapter` 令牌、非 gate 背压不变性、故障清理、L1/L2 层隔离以及 Verilated C ABI 边界 `GATE_NOTIFY` 实发）。
+  - `cn unit --suite contracts --config "$C2"`：**1330 passed, 0 failed**（全部 C009–C020 合同与行号锚点零漂移）；`cn sources verify`：**57/57 pass**。
+  - 全量 `pipeline_validator/tests/`：**625 passed, 1 skipped**（split-KV 分区交接仅适用于 decode）；变更文件 pre-commit 全绿。
+- 验收包：`out/coral_nexus/C036/accept-eXikzHrO/C036-evidence.tar.gz`，SHA-256 `9ead68ef4461ba03e909d254a1cf782154a42aa2fdbc499d0bd6d0ef1f352cd2`。消费者交接：C040（oneTile gate 路径）与 G4 C058（12 步真 FSM）。
+
 <a id="c037"></a>
 
 ## C037 — 严格包编解码、封印与只读 Loader

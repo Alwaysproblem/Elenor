@@ -41,6 +41,7 @@ class PythonTileBackend:
     self.live_launch_generation = 0
     self.stale_plan_rejected = 0
     self.accepted_plans: dict[int, dict[str, int]] = {}
+    self.gate_notifications: list[tuple[str, str, int]] = []
 
   @property
   def tile_id(self) -> int:
@@ -204,6 +205,10 @@ class PythonTileBackend:
             "stream_supported": True,
           },
         )
+      elif mtype == "GATE_NOTIFY":
+        self.gate_notifications.append(
+          (str(vals["level"]), str(vals["state"]), int(vals["profile_generation"]))
+        )
 
   def step(self, cycle: int, *, freeze_new_work: bool = False) -> None:
     """Advance this Python Tile once in `cycle` (never twice in the same cycle)."""
@@ -233,6 +238,7 @@ class PythonTileBackend:
     self._tx_seq.clear()
     self._last_step_cycle = None
     self.accepted_plans.clear()
+    self.gate_notifications.clear()
     self.tile.reset()
 
   def credit_invariant_holds(self) -> bool:

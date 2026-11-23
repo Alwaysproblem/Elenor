@@ -107,6 +107,8 @@ class AdmissionTicket:
   # Installation failed after irrevocable authorization: may drain a failure,
   # but never announce Task acceptance or DONE.
   final_fault_acknowledged: bool = False
+  # C036: event-driven L1 gate park epoch when HOLD is held back in PARENT_PREP.
+  wait_gate_epoch: int | None = None
 
   @property
   def can_retire(self) -> bool:
@@ -147,6 +149,10 @@ class AdmissionCoordinator:
     # Closed transactions are retained only within the C017 dedup window.
     self._resolved: OrderedDict[int, tuple[int, frozenset[tuple[str, str]]]] = OrderedDict()
     self._next_txn_id = 1
+    # C036: event-driven L1 gate wake bookkeeping (no per-tick gate polling).
+    self._l1_gate_parked_epoch: int | None = None
+    self._l1_gate_parked_route_seq: int = -1
+    self._l1_gate_retry_epoch: int = -1
     self.stats: dict[str, int] = {
       "tickets_accepted": 0,
       "tickets_wait_closed": 0,
@@ -158,15 +164,75 @@ class AdmissionCoordinator:
       "resource_updates_matched": 0,
       "resource_updates_stale": 0,
       "resource_updates_unmatched": 0,
+      "gate_park_events": 0,
+      "gate_wake_events": 0,
+      "gate_suppressed_ticks": 0,
+      "hold_gate_park_events": 0,
+      "hold_gate_wake_events": 0,
+      "hold_gate_suppressed_ticks": 0,
+      "candidate_scans": 0,
     }
 
   # ---- candidate selection (migrated from TileGroup._step_task_admission) ----
 
+  def wake_on_l1_gate(self, gate_epoch: int, cycle: int) -> bool:
+    """Record one coalesced L1-gate open wake for step() and gate-parked HOLD tickets."""
+    _ = cycle
+    woke = False
+    if self._l1_gate_parked_epoch is not None and gate_epoch > self._l1_gate_parked_epoch:
+      self._l1_gate_parked_epoch = None
+      self._l1_gate_parked_route_seq = -1
+      self._l1_gate_retry_epoch = gate_epoch
+      self.stats["gate_wake_events"] += 1
+      woke = True
+    woke_holds = 0
+    for ticket in self.tickets.values():
+      if ticket.wait_gate_epoch is not None and gate_epoch > ticket.wait_gate_epoch:
+        ticket.wait_gate_epoch = None
+        if ticket.wait_reason == "WAIT_CONTROL_RESOURCE":
+          ticket.wait_reason = None
+        if ticket.route.wait_reasons.get(ticket.tile_id) == "WAIT_CONTROL_RESOURCE":
+          ticket.route.wait_reasons.pop(ticket.tile_id, None)
+        woke_holds += 1
+    if woke_holds:
+      self.stats["hold_gate_wake_events"] += woke_holds
+      woke = True
+    return woke
+
+  def clear_gate_wait(self) -> None:
+    self._l1_gate_parked_epoch = None
+    self._l1_gate_parked_route_seq = -1
+    self._l1_gate_retry_epoch = -1
+    for ticket in self.tickets.values():
+      ticket.wait_gate_epoch = None
   def step(self, cycle: int) -> None:
     """Start candidates: one commit decision per Tile per Tick, deterministic."""
     group = self.group
     if group.profile_controller.issue_gate_closed("l1"):
+      gate_epoch = group.gate_wake.epoch("l1")
+      route_seq = group._route_sequence
+      if self._l1_gate_parked_epoch == gate_epoch and self._l1_gate_parked_route_seq == route_seq:
+        self.stats["gate_suppressed_ticks"] += 1
+        return
+      self._l1_gate_parked_epoch = gate_epoch
+      self._l1_gate_parked_route_seq = route_seq
+      self.stats["gate_park_events"] += 1
+      for queued_route in group._grid_routes.values():
+        if queued_route.sequencer.faulted:
+          continue
+        for tile_id in queued_route.expected:
+          if tile_id in queued_route.admissions or tile_id in queued_route.retired:
+            continue
+          tile = group.python_tiles_by_id.get(tile_id)
+          if tile is None and (tile_id, self._task_key(queued_route.expected[tile_id])) in self.tickets:
+            continue
+          queued_route.wait_reasons[tile_id] = "WAIT_CONTROL_RESOURCE"
       return
+    self._l1_gate_parked_epoch = None
+    self._l1_gate_parked_route_seq = -1
+    if not group._grid_routes:
+      return
+    self.stats["candidate_scans"] += 1
     current = group.profile_controller.active_modes["l1"]
     for tile_id in range(group.cfg.num_tiles):
       tile = group.python_tiles_by_id.get(tile_id)
@@ -361,8 +427,17 @@ class AdmissionCoordinator:
     finals_authorized: set[int] = set()
     for ticket in tuple(self.tickets.values()):
       if ticket.state is AdmissionState.PARENT_PREP:
-        port = self._port_or_fail(ticket)
         if "TASK_COMMIT" not in ticket.stage_seq:
+          if ticket.wait_gate_epoch is not None:
+            self.stats["hold_gate_suppressed_ticks"] += 1
+            continue
+          if self.group.profile_controller.issue_gate_closed("l1"):
+            ticket.wait_gate_epoch = self.group.gate_wake.epoch("l1")
+            ticket.wait_reason = "WAIT_CONTROL_RESOURCE"
+            ticket.route.wait_reasons[ticket.tile_id] = "WAIT_CONTROL_RESOURCE"
+            self.stats["hold_gate_park_events"] += 1
+            continue
+          port = self._port_or_fail(ticket)
           if not ticket.parent_held:
             if not port.outbox_ready("CTRL"):
               continue  # never take parent books while unable to proceed this Tick
@@ -786,6 +861,7 @@ class AdmissionCoordinator:
     """Pre-FINAL unwind: parent released now, keyed TICKET_ROLLBACK owed, the
     control slot held through the exact COMPENSATED proof before any retry."""
     self._release_parent(ticket, cycle)
+    ticket.wait_gate_epoch = None
     ticket.state = AdmissionState.COMPENSATE
     if wait_reason is not None:
       ticket.wait_reason = wait_reason

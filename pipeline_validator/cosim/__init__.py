@@ -1,5 +1,6 @@
 """Co-simulation boundary: generated wire codec (`wire.py`), `TilePort`, and `PythonTileBackend`."""
 
+from .gate_wake import GateStateRecord, GateWakeCoordinator
 from .python_backend import PythonTileBackend
 from .tile_port import (
   BackendKind,
@@ -21,6 +22,8 @@ __all__ = [
   "ChannelCreditLedger",
   "ContextKey",
   "CreditConservationError",
+  "GateStateRecord",
+  "GateWakeCoordinator",
   "LinkCreditPool",
   "PythonTileBackend",
   "TaskKey",

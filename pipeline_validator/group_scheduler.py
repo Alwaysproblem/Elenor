@@ -48,6 +48,8 @@ class RegisteredAction:
   action: ExecGroupAction
   registered_cycle: int
   issue_cycle: int = -1
+  wait_gate_level: str | None = None
+  wait_gate_epoch: int | None = None
 
 
 class GroupScheduler:
@@ -62,6 +64,9 @@ class GroupScheduler:
     self.config = config
     self.pmu = PMUCounter()
     self._queued: list[RegisteredAction] = []
+    # Gate-parked records (C036): still occupy action-table capacity while
+    # excluded from per-tick issue scans until ``wake_gate_waiters`` returns them.
+    self._gate_parked: list[RegisteredAction] = []
     self._inflight_by_event: dict[str, tuple[RegisteredAction, str]] = {}
     self._control_inflight: dict[str, RegisteredAction] = {}
     self._register_cursor = 0
@@ -79,10 +84,12 @@ class GroupScheduler:
     self.dependency_wait_candidate_checks = 0
     self.dependency_error_total = 0
     self.protocol_fault_total = 0
+    self.gate_parked_total = 0
+    self.gate_woken_total = 0
 
   @property
   def queued(self) -> int:
-    return len(self._queued)
+    return len(self._queued) + len(self._gate_parked)
 
   @property
   def inflight(self) -> int:
@@ -159,7 +166,7 @@ class GroupScheduler:
     self._trace_occupancy(cycle)
 
   def _register_one(self, contexts: list[TileGroupSequencer], cycle: int) -> bool:
-    if len(self._queued) >= self.config.action_capacity:
+    if self.queued >= self.config.action_capacity:
       self.pmu.add_cycle("group_action_table_full")
       return False
     live = [context for context in contexts if context.can_register_action()]
@@ -200,7 +207,7 @@ class GroupScheduler:
       self._queued.append(record)
       sequencer.note_registered(record)
       self._register_cursor = index + 1
-      self.queued_peak = max(self.queued_peak, len(self._queued))
+      self.queued_peak = max(self.queued_peak, self.queued)
       self.registered_total += 1
       self.pmu.add_event("group_action_registered")
       self._trace_action("group_action_register", record, cycle)
@@ -227,7 +234,7 @@ class GroupScheduler:
     self._scan_cursor = start + scan_count
     if self.config.policy == "s0":
       heads: dict[int, int] = {}
-      for queued in self._queued:
+      for queued in (*self._queued, *self._gate_parked):
         key = id(queued.sequencer)
         heads[key] = min(heads.get(key, queued.ordinal), queued.ordinal)
       excluded = [record for record in scanned if heads[id(record.sequencer)] != record.ordinal]
@@ -278,6 +285,20 @@ class GroupScheduler:
       if result.status is IssueStatus.BACKPRESSURE:
         self.backpressure_total += 1
         self.pmu.add_cycle("group_action_backpressure")
+        gate_level = self._gate_backpressure_level(result.reason)
+        if gate_level is not None and self.group.profile_controller.issue_gate_closed(gate_level):
+          record.wait_gate_level = gate_level
+          record.wait_gate_epoch = self.group.gate_wake.epoch(gate_level)
+          self._queued.remove(record)
+          self._gate_parked.append(record)
+          self.gate_parked_total += 1
+          self._trace_action(
+            "group_action_gate_park",
+            record,
+            cycle,
+            level=gate_level,
+            wait_gate_epoch=record.wait_gate_epoch,
+          )
         continue
       self._trace_action(
         "group_action_issue", record, cycle, status=result.status.value, reason=result.reason
@@ -345,6 +366,40 @@ class GroupScheduler:
       self._trace_action("group_action_complete", record, cycle, status=status)
       if status != "completed":
         self._fault_context(record.sequencer, f"control {command_id} {status}", cycle)
+
+  @staticmethod
+  def _gate_backpressure_level(reason: str) -> str | None:
+    if reason == "profile L1 issue gate":
+      return "l1"
+    if reason == "profile L2 issue gate":
+      return "l2"
+    return None
+
+  def wake_gate_waiters(self, level: str, gate_epoch: int, cycle: int) -> int:
+    """Return records parked on ``level``'s gate to the scan queue on epoch advance."""
+    if not self._gate_parked:
+      return 0
+    woken: list[RegisteredAction] = []
+    remaining: list[RegisteredAction] = []
+    for record in self._gate_parked:
+      if (
+        record.wait_gate_level == level
+        and record.wait_gate_epoch is not None
+        and record.wait_gate_epoch < gate_epoch
+      ):
+        record.wait_gate_level = None
+        record.wait_gate_epoch = None
+        woken.append(record)
+      else:
+        remaining.append(record)
+    if not woken:
+      return 0
+    self._gate_parked = remaining
+    self._queued.extend(woken)
+    self.gate_woken_total += len(woken)
+    for record in woken:
+      self._trace_action("group_action_gate_wake", record, cycle, level=level, gate_epoch=gate_epoch)
+    return len(woken)
 
   def _dependency_status(self, record: RegisteredAction) -> EventStatus:
     dependencies = record.sequencer.dependencies_for(record.action)
@@ -463,7 +518,7 @@ class GroupScheduler:
     for command_id, record in self._control_inflight.items():
       if record.sequencer is sequencer:
         self.group.profile_controller.request_cancel(command_id, cycle)
-    cancelled = [record for record in self._queued if record.sequencer is sequencer]
+    cancelled = [record for record in (*self._queued, *self._gate_parked) if record.sequencer is sequencer]
     owner = self.event_owner(sequencer)
     generation = sequencer.context_launch_generation
     try:
@@ -486,6 +541,7 @@ class GroupScheduler:
       self.protocol_fault_total += 1
       raise
     self._queued = [record for record in self._queued if record.sequencer is not sequencer]
+    self._gate_parked = [record for record in self._gate_parked if record.sequencer is not sequencer]
     for record in cancelled:
       sequencer.note_action_cancelled(record)
       self._trace_action("group_action_complete", record, cycle, status="cancelled")
@@ -589,6 +645,7 @@ class GroupScheduler:
 
   def reset(self) -> None:
     self._queued.clear()
+    self._gate_parked.clear()
     self._inflight_by_event.clear()
     if self._control_inflight:
       raise RuntimeError("scheduler reset before configuration control retirement")
@@ -607,4 +664,6 @@ class GroupScheduler:
     self.dependency_wait_candidate_checks = 0
     self.dependency_error_total = 0
     self.protocol_fault_total = 0
+    self.gate_parked_total = 0
+    self.gate_woken_total = 0
     self.pmu.reset()

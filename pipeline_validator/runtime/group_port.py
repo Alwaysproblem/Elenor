@@ -91,7 +91,7 @@ class GroupPortAdapter(DevicePort):
     self._next_ready_seq = 0
     self._pending_changed = False
     self._slot_version = 0
-    self._last_admission_token: tuple[object, int] | None = None
+    self._last_admission_token: tuple[object, int, tuple[int, int]] | None = None
 
     self._ready_control_completions: list[DeviceControlCompletion] = []
     self._control_inflight: set[str] = set()
@@ -352,12 +352,15 @@ class GroupPortAdapter(DevicePort):
     self._slot_peak = max(self._slot_peak, self.active_count)
     return "admitted"
 
+  def _admission_token(self) -> tuple[object, int, tuple[int, int]]:
+    return (self.group.admission_version, self._slot_version, self.group.gate_wake.gate_epoch)
+
   def _admit_pending(self, cycle: int, completions: list[DeviceCompletion]) -> None:
     if not self._pending:
       self._pending_changed = False
-      self._last_admission_token = (self.group.admission_version, self._slot_version)
+      self._last_admission_token = self._admission_token()
       return
-    token = (self.group.admission_version, self._slot_version)
+    token = self._admission_token()
     if not self._pending_changed and token == self._last_admission_token:
       return
 
@@ -374,7 +377,7 @@ class GroupPortAdapter(DevicePort):
         break
       break
     self._pending_changed = False
-    self._last_admission_token = (self.group.admission_version, self._slot_version)
+    self._last_admission_token = self._admission_token()
 
   def _cancel_pending(self, reason: str, cycle: int, completions: list[DeviceCompletion]) -> None:
     for record in tuple(self._pending.values()):

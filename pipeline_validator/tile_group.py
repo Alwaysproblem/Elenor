@@ -20,6 +20,7 @@ from .compiled_program import CompiledProgram
 from .config import GroupSchedulerConfig, HardwareConfig
 from .cosim.admission import AdmissionCoordinator, AdmissionProtocolError
 from .cosim.event_service import EventService
+from .cosim.gate_wake import GateWakeCoordinator
 from .cosim.retirement import RetirementCoordinator
 from .cosim.tile_port import BoundaryMessage, TilePort
 from .execution_ir import (
@@ -368,10 +369,8 @@ class TileGroup:
     # runtime id; values are (allocation_id, allocation_generation,
     # offset, bytes).  Cleared in begin_launch.
     self.precise_write_ledger: dict[str, list[tuple[str, int, int, int]]] = {}
-    # Plan §2: root request id of the run root, set by GroupPortAdapter on
-    # accept; None for standalone launches.
+    # Plan §2: root request id of the run root, set by GroupPortAdapter on accept; None for standalone.
     self.root_request_id: str | None = None
-    # transaction id -> sequencer
     self._txn_sequencer: dict[str, TileGroupSequencer] = {}
     # group transaction id -> (logical direction, visual concurrency slot)
     self._group_transfer_trace_slots: dict[str, tuple[str, int]] = {}
@@ -382,6 +381,7 @@ class TileGroup:
     self.event_service = EventService(self)
     self.admission = AdmissionCoordinator(self, context_count)
     self.retirement = RetirementCoordinator(self)
+    self.gate_wake = GateWakeCoordinator(self)
     self.l2_sram = ArenaPool(l2_profile, trace=self.memory_trace)
     if self.memory_enabled:
       self.payload = PayloadTracker()
@@ -1620,6 +1620,7 @@ class TileGroup:
       self.admission.cancel_all(cycle)
     self.admission.advance(cycle)
     self.retirement.advance(cycle)
+    self.gate_wake.flush(cycle)
     for tile_id, port in self.boundary_ports.items():
       if tile_id in self.reset_domain.tile_reset_links and port.outbox_ready():
         request = self.reset_domain.take_tile_reset_request(tile_id)
@@ -1947,6 +1948,8 @@ class TileGroup:
     self.profile_controller.begin_run(self.run_generation)
     self.transfer_manager.begin_run(self.run_generation)
     self.scheduler.reset()
+    self.gate_wake.clear_pending_notifies()
+    self.admission.clear_gate_wait()
     self.event_table.clear()
     self._grid_signals.clear()
     self._grid_l2_pins.clear()
@@ -2011,6 +2014,7 @@ class TileGroup:
       tuple(self.profile_controller.generations.items()),
       tuple(self.profile_controller.active_modes.items()),
       self.profile_controller.issue_gate_closed("l2"),
+      self.profile_controller.issue_gate_closed("l1"),
     )
 
   def retained_shared_blocks_admission(
@@ -2204,6 +2208,8 @@ class TileGroup:
       tile.reset()
     self.event_table.clear()
     self.scheduler.reset()
+    self.gate_wake.clear_pending_notifies()
+    self.admission.clear_gate_wait()
     self.program_table.invalidate_group()
     self.reset_domain.reset()
     self.fault_ring.reset()

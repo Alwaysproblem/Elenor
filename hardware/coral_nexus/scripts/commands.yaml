@@ -96,6 +96,7 @@ commands:
           - pipeline_validator/tests/test_w1_memory_service.py
           - pipeline_validator/tests/test_w1_admission.py
           - pipeline_validator/tests/test_w1_phase_signal.py
+          - pipeline_validator/tests/test_w1_gate_wake.py
           - pipeline_validator/tests/test_cn_abi_phase.py
           - pipeline_validator/tests/test_cn_abi_crash.py
       w2:

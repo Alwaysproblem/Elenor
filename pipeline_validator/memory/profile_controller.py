@@ -183,6 +183,18 @@ class ProfileController:
     self._recovery_acks: set[tuple[str, tuple[str, int, int], str]] = set()
     self._recovery_phase = "prepare"
 
+  def _set_profile_gate(self, level: str, closed: bool, cycle: int, *, notify: bool = True) -> None:
+    self._profile_gates[level] = closed
+    gate_wake = getattr(self.group, "gate_wake", None)
+    if gate_wake is not None:
+      gate_wake.register(
+        level,
+        closed=self.issue_gate_closed(level),
+        profile_generation=self._generations_mut[level],
+        cycle=cycle,
+        notify=notify,
+      )
+
   def _local_pool_ids(self, profile: MemoryProfile) -> tuple[int, ...]:
     if profile.level == "l2":
       return tuple(range(profile.pools))
@@ -243,8 +255,8 @@ class ProfileController:
         )
     self._initializing = True
     self._initialized = False
-    self._profile_gates["l1"] = True
-    self._profile_gates["l2"] = True
+    self._set_profile_gate("l1", True, cycle, notify=False)
+    self._set_profile_gate("l2", True, cycle, notify=False)
     self._trace_event("profile_initialize", cycle, {"registry_hash": registry.registry_hash})
 
   def recover(self, cycle: int) -> None:
@@ -278,8 +290,8 @@ class ProfileController:
     self._recovery_acks.clear()
     self._recovery_phase = "prepare"
     self._initialized = False
-    self._profile_gates["l1"] = True
-    self._profile_gates["l2"] = True
+    self._set_profile_gate("l1", True, cycle, notify=False)
+    self._set_profile_gate("l2", True, cycle, notify=False)
     self._recovering = True
     self._trace_event("profile_recover", cycle, {})
 
@@ -317,8 +329,8 @@ class ProfileController:
       # not initialized) and let the caller observe the dead controller.
       self._recovering = False
       self._recovery_fault = str(exc)
-      self._profile_gates["l1"] = True
-      self._profile_gates["l2"] = True
+      self._set_profile_gate("l1", True, cycle, notify=False)
+      self._set_profile_gate("l2", True, cycle, notify=False)
       self._trace_event("profile_recovery_fault", cycle, {"reason": self._recovery_fault})
 
   def _finish_recovery(self, cycle: int) -> None:
@@ -366,13 +378,13 @@ class ProfileController:
     self._dependency_receipts.clear()
     self._owner_inputs.clear()
     self._range_gates.clear()
-    self._profile_gates["l1"] = False
-    self._profile_gates["l2"] = False
     self._initialized = True
     self._recovering = False
     self._startup_authorized["l1"] = True
     self._startup_authorization_run = -1
     self._startup_authorized["l2"] = True
+    self._set_profile_gate("l1", False, cycle, notify=False)
+    self._set_profile_gate("l2", False, cycle, notify=False)
     self._trace_event("profile_recovered", cycle, {"discarded_dirty_lines": discarded_dirty_lines})
 
   def begin_run(self, run_generation: int) -> None:
@@ -576,8 +588,8 @@ class ProfileController:
         self._initialized = True
         self._startup_authorized["l1"] = True
         self._startup_authorized["l2"] = True
-        self._profile_gates["l1"] = False
-        self._profile_gates["l2"] = False
+        self._set_profile_gate("l1", False, cycle, notify=False)
+        self._set_profile_gate("l2", False, cycle, notify=False)
         self._trace_event("profile_initialized", cycle, {})
       return
     if self._recovering:
@@ -677,7 +689,7 @@ class ProfileController:
           return
         self._move(record, "CLOSE_ISSUE", cycle)
     elif step == "CLOSE_ISSUE":
-      self._profile_gates[command.level] = True
+      self._set_profile_gate(command.level, True, cycle)
       record.issue_closed = True
       self._move(record, "DRAIN_REFERENCES", cycle)
     elif step == "DRAIN_REFERENCES":
@@ -733,7 +745,7 @@ class ProfileController:
           return
         self._move(record, "OPEN_ISSUE", cycle)
     elif step == "OPEN_ISSUE":
-      self._profile_gates[command.level] = False
+      self._set_profile_gate(command.level, False, cycle)
       self._move(record, "RELEASE", cycle)
     elif step == "RELEASE":
       self._finish(record, "completed", cycle, "")
@@ -1457,7 +1469,7 @@ class ProfileController:
     # command or reset recovery.
     if record.kind == "profile_reconfig":
       assert isinstance(record.descriptor, ProfileReconfigDesc)
-      self._profile_gates[record.descriptor.level] = True
+      self._set_profile_gate(record.descriptor.level, True, cycle)
     self._advance_fault_cleanup(record, cycle)
     if first_fault:
       self._trace_command(record, cycle)
