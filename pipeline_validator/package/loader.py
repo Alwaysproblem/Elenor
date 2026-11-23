@@ -65,16 +65,17 @@ def load_text(
   hw: HardwareConfig,
   sim: SimConfig,
   actual_bindings: Mapping[str, GlobalBinding],
-  image_bytes: bytes | None = None,
-  target: dict[str, Any] | None = None,
+  image_bytes: bytes,
+  target: dict[str, Any],
 ) -> LoadedPackage:
+  """Load a package as installation proof: the contract layer, the wrapped CompiledProgram (codec and
+  semantic Loader), the shipped image bytes AND the independent Coral target are all mandatory. Use
+  ``verify`` for metadata-only inspection of a package whose image or target is not at hand."""
   package = parse_strict(text)
   verify(package)
   verify_control_plane(package, compiled_text, hw=hw, sim=sim, actual_bindings=actual_bindings)
-  if image_bytes is not None:
-    verify_image(package, image_bytes)
-  if target is not None:
-    check_target(package, target)
+  verify_image(package, image_bytes)
+  check_target(package, target)
   return LoadedPackage(
     view=_freeze(package), package_hash=package["package_hash"], _raw=copy.deepcopy(package)
   )
@@ -87,8 +88,8 @@ def load_file(
   hw: HardwareConfig,
   sim: SimConfig,
   actual_bindings: Mapping[str, GlobalBinding],
-  image_path: Path | None = None,
-  target: dict[str, Any] | None = None,
+  image_path: Path,
+  target: dict[str, Any],
 ) -> LoadedPackage:
   try:
     text = Path(path).read_text()
@@ -98,12 +99,10 @@ def load_file(
     compiled = Path(compiled_path).read_text()
   except OSError as exc:
     raise PackageError("UNREADABLE", str(compiled_path), str(exc)) from exc
-  image = None
-  if image_path is not None:
-    try:
-      image = Path(image_path).read_bytes()
-    except OSError as exc:
-      raise PackageError("UNREADABLE", str(image_path), str(exc)) from exc
+  try:
+    image = Path(image_path).read_bytes()
+  except OSError as exc:
+    raise PackageError("UNREADABLE", str(image_path), str(exc)) from exc
   return load_text(
     text,
     compiled_text=compiled,

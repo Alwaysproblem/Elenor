@@ -14,6 +14,7 @@ implementation; it is used here as a second, separately written oracle.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import subprocess
 import sys
@@ -52,9 +53,15 @@ import package_contract as ref  # noqa: E402  (independent C014 oracle, never im
 KNOWN_CODE_REFINEMENTS = {("HAND_WRITTEN_ADDRESS", "HELPER_CSR_MISMATCH")}
 
 
-def TARGET() -> dict[str, Any]:
-  """The validator target and actual launch bindings the wrapped pow body is semantically loaded
-  against (what `cn package` uses: the default hardware, runtime fidelity, the pow CLI binding)."""
+IMAGE = b"C037 test image: stands in for the linked ELF the package names by hash"
+# The Coral target a load is checked against. It is read from the committed C014 example, never from the
+# package under test, so a package that edits its own fingerprint cannot make itself match.
+CORAL_TARGET: dict[str, Any] = json.loads(EXAMPLE.read_text())["target_fingerprint"]
+
+
+def SEMANTIC() -> dict[str, Any]:
+  """The validator target and actual launch bindings the wrapped pow body is semantically loaded against
+  (what `cn package` uses: the default hardware, runtime fidelity, the pow CLI binding)."""
   from pipeline_validator.config import HardwareConfig, SimConfig
   from pipeline_validator.execution_ir import GlobalBinding
 
@@ -63,6 +70,12 @@ def TARGET() -> dict[str, Any]:
     "sim": SimConfig(fidelity="runtime"),
     "actual_bindings": {"Y": GlobalBinding("Y", 0x100000, 131072, "rw")},
   }
+
+
+def TARGET() -> dict[str, Any]:
+  """Everything `load_text` needs besides the package and body texts: SEMANTIC plus the shipped image bytes
+  and the independent Coral target (both mandatory)."""
+  return {**SEMANTIC(), "image_bytes": IMAGE, "target": copy.deepcopy(CORAL_TARGET)}
 
 
 @pytest.fixture(scope="module")
@@ -86,6 +99,7 @@ def good(compiled_text: str) -> dict[str, Any]:
   from pipeline_validator.compiled_program import parse_compiled_program
 
   package = copy.deepcopy(json.loads(EXAMPLE.read_text()))
+  package["image"]["bytes_sha256"] = hashlib.sha256(IMAGE).hexdigest()
   program = parse_compiled_program(compiled_text)
   package["control_plane"] = {
     "schema_version": program.schema_version,
@@ -140,7 +154,7 @@ def test_loader_returns_a_frozen_view_equal_to_the_source(good: dict[str, Any], 
 def test_seal_fills_the_hash_and_never_mutates_the_input(good: dict[str, Any], compiled_text: str) -> None:
   body = {k: v for k, v in good.items() if k != "package_hash"}
   before = copy.deepcopy(body)
-  sealed = seal(body, compiled_text=compiled_text, **TARGET())
+  sealed = seal(body, compiled_text=compiled_text, **SEMANTIC())
   assert body == before
   assert sealed["package_hash"] == good["package_hash"]
   verify(sealed)
@@ -150,7 +164,7 @@ def test_seal_refuses_a_package_that_breaks_the_contract(good: dict[str, Any], c
   body = {k: v for k, v in good.items() if k != "package_hash"}
   kernel(body)["ins"][0].pop("actual_view")
   with pytest.raises(PackageError) as caught:
-    seal(body, compiled_text=compiled_text, **TARGET())
+    seal(body, compiled_text=compiled_text, **SEMANTIC())
   assert caught.value.code == "MISSING_FIELD" and "ins[0].actual_view" in caught.value.field
 
 
@@ -304,18 +318,19 @@ def test_negative_image_without_controlled_source_or_over_capacity(good: dict[st
 def test_negative_target_mismatch_refuses_the_load_and_names_the_field(
   good: dict[str, Any], compiled_text: str
 ) -> None:
-  target = dict(good["target_fingerprint"])
-  load_text(
-    encode(good), compiled_text=compiled_text, **TARGET(), target=target
-  )  # the matching target loads
-  target["rvv_vlen"] = 256
-  with pytest.raises(PackageError) as caught:
-    load_text(encode(good), compiled_text=compiled_text, **TARGET(), target=target)
-  assert caught.value.code == "TARGET_MISMATCH" and caught.value.field.endswith("rvv_vlen")
-  del target["rvv_vlen"]
-  with pytest.raises(PackageError) as missing:
-    load_text(encode(good), compiled_text=compiled_text, **TARGET(), target=target)
-  assert missing.value.code == "TARGET_FIELD_MISSING"
+  load_text(encode(good), compiled_text=compiled_text, **TARGET())  # the matching target loads
+  for key, value, code in (
+    ("rvv_vlen", 256, "TARGET_MISMATCH"),
+    ("rvv_vlen", None, "TARGET_FIELD_MISSING"),
+  ):
+    target = copy.deepcopy(CORAL_TARGET)
+    if value is None:
+      del target[key]
+    else:
+      target[key] = value
+    with pytest.raises(PackageError) as caught:
+      load_text(encode(good), compiled_text=compiled_text, **{**TARGET(), "target": target})
+    assert caught.value.code == code and caught.value.field.endswith(key)
 
 
 # ----------------------------------------------------------------------------------------- patch / reuse
@@ -398,7 +413,9 @@ def test_a_substituted_digest_with_a_recomputed_outer_hash_is_refused(
   assert caught.value.code == "CONTROL_PLANE_MISMATCH"
   assert caught.value.field == "$.control_plane.artifact_hash"
   with pytest.raises(PackageError) as at_seal:
-    seal({k: v for k, v in forged.items() if k != "package_hash"}, compiled_text=compiled_text, **TARGET())
+    seal(
+      {k: v for k, v in forged.items() if k != "package_hash"}, compiled_text=compiled_text, **SEMANTIC()
+    )
   assert at_seal.value.code == "CONTROL_PLANE_MISMATCH"
 
 
@@ -419,7 +436,7 @@ def test_a_body_edit_without_a_recomputed_inner_digest_is_refused_by_the_codec(
   forged = copy.deepcopy(good)
   forged["control_plane"]["source_hash"] = "a" * 64
   with pytest.raises(PackageError) as at_seal:
-    seal({k: v for k, v in forged.items() if k != "package_hash"}, compiled_text=edited, **TARGET())
+    seal({k: v for k, v in forged.items() if k != "package_hash"}, compiled_text=edited, **SEMANTIC())
   assert at_seal.value.code == "CONTROL_PLANE_INVALID"
 
 
@@ -489,11 +506,12 @@ def test_a_semantically_forged_body_with_fresh_inner_and_outer_seals_is_refused(
     for index, guard in enumerate(artifact.binding_guards)
   }
   target = {"hw": hw, "sim": sim, "actual_bindings": bindings}
+  load_args = {**target, "image_bytes": IMAGE, "target": copy.deepcopy(CORAL_TARGET)}
 
   # control: the genuine program wraps, seals and loads
   genuine, genuine_text = _wrap(good, artifact)
   seal({k: v for k, v in genuine.items() if k != "package_hash"}, compiled_text=genuine_text, **target)
-  load_text(encode(genuine), compiled_text=genuine_text, **target)
+  load_text(encode(genuine), compiled_text=genuine_text, **load_args)
 
   last = max(i for i, a in enumerate(task.actions) if a.op is ExecGroupActionOp.RELEASE_L2)
   release = task.actions[last]
@@ -515,7 +533,7 @@ def test_a_semantically_forged_body_with_fresh_inner_and_outer_seals_is_refused(
   assert forged["package_hash"] == package_hash({k: v for k, v in forged.items() if k != "package_hash"})
 
   with pytest.raises(PackageError) as at_load:
-    load_text(encode(forged), compiled_text=forged_text, **target)
+    load_text(encode(forged), compiled_text=forged_text, **load_args)
   assert at_load.value.code == "CONTROL_PLANE_REJECTED"
   assert "already released L2 view" in str(at_load.value)
   with pytest.raises(PackageError) as at_seal:
@@ -529,11 +547,51 @@ def test_the_semantic_loader_also_checks_the_actual_bindings(
   """The same program with a binding that violates its compiled range guard is not loadable."""
   from pipeline_validator.execution_ir import GlobalBinding
 
-  target = TARGET()
-  target["actual_bindings"] = {"Y": GlobalBinding("Y", 0x100000, 16, "rw")}  # smaller than the guard
+  args = TARGET()
+  args["actual_bindings"] = {"Y": GlobalBinding("Y", 0x100000, 16, "rw")}  # smaller than the guard
   with pytest.raises(PackageError) as caught:
-    load_text(encode(good), compiled_text=compiled_text, **target)
+    load_text(encode(good), compiled_text=compiled_text, **args)
   assert caught.value.code == "CONTROL_PLANE_REJECTED" and "range guard" in str(caught.value)
+
+
+# ---------------------------------------------------------------- installation proof is not optional
+def test_load_text_requires_the_image_and_the_independent_coral_target(
+  good: dict[str, Any], compiled_text: str
+) -> None:
+  """A load that omits the ELF or the Coral fingerprint proves less than it looks like, so it cannot be
+  expressed: both are required keywords at the entry point (metadata-only inspection is `verify`)."""
+  full = TARGET()
+  load_text(encode(good), compiled_text=compiled_text, **full)
+  for missing in ("image_bytes", "target"):
+    args = {k: v for k, v in full.items() if k != missing}
+    with pytest.raises(TypeError, match=missing):
+      load_text(encode(good), compiled_text=compiled_text, **args)
+  verify(good)  # metadata-only inspection stays available and needs neither
+
+
+def test_load_file_requires_the_image_and_the_independent_coral_target(tmp_path: Path) -> None:
+  package = tmp_path / "package.json"
+  compiled = tmp_path / "compiled_program.json"
+  package.write_text("{}")
+  compiled.write_text("{}")
+  for missing in ("image_path", "target"):
+    args: dict[str, Any] = {**SEMANTIC(), "image_path": tmp_path / "image.elf", "target": CORAL_TARGET}
+    del args[missing]
+    with pytest.raises(TypeError, match=missing):
+      load_file(package, compiled_path=compiled, **args)
+
+
+def test_a_wrong_image_or_a_foreign_target_is_refused_at_load_text(
+  good: dict[str, Any], compiled_text: str
+) -> None:
+  with pytest.raises(PackageError) as wrong_image:
+    load_text(encode(good), compiled_text=compiled_text, **{**TARGET(), "image_bytes": IMAGE + b"!"})
+  assert wrong_image.value.code == "IMAGE_BYTES_MISMATCH"
+  # a package cannot vouch for itself: its own fingerprint is not an acceptable `target`
+  foreign = {**CORAL_TARGET, "context_count": CORAL_TARGET["context_count"] + 1}
+  with pytest.raises(PackageError) as wrong_target:
+    load_text(encode(good), compiled_text=compiled_text, **{**TARGET(), "target": foreign})
+  assert wrong_target.value.code == "TARGET_MISMATCH"
 
 
 # --------------------------------------------------------------------------------------- real build
@@ -566,9 +624,9 @@ def test_real_build_chain_seals_and_reloads_identically(tmp_path: Path) -> None:
   loaded = load_file(
     package,
     compiled_path=tmp_path / "compiled_program.json",
-    **TARGET(),
+    **SEMANTIC(),
     image_path=image,
-    target=json.loads(package.read_text())["target_fingerprint"],
+    target=copy.deepcopy(CORAL_TARGET),  # independent of the package's own fingerprint
   )
   assert loaded.package_hash == report["package_hash"]
   # the image really is the C018 bootstrap link: its hash is the one the committed measurement records
@@ -581,7 +639,13 @@ def test_real_build_chain_seals_and_reloads_identically(tmp_path: Path) -> None:
   bad = tmp_path / "tampered.elf"
   bad.write_bytes(bytes(tampered))
   with pytest.raises(PackageError) as caught:
-    load_file(package, compiled_path=tmp_path / "compiled_program.json", **TARGET(), image_path=bad)
+    load_file(
+      package,
+      compiled_path=tmp_path / "compiled_program.json",
+      **SEMANTIC(),
+      image_path=bad,
+      target=copy.deepcopy(CORAL_TARGET),
+    )
   assert caught.value.code == "IMAGE_BYTES_MISMATCH"
 
 
