@@ -119,6 +119,8 @@ class GateWakeCoordinator:
       level=level, closed=new_closed, profile_generation=new_gen, epoch=epoch, cycle=cycle
     )
 
+    if level == "l1":
+      self.group.admission.note_l1_gate(new_closed)
     if not new_closed:
       woken = self.group.scheduler.wake_gate_waiters(level, epoch, cycle)
       if woken:

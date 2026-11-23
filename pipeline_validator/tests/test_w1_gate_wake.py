@@ -189,9 +189,20 @@ def test_task_admission_parks_zero_poll_when_l1_gate_closed_and_wakes_on_open() 
 
   tile0.plan_admission = spy_plan  # type: ignore[method-assign]
 
+  # Count every controller read from the moment the latch parks: step() must make none.
+  controller_reads = 0
+  orig_closed = g.profile_controller.issue_gate_closed
+
+  def spy_closed(level):
+    nonlocal controller_reads
+    controller_reads += 1
+    return orig_closed(level)
+
+  g.profile_controller.issue_gate_closed = spy_closed  # type: ignore[method-assign]
   for cycle in range(2, 27):
     g.admission.step(cycle)
 
+  assert controller_reads == 0, f"step() polled the controller {controller_reads} times while parked"
   assert plan_probes == 0
   assert g.admission.stats["candidate_scans"] == 0
   assert g.admission.stats["gate_park_events"] == 1
@@ -208,6 +219,38 @@ def test_task_admission_parks_zero_poll_when_l1_gate_closed_and_wakes_on_open() 
   assert 0 in route.admissions and 0 not in route.wait_reasons
 
   run.cycle = 28
+  run.finish()
+
+
+def test_l1_transition_latch_alone_drives_admission_step() -> None:
+  """Reopening resumes admission from the transition latch even with the wake callback removed,
+  and the controller is never read by step()."""
+  run = start(participants=1, grids=1, leases=1, reads=False)
+  g = run.group
+  g.scheduler.step(g._active_sequencers, 0)
+  g.scheduler.step(g._active_sequencers, 1)
+  (route,) = g._grid_routes.values()
+  g.admission.wake_on_l1_gate = lambda *a, **k: False  # type: ignore[method-assign]
+  g.profile_controller._set_profile_gate("l1", True, cycle=2)
+  g.admission.step(2)
+  assert g.admission._l1_closed and not route.admissions
+
+  reads = 0
+  orig = g.profile_controller.issue_gate_closed
+
+  def spy(level):
+    nonlocal reads
+    reads += 1
+    return orig(level)
+
+  g.profile_controller.issue_gate_closed = spy  # type: ignore[method-assign]
+  g.profile_controller._set_profile_gate("l1", False, cycle=3)
+  reads_after_register = reads
+  g.admission.step(3)
+  assert reads == reads_after_register, "step() read the controller after the latch flipped"
+  assert not g.admission._l1_closed
+  assert 0 in route.admissions
+  run.cycle = 4
   run.finish()
 
 

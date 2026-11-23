@@ -149,10 +149,12 @@ class AdmissionCoordinator:
     # Closed transactions are retained only within the C017 dedup window.
     self._resolved: OrderedDict[int, tuple[int, frozenset[tuple[str, str]]]] = OrderedDict()
     self._next_txn_id = 1
-    # C036: event-driven L1 gate wake bookkeeping (no per-tick gate polling).
+    # C036: event-driven L1 gate wake bookkeeping (no per-tick gate polling). The latch is
+    # written only by GateWakeCoordinator.register() on every L1 transition; step() never
+    # reads ProfileController. The gate is closed until the controller's first open.
+    self._l1_closed = True
     self._l1_gate_parked_epoch: int | None = None
     self._l1_gate_parked_route_seq: int = -1
-    self._l1_gate_retry_epoch: int = -1
     self.stats: dict[str, int] = {
       "tickets_accepted": 0,
       "tickets_wait_closed": 0,
@@ -175,6 +177,10 @@ class AdmissionCoordinator:
 
   # ---- candidate selection (migrated from TileGroup._step_task_admission) ----
 
+  def note_l1_gate(self, closed: bool) -> None:
+    """L1 transition latch: the only input that opens or closes step()."""
+    self._l1_closed = closed
+
   def wake_on_l1_gate(self, gate_epoch: int, cycle: int) -> bool:
     """Record one coalesced L1-gate open wake for step() and gate-parked HOLD tickets."""
     _ = cycle
@@ -182,7 +188,6 @@ class AdmissionCoordinator:
     if self._l1_gate_parked_epoch is not None and gate_epoch > self._l1_gate_parked_epoch:
       self._l1_gate_parked_epoch = None
       self._l1_gate_parked_route_seq = -1
-      self._l1_gate_retry_epoch = gate_epoch
       self.stats["gate_wake_events"] += 1
       woke = True
     woke_holds = 0
@@ -202,13 +207,13 @@ class AdmissionCoordinator:
   def clear_gate_wait(self) -> None:
     self._l1_gate_parked_epoch = None
     self._l1_gate_parked_route_seq = -1
-    self._l1_gate_retry_epoch = -1
     for ticket in self.tickets.values():
       ticket.wait_gate_epoch = None
+
   def step(self, cycle: int) -> None:
     """Start candidates: one commit decision per Tile per Tick, deterministic."""
     group = self.group
-    if group.profile_controller.issue_gate_closed("l1"):
+    if self._l1_closed:
       gate_epoch = group.gate_wake.epoch("l1")
       route_seq = group._route_sequence
       if self._l1_gate_parked_epoch == gate_epoch and self._l1_gate_parked_route_seq == route_seq:
