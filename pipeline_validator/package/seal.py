@@ -45,10 +45,43 @@ def package_hash(package: dict[str, Any]) -> str:
   return hashlib.sha256(canonical({name: parts[name] for name in covers})).hexdigest()
 
 
-def seal(package: dict[str, Any]) -> dict[str, Any]:
-  """Return a copy carrying its ``package_hash``; the input is validated first and is never mutated."""
+def verify_control_plane(package: dict[str, Any], compiled_text: str) -> None:
+  """The wrapped CompiledProgram is the control plane, not a digest about it.
+
+  The artifact is parsed by the existing loader (``parse_compiled_program``: strict JSON, schema/ABI,
+  structural validation, and a recomputed ``artifact_hash`` that is never trusted), and the package's
+  ``control_plane`` must then name exactly that program. A substituted digest, or an edited body, is
+  rejected on what the program is, so recomputing the outer ``package_hash`` cannot rescue it.
+  """
+  from ..compiled_program import parse_compiled_program
+
+  try:
+    program = parse_compiled_program(compiled_text)
+  except (ValueError, TypeError) as exc:
+    raise PackageError("CONTROL_PLANE_INVALID", "$.control_plane", str(exc)) from exc
+  cp = package["control_plane"]
+  actual = {
+    "schema_version": program.schema_version,
+    "compiler_abi": program.compiler_abi,
+    "artifact_hash": program.artifact_hash,
+  }
+  if "source_hash" in cp:
+    actual["source_hash"] = program.source_hash
+  for key, value in actual.items():
+    if cp[key] != value:
+      raise PackageError(
+        "CONTROL_PLANE_MISMATCH",
+        f"$.control_plane.{key}",
+        f"package {cp[key]!r}, wrapped CompiledProgram {value!r}",
+      )
+
+
+def seal(package: dict[str, Any], *, compiled_text: str) -> dict[str, Any]:
+  """Return a copy carrying its ``package_hash``; validated first, checked against the wrapped
+  CompiledProgram, and never mutated."""
   body = {k: v for k, v in package.items() if k != "package_hash"}
   validate({**body, "package_hash": "0" * 64})
+  verify_control_plane(body, compiled_text)
   return {**body, "package_hash": package_hash(body)}
 
 

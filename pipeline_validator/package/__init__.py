@@ -13,7 +13,7 @@ from .package_ir import (
   RelocationEntry,
   validate_package,
 )
-from .seal import package_hash, seal, verify, verify_image
+from .seal import package_hash, seal, verify, verify_control_plane, verify_image
 
 __all__ = [
   "DeviceCaps",
@@ -36,5 +36,6 @@ __all__ = [
   "validate",
   "validate_package",
   "verify",
+  "verify_control_plane",
   "verify_image",
 ]

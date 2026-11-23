@@ -54,9 +54,35 @@ import package_contract as ref  # noqa: E402  (independent C014 oracle, never im
 KNOWN_CODE_REFINEMENTS = {("HAND_WRITTEN_ADDRESS", "HELPER_CSR_MISMATCH")}
 
 
+@pytest.fixture(scope="module")
+def compiled_text() -> str:
+  """A real serialized CompiledProgram (the pow workload the build wraps)."""
+  from pipeline_validator.compiled_program import serialize_compiled_program
+  from pipeline_validator.compiler import compile_program
+  from pipeline_validator.config import HardwareConfig, SimConfig
+  from pipeline_validator.workloads import PowWorkload
+
+  hw = HardwareConfig()
+  return serialize_compiled_program(
+    compile_program(PowWorkload(num_group_chunks=1, hw=hw).module, hw, SimConfig(fidelity="runtime"))
+  )
+
+
 @pytest.fixture
-def good() -> dict[str, Any]:
-  return copy.deepcopy(json.loads(EXAMPLE.read_text()))
+def good(compiled_text: str) -> dict[str, Any]:
+  """The committed C014 example, whose placeholder control-plane digests are replaced by the real
+  program's, then resealed (the committed example itself stays byte-identical)."""
+  from pipeline_validator.compiled_program import parse_compiled_program
+
+  package = copy.deepcopy(json.loads(EXAMPLE.read_text()))
+  program = parse_compiled_program(compiled_text)
+  package["control_plane"] = {
+    "schema_version": program.schema_version,
+    "compiler_abi": program.compiler_abi,
+    "artifact_hash": program.artifact_hash,
+    "source_hash": program.source_hash,
+  }
+  return resealed(package)
 
 
 def kernel(package: dict[str, Any]) -> dict[str, Any]:
@@ -85,8 +111,8 @@ def test_round_trip_is_field_for_field_equal(good: dict[str, Any]) -> None:
   assert encode(again) == encode(good)  # deterministic bytes
 
 
-def test_loader_returns_a_frozen_view_equal_to_the_source(good: dict[str, Any]) -> None:
-  loaded = load_text(encode(good))
+def test_loader_returns_a_frozen_view_equal_to_the_source(good: dict[str, Any], compiled_text: str) -> None:
+  loaded = load_text(encode(good), compiled_text=compiled_text)
   assert loaded.package_hash == good["package_hash"]
   assert loaded.to_dict() == good
   with pytest.raises(TypeError):
@@ -100,20 +126,20 @@ def test_loader_returns_a_frozen_view_equal_to_the_source(good: dict[str, Any]) 
 
 
 # ------------------------------------------------------------------------------------------------- seal
-def test_seal_fills_the_hash_and_never_mutates_the_input(good: dict[str, Any]) -> None:
+def test_seal_fills_the_hash_and_never_mutates_the_input(good: dict[str, Any], compiled_text: str) -> None:
   body = {k: v for k, v in good.items() if k != "package_hash"}
   before = copy.deepcopy(body)
-  sealed = seal(body)
+  sealed = seal(body, compiled_text=compiled_text)
   assert body == before
   assert sealed["package_hash"] == good["package_hash"]
   verify(sealed)
 
 
-def test_seal_refuses_a_package_that_breaks_the_contract(good: dict[str, Any]) -> None:
+def test_seal_refuses_a_package_that_breaks_the_contract(good: dict[str, Any], compiled_text: str) -> None:
   body = {k: v for k, v in good.items() if k != "package_hash"}
   kernel(body)["ins"][0].pop("actual_view")
   with pytest.raises(PackageError) as caught:
-    seal(body)
+    seal(body, compiled_text=compiled_text)
   assert caught.value.code == "MISSING_FIELD" and "ins[0].actual_view" in caught.value.field
 
 
@@ -264,16 +290,18 @@ def test_negative_image_without_controlled_source_or_over_capacity(good: dict[st
   rejects(resealed(big), "TEXT_EXCEEDS_CAPACITY", "text_bytes")
 
 
-def test_negative_target_mismatch_refuses_the_load_and_names_the_field(good: dict[str, Any]) -> None:
+def test_negative_target_mismatch_refuses_the_load_and_names_the_field(
+  good: dict[str, Any], compiled_text: str
+) -> None:
   target = dict(good["target_fingerprint"])
-  load_text(encode(good), target=target)  # the matching target loads
+  load_text(encode(good), compiled_text=compiled_text, target=target)  # the matching target loads
   target["rvv_vlen"] = 256
   with pytest.raises(PackageError) as caught:
-    load_text(encode(good), target=target)
+    load_text(encode(good), compiled_text=compiled_text, target=target)
   assert caught.value.code == "TARGET_MISMATCH" and caught.value.field.endswith("rvv_vlen")
   del target["rvv_vlen"]
   with pytest.raises(PackageError) as missing:
-    load_text(encode(good), target=target)
+    load_text(encode(good), compiled_text=compiled_text, target=target)
   assert missing.value.code == "TARGET_FIELD_MISSING"
 
 
@@ -342,6 +370,53 @@ def test_the_sealed_hash_equals_the_reference_hash(good: dict[str, Any]) -> None
   assert package_hash(good) == ref.package_hash(good, ref.load_contract()) == good["package_hash"]
 
 
+# ----------------------------------------------------------------------------------- control plane body
+def test_a_substituted_digest_with_a_recomputed_outer_hash_is_refused(
+  good: dict[str, Any], compiled_text: str
+) -> None:
+  """The digest must belong to the wrapped program: syntax-valid '9'*64 plus a fresh package_hash used to load."""
+  forged = copy.deepcopy(good)
+  forged["control_plane"]["artifact_hash"] = "9" * 64
+  forged = resealed(forged)
+  verify(forged)  # structurally fine, and the outer hash is consistent: only the body can refuse it
+  with pytest.raises(PackageError) as caught:
+    load_text(encode(forged), compiled_text=compiled_text)
+  assert caught.value.code == "CONTROL_PLANE_MISMATCH"
+  assert caught.value.field == "$.control_plane.artifact_hash"
+  with pytest.raises(PackageError) as at_seal:
+    seal({k: v for k, v in forged.items() if k != "package_hash"}, compiled_text=compiled_text)
+  assert at_seal.value.code == "CONTROL_PLANE_MISMATCH"
+
+
+def test_an_edited_compiled_program_body_is_refused_even_with_every_digest_recomputed(
+  good: dict[str, Any], compiled_text: str
+) -> None:
+  """Edit the inner body, then make the outer package consistent with the edit: still refused."""
+  body = json.loads(compiled_text)
+  body["source_hash"] = "a" * 64  # an inner field that the program's own digest covers
+  edited = json.dumps(body, sort_keys=True, indent=2) + "\n"
+  with pytest.raises(PackageError) as caught:
+    load_text(encode(good), compiled_text=edited)
+  assert (
+    caught.value.code == "CONTROL_PLANE_INVALID"
+  )  # the existing loader's recomputed artifact_hash disagrees
+  # and a package re-pointed at the edited body's claimed digest cannot be sealed either
+  forged = copy.deepcopy(good)
+  forged["control_plane"]["source_hash"] = "a" * 64
+  with pytest.raises(PackageError) as at_seal:
+    seal({k: v for k, v in forged.items() if k != "package_hash"}, compiled_text=edited)
+  assert at_seal.value.code == "CONTROL_PLANE_INVALID"
+
+
+def test_a_control_plane_body_that_is_not_a_compiled_program_is_refused(
+  good: dict[str, Any], compiled_text: str
+) -> None:
+  for bad in ("", "{}", "not json", compiled_text.replace('"v3"', '"v2"', 1), '{"a": 1, "a": 2}'):
+    with pytest.raises(PackageError) as caught:
+      load_text(encode(good), compiled_text=bad)
+    assert caught.value.code == "CONTROL_PLANE_INVALID", bad[:30]
+
+
 # --------------------------------------------------------------------------------------- real build
 HAVE_TOOLCHAIN = TOOLCHAIN.is_dir()
 
@@ -370,7 +445,10 @@ def test_real_build_chain_seals_and_reloads_identically(tmp_path: Path) -> None:
   package = tmp_path / "package.json"
   image = tmp_path / "image.elf"
   loaded = load_file(
-    package, image_path=image, target=json.loads(package.read_text())["target_fingerprint"]
+    package,
+    compiled_path=tmp_path / "compiled_program.json",
+    image_path=image,
+    target=json.loads(package.read_text())["target_fingerprint"],
   )
   assert loaded.package_hash == report["package_hash"]
   # the image really is the C018 bootstrap link: its hash is the one the committed measurement records
@@ -383,7 +461,7 @@ def test_real_build_chain_seals_and_reloads_identically(tmp_path: Path) -> None:
   bad = tmp_path / "tampered.elf"
   bad.write_bytes(bytes(tampered))
   with pytest.raises(PackageError) as caught:
-    load_file(package, image_path=bad)
+    load_file(package, compiled_path=tmp_path / "compiled_program.json", image_path=bad)
   assert caught.value.code == "IMAGE_BYTES_MISMATCH"
 
 

@@ -63,9 +63,10 @@ def read_binding(path: Path) -> dict[str, Any]:
   return doc
 
 
-def control_plane() -> dict[str, Any]:
-  """A real compiled control-plane artifact (the existing pow workload), wrapped unchanged."""
-  from pipeline_validator.compiled_program import artifact_digest
+def control_plane() -> tuple[dict[str, Any], str]:
+  """A real compiled control-plane artifact (the existing pow workload): its package fields and its
+  serialized body, which ships beside the package and is re-parsed by the existing loader."""
+  from pipeline_validator.compiled_program import artifact_digest, serialize_compiled_program
   from pipeline_validator.compiler import compile_program
   from pipeline_validator.config import HardwareConfig, SimConfig
   from pipeline_validator.workloads import PowWorkload
@@ -74,12 +75,13 @@ def control_plane() -> dict[str, Any]:
   program = compile_program(
     PowWorkload(num_group_chunks=1, hw=hw).module, hw, SimConfig(fidelity="runtime"), workload_info=None
   )
-  return {
+  fields = {
     "schema_version": program.schema_version,
     "compiler_abi": program.compiler_abi,
     "artifact_hash": artifact_digest(program),
     "source_hash": program.source_hash,
   }
+  return fields, serialize_compiled_program(program)
 
 
 UPSTREAM_PARAMS = H / "configs" / "params.d" / "upstream_coralnpu.json"
@@ -130,9 +132,12 @@ def build(binding_path: Path, config_path: Path, out: Path) -> dict[str, Any]:
   if rm["static_data_bytes"] + rm["stack_bytes"] + rm["scratch_bytes"] > c["dtcm_bytes"]:
     raise BuildError("RECHECKED", "DATA_EXCEEDS_CAPACITY", "static data + stack + scratch exceeds DTCM")
 
+  control_fields, compiled_text = control_plane()
+  compiled_path = out / "compiled_program.json"
+  compiled_path.write_text(compiled_text)
   package = {
     "package_schema": "cn_package/v1",
-    "control_plane": control_plane(),
+    "control_plane": control_fields,
     "image": {
       "bytes_sha256": _sha(elf),
       "text_bytes": layout["text_bytes"],
@@ -163,7 +168,7 @@ def build(binding_path: Path, config_path: Path, out: Path) -> dict[str, Any]:
   }
   # SEALED: validation first; a package that breaks the contract is never hashed.
   try:
-    sealed = seal(package)
+    sealed = seal(package, compiled_text=compiled_text)
   except PackageError as exc:
     raise BuildError("SEALED", exc.code, str(exc)) from exc
   package_path = out / "package.json"
@@ -172,7 +177,7 @@ def build(binding_path: Path, config_path: Path, out: Path) -> dict[str, Any]:
   # LOADED: re-read through the read-only Loader and require the identical sealed object.
   target = independent_target(binding["target"], config)
   try:
-    loaded = load_file(package_path, image_path=image_path, target=target)
+    loaded = load_file(package_path, compiled_path=compiled_path, image_path=image_path, target=target)
     verify_image(sealed, image_path.read_bytes())
     if loaded.to_dict() != sealed:
       raise PackageError("RELOAD_DIFFERS", "$", "the reloaded package is not the sealed package")
@@ -184,6 +189,7 @@ def build(binding_path: Path, config_path: Path, out: Path) -> dict[str, Any]:
     "states": list(STATES),
     "package": str(package_path),
     "image": str(image_path),
+    "compiled_program": str(compiled_path),
     "package_hash": sealed["package_hash"],
     "image_sha256": sealed["image"]["bytes_sha256"],
     "resource_manifest": sealed["resource_manifest"],
