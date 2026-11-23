@@ -12,11 +12,14 @@ code; the image is trusted through its controlled build and the numeric/protocol
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from ..config import HardwareConfig, SimConfig
+from ..execution_ir import GlobalBinding
 from .binding_ir import PackageError, parse_strict
 from .seal import verify, verify_control_plane, verify_image
 
@@ -56,11 +59,18 @@ def check_target(package: dict[str, Any], target: dict[str, Any]) -> None:
 
 
 def load_text(
-  text: str, *, compiled_text: str, image_bytes: bytes | None = None, target: dict[str, Any] | None = None
+  text: str,
+  *,
+  compiled_text: str,
+  hw: HardwareConfig,
+  sim: SimConfig,
+  actual_bindings: Mapping[str, GlobalBinding],
+  image_bytes: bytes | None = None,
+  target: dict[str, Any] | None = None,
 ) -> LoadedPackage:
   package = parse_strict(text)
   verify(package)
-  verify_control_plane(package, compiled_text)
+  verify_control_plane(package, compiled_text, hw=hw, sim=sim, actual_bindings=actual_bindings)
   if image_bytes is not None:
     verify_image(package, image_bytes)
   if target is not None:
@@ -71,7 +81,14 @@ def load_text(
 
 
 def load_file(
-  path: Path, *, compiled_path: Path, image_path: Path | None = None, target: dict[str, Any] | None = None
+  path: Path,
+  *,
+  compiled_path: Path,
+  hw: HardwareConfig,
+  sim: SimConfig,
+  actual_bindings: Mapping[str, GlobalBinding],
+  image_path: Path | None = None,
+  target: dict[str, Any] | None = None,
 ) -> LoadedPackage:
   try:
     text = Path(path).read_text()
@@ -87,4 +104,12 @@ def load_file(
       image = Path(image_path).read_bytes()
     except OSError as exc:
       raise PackageError("UNREADABLE", str(image_path), str(exc)) from exc
-  return load_text(text, compiled_text=compiled, image_bytes=image, target=target)
+  return load_text(
+    text,
+    compiled_text=compiled,
+    hw=hw,
+    sim=sim,
+    actual_bindings=actual_bindings,
+    image_bytes=image,
+    target=target,
+  )

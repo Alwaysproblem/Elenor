@@ -11,8 +11,13 @@ over itself. Two rules make the seal more than a checksum:
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from typing import Any
 
+from ..compiled_program import parse_compiled_program
+from ..config import HardwareConfig, SimConfig
+from ..execution_ir import GlobalBinding
+from ..loader import load_program
 from .binding_ir import PackageError, canonical, contract, validate
 
 
@@ -45,20 +50,35 @@ def package_hash(package: dict[str, Any]) -> str:
   return hashlib.sha256(canonical({name: parts[name] for name in covers})).hexdigest()
 
 
-def verify_control_plane(package: dict[str, Any], compiled_text: str) -> None:
+def verify_control_plane(
+  package: dict[str, Any],
+  compiled_text: str,
+  *,
+  hw: HardwareConfig,
+  sim: SimConfig,
+  actual_bindings: Mapping[str, GlobalBinding],
+) -> None:
   """The wrapped CompiledProgram is the control plane, not a digest about it.
 
-  The artifact is parsed by the existing loader (``parse_compiled_program``: strict JSON, schema/ABI,
-  structural validation, and a recomputed ``artifact_hash`` that is never trusted), and the package's
-  ``control_plane`` must then name exactly that program. A substituted digest, or an edited body, is
-  rejected on what the program is, so recomputing the outer ``package_hash`` cannot rescue it.
-  """
-  from ..compiled_program import parse_compiled_program
+  Two layers, both required (CMP-14, "a tampered contract layer is rejected even after rehash"):
 
+  * the CODEC (``parse_compiled_program``): strict JSON, schema/ABI, structure, and a recomputed
+    ``artifact_hash`` that is never trusted. This only proves the body is self-consistent;
+  * the SEMANTIC Loader (``pipeline_validator.loader.load_program``) against the real validator target
+    and actual bindings: an artifact whose inner digest was recomputed after a semantic edit (a forged
+    double release, a rebound layout, a source/IR mismatch) is rejected on what it does.
+
+  The package's ``control_plane`` must then name exactly that program. Recomputing the outer
+  ``package_hash`` therefore cannot rescue a substituted digest or an edited body.
+  """
   try:
     program = parse_compiled_program(compiled_text)
   except (ValueError, TypeError) as exc:
     raise PackageError("CONTROL_PLANE_INVALID", "$.control_plane", str(exc)) from exc
+  try:
+    load_program(program, hw, sim, actual_bindings=actual_bindings)
+  except (ValueError, TypeError) as exc:
+    raise PackageError("CONTROL_PLANE_REJECTED", "$.control_plane", str(exc)) from exc
   cp = package["control_plane"]
   actual = {
     "schema_version": program.schema_version,
@@ -76,12 +96,19 @@ def verify_control_plane(package: dict[str, Any], compiled_text: str) -> None:
       )
 
 
-def seal(package: dict[str, Any], *, compiled_text: str) -> dict[str, Any]:
+def seal(
+  package: dict[str, Any],
+  *,
+  compiled_text: str,
+  hw: HardwareConfig,
+  sim: SimConfig,
+  actual_bindings: Mapping[str, GlobalBinding],
+) -> dict[str, Any]:
   """Return a copy carrying its ``package_hash``; validated first, checked against the wrapped
-  CompiledProgram, and never mutated."""
+  CompiledProgram by the codec and the semantic Loader, and never mutated."""
   body = {k: v for k, v in package.items() if k != "package_hash"}
   validate({**body, "package_hash": "0" * 64})
-  verify_control_plane(body, compiled_text)
+  verify_control_plane(body, compiled_text, hw=hw, sim=sim, actual_bindings=actual_bindings)
   return {**body, "package_hash": package_hash(body)}
 
 

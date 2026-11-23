@@ -32,7 +32,6 @@ from pipeline_validator.package import (
   parse_strict,
   patch_allowed,
   seal,
-  validate,
   verify,
   verify_image,
 )
@@ -47,11 +46,23 @@ TOOLCHAIN = REPO / "out/coral_nexus/cache/toolchain/extracted/toolchain_coralnpu
 sys.path.insert(0, str(H / "scripts/lib"))
 import package_contract as ref  # noqa: E402  (independent C014 oracle, never imported by the code under test)
 
-
 # Both consumers reject, but this implementation names the cause more precisely: a hand-written numeric CSR
 # (`0x7c0`) is HAND_WRITTEN_ADDRESS here, while the reference's earlier name-mismatch check masks it as
 # HELPER_CSR_MISMATCH. Every other mutation must agree on the exact code.
 KNOWN_CODE_REFINEMENTS = {("HAND_WRITTEN_ADDRESS", "HELPER_CSR_MISMATCH")}
+
+
+def TARGET() -> dict[str, Any]:
+  """The validator target and actual launch bindings the wrapped pow body is semantically loaded
+  against (what `cn package` uses: the default hardware, runtime fidelity, the pow CLI binding)."""
+  from pipeline_validator.config import HardwareConfig, SimConfig
+  from pipeline_validator.execution_ir import GlobalBinding
+
+  return {
+    "hw": HardwareConfig(),
+    "sim": SimConfig(fidelity="runtime"),
+    "actual_bindings": {"Y": GlobalBinding("Y", 0x100000, 131072, "rw")},
+  }
 
 
 @pytest.fixture(scope="module")
@@ -112,7 +123,7 @@ def test_round_trip_is_field_for_field_equal(good: dict[str, Any]) -> None:
 
 
 def test_loader_returns_a_frozen_view_equal_to_the_source(good: dict[str, Any], compiled_text: str) -> None:
-  loaded = load_text(encode(good), compiled_text=compiled_text)
+  loaded = load_text(encode(good), compiled_text=compiled_text, **TARGET())
   assert loaded.package_hash == good["package_hash"]
   assert loaded.to_dict() == good
   with pytest.raises(TypeError):
@@ -129,7 +140,7 @@ def test_loader_returns_a_frozen_view_equal_to_the_source(good: dict[str, Any], 
 def test_seal_fills_the_hash_and_never_mutates_the_input(good: dict[str, Any], compiled_text: str) -> None:
   body = {k: v for k, v in good.items() if k != "package_hash"}
   before = copy.deepcopy(body)
-  sealed = seal(body, compiled_text=compiled_text)
+  sealed = seal(body, compiled_text=compiled_text, **TARGET())
   assert body == before
   assert sealed["package_hash"] == good["package_hash"]
   verify(sealed)
@@ -139,7 +150,7 @@ def test_seal_refuses_a_package_that_breaks_the_contract(good: dict[str, Any], c
   body = {k: v for k, v in good.items() if k != "package_hash"}
   kernel(body)["ins"][0].pop("actual_view")
   with pytest.raises(PackageError) as caught:
-    seal(body, compiled_text=compiled_text)
+    seal(body, compiled_text=compiled_text, **TARGET())
   assert caught.value.code == "MISSING_FIELD" and "ins[0].actual_view" in caught.value.field
 
 
@@ -294,14 +305,16 @@ def test_negative_target_mismatch_refuses_the_load_and_names_the_field(
   good: dict[str, Any], compiled_text: str
 ) -> None:
   target = dict(good["target_fingerprint"])
-  load_text(encode(good), compiled_text=compiled_text, target=target)  # the matching target loads
+  load_text(
+    encode(good), compiled_text=compiled_text, **TARGET(), target=target
+  )  # the matching target loads
   target["rvv_vlen"] = 256
   with pytest.raises(PackageError) as caught:
-    load_text(encode(good), compiled_text=compiled_text, target=target)
+    load_text(encode(good), compiled_text=compiled_text, **TARGET(), target=target)
   assert caught.value.code == "TARGET_MISMATCH" and caught.value.field.endswith("rvv_vlen")
   del target["rvv_vlen"]
   with pytest.raises(PackageError) as missing:
-    load_text(encode(good), compiled_text=compiled_text, target=target)
+    load_text(encode(good), compiled_text=compiled_text, **TARGET(), target=target)
   assert missing.value.code == "TARGET_FIELD_MISSING"
 
 
@@ -374,29 +387,31 @@ def test_the_sealed_hash_equals_the_reference_hash(good: dict[str, Any]) -> None
 def test_a_substituted_digest_with_a_recomputed_outer_hash_is_refused(
   good: dict[str, Any], compiled_text: str
 ) -> None:
-  """The digest must belong to the wrapped program: syntax-valid '9'*64 plus a fresh package_hash used to load."""
+  """The digest must belong to the wrapped program: a syntax-valid '9'*64 plus a fresh package_hash
+  used to load."""
   forged = copy.deepcopy(good)
   forged["control_plane"]["artifact_hash"] = "9" * 64
   forged = resealed(forged)
   verify(forged)  # structurally fine, and the outer hash is consistent: only the body can refuse it
   with pytest.raises(PackageError) as caught:
-    load_text(encode(forged), compiled_text=compiled_text)
+    load_text(encode(forged), compiled_text=compiled_text, **TARGET())
   assert caught.value.code == "CONTROL_PLANE_MISMATCH"
   assert caught.value.field == "$.control_plane.artifact_hash"
   with pytest.raises(PackageError) as at_seal:
-    seal({k: v for k, v in forged.items() if k != "package_hash"}, compiled_text=compiled_text)
+    seal({k: v for k, v in forged.items() if k != "package_hash"}, compiled_text=compiled_text, **TARGET())
   assert at_seal.value.code == "CONTROL_PLANE_MISMATCH"
 
 
-def test_an_edited_compiled_program_body_is_refused_even_with_every_digest_recomputed(
+def test_a_body_edit_without_a_recomputed_inner_digest_is_refused_by_the_codec(
   good: dict[str, Any], compiled_text: str
 ) -> None:
-  """Edit the inner body, then make the outer package consistent with the edit: still refused."""
+  """Codec layer only: the inner digest is NOT recomputed here, so parse_compiled_program refuses it.
+  The rehash case CMP-14 is about is test_a_semantically_forged_body_with_fresh_inner_and_outer_seals."""
   body = json.loads(compiled_text)
   body["source_hash"] = "a" * 64  # an inner field that the program's own digest covers
   edited = json.dumps(body, sort_keys=True, indent=2) + "\n"
   with pytest.raises(PackageError) as caught:
-    load_text(encode(good), compiled_text=edited)
+    load_text(encode(good), compiled_text=edited, **TARGET())
   assert (
     caught.value.code == "CONTROL_PLANE_INVALID"
   )  # the existing loader's recomputed artifact_hash disagrees
@@ -404,7 +419,7 @@ def test_an_edited_compiled_program_body_is_refused_even_with_every_digest_recom
   forged = copy.deepcopy(good)
   forged["control_plane"]["source_hash"] = "a" * 64
   with pytest.raises(PackageError) as at_seal:
-    seal({k: v for k, v in forged.items() if k != "package_hash"}, compiled_text=edited)
+    seal({k: v for k, v in forged.items() if k != "package_hash"}, compiled_text=edited, **TARGET())
   assert at_seal.value.code == "CONTROL_PLANE_INVALID"
 
 
@@ -413,8 +428,112 @@ def test_a_control_plane_body_that_is_not_a_compiled_program_is_refused(
 ) -> None:
   for bad in ("", "{}", "not json", compiled_text.replace('"v3"', '"v2"', 1), '{"a": 1, "a": 2}'):
     with pytest.raises(PackageError) as caught:
-      load_text(encode(good), compiled_text=bad)
+      load_text(encode(good), compiled_text=bad, **TARGET())
     assert caught.value.code == "CONTROL_PLANE_INVALID", bad[:30]
+
+
+def _two_buffer_artifact() -> tuple[Any, Any, Any, Any]:
+  """The test_double_release_rejected fixture (a data-dependent matmul/pow with >=2 L2 buffers)."""
+  from pipeline_validator.compiler import compile_program
+  from pipeline_validator.config import HardwareConfig, SimConfig
+  from pipeline_validator.execution_ir import ExecModel
+  from pipeline_validator.workload_ir import parse_workload_ir
+
+  hw = HardwareConfig().with_overrides(num_dma_channels=2, hbm_fixed_latency_cycles=10)
+  sim = SimConfig(max_cycles=200000, context_count=4)
+  module = parse_workload_ir((REPO / "examples/workloads/matmul_pow_data_dep.mlir").read_text())
+  artifact = compile_program(module, hw, sim)
+  assert isinstance(artifact.entry, ExecModel)
+  _id, task = next(
+    (key, task)
+    for key, task in artifact.entry.tasks.items()
+    if task.layout is not None and len(task.layout.buffer_layouts) >= 2
+  )
+  return artifact, hw, sim, task
+
+
+def _wrap(good: dict[str, Any], program: Any) -> tuple[dict[str, Any], str]:
+  """A package whose control plane names `program`, with a freshly computed outer package_hash."""
+  from pipeline_validator.compiled_program import serialize_compiled_program
+
+  package = copy.deepcopy(good)
+  package["control_plane"] = {
+    "schema_version": program.schema_version,
+    "compiler_abi": program.compiler_abi,
+    "artifact_hash": program.artifact_hash,
+    "source_hash": program.source_hash,
+  }
+  return resealed(package), serialize_compiled_program(program)
+
+
+def test_a_semantically_forged_body_with_fresh_inner_and_outer_seals_is_refused(
+  good: dict[str, Any],
+) -> None:
+  """CMP-14: a tampered contract layer is rejected even after rehash. A double RELEASE_L2 is inserted into
+  a real task and the program is re-sealed (fresh inner artifact_hash), then wrapped in a package with a
+  fresh outer package_hash. The codec accepts every digest; only the semantic Loader sees the forgery."""
+  from dataclasses import replace
+
+  from pipeline_validator.compiled_program import (
+    parse_compiled_program,
+    seal_program,
+    serialize_compiled_program,
+  )
+  from pipeline_validator.execution_ir import ExecGroupActionOp, GlobalBinding
+
+  artifact, hw, sim, task = _two_buffer_artifact()
+  bindings = {
+    guard.name: GlobalBinding(
+      guard.name, 0x100000 + index * 0x1000000, guard.minimum_bytes, guard.permissions
+    )
+    for index, guard in enumerate(artifact.binding_guards)
+  }
+  target = {"hw": hw, "sim": sim, "actual_bindings": bindings}
+
+  # control: the genuine program wraps, seals and loads
+  genuine, genuine_text = _wrap(good, artifact)
+  seal({k: v for k, v in genuine.items() if k != "package_hash"}, compiled_text=genuine_text, **target)
+  load_text(encode(genuine), compiled_text=genuine_text, **target)
+
+  last = max(i for i, a in enumerate(task.actions) if a.op is ExecGroupActionOp.RELEASE_L2)
+  release = task.actions[last]
+  forged_action = replace(
+    release, dst=f"{release.dst}:forged", instruction_id=f"{task.binding_id}:group:forged_release"
+  )
+  actions = (*task.actions[: last + 1], forged_action, *task.actions[last + 1 :])
+  model = replace(
+    artifact.entry, tasks={**artifact.entry.tasks, task.binding_id: replace(task, actions=actions)}
+  )
+  corrupted = seal_program(replace(artifact, entry=model))  # fresh inner digest
+  assert corrupted.artifact_hash != artifact.artifact_hash
+  forged, forged_text = _wrap(good, corrupted)  # fresh outer hash
+  assert serialize_compiled_program(corrupted) == forged_text
+
+  # every digest is self-consistent: the codec and the structural package check both accept it
+  assert parse_compiled_program(forged_text).artifact_hash == corrupted.artifact_hash
+  verify(forged)
+  assert forged["package_hash"] == package_hash({k: v for k, v in forged.items() if k != "package_hash"})
+
+  with pytest.raises(PackageError) as at_load:
+    load_text(encode(forged), compiled_text=forged_text, **target)
+  assert at_load.value.code == "CONTROL_PLANE_REJECTED"
+  assert "already released L2 view" in str(at_load.value)
+  with pytest.raises(PackageError) as at_seal:
+    seal({k: v for k, v in forged.items() if k != "package_hash"}, compiled_text=forged_text, **target)
+  assert at_seal.value.code == "CONTROL_PLANE_REJECTED"
+
+
+def test_the_semantic_loader_also_checks_the_actual_bindings(
+  good: dict[str, Any], compiled_text: str
+) -> None:
+  """The same program with a binding that violates its compiled range guard is not loadable."""
+  from pipeline_validator.execution_ir import GlobalBinding
+
+  target = TARGET()
+  target["actual_bindings"] = {"Y": GlobalBinding("Y", 0x100000, 16, "rw")}  # smaller than the guard
+  with pytest.raises(PackageError) as caught:
+    load_text(encode(good), compiled_text=compiled_text, **target)
+  assert caught.value.code == "CONTROL_PLANE_REJECTED" and "range guard" in str(caught.value)
 
 
 # --------------------------------------------------------------------------------------- real build
@@ -447,6 +566,7 @@ def test_real_build_chain_seals_and_reloads_identically(tmp_path: Path) -> None:
   loaded = load_file(
     package,
     compiled_path=tmp_path / "compiled_program.json",
+    **TARGET(),
     image_path=image,
     target=json.loads(package.read_text())["target_fingerprint"],
   )
@@ -461,7 +581,7 @@ def test_real_build_chain_seals_and_reloads_identically(tmp_path: Path) -> None:
   bad = tmp_path / "tampered.elf"
   bad.write_bytes(bytes(tampered))
   with pytest.raises(PackageError) as caught:
-    load_file(package, compiled_path=tmp_path / "compiled_program.json", image_path=bad)
+    load_file(package, compiled_path=tmp_path / "compiled_program.json", **TARGET(), image_path=bad)
   assert caught.value.code == "IMAGE_BYTES_MISMATCH"
 
 
