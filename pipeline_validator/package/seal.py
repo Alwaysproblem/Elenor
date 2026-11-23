@@ -152,10 +152,24 @@ def _elf_layout(image_bytes: bytes) -> dict[str, int | None]:
   text: list[tuple[int, int]] = []
   data: list[tuple[int, int, int]] = []
   for index in range(phnum):
-    kind, _off, vaddr, _paddr, filesz, memsz, flags, _align = struct.unpack_from(
+    kind, offset, vaddr, _paddr, filesz, memsz, flags, _align = struct.unpack_from(
       "<IIIIIIII", image_bytes, phoff + index * phentsize
     )
-    if kind != _PT_LOAD or memsz == 0:
+    if kind != _PT_LOAD:
+      continue
+    # a segment may not claim more file bytes than it loads, bytes the file does not hold, or addresses
+    # past the 32-bit space: a hash of truncated or inconsistent bytes still identifies them, so the
+    # ranges are checked here rather than trusted
+    if filesz > memsz:
+      raise fail(f"PT_LOAD {index}: p_filesz {filesz} exceeds p_memsz {memsz}")
+    if filesz and offset + filesz > len(image_bytes):
+      raise fail(
+        f"PT_LOAD {index}: file range [{offset}, {offset + filesz}) "
+        f"runs past the {len(image_bytes)}-byte file"
+      )
+    if vaddr + memsz > 1 << 32:
+      raise fail(f"PT_LOAD {index}: [{vaddr:#x}, +{memsz}) leaves the 32-bit address space")
+    if memsz == 0:
       continue
     if flags & _PF_X:
       text.append((vaddr, filesz))

@@ -752,6 +752,44 @@ def test_a_file_that_is_not_a_coral_elf_is_refused_even_when_its_hash_matches(go
     assert caught.value.code == "IMAGE_NOT_ELF", label
 
 
+def _with_phdr(blob: bytes, index: int, **fields: int) -> bytes:
+  """Rewrite one field of one program header in an ELF built by make_elf (offset/filesz/memsz/vaddr)."""
+  slot = {"offset": 4, "vaddr": 8, "filesz": 16, "memsz": 20}
+  out = bytearray(blob)
+  for name, value in fields.items():
+    struct.pack_into("<I", out, 52 + 32 * index + slot[name], value)
+  return bytes(out)
+
+
+def test_pt_load_ranges_must_be_consistent_with_the_file_that_was_hashed(good: dict[str, Any]) -> None:
+  """A hash of truncated or inconsistent bytes still identifies them, so the segment ranges are checked
+  against the supplied bytes: the file must hold every byte a segment claims, and a segment cannot ship
+  more file bytes than it loads or leave the 32-bit address space."""
+
+  def named(blob: bytes) -> dict[str, Any]:
+    package = copy.deepcopy(good)
+    package["image"]["bytes_sha256"] = hashlib.sha256(blob).hexdigest()
+    return package
+
+  whole = IMAGE
+  text_offset = struct.unpack_from("<I", whole, 52 + 4)[0]
+  cases = {
+    "truncated inside the text bytes": whole[: text_offset + 100],
+    "truncated before the text begins": whole[: text_offset - 1],
+    "text offset past the end of the file": _with_phdr(whole, 0, offset=len(whole) + 8),
+    # 200 file bytes fit inside the file (so the range check passes) but exceed the 100 the segment loads
+    "filesz larger than memsz": _with_phdr(whole, 1, filesz=200, memsz=100),
+    "data offset past the end of the file": _with_phdr(whole, 1, offset=len(whole) - 4),
+    "segment leaves the 32-bit address space": _with_phdr(whole, 1, vaddr=0xFFFFFF00),
+  }
+  verify_image(named(whole), whole)  # control: the untouched image is accepted
+  for label, blob in cases.items():
+    with pytest.raises(PackageError) as caught:
+      verify_image(named(blob), blob)
+    assert caught.value.code == "IMAGE_NOT_ELF", label
+    assert "PT_LOAD" in str(caught.value) or "program header" in str(caught.value), label
+
+
 # --------------------------------------------------------------------------------------- real build
 HAVE_TOOLCHAIN = TOOLCHAIN.is_dir()
 
@@ -851,6 +889,28 @@ def test_real_build_manifest_metadata_is_the_real_elf_and_an_edited_entry_is_ref
       target=copy.deepcopy(CORAL_TARGET),
     )
   assert at_load.value.code == "ENTRY_MISMATCH"
+
+  # Truncated copies of the real ELF, each named by its OWN hash: the hash identifies the truncated bytes,
+  # so only the segment-range check notices that the file no longer holds what its headers claim.
+  load_end = max(
+    struct.unpack_from("<II", elf, 52 + 32 * i + 4)[0] + struct.unpack_from("<I", elf, 52 + 32 * i + 16)[0]
+    for i in range(struct.unpack_from("<H", elf, 44)[0])
+    if struct.unpack_from("<I", elf, 52 + 32 * i)[0] == 1
+  )
+  # the bytes after the last PT_LOAD (symbols, section headers) are not loaded: dropping only those is fine
+  tail_only = elf[:load_end]
+  named_tail = copy.deepcopy(package)
+  named_tail["image"]["bytes_sha256"] = hashlib.sha256(tail_only).hexdigest()
+  verify_image(named_tail, tail_only)
+  for label, cut in (
+    ("one byte into the text", elf[: load_end - 1]),
+    ("half the text", elf[: load_end - 80]),
+  ):
+    truncated = copy.deepcopy(package)
+    truncated["image"]["bytes_sha256"] = hashlib.sha256(cut).hexdigest()
+    with pytest.raises(PackageError) as short:
+      verify_image(truncated, cut)
+    assert short.value.code == "IMAGE_NOT_ELF" and "runs past" in str(short.value), label
 
 
 @pytest.mark.skipif(not HAVE_TOOLCHAIN, reason="pinned C004 toolchain not extracted (cn env seed)")
