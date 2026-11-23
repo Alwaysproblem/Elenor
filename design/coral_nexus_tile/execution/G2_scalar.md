@@ -559,7 +559,7 @@ ROB 同 PC 双 Context store、错误 op_seq、独立退休、局部 fault flush
   - `cn unit --suite w1 --config "$C2"`：**44 passed, 0 failed**（含新增 `pipeline_validator/tests/test_w1_gate_wake.py` 9 项，覆盖真实 12 步 `ProfileController` `CLOSE_ISSUE`→`OPEN_ISSUE` Route 唤醒、Task 准入零轮询、PLAN 后 HOLD 前关门零父获取/零 HOLD 与开闸单次 HOLD、关门期回滚与已接受任务退休畅通、连续翻转 coalesce、统一 `GroupPortAdapter` 令牌、非 gate 背压不变性、故障清理、L1/L2 层隔离以及 Verilated C ABI 边界 `GATE_NOTIFY` 实发）。
   - `cn unit --suite contracts --config "$C2"`：**1330 passed, 0 failed**（全部 C009–C020 合同与行号锚点零漂移）；`cn sources verify`：**57/57 pass**。
   - 全量 `pipeline_validator/tests/`：**625 passed, 1 skipped**（split-KV 分区交接仅适用于 decode）；变更文件 pre-commit 全绿。
-- 验收包：`out/coral_nexus/C036/c022-eq-gASTOMMj/C036-evidence.tar.gz`，SHA-256 `928a3b4a33debcff586504f154c301fd0b636a9b1820a5044f04666e09148c99`（内含 `c022/` 四场景 report/trace 与 `equivalence_report.json`、`unit/`、`contracts/`、`sources/` 与全量 `validator.xml`）；CTRL 背压 `GATE_NOTIFY(open)` 先于 `TASK_COMMIT` 补充回归收据位于 `out/coral_nexus/C036/open-order-vgNybrDF/`（`w1` 44/44、`contracts` 1330/1330）。消费者交接：C040（oneTile gate 路径）与 G4 C058（12 步真 FSM）。
+- 验收包（最终 head `44494c181f` 全量复验）：`out/coral_nexus/C036/final-Q92e3x2j/C036-evidence.tar.gz`，SHA-256 `b72975a5cffa947e8b8cc8e9b4ced315c5bce4d2ad08f3db5bbdec21ffdd604d`（内含 `c022/` 四场景 report/trace 与 `equivalence_report.json`（四场景全相等）、`unit/`（w1 44/44）、`contracts/`（1330/1330）、`sources/`（57/57）与全量 `validator.xml`（625 passed, 1 skipped））。消费者交接：C040（oneTile gate 路径）与 G4 C058（12 步真 FSM）。
 
 <a id="c037"></a>
 
