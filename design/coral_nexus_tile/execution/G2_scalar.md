@@ -663,6 +663,15 @@ ROB 同 PC 双 Context store、错误 op_seq、独立退休、局部 fault flush
 
 - **通过/交接**：正负例全过 + `assert_l2_closed`；消费者：C040（顶层安装接线）、C041、G4 C063（多映像冷热/失效扩展）。
 
+### C039 交接：PROGRAM 安装与取指
+
+- `prepare_programs` 先核对 T58 指定的 C038 attempt-002 双包和公共 freeze，再将各 144 B 的可执行段分别上传到 Group HBM 的 `0x300000`、`0x301000`。两份包身份不同，text 的 SHA-256 相同；ACK 校验的是实收 text，不是 ELF 或外层包的摘要。
+- `ProgramResidencyManager.acquire` 对同 Tile、同身份的 pending 请求只发一个 INSTALL。引用和完成点由 Group 统一持有。无引用不等于驱逐：显式失效后不再命中，待真实 `INVALIDATE_ACK` 才回收 slot。旧 epoch 回复不能完成新事务；纯 Python 的估算延迟不作为安装证据。
+- T58 使用真实 Group、HBM、`ProgramService` 和 Verilated `install_service`，经 C030 读回 SRAM 字节。A 冷装 3 次请求、144 B，A 热命中 0 次、0 B；再装 B 后两 slot 位图为 `0b11`，仅失效 A 后为 `0b10`，Group reset 后为零。提交到 C030 时故意翻转字节的变异能通过传输阶段摘要校验，但在独立取指对比处失败。
+- **C040 接线边界**：以 Loader 核对的地址、长度及 text 摘要提供可信 setup；执行必须消费有效的本地 handle 和 `fetch_allow_o`，不能把 SRAM byte-valid 或“已收到安装头”当作可执行。测试中的原始 SRAM probe 可在 gate 关闭时观察物理字节，不代表 UCE 获准取指。本卡未执行完整 Coral Core。
+- **验收**：W5 **197 passed**；C2 实时联仿的 9 组序列均通过，最终 `l2_objects=[]`、`credits_hold=true`；独立 C1/C2 安装 bench 各 277 项检查通过，8 个安装 RTL 变异和 1 个联仿读回变异均在编译成功后由运行断言检出。W1 45 passed，contracts 1416 passed，G1、sources 通过；validator 回归 716 passed、1 skipped。最终 gate 拒绝错误 handle 后的取指，T58 覆盖 A/B 每条 fetch line；这两项以最终注册 W5 运行为准。
+- **证据**：`out/coral_nexus/C039/attempt-001/C039-evidence.tar.gz`，SHA-256 `f09a310a74e7fc00e4082fdde2c457969c12f9bfb648a8d8c97ea06291d38749`；`residency-cosim.json` 记录实际读请求数、传输字节和逐步驻留位图，非性能测量。
+
 <a id="c040"></a>
 
 ## C040 — 完整 oneTile 标量顶层与原生返回链

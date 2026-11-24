@@ -1,0 +1,11 @@
+--- a/w5/install_service.sv
++++ b/w5/install_service.sv
+@@ -408,7 +408,7 @@
+   // An invalidating record whose references have all drained.
+   function automatic logic inv_due(input int k);
+     return r_valid[SLOT_W'(k)] && r_inv[SLOT_W'(k)] &&
+-           ref_of(PROG_ID_W'(r_pid[SLOT_W'(k)]), EPOCH_W'(r_epoch[SLOT_W'(k)])) == 32'd0;
++           1'b1;
+   endfunction
+ 
+   // -------------------------------------------------------------------

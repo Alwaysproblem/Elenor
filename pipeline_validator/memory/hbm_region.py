@@ -132,6 +132,10 @@ class HBMRegion:
       self.trace.hbm_unbind(name, cycle)
       self.trace.hbm(self.snapshot(), cycle)
 
+  def bound_ranges(self) -> tuple[tuple[int, int], ...]:
+    """Occupied half-open IOVA ranges for preflighting a batch of host uploads."""
+    return tuple((handle.base_address, handle.end_address) for handle in self._bindings.values())
+
   def used_bytes(self) -> int:
     return sum(handle.size_bytes for handle in self._bindings.values())
 

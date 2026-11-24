@@ -1,0 +1,11 @@
+--- a/w5/install_service.sv
++++ b/w5/install_service.sv
+@@ -280,7 +280,7 @@
+       // whose local_handle was never confirmed by PROGRAM_READY keeps
+       // ready_o low AND this gate closed; resident_o (bitmap, committed)
+       // is unaffected.
+-      if (r_valid[k] && !r_inv[k] && r_ready[k] &&
++      if (r_valid[k] && r_ready[k] &&
+           64'(fetch_addr_i) >= lo && 64'(fetch_addr_i) < hi)
+         fetch_allow_o = 1'b1;
+     end

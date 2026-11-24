@@ -1,0 +1,416 @@
+schema: cn_program_scenario/v1
+name: t58_cold_warm
+# Paths are relative to --package-root: the C038 attempt-002 release or its byte-identical
+# rebuild (`cn package --binding kernels/bindings/scalar_ctl_v1.yaml`). `release` pins the
+# digests of that release; `slots` names the two package references.
+slot_freeze: slot_freeze.json
+slots:
+  A:
+    package: A/package.json
+    package_hash: f062e954f3523106ec5fe8ee5729d37d419b1c68ed88d47f0aebea5e9d3f8bdc
+    hbm_iova: 0x300000
+  B:
+    package: B/package.json
+    package_hash: 1cf65e4510afb7802601d7eba2495e3ccbc26e20a281a6f1cb14ba8b3ca4829d
+    hbm_iova: 0x301000
+launch_bindings:
+  X: { base_iova: 0x100000, size_bytes: 32, permissions: r }
+  Y: { base_iova: 0x200000, size_bytes: 32, permissions: w }
+release:
+  freeze_sha256: 4449aedc56d462cd76fc61617582799d1da3d2b9ecd0a57693f52199674d3075
+  image_sha256:
+    A: a4df3790410228418027b44052cf0b64b4a4c7e3a05906eb4813256e6365d6a4
+    B: e0db486e5fdd8011c213092226d41319b4803b24855938d5b371527dadd708c7
+expected:
+  # T-58 main line, referenced by the cold_warm steps below.
+  text_bytes: &text_bytes 144
+  read_requests_per_cold: &cold_reads 3
+  warm_read_requests: &warm_reads 0
+  resident_bitmap: &bitmap_both 3
+  after_invalidate_a_bitmap: &bitmap_b 2
+  after_group_reset_bitmap: &bitmap_none 0
+# Negative-only geometry, deliberately NOT sealed C038 packages: each entry is a test fixture
+# for exactly one residency rule and never stands in for a released image.
+fixtures:
+  C: { text_from: B, program_id: 3, text_base: 0 } # identity change inside slot A
+  oversize: { text_bytes: 5000, program_id: 7, text_base: 4096 } # cannot fit one 4096 B slot
+# Every sequence starts from a reset Tile and a reset Group transaction state (images and
+# uploads stay registered). A step is one verb plus optional `expect` / `reason` / `in_flight`
+# / `holder` options. `epochs` are relative to the identity's first record of the sequence.
+# `inject` steps send deliberately malformed or hostile Group traffic to prove the Tile refuses
+# it; they never stand in for a manager message.
+steps:
+  cold_warm:
+    - { probe: { slot: B, offset: 0, unwritten: true } } # nothing resident: no bytes are invented
+    - { acquire: A, holder: 0, expect: pending }
+    - {
+        check:
+          {
+            states: { A: RESIDENT, B: ABSENT },
+            bitmap: 1,
+            ready_bitmap: 1,
+            epochs: { A: 0 },
+            refs: { A: 1 },
+          },
+      }
+    - { check: { read_requests: *cold_reads, external_bytes: *text_bytes } }
+    - {
+        check:
+          {
+            last: { read_requests: *cold_reads, external_bytes: *text_bytes },
+            lockstep: true,
+            l2_closed: true,
+          },
+      }
+    - { probe: { slot: A, offset: 0 } }
+    - { probe: { slot: A, offset: 32 } }
+    - { probe: { slot: A, offset: 64 } }
+    - { probe: { slot: A, offset: 96 } }
+    - { probe: { slot: A, offset: 128 } } # tail line: 16 text bytes + 16 pad bytes
+    - { probe: { slot: A, offset: 4064, unwritten: true } } # the rest of the slot was never written
+    - { probe: { slot: B, offset: 0, unwritten: true } }
+    - { acquire: A, holder: 1, expect: hit } # warm: the resident text is reused
+    - {
+        check:
+          {
+            read_requests: *cold_reads,
+            external_bytes: *text_bytes,
+            refs: { A: 2 },
+          },
+      }
+    - {
+        check:
+          {
+            last:
+              {
+                read_requests: *warm_reads,
+                external_bytes: *warm_reads,
+                outbox: 0,
+              },
+          },
+      }
+    - {
+        check:
+          {
+            counters:
+              {
+                cold_misses: 1,
+                warm_hits: 1,
+                installs_armed: 1,
+                install_acks: 1,
+              },
+          },
+      }
+    - { acquire: B, holder: 0, expect: pending } # second image, other slot
+    - {
+        check:
+          {
+            states: { A: RESIDENT, B: RESIDENT },
+            bitmap: *bitmap_both,
+            ready_bitmap: *bitmap_both,
+          },
+      }
+    - { check: { read_requests: 6, external_bytes: 288 } }
+    - { probe: { slot: B, offset: 0 } }
+    - { probe: { slot: B, offset: 32 } }
+    - { probe: { slot: B, offset: 64 } }
+    - { probe: { slot: B, offset: 96 } }
+    - { probe: { slot: B, offset: 128 } }
+    - { probe: { slot: A, offset: 0 } } # installing B left A untouched
+    - { release: A, holder: 1 }
+    - { release: A, holder: 0 }
+    - { check: { states: { A: RESIDENT }, refs: { A: 0 }, read_requests: 6 } } # text stays resident
+    - { invalidate: A }
+    - {
+        check:
+          {
+            states: { A: ABSENT, B: RESIDENT },
+            bitmap: *bitmap_b,
+            ready_bitmap: *bitmap_b,
+          },
+      }
+    - { probe: { slot: A, offset: 0, gate: 0 } } # bytes remain readable; the residency gate is closed
+    - { probe: { slot: B, offset: 0 } }
+    - { group_reset: true }
+    - {
+        check:
+          {
+            states: { A: ABSENT, B: ABSENT },
+            bitmap: *bitmap_none,
+            ready_bitmap: *bitmap_none,
+          },
+      }
+    - {
+        check:
+          { lockstep: true, l2_closed: true, hbm_intact: true, faults: [] },
+      }
+  dedup:
+    - { acquire: A, holder: 0, expect: pending, in_flight: true }
+    - { check: { states: { A: PENDING_INSTALL }, bitmap: 0 } }
+    - { acquire: A, holder: 1, expect: pending } # joins the one install: no second PROGRAM_INSTALL
+    - { check: { states: { A: RESIDENT }, bitmap: 1, refs: { A: 2 } } }
+    - { check: { last: { kind: pending, outbox: 0 } } }
+    - { check: { read_requests: *cold_reads, external_bytes: *text_bytes } }
+    - {
+        check:
+          {
+            counters:
+              {
+                cold_misses: 1,
+                installs_armed: 1,
+                install_acks: 1,
+                shared_installs: 1,
+              },
+          },
+      }
+    - { acquire: A, holder: 2, expect: hit }
+    - {
+        check:
+          {
+            counters:
+              {
+                cold_misses: 1,
+                installs_armed: 1,
+                warm_hits: 1,
+                shared_installs: 1,
+              },
+          },
+      }
+    - { release: A, holder: 2 }
+    - { release: A, holder: 1 }
+    - { release: A, holder: 0 }
+    - {
+        check:
+          {
+            states: { A: RESIDENT },
+            refs: { A: 0 },
+            read_requests: *cold_reads,
+          },
+      }
+    - { check: { lockstep: true, l2_closed: true, faults: [] } }
+  invalidating_commit:
+    - { acquire: A, expect: pending }
+    - { release: A }
+    - { hold: 1 } # the Group stops accepting T2G words
+    - { invalidate: A, in_flight: true }
+    - { idle: 64 } # the INVALIDATE_ACK is offered, never accepted
+    - { check: { states: { A: INVALIDATING }, bitmap: 0, t2g_valid: 1 } }
+    - { acquire: A, expect: wait, reason: WAIT_PROGRAM_INVALIDATING } # no warm hit while invalidating
+    - {
+        check:
+          {
+            read_requests: *cold_reads,
+            external_bytes: *text_bytes,
+            refs: { A: 0 },
+          },
+      }
+    - { check: { last: { kind: wait, outbox: 0 } } }
+    - { hold: 0 }
+    - { settle: A }
+    - { check: { states: { A: ABSENT }, faults: [] } }
+    - { acquire: A, expect: pending } # cold again under the next epoch
+    - { check: { states: { A: RESIDENT }, epochs: { A: 1 } } }
+    - { check: { read_requests: 6, external_bytes: 288 } }
+    - { check: { lockstep: true, l2_closed: true, faults: [] } }
+  identity_change:
+    - { acquire: A, expect: pending }
+    - { check: { epochs: { A: 0 } } }
+    - { release: A }
+    - { group_reset: true } # the Group advances every identity
+    - { check: { states: { A: ABSENT }, bitmap: *bitmap_none } }
+    - { acquire: A, expect: pending } # the old identity is stale: cold again
+    - { check: { states: { A: RESIDENT }, epochs: { A: 1 } } }
+    - { check: { read_requests: *cold_reads, external_bytes: *text_bytes } }
+    - { release: A }
+    - { invalidate: A }
+    - { fixture: C }
+    - { acquire: C, expect: pending } # slot A now carries a different identity
+    - {
+        check:
+          { states: { C: RESIDENT, A: ABSENT }, bitmap: 1, read_requests: 6 },
+      }
+    - { probe: { slot: C, offset: 0 } }
+    - { acquire: A, expect: wait, reason: WAIT_SLOT_IN_USE } # bounded wait, zero traffic
+    - { check: { read_requests: 6, states: { C: RESIDENT } } }
+    - { check: { lockstep: true, l2_closed: true, faults: [] } }
+  tile_invalidate:
+    - { acquire: A, expect: pending }
+    - { acquire: B, expect: pending }
+    - { release: A }
+    - { release: B }
+    - { check: { states: { A: RESIDENT, B: RESIDENT }, bitmap: *bitmap_both } }
+    - { invalidate_tile: 0 }
+    - {
+        check:
+          {
+            states: { A: ABSENT, B: ABSENT },
+            bitmap: *bitmap_none,
+            ready_bitmap: *bitmap_none,
+          },
+      }
+    - { probe: { slot: A, offset: 0, unwritten: true } }
+    - { probe: { slot: B, offset: 0, unwritten: true } }
+    - { acquire: A, expect: pending }
+    - {
+        check:
+          {
+            states: { A: RESIDENT },
+            epochs: { A: 1 },
+            read_requests: *cold_reads,
+          },
+      }
+    - { check: { lockstep: true, l2_closed: true, faults: [] } }
+  backpressure:
+    - { acquire: A, expect: pending }
+    - { fetch_hold: 1 }
+    - { probe: { slot: A, offset: 32, arm_only: true } }
+    - { idle: 24 } # the fetch response is offered, not consumed
+    - { fetch_hold: 0 }
+    - { probe_settle: { slot: A, offset: 32 } }
+    - { release: A }
+    - { hold: 1 }
+    - { invalidate: A, in_flight: true }
+    - { idle: 64 }
+    - { check: { states: { A: INVALIDATING }, t2g_valid: 1 } }
+    - { hold: 0 }
+    - { settle: A }
+    - { check: { states: { A: ABSENT }, faults: [] } }
+    - { hold: 1 }
+    - { acquire: A, in_flight: true }
+    - { idle: 200 } # every READ_REQ waits under the hold
+    - { check: { states: { A: PENDING_INSTALL }, t2g_valid: 1 } }
+    - { hold: 0 }
+    - { settle: A }
+    - { check: { states: { A: RESIDENT }, read_requests: 6 } }
+    - { check: { lockstep: true, l2_closed: true, faults: [] } }
+  warm_refuse:
+    - { acquire: A, expect: pending }
+    - { inject: [rewrite, { slot: A, as: B }] } # another identity into a resident slot
+    - {
+        check:
+          {
+            faults: [INVALID_DESCRIPTOR],
+            states: { A: RESIDENT },
+            bitmap: 1,
+            read_requests: *cold_reads,
+          },
+      }
+    - { probe: { slot: A, offset: 0 } } # the resident text was not rewritten
+    - { probe: { slot: B, offset: 0, unwritten: true } }
+    - { inject: [warm_reinstall, { slot: A }] } # the identical identity re-ACKs, zero reads
+    - {
+        check:
+          {
+            read_requests: *cold_reads,
+            warm_hits: 1,
+            states: { A: RESIDENT },
+            ready_bitmap: 1,
+          },
+      }
+    - { probe: { slot: A, offset: 128 } }
+    - { patch: { slot: A, field: launch_descriptors, layer: runtime } } # outside the sealed patch_mask
+    - {
+        check:
+          {
+            rejections: [INVALID_DESCRIPTOR],
+            read_requests: *cold_reads,
+            manager_fault: INVALID_DESCRIPTOR,
+          },
+      }
+    - { acquire: A, expect: refused, reason: RESIDENCY_FAULTED }
+    - { group_reset: true }
+    - {
+        check:
+          {
+            states: { A: ABSENT },
+            manager_fault: null,
+            lockstep: true,
+            l2_closed: true,
+            hbm_intact: true,
+          },
+      }
+  fail_closed:
+    - { inject: [no_setup, { slot: B }] } # INSTALL without a trusted setup
+    - { check: { faults: [INVALID_DESCRIPTOR], bitmap: 0, read_requests: 0 } }
+    - { probe: { slot: B, offset: 0, unwritten: true } }
+    - { inject: corrupt_chunk } # one byte flips in transit
+    - { acquire: A, expect: pending }
+    - {
+        check: { states: { A: ABSENT }, bitmap: 0, read_requests: *cold_reads },
+      }
+    - {
+        check:
+          {
+            faults: [INVALID_DESCRIPTOR, INVALID_DESCRIPTOR],
+            last: { faulted: true },
+          },
+      }
+    - { check: { manager_fault: INVALID_DESCRIPTOR } }
+    - { probe: { slot: A, offset: 0, unwritten: true } } # nothing was committed: no half residency
+    - { acquire: A, expect: refused, reason: RESIDENCY_FAULTED }
+    - { inject: oversize } # text that cannot fit a slot
+    - {
+        check:
+          {
+            faults: [INVALID_DESCRIPTOR, INVALID_DESCRIPTOR, L2_CAPACITY_FAULT],
+          },
+      }
+    - { check: { read_requests: *cold_reads, bitmap: 0 } }
+    - { inject: [unsolicited_resp, { slot: A }] }
+    - {
+        check:
+          {
+            faults:
+              [
+                INVALID_DESCRIPTOR,
+                INVALID_DESCRIPTOR,
+                L2_CAPACITY_FAULT,
+                STREAM_PROTOCOL_ERROR,
+              ],
+          },
+      }
+    - { group_reset: true }
+    - { inject: wrong_handle } # PROGRAM_READY echoes another handle
+    - { acquire: A, expect: pending }
+    - { await: STREAM_PROTOCOL_ERROR }
+    - {
+        check:
+          {
+            faults: [STREAM_PROTOCOL_ERROR],
+            states: { A: RESIDENT },
+            ready_bitmap: 0,
+          },
+      }
+    - { probe: { slot: A, offset: 0, gate: 0 } } # installed bytes, but no fetch authorization
+    - { release: A }
+    - { group_reset: true }
+    - {
+        check:
+          {
+            states: { A: ABSENT },
+            manager_fault: null,
+            lockstep: true,
+            l2_closed: true,
+            faults: [],
+          },
+      }
+  invalidate_serial:
+    - { acquire: A, expect: pending }
+    - { release: A }
+    - { exec_ref: [inc, A] } # a Tile execution reference the Group does not hold
+    - { inject: [invalidate_with_ref, { slot: A }] }
+    - { idle: 200 } # the ACK waits for the reference: no permanent wait
+    - { check: { states: { A: RESIDENT }, ready_bitmap: 0, faults: [] } } # raw Tile invalidation closes its gate
+    - { exec_ref: [dec, A] }
+    - { await: INVALIDATE_ACK }
+    - { check: { tile_state: 0 } } # ST_IDLE once the ACK was emitted
+    - { group_reset: true }
+    - {
+        check:
+          {
+            states: { A: ABSENT },
+            bitmap: *bitmap_none,
+            lockstep: true,
+            l2_closed: true,
+          },
+      }

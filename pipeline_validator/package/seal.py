@@ -204,7 +204,7 @@ def _elf_layout(image_bytes: bytes) -> dict[str, int | None]:
   phentsize, phnum = struct.unpack_from("<HH", image_bytes, 42)
   if phentsize < 32 or phoff + phnum * phentsize > len(image_bytes):
     raise fail("program header table is outside the file")
-  text: list[tuple[int, int]] = []
+  text: list[tuple[int, int, int]] = []
   data: list[tuple[int, int, int]] = []
   load_ranges: list[tuple[int, int]] = []
   for index in range(phnum):
@@ -229,7 +229,7 @@ def _elf_layout(image_bytes: bytes) -> dict[str, int | None]:
       continue
     load_ranges.append((vaddr, vaddr + memsz))
     if flags & _PF_X:
-      text.append((vaddr, filesz))
+      text.append((vaddr, filesz, offset))
     elif flags & _PF_W:
       data.append((vaddr, filesz, memsz))
   load_ranges.sort()
@@ -242,13 +242,14 @@ def _elf_layout(image_bytes: bytes) -> dict[str, int | None]:
     "entry": entry,
     "text_base": text[0][0],
     "text_bytes": text[0][1],
+    "text_offset": text[0][2],
     "data_base": min(v for v, _f, _m in data) if data else None,
     "data_filesz": sum(f for _v, f, _m in data),
     "data_memsz": sum(m for _v, _f, m in data),
   }
 
 
-def verify_image(package: dict[str, Any], image_bytes: bytes) -> None:
+def verify_image(package: dict[str, Any], image_bytes: bytes) -> memoryview:
   """The image identity is its bytes, and the manifest's execution metadata must be what those bytes are.
 
   ``image.bytes_sha256`` authenticates the bytes but ``entry`` and ``link_layout`` are not under the
@@ -277,6 +278,9 @@ def verify_image(package: dict[str, Any], image_bytes: bytes) -> None:
   for field, claimed, linked, code, what in checks:
     if claimed != linked:
       raise PackageError(code, field, f"manifest {claimed}, linked ELF {what} {linked}")
+  offset = elf["text_offset"]
+  assert offset is not None
+  text = memoryview(image_bytes)[offset : offset + image["text_bytes"]]
   resource = package["resource_manifest"]
   if elf["data_base"] is None:
     if layout["data_bytes"] or resource["static_data_bytes"] or resource["stack_bytes"]:
@@ -285,7 +289,7 @@ def verify_image(package: dict[str, Any], image_bytes: bytes) -> None:
         "$.image.link_layout.data_base",
         "the manifest declares data the ELF does not load",
       )
-    return
+    return text
   if layout["data_base"] != elf["data_base"]:
     raise PackageError(
       "LAYOUT_MISMATCH",
@@ -307,3 +311,4 @@ def verify_image(package: dict[str, Any], image_bytes: bytes) -> None:
       "$.image.link_layout.data_bytes",
       f"declared data + proven stack + scratch is {need}, the linked data region is {elf['data_memsz']}",
     )
+  return text

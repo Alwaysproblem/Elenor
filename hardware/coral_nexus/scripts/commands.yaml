@@ -135,3 +135,8 @@ commands:
           - hardware/coral_nexus/verification/unit/w5/test_scalar_kernel.py
           - hardware/coral_nexus/verification/unit/w5/test_scalar_decode.py
           - pipeline_validator/tests/test_w5_scalar_package.py
+          - hardware/coral_nexus/verification/unit/w5/test_install_service.py
+          - pipeline_validator/tests/test_w5_residency_state.py
+          - pipeline_validator/tests/test_w5_residency.py
+          - pipeline_validator/tests/test_w5_program_prepare.py
+          - hardware/coral_nexus/verification/unit/w5/test_install_service.py

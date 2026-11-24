@@ -104,7 +104,7 @@ def test_program_install_completes_only_on_verified_tile_ack() -> None:
   offset = 0
   while offset < len(img.text):
     req = _msg("PROGRAM_READ_REQ", _img_fields(img))
-    resp, chunk = svc.handle_read_req(req, offset=offset)
+    resp, chunk = svc.handle_read_req(req)
     assert resp.message_type == "PROGRAM_READ_RESP"
     assert resp.fields["hbm_chunk_len"] == len(chunk)
     served += chunk
@@ -151,8 +151,8 @@ def test_program_install_completes_only_on_verified_tile_ack() -> None:
   assert (
     svc.handle_ready(_msg("PROGRAM_READY", {**_img_fields(img), "local_handle": 3}, direction="G2T")) == 3
   )
-  ack = svc.handle_invalidate(_msg("PROGRAM_INVALIDATE", _img_fields(img), direction="G2T"))
-  assert ack.message_type == "INVALIDATE_ACK"
+  svc.handle_invalidate(_msg("PROGRAM_INVALIDATE", _img_fields(img), direction="G2T"))
+  svc.handle_invalidate_ack(_msg("INVALIDATE_ACK", _img_fields(img)))
   assert not svc.install_complete(img.program_id, img.version, img.package_hash)
 
 

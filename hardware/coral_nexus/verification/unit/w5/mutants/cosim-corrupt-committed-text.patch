@@ -1,0 +1,12 @@
+diff --git a/w5/install_service.sv b/w5/install_service.sv
+--- a/w5/install_service.sv
++++ b/w5/install_service.sv
+@@ -433,7 +433,7 @@
+     ins_data_o = '0;
+     for (int b = 0; b < WORD_BYTES; b++)
+       if (commit_sent * 64'(WORD_BYTES) + 64'(b) < cur_len)
+-        ins_data_o[b*8 +: 8] = stage[SA_W'(commit_sent * 64'(WORD_BYTES) + 64'(b))];
++        ins_data_o[b*8 +: 8] = stage[SA_W'(commit_sent * 64'(WORD_BYTES) + 64'(b))] ^ 8'h01;
+   end
+   assign ins_rsp_ready_o = (state == ST_COMMIT);
+   wire ins_beat_fire = commit_issue && ins_ready_i;

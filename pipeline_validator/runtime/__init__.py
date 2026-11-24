@@ -7,7 +7,14 @@ from .fault_ring import FaultCode, FaultDomain, FaultRecord, FaultRing
 from .firmware import FirmwareRuntime
 from .host_runtime import HostRuntime
 from .kernel_driver import KernelDriver
-from .program_table import ProgramResidencyManager, ProgramTableEntry, ResidencyState
+from .program_table import (
+  ProgramIdentity,
+  ProgramResidencyManager,
+  ProgramTableEntry,
+  ResidencyError,
+  ResidencyState,
+  ResidencyStorage,
+)
 from .reset_domain import ResetDomain, ResetRequest
 
 __all__ = [
@@ -21,9 +28,12 @@ __all__ = [
   "FirmwareRuntime",
   "HostRuntime",
   "KernelDriver",
+  "ProgramIdentity",
   "ProgramResidencyManager",
   "ProgramTableEntry",
   "ResetDomain",
   "ResetRequest",
+  "ResidencyError",
   "ResidencyState",
+  "ResidencyStorage",
 ]

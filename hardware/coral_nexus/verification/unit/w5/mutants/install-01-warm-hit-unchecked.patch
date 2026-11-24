@@ -1,0 +1,20 @@
+--- a/w5/install_service.sv
++++ b/w5/install_service.sv
+@@ -713,7 +713,7 @@
+               if (k >= SLOTS) begin
+                 raise_fault(FC_ADDRESS_FAULT);
+               end else if (r_valid[k] && !r_inv[k] &&
+-                  same_id(r_pid[k], r_ver[k], r_epoch[k], r_pkg[k], p, v, e, h)) begin
++                  1'b1) begin
+                 // WARM HIT: identical identity resident - re-ACK the stored
+                 // measurement and handle. ZERO READ_REQ.
+                 cur_pid <= p; cur_ver <= v; cur_epoch <= e; cur_pkg <= h;
+@@ -793,7 +793,7 @@
+             any_hit = 1'b0;
+             for (k = 0; k < SLOTS; k++)
+               if (r_valid[k] && !r_inv[k] &&
+-                  same_id(r_pid[k], r_ver[k], r_epoch[k], r_pkg[k], p, v, e, h)) begin
++                  1'b1) begin
+                 r_inv[k] <= 1'b1;          // serial point: fetch gate closes now
+                 any_hit = 1'b1;
+               end

@@ -1,0 +1,11 @@
+--- a/w5/install_service.sv
++++ b/w5/install_service.sv
+@@ -356,7 +356,7 @@
+       default: begin
+         unique case (rx_type)
+           64'(CN_MSG_PROGRAM_INSTALL):
+-            rx_admit = (state == ST_IDLE) && !inv_active;
++            rx_admit = (state == ST_IDLE);
+           64'(CN_MSG_PROGRAM_INVALIDATE):
+             rx_admit = !noop_pend &&
+                        ((state == ST_IDLE) || (state == ST_WAIT_READY) ||

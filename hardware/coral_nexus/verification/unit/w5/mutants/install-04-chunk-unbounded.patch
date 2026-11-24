@@ -1,0 +1,11 @@
+--- a/w5/install_service.sv
++++ b/w5/install_service.sv
+@@ -746,7 +746,7 @@
+             clen = pw[7];
+             if (state != ST_RECV || !req_out ||
+                 !same_id(p, v, e, h, cur_pid, cur_ver, cur_epoch, cur_pkg) ||
+-                clen == 64'd0 || clen > cur_len - cur_recvd) begin
++                clen == 64'd0) begin
+               // Fail stop: the pending install drops and the stream
+               // re-synchronises at the next header. The declared blob is
+               // NEVER drained on a header fault - an unbounded chunk_len

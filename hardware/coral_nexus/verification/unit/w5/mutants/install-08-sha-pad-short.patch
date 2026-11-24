@@ -1,0 +1,11 @@
+--- a/w5/install_service.sv
++++ b/w5/install_service.sv
+@@ -736,7 +736,7 @@
+                 commit_total <= ((su_len[si] + 64'(LINE_BYTES) - 64'd1) /
+                                  64'(LINE_BYTES)) * 64'(LINE_BYTES);
+                 commit_sent <= '0; commit_rsp <= '0; commit_fail <= 1'b0;
+-                nblocks <= (su_len[si] + 64'd72) / 64'd64;
++                nblocks <= su_len[si] / 64'd64;
+                 state <= ST_RECV;
+               end
+             end

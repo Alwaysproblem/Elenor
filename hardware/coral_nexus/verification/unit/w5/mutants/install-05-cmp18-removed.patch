@@ -1,0 +1,12 @@
+--- a/w5/install_service.sv
++++ b/w5/install_service.sv
+@@ -723,9 +723,6 @@
+                 cur_sidx <= SLOT_W'(k);
+                 cnt_warm <= cnt_warm + 64'd1;
+                 state <= ST_ACK;
+-              end else if (r_valid[k]) begin
+-                // Slot held by a different (or draining) identity: CMP-18.
+-                raise_fault(FC_INVALID_DESCRIPTOR);
+               end else begin
+                 // COLD INSTALL: pull the stream, then measure and commit.
+                 cur_pid <= p; cur_ver <= v; cur_epoch <= e; cur_pkg <= h;

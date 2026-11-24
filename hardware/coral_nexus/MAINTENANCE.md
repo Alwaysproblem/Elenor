@@ -508,6 +508,24 @@ before using the published index. Each package commits to the same measurements 
 own slot, program ID, entry, layout and image hash. A filename is not registration authority.
 Package production neither installs an image nor executes a full Tile.
 
+## C039 program installation
+
+Use the corrected C038 `attempt-002` package directory or reproduce it with the C038 build command above.
+To exercise only host preparation and inspect the upload addresses and text digests:
+
+```bash
+python -m pipeline_validator.cosim.program_prepare \
+  --scenario "$H/verification/scenarios/t58_cold_warm.yaml" \
+  --package-root "$E/package" --config "$C2"
+```
+
+The scenario pins the two package hashes. Preparation runs the independent Loader and common freeze
+check before registering either image. It seeds only the executable segment in the Python HBM source
+region. The package hash identifies a fixed image; the install ACK measures the transferred **text**
+instead (the two slot packages have different identities but identical instruction bytes).
+The CLI exits after preparation. The W5 co-simulation uses `prepare_programs` **in process** so
+PROGRAM pulls read the uploaded bytes in that same HBM instance. No HBM traffic belongs in `cn package`.
+
 ## Offline seeds (C004)
 
 - Inventory: `env/seed_targets.json` — every seed has URL/path + sha256 +

@@ -10,8 +10,8 @@ Group-side program service per W1 plan §8.2:
   the service verifies both against the registered image and never fabricates completion.
 - PROGRAM_READY records the Tile-local handle; PROGRAM_INVALIDATE -> INVALIDATE_ACK.
 
-The sealed read-only Loader lands in C037; this service consumes immutable validated metadata
-registered by the harness/scenario, not a fake loader.
+Host prepare validates packages, then registers immutable image identities and uploads their linked
+text to HBM. Each ProgramService serves one Tile's ordered PROGRAM channel, independently of data DMA.
 """
 
 from __future__ import annotations
@@ -19,6 +19,10 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
+from ..execution_ir import GlobalBinding
+from ..memory.allocator import AllocationHandle, MemoryInvariantError
+from ..memory.byte_store import ByteStore
+from ..memory.hbm_region import HBMRegion
 from .tile_port import BoundaryMessage
 
 CHUNK_BYTES = 64
@@ -64,21 +68,29 @@ class _InstallRecord:
   acked: bool = False
   ready_handle: int | None = None
   bytes_served: int = 0
+  invalidating: bool = False
 
 
 class ProgramService:
   """Serves PROGRAM channel traffic against registered immutable images."""
 
-  def __init__(self, *, chunk_bytes: int = CHUNK_BYTES) -> None:
+  def __init__(self, *, chunk_bytes: int = CHUNK_BYTES, hbm: HBMRegion | None = None) -> None:
     if isinstance(chunk_bytes, bool) or not isinstance(chunk_bytes, int) or chunk_bytes <= 0:
       raise ValueError("chunk_bytes must be a positive int")
     self.chunk_bytes = chunk_bytes
+    self.hbm = hbm if hbm is not None else HBMRegion(byte_store=ByteStore())
+    if self.hbm.byte_store is None:
+      raise ValueError("PROGRAM reads require byte-backed HBM")
+    self._sources: dict[tuple[int, int], AllocationHandle] = {}
+    self._next_iova = self.hbm.base_iova
+    self._epochs: dict[tuple[int, int], int] = {}
     self._images: dict[tuple[int, int], ProgramImage] = {}
     self._installs: dict[tuple[int, int, int, bytes], _InstallRecord] = {}
     self.stats = {
       "images_registered": 0,
       "installs_armed": 0,
       "chunks_served": 0,
+      "text_bytes_served": 0,
       "install_acks": 0,
       "ready": 0,
       "invalidates": 0,
@@ -101,13 +113,20 @@ class ProgramService:
     image = self._images.get((program_id, version))
     return image if image is not None and image.package_hash == package_hash else None
 
-  def register_image(self, image: ProgramImage) -> None:
+  def register_image(self, image: ProgramImage, *, hbm_iova: int | None = None) -> None:
     key = (image.program_id, image.version)
     existing = self._images.get(key)
     if existing is not None:
-      if existing is image or existing == image:
+      if existing == image and (hbm_iova is None or hbm_iova == self._sources[key].base_address):
         return
       raise ProgramServiceError("IMAGE_IDENTITY_CONFLICT", f"program {image.program_id} v{image.version}")
+    base = self._next_iova if hbm_iova is None else hbm_iova
+    handle = self.hbm.bind_external(GlobalBinding(f"program:{key[0]}:{key[1]}", base, len(image.text), "r"))
+    assert self.hbm.byte_store is not None
+    self.hbm.byte_store.seed_hbm(base, image.text, cycle=0)
+    self._sources[key] = handle
+    self._next_iova = max(self._next_iova, base + len(image.text))
+    self._epochs[key] = image.program_epoch
     self._images[key] = image
     self.stats["images_registered"] += 1
 
@@ -119,17 +138,20 @@ class ProgramService:
     if image is None:
       self.stats["rejects"] += 1
       raise ProgramServiceError("UNKNOWN_IMAGE", f"program {msg.fields.get('program_id')} not registered")
-    if int(msg.fields["program_epoch"]) != image.program_epoch:
+    if int(msg.fields["program_epoch"]) != self._epochs[(image.program_id, image.version)]:
       self.stats["rejects"] += 1
       raise ProgramServiceError("EPOCH_MISMATCH", str(msg.fields["program_epoch"]))
     key = self._key4(msg.fields)
     if key in self._installs:
       self.stats["rejects"] += 1
       raise ProgramServiceError("INSTALL_ALREADY_ARMED", f"program {image.program_id}")
-    self._installs[key] = _InstallRecord(image=image, slot=int(msg.fields["slot"]))
+    slot = int(msg.fields["slot"])
+    if any(rec.slot == slot for rec in self._installs.values()):
+      raise ProgramServiceError("SLOT_OCCUPIED", str(slot))
+    self._installs[key] = _InstallRecord(image=image, slot=slot)
     self.stats["installs_armed"] += 1
 
-  def handle_read_req(self, msg: BoundaryMessage, *, offset: int = 0) -> tuple[BoundaryMessage, bytes]:
+  def handle_read_req(self, msg: BoundaryMessage) -> tuple[BoundaryMessage, bytes]:
     """PROGRAM_READ_REQ (T2G) -> (PROGRAM_READ_RESP, real chunk bytes on the data channel)."""
     if msg.message_type != "PROGRAM_READ_REQ":
       raise ProgramServiceError("BAD_PROGRAM_MESSAGE", msg.message_type)
@@ -141,11 +163,21 @@ class ProgramService:
     if rec is None:
       self.stats["rejects"] += 1
       raise ProgramServiceError("READ_WITHOUT_INSTALL", f"program {image.program_id}")
-    chunk = image.text[offset : offset + self.chunk_bytes]
-    if not chunk:
+    if rec.acked or rec.invalidating:
+      raise ProgramServiceError("READ_AFTER_INSTALL", f"program {image.program_id}")
+    offset = rec.bytes_served  # v5 wire has no offset: the ordered request consumes the next chunk.
+    size = min(len(image.text) - offset, self.chunk_bytes)
+    if size <= 0:
       raise ProgramServiceError("READ_PAST_IMAGE", f"offset {offset} len {len(image.text)}")
+    assert self.hbm.byte_store is not None
+    try:
+      (segment,) = self.hbm.resolve(self._sources[(image.program_id, image.version)], offset, size, "r")
+      chunk = self.hbm.byte_store.read_hbm(segment.address, size)
+    except MemoryInvariantError as exc:
+      raise ProgramServiceError("PROGRAM_SOURCE_UNAVAILABLE", str(exc)) from exc
     rec.bytes_served += len(chunk)
     self.stats["chunks_served"] += 1
+    self.stats["text_bytes_served"] += len(chunk)
     resp = BoundaryMessage(
       message_type="PROGRAM_READ_RESP",
       channel="PROGRAM",
@@ -173,56 +205,84 @@ class ProgramService:
       measured = measured.tobytes()
     if installed_len != len(rec.image.text):
       raise ProgramServiceError("INSTALL_LEN_MISMATCH", f"{installed_len} != {len(rec.image.text)}")
-    if measured is not None and measured != hashlib.sha256(rec.image.text).digest():
+    if measured != hashlib.sha256(rec.image.text).digest():
       raise ProgramServiceError("INSTALL_HASH_MISMATCH", f"program {rec.image.program_id}")
+    if rec.bytes_served != installed_len or rec.invalidating:
+      raise ProgramServiceError("INCOMPLETE_INSTALL", f"served {rec.bytes_served} bytes")
     rec.acked = True
     self.stats["install_acks"] += 1
 
   def handle_ready(self, msg: BoundaryMessage) -> int:
-    """PROGRAM_READY (T2G): record the Tile-local handle; requires a prior ACK."""
+    """PROGRAM_READY (G2T): authorize the Tile-local handle after the verified ACK."""
     if msg.message_type != "PROGRAM_READY":
       raise ProgramServiceError("BAD_PROGRAM_MESSAGE", msg.message_type)
     rec = self._installs.get(self._key4(msg.fields))
-    if rec is None or not rec.acked:
+    if rec is None or not rec.acked or rec.invalidating:
       self.stats["rejects"] += 1
       raise ProgramServiceError("READY_WITHOUT_ACK", str(msg.fields.get("program_id")))
+    if rec.ready_handle is not None:
+      raise ProgramServiceError("DUPLICATE_READY", str(rec.ready_handle))
     rec.ready_handle = int(msg.fields["local_handle"])
     self.stats["ready"] += 1
     return rec.ready_handle
 
-  def handle_invalidate(self, msg: BoundaryMessage) -> BoundaryMessage:
-    """PROGRAM_INVALIDATE (G2T) -> INVALIDATE_ACK (T2G)."""
+  def handle_invalidate(self, msg: BoundaryMessage) -> None:
+    """Serialize invalidation. Keep the occupied record until the real Tile ACK."""
     if msg.message_type != "PROGRAM_INVALIDATE":
       raise ProgramServiceError("BAD_PROGRAM_MESSAGE", msg.message_type)
-    rec = self._installs.pop(self._key4(msg.fields), None)
+    rec = self._installs.get(self._key4(msg.fields))
     if rec is None:
       self.stats["rejects"] += 1
       raise ProgramServiceError("INVALIDATE_WITHOUT_INSTALL", str(msg.fields.get("program_id")))
+    if rec.invalidating:
+      raise ProgramServiceError("DUPLICATE_INVALIDATE", str(rec.slot))
+    rec.invalidating = True
+
+  def handle_invalidate_ack(self, msg: BoundaryMessage) -> None:
+    key = self._key4(msg.fields)
+    rec = self._installs.get(key)
+    if msg.message_type != "INVALIDATE_ACK" or rec is None or not rec.invalidating:
+      raise ProgramServiceError("UNEXPECTED_INVALIDATE_ACK")
+    self._drop_record(key)
     self.stats["invalidates"] += 1
-    ack = BoundaryMessage(
-      message_type="INVALIDATE_ACK", channel="PROGRAM", direction="T2G", fields=msg.fields, message_seq=0
-    )
-    _ = ack.pack_wire()
-    return ack
+
+  def _drop_record(self, key: tuple[int, int, int, bytes]) -> None:
+    del self._installs[key]
+    self._epochs[(key[0], key[1])] = key[2] + 1
+
+  def abort_install(self, msg: BoundaryMessage) -> None:
+    key = self._key4(msg.fields)
+    rec = self._installs.get(key)
+    if rec is None or rec.acked:
+      raise ProgramServiceError("NO_PENDING_INSTALL")
+    self._drop_record(key)
+
+  def reset(self) -> None:
+    """Drop Tile transaction state; preserve immutable host registrations and uploaded HBM bytes."""
+    for key in list(self._installs):
+      self._drop_record(key)
 
   def install_complete(self, program_id: int, version: int, package_hash: bytes) -> bool:
     img = self._lookup_image(program_id, version, package_hash)
     if img is None:
       return False
-    rec = self._installs.get((program_id, version, img.program_epoch, package_hash))
-    return rec is not None and rec.acked
+    rec = self._installs.get((program_id, version, self._epochs[(program_id, version)], package_hash))
+    return rec is not None and rec.acked and not rec.invalidating
 
   def snapshot(self) -> dict:
     return {
       "stats": dict(self.stats),
       "installs": {
-        f"p{rec.image.program_id}:v{rec.image.version}:e{rec.image.program_epoch}": {
+        f"p{pid}:v{version}:e{epoch}": {
           "slot": rec.slot,
+          "epoch": epoch,
+          "package_hash": rec.image.package_hash.hex(),
+          "invalidating": rec.invalidating,
           "acked": rec.acked,
           "ready_handle": rec.ready_handle,
           "bytes_served": rec.bytes_served,
           "image_bytes": len(rec.image.text),
         }
-        for rec in self._installs.values()
+        for (pid, version, epoch, _hash), rec in self._installs.items()
       },
     }

@@ -1,0 +1,17 @@
+--- a/w5/install_service.sv
++++ b/w5/install_service.sv
+@@ -909,13 +909,7 @@
+       if (state == ST_HASH && sha_done) begin
+         sha_done <= 1'b0;
+         cur_measured <= digest_of();
+-        if (digest_of() != cur_digest) begin
+-          raise_fault(FC_INVALID_DESCRIPTOR);
+-          cur_recvd <= '0;
+-          state <= ST_IDLE;
+-        end else begin
+-          state <= ST_COMMIT;
+-        end
++        state <= ST_COMMIT;
+       end
+ 
+       // ---------------- commit responses ----------------

@@ -39,6 +39,7 @@ class LoadedPackage:
 
   view: Any
   package_hash: str
+  text: bytes  # executable PT_LOAD payload of the exact ELF verified at load
   _raw: dict[str, Any]
 
   def to_dict(self) -> dict[str, Any]:
@@ -77,10 +78,13 @@ def load_text(
   verify(package)
   check_measurements(package, slot_freeze)
   verify_control_plane(package, compiled_text, hw=hw, sim=sim, actual_bindings=actual_bindings)
-  verify_image(package, image_bytes)
+  payload = verify_image(package, image_bytes)
   check_target(package, target)
   return LoadedPackage(
-    view=_freeze(package), package_hash=package["package_hash"], _raw=copy.deepcopy(package)
+    view=_freeze(package),
+    package_hash=package["package_hash"],
+    text=bytes(payload),
+    _raw=copy.deepcopy(package),
   )
 
 
