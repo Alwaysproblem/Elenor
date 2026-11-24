@@ -595,10 +595,12 @@ ROB 同 PC 双 Context store、错误 op_seq、独立退休、局部 fault flush
 - **Loader 目标独立于 binding**：`cn package` 重载时 `rvv_vlen` 取自 `configs/params.d/upstream_coralnpu.json`（`rvv_vlen_bits`），`context_count` 取自 `--config`；三个字节宽度没有独立来源，仍取自 binding。Loader 拒绝的包会被删除，不留 `package.json`。回归：`test_real_build_checks_vlen_against_the_pinned_upstream_not_the_binding`，恢复旧行为后该测试失败（构建退出 0 且报告 `reload_identical`）。
 - **C014 参考消费者对照**：接受/拒绝逐项一致，错误码逐项一致，唯一例外是手写数字 CSR（`0x7c0`）——本实现报 `HAND_WRITTEN_ADDRESS`，参考实现先报 `HELPER_CSR_MISMATCH`，记于 `KNOWN_CODE_REFINEMENTS`。
 - **变异检验**：8 处破坏（重复键、未知字段、只读别名、目标不符、image 字节不校验、measured peak 当作界、非有限数、hash 不符被忽略）均被测试检出，还原后全绿。
-- 注册命令：`cn unit --suite w5`（43 passed）；`cn unit --suite contracts`（1330 passed）；`cn sources verify`（pass）；全量 `pipeline_validator/tests/`：669 passed + 1 skipped（在最终代码上运行）。
+- **ELF 加载段不可重叠**：Loader 按虚拟地址排序所有非空 `PT_LOAD` 的半开区间 `[p_vaddr, p_vaddr + p_memsz)`，不区分段权限。回归保持 manifest 声明的 text/data 区间不变，只改变 ELF 中可执行段的内存长度，并更新镜像摘要和封印：恰好与数据段相邻时可加载，多覆盖一个字节时以 `IMAGE_NOT_ELF` 拒绝。修复前后一字节重叠用例由失败转为通过。
+- 注册命令：`cn unit --suite w5`（45 passed）；`cn unit --suite contracts`（1330 passed）；`cn sources verify`（pass）；全量 `pipeline_validator/tests/`：671 passed + 1 skipped。
 - `cn package` 产物 `package_hash` `cb4cf5dd4b179859a84c99c10ac9ebdeb89f3d7e0483e77a930b19f58d64928b`，image sha256 `42b83d9d0efcf40aab2eb328795082210a96ee74c3ecbd3344da87d9af1e786d`。
 - **范围边界**：镜像是 C018 bootstrap 控制序列，不是可加载的 CS1 计算 kernel；Loader 只证明合同层、image 字节与目标，不证明机器码本身；未做程序安装（C039）与 oneTile 执行（C040）。
 - 验收包：`out/coral_nexus/C037/segments-155115/C037-evidence.tar.gz`，SHA-256 `7d8f5acf687f361bff666a573f9c53fe459e2e50fce8783c3fd71cd8ab9ff485`。消费者：C038、C039、G3 C048–C052。
+- 加载段重叠回归及最终验证包：`out/coral_nexus/C037/overlap-122757/C037-evidence.tar.gz`，SHA-256 `e915928cb06f6e4eb79f592dd07aad6da7c739e6794bffb98f1593757e5ea53e`。
 
 <a id="c038"></a>
 

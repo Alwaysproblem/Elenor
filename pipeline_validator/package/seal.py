@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import struct
 from collections.abc import Mapping
+from itertools import pairwise
 from typing import Any
 
 from ..compiled_program import parse_compiled_program
@@ -151,6 +152,7 @@ def _elf_layout(image_bytes: bytes) -> dict[str, int | None]:
     raise fail("program header table is outside the file")
   text: list[tuple[int, int]] = []
   data: list[tuple[int, int, int]] = []
+  load_ranges: list[tuple[int, int]] = []
   for index in range(phnum):
     kind, offset, vaddr, _paddr, filesz, memsz, flags, _align = struct.unpack_from(
       "<IIIIIIII", image_bytes, phoff + index * phentsize
@@ -171,10 +173,15 @@ def _elf_layout(image_bytes: bytes) -> dict[str, int | None]:
       raise fail(f"PT_LOAD {index}: [{vaddr:#x}, +{memsz}) leaves the 32-bit address space")
     if memsz == 0:
       continue
+    load_ranges.append((vaddr, vaddr + memsz))
     if flags & _PF_X:
       text.append((vaddr, filesz))
     elif flags & _PF_W:
       data.append((vaddr, filesz, memsz))
+  load_ranges.sort()
+  for (_, end), (start, _) in pairwise(load_ranges):
+    if start < end:
+      raise fail(f"PT_LOAD memory intervals overlap at {start:#x}")
   if len(text) != 1:
     raise fail(f"expected exactly one executable PT_LOAD segment, found {len(text)}")
   return {

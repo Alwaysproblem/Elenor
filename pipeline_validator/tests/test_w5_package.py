@@ -761,6 +761,26 @@ def _with_phdr(blob: bytes, index: int, **fields: int) -> bytes:
   return bytes(out)
 
 
+@pytest.mark.parametrize("extra_byte", [0, 1], ids=["adjacent", "overlap"])
+def test_load_checks_pt_load_memory_not_just_manifest_spans(
+  good: dict[str, Any], compiled_text: str, extra_byte: int
+) -> None:
+  layout = good["image"]["link_layout"]
+  assert layout["text_base"] + layout["text_bytes"] < layout["data_base"]
+  image = _with_phdr(IMAGE, 0, memsz=layout["data_base"] - layout["text_base"] + extra_byte)
+  good["image"]["bytes_sha256"] = hashlib.sha256(image).hexdigest()
+  package = resealed(good)
+  verify(package)  # Both manifests have the same disjoint declared text/data spans.
+  args = {**TARGET(), "image_bytes": image}
+  if extra_byte:
+    with pytest.raises(PackageError, match="PT_LOAD.*overlap") as caught:
+      load_text(encode(package), compiled_text=compiled_text, **args)
+    assert caught.value.code == "IMAGE_NOT_ELF"
+  else:
+    loaded = load_text(encode(package), compiled_text=compiled_text, **args)
+    assert loaded.package_hash == package["package_hash"]
+
+
 def test_pt_load_ranges_must_be_consistent_with_the_file_that_was_hashed(good: dict[str, Any]) -> None:
   """A hash of truncated or inconsistent bytes still identifies them, so the segment ranges are checked
   against the supplied bytes: the file must hold every byte a segment claims, and a segment cannot ship
