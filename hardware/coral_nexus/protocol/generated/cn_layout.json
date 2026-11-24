@@ -3461,6 +3461,34 @@
       "owner": "W3",
       "scope": "per_context",
       "access": "unspecified"
+    },
+    {
+      "name": "nexus.mfe.submit",
+      "address": 2000,
+      "owner": "W4",
+      "scope": "per_context",
+      "access": "write"
+    },
+    {
+      "name": "nexus.event.wait",
+      "address": 2001,
+      "owner": "W6",
+      "scope": "per_context",
+      "access": "write"
+    },
+    {
+      "name": "nexus.phase.signal",
+      "address": 2002,
+      "owner": "W6",
+      "scope": "per_context",
+      "access": "write"
+    },
+    {
+      "name": "nexus.task.ret",
+      "address": 2003,
+      "owner": "W2",
+      "scope": "per_context",
+      "access": "write"
     }
   ],
   "widths": {
@@ -3553,16 +3581,16 @@
   },
   "inputs": {
     "cn_protocol_v1.yaml": "ab8d448063a126d798631dae6abe9ef72fe9d4a4ab22e80a41f196265f7d207c",
-    "wire_schema_v1.yaml": "b2e11bd3687b7e61361f8f9bc593c13f27a8b723f25d02b2b06ebc906f1ab33a",
-    "csr_name_map.yaml": "8819944028986b1211adb073bb6c065bc5d1580a91f602abfe48151980c61b7b",
+    "wire_schema_v1.yaml": "d72b9fdb66a3eef894791d94bf28fbf486dc630de7222b7f1a952575e4970302",
+    "csr_name_map.yaml": "42ebcac2be23bb64109fdbba119374d8fd50ca49fc992112aa1425e4ba10550c",
     "upstream_csr_occupied.json": "81491cb41ed1813c871d1b6676d9eb361af2cb8a7bf6a696c8c7ba606eb92c8e",
     "channel_budgets.yaml": "959f786fcd42c5e61345270d6285dcdda3f46f406a31859077133b3b8afd3e1b",
     "lifetime_bounds.yaml": "90f825b1d58948279df7d8ec030d850a4ee73282ec2d831965e3d75def78f7a7",
     "field_requests/w1.yaml": "d7db4f0f961f22988178f33a5a27c2e4af7a612d2cfeaba43d412e680e7c0f6b",
-    "field_requests/w2.yaml": "32814fe480d57a4a7303537df94ea361638cf6745ff21540a0ba975d668034b0",
+    "field_requests/w2.yaml": "3a3a8e46ccf4495d0f8c55c62479a69fb7c47fbb63dacfffcf0d698302e7cd77",
     "field_requests/w3.yaml": "5120c67efe4659335ae798e1090343533afe13b976fbb64bc45acc5117da6787",
-    "field_requests/w4.yaml": "0f29e225dd829a9e172e1220153a3c4211468853b28d2b6d500296b8b1f34d81",
-    "field_requests/w5.yaml": "f5e72e0fe7e443283016505fb8cf37ef8090d9549c43688efe507b17b845d393",
-    "field_requests/w6.yaml": "9a2ce98cb7aec3e4e8fd452287b8116f59cfe7f1b741b87baa89eab60066ae59"
+    "field_requests/w4.yaml": "92e41bc27e691d2c074c20220011db9a196f389636987381ca8f013f55f6902e",
+    "field_requests/w5.yaml": "2a5bbee5bfcbc8eaf56fddba53abaf91d484f02bc2e0fcc951c4bd8748c008a5",
+    "field_requests/w6.yaml": "be6fb1ca8315c2ac0f896b9245a7706a421442e3dea4bb1914b783daf5ea52a1"
   }
 }

@@ -150,3 +150,10 @@ parameters:
       key: debug.fifo.depth,
       why: "frozen by burst and export-latency evidence, never defaulted",
     }
+csr_requests:
+  - name: nexus.event.wait
+    kind: WAIT
+    why: "the scalar WAIT helper: parks next issue until the referenced slot-local event terminates (operand = wait_events index); the wait record itself stays W6's single writer"
+  - name: nexus.phase.signal
+    kind: SIGNAL_PHASE
+    why: "the scalar SIGNAL_PHASE helper: one accepted write is one PHASE_SIGNAL (operand = phase enum 0 input_released / 1 output_ready); dedup/aggregation stay Group-side (EVT-14)"

@@ -71,8 +71,9 @@ REQUIRED_INPUTS = (
   "hardware/coral_nexus/protocol/w4_memory.contract.yaml",
   "hardware/coral_nexus/configs/w4_memory_constraints.yaml",
   "hardware/coral_nexus/configs/w4_capacity_decisions.yaml",
-  # C014 package contract
+  # C014 package contract + the G1v5 scalar-helper ABI its scalar block references
   "hardware/coral_nexus/protocol/w5_package.contract.yaml",
+  "hardware/coral_nexus/protocol/scalar_helper_abi_v1.json",
   # C015/C016 event, terminal-reset and trace contracts
   "hardware/coral_nexus/protocol/w6_event_facility.contract.yaml",
   "hardware/coral_nexus/protocol/w6_terminal_reset.contract.yaml",

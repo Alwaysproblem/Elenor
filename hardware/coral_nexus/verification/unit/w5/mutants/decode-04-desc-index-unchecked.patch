@@ -1,0 +1,11 @@
+--- a/scalar/scalar_helper_issue.sv
++++ b/scalar/scalar_helper_issue.sv
+@@ -185,7 +185,7 @@
+     sel_desc = launch_desc_i[0];
+     for (int i = 0; i < DESC_COUNT; i++)
+       if (desc_index == 32'(i)) sel_desc = launch_desc_i[i];
+-    desc_ok = (desc_index < 32'(DESC_COUNT));
++    desc_ok = 1'b1;
+   end
+ 
+   assign mfe_desc_o = '{

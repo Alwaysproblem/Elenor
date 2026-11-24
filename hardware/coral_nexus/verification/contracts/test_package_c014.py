@@ -50,6 +50,11 @@ def good() -> dict[str, Any]:
   return copy.deepcopy(json.loads(vp.EXAMPLE.read_text()))
 
 
+@pytest.fixture
+def scalar_good() -> dict[str, Any]:
+  return copy.deepcopy(json.loads(vp.EXAMPLE_SCALAR.read_text()))
+
+
 def _kernel(package: dict[str, Any]) -> dict[str, Any]:
   return package["binding_manifest"]["kernels"][0]  # type: ignore[no-any-return]
 
@@ -410,6 +415,286 @@ def test_a_single_step_first_and_final_chain_is_not_silently_accepted(good: dict
 def test_a_region_needs_both_start_and_end(good: dict, contract: dict, flag: str) -> None:
   _kernel(good)["region"][flag] = False
   assert _code(_resealed(good, contract), contract)[0] == "REGION_BOUNDS_MISSING"
+
+
+# --- scalar class: K-SCALAR-ADD7 views, descriptors, helpers, linked slot -----------------------
+
+
+def test_the_scalar_example_is_accepted_sealed_and_reloaded(scalar_good: dict, contract: dict) -> None:
+  pc.validate_package(scalar_good, contract)
+  sealed = pc.seal({k: v for k, v in scalar_good.items() if k != "package_hash"}, contract)
+  assert sealed["package_hash"] == scalar_good["package_hash"]
+  assert pc.load(json.dumps(sealed), contract) == sealed
+
+
+def test_the_scalar_example_is_a_real_resealable_package(scalar_good: dict, contract: dict) -> None:
+  assert scalar_good["package_hash"] != "0" * 64 and len(scalar_good["package_hash"]) == 64
+  assert _resealed(scalar_good, contract)["package_hash"] == scalar_good["package_hash"]
+
+
+@pytest.mark.parametrize("field", ["launch_descriptors", "linked_slot"])
+def test_a_scalar_sealed_field_is_required(scalar_good: dict, contract: dict, field: str) -> None:
+  _kernel(scalar_good).pop(field)
+  code, where = _code(_resealed(scalar_good, contract), contract)
+  assert code == "MISSING_FIELD" and where.endswith(f".{field}")
+
+
+@pytest.mark.parametrize("field", ["launch_descriptors", "linked_slot"])
+def test_the_scalar_fields_are_unknown_on_a_vme_entry(good: dict, contract: dict, field: str) -> None:
+  _kernel(good)[field] = [] if field == "launch_descriptors" else {}
+  code, where = _code(_resealed(good, contract), contract)
+  assert code == "UNKNOWN_FIELD" and where.endswith(f".{field}")
+
+
+@pytest.mark.parametrize("dtype", ["bf16", "f32"])
+def test_scalar_views_are_i32_only(scalar_good: dict, contract: dict, dtype: str) -> None:
+  _kernel(scalar_good)["ins"][0]["dtype"] = dtype
+  code, where = _code(_resealed(scalar_good, contract), contract)
+  assert code == "SCALAR_VIEW_DTYPE" and "ins[0].dtype" in where
+
+
+def test_a_scalar_view_dtype_outside_the_view_set_still_fails_first(
+  scalar_good: dict, contract: dict
+) -> None:
+  _kernel(scalar_good)["ins"][0]["dtype"] = "i8"
+  assert _code(_resealed(scalar_good, contract), contract)[0] == "BAD_DTYPE"
+
+
+@pytest.mark.parametrize("side", ["ins", "outs"])
+def test_scalar_views_still_need_declared_views(scalar_good: dict, contract: dict, side: str) -> None:
+  _kernel(scalar_good)[side] = []
+  assert _code(_resealed(scalar_good, contract), contract)[0] == "MISSING_VIEWS"
+
+
+def test_a_scalar_kernel_may_not_seed(scalar_good: dict, contract: dict) -> None:
+  _kernel(scalar_good)["initial"]["method"] = "vtzero"
+  assert _code(_resealed(scalar_good, contract), contract)[0] == "BAD_INITIAL"
+
+
+def test_a_scalar_kernel_has_no_mode_table(scalar_good: dict, contract: dict) -> None:
+  _kernel(scalar_good)["mode_table"] = "reference"
+  assert _code(_resealed(scalar_good, contract), contract)[0] == "MODE_TABLE_MISMATCH"
+
+
+@pytest.mark.parametrize(
+  "region",
+  [
+    {"start": True, "end": False, "chains": []},
+    {"start": False, "end": True, "chains": []},
+    {"start": False, "end": False, "chains": [{"id": 0, "steps": ["CHAIN_FIRST", "CHAIN_FINAL"]}]},
+  ],
+)
+def test_a_scalar_kernel_declares_no_vme_region(scalar_good: dict, contract: dict, region: dict) -> None:
+  _kernel(scalar_good)["region"] = region
+  assert _code(_resealed(scalar_good, contract), contract)[0] == "SCALAR_REGION_FORBIDDEN"
+
+
+@pytest.mark.parametrize(
+  ("mutate", "code"),
+  [
+    (lambda t: t.pop(), "BAD_DESCRIPTOR"),
+    (lambda t: t.__setitem__(0, {**t[0], "index": 1}), "BAD_DESCRIPTOR"),
+    (lambda t: t.__setitem__(0, {**t[0], "direction": "in"}), "BAD_DESCRIPTOR"),
+    (lambda t: t.__setitem__(0, {**t[0], "handle": "ghost"}), "BAD_DESCRIPTOR"),
+    (lambda t: t.__setitem__(0, {**t[0], "handle": "output"}), "BAD_DESCRIPTOR"),
+    (lambda t: t.__setitem__(1, {**t[1], "handle": "input"}), "BAD_DESCRIPTOR"),
+    (lambda t: t.__setitem__(0, {**t[0], "bytes": 0}), "BAD_DESCRIPTOR"),
+    (lambda t: t.__setitem__(0, {**t[0], "bytes": 30}), "BAD_DESCRIPTOR"),
+    (lambda t: t.__setitem__(0, {**t[0], "slot_offset": 2}), "BAD_DESCRIPTOR"),
+    (lambda t: t.__setitem__(0, {**t[0], "slot_offset": 4}), "BAD_DESCRIPTOR"),
+    (lambda t: t.__setitem__(0, {**t[0], "frame_offset": -4}), "BAD_DESCRIPTOR"),
+    (lambda t: t.__setitem__(0, {**t[0], "frame_offset": 2}), "BAD_DESCRIPTOR"),
+    (lambda t: t.__setitem__(0, {**t[0], "extra": 1}), "UNKNOWN_FIELD"),
+  ],
+)
+def test_each_descriptor_defect_is_rejected(
+  scalar_good: dict, contract: dict, mutate: Any, code: str
+) -> None:
+  table = _kernel(scalar_good)["launch_descriptors"]
+  mutate(table)
+  got, field = _code(_resealed(scalar_good, contract), contract)
+  assert got == code, (got, field)
+
+
+def test_a_one_sided_descriptor_table_is_rejected(scalar_good: dict, contract: dict) -> None:
+  _kernel(scalar_good)["launch_descriptors"].pop(1)
+  assert _code(_resealed(scalar_good, contract), contract)[0] == "BAD_DESCRIPTOR"
+
+
+def test_a_descriptor_extent_may_not_overrun_the_view(scalar_good: dict, contract: dict) -> None:
+  _kernel(scalar_good)["launch_descriptors"][0]["slot_offset"] = 8
+  assert _code(_resealed(scalar_good, contract), contract)[0] == "BAD_DESCRIPTOR"
+
+
+def test_scalar_helpers_must_be_exactly_the_four_declared(
+  scalar_good: dict, contract: dict
+) -> None:
+  for i, mutate in enumerate(
+    [
+      lambda h: [x for x in h if x["name"] != "task_ret"],
+      lambda h: [
+        *h,
+        {
+          "name": "region_start",
+          "csr": "nexus.mregion.start",
+          "observable": "x",
+          "barrier": "volatile_asm_memory_clobber",
+          "params": [],
+          "resources": {"stack_bytes": 0},
+        },
+      ],
+      lambda h: h[:-1],  # drops task_ret
+      lambda h: [*h, dict(h[6])],  # a second task_ret
+    ]
+  ):
+    pkg = copy.deepcopy(scalar_good)
+    kernel = _kernel(pkg)
+    kernel["helpers"] = mutate(kernel["helpers"])
+    code, where = _code(_resealed(pkg, contract), contract)
+    assert code == "SCALAR_HELPER_SET", (i, code, where)
+
+
+def test_every_descriptor_index_is_submitted_and_waited_once(
+  scalar_good: dict, contract: dict
+) -> None:
+  for i, mutate in enumerate(
+    [
+      lambda h: h[1:],  # no submit for descriptor 0
+      lambda h: [x for x in h if not (x["name"] == "wait" and x["params"]["index"] == 0)],
+      lambda h: [*h, {**h[0], "params": {"index": 0}}],  # a second submit of index 0
+    ]
+  ):
+    pkg = copy.deepcopy(scalar_good)
+    kernel = _kernel(pkg)
+    kernel["helpers"] = mutate(kernel["helpers"])
+    code, where = _code(_resealed(pkg, contract), contract)
+    assert code == "DESCRIPTOR_UNKNOWN", (i, code, where)
+
+
+def test_both_phases_must_be_signaled_exactly_once(scalar_good: dict, contract: dict) -> None:
+  pkg = copy.deepcopy(scalar_good)
+  kernel = _kernel(pkg)
+  kernel["helpers"] = [h for h in kernel["helpers"] if h["params"] != {"phase": 1}]
+  assert _code(_resealed(pkg, contract), contract)[0] == "BAD_HELPER_OPERAND"
+
+
+def test_a_scalar_helper_operand_must_be_the_declared_field(
+  scalar_good: dict, contract: dict
+) -> None:
+  for i, bad_params in enumerate([{"index": 0, "extra": 1}, {"phase": 0}, []]):
+    pkg = copy.deepcopy(scalar_good)
+    _kernel(pkg)["helpers"][0]["params"] = bad_params
+    code, where = _code(_resealed(pkg, contract), contract)
+    assert code == "BAD_HELPER_OPERAND", (i, code, where)
+
+
+@pytest.mark.parametrize("index", [-1, 2, 5, "0"])
+def test_a_helper_operand_index_must_resolve_into_the_table(
+  scalar_good: dict, contract: dict, index: Any
+) -> None:
+  _kernel(scalar_good)["helpers"][0]["params"] = {"index": index}
+  assert _code(_resealed(scalar_good, contract), contract)[0] == "DESCRIPTOR_UNKNOWN"
+
+
+def test_wait_uses_the_same_descriptor_index_space(scalar_good: dict, contract: dict) -> None:
+  _kernel(scalar_good)["helpers"][1]["params"] = {"index": 3}
+  assert _code(_resealed(scalar_good, contract), contract)[0] == "DESCRIPTOR_UNKNOWN"
+
+
+@pytest.mark.parametrize("phase", [2, -1, "0"])
+def test_signal_phase_takes_only_the_declared_codes(
+  scalar_good: dict, contract: dict, phase: Any
+) -> None:
+  _kernel(scalar_good)["helpers"][4]["params"] = {"phase": phase}
+  assert _code(_resealed(scalar_good, contract), contract)[0] == "BAD_HELPER_OPERAND"
+
+
+def test_a_phase_may_not_be_signaled_twice(scalar_good: dict, contract: dict) -> None:
+  _kernel(scalar_good)["helpers"][5]["params"] = {"phase": 0}
+  assert _code(_resealed(scalar_good, contract), contract)[0] == "DUPLICATE_OPERAND"
+
+
+def test_task_ret_is_normal_retire_only(scalar_good: dict, contract: dict) -> None:
+  _kernel(scalar_good)["helpers"][6]["params"] = {"code": 1}
+  assert _code(_resealed(scalar_good, contract), contract)[0] == "BAD_HELPER_OPERAND"
+
+
+@pytest.mark.parametrize(
+  ("helper", "params"),
+  [
+    (4, {"phase": True}),
+    (4, {"phase": 1.0}),
+    (4, {"phase": "0"}),
+    (6, {"code": False}),
+    (6, {"code": 0.0}),
+    (6, {"code": "0"}),
+  ],
+)
+def test_enum_operands_take_real_integers_only(
+  scalar_good: dict, contract: dict, helper: int, params: dict
+) -> None:
+  _kernel(scalar_good)["helpers"][helper]["params"] = params
+  assert _code(_resealed(scalar_good, contract), contract)[0] == "BAD_HELPER_OPERAND"
+
+
+def test_a_scalar_helper_csr_is_the_generated_logical_name(
+  scalar_good: dict, contract: dict
+) -> None:
+  _kernel(scalar_good)["helpers"][0]["csr"] = "0x7d0"
+  assert _code(_resealed(scalar_good, contract), contract)[0] == "HELPER_CSR_MISMATCH"
+  pkg = copy.deepcopy(scalar_good)
+  _kernel(pkg)["helpers"][0]["csr"] = "nexus.mfe.bogus"
+  assert _code(_resealed(pkg, contract), contract)[0] == "HELPER_CSR_MISMATCH"
+
+
+def test_a_vme_helper_cannot_be_called_from_the_scalar_entry(
+  scalar_good: dict, contract: dict
+) -> None:
+  _kernel(scalar_good)["helpers"][0]["name"] = "region_start"
+  _kernel(scalar_good)["helpers"][0]["csr"] = "nexus.mregion.start"
+  assert _code(_resealed(scalar_good, contract), contract)[0] == "SCALAR_HELPER_SET"
+
+
+def test_a_scalar_helper_cannot_be_called_from_a_vme_entry(good: dict, contract: dict) -> None:
+  _kernel(good)["helpers"][0]["name"] = "mfe_submit"
+  _kernel(good)["helpers"][0]["csr"] = "nexus.mfe.submit"
+  assert _code(_resealed(good, contract), contract)[0] == "HELPER_WRONG_CLASS"
+
+
+@pytest.mark.parametrize(
+  ("mutate", "code"),
+  [
+    (lambda s: s.__setitem__("slot", "C"), "SLOT_NAME_UNKNOWN"),
+    (lambda s: s.__setitem__("program_id", 2), "SLOT_IDENTITY_MISMATCH"),
+    (lambda s: s.__setitem__("program_id", 0), "SLOT_IDENTITY_MISMATCH"),
+    (lambda s: s.__setitem__("program_id", "1"), "SLOT_IDENTITY_MISMATCH"),
+    (lambda s: s.__setitem__("program_id", True), "WRONG_TYPE"),
+    (lambda s: s.__setitem__("entry", 4), "SLOT_LAYOUT_MISMATCH"),
+    (lambda s: s.__setitem__("text_base", 4096), "SLOT_LAYOUT_MISMATCH"),
+    (lambda s: s.__setitem__("text_bytes", 1024), "SLOT_LAYOUT_MISMATCH"),
+    (lambda s: s.__setitem__("data_base", 4096), "SLOT_LAYOUT_MISMATCH"),
+    (lambda s: s.__setitem__("data_bytes", 128), "SLOT_LAYOUT_MISMATCH"),
+    (lambda s: s.__setitem__("image_sha256", "9" * 64), "SLOT_LAYOUT_MISMATCH"),
+    (lambda s: s.__setitem__("freeze_sha256", "z" * 64), "BAD_HASH"),
+    (lambda s: s.pop("entry"), "MISSING_FIELD"),
+    (lambda s: s.__setitem__("extra", 1), "UNKNOWN_FIELD"),
+  ],
+)
+def test_each_linked_slot_defect_is_rejected(
+  scalar_good: dict, contract: dict, mutate: Any, code: str
+) -> None:
+  slot = _kernel(scalar_good)["linked_slot"]
+  mutate(slot)
+  got, field = _code(_resealed(scalar_good, contract), contract)
+  assert got == code, (got, field)
+
+
+def test_slot_b_names_the_other_frozen_identity(scalar_good: dict, contract: dict) -> None:
+  _kernel(scalar_good)["linked_slot"]["slot"] = "B"
+  _kernel(scalar_good)["linked_slot"]["program_id"] = 2
+  pc.validate_package(_resealed(scalar_good, contract), contract)
+  _kernel(scalar_good)["linked_slot"]["program_id"] = 1
+  assert _code(_resealed(scalar_good, contract), contract)[0] == "SLOT_IDENTITY_MISMATCH"
 
 
 # --- image and resources ----------------------------------------------------------------------
@@ -914,7 +1199,7 @@ def test_the_required_sets_are_module_constants_not_read_from_the_yaml(contract:
   contract["package"]["required_fields"] = []
   contract["helpers"]["registered"] = []
   assert (tuple(vp.REQUIRED_OUTER_FIELDS), dict(vp.REQUIRED_HELPERS), dict(vp.REQUIRED_KERNELS)) == before
-  assert len(vp.REQUIRED_OUTER_FIELDS) == 9 and len(vp.REQUIRED_HELPERS) == 5
+  assert len(vp.REQUIRED_OUTER_FIELDS) == 9 and len(vp.REQUIRED_HELPERS) == 9
 
 
 def test_the_contract_stays_draft_and_assigns_no_slot_count_or_encoding(contract: dict) -> None:

@@ -226,6 +226,69 @@ binding_manifest:
     int8_new_on_tensor_path: forbidden
     external_f32_output: forbidden
     note: "internal f32 seed/drain/scratch and scalar i32 control/address/index are legal companions, not new precisions"
+  # Scalar kernel class (C038): a scalar control kernel uses NO tensor machinery. Its ins/outs are i32
+  # slot-relative views, it declares the MFE launch descriptors its helpers index, it carries no mode
+  # table, seeds nothing, declares no VME region, and its helper name set is exactly the four scalar
+  # helpers. A VME-class entry keeps every rule above byte-identical.
+  scalar:
+    mode_table: "none"
+    initial_method: "none"
+    region: { start: false, end: false, chains_empty: true }
+    view_dtypes: [i32]
+    helpers_exact: [mfe_submit, wait, signal_phase, task_ret]
+    helper_abi:
+      {
+        ref: protocol/scalar_helper_abi_v1.json,
+        note: "carrier semantics and operand encodings of the scalar helpers; this contract is the consumer-side authority for the launch table and the operand domains",
+      }
+    helper_operand:
+      mfe_submit: { field: index, from: launch_descriptors }
+      wait: { field: index, from: wait_events }
+      signal_phase:
+        {
+          field: phase,
+          values: [0, 1],
+          unique_per_entry: true,
+          phase_0: INPUT_RELEASED,
+          phase_1: OUTPUT_READY,
+        }
+      task_ret: { field: code, values: [0], meaning: normal_retire_drain }
+    wait_events:
+      {
+        rule: "wait_events[i] is the completion event of launch_descriptors[i]: one immutable table, the two operand index spaces coincide",
+      }
+    launch_descriptors:
+      required_for_class: scalar
+      descriptor_format_ref: protocol/scalar_helper_abi_v1.json
+      required_fields: [index, direction, handle, bytes, slot_offset, frame_offset]
+      directions: [l2_to_frame, frame_to_l2]
+      dense_index: true
+      min_per_direction: 1
+      alignment: element
+      rule: "index i sits at position i; 'l2_to_frame' moves slot-relative bytes into the task frame, 'frame_to_l2' writes frame bytes back to the slot; handle must name a declared view of the matching side; bytes/slot_offset/frame_offset are whole elements of the view dtype and slot_offset+bytes never exceeds the view"
+    linked_slot:
+      required_for_class: scalar
+      required_fields:
+        [
+          slot,
+          program_id,
+          entry,
+          text_base,
+          text_bytes,
+          data_base,
+          data_bytes,
+          image_sha256,
+          freeze_sha256,
+        ]
+      slot_names: [A, B]
+      slot_program_id: { A: 1, B: 2 }
+      rule: "the build writes the fixed linked placement INTO the sealed binding entry (not authored in the binding yaml): slot is one of the frozen identities (A -> program_id 1, B -> program_id 2), entry/link_layout/image_sha256 must equal this package's own image, and freeze_sha256 is the canonical sha256 of the shared slot_freeze.json with the trailing packages mapping excluded. A scalar load requires the slot_freeze sidecar (seal/load kw, absence rejected) so the commitment is re-verified, never opaque"
+    rule: "a scalar-class entry MUST declare launch_descriptors and linked_slot; a non-scalar entry MUST NOT carry either field"
+    coverage:
+      descriptors: "every index in launch_descriptors appears in exactly one mfe_submit and one wait"
+      phases: "every value of helper_operand.signal_phase appears in exactly one signal_phase"
+      task_ret: "exactly one task_ret entry carries code 0 (normal_retire_drain)"
+      rule: "the helper name set alone is not sufficient; the sealed operands must cover the declared table"
   initial:
     methods: [vtzero, vtmv, tile_load]
     rule: "a FIRST chain with no seed is rejected; relying on undeclared mt residue is rejected"
@@ -245,12 +308,13 @@ binding_manifest:
     rule: "region and chain declarations are referenced by ABI kind; START/END positions and FIRST/CONTINUE/FINAL are declared per region"
   mode_table:
     ref: protocol/w3_vme_mode_tables_v1.json
-    rule: "the table must be one the mode-table checker accepts and must belong to the same kernel; a table the sealed profile does not list is rejected"
+    rule: "the table must be one the mode-table checker accepts and must belong to the same kernel; a table the sealed profile does not list is rejected. A scalar-class kernel names the literal 'none' and has no table"
   required_kernel_families:
     [matmul, gather, scatter, softmax, norm, reduce_sum, pow, add, recurrence]
   supported_kernels:
-    - { id: K-VME-BF16-ACC, version: 1, family: matmul, mode_table: reference }
-  note: "only the kernels listed in supported_kernels are registered by THIS card; the rest of the families are required by the plan and are added by C038/C052 with their own tables. An unregistered kernel id is rejected."
+    - { id: K-VME-BF16-ACC, version: 1, family: matmul, class: vme, mode_table: reference }
+    - { id: K-SCALAR-ADD7, version: 1, family: scalar, class: scalar }
+  note: "only the kernels listed in supported_kernels are registered by THIS card; the rest of the families are required by the plan and are added by C038/C052 with their own tables. class picks the rule set: vme entries follow the chain/mode-table/region rules, scalar entries follow binding_manifest.scalar. An unregistered kernel id is rejected."
 
 # ---------------------------------------------------------------------------
 # 6. Helpers. Each helper has observable semantics, a compiler-reordering barrier, parameter access and
@@ -271,6 +335,15 @@ helpers:
         kind: CHAIN_CONTINUE,
       }
     - { name: chain_final, csr: nexus.mregion.final, kind: CHAIN_FINAL }
+    # Scalar helpers (C038): CSRRW x0,csr,rs1 / CSRRWI x0,csr,imm against GENERATED addresses only.
+    # mfe_submit/wait take a slot-local immutable launch-descriptor index (operand field 'index');
+    # signal_phase takes 0=INPUT_RELEASED / 1=OUTPUT_READY; task_ret takes 0 (normal retire/drain).
+    # Their carrier and operand encoding is protocol/scalar_helper_abi_v1.json; the consumer-side
+    # operand domains and the launch-descriptor table are binding_manifest.scalar above.
+    - { name: mfe_submit, csr: nexus.mfe.submit, kind: MFE_SUBMIT }
+    - { name: wait, csr: nexus.event.wait, kind: WAIT }
+    - { name: signal_phase, csr: nexus.phase.signal, kind: SIGNAL_PHASE }
+    - { name: task_ret, csr: nexus.task.ret, kind: TASK_RET }
   hand_written_numeric_address: forbidden
 
 # ---------------------------------------------------------------------------

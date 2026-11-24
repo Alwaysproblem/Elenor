@@ -70,3 +70,7 @@ internal_events_not_on_wire:
       key: epochs,
       note: "W2-internal; field_visibility hidden in the protocol",
     }
+csr_requests:
+  - name: nexus.task.ret
+    kind: TASK_RET
+    why: "the scalar TASK_RET helper: retire-chain entry that stops issue and waits local events (RET record_owner W2 in ctx_ctrl.yaml); operand is the literal code 0 (normal retire/drain)"

@@ -32,7 +32,9 @@ H = LIB.parents[1]
 REPO = LIB.parents[3]
 UPSTREAM = H / "upstream" / "coralnpu"
 SCHEMA = H / "kernels" / "bindings" / "schema.json"
-EXAMPLE = H / "kernels" / "bindings" / "examples" / "k_vme_bf16_acc.package.json"
+EXAMPLES = H / "kernels" / "bindings" / "examples"
+EXAMPLE = EXAMPLES / "k_vme_bf16_acc.package.json"
+EXAMPLE_SCALAR = EXAMPLES / "k_scalar_add7.package.json"
 REQUEST = H / "protocol" / "field_requests" / "w5.yaml"
 CATALOG = H / "protocol" / "cn_protocol_v1.yaml"
 
@@ -101,13 +103,59 @@ REQUIRED_FAMILIES = (
   "add",
   "recurrence",
 )
-REQUIRED_KERNELS = {"K-VME-BF16-ACC": {"version": 1, "family": "matmul", "mode_table": "reference"}}
+REQUIRED_KERNELS = {
+  "K-VME-BF16-ACC": {"version": 1, "family": "matmul", "class": "vme", "mode_table": "reference"},
+  "K-SCALAR-ADD7": {"version": 1, "family": "scalar", "class": "scalar"},
+}
+REQUIRED_SCALAR = {
+  "mode_table": "none",
+  "initial_method": "none",
+  "region": {"start": False, "end": False, "chains_empty": True},
+  "view_dtypes": ["i32"],
+  "helpers_exact": ["mfe_submit", "wait", "signal_phase", "task_ret"],
+}
+REQUIRED_SCALAR_OPERAND: dict[str, dict[str, Any]] = {
+  "mfe_submit": {"field": "index", "from": "launch_descriptors"},
+  "wait": {"field": "index", "from": "wait_events"},
+  "signal_phase": {"field": "phase", "values": [0, 1], "unique_per_entry": True},
+  "task_ret": {"field": "code", "values": [0]},
+}
+REQUIRED_DESCRIPTOR = {
+  "required_for_class": "scalar",
+  "descriptor_format_ref": "protocol/scalar_helper_abi_v1.json",
+  "required_fields": ["index", "direction", "handle", "bytes", "slot_offset", "frame_offset"],
+  "directions": ["l2_to_frame", "frame_to_l2"],
+  "dense_index": True,
+  "min_per_direction": 1,
+  "alignment": "element",
+}
+REQUIRED_LINKED_SLOT = {
+  "required_for_class": "scalar",
+  "required_fields": [
+    "slot",
+    "program_id",
+    "entry",
+    "text_base",
+    "text_bytes",
+    "data_base",
+    "data_bytes",
+    "image_sha256",
+    "freeze_sha256",
+  ],
+  "slot_names": ["A", "B"],
+  "slot_program_id": {"A": 1, "B": 2},
+}
+SCALAR_HELPER_ABI = H / "protocol" / "scalar_helper_abi_v1.json"
 REQUIRED_HELPERS = {
   "region_start": ("nexus.mregion.start", "REGION_START"),
   "region_end": ("nexus.mregion.end", "REGION_END"),
   "chain_first": ("nexus.mregion.first", "CHAIN_FIRST"),
   "chain_continue": ("nexus.mregion.continue", "CHAIN_CONTINUE"),
   "chain_final": ("nexus.mregion.final", "CHAIN_FINAL"),
+  "mfe_submit": ("nexus.mfe.submit", "MFE_SUBMIT"),
+  "wait": ("nexus.event.wait", "WAIT"),
+  "signal_phase": ("nexus.phase.signal", "SIGNAL_PHASE"),
+  "task_ret": ("nexus.task.ret", "TASK_RET"),
 }
 REQUIRED_HELPER_FIELDS = ("name", "csr", "observable", "barrier", "params", "resources")
 REQUIRED_BARRIERS = ("volatile_asm_memory_clobber", "compiler_fence_seq_cst")
@@ -308,6 +356,49 @@ def check_required(contract: dict[str, Any], errors: list[str]) -> None:
     errors.append(
       f"binding_manifest.supported_kernels.{kid}: not in the validator's required set; add it deliberately"
     )
+  scalar = bm.get("scalar")
+  if not isinstance(scalar, dict):
+    errors.append("binding_manifest.scalar: the scalar-class rule block is required")
+  else:
+    for key, want in REQUIRED_SCALAR.items():
+      _eq(errors, f"binding_manifest.scalar.{key}", scalar.get(key), want)
+    if scalar.get("helper_abi", {}).get("ref") != "protocol/scalar_helper_abi_v1.json":
+      errors.append("binding_manifest.scalar.helper_abi.ref: must point at the sealed scalar helper ABI")
+    operand = scalar.get("helper_operand")
+    if not isinstance(operand, dict) or set(operand) != set(REQUIRED_SCALAR_OPERAND):
+      errors.append(
+        f"binding_manifest.scalar.helper_operand: must cover exactly {sorted(REQUIRED_SCALAR_OPERAND)}"
+      )
+    else:
+      for name, want in REQUIRED_SCALAR_OPERAND.items():
+        for key, val in want.items():
+          _eq(errors, f"binding_manifest.scalar.helper_operand.{name}.{key}", operand[name].get(key), val)
+    wait_events = scalar.get("wait_events")
+    if not isinstance(wait_events, dict) or not str(wait_events.get("rule") or "").strip():
+      errors.append("binding_manifest.scalar.wait_events: the descriptor/event index alias must be stated")
+    desc = scalar.get("launch_descriptors")
+    if not isinstance(desc, dict):
+      errors.append("binding_manifest.scalar.launch_descriptors: required")
+    else:
+      for key, want in REQUIRED_DESCRIPTOR.items():
+        _eq(errors, f"binding_manifest.scalar.launch_descriptors.{key}", desc.get(key), want)
+    link = scalar.get("linked_slot")
+    if not isinstance(link, dict):
+      errors.append("binding_manifest.scalar.linked_slot: required")
+    else:
+      for key, want in REQUIRED_LINKED_SLOT.items():
+        _eq(errors, f"binding_manifest.scalar.linked_slot.{key}", link.get(key), want)
+    if (
+      "launch_descriptors" not in str(scalar.get("rule", ""))
+      or "linked_slot" not in str(scalar.get("rule", ""))
+      or "MUST NOT" not in str(scalar.get("rule", ""))
+    ):
+      errors.append(
+        "binding_manifest.scalar.rule: must require both sealed fields for scalar "
+        "and forbid them otherwise"
+      )
+    check_scalar_helper_abi(errors)
+
 
   hp = contract["helpers"]
   _eq(errors, "helpers.entry_required_fields", tuple(hp["entry_required_fields"]), REQUIRED_HELPER_FIELDS)
@@ -352,6 +443,35 @@ def check_required(contract: dict[str, Any], errors: list[str]) -> None:
   if contract.get("status") != "draft":
     errors.append("status: must stay draft (C020 seals, not this card)")
 
+def check_scalar_helper_abi(errors: list[str]) -> None:
+  """The sealed scalar-helper ABI must name the same helpers on the same CSRs and format the same
+  descriptor record; the contract is the authority for the instance tables, the ABI for the carrier."""
+  try:
+    abi = json.loads(SCALAR_HELPER_ABI.read_text())
+  except (OSError, json.JSONDecodeError) as exc:
+    errors.append(f"scalar helper abi: {SCALAR_HELPER_ABI.name} unreadable ({exc})")
+    return
+  helpers = abi.get("helpers")
+  declared = {
+    h.get("name"): h.get("csr") for h in helpers if isinstance(h, dict)
+  } if isinstance(helpers, list) else {}
+  want = {name: csr for name, (csr, _kind) in REQUIRED_HELPERS.items() if name in REQUIRED_SCALAR_OPERAND}
+  for name, csr in want.items():
+    if declared.get(name) != csr:
+      errors.append(
+        f"scalar helper abi.helpers.{name}: csr {declared.get(name)!r} != contract helper {csr!r}"
+      )
+  record = abi.get("descriptor_record")
+  if isinstance(record, dict):
+    _eq(
+      errors,
+      "scalar helper abi.descriptor_record.required_fields",
+      record.get("required_fields"),
+      REQUIRED_DESCRIPTOR["required_fields"],
+    )
+  else:
+    errors.append("scalar helper abi.descriptor_record: required")
+
 
 # ---------------------------------------------------------------------------------------------------
 SCHEMA_COMMENT = (
@@ -394,7 +514,10 @@ def derive_schema(contract: dict[str, Any]) -> dict[str, Any]:
         "type": "object",
         "required": ["method"],
         "additionalProperties": False,
-        "properties": {"method": {"enum": b["initial"]["methods"]}, "note": {"type": "string"}},
+        "properties": {
+          "method": {"enum": b["initial"]["methods"] + [b["scalar"]["initial_method"]]},
+          "note": {"type": "string"},
+        },
       },
       "scratch": {
         "type": "array",
@@ -424,7 +547,44 @@ def derive_schema(contract: dict[str, Any]) -> dict[str, Any]:
         "type": "object",
         "required": ["start", "end", "chains"],
         "additionalProperties": False,
-        "properties": {"start": {"const": True}, "end": {"const": True}, "chains": {"type": "array"}},
+        "properties": {
+          "start": {"type": "boolean"},
+          "end": {"type": "boolean"},
+          "chains": {"type": "array"},
+        },
+      },
+      "launch_descriptors": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "additionalProperties": False,
+          "required": b["scalar"]["launch_descriptors"]["required_fields"],
+          "properties": {
+            "index": {"type": "integer", "minimum": 0},
+            "direction": {"enum": b["scalar"]["launch_descriptors"]["directions"]},
+            "handle": {"type": "string", "minLength": 1},
+            "bytes": {"type": "integer", "minimum": 1},
+            "slot_offset": {"type": "integer", "minimum": 0},
+            "frame_offset": {"type": "integer", "minimum": 0},
+          },
+        },
+      },
+      "linked_slot": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": b["scalar"]["linked_slot"]["required_fields"],
+        "properties": {
+          "slot": {"enum": b["scalar"]["linked_slot"]["slot_names"]},
+          "program_id": {"type": "integer", "minimum": 1},
+          "entry": {"type": "integer", "minimum": 0},
+          "text_base": {"type": "integer", "minimum": 0},
+          "text_bytes": {"type": "integer", "minimum": 0},
+          "data_base": {"type": "integer", "minimum": 0},
+          "data_bytes": {"type": "integer", "minimum": 0},
+          "image_sha256": {"type": "string", "minLength": 64, "maxLength": 64},
+          "freeze_sha256": {"type": "string", "minLength": 64, "maxLength": 64},
+        },
       },
       "patch_mask": {"type": "array"},
       "helpers": {"type": "array"},
@@ -451,8 +611,24 @@ def check_schema_matches(contract: dict[str, Any], errors: list[str], path: Path
       "schema: kernels/bindings/schema.json differs from what the contract derives; regenerate it"
     )
 
+def check_examples(contract: dict[str, Any], errors: list[str]) -> None:
+  """Every committed example loads under the strict consumer and re-seals to the same hash."""
+  expected = {EXAMPLE, EXAMPLE_SCALAR}
+  for path in sorted(expected):
+    if not path.is_file():
+      errors.append(f"example: {path} is missing")
+  for path in sorted(EXAMPLES.glob("*.package.json")):
+    try:
+      package = pc.load(path.read_text(), contract)
+    except pc.PackageError as exc:
+      errors.append(f"example {path.name}: the committed legal example is rejected: {exc}")
+      continue
+    sealed = pc.seal({k: v for k, v in package.items() if k != "package_hash"}, contract)
+    if sealed["package_hash"] != package["package_hash"]:
+      errors.append(f"example {path.name}: re-sealing gives a different package_hash")
 
 def check_example(contract: dict[str, Any], errors: list[str], path: Path = EXAMPLE) -> None:
+  """Single-path check kept for tests that point the checker at a broken or absent file."""
   if not path.is_file():
     errors.append(f"example: {path} is missing")
     return
@@ -536,7 +712,7 @@ def validate_docs(contract: Any, request: Any) -> dict[str, Any]:
   anchors = guarded("sources", sources) or 0
   guarded("required", check_required, contract, errors)
   guarded("schema", check_schema_matches, contract, errors)
-  guarded("example", check_example, contract, errors)
+  guarded("example", check_examples, contract, errors)
   guarded("field request", check_field_request, request, contract, errors)
   return {
     "schema": "cn_package_contract_report/v1",

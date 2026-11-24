@@ -1,0 +1,11 @@
+--- a/scalar/scalar_helper_issue.sv
++++ b/scalar/scalar_helper_issue.sv
+@@ -155,7 +155,7 @@
+   assign is_csrwi = is_zicsr && (funct3 == 3'b101);
+   assign form_ok  = (is_csrw || is_csrwi) && (rd == 5'd0);
+   // CSRRWI carries the uimm5 literal; CSRRW carries the rs1 register value.
+-  assign operand  = is_csrwi ? {27'd0, rs1f} : rs1_operand_i;
++  assign operand  = {27'd0, rs1f};
+ 
+   assign hit_mfe   = (csr == 12'(CN_CSR_NEXUS_MFE_SUBMIT));
+   assign hit_wait  = (csr == 12'(CN_CSR_NEXUS_EVENT_WAIT));

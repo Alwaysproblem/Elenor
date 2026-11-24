@@ -1,0 +1,11 @@
+--- a/scalar/scalar_helper_issue.sv
++++ b/scalar/scalar_helper_issue.sv
+@@ -175,7 +175,7 @@
+ 
+   always_ff @(posedge clk_i) begin
+     if (!rst_ni) txn_seq_q <= 24'd0;
+-    else if (mfe_fire) txn_seq_q <= txn_seq_q + 24'd1;
++    else if (mfe_desc_valid_o) txn_seq_q <= txn_seq_q + 24'd1;
+   end
+ 
+   // ---- descriptor select (immutable launch table by index) ----

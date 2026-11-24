@@ -64,6 +64,30 @@ helpers:
       why: "an accumulate step in an open chain",
     }
   - { name: chain_final, csr: nexus.mregion.final, why: "closes a chain" }
+  - {
+      name: mfe_submit,
+      csr: nexus.mfe.submit,
+      kind: MFE_SUBMIT,
+      why: "scalar helper: submits a slot-local immutable direct-move descriptor (operand = launch_descriptors index)",
+    }
+  - {
+      name: wait,
+      csr: nexus.event.wait,
+      kind: WAIT,
+      why: "scalar helper: parks next issue until a slot-local event terminates (operand = wait_events index)",
+    }
+  - {
+      name: signal_phase,
+      csr: nexus.phase.signal,
+      kind: SIGNAL_PHASE,
+      why: "scalar helper: one accepted write is one PHASE_SIGNAL (operand = phase enum 0/1)",
+    }
+  - {
+      name: task_ret,
+      csr: nexus.task.ret,
+      kind: TASK_RET,
+      why: "scalar helper: retire-chain entry, stops issue and waits local events (operand = 0); not a success signal",
+    }
 messages:
   - {
       message: PROGRAM_REGISTER,

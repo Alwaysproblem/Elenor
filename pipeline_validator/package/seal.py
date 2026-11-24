@@ -18,9 +18,10 @@ from typing import Any
 
 from ..compiled_program import parse_compiled_program
 from ..config import HardwareConfig, SimConfig
-from ..execution_ir import GlobalBinding
+from ..execution_ir import ExecTileGroupTask, ExecTileOp, GlobalBinding
 from ..loader import load_program
 from .binding_ir import PackageError, canonical, contract, validate
+from .slot_freeze import check_measurements
 
 
 def _parts(package: dict[str, Any]) -> dict[str, Any]:
@@ -52,6 +53,54 @@ def package_hash(package: dict[str, Any]) -> str:
   return hashlib.sha256(canonical({name: parts[name] for name in covers})).hexdigest()
 
 
+def _check_scalar_launch(kernel: dict, entry: Any) -> None:
+  """The scalar ELF addresses the same Frame and L2 views as the verified transfer program."""
+  error = PackageError("CONTROL_PLANE_MISMATCH", "$.binding_manifest.launch_descriptors")
+  if not isinstance(entry, ExecTileGroupTask) or len(entry.role_bindings) != 1:
+    raise error
+  role = next(iter(entry.role_bindings.values()))
+  tile = role.tile_program
+  if tile.layout is None:
+    raise error
+  frames = {row.buffer_id: row.arena_offset for row in tile.layout.buffer_layouts}
+  handles = dict(zip((f"formal:{i}" for i, f in enumerate(tile.formals) if f.space == "l2"), role.actuals))
+  observed: list[dict[str, Any]] = []
+  for inst in tile.insts:
+    if inst.op is not ExecTileOp.LAUNCH_MFE:
+      continue
+    desc = tile.descriptors[inst.args[0]]
+    move = desc.transfer
+    if move is None or desc.op not in ("load", "store"):
+      raise error
+    local, external = (move.dst, move.src) if desc.op == "load" else (move.src, move.dst)
+    if (
+      local.base not in frames
+      or external.base not in handles
+      or local.dtype != "i32"
+      or external.dtype != "i32"
+    ):
+      raise error
+    if (
+      len(local.offsets) != 1
+      or len(external.offsets) != 1
+      or local.strides != (1,)
+      or external.strides != (1,)
+    ):
+      raise error
+    observed.append(
+      {
+        "index": len(observed),
+        "direction": "l2_to_frame" if desc.op == "load" else "frame_to_l2",
+        "handle": handles[external.base],
+        "bytes": move.bytes,
+        "frame_offset": frames[local.base] + local.offsets[0] * 4,
+        "slot_offset": external.offsets[0] * 4,
+      }
+    )
+  if observed != kernel["launch_descriptors"]:
+    raise error
+
+
 def verify_control_plane(
   package: dict[str, Any],
   compiled_text: str,
@@ -81,6 +130,9 @@ def verify_control_plane(
     load_program(program, hw, sim, actual_bindings=actual_bindings)
   except (ValueError, TypeError) as exc:
     raise PackageError("CONTROL_PLANE_REJECTED", "$.control_plane", str(exc)) from exc
+  for kernel in package["binding_manifest"]["kernels"]:
+    if "linked_slot" in kernel:
+      _check_scalar_launch(kernel, program.entry)
   cp = package["control_plane"]
   actual = {
     "schema_version": program.schema_version,
@@ -105,11 +157,13 @@ def seal(
   hw: HardwareConfig,
   sim: SimConfig,
   actual_bindings: Mapping[str, GlobalBinding],
+  slot_freeze: dict | None = None,
 ) -> dict[str, Any]:
   """Return a copy carrying its ``package_hash``; validated first, checked against the wrapped
   CompiledProgram by the codec and the semantic Loader, and never mutated."""
   body = {k: v for k, v in package.items() if k != "package_hash"}
   validate({**body, "package_hash": "0" * 64})
+  check_measurements(body, slot_freeze)
   verify_control_plane(body, compiled_text, hw=hw, sim=sim, actual_bindings=actual_bindings)
   return {**body, "package_hash": package_hash(body)}
 

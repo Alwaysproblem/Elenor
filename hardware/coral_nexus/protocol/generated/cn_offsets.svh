@@ -370,6 +370,10 @@ localparam int CN_CSR_NEXUS_MREGION_FIRST = 12'h7cc;
 localparam int CN_CSR_NEXUS_MREGION_CONTINUE = 12'h7cd;
 localparam int CN_CSR_NEXUS_MREGION_FINAL = 12'h7ce;
 localparam int CN_CSR_NEXUS_MISSUE_CONTROL = 12'h7cf;
+localparam int CN_CSR_NEXUS_MFE_SUBMIT = 12'h7d0;
+localparam int CN_CSR_NEXUS_EVENT_WAIT = 12'h7d1;
+localparam int CN_CSR_NEXUS_PHASE_SIGNAL = 12'h7d2;
+localparam int CN_CSR_NEXUS_TASK_RET = 12'h7d3;
 
 function automatic int cn_msg_words(input int m);
   case (m)

@@ -320,11 +320,12 @@ class G0Gate:
 
 
 def _fragment_validators() -> list[tuple[str, Any]]:
-  """The C010-C016 producer validators G1 re-runs. The set is held here, not in any YAML."""
+  """The C010-C016 producer validators plus the G1v5 scalar-helper ABI, re-run here (set held in code)."""
   import derive_w4_bounds as w4
   import validate_native_owner as vno
   import validate_numeric as vnum
   import validate_package_contract as vpc
+  import validate_scalar_helper as vsh
   import validate_vme_decl as vvd
   import validate_w6_contract as vw6
   import validate_w7_contract as vw7
@@ -335,15 +336,16 @@ def _fragment_validators() -> list[tuple[str, Any]]:
     ("C012 vme decl", vvd.validate),
     ("C013 memory", lambda: w4.validate_all(constraints_path=_w4_path())),
     ("C014 package", vpc.validate),
+    ("G1v5 scalar helper ABI", vsh.validate),
     ("C015 event/reset", vw6.validate),
     ("C016 trace", vw7.validate),
   ]
-
 
 def _w4_path() -> Path:
   import freeze_check as fc
 
   return fc.W4_CONSTRAINTS
+
 
 
 class G1Gate:

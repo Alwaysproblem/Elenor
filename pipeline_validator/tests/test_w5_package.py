@@ -455,6 +455,75 @@ def test_matches_the_c014_reference_consumer(good: dict[str, Any]) -> None:
     )
 
 
+SCALAR_EXAMPLE = H / "kernels/bindings/examples/k_scalar_add7.package.json"
+
+
+def test_scalar_package_matches_the_c014_reference_consumer() -> None:
+  """The scalar-class entry (K-SCALAR-ADD7) agrees with the reference consumer on every guard."""
+  contract = ref.load_contract()
+  good = json.loads(SCALAR_EXAMPLE.read_text())
+  k = lambda p: p["binding_manifest"]["kernels"][0]  # noqa: E731
+
+  def drop_helper(name: str) -> Any:
+    return lambda p: k(p).__setitem__(
+      "helpers", [h for h in k(p)["helpers"] if h["name"] != name]
+    )
+
+  mutations: list[Any] = [
+    lambda p: None,
+    lambda p: k(p).pop("launch_descriptors"),
+    lambda p: k(p).pop("linked_slot"),
+    lambda p: k(p)["ins"][0].__setitem__("dtype", "bf16"),
+    lambda p: k(p)["ins"][0].__setitem__("dtype", "i8"),
+    lambda p: k(p)["initial"].__setitem__("method", "vtzero"),
+    lambda p: k(p).__setitem__("mode_table", "reference"),
+    lambda p: k(p)["region"].__setitem__("chains", [{"id": 0, "steps": ["CHAIN_FIRST", "CHAIN_FINAL"]}]),
+    lambda p: k(p)["region"].__setitem__("start", True),
+    lambda p: k(p)["launch_descriptors"][0].__setitem__("direction", "in"),
+    lambda p: k(p)["launch_descriptors"][0].__setitem__("handle", "output"),
+    lambda p: k(p)["launch_descriptors"][0].__setitem__("bytes", 30),
+    lambda p: k(p)["launch_descriptors"][0].__setitem__("slot_offset", 2),
+    lambda p: k(p)["launch_descriptors"].pop(1),
+    drop_helper("task_ret"),
+    lambda p: k(p)["helpers"][0].__setitem__("params", {"index": 0, "extra": 1}),
+    lambda p: k(p)["helpers"][0].__setitem__("params", {"index": 5}),
+    lambda p: k(p)["helpers"][4].__setitem__("params", {"phase": 2}),
+    lambda p: k(p)["helpers"][5].__setitem__("params", {"phase": 0}),
+    lambda p: k(p)["helpers"][6].__setitem__("params", {"code": 1}),
+    lambda p: k(p)["helpers"][4].__setitem__("params", {"phase": True}),
+    lambda p: k(p)["helpers"][4].__setitem__("params", {"phase": 1.0}),
+    lambda p: k(p)["helpers"][6].__setitem__("params", {"code": False}),
+    lambda p: k(p)["helpers"][6].__setitem__("params", {"code": 0.0}),
+    lambda p: k(p)["helpers"][0].__setitem__("csr", "0x7d0"),
+    lambda p: k(p)["helpers"][0].__setitem__("name", "region_start"),
+    lambda p: k(p)["linked_slot"].__setitem__("slot", "C"),
+    lambda p: k(p)["linked_slot"].__setitem__("program_id", 2),
+    lambda p: k(p)["linked_slot"].__setitem__("entry", 4),
+    lambda p: k(p)["linked_slot"].__setitem__("freeze_sha256", "9" * 64),
+  ]
+  for index, mutate in enumerate(mutations):
+    candidate = copy.deepcopy(good)
+    mutate(candidate)
+    body = {key: value for key, value in candidate.items() if key != "package_hash"}
+    candidate["package_hash"] = package_hash(body)
+    try:
+      verify(candidate)
+      mine: str | None = None
+    except PackageError as exc:
+      mine = exc.code
+    try:
+      ref.validate_package(candidate, contract)
+      theirs: str | None = None
+    except ref.PackageError as exc:
+      theirs = exc.code
+    assert (mine is None) == (theirs is None), (
+      f"scalar mutation {index}: accept/reject differs ({mine!r} vs {theirs!r})"
+    )
+    assert mine == theirs or (mine, theirs) in KNOWN_CODE_REFINEMENTS, (
+      f"scalar mutation {index}: implementation {mine!r} vs reference {theirs!r}"
+    )
+
+
 def test_the_sealed_hash_equals_the_reference_hash(good: dict[str, Any]) -> None:
   assert package_hash(good) == ref.package_hash(good, ref.load_contract()) == good["package_hash"]
 

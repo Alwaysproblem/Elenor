@@ -1,0 +1,224 @@
+{
+  "schema": "cn_scalar_helper_abi/v1",
+  "version": 1,
+  "status": "draft",
+  "note": "G1 v5 re-open (authorized before C038): the sealed scalar-helper control ABI used by the K-SCALAR-ADD7 kernel class. No CSR address, opcode or bit position is assigned here: addresses come only from the C017 allocator output (cn_messages.h / cn_layout.json); this file registers logical names, carrier forms, operand resolution rules and the descriptor record contract. A kernel binding supplies the per-kernel operand instance data (w5_package.contract.yaml scalar block); this ABI supplies the rules it must satisfy.",
+  "carrier": {
+    "csr_name_map_entries": [
+      "nexus.mfe.submit",
+      "nexus.event.wait",
+      "nexus.phase.signal",
+      "nexus.task.ret"
+    ],
+    "scope": "per_context",
+    "address_source": "generated only: csr_allocator output; a handwritten numeric address is a protocol fault",
+    "forms": [
+      "CSRRW x0,csr,rs1",
+      "CSRRWI x0,csr,imm"
+    ],
+    "forms_rule": "the architectural write form only: rs1 carries the operand register, imm carries the operand literal",
+    "rd_must_be_x0": true,
+    "rd_rule": "the read leg is discarded (rd == x0); a read result of a helper CSR is never observable",
+    "operand_source": "rs1 or uimm5; never a full address and never a second register pair",
+    "other_access": "protocol_fault",
+    "other_access_rule": "any access to a helper CSR outside the two forms (CSRRS/CSRRC/CSRRWI-with-rd, a load/store targeting the CSR, or any other encoding) is a protocol fault in the reference",
+    "hand_written_address": "forbidden",
+    "width_bits": "unresolved",
+    "bit_positions": "unresolved"
+  },
+  "helpers": [
+    {
+      "name": "mfe_submit",
+      "kind": "MFE_SUBMIT",
+      "csr": "nexus.mfe.submit",
+      "owner": "W4",
+      "operand": {
+        "kind": "descriptor_index",
+        "resolves_to": "launch_descriptors[index]",
+        "scope": "slot_local",
+        "domain_rule": "0 <= index < len(launch_descriptors); the sealed kernel binding declares the table",
+        "out_of_domain": "OPERAND_OUT_OF_DOMAIN"
+      },
+      "side_effect": "submits the referenced immutable direct-move descriptor; one accepted descriptor is exactly one transaction",
+      "one_descriptor_one_transaction": {
+        "file": "rtl/memory/c032_mfe_pkg.sv",
+        "line": 24,
+        "needle": "One direct-move descriptor = one transaction"
+      },
+      "external_leg_rule": {
+        "file": "protocol/w4_memory.contract.yaml",
+        "line": 186,
+        "needle": "external writes are MFE-only"
+      },
+      "completion": "settles only through a declared local waitable event of the same kernel (its wait_events table); the kernel observes it via WAIT, never by polling the CSR",
+      "ordering": "program order within the Context",
+      "no_address_operand": "the operand names an index, never the address; an address literal is rejected, not masked"
+    },
+    {
+      "name": "wait",
+      "kind": "WAIT",
+      "csr": "nexus.event.wait",
+      "owner": "W6",
+      "operand": {
+        "kind": "event_index",
+        "resolves_to": "wait_events[index]",
+        "scope": "slot_local",
+        "domain_rule": "0 <= index < len(wait_events); wait_events[i] is the completion event of launch_descriptors[i]; the sealed kernel binding declares the table",
+        "out_of_domain": "OPERAND_OUT_OF_DOMAIN"
+      },
+      "side_effect": "park this Context's NEXT issue until the referenced slot-local event reaches a terminal state; accepted in-flight work continues (park does not flush, EVT-04)",
+      "wait_record_writer": {
+        "file": "protocol/w6_event_facility.contract.yaml",
+        "line": 290,
+        "needle": "record_writer: W6"
+      },
+      "check_register": {
+        "file": "protocol/w6_event_facility.contract.yaml",
+        "line": 305,
+        "needle": "atomic: true"
+      },
+      "same_cycle_priority": "completion_first",
+      "ordering": "program order within the Context"
+    },
+    {
+      "name": "signal_phase",
+      "kind": "SIGNAL_PHASE",
+      "csr": "nexus.phase.signal",
+      "owner": "W6",
+      "operand": {
+        "kind": "phase_id",
+        "resolves_to": "phase enum",
+        "domain": {
+          "0": "input_released",
+          "1": "output_ready"
+        },
+        "domain_rule": "the operand is exactly the phase enum; any other value is OPERAND_OUT_OF_DOMAIN",
+        "out_of_domain": "OPERAND_OUT_OF_DOMAIN",
+        "enum_source": {
+          "file": "protocol/w6_event_facility.contract.yaml",
+          "line": 338,
+          "needle": "directions: [input_released, output_ready]"
+        }
+      },
+      "side_effect": "one accepted instruction is exactly one PHASE_SIGNAL message to the Group; the Tile never deduplicates or merges (a repeated signal is emitted again and judged live-duplicate at the Group, EVT-14)",
+      "one_instruction_one_message": {
+        "file": "protocol/w6_event_facility.contract.yaml",
+        "line": 339,
+        "needle": "one_instruction_one_message: true"
+      },
+      "at_most_once_per_task_direction": "a static guarantee of the compiler and Loader (EVT-15), not a Tile gate",
+      "ordering": "program order within the Context"
+    },
+    {
+      "name": "task_ret",
+      "kind": "TASK_RET",
+      "csr": "nexus.task.ret",
+      "owner": "W2",
+      "operand": {
+        "kind": "code",
+        "resolves_to": "literal code",
+        "domain": {
+          "0": "normal retire / drain"
+        },
+        "domain_rule": "the operand is exactly 0; any other value is OPERAND_OUT_OF_DOMAIN",
+        "out_of_domain": "OPERAND_OUT_OF_DOMAIN"
+      },
+      "side_effect": "stop new issue for this Context, wait for its local events to finish, then raise EXEC_DRAINED internally; it is the retire-chain entry, never a task-success signal",
+      "chain": "RET -> EXEC_DRAINED (W2 internal notice) -> RETIRE_READY -> Group RETIRE authorization -> local reclaim -> TASK_COMPLETION",
+      "op_anchor": {
+        "file": "rtl/scalar/doc/ctx_ctrl.yaml",
+        "line": 74,
+        "needle": "name: RET"
+      },
+      "ordering": "program order within the Context"
+    }
+  ],
+  "operand_rules": {
+    "index_scope": "slot-local to the sealed kernel; an index never crosses kernel or program instances",
+    "no_address": "a full address as operand is HAND_WRITTEN_ADDRESS / OPERAND_OUT_OF_DOMAIN, never masked or truncated",
+    "immutable_tables": "descriptor and event tables are sealed image state: the kernel selects an index, it may not write a table"
+  },
+  "descriptor_record": {
+    "authority": "the field list below is the carrier-side contract; per-kernel instance entries live in the w5 scalar block",
+    "required_fields": [
+      "index",
+      "direction",
+      "handle",
+      "bytes",
+      "slot_offset",
+      "frame_offset"
+    ],
+    "directions": [
+      "l2_to_frame",
+      "frame_to_l2"
+    ],
+    "scope": "slot_local",
+    "immutable": true,
+    "addressing": "index_only",
+    "no_full_addresses": "a descriptor names a binding handle and offsets; the ctx/arena/scope/binding provenance tuple is supplied by the Frame/descriptor owner at submit time, never written by the kernel",
+    "external_form": {
+      "file": "protocol/w4_memory.contract.yaml",
+      "line": 190,
+      "needle": "typed_binding(binding_class in [L2_VIEW, HBM_BINDING]) + offset"
+    },
+    "mutation": "reject",
+    "patch": "patch_mask_whitelist_only",
+    "silicon_struct": {
+      "file": "rtl/memory/c032_mfe_pkg.sv",
+      "line": 24,
+      "needle": "One direct-move descriptor = one transaction"
+    },
+    "coverage": {
+      "authority": "the binding's scalar.coverage block (w5 package contract) enforces this per package; the ABI states the invariant so a consumer cannot weaken it silently",
+      "descriptor_use": "every launch_descriptors index is the operand of exactly one mfe_submit AND exactly one wait (count and set equality; a duplicate submit is rejected)",
+      "signal_use": "every declared signal_phase value is signaled exactly once",
+      "retire_use": "exactly one task_ret(code=0) retires the task"
+    }
+  },
+  "faults": [
+    {
+      "code": "HELPER_ACCESS_FORM",
+      "group": "carrier",
+      "static": false,
+      "text": "an access to a helper CSR outside CSRRW x0,csr,rs1 / CSRRWI x0,csr,imm"
+    },
+    {
+      "code": "UNKNOWN_HELPER",
+      "group": "decode",
+      "static": true,
+      "text": "a helper the sealed binding does not declare cannot be called"
+    },
+    {
+      "code": "OPERAND_OUT_OF_DOMAIN",
+      "group": "operand",
+      "static": false,
+      "text": "operand value outside the helper's declared domain (index, phase enum or code)"
+    },
+    {
+      "code": "DESCRIPTOR_MUTATION",
+      "group": "descriptor",
+      "static": false,
+      "text": "a write to the sealed descriptor or event table"
+    },
+    {
+      "code": "HAND_WRITTEN_ADDRESS",
+      "group": "build",
+      "static": true,
+      "text": "a numeric CSR address or full address literal in kernel source instead of the generated name"
+    }
+  ],
+  "fault_note": "these are logical contract faults of the ABI; mapping into the wire fault_code enum is an implementation detail, not assigned here",
+  "reference_kernel": {
+    "kernel_id": "K-SCALAR-ADD7",
+    "kernel_version": 1,
+    "kernel_class": "scalar",
+    "instance_data_authority": "protocol/w5_package.contract.yaml scalar block (consumer-side): the launch_descriptors/wait_events tables and operand values live there",
+    "mode_table": "none",
+    "initial_method": "none",
+    "region": {
+      "start": false,
+      "end": false,
+      "chains": []
+    }
+  }
+}

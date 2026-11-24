@@ -486,6 +486,28 @@ or outstanding job.
 Python path. These tests do not implement external dynamic L1 profile transitions, C036 gate wake,
 C039 program installation or C040 oneTile execution; a unit stub is not CS1 evidence.
 
+## C038 scalar kernel packages
+
+From the repository root, with the pinned RV32 toolchain extracted:
+
+```bash
+H="$PWD/hardware/coral_nexus"
+C2="$H/configs/cs1_c2.yaml"
+E=$(mktemp -d)
+bash "$H/scripts/cn.sh" package --binding "$H/kernels/bindings/scalar_ctl_v1.yaml" --config "$C2" --out "$E/package"
+bash "$H/scripts/cn.sh" unit --suite w5 --config "$C2" --out "$E/w5"
+bash "$H/scripts/cn.sh" unit --suite w7 --config "$C2" --out "$E/w7"
+```
+
+Use an empty package output directory. `A/` and `B/` contain separately linked `image.elf`,
+`compiled_program.json` and `package.json`. Publication finishes with `slot_freeze.json`.
+The sidecar is mandatory for scalar packages: omitting it at seal or load is `SLOT_FREEZE_MISMATCH`.
+Pass it to `load_file(..., slot_freeze=freeze)` for each scalar package, then call
+`pipeline_validator.package.slot_freeze.verify_slot_freeze(freeze, {"A": loaded_a, "B": loaded_b})`
+before using the published index. Each package commits to the same measurements and carries its
+own slot, program ID, entry, layout and image hash. A filename is not registration authority.
+Package production neither installs an image nor executes a full Tile.
+
 ## Offline seeds (C004)
 
 - Inventory: `env/seed_targets.json` — every seed has URL/path + sha256 +

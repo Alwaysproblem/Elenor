@@ -56,6 +56,11 @@ _BANNED_FIELD = re.compile(r"(^|_)(addr|address|opcode|pc)($|_)")
 # layout's 0..47 order; extending the list appends AFTER them and leaves this invariant alone).
 V3_RESERVED_COUNT = 48
 V3_RESERVED_FINGERPRINT = "aeeefc19e3a165b0522baf269476516bd6b538f7b813278df048a79ccc80b9c3"
+# The v4 identity of the reserved msg_type block (v5 re-open, same mechanism): the first
+# V4_RESERVED_COUNT names must hash to V4_RESERVED_FINGERPRINT (the v3 order plus TICKET_ROLLBACK
+# at index 48), so the list cannot shrink back below the v4 pin either.
+V4_RESERVED_COUNT = 49
+V4_RESERVED_FINGERPRINT = "31b5810c181d519fdd7127736029eea5fcc958c1d64e0a268e54fa7c17dd65eb"
 _INPUTS = (
   "cn_protocol_v1.yaml",
   SCHEMA_FILE,
@@ -227,6 +232,18 @@ def _build(data: dict[str, Any], errors: list[str]) -> dict[str, Any]:
       errors.append(
         "index_reservation: the first 48 entries no longer match the v3 identity held by the "
         "generator; a v3 msg_type number never moves"
+      )
+  if len(reserved) < V4_RESERVED_COUNT:
+    errors.append(
+      f"index_reservation: {len(reserved)} entries is shorter than the {V4_RESERVED_COUNT} messages "
+      "the v4 seal numbered; dropping entries and re-fingerprinting cannot renumber v4"
+    )
+  else:
+    head = hashlib.sha256("\n".join(reserved[:V4_RESERVED_COUNT]).encode()).hexdigest()
+    if head != V4_RESERVED_FINGERPRINT:
+      errors.append(
+        "index_reservation: the first 49 entries no longer match the v4 identity held by the "
+        "generator; a v4 msg_type number never moves"
       )
   for i, want in enumerate(reserved):
     got = order[i] if i < len(order) else None

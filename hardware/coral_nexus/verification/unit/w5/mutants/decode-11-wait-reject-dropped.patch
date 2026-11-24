@@ -1,0 +1,11 @@
+--- a/scalar/scalar_helper_issue.sv
++++ b/scalar/scalar_helper_issue.sv
+@@ -277,7 +277,7 @@
+           fault_code_c = FC_INVALID_DESCRIPTOR;
+         end else begin
+           wait_valid_o = 1'b1;
+-          consumed = wait_ready_i | wait_reject_i;
++          consumed = wait_ready_i;
+           if (wait_reject_i) begin             // owner reject = protocol fault
+             is_fault = 1'b1;
+             rsp_c = RSP_FAULT;

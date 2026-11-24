@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from bitwise_scalar import FFLAGS_MASK, pack_flags_delta
-from nexus_extend import NexusContextAdapter, NexusEnvEvent
+from nexus_extend import NexusContextAdapter, NexusEnvEvent, scalar_env_from_dict
 
 HERE = Path(__file__).resolve().parent
 H = HERE.parents[1]
@@ -270,6 +270,7 @@ class TraceRequest:
   env_events: list[dict[str, Any]] = field(default_factory=list)
   memory_regions: list[tuple[int, int]] | None = None
   isa: str = ""
+  scalar_env: dict[str, Any] | None = None
 
 
 def _pack_reg_bank(values: list[int]) -> str:
@@ -300,6 +301,9 @@ def _execute_trace_in_process(so_path: Path, req: TraceRequest) -> dict[str, Any
       sim.WriteMemory(int(seg["address"]), bytes.fromhex(str(seg["hex"])))
 
     adapter = NexusContextAdapter(ctx_slot=req.ctx_slot, ctx_generation=req.ctx_generation)
+    if req.scalar_env is not None:
+      adapter.arm_scalar(scalar_env_from_dict(req.scalar_env), mem=sim)
+
     events_by_step: dict[int, list[NexusEnvEvent]] = {}
     for raw_ev in req.env_events:
       ev = NexusEnvEvent(
@@ -318,7 +322,9 @@ def _execute_trace_in_process(so_path: Path, req: TraceRequest) -> dict[str, Any
 
     step_idx = 0
     while step_idx < req.max_steps and not sim.IsHalted():
-      for ev in events_by_step.get(step_idx, []):
+      # pop, not get: a delivered completion leaves the bucket so the parked-WAIT fast-forward
+      # below can never inject the same scheduled event a second time.
+      for ev in events_by_step.pop(step_idx, []):
         adapter.inject_env_event(ev)
 
       pc = sim.GetPC()
@@ -338,6 +344,25 @@ def _execute_trace_in_process(so_path: Path, req: TraceRequest) -> dict[str, Any
           rs1_val=rs1_val,
           owner_op_seq=step_idx,
         )
+        if hrec.get("effect", {}).get("parked") and not hrec["effect"].get("resolved"):
+          # Parked WAIT: consume later env events in schedule order until it resolves; a wait whose
+          # completion never arrives is a protocol fault, never a timeout guess.
+          remaining: list[tuple[int, NexusEnvEvent]] = []
+          for ord_key in sorted(events_by_step):
+            for queued in events_by_step[ord_key]:
+              remaining.append((ord_key, queued))
+          resolved = False
+          for ord_key, queued in remaining:
+            adapter.inject_env_event(queued, at_step=step_idx)
+            events_by_step[ord_key] = [e for e in events_by_step[ord_key] if e is not queued]
+            if adapter.try_resolve_wait() == "resolved":
+              resolved = True
+              break
+          if not resolved:
+            raise SpikeRefError(
+              "WAIT_NEVER_SATISFIED",
+              f"parked wait({hrec['effect'].get('index')}) has no scheduled completion event",
+            )
         helper_trace.append(hrec)
         rd_idx = int(hrec["rd"])
         cur_x = list(prev_x)
@@ -373,6 +398,9 @@ def _execute_trace_in_process(so_path: Path, req: TraceRequest) -> dict[str, Any
         )
         prev_x = cur_x
         step_idx += 1
+        if adapter.task_finished:
+          # task_ret: the sealed retire chain ends the Context -- nothing is issued after it.
+          break
         continue
 
       # Snapshot CSRs before single-stepping so per-instruction flags_delta is exact even when
@@ -530,9 +558,23 @@ def _execute_trace_in_process(so_path: Path, req: TraceRequest) -> dict[str, Any
       "retire_stream": retire_stream,
       "helper_trace": helper_trace,
       "nexus_csr_values": {f"0x{k:03x}": v for k, v in sorted(adapter.csr_values.items())},
+      "task_exit": _task_exit_status(adapter),
+      "scalar_helpers": adapter.scalar_report() if adapter.scalar_env is not None else None,
     }
+
   finally:
     sim.close()
+
+def _task_exit_status(adapter: NexusContextAdapter) -> dict[str, Any]:
+  """Record `check_task_exit_clean` as evidence; a scalar-armed Context must end via task_ret."""
+  if adapter.scalar_env is None:
+    return {"clean": True, "checked": False}
+  try:
+    adapter.check_task_exit_clean()
+  except Exception as exc:  # NexusExtendError; surfaced as evidence, not hidden
+    return {"clean": False, "checked": True, "code": getattr(exc, "code", type(exc).__name__)}
+  return {"clean": True, "checked": True}
+
 
 
 def run_trace_request(req: TraceRequest, *, cache_dir: Path = DEFAULT_CACHE_DIR) -> dict[str, Any]:
@@ -581,6 +623,7 @@ def _run_trace_in_container(
     "env_events": req.env_events,
     "memory_regions": req.memory_regions,
     "isa": req.isa,
+    "scalar_env": req.scalar_env,
   }
   (stage_dir / "request.json").write_text(json.dumps(payload, indent=2) + "\n")
   image = json.loads(IMAGE_LOCK.read_text())["tag"]
@@ -645,6 +688,7 @@ def _cli_in_container() -> int:
     env_events=list(raw.get("env_events") or []),
     memory_regions=regions,  # type: ignore[arg-type]
     isa=str(raw.get("isa") or ""),
+    scalar_env=raw.get("scalar_env"),
   )
   out = _execute_trace_in_process(Path(args.in_container_so), req)
   Path(args.response).write_text(json.dumps(out, indent=2, sort_keys=True) + "\n")

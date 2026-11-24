@@ -327,15 +327,15 @@ groups:
 
 # ---------------------------------------------------------------------------------------------------
 # Index reservation across versioned seal reopens (C035). The names below are the messages whose
-# msg_type numbers were assigned by an earlier seal (through PROTOCOL_FREEZE v3); the generator
+# msg_type numbers were assigned by an earlier seal (through PROTOCOL_FREEZE v4); the generator
 # refuses any input set whose message order does not start with EXACTLY this list, so a rename,
 # removal or insertion cannot silently renumber a sealed message -- including the host-only
 # PROGRAM_REGISTER. A new message may only appear after the last reserved name; extend this list
 # deliberately (at its end) together with the seal that assigns the new number.
 # ---------------------------------------------------------------------------------------------------
 index_reservation:
-  reserved_through: v3
-  reserved_fingerprint: aeeefc19e3a165b0522baf269476516bd6b538f7b813278df048a79ccc80b9c3
+  reserved_through: v4
+  reserved_fingerprint: 31b5810c181d519fdd7127736029eea5fcc958c1d64e0a268e54fa7c17dd65eb
   reserved:
     [
       QUERY_CAPS,
@@ -386,6 +386,7 @@ index_reservation:
       REGION_GRANT,
       REGION_DONE,
       PROGRAM_REGISTER,
+      TICKET_ROLLBACK,
     ]
 
 # ---------------------------------------------------------------------------------------------------

@@ -22,6 +22,7 @@ from ..config import HardwareConfig, SimConfig
 from ..execution_ir import GlobalBinding
 from .binding_ir import PackageError, parse_strict
 from .seal import verify, verify_control_plane, verify_image
+from .slot_freeze import check_measurements
 
 
 def _freeze(value: Any) -> Any:
@@ -67,12 +68,14 @@ def load_text(
   actual_bindings: Mapping[str, GlobalBinding],
   image_bytes: bytes,
   target: dict[str, Any],
+  slot_freeze: dict | None = None,
 ) -> LoadedPackage:
   """Load a package as installation proof: the contract layer, the wrapped CompiledProgram (codec and
   semantic Loader), the shipped image bytes AND the independent Coral target are all mandatory. Use
   ``verify`` for metadata-only inspection of a package whose image or target is not at hand."""
   package = parse_strict(text)
   verify(package)
+  check_measurements(package, slot_freeze)
   verify_control_plane(package, compiled_text, hw=hw, sim=sim, actual_bindings=actual_bindings)
   verify_image(package, image_bytes)
   check_target(package, target)
@@ -90,6 +93,7 @@ def load_file(
   actual_bindings: Mapping[str, GlobalBinding],
   image_path: Path,
   target: dict[str, Any],
+  slot_freeze: dict | None = None,
 ) -> LoadedPackage:
   try:
     text = Path(path).read_text()
@@ -111,4 +115,5 @@ def load_file(
     actual_bindings=actual_bindings,
     image_bytes=image,
     target=target,
+    slot_freeze=slot_freeze,
   )

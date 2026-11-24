@@ -326,6 +326,9 @@ def run_scalar_selftest(work_dir: Path | None = None) -> dict[str, Any]:
         }
       )
 
+  # C038 scalar helper probe: only once the sealed ABI + the four CSR names exist in the layout.
+  scalar_probe = _run_scalar_helper_probe(stage)
+
   if mismatches:
     raise OracleError("SELFTEST_BIT_MISMATCH", json.dumps(mismatches[0], sort_keys=True))
 
@@ -341,7 +344,163 @@ def run_scalar_selftest(work_dir: Path | None = None) -> dict[str, Any]:
       "raw_upstream_mcause": raw_mcause,
       "extended_words_hex": [f"0x{w:08x}" for w in ext_words],
     },
+    "scalar_probe": scalar_probe,
     "retire_count": len(scalar_trace["retire_stream"]),
+  }
+
+
+SCALAR_PROBE_FRAME_BASE = 0x00014000
+SCALAR_PROBE_L2_IN = 0x00018000
+SCALAR_PROBE_L2_OUT = 0x0001C000
+SCALAR_PROBE_OUT_BASE = 0x00010400
+SCALAR_PROBE_TRAP_OUT = 0x00010500
+SCALAR_PROBE_INPUT_WORDS = (11, 22, 33, 44)
+SCALAR_HELPER_CSR_NAMES = {
+  "mfe_submit": "nexus.mfe.submit",
+  "event_wait": "nexus.event.wait",
+  "phase_signal": "nexus.phase.signal",
+  "task_ret": "nexus.task.ret",
+}
+
+
+def _scalar_probe_asm(catalog: dict[int, ne.NexusCsrSpec]) -> str:
+  """Emit the scalar-helper probe: every CSR address comes from the sealed layout catalog."""
+  name_by_csr = {spec.name: spec.address for spec in catalog.values()}
+  c = {key: name_by_csr[SCALAR_HELPER_CSR_NAMES[key]] for key in SCALAR_HELPER_CSR_NAMES}
+  return f"""/* Generated C038 scalar-helper probe; CSR addresses from generated/cn_layout.json. */
+.text
+.globl _start
+_start:
+  li sp, 0x00017f00
+  la t0, nexus_trap
+  csrw mtvec, t0
+  li a0, 0x{SCALAR_PROBE_FRAME_BASE:08x}
+  csrwi 0x{c['mfe_submit']:03x}, 0       /* mfe_submit(0): L2 -> frame */
+  csrwi 0x{c['event_wait']:03x}, 0      /* wait(0): settled before the loads below */
+  li t1, 0x{SCALAR_PROBE_OUT_BASE:08x}
+  li t2, 0
+copy_out:
+  slli t3, t2, 2
+  add t4, a0, t3
+  lw t5, 0(t4)
+  add t6, t1, t3
+  sw t5, 0(t6)
+  addi t2, t2, 1
+  li t6, 4
+  blt t2, t6, copy_out
+  csrwi 0x{c['mfe_submit']:03x}, 1      /* mfe_submit(1): frame -> L2 */
+  csrwi 0x{c['event_wait']:03x}, 1      /* wait(1): scheduled far -> parks, then wakes */
+  csrwi 0x{c['phase_signal']:03x}, 0    /* signal_phase(INPUT_RELEASED) */
+  csrwi 0x{c['phase_signal']:03x}, 1    /* signal_phase(OUTPUT_READY) */
+  csrwi 0x{c['task_ret']:03x}, 0        /* task_ret(0): last retire */
+  ebreak
+nexus_trap:
+  li t1, 0x{SCALAR_PROBE_TRAP_OUT:08x}
+  csrr t2, mcause
+  sw t2, 0(t1)
+  ebreak
+"""
+
+
+def _run_scalar_helper_probe(stage: Path) -> dict[str, Any] | None:
+  """Execute the C038 helper ABI end-to-end on the pinned reference when it is sealed.
+
+  Returns None while the scalar ABI (or the four CSR names in the regenerated layout) is not on
+  disk yet -- the C021 baseline capability is unchanged until the v5 seal lands and this probe
+  produces real executed bits.
+  """
+  if not ne.SCALAR_ABI_PATH.is_file():
+    return None
+  ne.verify_sealed_inputs(extra_inputs=(ne.SCALAR_ABI_SEALED_INPUT,))
+  abi = ne.load_scalar_helper_abi()
+  catalog = ne.load_nexus_csr_catalog()
+  names = {spec.name for spec in catalog.values()}
+  if not set(SCALAR_HELPER_CSR_NAMES.values()) <= names:
+    return None
+
+  asm_path = stage / "scalar_helper_probe.S"
+  asm_path.write_text(_scalar_probe_asm(catalog))
+  elf = build_asm_elf(asm_path, SELFTEST_DIR / "scalar_selftest.ld", stage / "scalar_helper_probe.elf")
+
+  l2_in_hex = b"".join(w.to_bytes(4, "little") for w in SCALAR_PROBE_INPUT_WORDS).hex()
+  scalar_env = {
+    "descriptors": [
+      {
+        "index": 0,
+        "direction": "l2_to_frame",
+        "handle": "input",
+        "bytes": 16,
+        "slot_offset": 0,
+        "frame_offset": 0,
+      },
+      {
+        "index": 1,
+        "direction": "frame_to_l2",
+        "handle": "output",
+        "bytes": 16,
+        "slot_offset": 0,
+        "frame_offset": 0,
+      },
+    ],
+    "bindings": {
+      "input": {"base": SCALAR_PROBE_L2_IN, "length": 64},
+      "output": {"base": SCALAR_PROBE_L2_OUT, "length": 64},
+    },
+    "frame_base": SCALAR_PROBE_FRAME_BASE,
+    "frame_length": 64,
+  }
+  trace = srd.run_trace_request(
+    srd.TraceRequest(
+      elf_path=str(elf),
+      ctx_slot=0,
+      # Spike's default DRAM sits at 0x80000000; the probe uses ITCM/DTCM/L2 addresses, so the
+      # backing regions are declared explicitly (text 0x0-0x2000, data 0x10000-0x30000).
+      memory_regions=[(0x0, 0x2000), (0x10000, 0x20000)],
+      env_events=[
+        {"step_ordinal": 0, "kind": "EVENT_DONE", "key": 0, "status": "DONE"},
+        {"step_ordinal": 1000000, "kind": "EVENT_DONE", "key": 1, "status": "DONE"},
+      ],
+      initial_memory=[{"address": SCALAR_PROBE_L2_IN, "hex": l2_in_hex}],
+      initial_gpr={"a0": SCALAR_PROBE_FRAME_BASE},
+      read_memory_ranges=[
+        {"address": SCALAR_PROBE_L2_OUT, "length": 16},
+        {"address": SCALAR_PROBE_OUT_BASE, "length": 16},
+      ],
+      scalar_env=scalar_env,
+      enable_nexus_extend=True,
+    )
+  )
+  l2_out = bytes.fromhex(trace["memory_bytes"][f"0x{SCALAR_PROBE_L2_OUT:08x}:16"])
+  out_words = bytes.fromhex(trace["memory_bytes"][f"0x{SCALAR_PROBE_OUT_BASE:08x}:16"])
+  got = [int.from_bytes(out_words[4 * i : 4 * (i + 1)], "little") for i in range(4)]
+  if got != list(SCALAR_PROBE_INPUT_WORDS):
+    raise OracleError(
+      "SCALAR_PROBE_DATA_MISMATCH", f"dtcm copy {got} != {list(SCALAR_PROBE_INPUT_WORDS)}"
+    )
+  if not trace["task_exit"]["clean"]:
+    raise OracleError("SCALAR_PROBE_EXIT_DIRTY", json.dumps(trace["task_exit"], sort_keys=True))
+  helpers = (trace["scalar_helpers"] or {}).get("helpers") or []
+  got_kinds = [h["kind"] for h in helpers]
+  expected_kinds = ["MFE_SUBMIT", "WAIT", "MFE_SUBMIT", "WAIT", "SIGNAL_PHASE", "SIGNAL_PHASE", "TASK_RET"]
+  if got_kinds != expected_kinds:
+    raise OracleError("SCALAR_PROBE_HELPER_ORDER", f"{got_kinds}")
+  waits = [h for h in helpers if h["kind"] == "WAIT"]
+  if waits[0]["effect"].get("parked") or not waits[1]["effect"].get("parked"):
+    raise OracleError("SCALAR_PROBE_PARK_MODEL", json.dumps(waits, sort_keys=True))
+  if not (trace["scalar_helpers"] or {}).get("task_finished"):
+    raise OracleError("SCALAR_PROBE_TASK_RET", "task_ret did not retire")
+  csr_used = sorted({h["csr_name"] for h in helpers})
+  return {
+    "helper_sequence": got_kinds,
+    "csr_names": csr_used,
+    "l2_out_hex": l2_out.hex(),
+    "dtcm_copy_words": [f"0x{w:08x}" for w in got],
+    "wait_park_witness": {
+      "direct": waits[0]["effect"],
+      "parked_then_resolved": waits[1]["effect"],
+    },
+    "task_exit": trace["task_exit"],
+    "abi_helper_kinds": sorted(abi.get("_helper_by_kind") or {}),
   }
 
 
@@ -475,6 +634,25 @@ def build_capability_and_coverage(
       "upstream_trap_mcause": selftest_evidence["nexus_probe"]["raw_upstream_mcause"],
     },
   ]
+
+  scalar_probe = selftest_evidence.get("scalar_probe")
+  if scalar_probe is not None:
+    scalar_entries.append(
+      {
+        "class_id": "nexus.scalar_ctl_helpers",
+        "category": "nexus_private",
+        "gate_phase": "G2",
+        "mandatory_in_g2": True,
+        "upstream_spike_oracle_kind": "NONE",
+        "oracle_kind": "BIT_ORACLE",
+        "adapter": "nexus_extend.py",
+        "status": "READY_VIA_NEXUS_EXTEND",
+        "g2_blocking": False,
+        "evidence_bits": list(scalar_probe["dtcm_copy_words"]),
+        "helper_sequence": scalar_probe["helper_sequence"],
+        "csr_names": scalar_probe["csr_names"],
+      }
+    )
 
   for g3 in G3_C047_CLASSES:
     scalar_entries.append(
@@ -836,11 +1014,13 @@ def check(
         "read_memory_ranges": inp.get("read_memory_ranges") or [],
         "enable_nexus_extend": bool(inp.get("enable_nexus_extend", False)),
         "env_events": inp.get("env_events") or [],
+        "scalar_env": inp.get("scalar_env"),
       }
     ]
 
   combined_retire: list[dict[str, Any]] = []
   combined_mem: dict[str, str] = {}
+  task_exit_bad: list[dict[str, Any]] = []
   for ctx in contexts:
     elf_p = Path(ctx["elf_path"])
     if not elf_p.is_absolute():
@@ -859,8 +1039,11 @@ def check(
         read_memory_ranges=list(ctx.get("read_memory_ranges") or []),
         enable_nexus_extend=bool(ctx.get("enable_nexus_extend", False)),
         env_events=list(ctx.get("env_events") or []),
+        scalar_env=ctx.get("scalar_env"),
       )
     )
+    if trace["task_exit"]["checked"] and not trace["task_exit"]["clean"]:
+      task_exit_bad.append(dict(trace["task_exit"]))
     combined_retire.extend(trace["retire_stream"])
     combined_mem.update(trace["memory_bytes"])
 
@@ -871,6 +1054,44 @@ def check(
 
   dut_doc = json.loads(dut_path.read_text())
   diffs = compare_retire_and_memory(oracle_trace=oracle_out, dut_trace=dut_doc)
+  # C038 golden: independent expected memory bytes (never DUT-derived) must equal the reference run.
+  for rng_key, expected_hex in (inp.get("expected_memory") or {}).items():
+    addr_s, _, len_s = rng_key.partition(":")
+    try:
+      _ = int(addr_s, 16)
+      _ = int(len_s)
+    except ValueError as exc:
+      raise OracleError("GOLDEN_RANGE", rng_key) from exc
+    actual_hex = combined_mem.get(rng_key)
+    if actual_hex is None:
+      diffs.append({"kind": "GOLDEN_RANGE_NOT_DUMPED", "range": rng_key})
+      continue
+    exp_b, act_b = bytes.fromhex(str(expected_hex)), bytes.fromhex(actual_hex)
+    if len(exp_b) != len(act_b):
+      diffs.append(
+        {
+          "kind": "GOLDEN_LEN_MISMATCH",
+          "range": rng_key,
+          "expected_len": len(exp_b),
+          "actual_len": len(act_b),
+        }
+      )
+      continue
+    for byte_off, (ab, eb) in enumerate(zip(act_b, exp_b)):
+      if ab != eb:
+        diffs.append(
+          {
+            "kind": "GOLDEN_BYTE_MISMATCH",
+            "range": rng_key,
+            "byte_offset": byte_off,
+            "actual": f"0x{ab:02x}",
+            "expected": f"0x{eb:02x}",
+            "bit_diff": first_diff_bit(ab, eb, 8),
+          }
+        )
+        break
+  for bad in task_exit_bad:
+    diffs.append({"kind": "TASK_EXIT_UNCLEAN", **bad})
   passed = len(diffs) == 0
   verdict: dict[str, Any] = {
     "schema": "cn_verdict/1",

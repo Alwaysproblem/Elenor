@@ -627,6 +627,15 @@ ROB 同 PC 双 Context store、错误 op_seq、独立退休、局部 fault flush
 
 - **通过/交接**：两 package 并存不重叠、封印/重载 hash 一致、`slot_freeze.json` 落盘；消费者：C039（安装）、C040/C041（oneTile 执行与对拍）。RVV/VME 数值 kernel（matmul/gather-scout 的向量路径等）归 G3 C048–C051，其 RTL 前置 C042–C046 亦在 G3，CN-G2 闭合不依赖它们。
 
+### C038 交接：`scalar_ctl_v1`
+
+- **协议**：[G1 v5 重开记录](G1_contracts.md#c038-g1-reopen)。四个标量 helper 使用生成的 CSR 地址，以索引选择封印的 descriptor/event，不接受自由 L2 地址。`task_ret(0)` 进入退休链，不是 TASK_COMPLETION。
+- **可装载产物**：`cn package` 生成 A/B 的 ELF、`CompiledProgram`、封印包、共享 `slot_freeze.json` 及两份 golden 二进制。`linked_slot` 将 program ID、链接区间、入口、ELF 摘要和同一份 freeze 摘要纳入 `package_hash`；外部 `packages` 仅用于定位，不授予身份。seal/load 缺少或替换 freeze 均拒绝；C039 消费两个已加载包前应执行 `verify_slot_freeze`。
+- **实测**：A/B 分别使用 program ID 1/2、version 1，入口 `0`/`0x1000`；每份 text 144 B，无静态数据、栈、spill 或 scratch。两个程序占 ITCM 288/8192 B。每个 Context 的输入位于 Frame +0、输出位于 +1024，均为 32 B；覆盖区间止于 +1056，条带取整后保留 2048 B。C2 即使两个 Frame 的保留量全计入同一 bank，仍剩 59392 B 用户容量。
+- **ISA 证据**：两个链接地址均由锁定 Spike 执行标准 RV32 指令，Nexus 扩展处理四种控制 helper。每份 36 条退休记录；`fmul.s` 的 `flags_delta=3`（UF|NX），输出 32 字节逐字节等于 `8..15` 的小端 i32。不是 full-core RTL 数值对拍，也不宣称 C039 安装或 C041 gate 已完成。
+- **验收结果**：G1 v5 通过，contracts 1416 passed，W5 151 passed，W7 230 passed，sources 57/57；validator 673 passed、1 skipped。真实 helper issue adapter 在 C1/C2 均通过 403 项检查，13 个 RTL 变异均在编译后由运行断言检出。容量越限、地址重叠、身份冲突负例均通过；两个独立输出目录中的 freeze、ELF 和封印包分别逐字节一致。
+- **证据**：`out/coral_nexus/C038/attempt-001/C038-evidence.tar.gz`，SHA-256 `77e8aa66278f92abd2d8d6077483b3155dea2161527652dba1be1a286be4f931`。取归档内 `final/package/`；A/B 的 `package_hash` 分别是 `35f04ce92506db927d3edf37e05f293d4b41e4042d00d43bee1ca5622b490b98` 和 `15d26c28c3d6f7447f19378d3064ae58322e6b829e1c2028233a7dc62e2a85bf`。
+
 <a id="c039"></a>
 
 ## C039 — 真实程序安装、引用与多 slot 驻留

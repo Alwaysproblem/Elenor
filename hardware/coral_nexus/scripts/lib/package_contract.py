@@ -191,7 +191,7 @@ def validate_package(package: Any, contract: dict[str, Any], *, check_hash: bool
   mtables = json.loads(TABLES.read_text())
   abi = json.loads(ABI.read_text())
   names = {d["name"] for d in yaml.safe_load(CSR_NAMES.read_text())["declared"]}
-  _check_manifest(package["binding_manifest"], contract, mtables, abi, names)
+  _check_manifest(package["binding_manifest"], contract, mtables, abi, names, package["image"])
   _check_resources(package, contract)
   _check_patch_mask(package["patch_mask"], contract, package["binding_manifest"])
 
@@ -264,7 +264,12 @@ def _check_numeric(package: dict[str, Any], contract: dict[str, Any]) -> None:
 
 
 def _check_manifest(
-  manifest: Any, contract: dict[str, Any], mtables: dict[str, Any], abi: dict[str, Any], csr_names: set[str]
+  manifest: Any,
+  contract: dict[str, Any],
+  mtables: dict[str, Any],
+  abi: dict[str, Any],
+  csr_names: set[str],
+  image: dict[str, Any],
 ) -> None:
   spec = contract["binding_manifest"]
   _need_fields(manifest, ["kernels"], "$.binding_manifest")
@@ -275,7 +280,13 @@ def _check_manifest(
   seen_events: set[str] = set()
   for index, entry in enumerate(kernels):
     path = f"$.binding_manifest.kernels[{index}]"
-    _need_fields(entry, spec["entry_required_fields"], path)
+    kclass = "vme"
+    if isinstance(entry, dict):
+      kclass = (registered.get(entry.get("kernel_id")) or {}).get("class", "vme")
+    allowed = list(spec["entry_required_fields"]) + (
+      ["launch_descriptors", "linked_slot"] if kclass == "scalar" else []
+    )
+    _need_fields(entry, spec["entry_required_fields"], path, allowed=allowed)
     kid = entry["kernel_id"]
     if kid not in registered:
       raise PackageError("UNREGISTERED_KERNEL", f"{path}.kernel_id", f"{kid!r}")
@@ -288,8 +299,18 @@ def _check_manifest(
       for j, view in enumerate(views):
         _check_view(view, f"{path}.{side}[{j}]", spec, spec["view"])
     _check_alias(entry, path)
-    _check_dtype_rule(entry, path, spec)
-    _check_initial(entry["initial"], path, spec)
+    if kclass != "scalar":
+      _check_dtype_rule(entry, path, spec)
+      desc_count = 0
+    else:
+      sspec = spec["scalar"]
+      _check_scalar_dtypes(entry, path, sspec)
+      for key in ("launch_descriptors", "linked_slot"):
+        if key not in entry:
+          raise PackageError("MISSING_FIELD", f"{path}.{key}")
+      desc_count = _check_launch_descriptors(entry, path, sspec)
+      _check_linked_slot(entry, path, sspec, image)
+    _check_initial(entry["initial"], path, spec, kclass)
     _check_scratch(entry["scratch"], path, spec)
     _check_events(entry["events"], path, spec, seen_events)
     if not isinstance(entry["clobber"], list) or not all(
@@ -298,9 +319,9 @@ def _check_manifest(
       raise PackageError("WRONG_TYPE", f"{path}.clobber")
     if entry["numeric_profile"] != contract["package"]["numeric_profile"]["must_equal_id"]:
       raise PackageError("NUMERIC_PROFILE_MISMATCH", f"{path}.numeric_profile")
-    _check_mode_table(entry, path, registered[kid], mtables)
-    _check_region(entry["region"], path, abi)
-    _check_helpers(entry["helpers"], path, contract, csr_names)
+    _check_mode_table(entry, path, registered[kid], mtables, spec, kclass)
+    _check_region(entry["region"], path, abi, kclass)
+    _check_helpers(entry["helpers"], path, contract, csr_names, kclass, desc_count)
 
 
 def _check_alias(entry: dict[str, Any], path: str) -> None:
@@ -336,8 +357,138 @@ def _check_dtype_rule(entry: dict[str, Any], path: str, spec: dict[str, Any]) ->
       raise PackageError("BAD_DTYPE", f"{path}.ins[{j}].dtype")
 
 
-def _check_initial(initial: Any, path: str, spec: dict[str, Any]) -> None:
+_DTYPE_BYTES = {"i32": 4, "f32": 4, "bf16": 2}
+
+
+def _check_scalar_dtypes(entry: dict[str, Any], path: str, sspec: dict[str, Any]) -> None:
+  """A scalar-class kernel reads and writes i32 views only (no tensor path at all)."""
+  allowed = sspec["view_dtypes"]
+  for side in ("ins", "outs"):
+    for j, view in enumerate(entry[side]):
+      if view["dtype"] not in allowed:
+        raise PackageError(
+          "SCALAR_VIEW_DTYPE", f"{path}.{side}[{j}].dtype", f"{view['dtype']!r}: scalar views are {allowed}"
+        )
+
+
+def _check_launch_descriptors(entry: dict[str, Any], path: str, sspec: dict[str, Any]) -> int:
+  """The sealed launch-descriptor table every mfe_submit/wait operand indexes. Returns the table size."""
+  spec = sspec["launch_descriptors"]
+  table = entry["launch_descriptors"]
+  tpath = f"{path}.launch_descriptors"
+  if not isinstance(table, list) or not table:
+    raise PackageError("BAD_DESCRIPTOR", tpath, "a scalar kernel declares its launch descriptors")
+  views = {v["handle"]: (v, "ins") for v in entry["ins"]}
+  views.update({v["handle"]: (v, "outs") for v in entry["outs"]})
+  seen_directions: set[str] = set()
+  for i, desc in enumerate(table):
+    dpath = f"{tpath}[{i}]"
+    _need_fields(desc, spec["required_fields"], dpath)
+    if spec.get("dense_index") is True and desc["index"] != i:
+      raise PackageError(
+        "BAD_DESCRIPTOR", f"{dpath}.index", f"index {desc['index']!r} must sit at position {i}"
+      )
+    direction = desc["direction"]
+    if direction not in spec["directions"]:
+      raise PackageError("BAD_DESCRIPTOR", f"{dpath}.direction", f"{direction!r}")
+    seen_directions.add(direction)
+    handle = desc["handle"]
+    want_side = "ins" if direction == spec["directions"][0] else "outs"
+    got = views.get(handle) if isinstance(handle, str) else None
+    if got is None or got[1] != want_side:
+      raise PackageError(
+        "BAD_DESCRIPTOR",
+        f"{dpath}.handle",
+        f"{handle!r} must name a declared {want_side} view",
+      )
+    view, _ = got
+    if direction == spec["directions"][0] and view["permission"] != "r":
+      raise PackageError(
+        "BAD_DESCRIPTOR", f"{dpath}.handle", f"{handle!r}: a load source is a read-only view"
+      )
+    if direction != spec["directions"][0] and view["permission"] == "r":
+      raise PackageError(
+        "BAD_DESCRIPTOR", f"{dpath}.handle", f"{handle!r}: a store target is a writable view"
+      )
+    if not _is_int(desc["bytes"]) or desc["bytes"] <= 0:
+      raise PackageError("BAD_DESCRIPTOR", f"{dpath}.bytes")
+    for key in ("slot_offset", "frame_offset"):
+      if not _is_int(desc[key]) or desc[key] < 0:
+        raise PackageError("BAD_DESCRIPTOR", f"{dpath}.{key}")
+    if spec.get("alignment") == "element":
+      width = _DTYPE_BYTES.get(view["dtype"], 1)
+      for key in ("bytes", "slot_offset", "frame_offset"):
+        if desc[key] % width:
+          raise PackageError(
+            "BAD_DESCRIPTOR", f"{dpath}.{key}", "offsets and length are whole elements of the view dtype"
+          )
+    extent = width * math.prod(view["shape"])
+    if desc["slot_offset"] + desc["bytes"] > extent:
+      raise PackageError(
+        "BAD_DESCRIPTOR",
+        f"{dpath}.slot_offset",
+        "slot_offset+bytes exceeds the declared view extent",
+      )
+  need = spec.get("min_per_direction")
+  if need:
+    for direction in spec["directions"]:
+      if sum(1 for d in table if d["direction"] == direction) < need:
+        raise PackageError(
+          "BAD_DESCRIPTOR", tpath, f"at least {need} '{direction}' descriptor(s) required"
+        )
+  return len(table)
+
+def _check_linked_slot(
+  entry: dict[str, Any], path: str, sspec: dict[str, Any], image: dict[str, Any]
+) -> None:
+  """The build-written fixed linked placement, sealed inside the binding entry: it must agree with the
+  package's own image (entry, link_layout, bytes digest) and name a registered slot identity."""
+  spec = sspec["linked_slot"]
+  link = entry["linked_slot"]
+  lpath = f"{path}.linked_slot"
+  _need_fields(link, spec["required_fields"], lpath)
+  if link["slot"] not in spec["slot_names"]:
+    raise PackageError("SLOT_NAME_UNKNOWN", f"{lpath}.slot", f"{link['slot']!r}")
+  if link["program_id"] != spec["slot_program_id"][link["slot"]]:
+    raise PackageError(
+      "SLOT_IDENTITY_MISMATCH",
+      f"{lpath}.program_id",
+      f"slot {link['slot']!r} is program_id {spec['slot_program_id'][link['slot']]}",
+    )
+  if not _is_int(link["program_id"]) or link["program_id"] <= 0:
+    raise PackageError("WRONG_TYPE", f"{lpath}.program_id")
+  layout = image["link_layout"]
+  pairs = (
+    ("entry", image["entry"]),
+    ("text_base", layout["text_base"]),
+    ("text_bytes", layout["text_bytes"]),
+    ("data_base", layout["data_base"]),
+    ("data_bytes", layout["data_bytes"]),
+    ("image_sha256", image["bytes_sha256"]),
+  )
+  for key, want in pairs:
+    if link[key] != want:
+      raise PackageError(
+        "SLOT_LAYOUT_MISMATCH",
+        f"{lpath}.{key}",
+        f"{link[key]!r} != this package's image {want!r}",
+      )
+  if (
+    not isinstance(link["freeze_sha256"], str)
+    or len(link["freeze_sha256"]) != 64
+    or any(c not in "0123456789abcdef" for c in link["freeze_sha256"])
+  ):
+    raise PackageError("BAD_HASH", f"{lpath}.freeze_sha256")
+
+
+def _check_initial(initial: Any, path: str, spec: dict[str, Any], kclass: str) -> None:
   _need_fields(initial, ["method"], f"{path}.initial", allowed=["method", "note"])
+  if kclass == "scalar":
+    if initial["method"] != spec["scalar"]["initial_method"]:
+      raise PackageError(
+        "BAD_INITIAL", f"{path}.initial.method", f"a scalar kernel seeds nothing ({initial['method']!r})"
+      )
+    return
   if initial["method"] not in spec["initial"]["methods"]:
     raise PackageError(
       "BAD_INITIAL",
@@ -382,9 +533,20 @@ def _check_events(events: Any, path: str, spec: dict[str, Any], seen: set[str]) 
 
 
 def _check_mode_table(
-  entry: dict[str, Any], path: str, reg: dict[str, Any], mtables: dict[str, Any]
+  entry: dict[str, Any],
+  path: str,
+  reg: dict[str, Any],
+  mtables: dict[str, Any],
+  spec: dict[str, Any],
+  kclass: str,
 ) -> None:
   mode = entry["mode_table"]
+  if kclass == "scalar":
+    if mode != spec["scalar"]["mode_table"]:
+      raise PackageError(
+        "MODE_TABLE_MISMATCH", f"{path}.mode_table", f"a scalar kernel has no mode table ({mode!r})"
+      )
+    return
   if mode != reg["mode_table"]:
     raise PackageError(
       "MODE_TABLE_MISMATCH", f"{path}.mode_table", f"{mode!r} is not the table sealed for {reg['id']}"
@@ -393,8 +555,16 @@ def _check_mode_table(
     raise PackageError("MODE_TABLE_UNKNOWN", f"{path}.mode_table", f"{mode!r}")
 
 
-def _check_region(region: Any, path: str, abi: dict[str, Any]) -> None:
+def _check_region(region: Any, path: str, abi: dict[str, Any], kclass: str) -> None:
   _need_fields(region, ["start", "end", "chains"], f"{path}.region")
+  if kclass == "scalar":
+    if region["start"] is not False or region["end"] is not False or region["chains"] != []:
+      raise PackageError(
+        "SCALAR_REGION_FORBIDDEN",
+        f"{path}.region",
+        "a scalar kernel declares no VME region: {start: false, end: false, chains: []}",
+      )
+    return
   if region["start"] is not True or region["end"] is not True:
     raise PackageError("REGION_BOUNDS_MISSING", f"{path}.region", "START and END must both be declared")
   chains = region["chains"]
@@ -416,11 +586,14 @@ def _check_region(region: Any, path: str, abi: dict[str, Any]) -> None:
       raise PackageError("CHAIN_WITHOUT_FINAL", f"{path}.region.chains[{j}]")
 
 
-def _check_helpers(helpers: Any, path: str, contract: dict[str, Any], csr_names: set[str]) -> None:
+def _check_helpers(
+  helpers: Any, path: str, contract: dict[str, Any], csr_names: set[str], kclass: str, desc_count: int
+) -> None:
   spec = contract["helpers"]
   if not isinstance(helpers, list):
     raise PackageError("WRONG_TYPE", f"{path}.helpers")
   registered = {h["name"]: h for h in spec["registered"]}
+  scalar_names = set(contract["binding_manifest"]["scalar"]["helpers_exact"])
   for j, helper in enumerate(helpers):
     hp = f"{path}.helpers[{j}]"
     _need_fields(helper, spec["entry_required_fields"], hp)
@@ -447,6 +620,80 @@ def _check_helpers(helpers: Any, path: str, contract: dict[str, Any], csr_names:
       raise PackageError(
         "MISSING_OBSERVABLE", f"{hp}.observable", "a helper must state what it makes observable"
       )
+  if kclass == "scalar":
+    if {h["name"] for h in helpers} != scalar_names:
+      raise PackageError(
+        "SCALAR_HELPER_SET",
+        f"{path}.helpers",
+        f"a scalar kernel's helper names are exactly {sorted(scalar_names)}",
+      )
+    _check_scalar_operands(helpers, path, desc_count, contract["binding_manifest"]["scalar"])
+  elif any(h["name"] in scalar_names for h in helpers):
+    raise PackageError(
+      "HELPER_WRONG_CLASS", f"{path}.helpers", "a scalar helper cannot be called from a VME entry"
+    )
+
+
+def _check_scalar_operands(
+  helpers: list[Any], path: str, desc_count: int, sspec: dict[str, Any]
+) -> None:
+  """Each scalar helper's params object carries exactly the operand the ABI resolves."""
+  operand = sspec["helper_operand"]
+  seen_unique: dict[str, set[Any]] = {}
+  for j, helper in enumerate(helpers):
+    hp = f"{path}.helpers[{j}]"
+    rules = operand[helper["name"]]
+    params = helper["params"]
+    field = rules["field"]
+    if not isinstance(params, dict) or set(params) != {field}:
+      raise PackageError(
+        "BAD_HELPER_OPERAND", f"{hp}.params", f"{helper['name']} takes exactly {{{field!r}}}"
+      )
+    value = params[field]
+    if rules.get("from") is not None:
+      if not _is_int(value) or value < 0 or value >= desc_count:
+        raise PackageError(
+          "DESCRIPTOR_UNKNOWN",
+          f"{hp}.params.{field}",
+          f"index {value!r} resolves into launch_descriptors ({desc_count} entries)",
+        )
+    elif not _is_int(value) or value not in rules["values"]:
+      raise PackageError(
+        "BAD_HELPER_OPERAND",
+        f"{hp}.params.{field}",
+        f"{value!r} not in {rules['values']}",
+      )
+    if rules.get("unique_per_entry") is True:
+      seen = seen_unique.setdefault(helper["name"], set())
+      if value in seen:
+        raise PackageError("DUPLICATE_OPERAND", f"{hp}.params.{field}", f"{value!r} already used")
+      seen.add(value)
+  submits = {h["params"]["index"] for h in helpers if h["name"] == "mfe_submit"}
+  waits = {h["params"]["index"] for h in helpers if h["name"] == "wait"}
+  submitted = sum(1 for h in helpers if h["name"] == "mfe_submit")
+  waited = sum(1 for h in helpers if h["name"] == "wait")
+  if (
+    submitted != desc_count
+    or waited != desc_count
+    or submits != waits
+    or submits != set(range(desc_count))
+  ):
+    raise PackageError(
+      "DESCRIPTOR_UNKNOWN",
+      f"{path}.helpers",
+      "every launch_descriptors index is submitted and waited exactly once",
+    )
+  phases = {h["params"]["phase"] for h in helpers if h["name"] == "signal_phase"}
+  if phases != set(operand["signal_phase"]["values"]):
+    raise PackageError(
+      "BAD_HELPER_OPERAND",
+      f"{path}.helpers",
+      f"signal_phase must cover exactly {operand['signal_phase']['values']}",
+    )
+  if sum(1 for h in helpers if h["name"] == "task_ret") != 1:
+    raise PackageError(
+      "SCALAR_HELPER_SET", f"{path}.helpers", "exactly one task_ret retires the task"
+    )
 
 
 def _check_resources(package: dict[str, Any], contract: dict[str, Any]) -> None:

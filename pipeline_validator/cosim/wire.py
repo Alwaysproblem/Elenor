@@ -848,7 +848,11 @@ CSR: dict[str, int] = {'nexus.mctx.dispatch_snapshot': 1992,
  'nexus.mregion.first': 1996,
  'nexus.mregion.continue': 1997,
  'nexus.mregion.final': 1998,
- 'nexus.missue.control': 1999}
+ 'nexus.missue.control': 1999,
+ 'nexus.mfe.submit': 2000,
+ 'nexus.event.wait': 2001,
+ 'nexus.phase.signal': 2002,
+ 'nexus.task.ret': 2003}
 MSG_INDEX = {m['name']: i for i, m in enumerate(MESSAGES)}
 MASK64 = (1 << 64) - 1
 

@@ -73,7 +73,7 @@ class ProgramService:
     if isinstance(chunk_bytes, bool) or not isinstance(chunk_bytes, int) or chunk_bytes <= 0:
       raise ValueError("chunk_bytes must be a positive int")
     self.chunk_bytes = chunk_bytes
-    self._images: dict[tuple[int, int, bytes], ProgramImage] = {}
+    self._images: dict[tuple[int, int], ProgramImage] = {}
     self._installs: dict[tuple[int, int, int, bytes], _InstallRecord] = {}
     self.stats = {
       "images_registered": 0,
@@ -97,8 +97,12 @@ class ProgramService:
     pid, ver, pkg = self._key3(f)
     return (pid, ver, int(f["program_epoch"]), pkg)
 
+  def _lookup_image(self, program_id: int, version: int, package_hash: bytes) -> ProgramImage | None:
+    image = self._images.get((program_id, version))
+    return image if image is not None and image.package_hash == package_hash else None
+
   def register_image(self, image: ProgramImage) -> None:
-    key = (image.program_id, image.version, image.package_hash)
+    key = (image.program_id, image.version)
     existing = self._images.get(key)
     if existing is not None:
       if existing is image or existing == image:
@@ -111,7 +115,7 @@ class ProgramService:
     """PROGRAM_INSTALL (G2T): arm one install for a registered image. No completion implied."""
     if msg.message_type != "PROGRAM_INSTALL":
       raise ProgramServiceError("BAD_PROGRAM_MESSAGE", msg.message_type)
-    image = self._images.get(self._key3(msg.fields))
+    image = self._lookup_image(*self._key3(msg.fields))
     if image is None:
       self.stats["rejects"] += 1
       raise ProgramServiceError("UNKNOWN_IMAGE", f"program {msg.fields.get('program_id')} not registered")
@@ -129,7 +133,7 @@ class ProgramService:
     """PROGRAM_READ_REQ (T2G) -> (PROGRAM_READ_RESP, real chunk bytes on the data channel)."""
     if msg.message_type != "PROGRAM_READ_REQ":
       raise ProgramServiceError("BAD_PROGRAM_MESSAGE", msg.message_type)
-    image = self._images.get(self._key3(msg.fields))
+    image = self._lookup_image(*self._key3(msg.fields))
     if image is None:
       self.stats["rejects"] += 1
       raise ProgramServiceError("UNKNOWN_IMAGE", f"program {msg.fields.get('program_id')} not registered")
@@ -202,8 +206,7 @@ class ProgramService:
     return ack
 
   def install_complete(self, program_id: int, version: int, package_hash: bytes) -> bool:
-    key = (program_id, version, package_hash)
-    img = self._images.get(key)
+    img = self._lookup_image(program_id, version, package_hash)
     if img is None:
       return False
     rec = self._installs.get((program_id, version, img.program_epoch, package_hash))

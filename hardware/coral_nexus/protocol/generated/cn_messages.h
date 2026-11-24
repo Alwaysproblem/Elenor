@@ -1438,5 +1438,9 @@ static const char* const cn_error_names[CN_ERR_COUNT] = {
 #define CN_CSR_NEXUS_MREGION_CONTINUE 0x7cd
 #define CN_CSR_NEXUS_MREGION_FINAL 0x7ce
 #define CN_CSR_NEXUS_MISSUE_CONTROL 0x7cf
+#define CN_CSR_NEXUS_MFE_SUBMIT 0x7d0
+#define CN_CSR_NEXUS_EVENT_WAIT 0x7d1
+#define CN_CSR_NEXUS_PHASE_SIGNAL 0x7d2
+#define CN_CSR_NEXUS_TASK_RET 0x7d3
 
 #endif /* CN_MESSAGES_H_ */

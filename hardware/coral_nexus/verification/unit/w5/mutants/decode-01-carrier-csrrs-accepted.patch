@@ -1,0 +1,11 @@
+--- a/scalar/scalar_helper_issue.sv
++++ b/scalar/scalar_helper_issue.sv
+@@ -151,7 +151,7 @@
+   assign csr      = instr_i[31:20];
+   assign rd       = instr_i[11:7];
+   assign rs1f     = instr_i[19:15];
+-  assign is_csrw  = is_zicsr && (funct3 == 3'b001);
++  assign is_csrw  = is_zicsr && (funct3 == 3'b001 || funct3 == 3'b010);
+   assign is_csrwi = is_zicsr && (funct3 == 3'b101);
+   assign form_ok  = (is_csrw || is_csrwi) && (rd == 5'd0);
+   // CSRRWI carries the uimm5 literal; CSRRW carries the rs1 register value.

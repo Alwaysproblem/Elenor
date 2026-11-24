@@ -83,3 +83,35 @@ declared:
       purpose: "VME issue metadata (W3-01/02)",
       source: implementation/W1_Boundary_Cosimulation_Plan.md#7.2-item4,
     }
+  - {
+      name: nexus.mfe.submit,
+      owner: W4,
+      scope: per_context,
+      access: write,
+      purpose: "MFE_SUBMIT helper: submit a slot-local immutable direct-move descriptor (operand = launch_descriptors index)",
+      source: protocol/scalar_helper_abi_v1.json,
+    }
+  - {
+      name: nexus.event.wait,
+      owner: W6,
+      scope: per_context,
+      access: write,
+      purpose: "WAIT helper: park next issue until a slot-local event reaches a terminal state (operand = wait_events index)",
+      source: protocol/scalar_helper_abi_v1.json,
+    }
+  - {
+      name: nexus.phase.signal,
+      owner: W6,
+      scope: per_context,
+      access: write,
+      purpose: "SIGNAL_PHASE helper: one accepted write is one PHASE_SIGNAL (operand = phase enum 0/1)",
+      source: protocol/scalar_helper_abi_v1.json,
+    }
+  - {
+      name: nexus.task.ret,
+      owner: W2,
+      scope: per_context,
+      access: write,
+      purpose: "TASK_RET helper: retire-chain entry, stop issue and wait local events; not a task-success signal (operand = 0)",
+      source: protocol/scalar_helper_abi_v1.json,
+    }

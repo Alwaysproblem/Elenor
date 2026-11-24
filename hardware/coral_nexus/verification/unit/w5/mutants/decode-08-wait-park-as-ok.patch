@@ -1,0 +1,11 @@
+--- a/scalar/scalar_helper_issue.sv
++++ b/scalar/scalar_helper_issue.sv
+@@ -289,7 +289,7 @@
+             fault_abi_c = FAB_WAIT_FAILED;
+             fault_code_c = FC_EVENT_DEPENDENCY_TIMEOUT;
+           end else if (wait_park_i) begin
+-            rsp_c = RSP_PARK;                  // record armed: park NEXT issue
++            rsp_c = RSP_OK;                    // mutant: park reported as OK
+           end else begin
+             rsp_c = RSP_OK;                    // direct DONE
+           end

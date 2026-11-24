@@ -1,0 +1,11 @@
+--- a/scalar/scalar_helper_issue.sv
++++ b/scalar/scalar_helper_issue.sv
+@@ -265,7 +265,7 @@
+           fault_code_c = FC_INVALID_DESCRIPTOR;
+         end else begin
+           mfe_desc_valid_o = 1'b1;
+-          consumed = mfe_desc_ready_i;         // real MFE backpressure stalls
++          consumed = 1'b1;                     // mutant: stall consumed anyway
+           rsp_c = RSP_OK;
+         end
+       end else if (hit_wait) begin

@@ -2,12 +2,8 @@
 
 The chain follows the contract's build order (AUTHORED, COMPILED, MEASURED, RECHECKED, SEALED, LOADED).
 A failure at any step returns to AUTHORED with a named reason and writes no package; nothing is patched in
-the Loader. The image is the REAL ELF the pinned C004 toolchain links (C018's ``measure_kernel``), and its
-text/static-data/stack numbers come from that link and the call-graph bound, never from an estimate.
-
-The selftest binding reuses the C018 bootstrap sources (explicitly cited by hash in the provenance). It
-registers the K-VME-BF16-ACC binding entry whose helper set is exactly what that image emits; real
-kernels are C038.
+the Loader. Bootstrap selftests reuse the measured C018 image. The scalar control binding links two
+fixed-address images, verifies both, and publishes their slot freeze only after both loads succeed.
 """
 
 from __future__ import annotations
@@ -16,6 +12,7 @@ import hashlib
 import json
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import yaml
@@ -35,6 +32,7 @@ from pipeline_validator.package import (  # noqa: E402
   seal,
   verify_image,
 )
+from pipeline_validator.package.slot_freeze import freeze_digest, verify_slot_freeze  # noqa: E402
 
 STATES = ("AUTHORED", "COMPILED", "MEASURED", "RECHECKED", "SEALED", "LOADED")
 
@@ -63,26 +61,32 @@ def read_binding(path: Path) -> dict[str, Any]:
   return doc
 
 
-def control_plane() -> tuple[dict[str, Any], str, tuple[Any, Any, dict[str, Any]]]:
-  """A real compiled control-plane artifact (the existing pow workload): its package fields, its
-  serialized body (re-parsed AND semantically loaded at seal and reload), and the validator target and
-  actual launch bindings it is loaded against (the pow CLI binding Y=0x100000:131072:rw)."""
+def control_plane(kernel: str) -> tuple[dict[str, Any], str, tuple[Any, Any, dict[str, Any]]]:
+  """Compile the control/transfer program and return its independent late-bound launch environment."""
   from pipeline_validator.compiled_program import artifact_digest, serialize_compiled_program
   from pipeline_validator.compiler import compile_program
   from pipeline_validator.config import HardwareConfig, SimConfig
   from pipeline_validator.execution_ir import GlobalBinding
+  from pipeline_validator.workload_ir import parse_workload_ir
   from pipeline_validator.workloads import PowWorkload
 
   hw = HardwareConfig()
   sim = SimConfig(fidelity="runtime")
-  program = compile_program(PowWorkload(num_group_chunks=1, hw=hw).module, hw, sim, workload_info=None)
+  if kernel == "scalar_ctl_v1":
+    module = parse_workload_ir((H / "kernels/library/scalar_ctl_v1.mlir").read_text())
+    bindings = {"X": GlobalBinding("X", 0x100000, 32, "r"), "Y": GlobalBinding("Y", 0x200000, 32, "w")}
+  elif kernel == "bootstrap":
+    module = PowWorkload(num_group_chunks=1, hw=hw).module
+    bindings = {"Y": GlobalBinding("Y", 0x100000, 131072, "rw")}
+  else:
+    raise BuildError("AUTHORED", "UNKNOWN_KERNEL", kernel)
+  program = compile_program(module, hw, sim, workload_info=None)
   fields = {
     "schema_version": program.schema_version,
     "compiler_abi": program.compiler_abi,
     "artifact_hash": artifact_digest(program),
     "source_hash": program.source_hash,
   }
-  bindings = {"Y": GlobalBinding("Y", 0x100000, 131072, "rw")}
   return fields, serialize_compiled_program(program), (hw, sim, bindings)
 
 
@@ -115,6 +119,9 @@ def build(binding_path: Path, config_path: Path, out: Path) -> dict[str, Any]:
     )
   out.mkdir(parents=True, exist_ok=True)
 
+  control = control_plane(binding["kernel"])
+  if binding["kernel"] == "scalar_ctl_v1":
+    return _build_scalar(binding, config, out, control)
   # COMPILED + MEASURED: the real ELF and the real resource record.
   try:
     record = mk.measure(out / "measure")
@@ -122,6 +129,94 @@ def build(binding_path: Path, config_path: Path, out: Path) -> dict[str, Any]:
     raise BuildError("MEASURED", exc.code, str(exc)) from exc
   layout = next(x for x in record["candidate_layouts"] if x["name"] == binding["layout"])
   elf_path = out / "measure" / binding["layout"] / "bootstrap.elf"
+  report, _ = _seal_image(binding, config, out, record, layout, elf_path, control)
+  return report
+
+
+def _build_scalar(binding: dict, config: dict, out: Path, control: tuple) -> dict:
+  import scalar_kernel_build as scalar
+
+  if binding["layout"] != ["A", "B"] or "linked_slot" in binding["manifest_kernel"]:
+    raise BuildError("AUTHORED", "BAD_LAYOUT", "select layouts [A,B]; linked_slot is build-derived")
+  # Do not mix two attempts: the freeze is the publication point for C039/C040.
+  if any(out.iterdir()):
+    raise BuildError("AUTHORED", "OUTPUT_NOT_EMPTY", str(out))
+  with TemporaryDirectory(dir=out) as scratch:
+    stage = Path(scratch)
+    try:
+      images = scalar.measure(binding, config, stage)
+    except mk.MeasureError as exc:
+      raise BuildError("RECHECKED", exc.code, str(exc)) from exc
+    reports = {}
+    loaded_slots = {}
+    freeze_path = stage / "slot_freeze.json"
+    freeze = json.loads(freeze_path.read_text())
+    rows = {row["name"]: row for row in freeze["slots"]}
+    commitment = freeze_digest(freeze)
+    for record, layout, elf_path in images:
+      slot = layout["name"]
+      slot_dir = stage / slot
+      slot_dir.mkdir(exist_ok=True)
+      linked = {
+        key: rows[slot][key]
+        for key in (
+          "program_id",
+          "entry",
+          "text_base",
+          "text_bytes",
+          "data_base",
+          "data_bytes",
+          "image_sha256",
+        )
+      }
+      entry = {
+        **binding["manifest_kernel"],
+        "linked_slot": {**linked, "slot": slot, "freeze_sha256": commitment},
+      }
+      reports[slot], loaded_slots[slot] = _seal_image(
+        {**binding, "manifest_kernel": entry},
+        config,
+        slot_dir,
+        record,
+        layout,
+        elf_path,
+        control,
+        published=out / slot,
+        slot_freeze=freeze,
+      )
+    if set(reports) != {"A", "B"}:
+      raise BuildError("RECHECKED", "MISSING_SLOT", str(sorted(reports)))
+    freeze["packages"] = {
+      slot: {
+        "path": f"{slot}/package.json",
+        "program_id": rows[slot]["program_id"],
+        "version": binding["manifest_kernel"]["kernel_version"],
+        "package_hash": reports[slot]["package_hash"],
+        "image_sha256": reports[slot]["image_sha256"],
+      }
+      for slot in ("A", "B")
+    }
+    verify_slot_freeze(freeze, loaded_slots)
+    freeze_path.write_text(json.dumps(freeze, indent=2, sort_keys=True) + "\n")
+    for product in stage.iterdir():
+      if product != freeze_path:
+        product.rename(out / product.name)
+    freeze_path.rename(out / freeze_path.name)
+  return {"packages": freeze["packages"], "reload_identical": True}
+
+
+def _seal_image(
+  binding: dict,
+  config: dict,
+  out: Path,
+  record: dict,
+  layout: dict,
+  elf_path: Path,
+  control: tuple,
+  published: Path | None = None,
+  slot_freeze: dict | None = None,
+):
+  published = out if published is None else published
   elf = elf_path.read_bytes()
   image_path = out / "image.elf"
   image_path.write_bytes(elf)
@@ -134,7 +229,7 @@ def build(binding_path: Path, config_path: Path, out: Path) -> dict[str, Any]:
   if rm["static_data_bytes"] + rm["stack_bytes"] + rm["scratch_bytes"] > c["dtcm_bytes"]:
     raise BuildError("RECHECKED", "DATA_EXCEEDS_CAPACITY", "static data + stack + scratch exceeds DTCM")
 
-  control_fields, compiled_text, (hw, sim, bindings) = control_plane()
+  control_fields, compiled_text, (hw, sim, bindings) = control
   compiled_path = out / "compiled_program.json"
   compiled_path.write_text(compiled_text)
   package = {
@@ -170,7 +265,14 @@ def build(binding_path: Path, config_path: Path, out: Path) -> dict[str, Any]:
   }
   # SEALED: validation first; a package that breaks the contract is never hashed.
   try:
-    sealed = seal(package, compiled_text=compiled_text, hw=hw, sim=sim, actual_bindings=bindings)
+    sealed = seal(
+      package,
+      compiled_text=compiled_text,
+      hw=hw,
+      sim=sim,
+      actual_bindings=bindings,
+      slot_freeze=slot_freeze,
+    )
   except PackageError as exc:
     raise BuildError("SEALED", exc.code, str(exc)) from exc
   package_path = out / "package.json"
@@ -187,6 +289,7 @@ def build(binding_path: Path, config_path: Path, out: Path) -> dict[str, Any]:
       actual_bindings=bindings,
       image_path=image_path,
       target=target,
+      slot_freeze=slot_freeze,
     )
     verify_image(sealed, image_path.read_bytes())
     if loaded.to_dict() != sealed:
@@ -197,9 +300,9 @@ def build(binding_path: Path, config_path: Path, out: Path) -> dict[str, Any]:
   report = {
     "schema": "cn_package_report/v1",
     "states": list(STATES),
-    "package": str(package_path),
-    "image": str(image_path),
-    "compiled_program": str(compiled_path),
+    "package": str(published / package_path.name),
+    "image": str(published / image_path.name),
+    "compiled_program": str(published / compiled_path.name),
     "package_hash": sealed["package_hash"],
     "image_sha256": sealed["image"]["bytes_sha256"],
     "resource_manifest": sealed["resource_manifest"],
@@ -207,7 +310,7 @@ def build(binding_path: Path, config_path: Path, out: Path) -> dict[str, Any]:
     "reload_identical": True,
   }
   (out / "package_report.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-  return report
+  return report, loaded
 
 
 def main() -> None:
@@ -223,7 +326,12 @@ def main() -> None:
   except BuildError as exc:
     print(f"package: {exc}  (build returns to AUTHORED; nothing written to a sealed path)", file=sys.stderr)
     raise SystemExit(1) from exc
-  print(json.dumps({k: report[k] for k in ("package_hash", "image_sha256", "reload_identical")}, indent=2))
+  keys = (
+    ("packages", "reload_identical")
+    if "packages" in report
+    else ("package_hash", "image_sha256", "reload_identical")
+  )
+  print(json.dumps({key: report[key] for key in keys}, indent=2))
 
 
 if __name__ == "__main__":

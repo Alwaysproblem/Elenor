@@ -19,6 +19,9 @@
 /hardware/coral_nexus/protocol/w3_vme_decl_abi_v1.md
 /hardware/coral_nexus/protocol/w3_vme_mode_tables_v1.json
 /hardware/coral_nexus/protocol/field_requests/w3.yaml
+# G1 v5 scalar helper and package contracts are hashed as source bytes.
+/hardware/coral_nexus/protocol/scalar_helper_abi_v1.json
+/hardware/coral_nexus/protocol/w5_package.contract.yaml
 # Generated C021 oracle capability/coverage artifacts; byte-compared against fresh generation in suite w7
 /hardware/coral_nexus/verification/oracle/oracle_capability.json
 /hardware/coral_nexus/verification/oracle/coverage_matrix.json

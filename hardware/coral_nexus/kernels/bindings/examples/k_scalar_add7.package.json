@@ -1,0 +1,204 @@
+{
+  "package_schema": "cn_package/v1",
+  "control_plane": {
+    "schema_version": 3,
+    "compiler_abi": "v3",
+    "artifact_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "source_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "image": {
+    "bytes_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "text_bytes": 512,
+    "entry": 0,
+    "link_layout": {
+      "text_base": 0,
+      "text_bytes": 512,
+      "data_base": 65536,
+      "data_bytes": 64
+    },
+    "provenance": {
+      "builder": "coral-nexus-builder:c002",
+      "toolchain_lock_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "source_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  },
+  "binding_manifest": {
+    "kernels": [
+      {
+        "kernel_id": "K-SCALAR-ADD7",
+        "kernel_version": 1,
+        "source_node": "scalar_add7_0",
+        "ins": [
+          {
+            "handle": "input",
+            "shape": [8],
+            "dtype": "i32",
+            "layout": "contiguous",
+            "permission": "r",
+            "alias": null,
+            "actual_view": "l2.input"
+          }
+        ],
+        "outs": [
+          {
+            "handle": "output",
+            "shape": [8],
+            "dtype": "i32",
+            "layout": "contiguous",
+            "permission": "w",
+            "alias": null,
+            "actual_view": "l2.output"
+          }
+        ],
+        "initial": {
+          "method": "none"
+        },
+        "scratch": [],
+        "clobber": ["t0", "t1", "ft0", "ft1"],
+        "events": {
+          "completion": "scalar_add7_0.done"
+        },
+        "numeric_profile": "w3_bf16_fp32_rod_v1",
+        "mode_table": "none",
+        "region": {
+          "start": false,
+          "end": false,
+          "chains": []
+        },
+        "patch_mask": [],
+        "launch_descriptors": [
+          {
+            "index": 0,
+            "direction": "l2_to_frame",
+            "handle": "input",
+            "bytes": 32,
+            "slot_offset": 0,
+            "frame_offset": 0
+          },
+          {
+            "index": 1,
+            "direction": "frame_to_l2",
+            "handle": "output",
+            "bytes": 32,
+            "slot_offset": 0,
+            "frame_offset": 32
+          }
+        ],
+        "linked_slot": {
+          "slot": "A",
+          "program_id": 1,
+          "entry": 0,
+          "text_base": 0,
+          "text_bytes": 512,
+          "data_base": 65536,
+          "data_bytes": 64,
+          "image_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "freeze_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+        },
+        "helpers": [
+          {
+            "name": "mfe_submit",
+            "csr": "nexus.mfe.submit",
+            "observable": "posts the inbound transfer descriptor",
+            "barrier": "volatile_asm_memory_clobber",
+            "params": {
+              "index": 0
+            },
+            "resources": {
+              "stack_bytes": 0
+            }
+          },
+          {
+            "name": "wait",
+            "csr": "nexus.event.wait",
+            "observable": "blocks until descriptor 0 completes",
+            "barrier": "volatile_asm_memory_clobber",
+            "params": {
+              "index": 0
+            },
+            "resources": {
+              "stack_bytes": 0
+            }
+          },
+          {
+            "name": "mfe_submit",
+            "csr": "nexus.mfe.submit",
+            "observable": "posts the outbound store descriptor",
+            "barrier": "volatile_asm_memory_clobber",
+            "params": {
+              "index": 1
+            },
+            "resources": {
+              "stack_bytes": 0
+            }
+          },
+          {
+            "name": "wait",
+            "csr": "nexus.event.wait",
+            "observable": "blocks until descriptor 1 completes",
+            "barrier": "volatile_asm_memory_clobber",
+            "params": {
+              "index": 1
+            },
+            "resources": {
+              "stack_bytes": 0
+            }
+          },
+          {
+            "name": "signal_phase",
+            "csr": "nexus.phase.signal",
+            "observable": "reports INPUT_RELEASED",
+            "barrier": "volatile_asm_memory_clobber",
+            "params": {
+              "phase": 0
+            },
+            "resources": {
+              "stack_bytes": 0
+            }
+          },
+          {
+            "name": "signal_phase",
+            "csr": "nexus.phase.signal",
+            "observable": "reports OUTPUT_READY",
+            "barrier": "volatile_asm_memory_clobber",
+            "params": {
+              "phase": 1
+            },
+            "resources": {
+              "stack_bytes": 0
+            }
+          },
+          {
+            "name": "task_ret",
+            "csr": "nexus.task.ret",
+            "observable": "retires the task through the drain chain",
+            "barrier": "volatile_asm_memory_clobber",
+            "params": {
+              "code": 0
+            },
+            "resources": {
+              "stack_bytes": 0
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "resource_manifest": {
+    "text_bytes": 512,
+    "static_data_bytes": 64,
+    "stack_bytes": 128,
+    "scratch_bytes": 0,
+    "bound_source": "static_analysis"
+  },
+  "target_fingerprint": {
+    "tensor_input_bytes": 2,
+    "accumulator_bytes": 4,
+    "tensor_output_bytes": 2,
+    "rvv_vlen": 128,
+    "context_count": 2
+  },
+  "numeric_profile_id": "w3_bf16_fp32_rod_v1",
+  "patch_mask": [],
+  "package_hash": "86da489080309e6a3224693ea9d76494c96540d830ff31b4e7ce14e6a43eac47"
+}

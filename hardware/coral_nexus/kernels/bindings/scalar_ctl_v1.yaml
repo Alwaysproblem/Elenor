@@ -1,0 +1,122 @@
+schema: cn_binding/v1
+# C038: K-SCALAR-ADD7 (kernel class scalar), the first real sealed kernel.
+#
+# cn package links kernels/library/scalar_ctl_v1 into BOTH fixed slots (layout is exactly [A, B]; the
+# contract maps A -> program_id 1, B -> 2) and seals one package per slot.
+#
+# launch_descriptors is the immutable table the helpers index: frame_offset counts bytes from the launch
+# Frame base (register a0) and slot_offset counts bytes into the handle's L2 view. The placement is the
+# one the compiled control plane uses: input at 0, output one 1024-byte stripe round up (16 banks x 64-byte
+# line), so the live Frame envelope is 1056 B and its reservation two stripe rounds (2048 B) per Context.
+#
+# helpers are listed in first-emission order; every descriptor index appears in exactly one mfe_submit and
+# one wait, every phase in exactly one signal_phase, and task_ret closes the task. linked_slot is the one
+# entry field the build writes into the sealed package: it never appears here.
+kernel: scalar_ctl_v1
+layout: [A, B]
+numeric_profile_id: w3_bf16_fp32_rod_v1
+target:
+  tensor_input_bytes: 2
+  accumulator_bytes: 4
+  tensor_output_bytes: 2
+  rvv_vlen: 128
+  context_count: 2
+patch_mask: []
+manifest_kernel:
+  kernel_id: K-SCALAR-ADD7
+  kernel_version: 1
+  source_node: scalar_add7_0
+  ins:
+    - {
+        handle: input,
+        shape: [8],
+        dtype: i32,
+        layout: contiguous,
+        permission: r,
+        alias: null,
+        actual_view: l2.input,
+      }
+  outs:
+    - {
+        handle: output,
+        shape: [8],
+        dtype: i32,
+        layout: contiguous,
+        permission: w,
+        alias: null,
+        actual_view: l2.output,
+      }
+  initial: { method: "none" }
+  scratch: []
+  clobber: [t0, t1, ft0, ft1]
+  events: { completion: scalar_add7_0.done }
+  numeric_profile: w3_bf16_fp32_rod_v1
+  mode_table: "none"
+  region: { start: false, end: false, chains: [] }
+  patch_mask: []
+  launch_descriptors:
+    - {
+        index: 0,
+        direction: l2_to_frame,
+        handle: input,
+        bytes: 32,
+        slot_offset: 0,
+        frame_offset: 0,
+      }
+    - {
+        index: 1,
+        direction: frame_to_l2,
+        handle: output,
+        bytes: 32,
+        slot_offset: 0,
+        frame_offset: 1024,
+      }
+  helpers:
+    - name: mfe_submit
+      csr: nexus.mfe.submit
+      observable: >-
+        submits launch descriptor 0: one MFE direct move brings input[0,32) from L2 into the Frame
+        [a0+0x000, a0+0x020)
+      barrier: volatile_asm_memory_clobber
+      params: { index: 0 }
+      resources: { stack_bytes: 0 }
+    - name: wait
+      csr: nexus.event.wait
+      observable: parks the next issue until the completion event of launch descriptor 0 is terminal
+      barrier: volatile_asm_memory_clobber
+      params: { index: 0 }
+      resources: { stack_bytes: 0 }
+    - name: mfe_submit
+      csr: nexus.mfe.submit
+      observable: >-
+        submits launch descriptor 1: one MFE direct move carries the Frame [a0+0x400, a0+0x420) to
+        output[0,32) in L2
+      barrier: volatile_asm_memory_clobber
+      params: { index: 1 }
+      resources: { stack_bytes: 0 }
+    - name: wait
+      csr: nexus.event.wait
+      observable: parks the next issue until the completion event of launch descriptor 1 is terminal
+      barrier: volatile_asm_memory_clobber
+      params: { index: 1 }
+      resources: { stack_bytes: 0 }
+    - name: signal_phase
+      csr: nexus.phase.signal
+      observable: emits one PHASE_SIGNAL for input_released (phase 0); no Frame input byte is read after it
+      barrier: volatile_asm_memory_clobber
+      params: { phase: 0 }
+      resources: { stack_bytes: 0 }
+    - name: signal_phase
+      csr: nexus.phase.signal
+      observable: emits one PHASE_SIGNAL for output_ready (phase 1) after the store event is terminal
+      barrier: volatile_asm_memory_clobber
+      params: { phase: 1 }
+      resources: { stack_bytes: 0 }
+    - name: task_ret
+      csr: nexus.task.ret
+      observable: >-
+        code 0: stops new issue, waits for the local events and enters the normal retirement chain
+        (never a task-success signal); last instruction of the image
+      barrier: volatile_asm_memory_clobber
+      params: { code: 0 }
+      resources: { stack_bytes: 0 }

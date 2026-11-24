@@ -1,0 +1,11 @@
+--- a/scalar/scalar_helper_issue.sv
++++ b/scalar/scalar_helper_issue.sv
+@@ -158,7 +158,7 @@
+   assign operand  = is_csrwi ? {27'd0, rs1f} : rs1_operand_i;
+ 
+   assign hit_mfe   = (csr == 12'(CN_CSR_NEXUS_MFE_SUBMIT));
+-  assign hit_wait  = (csr == 12'(CN_CSR_NEXUS_EVENT_WAIT));
++  assign hit_wait  = (csr == 12'(CN_CSR_NEXUS_MFE_SUBMIT));
+   assign hit_phase = (csr == 12'(CN_CSR_NEXUS_PHASE_SIGNAL));
+   assign hit_ret   = (csr == 12'(CN_CSR_NEXUS_TASK_RET));
+   assign helper_hit = hit_mfe || hit_wait || hit_phase || hit_ret;

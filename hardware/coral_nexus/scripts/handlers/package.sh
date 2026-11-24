@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# package handler (C037): build -> resource recheck -> seal -> reload, by really linking the selftest ELF
-# with the pinned C004 toolchain. Exit 1 on any build/seal/load refusal, 2 on usage, 3 on a missing
-# prerequisite (no toolchain is a refusal, never a fabricated image).
+# Build and reload a bootstrap selftest or both fixed-address scalar images.
+# Refusals: 1 build/seal/load, 2 usage, 3 missing prerequisite.
 set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 H="$(cd "$here/../.." && pwd)"

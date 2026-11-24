@@ -1,0 +1,11 @@
+--- a/scalar/scalar_helper_issue.sv
++++ b/scalar/scalar_helper_issue.sv
+@@ -295,7 +295,7 @@
+           end
+         end
+       end else if (hit_phase) begin
+-        if (operand > 32'd1) begin
++        if (operand > 32'd3) begin
+           consumed = 1'b1;                     // OPERAND_OUT_OF_DOMAIN
+           is_fault = 1'b1;
+           rsp_c = RSP_FAULT;
