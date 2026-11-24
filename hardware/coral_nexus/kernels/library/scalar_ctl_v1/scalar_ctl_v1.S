@@ -60,11 +60,9 @@ _start:
   sw t0, 1052(a0)
 
   /* fflags path: one FP instruction raises a deterministic flag delta and the flags are read with csrr.
-   * t0 = 0x00800000 = 2^-126 (the smallest normal); the product 2^-252 rounds to +0: UF|NX = 0x3. */
-  /* fflags path: one FP instruction raises a deterministic flag delta and the flags are read with csrr.
    * t0 = 0x00800000 = 2^-126 (the smallest normal); the product 2^-252 rounds to +0 under the encoded
    * RNE: UF|NX = 0x3 whatever frm holds (a dynamic rounding mode, frm=DYN, is a build refusal). */
-  lui t0, 0x80
+  lui t0, 0x800
   fmv.w.x ft0, t0
   fmul.s ft1, ft0, ft0, rne
   csrr t1, fflags

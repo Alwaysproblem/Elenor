@@ -126,7 +126,7 @@ def program(h: dict[str, dict[str, Any]] | None = None) -> list[int]:
   for index in range(8):
     words += [lw(T0, A0, 4 * index), addi(T0, T0, 7), sw(T0, A0, OUT + 4 * index)]
   words += [
-    lui(T0, 0x80),
+    lui(T0, 0x800),  # 0x00800000 = 2^-126, the smallest normal
     fmv(FT0, T0),
     fmul(FT1, FT0, FT0),
     csr(CSRRS, T1, X0, FFLAGS),  # csrr t1, fflags
@@ -373,6 +373,49 @@ def test_a_missing_link_script_or_source_is_a_refusal(tmp_path: Path) -> None:
   refuse("LINK_SCRIPT_MISSING", skb.plan, BINDING, CONFIG, kernel_dir)
   shutil.rmtree(kernel_dir)
   refuse("SOURCE_MISSING", skb.plan, BINDING, CONFIG, kernel_dir)
+
+
+def test_a_helper_csr_named_by_a_numeric_literal_in_the_source_is_refused_before_the_build(
+  tmp_path: Path,
+) -> None:
+  # The substituted source assembles to the same bytes, so only the source scan can see it, and
+  # measure() reaches that scan before any tool runs.
+  for index, (name, helper) in enumerate(helpers().items()):
+    kernel_dir = kernel_copy(tmp_path / f"literal-{name}")
+    source = kernel_dir / f"{skb.KERNEL}.S"
+    text = source.read_text()
+    assert helper["macro"] in text, name
+    literal = str(helper["address"]) if index % 2 else f"{helper['address']:#x}"
+    source.write_text(text.replace(helper["macro"], literal))
+    out = kernel_dir.parent / "out"
+    error = refuse("HAND_WRITTEN_ADDRESS", skb.measure, BINDING, CONFIG, out, source_dir=kernel_dir)
+    assert error.detail.startswith(f"{skb.KERNEL}.S:") and helper["csr"] in error.detail
+    assert not out.exists()
+
+
+def test_the_source_scan_reads_the_csr_operand_of_every_csr_form_and_nothing_else() -> None:
+  nexus = skb.helper_csrs()["nexus"]
+  address = next(iter(nexus))
+  path = Path(f"{skb.KERNEL}.S")
+  refused = [
+    (1, f"  csrrwi x0, {address:#x}, 0\n"),  # three-operand form
+    (1, f"  csrwi {address:#x}, 0\n"),  # two-operand alias
+    (1, f"  csrrw x0, {address:#05x}, t0\n"),
+    (1, f"  csrs {address}, t1\n"),  # decimal spelling
+    (2, f"  /* a comment */\n  csrw {address:#x}, t0\n"),
+  ]
+  for line, text in refused:
+    error = refuse("HAND_WRITTEN_ADDRESS", skb.check_source, text, nexus, path)
+    assert error.detail.startswith(f"{path.name}:{line}:")
+  accepted = [
+    f"  csrrwi x0, CN_CSR_NEXUS_MFE_SUBMIT, {address & 31}\n",  # the immediate is a number, the CSR is not
+    "  csrr t1, fflags\n  csrrw x0, fflags, x0\n",  # the standard flags register keeps its symbolic name
+    f"  /* csrw {address:#x}, t0: a commented-out literal */\n  lui t0, 0x800\n",
+    "  csrw 0x001, x0\n",  # not a generated Nexus address: the audit of the linked bytes decides
+  ]
+  for text in accepted:
+    skb.check_source(text, nexus, path)
+  skb.check_source((skb.SOURCE / f"{skb.KERNEL}.S").read_text(), nexus, path)
 
 
 def test_the_scripts_follow_a_changed_target_never_the_other_way(tmp_path: Path) -> None:
@@ -710,6 +753,8 @@ def test_resources_come_from_the_linked_image_and_its_bytes(built: dict[str, Any
 def test_the_hand_encoding_is_the_linked_image(built: dict[str, Any]) -> None:
   for _, _, elf_path in built["images"]:
     assert skb.elf_segments(elf_path.read_bytes())["text"][0]["data"] == packed(program())
+  # the fflags path squares the smallest normal: `lui t0, 0x800` loads 0x00800000 = 2^-126
+  assert program()[LUI] == 0x008002B7
 
 
 @needs_toolchain

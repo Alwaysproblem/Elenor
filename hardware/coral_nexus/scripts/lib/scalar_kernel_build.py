@@ -13,7 +13,9 @@ execute; nothing is estimated:
   before its submit);
 * helper CSRs: named by ``protocol/scalar_helper_abi_v1.json`` and numbered only by the C017-generated
   ``cn_layout.json`` / ``cn_messages.h``. A helper CSR written in any other form, an undeclared Nexus CSR,
-  an operand outside its domain or a numeric helper address in the kernel source is a build refusal;
+  an operand outside its domain, or a helper CSR named by a direct numeric literal in the kernel source
+  (ABI fault HAND_WRITTEN_ADDRESS: the CSR operand of every CSR instruction is scanned before the build,
+  which is not an assembler-level analysis) is a build refusal;
 * frame / per bank: the live Frame envelope is the declared descriptor extent; its reservation is that
   envelope in whole stripe rounds (one cache line per bank), the number the control plane reserves too.
   Under the all-bank striped Arena each bank holds reservation / banks per Context; no sealed input fixes
@@ -112,6 +114,10 @@ _RE_REGION = re.compile(
   r"\b(ITCM|DTCM)\s*\([^)]*\)\s*:\s*ORIGIN\s*=\s*(0x[0-9a-fA-F]+)\s*,\s*LENGTH\s*=\s*(0x[0-9a-fA-F]+)"
 )
 _RE_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+_RE_CSR_INSN = re.compile(
+  r"\b(csrrw|csrrs|csrrc|csrrwi|csrrsi|csrrci|csrw|csrs|csrc|csrwi|csrsi|csrci|csrr)\s+([^;\n]*)"
+)
+_RE_NUMBER = re.compile(r"^(0[xX][0-9a-fA-F]+|\d+)$")
 # one line of `readelf -SW`: [Nr] Name Type Address Off Size ...
 _RE_SECTION = re.compile(r"^\s*\[\s*\d+\]\s+(\S+)\s+(\S+)\s+([0-9a-f]+)\s+([0-9a-f]+)\s+([0-9a-f]+)", re.M)
 
@@ -422,6 +428,28 @@ def check_link_script(text: str, slot: dict[str, Any], path: Path) -> None:
       )
 
 
+def check_source(text: str, nexus: dict[int, str], path: Path) -> None:
+  """A helper CSR must not be named by a direct numeric literal in the kernel source.
+
+  This is the ABI's static build fault HAND_WRITTEN_ADDRESS. The scan reads the CSR operand of every CSR
+  instruction with comments removed; it is not an assembler-level analysis: a number that only appears
+  through an alias, a macro or an expression is not seen here and still has to pass the audit of the
+  linked bytes. A standard register keeps its symbolic name (``csrr t1, fflags``), and a literal that is
+  not a generated Nexus address is left to that audit.
+  """
+  body = _RE_COMMENT.sub(lambda match: "\n" * match.group(0).count("\n"), text)
+  for match in _RE_CSR_INSN.finditer(body):
+    operands = [operand.strip() for operand in match.group(2).split(",")]
+    csr = operands[1] if len(operands) == 3 else operands[0]
+    if _RE_NUMBER.match(csr) and int(csr, 0) in nexus:
+      line = body.count("\n", 0, match.start()) + 1
+      raise MeasureError(
+        "HAND_WRITTEN_ADDRESS",
+        f"{path.name}:{line}: {match.group(1)} names {nexus[int(csr, 0)]} by the literal {csr}; "
+        "use its generated CN_CSR_NEXUS_* macro",
+      )
+
+
 def plan(binding: Any, config: Any, source_dir: Any = None) -> dict[str, Any]:
   """Validate every static input and derive the slot table. No toolchain is needed for this step."""
   binding, config = _doc(binding, "binding"), _doc(config, "config")
@@ -432,8 +460,10 @@ def plan(binding: Any, config: Any, source_dir: Any = None) -> dict[str, Any]:
   frame_bytes = max(desc["frame_offset"] + desc["bytes"] for desc in descriptors)
   banks = bank_proof(config, frame_bytes)
   source = SOURCE if source_dir is None else Path(source_dir)
-  if not (source / f"{KERNEL}.S").is_file():
-    raise MeasureError("SOURCE_MISSING", f"{source / f'{KERNEL}.S'}: the kernel source")
+  kernel_source = source / f"{KERNEL}.S"
+  if not kernel_source.is_file():
+    raise MeasureError("SOURCE_MISSING", f"{kernel_source}: the kernel source")
+  check_source(kernel_source.read_text(), csrs["nexus"], kernel_source)
   for slot in slots:
     script = source / f"slot_{slot['name'].lower()}.ld"
     if not script.is_file():

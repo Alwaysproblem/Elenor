@@ -635,6 +635,7 @@ ROB 同 PC 双 Context store、错误 op_seq、独立退休、局部 fault flush
 - **ISA 证据**：两个链接地址均由锁定 Spike 执行标准 RV32 指令，Nexus 扩展处理四种控制 helper。每份 36 条退休记录；`fmul.s` 的 `flags_delta=3`（UF|NX），输出 32 字节逐字节等于 `8..15` 的小端 i32。不是 full-core RTL 数值对拍，也不宣称 C039 安装或 C041 gate 已完成。
 - **验收结果**：G1 v5 通过，contracts 1416 passed，W5 151 passed，W7 230 passed，sources 57/57；validator 673 passed、1 skipped。真实 helper issue adapter 在 C1/C2 均通过 403 项检查，13 个 RTL 变异均在编译后由运行断言检出。容量越限、地址重叠、身份冲突负例均通过；两个独立输出目录中的 freeze、ELF 和封印包分别逐字节一致。
 - **证据**：`out/coral_nexus/C038/attempt-001/C038-evidence.tar.gz`，SHA-256 `77e8aa66278f92abd2d8d6077483b3155dea2161527652dba1be1a286be4f931`。取归档内 `final/package/`；A/B 的 `package_hash` 分别是 `35f04ce92506db927d3edf37e05f293d4b41e4042d00d43bee1ca5622b490b98` 和 `15d26c28c3d6f7447f19378d3064ae58322e6b829e1c2028233a7dc62e2a85bf`。
+- **C039 当前输入（替代 attempt-001 中的镜像）**：`out/coral_nexus/C038/attempt-002/C038-kernel-evidence.tar.gz`，SHA-256 `d5e11944fbf08fdda1b8751bc28c57f9e8370e771ee90e158c222298e7040832`，取归档内 `package/`。`lui t0,0x800` 加载最小正规 FP32 数 `0x00800000`，不再依赖次正规输入；A/B 实跑仍各退休 36 条、乘法报告 UF|NX，输出逐字节匹配。新包 hash 为 A `f062e954f3523106ec5fe8ee5729d37d419b1c68ed88d47f0aebea5e9d3f8bdc`、B `1cf65e4510afb7802601d7eba2495e3ccbc26e20a281a6f1cb14ba8b3ca4829d`。W5 152 passed，W7 230 passed；归档内 `mutation.log` 记录去掉 `_check_scalar_launch` 后，对齐的输出偏移 1024→1028 未被拒绝，恢复后回归通过。
 
 <a id="c039"></a>
 
