@@ -13,8 +13,8 @@ import pytest
 from pipeline_validator.config import HardwareConfig, SimConfig
 from pipeline_validator.cosim.program_service import ProgramImage, ProgramService, ProgramServiceError
 from pipeline_validator.execution_ir import GlobalBinding
-from pipeline_validator.package import PackageError, load_file
-from pipeline_validator.package.slot_freeze import verify_slot_freeze
+from pipeline_validator.package import PackageError, load_file, package_hash, verify
+from pipeline_validator.package.slot_freeze import check_measurements, verify_slot_freeze
 
 ROOT = Path(__file__).resolve().parents[2]
 H = ROOT / "hardware/coral_nexus"
@@ -30,8 +30,9 @@ def executable_segment(elf: bytes) -> bytes:
   raise AssertionError("no loaded text")
 
 
-def test_two_slot_freeze_is_consumable_and_identity_cannot_be_rebound(tmp_path: Path) -> None:
-  out = tmp_path / "package"
+@pytest.fixture(scope="module")
+def out(tmp_path_factory: pytest.TempPathFactory) -> Path:
+  out = tmp_path_factory.mktemp("scalar-package")
   subprocess.run(
     [
       "bash",
@@ -47,20 +48,32 @@ def test_two_slot_freeze_is_consumable_and_identity_cannot_be_rebound(tmp_path: 
     check=True,
     timeout=300,
   )
-  freeze = json.loads((out / "slot_freeze.json").read_bytes())
+  return out
+
+
+@pytest.fixture
+def target() -> dict[str, int]:
   vlen = next(
     p["value"]
     for p in json.loads((H / "configs/params.d/upstream_coralnpu.json").read_bytes())["params"]
     if p["name"] == "rvv_vlen_bits"
   )
-  target = {
+  return {
     "context_count": 2,
     "rvv_vlen": vlen,
     "tensor_input_bytes": 2,
     "tensor_output_bytes": 2,
     "accumulator_bytes": 4,
   }
-  bindings = {"X": GlobalBinding("X", 0x100000, 32, "r"), "Y": GlobalBinding("Y", 0x200000, 32, "w")}
+
+
+@pytest.fixture
+def bindings() -> dict[str, GlobalBinding]:
+  return {"X": GlobalBinding("X", 0x100000, 32, "r"), "Y": GlobalBinding("Y", 0x200000, 32, "w")}
+
+
+def test_two_slot_freeze_is_consumable_and_identity_cannot_be_rebound(out, target, bindings) -> None:
+  freeze = json.loads((out / "slot_freeze.json").read_bytes())
   registry = ProgramService()
   images, loaded_slots = [], {}
   for slot in ("A", "B"):
@@ -123,3 +136,34 @@ def test_two_slot_freeze_is_consumable_and_identity_cannot_be_rebound(tmp_path: 
     registry.register_image(replace(images[1], program_id=images[0].program_id))
   registry.register_image(images[0])  # original still registered, idempotent
   assert registry.stats["images_registered"] == 2
+
+
+def test_aligned_output_offset_must_match_compiled_transfer(out, target, bindings, tmp_path) -> None:
+  slot = out / "A"
+  pkg = json.loads((slot / "package.json").read_bytes())
+  output = pkg["binding_manifest"]["kernels"][0]["launch_descriptors"][1]
+  assert (output["direction"], output["frame_offset"]) == ("frame_to_l2", 1024)
+  output["frame_offset"] = 1028
+  pkg["package_hash"] = package_hash(pkg)
+  freeze = json.loads((out / "slot_freeze.json").read_bytes())
+  freeze["packages"]["A"]["package_hash"] = pkg["package_hash"]
+  verify(pkg)
+  check_measurements(pkg, freeze)
+
+  forged = tmp_path / "package.json"
+  forged.write_text(json.dumps(pkg))
+  with pytest.raises(PackageError) as caught:
+    load_file(
+      forged,
+      compiled_path=slot / "compiled_program.json",
+      image_path=slot / "image.elf",
+      hw=HardwareConfig(),
+      sim=SimConfig(fidelity="runtime"),
+      actual_bindings=bindings,
+      target=target,
+      slot_freeze=freeze,
+    )
+  assert (caught.value.code, caught.value.field) == (
+    "CONTROL_PLANE_MISMATCH",
+    "$.binding_manifest.launch_descriptors",
+  )
