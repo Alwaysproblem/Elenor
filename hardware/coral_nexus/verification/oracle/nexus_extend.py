@@ -226,7 +226,8 @@ class NexusContextAdapter:
   def is_nexus_csr(self, csr_addr: int) -> bool:
     return csr_addr in self.catalog
 
-  def decode_zicsr(self, insn: int) -> tuple[str, int, int, int, int] | None:
+  @staticmethod
+  def decode_zicsr(insn: int) -> tuple[str, int, int, int, int] | None:
     """Return `(mnemonic, rd, rs1_or_uimm, csr_addr, funct3)` if `insn` is a Zicsr op."""
     if (insn & 0x7F) != 0x73:
       return None

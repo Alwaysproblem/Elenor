@@ -379,18 +379,26 @@ def test_a_helper_csr_named_by_a_numeric_literal_in_the_source_is_refused_before
   tmp_path: Path,
 ) -> None:
   # The substituted source assembles to the same bytes, so only the source scan can see it, and
-  # measure() reaches that scan before any tool runs.
-  for index, (name, helper) in enumerate(helpers().items()):
-    kernel_dir = kernel_copy(tmp_path / f"literal-{name}")
-    source = kernel_dir / f"{skb.KERNEL}.S"
-    text = source.read_text()
-    assert helper["macro"] in text, name
-    literal = str(helper["address"]) if index % 2 else f"{helper['address']:#x}"
-    source.write_text(text.replace(helper["macro"], literal))
-    out = kernel_dir.parent / "out"
-    error = refuse("HAND_WRITTEN_ADDRESS", skb.measure, BINDING, CONFIG, out, source_dir=kernel_dir)
-    assert error.detail.startswith(f"{skb.KERNEL}.S:") and helper["csr"] in error.detail
-    assert not out.exists()
+  # measure() reaches that scan before any tool runs. Each helper takes another spelling the assembler
+  # accepts (the pinned one reads a leading-zero digit string as octal), plain and with a trailing comment
+  # that holds a comma.
+  spellings = ("{:#x}", "{}", "0b{:b}", "0{:o}")
+  for (name, helper), spelling in zip(helpers().items(), spellings, strict=True):
+    for commented in (False, True):
+      label = f"literal-{name}-{int(commented)}"
+      kernel_dir = kernel_copy(tmp_path / label)
+      source = kernel_dir / f"{skb.KERNEL}.S"
+      literal = spelling.format(helper["address"])
+      lines = source.read_text().splitlines()
+      hits = [i for i, line in enumerate(lines) if helper["macro"] in line]
+      assert hits, name
+      for i in hits:
+        lines[i] = lines[i].replace(helper["macro"], literal) + (" # note, extra" if commented else "")
+      source.write_text("\n".join(lines) + "\n")
+      out = kernel_dir.parent / "out"
+      error = refuse("HAND_WRITTEN_ADDRESS", skb.measure, BINDING, CONFIG, out, source_dir=kernel_dir)
+      assert error.detail.startswith(f"{skb.KERNEL}.S:") and helper["csr"] in error.detail
+      assert not out.exists()
 
 
 def test_the_source_scan_reads_the_csr_operand_of_every_csr_form_and_nothing_else() -> None:
@@ -398,20 +406,30 @@ def test_the_source_scan_reads_the_csr_operand_of_every_csr_form_and_nothing_els
   address = next(iter(nexus))
   path = Path(f"{skb.KERNEL}.S")
   refused = [
-    (1, f"  csrrwi x0, {address:#x}, 0\n"),  # three-operand form
-    (1, f"  csrwi {address:#x}, 0\n"),  # two-operand alias
+    (1, f"  csrrwi x0, {address:#x}, 0\n"),  # rd, csr, uimm
+    (1, f"  csrwi {address:#x}, 0\n"),  # the write alias: csr, uimm
     (1, f"  csrrw x0, {address:#05x}, t0\n"),
     (1, f"  csrs {address}, t1\n"),  # decimal spelling
+    (1, f"  csrr t1, {address:#x}\n"),  # the read pseudo-instruction: rd, csr
+    (1, f"  csrrwi x0, {address:#x}, 0 # note, extra\n"),  # a comma inside a trailing comment
+    (1, f"  csrwi {address:#x}, 0 // note, extra\n"),
     (2, f"  /* a comment */\n  csrw {address:#x}, t0\n"),
+    (1, f"  csrrwi x0, 0b{address:b}, 0\n"),  # binary
+    (1, f"  csrwi 0B{address:b}, 0\n"),
+    (1, f"  csrw 0{address:o}, t0\n"),  # a leading-zero digit string: octal to the pinned assembler
+    (1, f"  csrr t1, 0{address:o}\n"),
   ]
   for line, text in refused:
     error = refuse("HAND_WRITTEN_ADDRESS", skb.check_source, text, nexus, path)
     assert error.detail.startswith(f"{path.name}:{line}:")
   accepted = [
     f"  csrrwi x0, CN_CSR_NEXUS_MFE_SUBMIT, {address & 31}\n",  # the immediate is a number, the CSR is not
+    "  csrrwi x0, CN_CSR_NEXUS_MFE_SUBMIT, 0 # note, extra\n",
     "  csrr t1, fflags\n  csrrw x0, fflags, x0\n",  # the standard flags register keeps its symbolic name
+    "  csrr t1, fflags # note, extra\n  csrw fflags, x0 // note, extra\n",
     f"  /* csrw {address:#x}, t0: a commented-out literal */\n  lui t0, 0x800\n",
     "  csrw 0x001, x0\n",  # not a generated Nexus address: the audit of the linked bytes decides
+    "  csrr t1, 0x001\n  csrw 0b1, x0\n  csrw 08, x0\n",  # no generated Nexus address in any radix
   ]
   for text in accepted:
     skb.check_source(text, nexus, path)

@@ -7,12 +7,20 @@ One callable entry point for the real-run acceptance:
     (`spike_ref_driver` + `nexus_extend` scalar helper model) and checks:
       - independent golden output bytes (never inferred from the DUT/package),
       - the committed `golden_output.bin` produced by the kernel build (when present),
-      - helper retire stream order (`mfe_submit/wait` pairs, `signal_phase`, `task_ret` last),
+      - both MFE transfer directions in the final memory, and a Frame untouched outside the
+        descriptors,
+      - helper retire stream order (`mfe_submit/wait` pairs, `signal_phase`, `task_ret` last) and
+        each helper's published offset and CSR number against the committed freeze,
+      - the retire stream against the published image: count and straight-line order from the
+        freeze row, every retired word equal to the `image.elf` bytes at its pc,
+      - the fflags path against the independent `bitwise_scalar` model, record by record,
+      - once-only delivery of the scheduled environment completions,
       - a clean retire-chain exit (`task_exit`), and
       - an optional DUT retire/memory comparison (`--dut-retire`).
   * Package authentication is delegated to the sealed C037 read-only Loader (`load_file`): the
     codec, the semantic `load_program`, the image ELF cross-check and the `linked_slot` /
-    `slot_freeze` commitment all run there. Nothing here re-derives or trusts those fields.
+    `slot_freeze` commitment all run there. The grading consumes only that Loader-verified package
+    and the freeze its `linked_slot` commits; it re-derives none of the Loader's checks.
 
 CLI:
   python scalar_ctl_run.py --binding H/kernels/bindings/scalar_ctl_v1.yaml \
@@ -29,6 +37,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import bitwise_scalar as bs
 import nexus_extend as ne
 import oracle_main as om
 import spike_ref_driver as srd
@@ -57,6 +66,12 @@ DEFAULT_FRAME_BASE = 0x00040000
 # default is the declared 2048 reservation, not the older 32-word guess. --frame-length still wins.
 DEFAULT_FRAME_LENGTH = 2048
 DEFAULT_OUTPUT_FILL = 0xEE
+FRAME_FILL = 0xCD  # the task frame starts as this fill byte; only descriptors may overwrite it
+# Retire-record provenance tags written by spike_ref_driver.py.
+ISA_SOURCE = "spike_isa_ref"
+HELPER_SOURCE = "nexus_extend"
+# The three architectural CSRs that hold the FP flag state: fflags, frm and fcsr (= {frm, fflags}).
+FLAG_CSRS = (0x001, 0x002, 0x003)
 
 
 class ScalarCaseError(Exception):
@@ -91,6 +106,7 @@ class ScalarCase:
   env_events: list[dict[str, Any]]
   l2_source: str
   freeze_dir: Path | None = None
+  freeze: dict[str, Any] | None = None  # the committed slot_freeze.json (Loader-verified digest)
   verified: dict[str, Any] = field(default_factory=dict)
   wait_events: list[Any] = field(default_factory=list)
 
@@ -474,6 +490,7 @@ def load_case(
     env_events=env_events,
     l2_source=l2_source,
     freeze_dir=freeze_dir,
+    freeze=freeze_doc,
     verified=verified,
     wait_events=wait_events,
   )
@@ -523,13 +540,19 @@ def build_request(
   initial_memory = [
     {"address": in_base, "hex": case.input_bytes.hex()},
     {"address": out_base, "hex": (bytes([output_fill]) * out_desc["bytes"]).hex()},
-    {"address": case.frame_base, "hex": (bytes([0xCD]) * case.frame_length).hex()},
+    {"address": case.frame_base, "hex": (bytes([FRAME_FILL]) * case.frame_length).hex()},
   ]
-  read_ranges = [
-    {"address": out_base, "length": out_desc["bytes"]},
-    {"address": case.frame_base, "length": case.frame_length},
-    {"address": in_base, "length": in_desc["bytes"]},
-  ]
+  # Every descriptor's L2 range is dumped so the transfer proof can compare each slot with its
+  # Frame stripe (order-preserving, de-duplicated; the golden/Frame/input ranges stay present).
+  ranges: dict[tuple[int, int], None] = {
+    (out_base, int(out_desc["bytes"])): None,
+    (case.frame_base, case.frame_length): None,
+    (in_base, int(in_desc["bytes"])): None,
+  }
+  for d in case.descriptors:
+    slot = case.bindings[d["handle"]]["base"] + int(d["slot_offset"])
+    ranges[(slot, int(d["bytes"]))] = None
+  read_ranges = [{"address": addr, "length": length} for addr, length in ranges]
   return srd.TraceRequest(
     elf_path=str(case.elf_path),
     entry_pc=case.entry_pc,
@@ -552,10 +575,644 @@ def build_request(
   )
 
 
+def _hex(value: int) -> str:
+  return f"0x{value & 0xFFFFFFFF:08x}"
+
+
+def _positive_int(value: Any) -> int | None:
+  """A positive `int` (never a bool or a float); None for anything else."""
+  if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    return None
+  return value
+
+
+def _flag_names(value: int) -> list[str]:
+  """Names of the set fflags bits, in CSR bit order NV, DZ, OF, UF, NX."""
+  return [
+    name
+    for bit, name in (
+      (bs.FLAG_NV, "NV"),
+      (bs.FLAG_DZ, "DZ"),
+      (bs.FLAG_OF, "OF"),
+      (bs.FLAG_UF, "UF"),
+      (bs.FLAG_NX, "NX"),
+    )
+    if value & bit
+  ]
+
+
+def _exact_text(bits: int) -> str:
+  """Exact value of a binary32 as a power of two (`2^-130`) or a fraction; never `float`."""
+  _kind, sign, value = bs.decode_fp32(bits)
+  if value is None:
+    return "non-finite"
+  mag = -value if sign else value
+  if mag == 0:
+    return "0"
+  if mag.denominator == 1 and mag.numerator & (mag.numerator - 1) == 0:
+    text = f"2^{mag.numerator.bit_length() - 1}"
+  elif mag.numerator == 1 and mag.denominator & (mag.denominator - 1) == 0:
+    text = f"2^-{mag.denominator.bit_length() - 1}"
+  else:
+    text = str(mag)
+  return f"-{text}" if sign else text
+
+
+def _elf_load_segments(elf: bytes, path: Path) -> list[tuple[int, int, int]]:
+  """`(p_vaddr, p_offset, p_filesz)` of every PT_LOAD of a little-endian ELF32 image."""
+  if len(elf) < 52 or elf[:7] != b"\x7fELF\x01\x01\x01":
+    raise ScalarCaseError("ELF_NOT_ELF32LE", f"{path} is not a little-endian ELF32 image")
+  e_phoff = int.from_bytes(elf[0x1C:0x20], "little")
+  e_phentsize = int.from_bytes(elf[0x2A:0x2C], "little")
+  e_phnum = int.from_bytes(elf[0x2C:0x2E], "little")
+  segments: list[tuple[int, int, int]] = []
+  for index in range(e_phnum):
+    start = e_phoff + index * e_phentsize
+    phdr = elf[start : start + 32]
+    if len(phdr) < 32:
+      raise ScalarCaseError("ELF_PHDR_TRUNCATED", f"{path}: program header {index} is truncated")
+    if int.from_bytes(phdr[0:4], "little") == 1:  # PT_LOAD
+      segments.append(
+        (
+          int.from_bytes(phdr[8:12], "little"),
+          int.from_bytes(phdr[4:8], "little"),
+          int.from_bytes(phdr[16:20], "little"),
+        )
+      )
+  return segments
+
+
+def _elf_word_at(elf: bytes, segments: list[tuple[int, int, int]], pc: int) -> int | None:
+  """The 32-bit word the image file places at `pc`; None when no PT_LOAD covers it."""
+  for vaddr, offset, size in segments:
+    if vaddr <= pc and pc + 4 <= vaddr + size:
+      start = offset + (pc - vaddr)
+      return int.from_bytes(elf[start : start + 4], "little")
+  return None
+
+
+def _fp_form(word: int) -> str:
+  """`"fmul.s"`, `"fmv.w.x"`, `"other"` for any other floating-point word, else `""`.
+
+  The flag model covers exactly the first two forms. Every other FP instruction (arithmetic,
+  conversion, comparison, sign injection, fused ops, FP loads/stores) fails closed.
+  """
+  opcode = word & 0x7F
+  if opcode == 0x53:
+    if word >> 25 == 0x08:
+      return "fmul.s"
+    if word >> 25 == 0x78 and (word >> 12) & 7 == 0 and (word >> 20) & 31 == 0:
+      return "fmv.w.x"
+    return "other"
+  return "other" if opcode in (0x07, 0x27, 0x43, 0x47, 0x4B, 0x4F) else ""
+
+
+def _check_retire(
+  case: ScalarCase,
+  retire: list[dict[str, Any]],
+  elf: bytes,
+  segments: list[tuple[int, int, int]],
+  ctx: tuple[int, int] | None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+  """The retire stream is the published image executed straight-line from its entry, exactly once.
+
+  The expected count comes from the committed freeze row (`instruction_count`, `retire_count`), and
+  every retired `(pc, insn)` pair must equal the bytes of the published `image.elf` at that pc.
+  """
+  diffs: list[dict[str, Any]] = []
+  info: dict[str, Any] = {"records": len(retire)}
+  rows = (case.freeze or {}).get("slots") or []
+  row: dict[str, Any] | None = next(
+    (r for r in rows if isinstance(r, dict) and r.get("name") == case.slot), None
+  )
+  if row is None:
+    return info | {"ok": False}, [{"kind": "RETIRE_FREEZE_ROW_MISSING", "slot": case.slot, "row": None}]
+  # `slot_freeze.check_measurements` ties layout/entry/image to the freeze row but never looks at
+  # the counts, so they are validated here before use: positive ints, each no larger than the
+  # Loader-checked text span allows (4 bytes per instruction).
+  layout = ((case.package or {}).get("image") or {}).get("link_layout") or {}
+  text_bytes = _positive_int(layout.get("text_bytes"))
+  n_insn = _positive_int(row.get("instruction_count"))
+  n_retire = _positive_int(row.get("retire_count"))
+  limit = text_bytes // 4 if text_bytes is not None else 0
+  if n_insn is None or n_retire is None or n_insn > limit or n_retire > limit:
+    return info | {"ok": False}, [
+      {
+        "kind": "RETIRE_FREEZE_ROW_INVALID",
+        "slot": case.slot,
+        "instruction_count": row.get("instruction_count"),
+        "retire_count": row.get("retire_count"),
+        "text_bytes": layout.get("text_bytes"),
+      }
+    ]
+  sealed = ((case.package or {}).get("image") or {}).get("bytes_sha256")
+  checked = _sha(elf)
+  info.update(
+    instruction_count=n_insn,
+    retire_count=n_retire,
+    entry=_hex(case.entry_pc),
+    text_bytes=row.get("text_bytes"),
+    image_sha256=sealed,
+    image_sha256_checked=checked,
+  )
+  if checked != sealed:
+    diffs.append(
+      {"kind": "IMAGE_SHA_MISMATCH", "file": str(case.elf_path), "sealed": sealed, "read": checked}
+    )
+  # Lazy comparison: nothing here is sized by a freeze-supplied count.
+  first = next(
+    (i for i, rec in enumerate(retire) if int(rec["pc_rdata"]) != case.entry_pc + 4 * i),
+    min(len(retire), n_insn) if len(retire) != n_insn else None,
+  )
+  if first is not None:
+    diffs.append(
+      {
+        "kind": "RETIRE_STREAM",
+        "expected_records": n_insn,
+        "actual_records": len(retire),
+        "first_divergence": {
+          "record": first,
+          "expected_pc": _hex(case.entry_pc + 4 * first) if first < n_insn else None,
+          "actual_pc": _hex(int(retire[first]["pc_rdata"])) if first < len(retire) else None,
+        },
+      }
+    )
+  if n_insn != n_retire:
+    diffs.append({"kind": "RETIRE_COUNT_MISMATCH", "instruction_count": n_insn, "retire_count": n_retire})
+  ctx_seen = {(int(r.get("ctx_slot", 0)), int(r.get("ctx_generation", 0))) for r in retire}
+  if len(ctx_seen) > 1:
+    diffs.append({"kind": "RETIRE_CTX_MIXED", "ctx": sorted(ctx_seen)})
+  elif retire and ctx is not None and ctx_seen != {ctx}:
+    diffs.append({"kind": "RETIRE_CTX_MISMATCH", "expected": list(ctx), "actual": sorted(ctx_seen)})
+  for i, rec in enumerate(retire):
+    pc = int(rec["pc_rdata"])
+    if rec.get("valid") != 1 or rec.get("trap", 0) not in (0, False):
+      diffs.append(
+        {
+          "kind": "RETIRE_RECORD_INVALID",
+          "record": i,
+          "pc": _hex(pc),
+          "valid": rec.get("valid"),
+          "trap": rec.get("trap"),
+        }
+      )
+      break
+    word = _elf_word_at(elf, segments, pc)
+    if word is None:
+      diffs.append({"kind": "RETIRE_PC_OUTSIDE_IMAGE", "record": i, "pc": _hex(pc)})
+      break
+    if word != int(rec["insn"]):
+      diffs.append(
+        {
+          "kind": "RETIRE_INSN_MISMATCH",
+          "record": i,
+          "pc": _hex(pc),
+          "retired": _hex(int(rec["insn"])),
+          "image": _hex(word),
+        }
+      )
+      break
+  info["ctx"] = sorted(ctx_seen)
+  info["ok"] = not diffs
+  return info, diffs
+
+
+def _check_helper_map(
+  case: ScalarCase,
+  trace: dict[str, Any],
+  retire: list[dict[str, Any]],
+  elf: bytes,
+  segments: list[tuple[int, int, int]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+  """Every helper sits where the committed freeze says and addresses the CSR the layout generated.
+
+  Freeze `helper_sequence` (offset, helper, csr, operand) must agree four ways: the published image
+  bytes at `entry + offset` decode to the sealed carrier addressing the generated CSR number, the
+  retire record at that pc is a helper record, the adapter executed that helper on that CSR name,
+  and the binding lists the same helper with the same operand at the same position.
+  """
+  sequence = (case.freeze or {}).get("helper_sequence")
+  if not isinstance(sequence, list):
+    return {"ok": False}, [{"kind": "HELPER_SEQUENCE_FREEZE_MISSING", "slot": case.slot}]
+  diffs: list[dict[str, Any]] = []
+  address_by_name = {spec.name: spec.address for spec in ne.load_nexus_csr_catalog().values()}
+  retire_by_pc = {int(r["pc_rdata"]): r for r in retire}
+  executed_by_pc = {int(h["pc"]): h for h in trace.get("helper_trace") or []}
+  binding = case.kernel.get("helpers") or []
+  rows: list[dict[str, Any]] = []
+  expected_pcs: set[int] = set()
+  for index, entry in enumerate(sequence):
+    pc = case.entry_pc + int(entry["offset"])
+    expected_pcs.add(pc)
+    address = address_by_name.get(str(entry["csr"]))
+    word = _elf_word_at(elf, segments, pc)
+    rec = retire_by_pc.get(pc)
+    executed = executed_by_pc.get(pc)
+    problems: list[str] = []
+    if word is None:
+      problems.append("offset is outside the published image")
+    if address is None:
+      problems.append("csr is not in the generated layout")
+    if rec is None or rec.get("source") != HELPER_SOURCE:
+      problems.append("no helper retire record at this pc")
+    if executed is None:
+      problems.append("the adapter executed no helper at this pc")
+    if word is not None and address is not None:
+      decoded = ne.NexusContextAdapter.decode_zicsr(word)
+      if (
+        decoded is None
+        or decoded[0] != str(entry["form"]).split()[0]
+        or decoded[1] != 0
+        or decoded[2] != int(entry["operand"])
+        or decoded[3] != address
+      ):
+        problems.append(f"published word {_hex(word)} is not {entry['form']} for {entry['csr']}")
+    if executed is not None and (
+      executed.get("csr_name") != entry["csr"]
+      or str(executed.get("scalar_kind", "")).lower() != str(entry["helper"]).lower()
+    ):
+      problems.append("the adapter's helper/csr differ from the freeze")
+    bound = binding[index] if index < len(binding) else None
+    if bound is None:
+      problems.append("the binding lists no helper at this position")
+    elif bound["name"].lower() != str(entry["helper"]).lower() or list(bound["params"].values()) != [
+      int(entry["operand"])
+    ]:
+      problems.append("the binding helper differs from the freeze")
+    rows.append(
+      {
+        "offset": int(entry["offset"]),
+        "pc": _hex(pc),
+        "helper": entry["helper"],
+        "csr": entry["csr"],
+        "csr_address": _hex(address) if address is not None else None,
+        "operand": int(entry["operand"]),
+        "ok": not problems,
+        "problems": problems,
+      }
+    )
+  stray_pcs = [pc for pc, r in retire_by_pc.items() if r.get("source") == HELPER_SOURCE]
+  stray = sorted(pc for pc in stray_pcs if pc not in expected_pcs)
+  if stray:
+    diffs.append({"kind": "HELPER_UNEXPECTED", "pcs": [_hex(pc) for pc in stray]})
+  bad = [row for row in rows if not row["ok"]]
+  if bad:
+    diffs.append({"kind": "HELPER_MAP", "helpers": bad})
+  return {"ok": not diffs, "helpers": rows}, diffs
+
+
+def _check_fflags(
+  retire: list[dict[str, Any]], trace: dict[str, Any]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+  """Grade the fflags path against the independent bitwise model, record by record.
+
+  Model: `bitwise_scalar.fmul_s` for every `fmul.s` with a static rounding mode, `bitwise_scalar.
+  csr_step_expectation` for every access to fflags/frm/fcsr, and a plain bit move for `fmv.w.x`.
+  Operands count only when an earlier write-back in this same retire stream proves them. After each
+  record the architectural fflags read back from Spike (`arch_fflags_stream`) must equal the modeled
+  value. The path must also be real: an FP instruction raises a flag that a later `csrr` observes.
+  """
+  initial = trace.get("initial_csr") or {}
+  stream = trace.get("arch_fflags_stream")
+  if (
+    not {"fflags", "frm", "fcsr"} <= set(initial)
+    or not isinstance(stream, list)
+    or len(stream) != len(retire)
+  ):
+    return {"ok": False}, [
+      {
+        "kind": "FFLAGS_EVIDENCE_MISSING",
+        "records": len(retire),
+        "arch_fflags_stream": None if stream is None else len(stream),
+      }
+    ]
+  diffs: list[dict[str, Any]] = []
+  fcsr0 = int(initial["fcsr"]) & 0xFF
+  if (fcsr0 & bs.FFLAGS_MASK) != (int(initial["fflags"]) & bs.FFLAGS_MASK) or ((fcsr0 >> 5) & 7) != (
+    int(initial["frm"]) & 7
+  ):
+    diffs.append({"kind": "FFLAGS_INITIAL_INCONSISTENT", "initial_csr": initial})
+    fcsr0 = ((int(initial["frm"]) & 7) << 5) | (int(initial["fflags"]) & bs.FFLAGS_MASK)
+  fcsr = fcsr0
+  x_regs: dict[int, int] = {}
+  f_regs: dict[int, int] = {}
+  fp_ops: list[dict[str, Any]] = []
+  reads: list[dict[str, Any]] = []
+  writes: list[dict[str, Any]] = []
+  raised_live = 0
+  observed = False
+
+  def _delta_diff(kind: str, i: int, pc: int, retired: int, expected: int) -> dict[str, Any]:
+    return {"kind": kind, "record": i, "pc": _hex(pc), "retired": retired, "expected": expected}
+
+  for i, rec in enumerate(retire):
+    pc, word = int(rec["pc_rdata"]), int(rec["insn"])
+    delta = int(rec.get("flags_delta") or 0)
+    if rec.get("source") != ISA_SOURCE:
+      if delta != 0:
+        diffs.append(_delta_diff("FFLAGS_DELTA_UNEXPECTED", i, pc, delta, 0))
+    else:
+      if delta >> bs.VXSAT_SHIFT:
+        diffs.append({"kind": "VXSAT_DELTA_UNEXPECTED", "record": i, "pc": _hex(pc), "retired": delta})
+      zicsr = ne.NexusContextAdapter.decode_zicsr(word)
+      form = _fp_form(word)
+      if zicsr is not None and zicsr[3] in FLAG_CSRS:
+        mnemonic, rd, rs1_field, csr, _funct3 = zicsr
+        rs1_is_x0 = rs1_field == 0
+        is_write = mnemonic in ("csrrw", "csrrwi") or not rs1_is_x0
+        immediate = mnemonic in ("csrrwi", "csrrsi", "csrrci")
+        operand = rs1_field if immediate else x_regs.get(rs1_field, 0 if rs1_is_x0 else None)
+        if delta & bs.FFLAGS_MASK:
+          diffs.append(_delta_diff("FFLAGS_DELTA_MISMATCH", i, pc, delta, 0))
+        if operand is None:
+          diffs.append(
+            {"kind": "FFLAGS_OPERAND_UNPROVEN", "record": i, "pc": _hex(pc), "registers": [f"x{rs1_field}"]}
+          )
+        else:
+          old = {0x001: fcsr & bs.FFLAGS_MASK, 0x002: (fcsr >> 5) & 7, 0x003: fcsr & 0xFF}[csr]
+          try:
+            step = bs.csr_step_expectation(csr, mnemonic, old, operand, rs1_is_x0=rs1_is_x0)
+          except bs.BitwiseScalarError as exc:
+            diffs.append(
+              {"kind": "FFLAGS_CSR_MODEL_UNSUPPORTED", "record": i, "pc": _hex(pc), "code": exc.code}
+            )
+          else:
+            if rd != 0:
+              got = int(rec.get("x_rd_val", 0))
+              if rec.get("x_rd") != rd or got != step.rd_value:
+                diffs.append(
+                  {
+                    "kind": "FFLAGS_CSR_READBACK_MISMATCH",
+                    "record": i,
+                    "pc": _hex(pc),
+                    "retired": _hex(got),
+                    "expected": _hex(step.rd_value),
+                  }
+                )
+              x_regs[rd] = step.rd_value
+            if is_write:
+              if csr == 0x001:
+                fcsr = (fcsr & ~bs.FFLAGS_MASK) | (step.new_value & bs.FFLAGS_MASK)
+              elif csr == 0x002:
+                fcsr = (fcsr & ~0xE0) | ((step.new_value & 7) << 5)
+              else:
+                fcsr = step.new_value & 0xFF
+              if csr != 0x002:
+                raised_live = 0
+                writes.append(
+                  {
+                    "record": i,
+                    "pc": _hex(pc),
+                    "mnemonic": mnemonic,
+                    "csr": _hex(csr),
+                    "fflags": fcsr & bs.FFLAGS_MASK,
+                    "fflags_names": _flag_names(fcsr),
+                  }
+                )
+            if rd != 0 and csr != 0x002:
+              value = step.rd_value & bs.FFLAGS_MASK
+              observed = observed or bool(value & raised_live)
+              reads.append(
+                {
+                  "record": i,
+                  "pc": _hex(pc),
+                  "mnemonic": mnemonic,
+                  "csr": _hex(csr),
+                  "register": f"x{rd}",
+                  "fflags": value,
+                  "fflags_names": _flag_names(value),
+                }
+              )
+      elif form == "fmul.s":
+        rm = (word >> 12) & 7
+        fs1, fs2, fd = (word >> 15) & 31, (word >> 20) & 31, (word >> 7) & 31
+        a, b = f_regs.get(fs1), f_regs.get(fs2)
+        if rm not in bs.LEGAL_SCALAR_FRM:
+          diffs.append({"kind": "FFLAGS_RM_UNSUPPORTED", "record": i, "pc": _hex(pc), "rm": rm})
+        elif a is None or b is None:
+          diffs.append(
+            {
+              "kind": "FFLAGS_OPERAND_UNPROVEN",
+              "record": i,
+              "pc": _hex(pc),
+              "registers": [f"f{fs1}", f"f{fs2}"],
+            }
+          )
+        else:
+          result = bs.fmul_s(a, b, insn_rm=rm, csr_frm=(fcsr >> 5) & 7)
+          got = int(rec.get("f_rd_val", 0))
+          fp_ops.append(
+            {
+              "record": i,
+              "pc": _hex(pc),
+              "insn": _hex(word),
+              "op": "fmul.s",
+              "rd": f"f{fd}",
+              "fs1": {"reg": f"f{fs1}", "bits": _hex(a), "value": _exact_text(a)},
+              "fs2": {"reg": f"f{fs2}", "bits": _hex(b), "value": _exact_text(b)},
+              "rm": ("rne", "rtz", "rdn", "rup", "rmm")[rm],
+              "expected_result": _hex(result.bits),
+              "retired_result": _hex(got),
+              "expected_fflags": result.fflags_delta,
+              "expected_fflags_names": _flag_names(result.fflags_delta),
+              "retired_flags_delta": delta & bs.FFLAGS_MASK,
+            }
+          )
+          if rec.get("f_rd") != fd or got != result.bits:
+            diffs.append(
+              {
+                "kind": "FFLAGS_RESULT_MISMATCH",
+                "record": i,
+                "pc": _hex(pc),
+                "retired": _hex(got),
+                "expected": _hex(result.bits),
+              }
+            )
+          if (delta & bs.FFLAGS_MASK) != result.fflags_delta:
+            diffs.append(
+              _delta_diff("FFLAGS_DELTA_MISMATCH", i, pc, delta & bs.FFLAGS_MASK, result.fflags_delta)
+            )
+          f_regs[fd] = result.bits
+          fcsr |= result.fflags_delta
+          raised_live |= result.fflags_delta
+      elif form == "fmv.w.x":
+        rs1, fd = (word >> 15) & 31, (word >> 7) & 31
+        moved = x_regs.get(rs1)
+        got = int(rec.get("f_rd_val", 0))
+        if moved is None:
+          diffs.append(
+            {"kind": "FFLAGS_OPERAND_UNPROVEN", "record": i, "pc": _hex(pc), "registers": [f"x{rs1}"]}
+          )
+        else:
+          if rec.get("f_rd") != fd or got != moved:
+            diffs.append(
+              {
+                "kind": "FFLAGS_RESULT_MISMATCH",
+                "record": i,
+                "pc": _hex(pc),
+                "retired": _hex(got),
+                "expected": _hex(moved),
+              }
+            )
+          f_regs[fd] = moved
+        if delta & bs.FFLAGS_MASK:
+          diffs.append(_delta_diff("FFLAGS_DELTA_MISMATCH", i, pc, delta, 0))
+      elif form == "other":
+        diffs.append({"kind": "FFLAGS_MODEL_UNSUPPORTED", "record": i, "pc": _hex(pc), "insn": _hex(word)})
+      elif delta & bs.FFLAGS_MASK:
+        diffs.append(_delta_diff("FFLAGS_DELTA_MISMATCH", i, pc, delta, 0))
+      if rec.get("x_wb") and rec.get("x_rd") is not None:
+        x_regs[int(rec["x_rd"])] = int(rec["x_rd_val"]) & 0xFFFFFFFF
+    read_back = int(stream[i]) & bs.FFLAGS_MASK
+    if read_back != (fcsr & bs.FFLAGS_MASK):
+      diffs.append(
+        {
+          "kind": "FFLAGS_ARCH_STREAM_MISMATCH",
+          "record": i,
+          "pc": _hex(pc),
+          "read_back": read_back,
+          "modeled": fcsr & bs.FFLAGS_MASK,
+        }
+      )
+  final = trace.get("final_csr") or {}
+  final_fflags, final_frm = fcsr & bs.FFLAGS_MASK, (fcsr >> 5) & 7
+  final_got = (final.get("fflags"), final.get("fcsr"), final.get("frm"))
+  if final_got != (final_fflags, fcsr & 0xFF, final_frm):
+    diffs.append(
+      {
+        "kind": "FFLAGS_FINAL_MISMATCH",
+        "final_csr": dict(zip(("fflags", "fcsr", "frm"), final_got)),
+        "modeled": {"fflags": final_fflags, "fcsr": fcsr & 0xFF, "frm": final_frm},
+      }
+    )
+  if not fp_ops:
+    diffs.append({"kind": "FFLAGS_PATH_MISSING", "detail": "the image executes no modeled FP instruction"})
+  elif not any(op["expected_fflags"] for op in fp_ops):
+    diffs.append({"kind": "FFLAGS_PATH_VACUOUS", "detail": "no FP instruction raises a flag"})
+  if not observed:
+    diffs.append(
+      {"kind": "FFLAGS_RAISE_NOT_OBSERVED", "detail": "no csrr of fflags observes a raised flag"}
+    )
+  info: dict[str, Any] = {
+    "ok": not diffs,
+    "model": (
+      "bitwise_scalar.fmul_s (fmul.s, static rm) + fmv.w.x bit move + "
+      "bitwise_scalar.csr_step_expectation (fflags/frm/fcsr); any other FP form fails closed"
+    ),
+    "initial_fflags": fcsr0 & bs.FFLAGS_MASK,
+    "fp_ops": fp_ops,
+    "reads": reads,
+    "writes": writes,
+    "raise_observed_by_software": observed,
+    "final_fflags": final_fflags,
+    "final_fflags_names": _flag_names(final_fflags),
+  }
+  return info, diffs
+
+
+def _check_transfers(
+  case: ScalarCase, trace: dict[str, Any]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+  """Both MFE directions leave the same bytes on each side, sources stay intact, the Frame is bounded.
+
+  Independent of the helper model (final memory only). For every descriptor the Frame stripe and its
+  L2 range must be byte-identical; the seeded input must still sit in its L2 range; the expected
+  output must also sit in the Frame stripe (so the L2 bytes came from the Frame, not from the
+  oracle's own seeding); and every Frame byte outside all descriptors must still be the fill.
+  """
+  dumps = trace.get("memory_bytes") or {}
+
+  def _dump(address: int, length: int) -> bytes | None:
+    text = dumps.get(f"0x{address:08x}:{length}")
+    return bytes.fromhex(text) if text is not None else None
+
+  frame = _dump(case.frame_base, case.frame_length)
+  covered = bytearray(case.frame_length)
+  in_desc = next((d for d in case.descriptors if d["direction"] == "l2_to_frame"), None)
+  rows: list[dict[str, Any]] = []
+  for d in case.descriptors:
+    length, offset = int(d["bytes"]), int(d["frame_offset"])
+    slot = case.bindings[d["handle"]]["base"] + int(d["slot_offset"])
+    for k in range(offset, min(offset + length, case.frame_length)):
+      covered[k] = 1
+    stripe = frame[offset : offset + length] if frame is not None else None
+    l2 = _dump(slot, length)
+    problems: list[str] = []
+    if stripe is None or l2 is None or len(stripe) != length or len(l2) != length:
+      problems.append("the final Frame stripe or L2 range was not dumped")
+    else:
+      if stripe != l2:
+        problems.append("the Frame stripe and the L2 range differ")
+      if in_desc is not None and d["index"] == in_desc["index"] and l2 != case.input_bytes:
+        problems.append("the L2 input range no longer holds the input bytes")
+      if (
+        d["direction"] == "frame_to_l2"
+        and (slot, length) == (case.out_range["address"], case.out_range["length"])
+        and stripe != case.expected_bytes
+      ):
+        problems.append("the Frame output stripe does not hold the expected bytes")
+    rows.append(
+      {
+        "index": int(d["index"]),
+        "direction": str(d["direction"]),
+        "handle": str(d["handle"]),
+        "bytes": length,
+        "frame_offset": offset,
+        "l2_address": _hex(slot),
+        "ok": not problems,
+        "problems": problems,
+      }
+    )
+  diffs: list[dict[str, Any]] = []
+  touched: list[int] = []
+  if frame is None:
+    diffs.append({"kind": "FRAME_NOT_DUMPED", "range": f"0x{case.frame_base:08x}:{case.frame_length}"})
+  else:
+    touched = [i for i in range(case.frame_length) if not covered[i] and frame[i] != FRAME_FILL]
+    if touched:
+      diffs.append(
+        {"kind": "FRAME_TOUCHED_OUTSIDE_DESCRIPTORS", "first_offset": touched[0], "count": len(touched)}
+      )
+  bad = [row for row in rows if not row["ok"]]
+  if bad:
+    diffs.append({"kind": "TRANSFER_MISMATCH", "descriptors": bad})
+  info = {
+    "ok": not diffs,
+    "frame_fill": f"0x{FRAME_FILL:02x}",
+    "frame_untouched_outside_descriptors": frame is not None and not touched,
+    "descriptors": rows,
+  }
+  return info, diffs
+
+
+def _check_env_events(
+  case: ScalarCase, trace: dict[str, Any]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+  """Every scheduled environment completion is injected exactly once (never re-delivered)."""
+  scheduled = sorted((int(e["key"]), int(e["step_ordinal"])) for e in case.env_events)
+  logged = sorted(
+    (int(e["key"]), int(e["step_ordinal"]))
+    for e in (trace.get("scalar_helpers") or {}).get("env_log") or []
+  )
+  diffs: list[dict[str, Any]] = []
+  if logged != scheduled:
+    diffs.append({"kind": "ENV_EVENT_DELIVERY", "scheduled": scheduled, "logged": logged})
+  return {"ok": not diffs, "scheduled": scheduled, "logged": logged}, diffs
+
+
 def evaluate(
-  case: ScalarCase, trace: dict[str, Any], *, dut_doc: dict[str, Any] | None = None
+  case: ScalarCase,
+  trace: dict[str, Any],
+  *,
+  dut_doc: dict[str, Any] | None = None,
+  ctx: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
-  """Grade the real run: golden bytes, helper order, exit cleanliness, optional DUT compare."""
+  """Grade the real run; every section is verdict-bearing and `diffs` names each failure by kind.
+
+  Golden bytes, helper order and clean exit; then the retire stream against the published image and
+  freeze (count, order, bytes, helper placement), the fflags path against `bitwise_scalar`, both
+  transfer directions in the final memory, once-only env-event delivery, and an optional DUT compare.
+  """
   diffs: list[dict[str, Any]] = []
   out_key = f"0x{case.out_range['address']:08x}:{case.out_range['length']}"
   actual_hex = (trace.get("memory_bytes") or {}).get(out_key)
@@ -606,8 +1263,7 @@ def evaluate(
   retire = trace.get("retire_stream") or []
   last = retire[-1] if retire else {}
   last_is_task_ret = (
-    last.get("source") == "nexus_extend"
-    and (trace.get("scalar_helpers") or {}).get("task_finished") is True
+    last.get("source") == HELPER_SOURCE and (trace.get("scalar_helpers") or {}).get("task_finished") is True
   )
 
   dut_diffs: list[dict[str, Any]] | None = None
@@ -629,6 +1285,19 @@ def evaluate(
     diffs.append({"kind": "LAST_RETIRE_NOT_TASK_RET", "last": last.get("insn")})
   if dut_diffs:
     diffs.append({"kind": "DUT_MISMATCH", "first": dut_diffs[0]})
+
+  try:
+    elf = case.elf_path.read_bytes()
+  except OSError as exc:
+    raise ScalarCaseError("IMAGE_UNREADABLE", f"{case.elf_path}: {exc}") from exc
+  segments = _elf_load_segments(elf, case.elf_path)
+  retire_info, retire_diffs = _check_retire(case, retire, elf, segments, ctx)
+  helper_map, helper_map_diffs = _check_helper_map(case, trace, retire, elf, segments)
+  fflags, fflags_diffs = _check_fflags(retire, trace)
+  transfer, transfer_diffs = _check_transfers(case, trace)
+  env_events, env_diffs = _check_env_events(case, trace)
+  for section_diffs in (retire_diffs, helper_map_diffs, fflags_diffs, transfer_diffs, env_diffs):
+    diffs.extend(section_diffs)
 
   verdict = "PASS" if not diffs else "FAIL"
   return {
@@ -656,6 +1325,11 @@ def evaluate(
       "parked_witness": parked_witness,
       "direct_witness": direct_witness,
     },
+    "helper_map": helper_map,
+    "retire": retire_info,
+    "fflags": fflags,
+    "transfer": transfer,
+    "env_events": env_events,
     "task_exit": trace.get("task_exit"),
     "steps_executed": trace.get("steps_executed"),
     "halted": trace.get("halted"),
@@ -674,7 +1348,7 @@ def run_case(case: ScalarCase, **kwargs: Any) -> tuple[dict[str, Any], dict[str,
     **{k: v for k, v in kwargs.items() if k in ("ctx_slot", "ctx_generation", "max_steps", "output_fill")},
   )
   trace = srd.run_trace_request(req)
-  report = evaluate(case, trace, dut_doc=kwargs.get("dut_doc"))
+  report = evaluate(case, trace, dut_doc=kwargs.get("dut_doc"), ctx=(req.ctx_slot, req.ctx_generation))
   return report, trace
 
 

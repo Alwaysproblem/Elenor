@@ -320,6 +320,17 @@ def _execute_trace_in_process(so_path: Path, req: TraceRequest) -> dict[str, Any
     prev_x = [sim.ReadRegister(f"x{i}") for i in range(32)]
     prev_f = [sim.ReadRegister(f"f{i}") for i in range(32)]
 
+    # Architectural FP flag state read back from Spike before the first step, and after every
+    # retire record (`arch_fflags_stream[i]` pairs with `retire_stream[i]`): the evidence the
+    # oracle grades the fflags path against, so no reset value is ever assumed downstream.
+    initial_csr = {
+      "fflags": sim.ReadRegister("fflags") & FFLAGS_MASK,
+      "frm": sim.ReadRegister("frm") & 0x7,
+      "fcsr": sim.ReadRegister("fcsr") & 0xFF,
+      "vxsat": sim.ReadRegister("vxsat") & 0x1,
+    }
+    arch_fflags_stream: list[int] = []
+
     step_idx = 0
     while step_idx < req.max_steps and not sim.IsHalted():
       # pop, not get: a delivered completion leaves the bucket so the parked-WAIT fast-forward
@@ -396,6 +407,7 @@ def _execute_trace_in_process(so_path: Path, req: TraceRequest) -> dict[str, Any
             "source": "nexus_extend",
           }
         )
+        arch_fflags_stream.append(sim.ReadRegister("fflags") & FFLAGS_MASK)
         prev_x = cur_x
         step_idx += 1
         if adapter.task_finished:
@@ -453,6 +465,9 @@ def _execute_trace_in_process(so_path: Path, req: TraceRequest) -> dict[str, Any
         vxsat_delta = sim.ReadRegister("vxsat") & 0x1
         sim.WriteRegister("fflags", arch_fflags_before | fflags_delta)
         sim.WriteRegister("vxsat", arch_vxsat_before | vxsat_delta)
+
+      # Read back after the restore: the per-record architectural fflags the oracle grades against.
+      arch_fflags_stream.append(sim.ReadRegister("fflags") & FFLAGS_MASK)
 
       _ = prev_mepc
 
@@ -537,6 +552,8 @@ def _execute_trace_in_process(so_path: Path, req: TraceRequest) -> dict[str, Any
       "final_pc": sim.GetPC(),
       "final_gpr": {f"x{i}": prev_x[i] for i in range(32)},
       "final_fpr": {f"f{i}": prev_f[i] for i in range(32)},
+      "initial_csr": initial_csr,
+      "arch_fflags_stream": arch_fflags_stream,
       "final_csr": {
         "fflags": sim.ReadRegister("fflags") & FFLAGS_MASK,
         "frm": sim.ReadRegister("frm") & 0x7,

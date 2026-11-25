@@ -114,10 +114,15 @@ _RE_REGION = re.compile(
   r"\b(ITCM|DTCM)\s*\([^)]*\)\s*:\s*ORIGIN\s*=\s*(0x[0-9a-fA-F]+)\s*,\s*LENGTH\s*=\s*(0x[0-9a-fA-F]+)"
 )
 _RE_COMMENT = re.compile(r"/\*.*?\*/", re.S)
-_RE_CSR_INSN = re.compile(
-  r"\b(csrrw|csrrs|csrrc|csrrwi|csrrsi|csrrci|csrw|csrs|csrc|csrwi|csrsi|csrci|csrr)\s+([^;\n]*)"
-)
-_RE_NUMBER = re.compile(r"^(0[xX][0-9a-fA-F]+|\d+)$")
+# the CSR operand of every CSR form, by mnemonic: `rd, csr, rs1|uimm` (csrr and its w/s/c and i forms) and
+# the write aliases `csr, rs1|uimm`
+_RE_CSR_RD = re.compile(r"\b(?P<op>csrr[wcs]i?|csrr)\s+[^,\s]+\s*,\s*(?P<csr>[^,\s]+)")
+_RE_CSR_ALIAS = re.compile(r"\b(?P<op>csr[wsc]i?)\s+(?P<csr>[^,\s]+)")
+_RE_LINE_COMMENT = re.compile(r"//.*|#.*")
+# an integer literal the pinned assembler lexes: 0x/0X hexadecimal, 0b/0B binary, or a digit string, which
+# is decimal and octal when it has a leading zero (03720 assembles to 2000)
+_RE_LITERAL = re.compile(r"^(?:0[xX][0-9a-fA-F]+|0[bB][01]+|[0-9]+)$")
+_RADIX = {"x": 16, "b": 2}
 # one line of `readelf -SW`: [Nr] Name Type Address Off Size ...
 _RE_SECTION = re.compile(r"^\s*\[\s*\d+\]\s+(\S+)\s+(\S+)\s+([0-9a-f]+)\s+([0-9a-f]+)\s+([0-9a-f]+)", re.M)
 
@@ -428,26 +433,42 @@ def check_link_script(text: str, slot: dict[str, Any], path: Path) -> None:
       )
 
 
+def _literal_values(literal: str) -> set[int]:
+  """What an integer literal denotes: the prefixed radix for 0x and 0b, otherwise decimal, plus octal for a
+  leading-zero spelling, which is how the pinned assembler reads it. Both readings of such a spelling are
+  kept, so the refusal does not depend on that convention. A digit string is never an error here.
+  """
+  if literal[0] == "0" and len(literal) > 2 and literal[1].lower() in _RADIX:
+    return {int(literal[2:], _RADIX[literal[1].lower()])}
+  values = {int(literal, 10)}
+  if len(literal) > 1 and not literal.strip("01234567"):
+    values.add(int(literal, 8))
+  return values
+
+
 def check_source(text: str, nexus: dict[int, str], path: Path) -> None:
   """A helper CSR must not be named by a direct numeric literal in the kernel source.
 
   This is the ABI's static build fault HAND_WRITTEN_ADDRESS. The scan reads the CSR operand of every CSR
-  instruction with comments removed; it is not an assembler-level analysis: a number that only appears
-  through an alias, a macro or an expression is not seen here and still has to pass the audit of the
-  linked bytes. A standard register keeps its symbolic name (``csrr t1, fflags``), and a literal that is
-  not a generated Nexus address is left to that audit.
+  instruction with comments removed, in every radix the assembler lexes (0x, 0b, decimal, leading-zero
+  octal). It is not an assembler-level analysis: a number that only appears through an alias, a macro or
+  an expression is not seen here and still has to pass the audit of the linked bytes. A standard register
+  keeps its symbolic name (``csrr t1, fflags``), and a literal that is not a generated Nexus address is
+  left to that audit.
   """
-  body = _RE_COMMENT.sub(lambda match: "\n" * match.group(0).count("\n"), text)
-  for match in _RE_CSR_INSN.finditer(body):
-    operands = [operand.strip() for operand in match.group(2).split(",")]
-    csr = operands[1] if len(operands) == 3 else operands[0]
-    if _RE_NUMBER.match(csr) and int(csr, 0) in nexus:
-      line = body.count("\n", 0, match.start()) + 1
-      raise MeasureError(
-        "HAND_WRITTEN_ADDRESS",
-        f"{path.name}:{line}: {match.group(1)} names {nexus[int(csr, 0)]} by the literal {csr}; "
-        "use its generated CN_CSR_NEXUS_* macro",
-      )
+  body = _RE_LINE_COMMENT.sub("", _RE_COMMENT.sub(lambda match: "\n" * match.group(0).count("\n"), text))
+  for pattern in (_RE_CSR_RD, _RE_CSR_ALIAS):
+    for match in pattern.finditer(body):
+      csr = match.group("csr")
+      named = _literal_values(csr) & nexus.keys() if _RE_LITERAL.match(csr) else set()
+      if named:
+        value = next(iter(named))
+        line = body.count("\n", 0, match.start()) + 1
+        raise MeasureError(
+          "HAND_WRITTEN_ADDRESS",
+          f"{path.name}:{line}: {match.group('op')} names {nexus[value]} by the literal {csr}; "
+          "use its generated CN_CSR_NEXUS_* macro",
+        )
 
 
 def plan(binding: Any, config: Any, source_dir: Any = None) -> dict[str, Any]:

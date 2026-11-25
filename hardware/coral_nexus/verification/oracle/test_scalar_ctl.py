@@ -8,16 +8,19 @@ Two layers, both real:
   * The linked-package acceptance (`scalar_ctl_run.load_case` + `run_case`): the sealed C037
     Loader authenticates the package (codec + semantic load_program + ELF cross-check + linked_slot /
     slot_freeze commitment), then the real linked `image.elf` executes on the pinned Spike
-    reference with the `scalar_env` armed from the binding's `launch_descriptors`, and the output
-    is checked against an independently computed golden (input words + 7, never DUT-derived).
-    These skip when the binding/package artifacts are not produced yet (scalar_kernel_build is a
-    separate slice), never fabricating a pass.
+    reference with the `scalar_env` armed from the binding's `launch_descriptors`. The verdict is
+    carried by independent golden output (input words + 7, never DUT-derived), both MFE transfer
+    directions in the final memory, the retire stream against the published ELF bytes and the
+    committed freeze, the fflags path against `bitwise_scalar`, and once-only env-event delivery.
+    Nothing here skips or xfails: a build, loader or trace defect is a plain failure.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -257,61 +260,208 @@ def test_task_ret_last_and_clean_exit() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_scalar_ctl_package_runs_real_spike_with_independent_golden(tmp_path: Path) -> None:
-  """Real C038 acceptance: sealed Loader + linked ELF + independent golden on pinned Spike."""
+@pytest.fixture(scope="module")
+def real_run(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+  """Build the real package in-process, then run it on the pinned Spike through the sealed Loader."""
   import package_build
   import scalar_ctl_run as sc
 
-  if not BINDING.is_file():
-    pytest.fail(f"scalar_ctl_v1.yaml binding missing: {BINDING}")
-  pkg_out = tmp_path / "pkg"
+  pkg_out = tmp_path_factory.mktemp("c038-pkg")
   package_build.build(BINDING, H / "configs" / "cs1_c2.yaml", pkg_out)
-  freeze = pkg_out / "slot_freeze.json"
-  assert freeze.is_file()
-
   case = sc.load_case(
     binding_path=BINDING,
-    freeze_path=freeze,
+    freeze_path=pkg_out / "slot_freeze.json",
     slot="A",
     input_bytes=b"".join(w.to_bytes(4, "little") for w in range(1, 9)),
     expect_addend=7,
   )
   report, trace = sc.run_case(case)
+  return {"sc": sc, "case": case, "report": report, "trace": trace}
+
+
+def test_scalar_ctl_package_runs_real_spike_with_independent_golden(real_run: dict[str, Any]) -> None:
+  """Real C038 acceptance: sealed Loader + published ELF + independent golden and flags on Spike."""
+  case, report, trace = (real_run[k] for k in ("case", "report", "trace"))
   assert report["verdict"] == "PASS", json.dumps(report["diffs"], indent=1)
+  for section in ("helper_stream", "helper_map", "retire", "fflags", "transfer", "env_events"):
+    assert report[section]["ok"] is True, f"{section}: {json.dumps(report[section])[:400]}"
   # Independence: the oracle-computed golden (input + 7) equals the committed kernel golden.
   assert report["golden"]["golden_file_match"] is True
-  kinds = [h["kind"] for h in report["helper_stream"]["kinds"] and trace["scalar_helpers"]["helpers"]]
+  kinds = [h["kind"] for h in trace["scalar_helpers"]["helpers"]]
   assert kinds[:4] == ["MFE_SUBMIT", "WAIT", "MFE_SUBMIT", "WAIT"]
   assert kinds[-1] == "TASK_RET"
   assert trace["task_exit"]["clean"] is True
-  # Every scheduled env completion is delivered exactly once (no .get() re-delivery).
-  scheduled = [(int(e["key"]), int(e["step_ordinal"])) for e in case.env_events]
-  logged = [
-    (int(e["key"]), int(e["step_ordinal"]))
-    for e in trace["scalar_helpers"]["env_log"]
-  ]
-  assert sorted(logged) == sorted(scheduled), f"env_log {logged} != scheduled {scheduled}"
-  assert len(set(logged)) == len(logged), f"duplicate completions delivered: {logged}"
+  # Retire: one record per instruction of the published image, matching the freeze's own counts,
+  # and the file that was graded is the sealed image.
+  retire = report["retire"]
+  assert retire["records"] == retire["instruction_count"] == retire["retire_count"]
+  assert retire["records"] == len(trace["retire_stream"])
+  assert retire["image_sha256_checked"] == retire["image_sha256"] == report["image_sha256"]
+  # Helper mapping: the committed freeze's helpers, in binding order, each on its generated CSR.
+  helpers = report["helper_map"]["helpers"]
+  assert [row["helper"] for row in helpers] == [h["name"] for h in case.kernel["helpers"]]
+  # Transfers: the Frame output stripe equals the L2 output; nothing outside descriptors moved.
+  assert report["transfer"]["frame_untouched_outside_descriptors"] is True
+  # fflags: the kernel squares one power of two. 2^-k * 2^-k = 2^-2k is nonzero yet below the
+  # smallest subnormal (2^-149), so RNE delivers +0 and raises exactly underflow and inexact. That
+  # expectation is derived here from first principles, independent of Spike and of bitwise_scalar.
+  op = report["fflags"]["fp_ops"][0]
+  m = re.fullmatch(r"2\^-(\d+)", op["fs1"]["value"])
+  assert m is not None and op["fs2"]["value"] == op["fs1"]["value"], op
+  assert 2 * int(m.group(1)) > 149
+  assert op["retired_result"] == "0x00000000"
+  assert op["retired_flags_delta"] == op["expected_fflags"] == 0b00011  # fflags: NX=bit0, UF=bit1
+  assert op["expected_fflags_names"] == ["UF", "NX"]
+  # Software read the raised flags back through the kernel's own csrr, never through the driver.
+  read = report["fflags"]["reads"][0]
+  assert report["fflags"]["raise_observed_by_software"] is True
+  assert read["fflags"] == op["expected_fflags"]
+  assert trace["retire_stream"][read["record"]]["x_rd_val"] == op["expected_fflags"]
+  # Every scheduled env completion was delivered exactly once.
+  assert report["env_events"]["scheduled"] == report["env_events"]["logged"]
+  assert len(set(report["env_events"]["logged"])) == len(case.env_events)
 
-  # Mutation: corrupt one output byte -> the oracle flags the exact byte.
-  bad = dict(trace)
-  key = f"0x{case.out_range['address']:08x}:{case.out_range['length']}"
-  raw = bytearray.fromhex(bad["memory_bytes"][key])
-  raw[0] ^= 0xFF
-  bad_mem = dict(bad["memory_bytes"])
-  bad_mem[key] = raw.hex()
-  bad["memory_bytes"] = bad_mem
-  rep2 = sc.evaluate(case, bad)
-  assert rep2["verdict"] == "FAIL"
-  assert rep2["diffs"][0]["kind"] == "GOLDEN_MISMATCH"
+
+def test_scalar_ctl_grading_fails_closed_on_altered_evidence(real_run: dict[str, Any]) -> None:
+  """Every verdict-bearing section fails on the specific defect it guards, using the real trace."""
+  import copy
+
+  sc, case, trace = (real_run[k] for k in ("sc", "case", "trace"))
+  fflags = real_run["report"]["fflags"]
+  fmul = fflags["fp_ops"][0]["record"]
+  csrr = fflags["reads"][0]["record"]
+  plain = next(
+    i for i, r in enumerate(trace["retire_stream"]) if r["source"] == "spike_isa_ref" and i < fmul - 2
+  )
+  frame_key = f"0x{case.frame_base:08x}:{case.frame_length}"
+  out_key = f"0x{case.out_range['address']:08x}:{case.out_range['length']}"
+  in_desc = next(d for d in case.descriptors if d["direction"] == "l2_to_frame")
+  in_base = case.bindings[in_desc["handle"]]["base"] + in_desc["slot_offset"]
+  in_key = f"0x{in_base:08x}:{in_desc['bytes']}"
+  out_offset = next(d["frame_offset"] for d in case.descriptors if d["direction"] == "frame_to_l2")
+
+  def altered(edit: Callable[[dict[str, Any]], None]) -> tuple[Any, dict[str, Any]]:
+    t = copy.deepcopy(trace)
+    edit(t)
+    return case, t
+
+  def flip_bytes(t: dict[str, Any], key: str, offset: int) -> None:
+    raw = bytearray.fromhex(t["memory_bytes"][key])
+    raw[offset] ^= 0xFF
+    t["memory_bytes"][key] = bytes(raw).hex()
+
+  def retire_edit(index: int, **fields: Any) -> Callable[[dict[str, Any]], None]:
+    def edit(t: dict[str, Any]) -> None:
+      t["retire_stream"][index].update(fields)
+
+    return edit
+
+  def refrozen(list_key: str, index: int, field: str, value: Any) -> tuple[Any, dict[str, Any]]:
+    c = copy.deepcopy(case)
+    c.freeze[list_key][index][field] = value
+    return c, copy.deepcopy(trace)
+
+  def drop_last_record(t: dict[str, Any]) -> None:
+    t["retire_stream"].pop()
+    t["arch_fflags_stream"].pop()
+
+  def vacuous_fflags_path(t: dict[str, Any]) -> None:
+    # 1.0 * 1.0 raises nothing, and every read-back is made consistent with that: still no flag
+    # is ever raised or observed, which the acceptance must refuse to call an fflags path.
+    t["retire_stream"][fmul - 2]["x_rd_val"] = 0x3F800000
+    t["retire_stream"][fmul - 1]["f_rd_val"] = 0x3F800000
+    t["retire_stream"][fmul].update(f_rd_val=0x3F800000, flags_delta=0)
+    t["retire_stream"][csrr]["x_rd_val"] = 0
+    for i in range(fmul, len(t["arch_fflags_stream"])):
+      t["arch_fflags_stream"][i] = 0
+
+  def zero_stream_at_fmul(t: dict[str, Any]) -> None:
+    t["arch_fflags_stream"][fmul] = 0
+
+  def set_final_fflags(t: dict[str, Any]) -> None:
+    t["final_csr"]["fflags"] = 3
+
+  def drop_stream(t: dict[str, Any]) -> None:
+    del t["arch_fflags_stream"]
+
+  def flip_frame_last(t: dict[str, Any]) -> None:
+    flip_bytes(t, frame_key, case.frame_length - 1)
+
+  def flip_frame_stripe(t: dict[str, Any]) -> None:
+    flip_bytes(t, frame_key, out_offset)
+
+  def flip_output(t: dict[str, Any]) -> None:
+    flip_bytes(t, out_key, 0)
+
+  def clobber_input(t: dict[str, Any]) -> None:
+    # The L2 input range and its Frame stripe still agree with each other, but not with the input.
+    flip_bytes(t, in_key, 0)
+    flip_bytes(t, frame_key, in_desc["frame_offset"])
+
+  def duplicate_event(t: dict[str, Any]) -> None:
+    t["scalar_helpers"]["env_log"].append(dict(t["scalar_helpers"]["env_log"][0]))
+
+  flipped_insn = trace["retire_stream"][plain]["insn"] ^ (1 << 20)
+  mutations: list[tuple[str, str, tuple[Any, dict[str, Any]]]] = [
+    ("dropped retire record", "RETIRE_STREAM", altered(drop_last_record)),
+    (
+      "retired word differs from the image",
+      "RETIRE_INSN_MISMATCH",
+      altered(retire_edit(plain, insn=flipped_insn)),
+    ),
+    ("freeze retire_count", "RETIRE_COUNT_MISMATCH", refrozen("slots", 0, "retire_count", 35)),
+    (
+      "freeze instruction_count far beyond the text span",
+      "RETIRE_FREEZE_ROW_INVALID",
+      refrozen("slots", 0, "instruction_count", 10**12),
+    ),
+    (
+      "freeze retire_count not positive",
+      "RETIRE_FREEZE_ROW_INVALID",
+      refrozen("slots", 0, "retire_count", 0),
+    ),
+    (
+      "freeze retire_count a float",
+      "RETIRE_FREEZE_ROW_INVALID",
+      refrozen("slots", 0, "retire_count", 36.0),
+    ),
+    ("freeze helper offset", "HELPER_MAP", refrozen("helper_sequence", 5, "offset", 137)),
+    (
+      "unmodeled FP instruction (fsub.s)",
+      "FFLAGS_MODEL_UNSUPPORTED",
+      altered(retire_edit(plain, insn=0x08008053)),
+    ),
+    ("fmul.s flags_delta zeroed", "FFLAGS_DELTA_MISMATCH", altered(retire_edit(fmul, flags_delta=0))),
+    ("fmul.s result altered", "FFLAGS_RESULT_MISMATCH", altered(retire_edit(fmul, f_rd_val=1))),
+    (
+      "csrr fflags read-back altered",
+      "FFLAGS_CSR_READBACK_MISMATCH",
+      altered(retire_edit(csrr, x_rd_val=0)),
+    ),
+    ("per-record architectural fflags", "FFLAGS_ARCH_STREAM_MISMATCH", altered(zero_stream_at_fmul)),
+    ("final fflags", "FFLAGS_FINAL_MISMATCH", altered(set_final_fflags)),
+    ("fflags evidence removed", "FFLAGS_EVIDENCE_MISSING", altered(drop_stream)),
+    ("vacuous fflags path", "FFLAGS_PATH_VACUOUS", altered(vacuous_fflags_path)),
+    ("Frame written outside descriptors", "FRAME_TOUCHED_OUTSIDE_DESCRIPTORS", altered(flip_frame_last)),
+    ("Frame output stripe differs from L2", "TRANSFER_MISMATCH", altered(flip_frame_stripe)),
+    ("L2 input overwritten", "TRANSFER_MISMATCH", altered(clobber_input)),
+    ("env completion delivered twice", "ENV_EVENT_DELIVERY", altered(duplicate_event)),
+  ]
+  # Control: an untouched copy still passes, so each failure below comes from its mutation alone.
+  assert sc.evaluate(*altered(lambda t: None))["verdict"] == "PASS"
+  for name, kind, (c, t) in mutations:
+    rep = sc.evaluate(c, t)
+    assert rep["verdict"] == "FAIL", f"{name}: not rejected"
+    assert kind in {d["kind"] for d in rep["diffs"]}, f"{name}: {rep['diffs']}"
+  # The output defect stays first in `diffs` (consumers read it as the primary verdict).
+  rep = sc.evaluate(*altered(flip_output))
+  assert rep["verdict"] == "FAIL" and rep["diffs"][0]["kind"] == "GOLDEN_MISMATCH"
 
 
 def test_bogus_package_rejected_by_loader(tmp_path: Path) -> None:
   """A malformed package.json is refused by the sealed Loader's codec, never trusted."""
   import scalar_ctl_run as sc
 
-  if not BINDING.is_file():
-    pytest.fail(f"scalar_ctl_v1.yaml binding missing: {BINDING}")
   fake_dir = tmp_path / "A"
   fake_dir.mkdir()
   (fake_dir / "package.json").write_text("{}")
